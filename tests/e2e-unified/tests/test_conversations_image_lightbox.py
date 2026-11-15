@@ -1,5 +1,5 @@
 """Conversations received image — ``image-lightbox`` (full-screen viewer): tui,
-web, linux, macos, ios, windows.
+web, linux, macos, ios, windows, android.
 
 ``tests/e2e-unified/ui.yaml`` ``components.image-lightbox`` lists
 ``conversations.conversation_detail`` in its ``used_in``, and the conversations
@@ -23,8 +23,9 @@ feed card's trigger) on the decoded bytes it painted; the lightbox takes Escape.
 windows joined by giving the bubble's picture the feed ``post-image``'s shape (a
 transparent Button wrapping the picture, ``Controls/DmMessageBubble.xaml.cs``)
 whose click opens the page's ``Controls/ImageLightboxOverlay`` — the feed's own
-control — which focuses itself on open and closes on Escape. android follows;
-widen the mark when it wires the trigger.
+control — which focuses itself on open and closes on Escape. android joined by
+making the bubble's picture clickable (``ConversationDetailScreen.kt``), opening
+the ``ImageLightbox`` dialog over the thread, which takes Escape and back.
 
 The attachment arrives through the inject seam (a *received* message, the row's
 subject) with bytes unique to this run, so the picture is this run's own and
@@ -51,6 +52,7 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
     pytest.mark.windows,
+    pytest.mark.android,
 ]
 
 FIXTURE_IMAGE = Path(__file__).parent.parent / "fixtures" / "test-image.png"

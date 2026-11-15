@@ -161,6 +161,15 @@ pub struct UnsentChange {
     /// Attempts that did not conclude.
     pub attempts: u32,
     pub description: IntentDescription,
+    /// Why a [`UnsentState::Held`] row waits, when it is not the scope's
+    /// parked head: a stable code of [`hold_code`]'s. `None` on every row of
+    /// this device's own outbox — those are held by their scope's park, the
+    /// three-state derivation's own hold. `Some` on a retired identity's row
+    /// not yet carried into this outbox (`succession-aftermath.md` § Re-key
+    /// scope, the device-local outbox row): the state still says *held*, and
+    /// this says by what. Additive: an older reader drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<String>,
 }
 
 impl UnsentChange {
@@ -257,6 +266,23 @@ pub mod park_code {
     pub const MLS_NOT_A_MEMBER: &str = "fauna.outbox.mls.not_a_member";
     /// The sealing send failed permanently.
     pub const MLS_SEND_FAILED: &str = "fauna.outbox.mls.send_failed";
+    /// A staged attachment the intent names is not on this device any more
+    /// (a retired identity's intent carried across a succession, or bytes
+    /// evicted): the remedy is discard and recompose, never a send without
+    /// the attachment.
+    pub const MLS_ATTACHMENT_MISSING: &str = "fauna.outbox.mls.attachment_missing";
+}
+
+/// The stable codes an [`UnsentChange::hold`] carries — why a held row waits
+/// when no park in its scope holds it. Never renamed: a surface renders each
+/// by name.
+pub mod hold_code {
+    /// A retired identity's intent not yet carried into its successor's
+    /// outbox — an MLS intent waiting for the successor's engine to hold its
+    /// conversation's group (`succession-aftermath.md` § Re-key scope, the
+    /// device-local outbox row, point 4), or any intent the next carry pass
+    /// has not reached yet.
+    pub const CARRY_AWAITING_GROUP: &str = "fauna.outbox.carry.awaiting_group";
 }
 
 /// The conversations engine's half of the MLS outbox drain: seal one queued
@@ -275,6 +301,18 @@ pub trait MlsIntentSender: crate::MaybeSendSync {
     /// Seal and send one intent's `payload` (the bytes its composer queued)
     /// under `intent_id`.
     async fn send_mls_intent(&self, intent_id: [u8; 16], payload: &[u8]) -> MlsIntentOutcome;
+
+    /// Whether this engine holds the group of the channel `payload` (a queued
+    /// MLS intent's bytes) names — the outbox carry's MLS hold
+    /// (`succession-aftermath.md` § Re-key scope, the device-local outbox
+    /// row, point 4): a retired identity's MLS intent moves into this outbox
+    /// only once its group is here, since the drain would park it *not a
+    /// member* before. Default `false`: a sender that cannot answer carries no
+    /// MLS row, and the row waits listed as held.
+    fn holds_group_of(&self, payload: &[u8]) -> bool {
+        let _ = payload;
+        false
+    }
 }
 
 /// What [`IdentityIntentSender::send_identity_intent`] made of one queued

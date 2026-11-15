@@ -92,6 +92,30 @@ export function paymentsClaimsRedeem(
   return rpcCall(secretHex, (c) => c.paymentsClaimsRedeem(code) as Promise<PaymentClaimRedeemed>);
 }
 
+/** Redeem a claim code where its creator lives (`PaymentsClient::
+ *  claims_redeem_across_nests`; `monetization.md` § Pillar 3 → *Which nest an
+ *  in-app redeem binds on*): with `authorHomeUrl` named, the redeemer's signed
+ *  intent is relayed to that home nest; with it `null`/blank this is the plain
+ *  local `paymentsClaimsRedeem` and `authorIdHex` is never read (the
+ *  convention for that slot is then the redeemer's own id). Same reply. */
+export function paymentsClaimsRedeemAcrossNests(
+  secretHex: string,
+  code: string,
+  authorIdHex: string,
+  authorHomeUrl: string | null,
+): Promise<PaymentClaimRedeemed> {
+  return rpcCall(
+    secretHex,
+    (c) =>
+      c.paymentsClaimsRedeemAcrossNests(
+        code,
+        secretHex,
+        authorIdHex,
+        authorHomeUrl,
+      ) as Promise<PaymentClaimRedeemed>,
+  );
+}
+
 /** A freshly minted manual claim code (`claims.mint`). */
 export interface PaymentClaimMinted {
   code: string;

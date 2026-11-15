@@ -218,11 +218,14 @@ pub(crate) fn record_sign_out(app: &App) -> fauna_client_accounts::SignOutRecord
 /// the shared [`fauna_client_accounts::finish_sign_out_with`] over tui's
 /// install base, its three [`erase_bases`], the serving bases and its
 /// registry, with tui's own credential acts ([`TuiFinishHost`]).
-/// `dismiss_agent` is false for the gesture, whose own stop already dismissed
-/// the sync agent; `written` is the gesture's own record (`None` elsewhere).
+/// `caller` says which of the three this run is: the sync agent is not
+/// dismissed again for the gesture, whose own stop already dismissed it, and
+/// only Remove Again re-sweeps the residue's paths while the registry names
+/// somebody;
+/// `written` is the gesture's own record (`None` elsewhere).
 pub(crate) fn finish(
     app: &App,
-    dismiss_agent: bool,
+    caller: fauna_client_accounts::FinishCaller,
     written: Option<fauna_client_accounts::SignOutRecord>,
 ) -> fauna_client_accounts::SignOutFinish {
     let Some(flat) = crate::session::config_dir() else {
@@ -241,7 +244,7 @@ pub(crate) fn finish(
             &flat,
             store_root.as_ref().map(|root| root.base()),
             serving,
-            dismiss_agent,
+            caller,
             written,
         )
     })
@@ -287,7 +290,7 @@ fn finish_under(
     flat: &Path,
     store_root: Option<&Path>,
     serving: fauna_client_accounts::ServingBases<'_>,
-    dismiss_agent: bool,
+    caller: fauna_client_accounts::FinishCaller,
     written: Option<fauna_client_accounts::SignOutRecord>,
 ) -> fauna_client_accounts::SignOutFinish {
     let swept: Vec<PathBuf> = match store_root {
@@ -297,7 +300,8 @@ fn finish_under(
     let mut host = TuiFinishHost {
         registry,
         credentials,
-        dismiss_agent,
+        // The gesture's own stop already dismissed the sync agent.
+        dismiss_agent: caller != fauna_client_accounts::FinishCaller::Gesture,
     };
     fauna_client_accounts::finish_sign_out_with(
         fauna_client_accounts::FinishSeat {
@@ -305,6 +309,7 @@ fn finish_under(
             swept_bases: &swept,
             serving,
             registry,
+            caller,
         },
         &mut host,
         written,
@@ -426,7 +431,7 @@ fn paint_finish(app: &mut App, outcome: &fauna_client_accounts::SignOutFinish) {
 /// its wipe — the launch must not route over the registry), the create
 /// surface when the finish's wipe relocked the sealed store. `None`: route.
 pub(crate) fn finish_at_launch(app: &mut App) -> Option<crate::launch::LaunchSurface> {
-    let outcome = finish(app, true, None);
+    let outcome = finish(app, fauna_client_accounts::FinishCaller::Launch, None);
     app.sign_out_residue = outcome.surface(fauna_i18n::strings::lookup);
     if outcome.fails_closed() {
         return Some(crate::launch::LaunchSurface::Wizard);
@@ -447,7 +452,7 @@ pub(crate) fn retry_residue(app: &mut App) {
     if app.sign_out_residue.take().is_none() {
         return;
     }
-    let outcome = finish(app, true, None);
+    let outcome = finish(app, fauna_client_accounts::FinishCaller::RemoveAgain, None);
     paint_finish(app, &outcome);
 }
 
@@ -635,6 +640,12 @@ fn remove_account_under(
         tracing::warn!("[settings/account] remove-account REFUSED ({blocked:?}) — {actor_id_hex}");
         return Err(blocked.copy().resolve(fauna_i18n::strings::lookup));
     }
+    if let Some(owed) =
+        fauna_client_accounts::remove_account_carry_owed(registry, Some(store_root), actor_id_hex)
+    {
+        tracing::warn!("[settings/account] remove-account REFUSED (carry owed) — {actor_id_hex}");
+        return Err(owed.copy().resolve(fauna_i18n::strings::lookup));
+    }
     // The removal joins the sign-out record before its registry step, so the
     // store that step's crash-safety argument leaves unreached is finished by
     // the next launch (`account-scoping.md` § Erasure follows scope → *The
@@ -684,7 +695,7 @@ mod tests {
                 state_base: Some(flat),
                 store_root: Some(store_root),
             },
-            false,
+            fauna_client_accounts::FinishCaller::Gesture,
             None,
         )
     }

@@ -37,7 +37,7 @@ Stamped 2026-09-26 at ef1315baff.
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | — absent | |
 | android | — absent | |
-| tui | ✅ full | 0.1.5 docker |
+| tui | ✅ full | 0.1.6-dev+2f2257c1 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

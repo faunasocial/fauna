@@ -299,6 +299,15 @@ fn attach_replica_autosave(
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     manager_strong.add_observer(Arc::new(ReplicaAutosaveObserver { tx }));
+    // The same plane, reachable by identity for the succession ceremony's
+    // awaited flush before its submit (`crate::leave_flush` says why the
+    // debounce cannot carry that moment).
+    crate::leave_flush::register_live_plane(
+        backend.engine().identity_actor_id(),
+        &manager_strong,
+        &backend,
+        Arc::clone(&sync),
+    );
     drop(manager_strong);
 
     tokio::spawn(async move {
@@ -408,8 +417,15 @@ mod tests {
     );
 
     fn graph(transport: Box<dyn MlsReplicaTransport>) -> Graph {
+        graph_seeded(transport, 7)
+    }
+
+    /// [`graph`] over an identity of its own — for a test of the per-actor
+    /// flush registry, which tests running side by side on the shared seed
+    /// would overwrite.
+    fn graph_seeded(transport: Box<dyn MlsReplicaTransport>, seed: u8) -> Graph {
         let engine =
-            Arc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret([7; 32])).unwrap());
+            Arc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret([seed; 32])).unwrap());
         let conv: Arc<dyn ConversationsRpc> = Arc::new(ConvNest(Arc::new(FakeConvNest::default())));
         let manager = ConversationsManager::new();
         let backend = Arc::new(FaunaMlsBackend::new(
@@ -424,7 +440,7 @@ mod tests {
         });
         let launcher = tokio_launcher(
             transport,
-            &[7u8; 32],
+            &[seed; 32],
             Arc::clone(&backend),
             Arc::clone(&manager),
             Some(hook.clone() as Arc<dyn PostRestoreHook>),
@@ -561,6 +577,54 @@ mod tests {
     /// Wait out the autosave's debounce plus its off-task upload.
     async fn settle() {
         tokio::time::sleep(REPLICA_DEBOUNCE + Duration::from_millis(700)).await;
+    }
+
+    /// **The succession ceremony's flush lands the replica at once, inside the
+    /// debounce window** (`crate::leave_flush`): the submit revokes the
+    /// identity's bearer, so a change still waiting out `REPLICA_DEBOUNCE`
+    /// would never land under it. The control is the debounce itself — no
+    /// upload has happened yet when the flush is called; after the awaited
+    /// flush the provider has landed. And an identity change retires the
+    /// entry: the next flush finds no live plane.
+    #[tokio::test]
+    async fn the_pre_succession_flush_lands_a_pending_change_without_the_debounce() {
+        use crate::leave_flush::{LeaveFlush, flush_before_retire};
+        let transport = CountingReplica::default();
+        let puts = Arc::clone(&transport.puts);
+        let (backend, manager, _conv, launcher, _hook) = graph_seeded(Box::new(transport), 0x53);
+        let actor = backend.engine().identity_actor_id();
+        assert_eq!(
+            flush_before_retire(&actor).await,
+            LeaveFlush::NoLivePlane,
+            "nothing is registered before the plane is wired"
+        );
+        launcher.launch().await;
+        let launched = puts.load(Ordering::SeqCst);
+
+        backend.engine().generate_key_packages(1).unwrap();
+        manager.set_search_query(Some("pending".into()));
+        assert_eq!(
+            puts.load(Ordering::SeqCst),
+            launched,
+            "the change is still inside the debounce — the control"
+        );
+        assert_eq!(
+            flush_before_retire(&actor).await,
+            LeaveFlush::Flushed {
+                provider_written: true
+            }
+        );
+        assert!(
+            puts.load(Ordering::SeqCst) > launched,
+            "the awaited flush uploaded the pending change"
+        );
+
+        manager.clear_for_identity_change();
+        assert_eq!(
+            flush_before_retire(&actor).await,
+            LeaveFlush::NoLivePlane,
+            "an identity change retires the entry"
+        );
     }
 
     /// An app that keeps one manager across sign-ins wipes it with

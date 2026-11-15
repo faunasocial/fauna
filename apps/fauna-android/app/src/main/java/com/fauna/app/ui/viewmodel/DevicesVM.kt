@@ -8,6 +8,7 @@ import com.fauna.app.core.ApiClient
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.ResolveService
 import com.fauna.app.ui.util.firstListingRefusal
+import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.loadFailureText
 import com.fauna.app.core.SecureStorage
 import com.fauna.app.p2pshare.GroupShareRows
@@ -64,6 +65,16 @@ private const val READ_ACTIVITY = "fauna.folders.devices"
 private const val READ_DESTINATIONS = "fauna.backup.destination.list"
 private const val READ_PLACES = "fauna.folders.members.list"
 
+/** How often the Folders page re-reads the group sets' review rows while shown. */
+internal const val GROUP_REVIEW_POLL_MS = 2_000L
+
+/**
+ * One group set's review row: the shared `ConflictSummary::of_retained`
+ * mapping, and the set's `group:` ref its gesture is keyed by (`group-set.md`
+ * § Build design — the group set, decision 9).
+ */
+data class GroupReviewRow(val folderId: String, val conflict: uniffi.fauna_devices_machine.ConflictSummary)
+
 @HiltViewModel
 class DevicesVM @Inject constructor(
     private val api: ApiClient,
@@ -76,7 +87,13 @@ class DevicesVM @Inject constructor(
     // The on-demand presence the `folder-on-demand-toggle` steers (the shared
     // preference store + plan, behind the provider's source).
     private val onDemandToggle: OnDemandToggle,
+    // The cross-user peer-transfer plane's readings (the six `share-*` ids);
+    // the plane itself is app-scoped and lifecycle-driven, never this VM's.
+    sharePlane: com.fauna.app.p2pshare.SharePlaneReadingsSource,
 ) : ViewModel() {
+
+    /** The peer-transfer surface — `null` while this device is not running the plane. */
+    val sharePlaneReadings: StateFlow<com.fauna.app.p2pshare.SharePlaneReadings?> = sharePlane.readings
 
     private val _snapshot = MutableStateFlow<DevicesSnapshot?>(null)
     /** The whole renderable Devices page; null until the machine is built + first refresh. */
@@ -153,6 +170,20 @@ class DevicesVM @Inject constructor(
     val onDemand: StateFlow<Map<OnDemandRowKey, OnDemandRow>> = _onDemand
     /** The folder list [loadOnDemand] last read — re-read after each provider reconcile. */
     @Volatile private var onDemandFolders: List<FolderSummary>? = null
+    // The group-scope rows' readings (`group-set.md` § Build design — the group
+    // set, decision 11): a phone's seat is its on-demand replica, so a group
+    // row carries the same hide-only toggle a member row does, keyed by the
+    // scope's `group:` folder id.
+    private val _groupOnDemand = MutableStateFlow<Map<String, OnDemandRow>>(emptyMap())
+    val groupOnDemand: StateFlow<Map<String, OnDemandRow>> = _groupOnDemand
+    /** The group refs [loadGroupOnDemand] last read — re-read after each provider reconcile. */
+    @Volatile private var onDemandGroupRefs: List<String>? = null
+    // Each group set's review rows (`group-set.md` decision 9), continuing the
+    // page's flat `conflict-*` list after the nest's, in the scope order.
+    private val _groupReviewRows = MutableStateFlow<List<GroupReviewRow>>(emptyList())
+    val groupReviewRows: StateFlow<List<GroupReviewRow>> = _groupReviewRows
+    /** The sets [pollGroupReviewRows] reads: each `group:` ref with its page label. */
+    @Volatile private var reviewScopes: List<Pair<String, String>> = emptyList()
 
     // Which rows the Compose screen currently has expanded — a VM-side shadow of
     // FolderRow's own local `expanded` boolean (Compose state the VM has no other
@@ -278,7 +309,10 @@ class DevicesVM @Inject constructor(
         // *Revocation on a capability host* — the fold runs on the folder-list
         // refresh, [loadOnDemand], and on the presence reconcile, here).
         viewModelScope.launch {
-            onDemandToggle.reconciled.collect { onDemandFolders?.let { loadOnDemand(it) } }
+            onDemandToggle.reconciled.collect {
+                onDemandFolders?.let { loadOnDemand(it) }
+                onDemandGroupRefs?.let { loadGroupOnDemand(it) }
+            }
         }
         // `fauna.sync.changed` — a record landed in a folder this actor
         // participates in (own other device, or a fellow member). The push is
@@ -490,6 +524,63 @@ class DevicesVM @Inject constructor(
         val m = machine ?: return
         val deviceId = secureStorage.resolveDeviceId() ?: return
         viewModelScope.launch { m.useOtherVersion(conflictId, deviceId) }
+    }
+
+    /**
+     * Re-read every listed group set's review rows (`group-set.md` § Build
+     * design — the group set, decision 9) every [GROUP_REVIEW_POLL_MS] until the
+     * caller's scope ends (the page goes) — [scopes] is each set's `group:` ref
+     * with the label the page shows it under. A poll, because the fold records a
+     * row with no gesture of this device and no push announces it; the read is a
+     * cheap WAL read of the set's state DB. The twin of ios's
+     * `GroupSetReviewRows.poll`.
+     */
+    suspend fun pollGroupReviewRows(scopes: List<Pair<String, String>>) {
+        reviewScopes = scopes
+        while (kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]?.isActive != false) {
+            refreshGroupReviewRows()
+            kotlinx.coroutines.delay(GROUP_REVIEW_POLL_MS)
+        }
+    }
+
+    /** One read of every asked set; a set whose read fails keeps the rows last read. */
+    internal suspend fun refreshGroupReviewRows() {
+        val last = _groupReviewRows.value.groupBy { it.folderId }
+        val fresh = reviewScopes.flatMap { (ref, label) ->
+            try {
+                onDemandToggle.groupReviewRows(ref, label).map { GroupReviewRow(ref, it) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                last[ref].orEmpty()
+            }
+        }
+        if (fresh != _groupReviewRows.value) _groupReviewRows.value = fresh
+    }
+
+    /**
+     * A group set's `conflict-resolve-button`: *use the other version* on the
+     * set's own host, keyed by (the set's `group:` ref, the row id) — never the
+     * nest machine's [useOtherVersion], which knows no such row (`folders.md`
+     * § Conflicts). A refusal lands on the page's `error-message` through
+     * `devices.error_use_other_version` and the row stays; either way the rows
+     * are re-read, so a used row goes.
+     */
+    fun useRetainedVersion(folderRef: String, conflictId: Long) {
+        viewModelScope.launch {
+            _sharingError.value = null
+            try {
+                onDemandToggle.restoreRetainedVersion(folderRef, conflictId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _sharingError.value = appContext.getStringFmt(
+                    R.string.devices_error_use_other_version,
+                    e.loadFailureText() ?: e.toString(),
+                )
+            }
+            refreshGroupReviewRows()
+        }
     }
 
     /**
@@ -1016,6 +1107,42 @@ class DevicesVM @Inject constructor(
             val deviceId = secureStorage.resolveDeviceId()
             if (shown && folder.role != "member" && !deviceId.isNullOrEmpty()) {
                 runCatching { api.ensureFolderPlace(folder.name, deviceId) }
+            }
+            runCatching { onDemandToggle.replan() }
+        }
+    }
+
+    /**
+     * Read every group-scope row's `folder-on-demand-toggle` state, keyed by
+     * the scope's `group:` ref (the screen calls this whenever the scope list
+     * changes) — [loadOnDemand]'s twin for the rows no `FolderSummary` backs.
+     */
+    fun loadGroupOnDemand(folderRefs: List<String>) {
+        onDemandGroupRefs = folderRefs
+        viewModelScope.launch {
+            val identities = folderRefs.mapNotNull { ref -> onDemandToggle.identifyRef(ref)?.let { ref to it } }
+            val states = runCatching { onDemandToggle.read(identities.map { it.second }) }
+                .getOrDefault(emptyMap())
+            _groupOnDemand.value = identities.mapNotNull { (ref, id) ->
+                states[id.scopedId]?.let { ref to OnDemandRow(id.scopedId, it.shown, it.stronger, it.parked) }
+            }.toMap()
+        }
+    }
+
+    /**
+     * Flip a group-scope row's `folder-on-demand-toggle`: **hide-only**, like a
+     * member's row (`group-set.md` decision 11; `on-demand-files-shared-sets.md`
+     * § Shared sets on a capability host, decision 3) — the membership is the
+     * seat, so no place is read or written; persist, then re-plan.
+     */
+    fun setGroupOnDemand(folderRef: String, shown: Boolean) {
+        val row = _groupOnDemand.value[folderRef] ?: return
+        _groupOnDemand.update { it + (folderRef to row.copy(shown = shown)) }
+        viewModelScope.launch {
+            val persisted = runCatching { onDemandToggle.setShown(row.scopedId, shown) }
+            if (persisted.isFailure) {
+                _groupOnDemand.update { it + (folderRef to row) }
+                return@launch
             }
             runCatching { onDemandToggle.replan() }
         }

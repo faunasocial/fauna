@@ -104,13 +104,13 @@ Stamped 2026-10-13 at ab51f8d2bd.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+879affa6 standalone |
+| web | ✅ full | 0.1.5-dev+879affa6 standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.5-dev+908cb4f5 standalone |
 | macos | ✅ full | |
 | ios | ✅ full | |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6-dev+94702c5c standalone |
+| tui | ✅ full | 0.1.6 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -150,7 +150,7 @@ Stamped 2026-10-13 at ab51f8d2bd.
 | 31 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_is_forgotten_on_leaving_and_offered_only_for_a_confirmed_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 32 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_leg` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 33 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_is_forgotten_on_leaving_and_offered_only_for_a_confirmed_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 34 | app | `tests/e2e-unified/tests/test_retire_keeps_recovery_key.py::test_retire_keeps_the_nests_recovery_key` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 34 | app | `tests/e2e-unified/tests/test_retire_keeps_recovery_key.py::test_retire_keeps_the_nests_recovery_key` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 35 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_list_holds_every_server_however_many` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 36 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_leg` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

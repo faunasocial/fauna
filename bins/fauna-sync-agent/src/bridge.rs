@@ -1197,6 +1197,26 @@ impl PlaceholderInvalidator for CfapiInvalidator {
         off_the_serve_thread(move || fauna_cfapi::dehydrate_placeholder(&path))
     }
 
+    /// The default unlink, except under a **reader's** root, whose access list refuses
+    /// this provider's own delete as it refuses the user's (it runs as the user — measured,
+    /// `fauna-cfapi`'s `tests/live_reader_root.rs`): there the agent first grants itself
+    /// `DELETE` on that one file and clears its read-only attribute
+    /// ([`crate::cfapi_host::own_delete`]).
+    fn remove(&self, abs_path: &Path) -> Result<()> {
+        if crate::cfapi_host::under_reader_root(abs_path) {
+            return crate::cfapi_host::own_delete(abs_path)
+                .with_context(|| format!("removing {} for a remote delete", abs_path.display()));
+        }
+        match std::fs::remove_file(abs_path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(anyhow::Error::new(e)
+                .context(format!(
+                    "removing {} for a remote delete",
+                    abs_path.display()
+                ))),
+            _ => Ok(()),
+        }
+    }
+
     fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> PlatformCall<'_> {
         let path = abs_path.to_path_buf();
         off_the_serve_thread(move || fauna_cfapi::supersede_placeholder(&path, size, mtime))
@@ -1307,6 +1327,7 @@ impl PlaceholderInvalidator for CfapiInvalidator {
                 size,
                 mtime,
                 is_dir,
+                read_only: crate::cfapi_host::under_reader_root(parent_abs),
             },
         )
     }
@@ -2866,6 +2887,12 @@ pub(crate) struct RootBoot<C> {
     /// Connect the root to the OS — called AFTER the boot sweep, never before
     /// (decision (c)); the returned guard lives as long as the loop.
     pub connect: C,
+    /// The root is a **reader's** presence root, its engine built read-only
+    /// (`BuiltEngine::read_only`; `on-demand-files-shared-sets.md` § Shared sets
+    /// on a capability host, decision 3d (4)): no write half — no watcher, no
+    /// `converge` upload pass, no corpus seal or re-seal pass, no deposit
+    /// adoption, no own-record pin. It folds, lists, hydrates and dehydrates.
+    pub read_only: bool,
 }
 
 #[cfg(test)]
@@ -2877,6 +2904,7 @@ impl RootBoot<fn()> {
         RootBoot {
             fresh_registration: false,
             connect: connected,
+            read_only: false,
         }
     }
 }
@@ -2963,6 +2991,7 @@ async fn drive_hydration_root<H, I, C, G>(
     I: PlaceholderInvalidator,
     C: FnOnce() -> G,
 {
+    let read_only = boot.read_only;
     // The off-disk posture comes before anything reads the rows: the fold, the
     // mark hygiene and above all the boot sweep must already treat a placeholder
     // as a row, never a file (`on-demand-files-linux.md` § Linux FUSE binding, the
@@ -3020,7 +3049,11 @@ async fn drive_hydration_root<H, I, C, G>(
     // while still counting them, so a dehydrated file is never mistaken for a
     // deleted one; a SEEN placeholder that is gone is propagated (or held, with its
     // siblings, by the floor) before any browse can list it back.
-    let recorded = hydrator.converge(&folder).await;
+    let recorded = if read_only {
+        Vec::new()
+    } else {
+        hydrator.converge(&folder).await
+    };
 
     // Only now may the OS re-populate the root.
     //
@@ -3091,9 +3124,13 @@ async fn drive_hydration_root<H, I, C, G>(
             // rescan tick's `converge` still catches local edits (a slower path, but a real
             // one). Going one-way here would silently drop the user's edits, which is the very
             // bug this closes — so it is loud.
-            let local = match LocalWrites::start(&sync_root) {
-                Ok(w) => Some(w),
-                Err(e) => {
+            //
+            // A reader's root has no write half at all ([`RootBoot::read_only`]): nothing
+            // the user could write lies behind its engine, so there is nothing to watch.
+            let local = match (!read_only).then(|| LocalWrites::start(&sync_root)) {
+                None => None,
+                Some(Ok(w)) => Some(w),
+                Some(Err(e)) => {
                     tracing::error!(
                         folder = %fauna_core::log_redact::log_folder_name(&folder),
                         error = %e,
@@ -3126,14 +3163,22 @@ async fn drive_hydration_root<H, I, C, G>(
             // so it kept the build-time audience for ever — so an owner's public window
             // never declassified an on-demand folder's back-catalogue and the flip back
             // never re-sealed it.
-            hydrator.converge_corpus_at_start(&folder).await;
-            hydrator.refresh_and_converge_corpus(&folder).await;
+            if !read_only {
+                hydrator.converge_corpus_at_start(&folder).await;
+            }
+            if !read_only {
+                hydrator.refresh_and_converge_corpus(&folder).await;
+            }
             // Third-party deposits parked while this seat was down — after the startup
             // fold, so an item another seat already adopted is found landed.
-            adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+            if !read_only {
+                adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+            }
             // The residency reading the refresh just installed reaches the disk: a body
             // the holder-keeps gate now keeps is pinned before anything may evict it.
-            pin_kept_own_records(hydrator, &invalidator, &sync_root).await;
+            if !read_only {
+                pin_kept_own_records(hydrator, &invalidator, &sync_root).await;
+            }
 
             // Heal pin flips made while the service was down (Explorer's cloud verbs write
             // pin state whether or not the provider is up). AFTER converge, so an
@@ -3228,12 +3273,18 @@ async fn drive_hydration_root<H, I, C, G>(
                 // row leg, decision 4). With no nest answering, this tick and the
                 // admission arm are the only triggers.
                 hydrator.pull_siblings(&folder).await;
-                adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+                if !read_only {
+                    adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+                }
                 // Inbound first, then outbound. A file edited locally *and* moved on the nest
                 // is safe in this order: `apply_stale_hydrated`'s dehydrate REFUSES a file
                 // carrying unsynced local edits (`PlaceholderInvalidator::dehydrate`), so the
                 // edit survives the fold and this pass uploads it.
-                let recorded = hydrator.converge(&folder).await;
+                let recorded = if read_only {
+                    Vec::new()
+                } else {
+                    hydrator.converge(&folder).await
+                };
                 // The last leg, same as the watcher path: converge-driven uploads (rescan
                 // catch-up, watcher misses, offline edits) flip ✅ too — before the pin
                 // backstop, for the same edit-survival ordering.
@@ -3243,9 +3294,13 @@ async fn drive_hydration_root<H, I, C, G>(
                 // RUNNING root — the same posture refresh + per-tick pair the
                 // always-resident loop runs (`always_resident::refresh_and_converge_corpus`).
                 // After converge, so a re-seal sees the tick's own uploads recorded.
-                hydrator.refresh_and_converge_corpus(&folder).await;
+                if !read_only {
+                    hydrator.refresh_and_converge_corpus(&folder).await;
+                }
                 // A flip to metadata-only lands here: pin what the gate now keeps.
-                pin_kept_own_records(hydrator, &invalidator, &sync_root).await;
+                if !read_only {
+                    pin_kept_own_records(hydrator, &invalidator, &sync_root).await;
+                }
                 // Pin backstop, after converge for the same edit-survival reason: catches
                 // flips the watcher missed and dirty-at-flip-time files converge just uploaded.
                 react_to_pin_sweep(hydrator, &invalidator, &sync_root, event_tx.as_ref()).await;
@@ -3257,13 +3312,19 @@ async fn drive_hydration_root<H, I, C, G>(
                 Ok(()) => requests.answer_while(async {
                     repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending, "reconnect").await;
                     hydrator.pull_siblings(&folder).await;
-                    adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+                    if !read_only {
+                        adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+                    }
                     // Then upload what waited (`file-sync.md` § 5, Offline Catch-Up
                     // step 3 — apply, then upload): a record or upload that failed
                     // while the socket was down is re-driven only by a converge,
                     // which until 2026-11-07 ran only on the rescan tick. Flipped
                     // ✅ in the tick's order.
-                    let recorded = hydrator.converge(&folder).await;
+                    let recorded = if read_only {
+                        Vec::new()
+                    } else {
+                        hydrator.converge(&folder).await
+                    };
                     flip_recorded_in_sync(hydrator, &invalidator, &sync_root, &recorded).await;
                     flip_clean_ancestor_dirs(hydrator, &invalidator, &sync_root, &recorded).await;
                 }).await,
@@ -3279,7 +3340,9 @@ async fn drive_hydration_root<H, I, C, G>(
                 hydrator.pull_siblings(&folder).await;
                 // A deposit's nudge reaches the owner's seats alone; the pass is
                 // one list call when nothing is parked.
-                adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+                if !read_only {
+                    adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+                }
             }).await,
 
             // A sibling was admitted (a new or replaced channel): pull its rows now
@@ -4067,6 +4130,12 @@ pub(crate) fn agent_engine_params(
     // The account's folder-key custody through the mounted store
     // (`SyncServiceState::folder_keys`).
     folder_keys: Arc<dyn fauna_client_folders::FolderKeyReader>,
+    // What the build does with a set the account may only read: `Refuse` for
+    // a bound location — a directory the user writes behind the engine — and
+    // `ReadOnly` for a presence root, whose backing is reachable only through
+    // the agent (`on-demand-files-shared-sets.md` § Shared sets on a
+    // capability host, decision 3d (4)).
+    reader_hosting: fauna_sync_engine::engine_lifecycle::ReaderHosting,
 ) -> EngineParams {
     EngineParams {
         state_dir,
@@ -4087,9 +4156,7 @@ pub(crate) fn agent_engine_params(
         access_gate: Some(access_gate),
         change_signer,
         folder_keys,
-        // The agent's engines sit over bound folders the user can write: a
-        // reader's set is refused, never built read-only.
-        reader_hosting: fauna_sync_engine::engine_lifecycle::ReaderHosting::Refuse,
+        reader_hosting,
     }
 }
 
@@ -4866,6 +4933,7 @@ mod tests {
         let delete = |rel: &str| FoldedDelete {
             relative_path: rel.to_string(),
             deleting_device: Some("another-device".to_string()),
+            seq: Some(1),
         };
         let fold = PlaceholderFold {
             deleted: vec![
@@ -6631,6 +6699,15 @@ mod tests {
     /// then the serve loop's first `select!` ends it — and return the boot's order
     /// (`FakeHydrator::boot_log`, with `connect` pushed by the root's connect).
     fn boot_order(hydrator: FakeHydrator, fresh_registration: bool) -> Vec<&'static str> {
+        boot_order_of(hydrator, fresh_registration, false)
+    }
+
+    /// [`boot_order`] for a root built `read_only` or not.
+    fn boot_order_of(
+        hydrator: FakeHydrator,
+        fresh_registration: bool,
+        read_only: bool,
+    ) -> Vec<&'static str> {
         let log = hydrator.boot_log.clone();
         let connect_log = log.clone();
         let cancel = CancellationToken::new();
@@ -6642,6 +6719,7 @@ mod tests {
             RootBoot {
                 fresh_registration,
                 connect: move || connect_log.lock().unwrap().push("connect"),
+                read_only,
             },
             rx,
             None,
@@ -6682,6 +6760,16 @@ mod tests {
             ],
             "a kept registration keeps its marks and sweeps before connecting; the sibling \
              pull and the corpus passes run behind the startup fold"
+        );
+    }
+
+    /// A reader's presence root has no write half (decision 3d (4)): its boot
+    /// folds, connects and pulls, and runs no upload sweep and no corpus pass.
+    #[test]
+    fn a_readers_root_boots_with_no_write_half() {
+        assert_eq!(
+            boot_order_of(FakeHydrator::default(), true, true),
+            vec!["prepare", "clear_seen_all", "connect", "pull_siblings"]
         );
     }
 
@@ -8420,6 +8508,7 @@ mod tests {
             fauna_sync_engine::access_gate::AccessGate::new(),
             None, // change_signer: an unsigned test root
             std::sync::Arc::new(fauna_client_folders::MemoryFolderKeyStore::default()),
+            fauna_sync_engine::engine_lifecycle::ReaderHosting::Refuse,
         );
         fauna_sync_engine::engine_lifecycle::assemble_engine(params, binding)
             .expect("engine assembles offline")

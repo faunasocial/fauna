@@ -12,7 +12,9 @@ Every step is the production path, app-less:
 
 - mail is enabled by the shared Mail settings machine (``harness_enable_mail``),
   which leaves the MSEK in the owner's sealed mail custody and registers the
-  recipient seal key the MTA seals to;
+  recipient seal key, then runs the app's connect-time refresh, publishing the
+  content-sealing epoch schedule the MTA seals to (so the materializer must
+  open an epoch-sealed record, as for every app user);
 - the grant is minted by the Nests page's own ``LinkedNestsMachine`` from its
   derived "Keep my mail searchable on this nest" option, to the holder that
   option names — the nest's own materializer (``harness_mint_trust``);
@@ -76,6 +78,18 @@ def _materialization_grant_ids(db_path: str, owner: bytes) -> list[bytes]:
     return [bytes(r[0]) for r in rows]
 
 
+def _epoch_seal_key_count(db_path: str, owner: bytes) -> int:
+    conn = sqlite3.connect(db_path, timeout=10.0)
+    try:
+        (n,) = conn.execute(
+            "SELECT COUNT(*) FROM actor_epoch_seal_keys WHERE actor_id = ?",
+            (owner,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(n)
+
+
 @pytest.mark.feature("search")
 def test_your_mail_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_it(
     nest_instance, mail_bridge_mta
@@ -90,8 +104,12 @@ def test_your_mail_kept_searchable_on_your_nest_is_found_by_you_alone_and_turnin
     other = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_key)
     owner_seed = bytes(owner["signing_key"])
 
-    # ── Arrange: mail on, an address the MTA routes to the owner. ──
-    fauna_ffi.harness_enable_mail(url, owner_seed)
+    # ── Arrange: mail on with the epoch schedule an app publishes, so the MTA
+    #    seals the mail under a per-epoch key — the case every app produces —
+    #    and an address the MTA routes to the owner. ──
+    fauna_ffi.harness_enable_mail(url, owner_seed, epoch_schedule=True)
+    assert _epoch_seal_key_count(nest_instance["db_path"], owner["actor_id_bytes"]) > 0, (
+        "the enable must publish the owner's content-sealing epoch schedule")
     address = add_exact_alias(url, owner["signing_key"], mail_bridge_mta.domain,
                               f"keep-{owner['actor_id_hex'][:10]}")
 

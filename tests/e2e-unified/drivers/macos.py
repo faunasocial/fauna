@@ -293,6 +293,15 @@ _PHOTO_LIBRARY_PIDFILE = _PHOTO_LIBRARY_STAGE_DIR / "running.pid"
 #: Long enough for a person running `just mac-photos-e2e-grant` at the screen to
 #: type the login password; an unattended run past it fails naming that recipe.
 _CODESIGN_TIMEOUT_S = 120
+#: Set once a codesign of the photo-library bundle timed out on the keychain's
+#: unanswered dialog this session; every later launch then skips at once.
+_CODESIGN_UNGRANTED = False
+_CODESIGN_UNGRANTED_WHY = (
+    f"codesign did not finish within {_CODESIGN_TIMEOUT_S}s signing the photo-library "
+    "test bundle: the login keychain is asking whether `codesign` may use the Apple "
+    "Development key, a one-time dialog on the Mac's screen. A person at the screen "
+    "runs `just mac-photos-e2e-grant` and clicks 'Always Allow'."
+)
 
 
 def apple_development_identity() -> str:
@@ -374,6 +383,13 @@ def stage_photo_library_bundle(binary: Path, stage_dir: Path | None = None) -> P
     with open(app / "Contents" / "Info.plist", "wb") as fh:
         plistlib.dump(info, fh)
 
+    from helpers.app_surface import skip_environment
+
+    global _CODESIGN_UNGRANTED
+    if _CODESIGN_UNGRANTED:
+        # One unanswered keychain dialog per session is enough: every later
+        # launch would raise it again and wait the whole timeout for nobody.
+        skip_environment(_CODESIGN_UNGRANTED_WHY)
     identity = apple_development_identity()
     try:
         signed = subprocess.run(
@@ -381,13 +397,12 @@ def stage_photo_library_bundle(binary: Path, stage_dir: Path | None = None) -> P
             capture_output=True, text=True, timeout=_CODESIGN_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"codesign did not finish within {_CODESIGN_TIMEOUT_S}s signing the "
-            "photo-library test bundle. That is the login keychain asking whether "
-            "`codesign` may use the Apple Development key — a one-time dialog on the "
-            "Mac's screen. Click 'Always Allow' there (it will not ask again), then "
-            "re-run: `just mac-photos-e2e-grant`."
-        ) from None
+        # The login keychain asking whether `codesign` may use the Apple
+        # Development key — the venue's one-time human step, a property of this
+        # box and not of the app (convention 7), so the run declares it rather
+        # than reading it as a red.
+        _CODESIGN_UNGRANTED = True
+        skip_environment(_CODESIGN_UNGRANTED_WHY)
     if signed.returncode != 0:
         raise RuntimeError(
             f"codesign failed signing the photo-library test bundle "
@@ -993,6 +1008,17 @@ class MacosInProcessDriver(InProcessAgentDriver):
         # included — lands in this launch's `app.err`. A caller-supplied
         # override wins. Read back via `custody_hold_file()`.
         env.setdefault("FAUNA_E2E_CUSTODY_HOLD_FILE", os.path.join(tmp, "custody-hold"))
+        # The e2e outbox drain hold (`fauna_account_plane::outbox`'s
+        # `outbox_drain_held`, the compile-gated `FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`
+        # seam), as tui sets it: a path in this launch's scratch dir that does
+        # not exist, so every drain runs as usual until a test creates the file
+        # (`helpers/outbox_drain.py::hold_outbox_drain`). Both processes read
+        # it — this app's MLS/identity drain and the spawned `fauna-sync-agent`
+        # child's generic pump (it inherits the env). A caller-supplied
+        # override wins. Read back via `outbox_drain_hold_file()`.
+        env.setdefault(
+            "FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE", os.path.join(tmp, "outbox-drain-hold")
+        )
         env["HOME"] = device_home
         # macOS resolves `.applicationSupportDirectory` — where the MLS state db
         # (`conv-mls.db`, `mls.db`) and the SwiftData store live — from CoreFoundation's
@@ -1377,6 +1403,12 @@ class MacosInProcessDriver(InProcessAgentDriver):
         custody (`FAUNA_E2E_CUSTODY_HOLD_FILE`, set in `launch()`); None before
         `launch()`. Driven through `helpers/folder_content.py::hold_custody_reread`."""
         return (getattr(self, "_launch_env", None) or {}).get("FAUNA_E2E_CUSTODY_HOLD_FILE")
+
+    def outbox_drain_hold_file(self) -> str | None:
+        """The file whose existence holds this launch's outbox drains
+        (`FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`, set in `launch()`); None before
+        `launch()`. Driven through `helpers/outbox_drain.py`."""
+        return (getattr(self, "_launch_env", None) or {}).get("FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE")
 
     def app_stderr_text(self) -> str:
         """This launch's `app.err` so far ("" if it has none yet).

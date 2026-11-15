@@ -31,6 +31,7 @@ nothing (e2e rule 8b). tier_2: the trigger is the nest's test hook.
 
 from __future__ import annotations
 
+import sys
 import uuid
 
 import pytest
@@ -158,7 +159,15 @@ def test_a_flood_of_knocks_raises_one_localized_notice(
         f"the toast text must resolve from the catalog key; got {entries!r}"
     )
     ids = {e.get("replace_id") for e in entries}
-    assert ids == {KNOCK_TOAST_REPLACE_ID}, (
+    # tui's only arm that carries an id is freedesktop (`os_notify::KNOCK_REPLACE_ID`
+    # is `None` off linux): on macOS and windows its banner is an OSC 9/777
+    # terminal escape, which no terminal replaces by id, so it honestly records
+    # none — every entry must still agree on that one value, never one per sender.
+    want = (
+        None if app_name(d) == "tui" and not sys.platform.startswith("linux")
+        else KNOCK_TOAST_REPLACE_ID
+    )
+    assert ids == {want}, (
         "every knock toast must carry the one shared replace id, so a flood of "
         "fresh keys replaces one toast instead of stacking "
         f"(§ Localized body, the knock toast); replace ids: {ids!r}"

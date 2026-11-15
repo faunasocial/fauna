@@ -18,7 +18,8 @@ namespace FaunaApp.Views.Payments;
 public sealed partial class SoldPostTeaser : UserControl
 {
     /// <summary>Fires when <c>gated-post-payment-link</c> is clicked, carrying the post
-    /// whose offer URL the host should open (behind the shared https-only guard).</summary>
+    /// whose offer the host should pay: behind the shared https-only guard, it subscribes
+    /// first and opens the checkout URL the shared rule composes (never the raw link).</summary>
     public event EventHandler<FeedPostItem>? PaymentLinkRequested;
 
     /// <summary>Fires when <c>gated-post-buy-button</c> is clicked, carrying the post

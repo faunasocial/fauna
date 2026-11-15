@@ -4,6 +4,10 @@ title: Status, quotas and limits
 section: your data and devices
 goal: docs/goal/ui/status.md § Goal
 guide: docs/guides/app-tour.md § Settings
+absences:
+  web (outcome 6): "docs/goal/ui/status.md § Layout & flow"
+  ios (outcome 6): "docs/goal/ui/status.md § Layout & flow"
+  android (outcome 6): "docs/goal/ui/status.md § Layout & flow"
 ---
 
 ## What a user gets
@@ -68,11 +72,11 @@ Stamped 2026-11-07 at ac836c937b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+36883152.dirty standalone |
-| linux | ✅ full | 0.1.5-dev+36883152.dirty standalone |
-| windows | ✅ full | 0.1.5-dev+36883152.dirty standalone |
+| web | ✅ full | 0.1.5-dev+36883152.dirty standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| windows | ✅ full | 0.1.6-dev+8cbc32a3 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+662ece79 standalone |
+| ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+b6bf85de standalone |
 | android-kids |  no run recorded | |
@@ -90,6 +94,7 @@ Stamped 2026-11-07 at ac836c937b.
 | 5 | app | `tests/e2e-unified/tests/test_settings.py::test_status_names_your_nest_and_its_version` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_settings.py::test_status_says_when_your_last_sync_pass_finished` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_settings.py::test_status_shows_your_pending_sync_backlog` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed |
+| 6 | app | absent by design on web, ios, android, android-kids, ios-kids | — |
 | 7 | app | `tests/e2e-unified/tests/test_settings.py::test_status_shows_your_encryption_state_read_only` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_settings.py::test_status_names_the_build_you_are_running` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_an_events_bytes_move_the_one_storage_number_mail_reads` | nest (linux): passed |

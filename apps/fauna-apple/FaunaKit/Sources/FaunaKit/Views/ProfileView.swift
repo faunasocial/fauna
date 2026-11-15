@@ -225,7 +225,10 @@ public struct ProfileView: View {
                 if isSelf {
                     SubscriptionTiersTab(vm: vm, handle: session.handle ?? "")
                 } else {
-                    SubscriptionOffersTab(vm: offersVM)
+                    // The rows carry the page's actor-home slot, read at press
+                    // time as `toggleFollow` reads it, so a creator homed on
+                    // another nest is subscribed (and checked out) across nests.
+                    SubscriptionOffersTab(vm: offersVM, home: { knockVM.home(peer: viewedActorId) })
                 }
             }
             #endif
@@ -274,13 +277,17 @@ public struct ProfileView: View {
             if isSelf {
                 await vm.configure(api: client.api, authorIdHex: viewedActorId)
             } else {
-                await offersVM.configure(api: client.api, authorIdHex: viewedActorId)
                 if let selfActorId = session.actorId {
                     knockVM.configure(api: client.api, actorId: selfActorId, familyStatus: familyStatus)
                 }
                 // A fresh open: the knock's per-open state (error, "sent", route)
-                // starts clean, as a rebuilt page would.
+                // starts clean, as a rebuilt page would. Seeded before the offers
+                // load, which reads from the slot it seeds (`subscriptions.md`
+                // § Pillar 1 → *The offers browse across nests*); the header read
+                // below may move it, and the offers re-read then.
                 knockVM.beginOpen(peer: viewedActorId, carried: homeNestUrl)
+                await offersVM.configure(api: client.api, authorIdHex: viewedActorId,
+                                         home: knockVM.home(peer: viewedActorId))
                 blockEdge.reset()
                 publishState()
                 await refreshBlockState()
@@ -381,6 +388,8 @@ public struct ProfileView: View {
             if !isSelf {
                 knockVM.noteProfile(body: body, peer: viewedActorId)
                 publishState()
+                // A moved slot re-reads the Tiers tab's offers from the new home.
+                await offersVM.noteHome(knockVM.home(peer: viewedActorId))
             }
         } else {
             headerName = nil
@@ -1459,6 +1468,8 @@ private struct SubscriptionClaimRow: View {
 /// Mirrors linux `views/profile/offers.rs`.
 private struct SubscriptionOffersTab: View {
     @Bindable var vm: ProfileOffersVM
+    /// The page's actor-home slot (`nil` = the local arm), read at press time.
+    let home: () -> String?
 
     var body: some View {
         ScrollView {
@@ -1471,7 +1482,7 @@ private struct SubscriptionOffersTab: View {
                 }
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(vm.offers, id: \.name) { offer in
-                        SubscriptionOfferRow(offer: offer, vm: vm)
+                        SubscriptionOfferRow(offer: offer, vm: vm, home: home)
                             .accessibilityElement(children: .contain)
                             .accessibilityIdentifier(Ids.subscriptionOfferRow)
                             .automationValue(Ids.subscriptionOfferRow, text: { offer.name })
@@ -1482,6 +1493,18 @@ private struct SubscriptionOffersTab: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(Ids.subscriptionOfferList)
                 .automationValue(Ids.subscriptionOfferList, text: { String(vm.offers.count) })
+
+                #if !FAUNA_EXCISE_PAYMENTS
+                // The redeem row (`profile.md` § Layout & flow → *Another's
+                // profile*): the `subscription-settings` pair, here carrying this
+                // creator's home — paints with or without offer rows. Same
+                // excision and Dim-3 gate as the settings pair (the shared row).
+                Text(L.subscriptions.redeemClaimTitle).font(.headline)
+                ClaimRedeemRow(code: $vm.claimCodeInput) {
+                    let actorHome = home()
+                    Task { await vm.redeemClaim(home: actorHome) }
+                }
+                #endif
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1498,6 +1521,8 @@ private struct SubscriptionOffersTab: View {
 private struct SubscriptionOfferRow: View {
     let offer: FfiTierItem
     @Bindable var vm: ProfileOffersVM
+    let home: () -> String?
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1523,6 +1548,10 @@ private struct SubscriptionOfferRow: View {
                     .controlSize(.small)
                     .accessibilityIdentifier(Ids.subscriptionOfferPaymentLink)
                     .automationActivate(Ids.subscriptionOfferPaymentLink) { openPayment(url) }
+                    // The link subscribes before it opens the checkout (Q13
+                    // rule (1)), so it is gated like the Subscribe beside it
+                    // (tui gates `OpenPaymentLink` on the same method).
+                    .faunaGate("fauna.subscriptions.subscribe")
             }
             #endif
 
@@ -1530,14 +1559,9 @@ private struct SubscriptionOfferRow: View {
                 automationText(Ids.subscriptionOfferStatus, statusText)
                     .font(.caption)
                 Spacer()
-                Button(L.subscriptions.subscribe) { Task { await vm.subscribe(offer.name) } }
+                Button(L.subscriptions.subscribe) { subscribe() }
                     .accessibilityIdentifier(Ids.subscriptionOfferSubscribeButton)
-                    .automationActivate(Ids.subscriptionOfferSubscribeButton) {
-                        Task { await vm.subscribe(offer.name) }
-                    }
-                    // The payment link beside it just hands a URL to the OS —
-                    // no round trip, so it stays live (tui's `OpenPaymentLink`
-                    // makes the same split).
+                    .automationActivate(Ids.subscriptionOfferSubscribeButton) { subscribe() }
                     .faunaGate("fauna.subscriptions.subscribe")
             }
         }
@@ -1547,12 +1571,25 @@ private struct SubscriptionOfferRow: View {
         renderLocalizedText(offerStatusLabel(status: vm.status(for: offer.name)))
     }
 
-    /// Refused for a non-`https` scheme via the shared `is_safe_payment_url`
-    /// UniFFI export (F-CL2 anti-phishing-redirect class) — the
-    /// payment_url is nest/author-supplied, so it is untrusted the same way
-    /// linux's `views/profile/offers.rs` and web's `isSafeNavUrl` treat it.
+    /// The row's Subscribe, across nests at the page's actor-home slot.
+    private func subscribe() {
+        let home = home()
+        Task { await vm.subscribe(offer.name, home: home) }
+    }
+
+    /// The payment link: refused for a non-`https` scheme via the shared
+    /// `is_safe_payment_url` UniFFI export (F-CL2 anti-phishing-redirect class — the payment_url is nest/author-supplied, so untrusted the
+    /// same way linux's `views/profile/offers.rs` and web's `isSafeNavUrl` treat
+    /// it); otherwise the subscribe goes first and the checkout the shared rule
+    /// binds to the buyer's actor opens after (`ProfileOffersVM.payTo`).
     private func openPayment(_ url: String) {
-        openPaymentURL(url) { vm.errorMessage = $0 }
+        let home = home()
+        let openURL = openURL
+        Task {
+            await vm.payTo(offer.name, paymentUrl: url, home: home) {
+                ExternalURLOpener.open($0, with: openURL)
+            }
+        }
     }
 }
 #endif

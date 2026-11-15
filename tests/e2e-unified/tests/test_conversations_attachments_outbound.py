@@ -117,7 +117,7 @@ those same calls. The legs are windows-shaped (launch-time
 ``real_conversations`` gate, so they share windows' bodies). Three things stand
 between them and a recorded run, none in this module: android's run venue
 (``docs/goal/architecture/testing.md`` § Default app and nest mode ->
-*Android's run venue*, an open user decision); an app-log reader on the
+*Android's emulator placement*, an open user decision); an app-log reader on the
 android driver, without which ``real_faunamls_app``'s real-rail control takes
 its declared ``skip_unbuilt`` (``helpers/real_rail_control.py``); and a first
 run of the file transport on a device -- the agent reads ``file`` on the

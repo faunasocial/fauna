@@ -83,6 +83,11 @@ pub async fn handle_request(req: &Request, state: &Arc<SyncServiceState>) -> Res
             state.recover_job.lock().await.clone(),
         )),
         RequestMethod::GetCustodianFolderNames => handle_get_custodian_folder_names(state).await,
+        RequestMethod::SetPresenceEnabled { scoped_id, enabled } => {
+            crate::presence_roots::set_presence_enabled(state, scoped_id, *enabled)
+                .await
+                .map(|()| ResponsePayload::Empty)
+        }
         RequestMethod::Pause => handle_set_paused(state, true).await,
         RequestMethod::Resume => handle_set_paused(state, false).await,
         RequestMethod::PullFolderNow {
@@ -4853,6 +4858,58 @@ mod tests {
         }
     }
 
+    /// `SetPresenceEnabled` persists the device-local toggle under the set's
+    /// actor-scoped id (default ON, so only an off is stored), round-trips back
+    /// ON, and refuses an identifier the parser does not take — the desktops'
+    /// `folder-on-demand-toggle` (`on-demand-files-shared-sets.md` § Shared sets
+    /// on a capability host, decision 3d, rule 5).
+    #[tokio::test]
+    async fn set_presence_enabled_round_trips_the_toggle() {
+        use fauna_folders_machine::on_demand_presence::OnDemandPrefs;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
+        let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        let state = SyncServiceState::new(
+            crate::config::SyncConfig::default(),
+            shutdown_tx,
+            event_tx,
+            paths.clone(),
+        );
+        let scoped = FolderRef::Local(4).scoped_to([9; 32]);
+        let store = crate::presence_roots::prefs_path(&paths);
+        let set = |id: u64, enabled: bool, scoped_id: String| Request {
+            id,
+            method: RequestMethod::SetPresenceEnabled { scoped_id, enabled },
+        };
+
+        let resp = handle_request(&set(1, false, scoped.to_wire()), &state).await;
+        assert!(matches!(
+            resp.result,
+            ResponseResult::Ok(ResponsePayload::Empty)
+        ));
+        assert!(
+            !OnDemandPrefs::load(&store).unwrap().is_enabled(&scoped),
+            "off persisted"
+        );
+
+        let resp = handle_request(&set(2, true, scoped.to_wire()), &state).await;
+        assert!(matches!(
+            resp.result,
+            ResponseResult::Ok(ResponsePayload::Empty)
+        ));
+        assert!(
+            OnDemandPrefs::load(&store).unwrap().is_enabled(&scoped),
+            "back ON"
+        );
+
+        let resp = handle_request(&set(3, false, "docs".into()), &state).await;
+        assert!(
+            matches!(resp.result, ResponseResult::Err(_)),
+            "a bare name is not a toggle key"
+        );
+    }
+
     /// TDD — `Pause`/`Resume` persist the device-global flag to config (and reply
     /// `Empty`), so a paused agent stays paused across a restart. Uses an override
     /// data-root so the save actually hits a temp `config.toml`.
@@ -7315,6 +7372,7 @@ mod reconcile_account_runtime_tests {
             peer_transport: None,
             enrollment_target_device_id: "ab".repeat(32),
             enrollment_device_label: None,
+            foreground: true,
         })
         .await
         .expect("an offline runtime starts")

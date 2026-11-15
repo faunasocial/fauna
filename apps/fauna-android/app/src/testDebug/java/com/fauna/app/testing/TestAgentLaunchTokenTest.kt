@@ -22,7 +22,7 @@ import org.robolectric.annotation.Config
  * refusal, never an absent key or a hand-spelled zero) and the command refuses
  * loudly on the app's own `error-message`. The live shape, `expires_in_secs`
  * in `(60, 3600]` before and after the forced refresh, is case M's to witness
- * once the android venue runs it.
+ * once the android emulator runs it.
  */
 @RunWith(FaunaRobolectricTestRunner::class)
 @Config(sdk = [34])

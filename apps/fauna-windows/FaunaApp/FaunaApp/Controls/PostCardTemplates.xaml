@@ -29,6 +29,98 @@
     <helpers:HexColorToBrushConverter x:Key="HexBrush" />
     <helpers:TagChipTextConverter x:Key="TagChipText" />
 
+    <!-- The card's media: one element per PostMediaElement (FeedPostItem.MediaElements —
+         every Image / ProxiedImage / Video / ProxiedVideo block of the shared
+         media_blocks fold, in body order, render-model.md § D6b Accessors), picked by
+         PostMediaTemplateSelector. Each element publishes its settled alt (the author's,
+         else the shared fallback text, § D6c → Proxied video, the alt paragraph) as its
+         `alt` attribute, packed beside what it already published on HelpText. Every
+         binding is OneTime: the element is an immutable record, and a changed post
+         rebuilds its row (ContentEquals → replace). -->
+
+    <!-- Post image (post-image): visible once its picture resolves via BlobImageLoader.
+         AutomationId + Click sit on the wrapping Button (never bare Tapped on the Image),
+         so FlaUI drives it via UIA InvokePattern instead of falling back to physical
+         SendInput — the SAME nested-Button-inside-post-card idiom
+         load-remote-content-button/feed-post-actions-button use, and required here: a
+         bare Image.Tapped measured 2026-09-07 reliably hit SendInput's "Access is
+         denied" off-foreground. The Button starts Collapsed and
+         ImageHashBind.VisibilityTarget (not an x:Bind on the hash string) flips it once
+         the async fetch actually resolves — gating on the hash alone let automation
+         click the button before Source was set, silently no-op'ing (post-card's own
+         click would then win instead, opening post_detail unexpectedly). feed.md
+         § Element IDs, image-lightbox: the other apps open the lightbox from this same
+         list-card image.
+         A bridged post's picture (render-model.md § D6c) has no hash: it is the
+         nest-relative ProxiedPath, fetched with the session bearer. It is the one case
+         where the Button shows before a picture has loaded — behind
+         PostImagePlaceholder, with the path as its automation Name until the bytes land
+         (they may never: the remote host can be gone), so the slot stays addressable.
+         PostImage_Click opens the lightbox only for a loaded bitmap, so a click on the
+         placeholder does nothing.
+         The template's root is a bare Grid, never the Button itself: the XAML compiler
+         holds a template's root element as a WeakReference, and an x:Bind naming that
+         root (VisibilityTarget below) then generates a call passing the WeakReference
+         where the element is wanted (CS1503 in the generated .g.cs). A Grid has no
+         automation peer, so the UIA tree is the Button's as before. -->
+    <DataTemplate x:Key="PostMediaImageTemplate" x:DataType="corehelpers:PostMediaElement">
+        <Grid>
+            <Button x:Name="PostImageButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.PostImage}"
+                    Click="PostImage_Click"
+                    Background="Transparent" BorderThickness="0" Padding="0"
+                    HorizontalAlignment="Left" HorizontalContentAlignment="Left"
+                    Margin="0,4,0,4"
+                    Visibility="Collapsed">
+                <Grid>
+                    <Border x:Name="PostImagePlaceholder" Width="160" Height="100" CornerRadius="4"
+                            Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
+                            Visibility="Collapsed">
+                        <TextBlock Text="&#xE8B9;" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="24" Opacity="0.5"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <Image MaxHeight="300" Stretch="Uniform"
+                           helpers:ImageHashBind.VisibilityTarget="{x:Bind PostImageButton, Mode=OneTime}"
+                           helpers:ImageHashBind.Placeholder="{x:Bind PostImagePlaceholder, Mode=OneTime}"
+                           helpers:ImageHashBind.Alt="{x:Bind Alt, Mode=OneTime}"
+                           helpers:ImageHashBind.Hash="{x:Bind Hash, Mode=OneTime}"
+                           helpers:ImageHashBind.Home="{x:Bind Home, Mode=OneTime}"
+                           helpers:ImageHashBind.ProxiedPath="{x:Bind ProxiedPath, Mode=OneTime}"
+                           helpers:ImageHashBind.Loader="{x:Bind feed:PostCardBind.GetImageLoader(), Mode=OneTime}" />
+                </Grid>
+            </Button>
+        </Grid>
+    </DataTemplate>
+
+    <!-- Video thumbnail (video-thumbnail): the D6b `Video` sibling of `Image` — a play
+         glyph + the hash as text, since no poster frame exists to paint
+         (`MediaItem.thumbnail`/`dimensions` are `None` from every writer, deliberately).
+         Since inline playback (§ D6c → Inline playback) the element is the player host:
+         controls:VideoThumbnailView swaps the glyph, on a tap, for WinUI's
+         MediaPlayerElement in the same slot, off the shared playback_source for the bound
+         block — never autoplay — and publishes state/position/source (and its alt)
+         through its automation peer. It names itself from the block (an unnamed
+         DataTemplate element is UIA-pruned — memory reference_winui_flaui_datatemplate_name).
+         A bridged post's `ProxiedVideo` (§ D6c → Proxied video) is the block of this
+         same element: the glyph + its nest-relative path, never byte-loaded before the
+         tap, and played off the ticketed path playback_source answers for it. PostId
+         keys the list's player keep and routes the player's progress to the
+         engagement-cue capture (CueViewportObserver.NotePlayed, the tracker-held peak),
+         so a video played to its end derives the media watch-complete. -->
+    <DataTemplate x:Key="PostMediaVideoTemplate" x:DataType="corehelpers:PostMediaElement">
+        <controls:VideoThumbnailView Margin="0,4,0,0"
+                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.VideoThumbnail}"
+                                     Block="{x:Bind Block, Mode=OneTime}"
+                                     Home="{x:Bind Home, Mode=OneTime}"
+                                     PostId="{x:Bind PostId, Mode=OneTime}"
+                                     Alt="{x:Bind Alt, Mode=OneTime}" />
+    </DataTemplate>
+
+    <controls:PostMediaTemplateSelector x:Key="PostMediaTemplates"
+                                        Image="{StaticResource PostMediaImageTemplate}"
+                                        Video="{StaticResource PostMediaVideoTemplate}" />
+
     <DataTemplate x:Key="PostCardTemplate" x:DataType="vm:FeedPostItem">
         <!-- Outer wrapper: the post-card id/Name stay here so count("post-card")
              is unaffected by ANY withholding arm (topic-factors.md § Scoring — a
@@ -177,6 +269,19 @@
                            Text="{x:Bind GuardianReasonText}"
                            Visibility="{x:Bind feed:PostCardBind.BoolToVisibility(ShowGuardianReason)}"
                            Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
+                <!-- The reporter's show-again (`content-policy-show-again-button`,
+                     moderation.md § Corollary — the reporter's hide is theirs to
+                     undo): beside the reported notice and only there, its label
+                     naming the scope (the post, or the whole account) from the
+                     shared fold. A persisted un-hide (PostCardHost.ShowAgain_Click),
+                     never the session-local reveal below. Name beside Content, or
+                     the DataTemplate peer is UIA-pruned. -->
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyShowAgainButton}"
+                        AutomationProperties.Name="{x:Bind ShowAgainLabel}"
+                        Content="{x:Bind ShowAgainLabel}"
+                        Visibility="{x:Bind feed:PostCardBind.BoolToVisibility(ShowShowAgain), Mode=OneWay}"
+                        HorizontalAlignment="Left" Padding="8,2" FontSize="12"
+                        Tag="{x:Bind}" Click="ShowAgainButton_Click" />
             </StackPanel>
 
             <StackPanel Grid.Row="1" Spacing="4" Padding="8,12"
@@ -219,7 +324,12 @@
                         Tag="{x:Bind}" Click="ContentRevealButton_Click" />
             </StackPanel>
 
+        <!-- The post body: the one arm no placeholder above shows, so it alone
+             carries the cue-subject mark the engagement-cue capture measures by
+             (Feed.CueSubject; engagement-cues.md § Cue vocabulary & derivation —
+             lingering on a placeholder is no exposure to the post). -->
         <Grid Grid.Row="3" Padding="8,12" ColumnSpacing="12" RowSpacing="4"
+              feed:CueSubject.IsSubject="True"
               Visibility="{x:Bind feed:PostCardBind.BoolToVisibility(ShowNormalContent), Mode=OneWay}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
@@ -409,54 +519,18 @@
                 </StackPanel>
             </Border>
 
-            <!-- Post image: visible once MediaHashHex resolves via BlobImageLoader.
-                 AutomationId + Click sit on the wrapping Button (never bare Tapped
-                 on the Image), so FlaUI drives it via UIA InvokePattern instead of
-                 falling back to physical SendInput — the SAME nested-Button-inside-
-                 post-card idiom load-remote-content-button/feed-post-actions-button
-                 already use below, and required here: a bare Image.Tapped measured
-                 2026-09-07 reliably hit SendInput's "Access is denied" off-foreground.
-                 The Button starts Collapsed and ImageHashBind.VisibilityTarget (not
-                 an x:Bind on the hash string) flips it once the async fetch actually
-                 resolves — gating on the hash alone let automation click the button
-                 before Source was set, silently no-op'ing (post-card's own click
-                 would then win instead, opening post_detail unexpectedly). feed.md
-                 § Element IDs, image-lightbox: five other apps already open the
-                 lightbox from this same list-card image.
-                 A bridged post's picture (render-model.md § D6c) has no hash: it is
-                 the nest-relative MediaProxiedPath, fetched with the session bearer.
-                 It is the one case where the Button shows before a picture has
-                 loaded — behind PostImagePlaceholder, with the path as its
-                 automation Name until the bytes land (they may never: the remote
-                 host can be gone), so the slot stays addressable. PostImage_Click
-                 opens the lightbox only for a loaded bitmap, so a click on the
-                 placeholder does nothing. -->
-            <Button x:Name="PostImageButton" Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2"
-                    AutomationProperties.AutomationId="{x:Bind ids:Ids.PostImage}"
-                    Click="PostImage_Click"
-                    Background="Transparent" BorderThickness="0" Padding="0"
-                    HorizontalAlignment="Left" HorizontalContentAlignment="Left"
-                    Margin="0,4,0,4"
-                    Visibility="Collapsed">
-                <Grid>
-                    <Border x:Name="PostImagePlaceholder" Width="160" Height="100" CornerRadius="4"
-                            Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
-                            Visibility="Collapsed">
-                        <TextBlock Text="&#xE8B9;" FontFamily="Segoe MDL2 Assets"
-                                   FontSize="24" Opacity="0.5"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    </Border>
-                    <Image MaxHeight="300" Stretch="Uniform"
-                           helpers:ImageHashBind.VisibilityTarget="{x:Bind PostImageButton, Mode=OneTime}"
-                           helpers:ImageHashBind.Placeholder="{x:Bind PostImagePlaceholder, Mode=OneTime}"
-                           helpers:ImageHashBind.Hash="{x:Bind MediaHashHex, Mode=OneWay}"
-                           helpers:ImageHashBind.Home="{x:Bind BlobHome, Mode=OneWay}"
-                           helpers:ImageHashBind.ProxiedPath="{x:Bind MediaProxiedPath, Mode=OneWay}"
-                           helpers:ImageHashBind.Loader="{x:Bind feed:PostCardBind.GetImageLoader(), Mode=OneTime}" />
-                </Grid>
-            </Button>
+            <!-- The post's media (render-model.md § D6b Accessors): one post-image per
+                 picture and one video-thumbnail per video, in body order, from
+                 FeedPostItem.MediaElements — the templates and why each is shaped as it
+                 is sit at the top of this dictionary (PostMediaImageTemplate /
+                 PostMediaVideoTemplate). Until 2026-11-13 the card painted one picture
+                 and one video per post (the first of each); every other app paints
+                 every block. An ItemsControl with no elements renders nothing. -->
+            <ItemsControl Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2"
+                          ItemsSource="{x:Bind MediaElements, Mode=OneWay}"
+                          ItemTemplateSelector="{StaticResource PostMediaTemplates}" />
             <!-- C2PA provenance badge (media.md § C2PA provenance): overlays the
-                 post image's bottom-right corner once PostCardHost.Sync's
+                 post media's bottom-right corner once PostCardHost.Sync's
                  fire-once trigger resolves the `x-c2pa` header (the SAME
                  authenticated blob GET post-image's own load performs — no extra
                  request) and sets HasC2pa on this row. Same corner placement +
@@ -543,33 +617,8 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
-            <!-- Video thumbnail (video-thumbnail): the D6b `Video` sibling of `Image`
-                 (render-model.md § Implementation status today) — painted from the
-                 folded `RenderBlock.Video` (VideoBlock), the twin of
-                 MediaHashHex/post-image. No poster frame exists to paint
-                 (`MediaItem.thumbnail`/`dimensions` are `None` from every writer,
-                 deliberately) — a play glyph + the hash as text. Since inline
-                 playback (§ D6c → Inline playback) the element is the player host:
-                 controls:VideoThumbnailView swaps the glyph, on a tap, for WinUI's
-                 MediaPlayerElement in the same slot, off the shared playback_source for
-                 the bound VideoBlock — never autoplay — and publishes
-                 state/position/source through its automation peer. It names itself
-                 from the block (an unnamed DataTemplate element is UIA-pruned — memory
-                 reference_winui_flaui_datatemplate_name).
-                 A bridged post's `ProxiedVideo` (render-model.md § D6c → Proxied
-                 video) is the block of this same element: the glyph + its
-                 nest-relative path, never byte-loaded before the tap, and played off
-                 the ticketed path playback_source answers for it. PostId routes the
-                 player's progress to the engagement-cue capture (CueViewportObserver
-                 .NotePlayed, the tracker-held peak), so a video played to its end
-                 derives the media watch-complete. -->
-            <controls:VideoThumbnailView Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2"
-                                         Margin="0,4,0,0"
-                                         AutomationProperties.AutomationId="{x:Bind ids:Ids.VideoThumbnail}"
-                                         Block="{x:Bind VideoBlock, Mode=OneWay}"
-                                         Home="{x:Bind BlobHome, Mode=OneWay}"
-                                         PostId="{x:Bind PostId}"
-                                         Visibility="{x:Bind feed:PostCardBind.BoolToVisibility(HasVideo), Mode=OneWay}" />
+            <!-- Grid.Row="6" held the card's one video-thumbnail until 2026-11-13; videos
+                 now paint in body order with the pictures, in the media list above. -->
             <!-- Quoted-post embed (render-model.md § D6). A bare layout Border inside a
                  DataTemplate that sets only AutomationId is pruned from the UIA tree, so
                  FlaUI's scoped is_visible("quoted-post", scope="post-card[i]") finds 0 even

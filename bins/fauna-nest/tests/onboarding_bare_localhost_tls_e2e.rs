@@ -52,6 +52,11 @@ async fn bare_test_at_localhost_reaches_claim_path_on_injected_port_over_floor_t
     let observer: Arc<dyn OnboardingObserver> = Arc::new(NullObserver);
     let m = OnboardingMachine::new(observer);
     m.seed_identity("01".repeat(32));
+    // The regular app's claim path, whatever this build's features: the nest's
+    // `--all-features` test build compiles `fauna-ffi-core`'s `kids-floor`, which
+    // turns on the machine's kids input, and the kids app has no claim path
+    // (`account-age-band.md` § The account age band, the kids-app bullet).
+    m.set_kids_for_test(false);
     // The same-box app / e2e injects WHERE its local nest listens (the Option-A
     // seam). Here: the random floor-TLS port. Without this, a bare loopback handle
     // resolves to the default https://localhost:443 (nothing there in the test).

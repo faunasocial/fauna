@@ -204,6 +204,32 @@ public class ContactArchiveLinkTests
         Assert.Single(links.Unlinks);
     }
 
+    /// <summary>The roster narrowed by <c>contacts-search-field</c> repaints like the whole
+    /// one: the answer that moves the shared views clears the question on the narrowed
+    /// row too. The page used to show a snapshot of the rows taken when the query was
+    /// typed, so a repaint rebuilt rows nobody saw and the asked row kept its question
+    /// for good — the windows red of <c>test_archive_link_merge.py</c>'s "A's answer
+    /// clears A's prompt", whose roster is narrowed to the peer.</summary>
+    [Fact]
+    public async Task A_narrowed_roster_repaints_its_row_when_an_answer_moves_the_views()
+    {
+        UseLocalizer();
+        var links = new FakeArchiveLinks { NextViews = new[] { View(B, ArchiveLinkState.Asked) } };
+        var (vm, _) = await Loaded(links);
+
+        vm.RosterQuery = "bo";
+        var row = Assert.Single(Assert.Single(vm.Sections));
+        Assert.Equal(B, row.ActorId);
+        var asked = Assert.Single(row.ArchiveLinks);
+
+        links.NextViews = new[] { View(B, ArchiveLinkState.Offered) };
+        await vm.AnswerArchiveLinkAsync(asked, yes: true);
+
+        var repainted = Assert.Single(Assert.Single(vm.Sections));
+        Assert.Equal(B, repainted.ActorId);
+        Assert.Empty(repainted.ArchiveLinks);
+    }
+
     /// <summary>The login hand-over (archive-import.md § Implementation status today, the
     /// tui shape every app inherits): one drive at once, then a tick that drives again
     /// only while work is due and re-reads the views only when the sink captured

@@ -853,6 +853,14 @@ pub struct UsersState {
     /// Per-pending-request deny-reason drafts (`invite-request-row-deny-reason-field[i]`),
     /// parallel to `snapshot.invite_requests`.
     pub request_deny_reasons: Vec<String>,
+    /// The viewing admin's raw actor id, set at the post-auth hook — what the
+    /// shared take-over offer keys on (`admin_user_row_controls`).
+    pub viewer_actor: Vec<u8>,
+    /// The armed take-over confirm (`admin-users-take-over-confirm-*`,
+    /// `family-safety.md` § App surface → *Admin take-over*): the ward's actor
+    /// id, captured at arm time so a re-read that re-orders the rows cannot
+    /// retarget the confirm. One row armed at a time; `None` while un-armed.
+    pub take_over_armed: Option<Vec<u8>>,
 }
 
 impl UsersState {
@@ -2152,6 +2160,16 @@ pub enum Action {
     RemoveAdmin {
         row: usize,
     },
+    /// `admin-users-take-over-button[row]` — arm the inline take-over confirm
+    /// on the `row`-th (supervised) user, disarming any other row (local).
+    ArmTakeOver {
+        row: usize,
+    },
+    /// `admin-users-take-over-cancel-button[row]` — disarm, touching nothing.
+    CancelTakeOver,
+    /// `admin-users-take-over-confirm-button[row]` — disarm, then dispatch
+    /// `fauna.family.transfer { ward, self }`, which completes at once.
+    ConfirmTakeOver,
     /// `admin-pending-action-approve-button[i]` — add this admin's approval to
     /// pending action `id` (`pending_action_approve`; the nest refuses
     /// self-approval, surfaced on the page-scoped error — `admin.md` § Pending
@@ -2568,6 +2586,7 @@ impl Action {
             Action::SuspendUser { .. } => Some("fauna.admin.users.suspend"),
             Action::CancelUserEviction { .. } => Some("fauna.admin.users.cancel_eviction"),
             Action::MakeAdmin { .. } => Some("fauna.admin.admins.add"),
+            Action::ConfirmTakeOver => Some("fauna.family.transfer"),
             Action::RemoveAdmin { .. } => Some("fauna.admin.admins.remove"),
             Action::ApprovePending { .. } => Some("fauna.pending_actions.approve"),
             Action::CancelPending { .. } => Some("fauna.pending_actions.cancel"),
@@ -2663,6 +2682,8 @@ impl Action {
             | Action::SetTakedownConversation(_)
             | Action::ToggleTakedownRestore
             | Action::OpenTakedownConfirm
+            | Action::ArmTakeOver { .. }
+            | Action::CancelTakeOver
             | Action::CancelTakedown
             | Action::OpenReportTakedown { .. }
             | Action::OpenBlockConfirm { .. }
@@ -2997,11 +3018,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let cached_handle = crate::session::stored_account(app)
                 .map(|(_, _, handle)| handle)
                 .unwrap_or_default();
+            let cached_domain = crate::session::stored_account_domain(app);
             Some(Op::FactoryReset {
                 nest,
                 nest_url,
                 persistence,
                 cached_handle,
+                cached_domain,
             })
         }
         Action::OpenSeedRotateConfirm => {
@@ -3636,6 +3659,21 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 actor: user_actor_at(&app.admin.users, row)?,
             },
         ),
+        // The admin take-over (`family-safety.md` § App surface → *Admin
+        // take-over*): arm captures the ward, confirm disarms BEFORE dispatch.
+        Action::ArmTakeOver { row } => {
+            app.admin.users.take_over_armed = Some(user_actor_at(&app.admin.users, row)?);
+            None
+        }
+        Action::CancelTakeOver => {
+            app.admin.users.take_over_armed = None;
+            None
+        }
+        Action::ConfirmTakeOver => {
+            let ward = app.admin.users.take_over_armed.take()?;
+            let viewer = app.admin.users.viewer_actor.clone();
+            mutate_users_op(app, UsersMutation::TakeOver { ward, viewer })
+        }
         Action::ApprovePending { id } => mutate_users_op(app, UsersMutation::ApproveAction { id }),
         Action::CancelPending { id } => mutate_users_op(app, UsersMutation::CancelAction { id }),
         Action::UsersNextPage => users_page_op(app, next_users_offset(&app.admin.users)),
@@ -4781,6 +4819,13 @@ pub enum Op {
         /// there* — ask the live session first, keep the cache as the fallback);
         /// tui had adopted only the first half.
         cached_handle: String,
+        /// The account's cached handle domain ([`crate::session::stored_account_domain`]):
+        /// the domain a bare re-claim handle is qualified with, ahead of the
+        /// nest URL's host, which names where the nest is dialled, not the
+        /// handle's domain (a nest reached by IP or another host would
+        /// otherwise re-claim under a handle the wizard reads as non-real, and
+        /// derive email off).
+        cached_domain: Option<String>,
     },
     /// Read the current admin roster for the armed rotation confirm
     /// (`fauna.admin.admins.list`, plus a best-effort `users.get` per member for
@@ -4961,6 +5006,10 @@ pub enum UsersMutation {
     /// `admins_remove` — revoke the admin role (a scheduled pending action; the
     /// nest refuses at the last superadmin).
     RemoveAdmin { actor: Vec<u8> },
+    /// `fauna.family.transfer { ward, viewer }` — the admin takes the ward's
+    /// guardianship over; a self-proposal completes at once. The outcome
+    /// re-reads the users page and the viewer's `fauna.family.status`.
+    TakeOver { ward: Vec<u8>, viewer: Vec<u8> },
     /// `pending_action_approve` — add this admin's approval to a pending action.
     ApproveAction { id: i64 },
     /// `pending_action_cancel` — call a pending admin action off.
@@ -5145,6 +5194,9 @@ pub enum Outcome {
     /// unboxed variant would balloon `Outcome` (and the `PageOutcome`/`DataMessage`
     /// chain) past the `large_enum_variant` threshold (the `MailSnapshot` shape).
     UsersLoaded(Box<UsersSnapshot>),
+    /// A take-over landed: the re-read users page, plus a family-status re-read
+    /// so the viewer's `family-tab` reveals the ward.
+    TookOver(Box<UsersSnapshot>),
     /// A failed `admin-users` mutation — lands on the page-scoped
     /// `admin-users-action-error` (NOT the app-wide `error-message`; `admin.md`
     /// § Errors), leaving the last snapshot painted.
@@ -5430,25 +5482,31 @@ impl Op {
                 nest_url,
                 persistence,
                 cached_handle,
+                cached_domain,
             } => {
                 // Authoritative handle from the still-live session, before the wipe
-                // (linux `client.rs:4298`); qualify a bare local-part with the nest
-                // host so the post-reset re-claim re-registers the primary mail domain.
+                // (linux `client.rs::factory_reset`); qualify a bare local-part with
+                // the account's domain (else the nest host) through the shared rule,
+                // so the post-reset re-claim re-registers the primary mail domain.
                 //
                 // Fall back to the registry's cached handle when that lookup cannot
                 // answer — an unreachable nest, a session already torn down. Without
                 // the fallback the slot persists an EMPTY handle and the post-reset
                 // re-claim is refused ("a handle is required to claim the nest"),
                 // trapping the client; see the variant's `cached_handle` doc.
-                let handle = AccountClient::new(nest.clone())
+                let local = AccountClient::new(nest.clone())
                     .get()
                     .await
                     .ok()
                     .and_then(|r| r.handle)
                     .filter(|h| !h.is_empty())
                     .or_else(|| Some(cached_handle).filter(|h| !h.is_empty()))
-                    .map(|h| qualify_handle(h, &nest_url))
                     .unwrap_or_default();
+                let handle = fauna_onboarding_machine::qualify_reclaim_handle(
+                    local,
+                    cached_domain,
+                    nest_url.clone(),
+                );
                 // CR-1: mint + persist the post-reset claim code BEFORE dispatching.
                 // The helper returns the code only once the row is durable, so the
                 // crash-unsafe ordering is unrepresentable; a store that silently
@@ -5791,6 +5849,18 @@ impl Op {
                         .await
                         .map(|_| ())
                         .map_err(|e| format!("revoke admin: {e}")),
+                    UsersMutation::TakeOver { ward, viewer } => {
+                        return match fauna_client_family::FamilyClient::new(nest.clone())
+                            .transfer(ward, viewer)
+                            .await
+                        {
+                            Ok(()) => match load_users_snapshot(&nest, offset).await {
+                                Ok(snapshot) => Outcome::TookOver(Box::new(snapshot)),
+                                Err(e) => Outcome::UsersActionFailed(e),
+                            },
+                            Err(e) => Outcome::UsersActionFailed(format!("take over: {e}")),
+                        };
+                    }
                     UsersMutation::ApproveAction { id } => client
                         .pending_action_approve(id)
                         .await
@@ -6310,30 +6380,6 @@ async fn reflect_outcome(nest: &Arc<NestClient>) -> Outcome {
     }
 }
 
-/// Qualify a bare local-part handle with the nest host (linux's `nest_host`
-/// fallback) so the post-reset re-claim re-registers the primary mail domain
-/// (claim auto-registers the handle's `@domain`). An already-qualified handle
-/// (contains `@`) is returned unchanged.
-fn qualify_handle(handle: String, nest_url: &str) -> String {
-    if handle.contains('@') {
-        return handle;
-    }
-    match nest_host(nest_url) {
-        Some(host) => format!("{handle}@{host}"),
-        None => handle,
-    }
-}
-
-/// The host portion of a nest url (`wss://host:port/path` → `host`), or
-/// `None` when no host can be isolated (empty/scheme-only input) — a bare
-/// `fauna_core::format::url_host` swap would be wrong here: that fn's
-/// echo-the-input fallback can't be told apart from a genuine bare-host
-/// success by output inspection alone (`url_host("")` == `""`, which doesn't
-/// look like a failure).
-fn nest_host(nest_url: &str) -> Option<String> {
-    fauna_core::format::url_host_opt(nest_url)
-}
-
 /// Fold an [`Outcome`] back into the app.
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
     match outcome {
@@ -6572,6 +6618,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.admin.users.snapshot = Some(snapshot);
             app.admin.users.action_error = None;
         }
+        Outcome::TookOver(snapshot) => {
+            let snapshot = *snapshot;
+            app.admin.users.reseed(&snapshot);
+            app.admin.users.snapshot = Some(snapshot);
+            app.admin.users.action_error = None;
+            // The admin is now the ward's guardian: the same post-auth
+            // `fauna.family.status` read reveals `family-tab` with the ward.
+            crate::family::spawn_status_check(&app.family, &app.tx, app.session_generation);
+        }
         Outcome::BridgesSnapshot(snapshot) => {
             // The page paints its own `error-message` off the snapshot, like the
             // Web page — nothing to bridge onto `app.errors`.
@@ -6794,51 +6849,6 @@ mod tests {
         }
         assert!(seen.contains("admin-nav-row[admin-dns]"));
         assert!(seen.contains("admin-nav-row[admin-bridges-pending]"));
-    }
-
-    #[test]
-    fn nest_host_extracts_host_from_scheme_and_port() {
-        assert_eq!(
-            nest_host("wss://nest.example.com:8443/path").as_deref(),
-            Some("nest.example.com")
-        );
-        assert_eq!(nest_host("bare-host").as_deref(), Some("bare-host"));
-    }
-
-    /// The cases a naive `url_host`-based adapter gets wrong:
-    /// echoing the original input on extraction failure happens not to
-    /// contain "://" for these two inputs, so an adapter built as
-    /// `let host = url_host(u); (!host.contains("://")).then_some(host)`
-    /// would return `Some("")`/`Some(":")` here instead of `None`.
-    #[test]
-    fn nest_host_is_none_on_empty_or_bare_colon() {
-        assert_eq!(nest_host(""), None);
-        assert_eq!(nest_host(":"), None);
-    }
-
-    #[test]
-    fn qualify_handle_leaves_an_already_qualified_handle_unchanged() {
-        assert_eq!(
-            qualify_handle("alice@other.example".to_string(), "wss://nest.example.com"),
-            "alice@other.example"
-        );
-    }
-
-    #[test]
-    fn qualify_handle_appends_the_nest_host() {
-        assert_eq!(
-            qualify_handle("alice".to_string(), "wss://nest.example.com:8443"),
-            "alice@nest.example.com"
-        );
-    }
-
-    /// When the nest URL yields no host, the handle stays unqualified rather
-    /// than gaining a garbage `@`/`@:` suffix — the regression a prior adapter
-    /// analysis flagged as the real, if rare, failure mode to guard against.
-    #[test]
-    fn qualify_handle_stays_unqualified_when_nest_host_is_unavailable() {
-        assert_eq!(qualify_handle("alice".to_string(), ""), "alice");
-        assert_eq!(qualify_handle("alice".to_string(), ":"), "alice");
     }
 
     /// The gate fold sets the app-level `am_i_admin` flag (which drives the

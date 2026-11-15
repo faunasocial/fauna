@@ -385,6 +385,51 @@ pub fn derive_recipient_mail_capability_secret(msek: &[u8; 32]) -> Vec<u8> {
     payload
 }
 
+/// Length of one MSEK generation's chunk in a **master-key** `content.read{mail}`
+/// payload: the generation's standing recipient secret
+/// ([`derive_recipient_mail_capability_secret`], `x25519_secret ∥ ml-kem-dk`,
+/// `32 + 2400` bytes) followed by its 32-byte mail-epoch root
+/// ([`derive_mail_epoch_root`]) — `capability-grants.md` § Capability tiering →
+/// *Content-sealing epochs* → *What a master-key mail wrap conveys*.
+pub const MASTER_MAIL_CHUNK_LEN: usize = 32 + fauna_pq_kem::MLKEM768_DECAPS_KEY_LEN + 32;
+
+/// The most MSEK generations a master-key mail payload carries (newest first;
+/// older ones are left out and stay dark to the grant). The cap is also what
+/// keeps the master form apart from the bounded `k × 2432` form in the
+/// opener's length dispatch: the first length both forms share is
+/// `76 × 2464 = 77 × 2432`, past this cap.
+pub const MAX_MASTER_MAIL_GENERATIONS: usize = 64;
+
+/// The **master-key** `content.read{mail}` capability payload: one
+/// [`MASTER_MAIL_CHUNK_LEN`]-byte chunk per retained MSEK generation, newest
+/// first (`msek`, then `prior_mseks_newest_first` — `MailConfig.prior_mseks`'
+/// own order), truncated to the newest [`MAX_MASTER_MAIL_GENERATIONS`]. Each
+/// chunk is the generation's standing recipient secret then its mail-epoch
+/// root, so the holder opens that generation's standing-sealed AND
+/// epoch-sealed mail (`open_mail_record_with_grant_key`). Ruled in
+/// `capability-grants.md` § Capability tiering → *Content-sealing epochs* →
+/// *What a master-key mail wrap conveys*; the bounded per-epoch form is
+/// [`derive_recipient_mail_epoch_capability_secret_from_root`].
+#[must_use]
+pub fn derive_master_mail_capability_payload(
+    msek: &[u8; 32],
+    prior_mseks_newest_first: &[[u8; 32]],
+) -> Zeroizing<Vec<u8>> {
+    let generations = std::iter::once(msek)
+        .chain(prior_mseks_newest_first.iter())
+        .take(MAX_MASTER_MAIL_GENERATIONS);
+    let mut payload = Zeroizing::new(Vec::with_capacity(
+        MASTER_MAIL_CHUNK_LEN
+            * (1 + prior_mseks_newest_first.len()).min(MAX_MASTER_MAIL_GENERATIONS),
+    ));
+    for g in generations {
+        let standing = Zeroizing::new(derive_recipient_mail_capability_secret(g));
+        payload.extend_from_slice(&standing);
+        payload.extend_from_slice(&*derive_mail_epoch_root(g));
+    }
+    payload
+}
+
 // ── Calendar and card recipient keypairs (`owner-key-material.md`
 // § Path B-sibling-5 / § Path B-sibling-6, designed 2026-10-23) ──
 //
@@ -2308,5 +2353,28 @@ mod tests {
                 Err(UnwrapError::InvalidFormat(_))
             ));
         }
+    }
+
+    /// The master-key mail payload's byte layout (`capability-grants.md`
+    /// § Capability tiering → *What a master-key mail wrap conveys*): per
+    /// generation, newest first, the standing secret then the mail-epoch root
+    /// — golden-pinned so neither the layout nor a derive context drifts.
+    #[test]
+    fn master_mail_payload_golden_bytes_for_two_generations() {
+        let new = [0x5Au8; 32];
+        let old = [0xA5u8; 32];
+        let payload = derive_master_mail_capability_payload(&new, &[old]);
+        assert_eq!(MASTER_MAIL_CHUNK_LEN, 2464);
+        assert_eq!(payload.len(), 2 * MASTER_MAIL_CHUNK_LEN);
+        let mut expected = Vec::new();
+        for g in [&new, &old] {
+            expected.extend_from_slice(&derive_recipient_mail_capability_secret(g));
+            expected.extend_from_slice(&*derive_mail_epoch_root(g));
+        }
+        assert_eq!(payload.as_slice(), expected.as_slice());
+        assert_eq!(
+            hex::encode(blake3::hash(&payload).as_bytes()),
+            "fab4771eb38737092c0d9506a64367ddf08dd2030098bd80cd1e1b8ca6be7c11"
+        );
     }
 }

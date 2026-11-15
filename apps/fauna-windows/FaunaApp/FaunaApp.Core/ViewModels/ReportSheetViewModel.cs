@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using FaunaApp.Core.Services;
 using uniffi.fauna_ffi;
@@ -74,6 +75,37 @@ internal sealed class ReportSheetViewModel
         FfiReportSubject.Actor a => a.actorId,
         _ => "",
     };
+
+    /// <summary>
+    /// The press of <c>content-policy-show-again-button</c> (moderation.md § Corollary —
+    /// the reporter's hide is theirs to undo): one <c>unhide_reported</c> per id the
+    /// shared fold matched (<see cref="ContentPolicyCache.ShowAgainFor"/>), then the last
+    /// stored list into the same render slot the report's hide fills
+    /// (<see cref="ContentPolicyCache.SetHiddenContent"/>, whose change signal repaints
+    /// every open surface). The report itself is never withdrawn — showing again is the
+    /// reporter's view, the report is evidence on an admin's queue.
+    ///
+    /// <para>Returns the failure for the page's <c>error-message</c>, or <c>null</c>.
+    /// Never throws. When a later un-hide fails after an earlier one landed, the list the
+    /// earlier one returned still goes into the render state, so what paints is what is
+    /// stored.</para>
+    /// </summary>
+    internal static async Task<string?> ShowAgainAsync(INestRpcClient rpc, IReadOnlyList<string> ids)
+    {
+        if (ids.Count == 0) return null;
+        string[]? stored = null;
+        string? error = null;
+        try
+        {
+            foreach (var id in ids) stored = await rpc.UnhideReportedAsync(id);
+        }
+        catch (Exception ex)
+        {
+            error = $"show again: {Strings.Error(ex)}";
+        }
+        if (stored is not null) ContentPolicyCache.SetHiddenContent(stored);
+        return error;
+    }
 
     /// <summary>The subject's kind word as the admin queue line prints it
     /// (<c>post</c> / <c>message</c> / <c>actor</c>); <c>unknown</c> for a subject

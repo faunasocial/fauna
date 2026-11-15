@@ -857,7 +857,7 @@ async fn a_permanent_fetch_failure_does_not_hold_the_pull_cursor_but_a_transient
 
 // ── The relayed-row lift (writer-signed change records, ruling (3)) ─────────
 
-const SET_NONCE: [u8; 32] = [0x4E; 32];
+pub(crate) const SET_NONCE: [u8; 32] = [0x4E; 32];
 
 /// The set's owner, a writer member, and a member holding no writer role.
 fn set_owner() -> ActorKeypair {

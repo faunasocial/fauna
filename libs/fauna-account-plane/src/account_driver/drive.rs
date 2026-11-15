@@ -631,6 +631,9 @@ where
         }),
         Driven::Reassemble => Err(Reassemble),
     };
+    if let Ok(report) = &outcome {
+        drive.cycles.record_owed_nests(&report.owed_nests);
+    }
     if let Some(cycles) = cycles {
         cycles.end();
     }

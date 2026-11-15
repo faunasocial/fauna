@@ -18,7 +18,7 @@ private final class ScriptedFollowAPI: APIClient {
 
     init() { super.init(nodeUrl: URL(string: "https://nest.invalid/")!) }
 
-    override func subscriptionOffersList(authorIdHex: String) async throws -> [FfiTierItem] { [] }
+    override func subscriptionOffersList(authorIdHex: String, home: String?) async throws -> [FfiTierItem] { [] }
 
     override func subscriptionStatusGet(authorIdHex: String) async throws -> FfiSubscriptionStatus {
         status

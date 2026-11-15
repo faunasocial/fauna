@@ -56,6 +56,36 @@ impl NamedMutexTestGuard {
         );
         Self(handle)
     }
+
+    /// Acquire the named mutex `Local\<name>` if it frees within `timeout`; `None` when
+    /// another holder keeps it that long. An abandoned mutex (its holder died holding it)
+    /// is acquired, as [`acquire`](Self::acquire) acquires it.
+    ///
+    /// A Win32 mutex is re-entrant for its owning thread: called from a thread that
+    /// already holds `name`, this succeeds at once. A caller asking "does anyone else
+    /// hold it?" asks from a thread that does not.
+    pub fn try_acquire(name: &str, timeout: std::time::Duration) -> Option<Self> {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+        use windows::core::PCWSTR;
+
+        let wide: Vec<u16> = format!("Local\\{name}")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) }
+            .unwrap_or_else(|e| panic!("create named test mutex {name}: {e}"));
+        let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+        let wait = unsafe { WaitForSingleObject(handle, ms) };
+        if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+            Some(Self(handle))
+        } else {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            None
+        }
+    }
 }
 
 impl Drop for NamedMutexTestGuard {

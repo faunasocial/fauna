@@ -124,14 +124,14 @@ func TestInviteSealsToTheCalendarKey(t *testing.T) {
 	if !bytes.Contains(pt, []byte("BEGIN:VCALENDAR")) {
 		t.Fatalf("placed body = %q", pt)
 	}
-	if _, err := faunaFfi.OpenMailRecordWithKey(body, mail.CapabilitySecret); err == nil {
+	if _, err := faunaFfi.OpenMailRecordWithKey(body, mail.CapabilitySecret, 0); err == nil {
 		t.Fatal("the mail payload opened the placed invitation; it must be a calendar record")
 	}
 	hint, _ := c.placed["encrypted_index_hint"].([]byte)
 	if _, err := mailfauna.OpenStoredRecord(opener, hint); err != nil {
 		t.Fatalf("with no index key registered the hint seals to the calendar key: %v", err)
 	}
-	if _, err := faunaFfi.OpenMailRecordWithKey(hint, mail.CapabilitySecret); err == nil {
+	if _, err := faunaFfi.OpenMailRecordWithKey(hint, mail.CapabilitySecret, 0); err == nil {
 		t.Fatal("the mail payload opened the placed hint; it must be a calendar record")
 	}
 

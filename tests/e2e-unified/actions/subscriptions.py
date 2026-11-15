@@ -74,26 +74,6 @@ class SubscriptionsActions:
         self.driver.click("profile-tiers-tab")
         self.driver.wait_for("subscription-tiers-section", timeout=10.0)
 
-    # --- e2e convention 7: app-gate declarations (the platform check lives
-    # here, not the test body) ---
-
-    def require_sell_post_seller_fanout_leg_supported(self) -> None:
-        """Skip unless this app has both the §1 tier-create and §2 approve
-        surfaces needed to prove the sell-post seller fan-out/reconcile leg.
-
-        linux + tui (the tui Tiers author track lifted §§1–5) and windows today; widen
-        with the trickle-down lifts. Windows joined
-        2026-09-22: the gate had kept it out on the strength of a citation
-        nobody had re-run, and the leg went green there unchanged — the Tiers
-        tab's create form, §2 approve and roster surfaces are all built. Web
-        joined 2026-10-09 on the same terms: its Tiers tab carries the same
-        three surfaces, and the leg's witnesses ran there once the gate let
-        them. macos and ios (shared FaunaKit ProfileView's Tiers tab, the same
-        three surfaces) joined 2026-10-24 on the same terms."""
-        from helpers.app_surface import require_surface
-
-        require_surface(self.driver, "sell-post-seller-surfaces")
-
     def refresh(self) -> None:
         """Force a fresh read of all three sections.
 

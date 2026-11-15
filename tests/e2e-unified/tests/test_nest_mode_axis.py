@@ -781,6 +781,10 @@ _COMPOSED_AUTHORITY_IS_NOT_A_NEST = {
         "the mail bridge's own CalDAV listener (`handle.caldav_port`, the "
         "MDA's self-signed HTTPS endpoint the stock organizer client dials) — "
         "a bridge authority, never the nest's API listener",
+    "tests/test_nest_trust_grants.py":
+        "the mail bridge's own DAV listener (`mail_bridge_mda.caldav_port`, "
+        "the MDA's self-signed HTTPS endpoint a stock calendar or contacts "
+        "app dials) — a bridge authority, never the nest's API listener",
     "tests/test_caldav_nest_outcomes.py":
         "the mail bridge's own CalDAV/WebDAV listener (`handle.caldav_port` / "
         "`venue.caldav_port`, the MDA's self-signed HTTPS endpoint a stock "
@@ -1931,6 +1935,137 @@ def test_a_feature_set_fixture_reports_class_9_instead_of_the_blunt_binary_rule(
         ns.RULE_FEATURE_SET_BINARY,
         ns.RULE_NEST_BINARY,
     }
+
+
+def test_a_test_configuring_the_fake_payment_provider_is_class_9_in_image_modes():
+    """Class (9)'s second door: the `fake` payment provider is compiled in by
+    `test-hooks` alone, so a test that hands the nest `{"kind": "fake", …}` can
+    never pass against a release image. Measured on 0.1.6's candidate run: the
+    payments and membership suites errored at setup with
+    `fauna.payments.unknown_provider … (known: stripe)` in four nest cells,
+    and the regression verdict read a test-mode defect as a product
+    regression.
+
+    Three doors the configuration arrives by, each a real test of the tree:
+    the test body itself, a module fixture of its own (`paid_nest`), and a
+    module fixture calling a SHARED starter (`member_nest` →
+    `helpers.membership_nest.start_member_nest`). A neighbour that configures
+    no provider stays eligible, and standalone excludes nothing."""
+    from helpers import nest_surface as ns
+
+    api = pathlib.Path(__file__).resolve().parent / "api"
+    for module, name, fixtures in (
+        ("test_feature_gate_refusals.py",
+         "test_with_payments_denied_the_adds_are_refused_and_the_undos_never_are",
+         ["nest_instance"]),
+        ("test_payments_webhook.py", "test_providers_list_shows_config_without_secret",
+         ["paid_nest"]),
+        ("test_membership_admission.py",
+         "test_a_paid_membership_code_admits_like_an_invite_code", ["member_nest"]),
+    ):
+        item = _FakeItem(fixturenames=fixtures, name=name)
+        item.path = api / module
+        assert ns.classify(item, nm.parse_nest_mode("standalone")) is None, module
+        for mode in ("docker", "live"):
+            verdict = next(
+                (v for v in ns._verdicts(item, nm.parse_nest_mode(mode))
+                 if v.rule == ns.RULE_FEATURE_SET_BINARY),
+                None,
+            )
+            assert verdict is not None, (module, mode)
+            assert verdict.klass == ns.DECLARED_ABSENCE
+            assert "'kind': 'fake'" in verdict.reason, verdict.reason
+
+    neighbour = _FakeItem(
+        fixturenames=["routing_nest"],
+        name="test_publishing_alone_gives_a_front_page_and_a_feed",
+    )
+    neighbour.path = api / "test_web_host_routing.py"
+    assert ns.RULE_FEATURE_SET_BINARY not in set(
+        ns.all_rules(neighbour, nm.parse_nest_mode("docker"))
+    )
+
+
+def test_a_configuration_entry_is_the_pair_never_either_string():
+    """`_dict_entries` reads a dict literal's constant `key: value` pairs and
+    nothing else: `"fake"` alone is an everyday word in a test tree and `"kind"`
+    is on every frame, so a bare string, a keyword argument or a non-constant
+    value must not count — over-reach here deselects a test from a release run
+    for a reason that reads perfectly plausible."""
+    import ast
+
+    from helpers import kind_reach
+
+    tree = ast.parse(
+        "def f(ws, k):\n"
+        "    ws.call('x', {'kind': 'fake', 'tier': t})\n"
+        "    ws.call('y', {'kind': k})\n"
+        "    g(kind='fake')\n"
+        "    h('fake', 'kind')\n"
+    )
+    entries = kind_reach._dict_entries(tree)
+    assert ("kind", "fake") in entries
+    assert entries == {("kind", "fake")}, entries
+
+
+def test_a_test_saving_the_fake_provider_through_the_app_is_class_9_in_image_modes():
+    """Class (9)'s third door: a journey test saves the `fake` provider through
+    the app's provider form (`SubscriptionsActions.add_provider("fake", …)`),
+    so the kind reaches the nest as the form's value, never as a dict literal
+    the test writes. Measured on 0.1.6's candidate run: the three tui provider
+    journeys failed with `save provider: Something went wrong talking to the
+    nest` against the release image, collected because the second door reads
+    dict literals only. A neighbour that only OPENS the form for the kind
+    (`open_provider_form("fake")`, the webhook-URL preview) saves nothing and
+    stays eligible; standalone excludes nothing."""
+    from helpers import nest_surface as ns
+
+    module = pathlib.Path(__file__).resolve().parent / "test_subscription_payments.py"
+    for name in (
+        "test_provider_config_add_and_remove",
+        "test_provider_product_mapping_covers_only_its_own_payments",
+        "test_a_payment_backed_request_shows_the_paid_badge",
+    ):
+        item = _FakeItem(fixturenames=["app", "payments_nest"], name=name)
+        item.path = module
+        assert ns.classify(item, nm.parse_nest_mode("standalone")) is None, name
+        for mode in ("docker", "live"):
+            verdict = next(
+                (v for v in ns._verdicts(item, nm.parse_nest_mode(mode))
+                 if v.rule == ns.RULE_FEATURE_SET_BINARY),
+                None,
+            )
+            assert verdict is not None, (name, mode)
+            assert verdict.klass == ns.DECLARED_ABSENCE
+            assert "add_provider" in verdict.reason and "'fake'" in verdict.reason, (
+                verdict.reason)
+
+    neighbour = _FakeItem(fixturenames=["app", "payments_nest"],
+                          name="test_provider_webhook_url_preview")
+    neighbour.path = module
+    assert ns.RULE_FEATURE_SET_BINARY not in set(
+        ns.all_rules(neighbour, nm.parse_nest_mode("docker"))
+    )
+
+
+def test_a_configuring_call_is_the_callee_and_its_first_constant_argument():
+    """`_call_entries` reads a call's callee name and its FIRST positional
+    argument when that is a string constant — `subs.add_provider("fake", …)` is
+    `("add_provider()", "fake")`, the parentheses keeping a call apart from a
+    dict key of the same spelling. A keyword argument, a later positional or a
+    non-constant first argument does not count."""
+    import ast
+
+    from helpers import kind_reach
+
+    tree = ast.parse(
+        "def f(subs, k):\n"
+        "    subs.add_provider('fake', SECRET, tier)\n"
+        "    subs.add_provider(k, SECRET, tier)\n"
+        "    add_provider(kind='fake')\n"
+        "    other(1, 'fake')\n"
+    )
+    assert kind_reach._call_entries(tree) == {("add_provider()", "fake")}
 
 
 def test_a_permanently_unhonourable_option_is_a_fact_not_closable_debt():
@@ -6736,6 +6871,10 @@ _PEER_FIELDS_REVIEWED_AS_CLIENT_DIALS = {
     "test_a_wedge_recovery_leaves_no_live_grant_on_a_shared_account",   # ditto, the wedge-recovery twin
     "test_activitypub_federation_live_three_party",  # `_ui_claim`: the app's own nest
     "test_private_relay_behind_hetzner_public_node",  # ditto, private axis
+    # A live tier_4 witness on its own containers, outside every nest mode:
+    # B's two pairing rows name the box each row's OTHER end is reached at, and
+    # the home box pulls from the relay's public address — no run's nest in it.
+    "test_the_home_nest_refuses_a_relayed_certificate_its_admins_did_not_sign",
     "test_provision_drives_nest_url_without_device_toml",  # sync-agent → its nest
     "test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it",
                                # the app's own registry row, not a peer
@@ -7507,6 +7646,57 @@ def test_mail_venue_host_affordance_readers_are_exactly_pinned():
     root = Path(__file__).resolve().parents[1]
     seeds = set(_VENUE_FIXTURE_NAMES)
     found = set()
+
+    def _aliases(fn, names):
+        # Follow one level of aliasing (`handle = dedicated_mail_nest`),
+        # which is how almost every consumer names it.
+        alias = set(names)
+        for sub in _ast.walk(fn):
+            if (isinstance(sub, _ast.Assign)
+                    and isinstance(sub.value, _ast.Name)
+                    and sub.value.id in alias):
+                for t in sub.targets:
+                    if isinstance(t, _ast.Name):
+                        alias.add(t.id)
+        return alias
+
+    def _reads_host_attr(fn, names, helpers, seen):
+        # True when `fn` reads a host-only attribute off one of `names`, or
+        # hands one of them to a helper of the same module that does — the
+        # venue handle passed down (`_wait_captured(handle, …)` reading
+        # `handle.stub_mx`) is as much a read as one in the test's own body,
+        # and missing it let a reader route into a container.
+        alias = _aliases(fn, names)
+        for sub in _ast.walk(fn):
+            if (isinstance(sub, _ast.Attribute)
+                    and isinstance(sub.value, _ast.Name)
+                    and sub.value.id in alias
+                    and sub.attr in _VENUE_HOST_ONLY_ATTRS):
+                return True
+        for sub in _ast.walk(fn):
+            if not (isinstance(sub, _ast.Call) and isinstance(sub.func, _ast.Name)):
+                continue
+            helper = helpers.get(sub.func.id)
+            if helper is None or helper is fn:
+                continue
+            hparams = [a.arg for a in helper.args.args]
+            passed = set()
+            for i, arg in enumerate(sub.args):
+                if (isinstance(arg, _ast.Name) and arg.id in alias
+                        and i < len(hparams)):
+                    passed.add(hparams[i])
+            for kw in sub.keywords:
+                if (kw.arg is not None and isinstance(kw.value, _ast.Name)
+                        and kw.value.id in alias):
+                    passed.add(kw.arg)
+            key = (helper.name, frozenset(passed))
+            if not passed or key in seen:
+                continue
+            seen.add(key)
+            if _reads_host_attr(helper, passed, helpers, seen):
+                return True
+        return False
+
     for source_path in sorted((root / "tests").rglob("*.py")):
         if source_path.name == "test_nest_mode_axis.py":
             continue
@@ -7515,6 +7705,10 @@ def test_mail_venue_host_affordance_readers_are_exactly_pinned():
         except (OSError, SyntaxError):
             continue
         rel = source_path.relative_to(root).as_posix()
+        helpers = {
+            n.name: n for n in tree.body
+            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+        }
         for node in _ast.walk(tree):
             if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
                 continue
@@ -7522,22 +7716,8 @@ def test_mail_venue_host_affordance_readers_are_exactly_pinned():
             used = seeds & set(params)
             if not used:
                 continue
-            # Follow one level of aliasing (`handle = dedicated_mail_nest`),
-            # which is how almost every consumer names it.
-            alias = set(used)
-            for sub in _ast.walk(node):
-                if (isinstance(sub, _ast.Assign)
-                        and isinstance(sub.value, _ast.Name)
-                        and sub.value.id in alias):
-                    for t in sub.targets:
-                        if isinstance(t, _ast.Name):
-                            alias.add(t.id)
-            for sub in _ast.walk(node):
-                if (isinstance(sub, _ast.Attribute)
-                        and isinstance(sub.value, _ast.Name)
-                        and sub.value.id in alias
-                        and sub.attr in _VENUE_HOST_ONLY_ATTRS):
-                    found.add(f"{rel}::{node.name}")
+            if _reads_host_attr(node, used, helpers, set()):
+                found.add(f"{rel}::{node.name}")
 
     mapped = set(ns.MAIL_VENUE_HOST_AFFORDANCE_READERS)
     unmapped = sorted(found - mapped)
@@ -8031,6 +8211,22 @@ _NEST_BINARY_DISPOSITIONS = {
         "`db_path` and walks every file under the relay's data dir for the "
         "plaintext marker. A container's data dir is not the host's, so the "
         "routed form would read no disk at all and pass vacuously.",
+
+    # The feed overflow's Advertise-on-Nostr witness (2026-11-14): its
+    # `advertise_nest` dials the test's loopback relay, the reason below.
+    "tests/test_advertise_post_nostr.py::test_an_advertised_sold_post_reaches_nostr_with_its_price_and_stopping_retracts_it":
+        "PREMISE: `advertise_nest` dials a harness relay on 127.0.0.1, which "
+        "only a `test-hooks` build with `FAUNA_TEST_NOSTR_ALLOW_LOOPBACK` set "
+        "admits (`relays.rs::relay_dial_policy`); the image compiles no "
+        "`test-hooks`, so the routed form would refuse the relay and assert "
+        "nothing — the Nostr page's dialing witnesses' reason, below.",
+    # Its price-lifecycle twin (2026-11-14): `advertising_nest`, same reason.
+    "tests/api/test_nostr_advertise_price_lifecycle.py::test_a_price_edit_or_a_cleared_price_withdraws_the_note_that_carried_the_old_price":
+        "PREMISE: `advertising_nest` dials a harness `FakeRelay` on 127.0.0.1, "
+        "which only a `test-hooks` build with `FAUNA_TEST_NOSTR_ALLOW_LOOPBACK` "
+        "set admits (`relays.rs::relay_dial_policy`); the image compiles no "
+        "`test-hooks`, so the routed form would refuse the relay and assert "
+        "nothing — `test_advertise_post_nostr.py`'s reason, above.",
 
     # The Nostr page's nest witnesses that watch a relay the nest dials
     # (2026-10-09). The file's other half routes
@@ -9848,6 +10044,26 @@ def test_a_journey_that_names_no_admin_element_still_runs_on_live():
     )
     assert not reached, sorted(reached)
     item = _FakeItem(name="test_enable_activitypub")
+    assert ns.classify(item, nm.parse_nest_mode("live")) is None
+
+
+def test_no_driver_method_name_reaches_an_admin_element():
+    """Every journey calls the driver's own methods, so a public `click`,
+    `get_attr` or `get_text` that names an admin element anywhere in the tree —
+    a tier_1 fake driver's, merged by bare name — puts that element on every
+    journey at once. Measured 2026-11-11: a fake driver's `click` comparing its
+    argument with `admin-mail-enabled-toggle` deselected the store reviewer
+    journey (and every other clicking journey) from every shared-box live run.
+    A fake compares against the helper's own constant instead
+    (`live_admin._MAIL_SWITCH`), which the scan does not fold into the fake."""
+    from helpers import kind_reach
+    from helpers import nest_surface as ns
+
+    admin_ids = ns.admin_shell_element_ids() - ns.ADMIN_SHELL_EXIT_IDS
+    for name in ("click", "get_attr", "get_text", "count", "wait_for", "type_text"):
+        reached = kind_reach.element_ids_reached_by(name, admin_ids)
+        assert not reached, f"{name} reaches {sorted(reached)}"
+    item = _FakeItem(name="test_a_store_reviewer_can_do_what_a_reviewer_checks")
     assert ns.classify(item, nm.parse_nest_mode("live")) is None
 
 

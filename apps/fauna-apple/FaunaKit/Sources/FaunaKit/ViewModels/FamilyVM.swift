@@ -160,6 +160,14 @@ public final class FamilyVM {
     /// `family`, the raw client.
     private var api: APIClient?
 
+    /// The session's screen-time lock, handed in by `FamilyView` off the
+    /// environment. A successful status read on the ward's own Family visit
+    /// lands in it, so a guardian's screen-time edit binds the running app
+    /// without a restart (`family-client-enforcement.md` § Implementation
+    /// status today: "both legs re-read the policy on the ward's own
+    /// Family-page visit"). `weak`: the shell's state object owns the store.
+    weak var screenTime: ScreenTimeStore?
+
     public init() {}
 
     /// The guardian host of the shared `feature-policy-editor`
@@ -261,6 +269,7 @@ public final class FamilyVM {
             // The in-flight clause: a status read suspended for the outgoing account
             // still returns after the drop, and its ward roster must not land here.
             guard self.api === api else { return }
+            screenTime?.land(status)
             supervisedBy = status.supervisedBy
             myPolicy = status.policy
             myUsageTodayMinutes = status.usageTodayMinutes

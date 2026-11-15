@@ -90,6 +90,7 @@ import pytest
 from nacl.signing import SigningKey
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from common.accounts import single_account_seed
 from helpers import live_box_door
 from helpers.budgets import SERVICE_BOOT_S
 from helpers.live_handle import derive_handle
@@ -542,11 +543,8 @@ def _mint_sender_credential(app) -> tuple[str, str, str]:
     cred_nonce = uuid.uuid4().hex[:6]
     display_name = f"Relay E2E {cred_nonce}"          # → credential_id relay-e2e-<nonce>
     password = uuid.uuid4().hex
-    _relaunch(app, extra={"seed_credentials": {
-        "secret_key": live_secret,
-        "node_url": live_url,
-        "device_id": "relay-live-sender",
-    }})
+    _relaunch(app, extra={"seed_credentials": single_account_seed(
+        live_secret, nest_url=live_url, device_id="relay-live-sender")})
     _await_authenticated(app)
     # The sender address is the admin's own mailbox = handle@domain, and the
     # handle is the box's answer, not ours: derive it from the identity we just
@@ -581,11 +579,8 @@ def _revoke_sender_credential(app, mua_username: str) -> None:
     onto the live box and revokes the row matching the sub-addressed username).
     Failures are swallowed — ids are nonce-unique, so residue is inert."""
     live_url, live_secret = LIVE_URL, LIVE_SECRET
-    _relaunch(app, extra={"seed_credentials": {
-        "secret_key": live_secret,
-        "node_url": live_url,
-        "device_id": "relay-live-sender-cleanup",
-    }})
+    _relaunch(app, extra={"seed_credentials": single_account_seed(
+        live_secret, nest_url=live_url, device_id="relay-live-sender-cleanup")})
     _await_authenticated(app)
     _open_settings_page(app, nest_url=live_url, secret_hex=live_secret,
                         sub_id="mail-settings", anchor_check=app.mail_settings.is_page_visible)
@@ -833,11 +828,8 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
         # BOTH nests — the home box's row recording this session's relay URL,
         # the target its worker dials — AND fires MailRelayProvisionHook → ProvisionRelayMailbox
         # (fleet-MSEK read recipe onto the home box) — the one-action user flow.
-        _relaunch(app, extra={"seed_credentials": {
-            "secret_key": secret_hex,
-            "node_url": public_fqdn_url,
-            "device_id": "relay-live-e2e",
-        }})
+        _relaunch(app, extra={"seed_credentials": single_account_seed(
+        secret_hex, nest_url=public_fqdn_url, device_id="relay-live-e2e")})
         _await_authenticated(app)
         _open_settings_page(app, nest_url=public_fqdn_url, secret_hex=secret_hex,
                             sub_id="nests",
@@ -916,11 +908,8 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
         # Authenticated relaunch onto the home box; the shared receive loop
         # fetches + decrypts on its own — poll the conversations list for the
         # nonce (the pattern of tests/test_mail_client_receive.py).
-        _relaunch(app, extra={"seed_credentials": {
-            "secret_key": secret_hex,
-            "node_url": private_url,
-            "device_id": "relay-live-e2e-home",
-        }})
+        _relaunch(app, extra={"seed_credentials": single_account_seed(
+        secret_hex, nest_url=private_url, device_id="relay-live-e2e-home")})
         _await_authenticated(app)
         _reassert_session(app, nest_url=private_url, secret_hex=secret_hex,
                           view="conversations")

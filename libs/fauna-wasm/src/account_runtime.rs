@@ -961,6 +961,53 @@ pub fn account_escrow_holders() -> js_sys::Promise {
     })
 }
 
+/// The **keyless-posture marker** for each roster row's enrolled `principal`
+/// (lowercase hex, or `null` for a row carrying none), in order: `true` when
+/// the row's principal holds no generation key at this observer's resolved
+/// tip (`ui/devices.md` § Custody facet, piece 1). The SAME shared read native
+/// calls (`AccountStoreHandle::keyed_principals`) through the SAME shared rule
+/// (`fauna_devices_machine::keyless_posture`) — the twin of `fauna-ffi`'s
+/// `devices_keyless_posture`. Every fail-safe answers `false` (no badge): no
+/// runtime, a failed read, an unresolved tip, a principal-less or undecodable
+/// row — a "holds no keys" marker never rests on an unknown.
+#[wasm_bindgen(
+    js_name = accountKeylessPosture,
+    unchecked_return_type = "Promise<boolean[]>"
+)]
+pub fn account_keyless_posture(
+    #[wasm_bindgen(unchecked_param_type = "(string | null)[]")] principals: js_sys::Array,
+) -> js_sys::Promise {
+    let principals: Vec<Option<String>> = principals.iter().map(|p| p.as_string()).collect();
+    wasm_bindgen_futures::future_to_promise(async move {
+        let keyed = match handle() {
+            Some(handle) => match handle.keyed_principals().await {
+                Ok(keyed) => keyed,
+                Err(e) => {
+                    tracing::debug!("account keyless posture: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
+        Ok(keyless_posture_over(keyed.as_ref(), &principals)
+            .into_iter()
+            .map(JsValue::from_bool)
+            .collect::<js_sys::Array>()
+            .into())
+    })
+}
+
+/// The pure half of [`account_keyless_posture`]: one answer per row, in order.
+fn keyless_posture_over(
+    keyed: Option<&std::collections::BTreeSet<[u8; 32]>>,
+    principals: &[Option<String>],
+) -> Vec<bool> {
+    principals
+        .iter()
+        .map(|p| fauna_devices_machine::keyless_posture(keyed, p.as_deref()))
+        .collect()
+}
+
 /// The **store-change notice** for this tab's open pages
 /// (`account-runtime.md` § Multi-instance concurrency → *A runtime's own pump
 /// is a source of the notice too*, parts 4 and 5): resolves with the notice

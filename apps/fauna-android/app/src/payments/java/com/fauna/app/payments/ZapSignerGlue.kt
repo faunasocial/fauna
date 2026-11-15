@@ -54,3 +54,15 @@ suspend fun ApiClient.nostrZapSignersAdd(signerPubkey: String, label: String) {
 suspend fun ApiClient.nostrZapSignersRemove(signerPubkey: String) {
     nostrZapSignersRpc().remove(signerPubkey)
 }
+
+/** Whether this build may advertise a sold post on Nostr at all — the `zaps`
+ *  member is compiled in (`monetization.md` § The Nostr advertisement of a
+ *  sold post). The nest's capability is the separate, shared read. */
+const val NOSTR_ADVERTISE_BUILT: Boolean = true
+
+/** `fauna.nostr.advertise.set` — advertise one of the caller's own sold posts
+ *  (64-hex `postId`) through the shared client; the nest's typed refusals
+ *  arrive as the error's text, verbatim. */
+suspend fun ApiClient.nostrAdvertisePost(postId: String) {
+    nestRpc().nostrAdvertise().advertisePost(postId)
+}

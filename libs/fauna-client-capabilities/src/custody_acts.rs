@@ -22,16 +22,25 @@
 //! ordering below is load-bearing, and a second hand-rolled copy in a wasm
 //! crate is exactly where it would be got wrong.
 //!
+//! **The mint is the second such act (2026-11-11).** It needs a conversations
+//! channel to post on, which web's rail holds (the same `FaunaMlsBackend`), and
+//! its write is the ceremony-records seam every app's account store implements
+//! — so [`mint_custody`] and its candidate check live here too, and the native
+//! `Mint` arm calls them.
+//!
 //! What stays native-only, and stays in `fauna-client-custody`: accept (binds
-//! the T10 writer key), the mint (needs a conversations session to post on),
-//! and set-budget/stop (write the R14 registry row). Those are gated on
-//! capabilities web does not have yet, not on where the code lives.
+//! the T10 writer key) and set-budget/stop (write the R14 registry row). Those
+//! are gated on capabilities web does not have yet, not on where the code lives.
 
 use fauna_client_config::SuccessionLedgerStore;
-use fauna_core::identity::ActorKeypair;
+use fauna_core::data::Timestamp;
+use fauna_core::device_endpoints::DeviceEndpoints;
+use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_core::succession_ledger::SuccessionLedger;
 use fauna_protocol::{RpcErrorClass, RpcRequester};
 
+use crate::custody_ceremony::{self, CeremonyRecords};
+use crate::custody_view::CustodyMintCandidateView;
 use crate::grant_log;
 use crate::rpc::CapabilitiesClient;
 
@@ -89,9 +98,187 @@ where
     }
 }
 
+/// The refusal a mint with no conversations channel answers — no session on a
+/// native app, no MLS rail on web. An offer recorded with nothing to post it on
+/// would never be sent and never reported (e2e convention 11).
+pub const MINT_NO_CHANNEL: &str =
+    "no conversation channel to send the request over — start a conversation first";
+
+/// The refusal a mint whose `(host, channel)` pair the candidate list never
+/// offered answers.
+pub const MINT_NOT_A_CANDIDATE: &str =
+    "that person is not an eligible custodian — refresh and pick again";
+
+/// Does `(host, channel_hex)` name a real row of `candidates`? The enforcement
+/// the mint's boundary documents: `host`/`channel_hex`
+/// arrive as free parameters, so nothing else stops a leg from hand-assembling a
+/// pair the candidate fold (`fauna_client_conversations::
+/// mint_candidates_from_channels`) never offered. Lives here, wasm-clean, so
+/// the native mint and web's run the same check.
+///
+/// This one check also carries the candidate rules' self-exclusion for free:
+/// the fold never lists the owner's own actor as a host, so a `host == own
+/// actor` pair is already "not a candidate" here, with no second check needed.
+pub fn host_channel_is_a_mint_candidate(
+    candidates: &[CustodyMintCandidateView],
+    host: &[u8; 32],
+    channel_hex: &str,
+) -> bool {
+    candidates
+        .iter()
+        .any(|c| c.host == host.as_slice() && c.channel_hex == channel_hex)
+}
+
+/// Offer initiation (`custody-mint-confirm-button`) — the owner's side of the
+/// ceremony: record the offer on a fresh ceremony record (Account scope, the
+/// default window) through the ceremony-records seam. The caller then runs one
+/// drive pass, which posts it over the chosen conversation's channel.
+///
+/// `candidates` is the list the page offered, read fresh from the live rail;
+/// `None` = there is no rail to post on at all ([`MINT_NO_CHANNEL`]). A pair not
+/// in the list is refused ([`MINT_NOT_A_CANDIDATE`]). `owner_devices` is the
+/// offer's discovery seed (this device's principal when the app can resolve it,
+/// else empty — the seed narrows discovery, it is not a precondition).
+///
+/// Returns `None` once the offer is recorded, or the error string for the
+/// page's `error-message` — never a silent drop (e2e convention 11). Shared by
+/// `fauna_client_custody::run_custody_act`'s `Mint` arm and web's rail, so the
+/// two refusals and the offer's shape are stated once (`ui/devices.md` § Where
+/// logic lives).
+#[allow(clippy::too_many_arguments)]
+pub async fn mint_custody(
+    records: &impl CeremonyRecords,
+    owner: &ActorKeypair,
+    candidates: Option<&[CustodyMintCandidateView]>,
+    host: ActorId,
+    channel_hex: String,
+    owner_devices: Vec<DeviceEndpoints>,
+    owner_nest_url: String,
+    now: Timestamp,
+) -> Option<String> {
+    let Some(candidates) = candidates else {
+        return Some(MINT_NO_CHANNEL.to_string());
+    };
+    if !host_channel_is_a_mint_candidate(candidates, &host.0, &channel_hex) {
+        return Some(MINT_NOT_A_CANDIDATE.to_string());
+    }
+    let params = custody_ceremony::OfferParams {
+        host,
+        channel_hex,
+        scopes: fauna_core::custody_grant::CustodyScopeSet::Account,
+        duration_secs: crate::DEFAULT_GRANT_WINDOW_SECS,
+        owner_devices,
+        owner_nest_url: Some(owner_nest_url),
+        grant_id: fauna_core::custody_grant::random_grant_id(),
+    };
+    match records
+        .update(|cfg| custody_ceremony::begin_offer(cfg, owner, params, now))
+        .await
+    {
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(e) => Some(e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate(host: u8, channel: &str) -> CustodyMintCandidateView {
+        CustodyMintCandidateView {
+            host: vec![host; 32],
+            channel_hex: channel.to_string(),
+            label: "Bo".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_listed_candidates_own_pair_is_a_candidate() {
+        assert!(host_channel_is_a_mint_candidate(
+            &[candidate(7, "c0ffee")],
+            &[7u8; 32],
+            "c0ffee"
+        ));
+    }
+
+    #[test]
+    fn a_pair_with_the_right_channel_but_the_wrong_host_is_not_a_candidate() {
+        assert!(!host_channel_is_a_mint_candidate(
+            &[candidate(7, "c0ffee")],
+            &[9u8; 32],
+            "c0ffee"
+        ));
+    }
+
+    #[test]
+    fn a_pair_with_the_right_host_but_the_wrong_channel_is_not_a_candidate() {
+        assert!(!host_channel_is_a_mint_candidate(
+            &[candidate(7, "c0ffee")],
+            &[7u8; 32],
+            "deadbeef"
+        ));
+    }
+
+    #[test]
+    fn an_empty_candidate_list_refuses_every_pair() {
+        assert!(!host_channel_is_a_mint_candidate(&[], &[7u8; 32], "c0ffee"));
+    }
+
+    fn mint(
+        store: &fauna_client_config::test_helpers::FakeCustodyCeremonyStore,
+        candidates: Option<&[CustodyMintCandidateView]>,
+        host: u8,
+        channel: &str,
+    ) -> Option<String> {
+        fauna_client_testkit::block_on(mint_custody(
+            store,
+            &ActorKeypair::from_secret([1u8; 32]),
+            candidates,
+            ActorId([host; 32]),
+            channel.to_string(),
+            Vec::new(),
+            "https://owner.example".to_string(),
+            Timestamp::now(),
+        ))
+    }
+
+    /// No rail to post on → the named refusal, and nothing recorded: an offer
+    /// that could never be sent must not sit in the records looking pending.
+    #[test]
+    fn a_mint_with_no_channel_is_refused_and_records_nothing() {
+        let store = fauna_client_config::test_helpers::FakeCustodyCeremonyStore::empty();
+        assert_eq!(
+            mint(&store, None, 2, "aa").as_deref(),
+            Some(MINT_NO_CHANNEL)
+        );
+        assert!(store.current().granted.is_empty());
+    }
+
+    /// A pair the candidate list never offered is refused before any write.
+    #[test]
+    fn a_mint_to_a_pair_never_offered_is_refused_and_records_nothing() {
+        let store = fauna_client_config::test_helpers::FakeCustodyCeremonyStore::empty();
+        let offered = [candidate(2, "aa")];
+        assert_eq!(
+            mint(&store, Some(&offered), 3, "aa").as_deref(),
+            Some(MINT_NOT_A_CANDIDATE)
+        );
+        assert!(store.current().granted.is_empty());
+    }
+
+    /// An offered pair records one pending offer addressed to that host, on
+    /// that channel — what the next drive pass posts.
+    #[test]
+    fn a_mint_to_an_offered_pair_records_one_offer() {
+        let store = fauna_client_config::test_helpers::FakeCustodyCeremonyStore::empty();
+        let offered = [candidate(2, "aa")];
+        assert_eq!(mint(&store, Some(&offered), 2, "aa"), None);
+        let state = store.current();
+        assert_eq!(state.granted.len(), 1, "got {state:?}");
+        assert_eq!(state.granted[0].host, [2u8; 32]);
+        assert_eq!(state.granted[0].channel_hex, "aa");
+    }
 
     /// A malformed grant id is refused before any nest call — the caller gets a
     /// string for `error-message`, not a panic and not a silent no-op.

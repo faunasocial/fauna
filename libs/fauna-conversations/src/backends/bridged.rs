@@ -116,6 +116,15 @@ pub struct BridgedRoomRecord {
 /// account's own address is dropped.
 type RoomKey = (String, Vec<String>);
 
+/// The room facts one `rooms.list` read sets ([`BridgedBackend::room_facts`]).
+#[derive(PartialEq)]
+struct RoomFacts {
+    served: Vec<String>,
+    guardian: HashMap<RoomKey, GuardianState>,
+    disconnected: HashSet<RoomKey>,
+    undelivered: usize,
+}
+
 pub struct BridgedBackend {
     sink: Arc<dyn BridgedSink>,
     registry: RwLock<HashMap<String, BridgeIdentity>>,
@@ -218,6 +227,22 @@ impl BridgedBackend {
     }
 
     /// Record that the Sent row `row_id` was stamped undelivered.
+    /// Everything a `rooms.list` read can change about the rooms the threads
+    /// show — which bridges serve, each room's guardian marker and
+    /// disconnected flag, how many Sent copies are stamped undelivered (a set
+    /// that only grows) — compared before and after a read so a read that
+    /// moved only these still notifies ([`poll_inbound_bridged`]).
+    fn room_facts(&self) -> RoomFacts {
+        let mut served: Vec<String> = self.registry.read().unwrap().keys().cloned().collect();
+        served.sort();
+        RoomFacts {
+            served,
+            guardian: self.guardian.read().unwrap().clone(),
+            disconnected: self.disconnected.read().unwrap().clone(),
+            undelivered: self.undelivered.read().unwrap().len(),
+        }
+    }
+
     pub fn note_undelivered(&self, row_id: i64) {
         self.undelivered
             .write()
@@ -573,6 +598,7 @@ pub async fn poll_inbound_bridged(
         .iter()
         .flat_map(|room| room.removed_rows.iter().copied())
         .collect();
+    let facts_before = backend.room_facts();
     let vanished = backend.set_rooms(rooms);
     if !vanished.is_empty() {
         for (thread, participants) in manager.threads_on_rail(Rail::Bridged) {
@@ -623,6 +649,13 @@ pub async fn poll_inbound_bridged(
         if page_limit != 0 && (count as u32) < page_limit {
             break;
         }
+    }
+    // A read that moved only the rooms' facts — a room disconnected or
+    // adopted again, a guardian marker, an undelivered stamp — ingests
+    // nothing, so no ingest's notify carries it: tell the observers here, or
+    // an app that repaints on a notify keeps the old notice and send bar.
+    if backend.room_facts() != facts_before {
+        manager.notify();
     }
     Ok(ingested)
 }
@@ -1213,6 +1246,73 @@ mod tests {
         let detail = manager.thread_detail(thread_id).unwrap();
         assert_eq!(detail.room.as_ref().unwrap().notice(), None);
         assert_eq!(detail.messages.iter().filter(|m| m.undelivered).count(), 2);
+    }
+
+    /// A read that changes only a room's facts — disconnected, the guardian
+    /// marker, a Sent copy stamped undelivered — with no row to ingest still
+    /// tells the observers: an app that paints on a notify (the Apple apps)
+    /// would otherwise keep the room's old notice and send bar until some
+    /// unrelated change, while one that re-reads every frame shows it at once.
+    /// An unchanged read stays silent.
+    #[tokio::test]
+    async fn a_read_that_changes_only_a_rooms_facts_notifies_the_observers() {
+        use crate::observer::SnapshotObserver;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Ticks(Arc<AtomicUsize>);
+        impl SnapshotObserver for Ticks {
+            fn on_changed(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let backend = Arc::new(BridgedBackend::new(Arc::new(FakeSink::default())));
+        let manager = ConversationsManager::new();
+        manager.register_backend(backend.clone());
+        let peer = "@alice:example.org";
+        let source = FakeSource {
+            rooms: Mutex::new(vec![room(peer, None)]),
+            rows: vec![deposit(1, peer)],
+        };
+        let (mut after, mut seen) = (0i64, HashSet::new());
+        poll_inbound_bridged(&source, &backend, &manager, &mut after, &mut seen, 0)
+            .await
+            .unwrap();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        manager.add_observer(Arc::new(Ticks(ticks.clone())));
+
+        // Nothing moved: no notify.
+        poll_inbound_bridged(&source, &backend, &manager, &mut after, &mut seen, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            0,
+            "an unchanged read is silent"
+        );
+
+        // Revoked: only the room's flag moves, and the observers hear it.
+        *source.rooms.lock().unwrap() = vec![BridgedRoomRecord {
+            identity: None,
+            disconnected: true,
+            ..room(peer, None)
+        }];
+        poll_inbound_bridged(&source, &backend, &manager, &mut after, &mut seen, 0)
+            .await
+            .unwrap();
+        assert!(
+            ticks.load(Ordering::SeqCst) > 0,
+            "a room going disconnected notifies the observers"
+        );
+
+        // Adopted again: back to served, heard too.
+        let before = ticks.load(Ordering::SeqCst);
+        *source.rooms.lock().unwrap() = vec![room(peer, None)];
+        poll_inbound_bridged(&source, &backend, &manager, &mut after, &mut seen, 0)
+            .await
+            .unwrap();
+        assert!(
+            ticks.load(Ordering::SeqCst) > before,
+            "a room reconnecting notifies the observers"
+        );
     }
 
     // ── The local remove (`bridged-adapter.md` § Removing bridged rows) ──

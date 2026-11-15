@@ -8,9 +8,9 @@ run-name: ${{ inputs.commit && format('Build, stage and verify the nest Docker i
 # § Image tags & channels → *The two pipelines on GitHub-hosted runners*). It is
 # written once, ships verbatim to the public repository, and reads its
 # repository at run time:
-#   * the public repository (faunasocial/fauna) stages :test + :<version>
-#     signed (UAT entry), verifies at test.fauna.build and alone runs the
-#     `promote` job, the only writer of :latest, inside the `promote-nest`
+#   * the public repository (faunasocial/fauna) stages :test signed (UAT
+#     entry), verifies at test.fauna.build and alone runs the `promote` job,
+#     the only writer of :<version> and :latest, inside the `promote-nest`
 #     Environment;
 #   * the private development repository stages :dev and verifies at
 #     dev.fauna.build; `promote` is skipped there by its repository guard.
@@ -39,17 +39,20 @@ run-name: ${{ inputs.commit && format('Build, stage and verify the nest Docker i
 #   2. stage   — pushes the per-arch tags, merges them into the immutable
 #                :sha-<sha>, stages the vetted third-party images on it, then
 #                moves the stage tag on all of them: :dev on the private
-#                repository; on the public one :test + :<version> together,
-#                every digest cosign-signed first and a :<version> naming
-#                another build refused (UAT entry). The stage tag is what the
-#                staging box's Watchtower follows, so this push IS its deploy.
+#                repository; on the public one :test alone, every digest
+#                cosign-signed first (UAT entry) — a stage spends no version
+#                string, so a fix before the public tag is staged again at the
+#                same version. The stage tag is what the staging box's
+#                Watchtower follows, so this push IS its deploy.
 #   3. verify  — the content-scan sidecars boot from the staged mirrors, then
 #                the serving gate runs against the staging box, which stays
 #                behind its own cloud firewall: the job admits its runner's own
 #                address for the length of the run (scripts/box-firewall-admit.py)
 #                and revokes it in an always() step.
 #   4. promote — public repository only; verifies the stage's signatures and
-#                copies the verified digest to :latest.
+#                that the public tag v<version> names the built commit, then
+#                copies the verified digest to :<version> (written once) and
+#                :latest.
 #
 # `dry_run` builds and smokes the repository's arches (both on the public one,
 # amd64 on the private one). On the public repository it stops there: nothing
@@ -161,6 +164,9 @@ jobs:
       # build from the registry, which refuses an anonymous token for a
       # package that is not public
       packages: read
+      # the earlier-candidates upgrade smoke reads this repository's own
+      # runs to find which builds of the version reached :test
+      actions: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       build_id: ${{ env.BUILD_ID }}
@@ -521,15 +527,49 @@ jobs:
           ./scripts/image-upgrade-smoke.sh "$IMAGE:$ARCH_TAG" \
             --expect-commit ${{ inputs.commit || github.sha }} "${previous[@]}"
 
+      # A version may be staged on :test several times before its public tag,
+      # and a Test box applies each candidate, so the same hop runs from every
+      # earlier candidate of THIS version that reached :test — read off this
+      # repository's own runs whose stage job went green, by :sha-<commit>
+      # (scripts/image-earlier-candidates.py; image-pipeline.md § Image tags &
+      # channels, the UAT bullet's decision (3)). From 0.2.0 a failure reds the
+      # build as the previous-release leg does; inside 0.1.x a later candidate
+      # owes an earlier one nothing, so the leg reports and passes.
+      - name: Upgrade smoke — the candidate boots healthy on each earlier candidate's /data
+        if: matrix.arch == 'amd64' && github.repository == 'faunasocial/fauna'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          COMMIT: ${{ inputs.commit || github.sha }}
+        run: |
+          uv run --no-project python scripts/image-earlier-candidates.py candidates \
+            --repo "${{ github.repository }}" --version "$VERSION" \
+            --commit "$COMMIT" --image "$IMAGE" > "$RUNNER_TEMP/earlier-candidates"
+          mapfile -t earlier < "$RUNNER_TEMP/earlier-candidates"
+          echo "earlier candidates of $VERSION that reached :test: ${#earlier[@]}"
+          failed=()
+          for ref in "${earlier[@]}"; do
+            ./scripts/image-upgrade-smoke.sh "$IMAGE:$ARCH_TAG" \
+              --expect-commit "$COMMIT" --previous-image "$ref" || failed+=("$ref")
+          done
+          [ ${#failed[@]} -eq 0 ] && exit 0
+          if uv run --no-project python scripts/image-earlier-candidates.py enforced "$VERSION"; then
+            for ref in "${failed[@]}"; do echo "::error::the candidate does not open on $ref's /data"; done
+            exit 1
+          fi
+          for ref in "${failed[@]}"; do
+            echo "::warning::the candidate does not open on $ref's /data — reported, not failed: inside 0.1.x a later candidate owes an earlier one nothing"
+          done
+
       # The served web tree — the Dockerfile's `web-tree` stage, exactly what
       # the image serves from /usr/share/fauna-web/ — leaves every green build
       # as the run artifact `web-tree`, dry or not, either leg, for the e2e
       # columns whose harness runs where web is never built (build-system.md
       # § The Deno build sandbox → *The web tree is consumed off Linux, never
       # built there*). Once per run: the amd64 job, or the arm64 one when the
-      # run built arm64 alone. The final build above left the stage in this
-      # job's builder, so with the same build args this is an export, not a
-      # rebuild, and it starts no Rust stage. The manifest ships inside the
+      # run built arm64 alone. The final build above built the web-export
+      # stage (its tree's source) in this job's builder, so with the same build
+      # args this is an export, not a rebuild, and it starts no Rust stage. The manifest ships inside the
       # tree and names the commit (no --static: the runner holds no `just
       # wasm` tree, as in web-tree-reproducibility.yml).
       - name: Export the served web tree
@@ -540,26 +580,24 @@ jobs:
           if [ "$RUNNER_LEG" = self-hosted ]; then builder=(--builder default); fi
           # A cold witness's stages are keyed on its salt: the same build args.
           if [ -n "$CACHE_SALT" ]; then builder+=(--build-arg FAUNA_CACHE_SALT="$CACHE_SALT"); fi
-          rm -rf "$RUNNER_TEMP/web-tree"
+          # One invocation exports the tree and, beside it, the version of the
+          # rust-wasm stage's pinned clang that built the chunks (this runner
+          # holds none): the web-export stage, which the final stage copies its
+          # tree from, so the Build step above already built and cached both
+          # layers and this needs no rust-wasm snapshot (fleet-guests.md
+          # § the self-hosted CI runner, the 2026-11-13 reading).
+          rm -rf "$RUNNER_TEMP/web-export" "$RUNNER_TEMP/web-tree" "$RUNNER_TEMP/wasm32-cc"
           docker buildx build "${builder[@]}" \
             --platform "linux/${{ matrix.arch }}" \
             --build-arg BUILD_JOBS="${{ steps.jobs.outputs.jobs }}" \
             --build-arg FAUNA_BUILD_COMMIT=${{ inputs.commit || github.sha }} \
             --build-arg FAUNA_BUILD_ID="$BUILD_ID" \
             --build-arg FAUNA_VERSION=${{ steps.version.outputs.version }} \
-            --target web-tree \
-            --output type=local,dest="$RUNNER_TEMP/web-tree" .
-          # The compiler that built the chunks is the rust-wasm stage's pinned
-          # clang, not this runner's: export its version (a cached stage).
-          rm -rf "$RUNNER_TEMP/wasm32-cc"
-          docker buildx build "${builder[@]}" \
-            --platform "linux/${{ matrix.arch }}" \
-            --build-arg BUILD_JOBS="${{ steps.jobs.outputs.jobs }}" \
-            --build-arg FAUNA_BUILD_COMMIT=${{ inputs.commit || github.sha }} \
-            --build-arg FAUNA_BUILD_ID="$BUILD_ID" \
-            --build-arg FAUNA_VERSION=${{ steps.version.outputs.version }} \
-            --target wasm32-cc-version \
-            --output type=local,dest="$RUNNER_TEMP/wasm32-cc" .
+            --target web-export \
+            --output type=local,dest="$RUNNER_TEMP/web-export" .
+          mkdir -p "$RUNNER_TEMP/wasm32-cc"
+          mv "$RUNNER_TEMP/web-export/web-tree" "$RUNNER_TEMP/web-tree"
+          mv "$RUNNER_TEMP/web-export/wasm32-cc-version.txt" "$RUNNER_TEMP/wasm32-cc/"
           uv run --no-project python scripts/web-asset-manifest.py write \
             "$RUNNER_TEMP/web-tree" --commit ${{ inputs.commit || github.sha }} \
             --wasm32-cc-version-file "$RUNNER_TEMP/wasm32-cc/wasm32-cc-version.txt"
@@ -638,10 +676,15 @@ jobs:
       VERSION: ${{ needs.build.outputs.version }}
     steps:
       # The mirror step reads the vetted table (which repositories to copy).
+      # Full on the self-hosted leg, shallow on a hosted one: a shallow checkout
+      # re-shallows the runner's one persistent checkout and the next full one
+      # re-fetches all history, while a hosted runner clones afresh every time
+      # (fleet-guests.md § the self-hosted CI runner's runner capacity; runner-checkout-depth-check).
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false
           ref: ${{ inputs.commit || github.sha }}
+          fetch-depth: ${{ env.RUNNER_LEG == 'hosted' && 1 || 0 }}
 
       # The mirror step reads the vetted table through `uv run`.
       - name: Install uv
@@ -721,12 +764,12 @@ jobs:
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
       # UAT entry (image-pipeline.md § Image tags & channels → *The UAT channel*):
-      # :test + :<version> together from the one digest, every staged manifest
-      # signed before either tag moves, and a :<version> that already names
-      # another build refused — staging a numbered build spends its version.
-      - name: UAT entry, signed — nest + mirrors to the stage tag + :<version>
+      # :test alone from the one digest, every staged manifest signed before it
+      # moves. No :<version>: the promote writes it once, after the public tag,
+      # so a second candidate of a version is staged at the same number.
+      - name: UAT entry, signed — nest + mirrors to the stage tag
         if: github.repository == 'faunasocial/fauna'
-        run: ./scripts/release-nest-image.sh stage "$SHA_TAG" "$STAGE_TAG" "$VERSION"
+        run: ./scripts/release-nest-image.sh stage "$SHA_TAG" "$STAGE_TAG"
 
       # The build job left the image in the self-hosted daemon for this job;
       # it is on the registry now.
@@ -756,10 +799,12 @@ jobs:
       HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
       GITHUB_TOKEN: ${{ github.token }}
     steps:
+      # Full on the self-hosted leg, shallow on a hosted one (the stage job's note).
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false
           ref: ${{ inputs.commit || github.sha }}
+          fetch-depth: ${{ env.RUNNER_LEG == 'hosted' && 1 || 0 }}
 
       # The scanner probe and the admission run under uv.
       - name: Install uv
@@ -819,16 +864,17 @@ jobs:
         if: always() && env.RUNNER_LEG == 'hosted'
         run: uv run --no-project python scripts/box-firewall-admit.py held "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --refuse-if-lists "$REFUSE_ACCEPTANCE" --run-id "$GITHUB_RUN_ID"
 
-  # The release: the SAME verified digest copied to :latest, the mirrors with
-  # it, each one's stage-time signature verified first — an unsigned digest is
-  # a break. The only job that names :latest, guarded twice — the public
+  # The release: the SAME verified digest copied to :<version> and :latest,
+  # the mirrors with it, each one's stage-time signature verified first — an
+  # unsigned digest is a break — and only when the public tag v<version> names
+  # the commit it was built from. The only job that names either tag, guarded twice — the public
   # repository's name, and the `promote-nest` Environment's required reviewer,
   # the human act that names a verified artifact a release (the UAT sign-off).
   # The signature is what makes that boundary checkable from outside:
   # `cosign verify` anchored to this repository's workflow identity
   # (release-integrity.md § Release signing).
   promote:
-    needs: verify
+    needs: [build, verify]
     if: ${{ !inputs.dry_run && github.repository == 'faunasocial/fauna' }}
     runs-on: ubuntu-latest
     environment: promote-nest
@@ -836,6 +882,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
     steps:
       # The mirror copy and the verification read the vetted table (which mirrors).
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
@@ -856,5 +904,5 @@ jobs:
           TOKEN: ${{ github.token }}
         run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Promote, signature verified — nest + mirrors to :latest
-        run: ./scripts/release-nest-image.sh promote "$SHA_TAG"
+      - name: Promote, signature and public tag verified — nest + mirrors to :<version> + :latest
+        run: ./scripts/release-nest-image.sh promote "$SHA_TAG" "$VERSION"

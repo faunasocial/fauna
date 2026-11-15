@@ -147,24 +147,50 @@ def _rank(kind: str) -> int:
 
 
 def note(nodeid: str, *, duration: float, outcome: str | None = None,
-         skip_class: str | None = None, time: str | None = None) -> None:
+         skip_class: str | None = None, time: str | None = None,
+         why: str | None = None) -> None:
     """One report phase. Every phase adds its duration; a phase with an outcome
-    records it unless a worse one already stands for this test this session."""
+    records it unless a worse one already stands for this test this session. A red
+    phase's `why` (its crash text) is kept from the first red phase only."""
     if not _run or nodeid not in _run["node_ids"]:
         return
     seen = _observed.setdefault(nodeid, {"outcome": None, "duration": 0.0, "time": None})
+    if seen.get("withheld"):
+        return
     seen["duration"] = round(seen["duration"] + (duration or 0.0), 3)
     kind = classify(outcome, skip_class)
     if kind is None:
         return
+    if kind in (RED, ERROR) and why and not seen.get("why"):
+        seen["why"] = why
     if seen["outcome"] is None or _rank(kind) < _rank(seen["outcome"]):
         seen["outcome"] = kind
     seen["time"] = time or _now()
 
 
+def withhold(nodeid: str) -> None:
+    """Record no outcome for this test this session — a failure the pass hold
+    marked (helpers/pass_hold): whatever its earlier phases noted is dropped and
+    its later phases note nothing, so the run leaves its record as it found it
+    but for `collected`."""
+    if not _run or nodeid not in _run["node_ids"]:
+        return
+    _observed[nodeid] = {"outcome": None, "duration": 0.0, "time": None, "withheld": True}
+
+
+def key_of(nodeid: str) -> str:
+    """The directory key of a pytest node id this run collected (the node id
+    itself when the run keyed it no way)."""
+    return (_run.get("node_ids") or {}).get(nodeid, nodeid) if _run else nodeid
+
+
 # ── the record ──────────────────────────────────────────────────────────────
 #: The newest flake times a record keeps (`flaky.times`), enough for any window's count.
 FLAKY_TIMES_KEPT = 10
+#: A red's failure text kept on its `last` and, once the re-run greens, in `flaky.whys`
+#: beside its time: the tester's run log is overwritten by the next run, so the record
+#: is the only place a flaky red's failure survives to be read (convention 14's hunt).
+FLAKY_WHY_CHARS = 600
 
 
 def empty_record() -> dict:
@@ -173,7 +199,7 @@ def empty_record() -> dict:
 
 
 def observe(record: dict | None, *, outcome: str | None, time: str | None,
-            duration: float, run: dict) -> dict:
+            duration: float, run: dict, why: str | None = None) -> dict:
     """Fold one observation into a record — pure, so the fixture world pins it.
 
     Newest observation wins: when the record already holds a `last` newer than this
@@ -197,8 +223,13 @@ def observe(record: dict | None, *, outcome: str | None, time: str | None,
         if (prev and prev.get("outcome") in (RED, ERROR) and prev.get("commit") == run["commit"]
                 and prev.get("dirty") is False and not run["dirty"]):
             was = rec.get("flaky") or {}
-            times = ([*(was.get("times") or []), time])[-FLAKY_TIMES_KEPT:]
-            rec["flaky"] = {"count": was.get("count", 0) + 1, "last": time, "times": times}
+            old_times = was.get("times") or []
+            # `whys` align with `times`; a time kept before whys were recorded reads "".
+            old_whys = was.get("whys") or [""] * len(old_times)
+            times = ([*old_times, time])[-FLAKY_TIMES_KEPT:]
+            whys = ([*old_whys, prev.get("why") or ""])[-FLAKY_TIMES_KEPT:]
+            rec["flaky"] = {"count": was.get("count", 0) + 1, "last": time, "times": times,
+                            "whys": whys}
         rec["last_green"] = green
         rec["red_since"] = None
     elif outcome in (RED, ERROR):
@@ -207,6 +238,8 @@ def observe(record: dict | None, *, outcome: str | None, time: str | None,
                             else {"count": 1, "tip": run["commit"]})
     rec["last"] = {"commit": run["commit"], "dirty": run["dirty"], "outcome": outcome,
                    "time": time}
+    if outcome in (RED, ERROR) and why:
+        rec["last"]["why"] = why.strip()[:FLAKY_WHY_CHARS]
     return rec
 
 
@@ -320,7 +353,7 @@ def write(directory: Path | None = None, *, platform: str | None = None) -> Path
             seen = _observed.get(nodeid) or {}
             tests[key] = observe(tests.get(key), outcome=seen.get("outcome"),
                                  time=seen.get("time"), duration=seen.get("duration", 0.0),
-                                 run=_run)
+                                 run=_run, why=seen.get("why"))
         save(path, platform, tests)
     return path
 

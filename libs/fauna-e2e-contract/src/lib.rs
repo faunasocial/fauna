@@ -201,9 +201,126 @@ pub fn custody_ceremony_ingest_json(
     })
 }
 
+/// Under this many layout units (DIP, or a terminal cell) in either dimension a
+/// box shows nothing — `frame_invariants.py::_MIN_READABLE_DIP`, the checker's
+/// own threshold.
+pub const MIN_READABLE_LAYOUT_UNIT: f64 = 1.0;
+
+/// At most this many entries per frame: a build broken in a shared way starves
+/// every element of every frame, and the state push is the command ack path.
+pub const PAINTED_TEXT_AREA_MAX: usize = 16;
+
+/// One id-bearing text element as the app's own layout placed it — the input to
+/// [`PaintedTextArea`]. `width`/`height` are the ROOM the layout gave it (its box
+/// capped by every ancestor that clips it; a scroll viewport is not such a clip),
+/// never its arranged size alone. `pane` is the box of its nearest ancestor that
+/// has one (`None` when none has), `depth` the box-less ancestors between them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaidOutText {
+    pub id: String,
+    pub text: String,
+    pub width: f64,
+    pub height: f64,
+    pub pane: Option<(f64, f64)>,
+    pub depth: u32,
+}
+
+/// The value behind `fauna_e2e_agent::PAINTED_TEXT_AREA_KEY` — convention 17's
+/// `painted-text-has-area` field (`frame_invariants.py::
+/// _check_painted_text_has_area` owns the contract and the verdict). One per app,
+/// fed each laid-out frame; it keeps the frame's STARVED elements only (non-empty
+/// text, a box under [`MIN_READABLE_LAYOUT_UNIT`] in either dimension), in the
+/// order given, at most [`PAINTED_TEXT_AREA_MAX`]. Whether the pane had area is
+/// the checker's call, not this one's.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct PaintedTextArea {
+    starved: Vec<LaidOutText>,
+}
+
+impl PaintedTextArea {
+    /// Replace the record with one laid-out frame's starved elements.
+    pub fn observe(&mut self, frame: impl IntoIterator<Item = LaidOutText>) {
+        self.starved = frame
+            .into_iter()
+            .filter(|e| {
+                !e.text.trim().is_empty()
+                    && (e.width < MIN_READABLE_LAYOUT_UNIT || e.height < MIN_READABLE_LAYOUT_UNIT)
+            })
+            .take(PAINTED_TEXT_AREA_MAX)
+            .collect();
+    }
+
+    /// The `fauna_e2e_agent::PAINTED_TEXT_AREA_KEY` value: `{"starved": [{"id",
+    /// "text", "width", "height", "pane", "depth"}, …]}`.
+    pub fn json(&self) -> Value {
+        json!({
+            "starved": self
+                .starved
+                .iter()
+                .map(|e| json!({
+                    "id": e.id,
+                    "text": e.text,
+                    "width": e.width,
+                    "height": e.height,
+                    "pane": e.pane.map(|(w, h)| json!({ "width": w, "height": h })),
+                    "depth": e.depth,
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn laid_out(id: &str, text: &str, width: f64, height: f64) -> LaidOutText {
+        LaidOutText {
+            id: id.into(),
+            text: text.into(),
+            width,
+            height,
+            pane: Some((80.0, 20.0)),
+            depth: 0,
+        }
+    }
+
+    /// Only a starved element with text of its own is kept — a box under one
+    /// unit in EITHER dimension — and the shape is the one the checker reads.
+    #[test]
+    fn painted_text_area_keeps_starved_text_only() {
+        let mut area = PaintedTextArea::default();
+        assert_eq!(area.json(), json!({ "starved": [] }));
+        area.observe([
+            laid_out("title", "Room", 0.0, 1.0),
+            laid_out("fits", "Fine", 12.0, 1.0),
+            laid_out("flat", "Flat", 4.0, 0.5),
+            laid_out("empty", "  ", 0.0, 0.0),
+        ]);
+        assert_eq!(
+            area.json(),
+            json!({ "starved": [
+                { "id": "title", "text": "Room", "width": 0.0, "height": 1.0,
+                  "pane": { "width": 80.0, "height": 20.0 }, "depth": 0 },
+                { "id": "flat", "text": "Flat", "width": 4.0, "height": 0.5,
+                  "pane": { "width": 80.0, "height": 20.0 }, "depth": 0 },
+            ]})
+        );
+        // Each frame replaces the last: a starve fixed is a record emptied.
+        area.observe([laid_out("fits", "Fine", 12.0, 1.0)]);
+        assert_eq!(area.json(), json!({ "starved": [] }));
+    }
+
+    /// A frame broken in a shared way is capped, so the ack path stays small.
+    #[test]
+    fn painted_text_area_caps_its_entries() {
+        let mut area = PaintedTextArea::default();
+        area.observe((0..40).map(|i| laid_out(&format!("e{i}"), "x", 0.0, 1.0)));
+        assert_eq!(
+            area.json()["starved"].as_array().unwrap().len(),
+            PAINTED_TEXT_AREA_MAX
+        );
+    }
 
     /// The five tally counts land under the names the cross-app journeys
     /// read, so tui, linux and the UniFFI apps publish one shape.

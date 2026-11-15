@@ -111,8 +111,10 @@ pub enum CommitGateError {
     /// transport / seal / codec / size / conflict-exhaustion error.
     Replica(MlsReplicaClientError),
     /// The gate-send failed for a reason other than the stale-epoch rebase signal
-    /// (a hard `Rejected`, an `Transient` transport fault, a nest-outdated
-    /// `NeedsUpdate`). The pending commit has been cleared before this is raised.
+    /// (a hard `Rejected`, a `Transient` transport fault, a nest-outdated
+    /// `NeedsUpdate`). An answered refusal (`Rejected`, `NeedsUpdate`) cleared
+    /// and unstaged the pending before this is raised; a `Transient` one kept
+    /// it, because the send may have landed — the next walk decides it.
     Conv(ConvRpcError),
     /// A staged-commit / merge / clear engine primitive failed.
     Engine(MlsError),
@@ -192,6 +194,21 @@ impl MlsStateSync {
         Build: FnMut() -> Result<(Vec<u8>, X), MlsError>,
     {
         let hex = channel.to_string();
+        // A pending an earlier gate-send left with no answer may have landed;
+        // the log decides it before anything is staged over it (`devices.md`
+        // § Cross-device MLS group-state sync, Rule 2 → *An own-leaf claim is
+        // the account's replica's to answer*, premise (a)): the catch-up walk
+        // merges it if it meets the record (Rule 1) and clears it if it walks
+        // the log to its head without it.
+        if engine.has_unanswered_pending(channel) {
+            let from = self.processed_seq(channel);
+            tracing::debug!(channel = %hex, from, "commit gate: an unanswered gate-send is pending; letting the log decide it first");
+            let new_seq = catch_up
+                .catch_up_after(channel, from)
+                .await
+                .map_err(CommitGateError::CatchUp)?;
+            self.advance_processed_seq(channel, new_seq);
+        }
         for round in 0..MAX_GATE_ROUNDS {
             // 1. stage a pending commit. The engine records its identity in the
             //    same provider KV (design §3 resync-identity hardening: a
@@ -251,16 +268,27 @@ impl MlsStateSync {
                     tracing::debug!(channel = %hex, round, new_seq, "commit gate: caught up; rebuilding on the new epoch");
                     self.advance_processed_seq(channel, new_seq);
                 }
+                Err(no_answer @ ConvRpcError::Transient { .. }) => {
+                    // No answer the commit was refused: a transport fault, or a
+                    // reply lost after the nest appended it. The send may have
+                    // landed, so the pending stays — in the engine and in the
+                    // step-2 replica — until the log decides it (`devices.md`
+                    // § Cross-device MLS group-state sync, Rule 2 → *An
+                    // own-leaf claim is the account's replica's to answer*,
+                    // premise (a)): clearing it here left the account's own
+                    // commit on the log with no device and no replica holding
+                    // it, which the replica would then answer *not ours*. A
+                    // rate-limit refusal travels as `Transient` too; keeping
+                    // its pending costs only the walk that settles it.
+                    tracing::debug!(channel = %hex, round, "commit gate: the gate-send got no answer: {no_answer}; keeping the pending for the log to decide");
+                    engine.note_pending_unanswered(channel, expect);
+                    return Err(CommitGateError::Conv(no_answer));
+                }
                 Err(other) => {
-                    // Every non-stale refusal collapses here identically — a
-                    // terminal `Rejected` and a retryable `Transient` (the shape
-                    // a `fauna.conversations.rate_limited` refusal takes once
-                    // `RpcError::action()` classifies it) leave by the same door,
-                    // and the advertisement pump above retries either with no
-                    // backoff (`fauna-sync-engine/src/share_glue.rs`). Harmless
-                    // while the nest's commit limiter does not extend its own
-                    // lockout, but the retryable/terminal distinction is
-                    // available here and unconsumed.
+                    // A refusal the nest answered (`Rejected`, `NeedsUpdate`):
+                    // the commit can never be on the log, so clear and unstage.
+                    // The advertisement pump above retries with no backoff
+                    // (`fauna-sync-engine/src/share_glue.rs`).
                     tracing::debug!(channel = %hex, round, "commit gate: the nest refused the commit: {other}");
                     let _ = engine.clear_pending_commit(channel);
                     self.unstage_saved_pending(engine).await;

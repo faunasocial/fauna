@@ -47,22 +47,22 @@ Stamped 2026-10-01 at e129e78aa0.
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.2-dev+c04c2468 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+cdf5f9b7 standalone |
+| ios | ✅ full | 0.1.6 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+cdf5f9b7 standalone |
+| tui | ✅ full | 0.1.6 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_apex_designate_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_admin_apex_hosting_serves_then_clears` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_set_apex_actor_is_admin_only` | nest (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_web_apex_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_web_apex_picker_offers_an_account_older_than_the_newest_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_shows_the_address_it_serves_at` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_opens_on_who_is_the_front_page_now` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_admin_apex_hosting_serves_then_clears` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_front_page_durability.py::test_the_chosen_front_page_keeps_serving_after_a_nest_restart` | nest (linux): passed |
-| 9 | nest | `tests/e2e-unified/tests/api/test_front_page_durability.py::test_the_front_page_follows_its_member_to_a_successor_key` | nest (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_apex_designate_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_admin_apex_hosting_serves_then_clears` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_set_apex_actor_is_admin_only` | nest (linux): passed, nest (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_web_apex_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_web_apex_picker_offers_an_account_older_than_the_newest_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_shows_the_address_it_serves_at` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_opens_on_who_is_the_front_page_now` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_admin_apex_hosting_serves_then_clears` | nest (linux): passed, nest (macos): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_front_page_durability.py::test_the_chosen_front_page_keeps_serving_after_a_nest_restart` | nest (linux): passed, nest (macos): passed |
+| 9 | nest | `tests/e2e-unified/tests/api/test_front_page_durability.py::test_the_front_page_follows_its_member_to_a_successor_key` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

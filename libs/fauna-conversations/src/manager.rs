@@ -185,6 +185,18 @@ pub struct ConversationsManager {
     /// instead of failing (`devices.md` § Offline compose). `None` — the old
     /// behaviour exactly: always send.
     offline_queue: RwLock<Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>>>,
+    /// The staged attachment hashes of each MLS intent this manager queued,
+    /// keyed by intent id (lowercase hex) — pinned in the attachment store
+    /// beside the drafts' own ([`Self::attachment_pins`]): the queued send
+    /// clears the draft that pinned them, and the drain re-resolves the bytes
+    /// by hash (`conversation-attachments.md` § Attachments → *Retention*, the
+    /// queued-intent pin). Filled when the outbox takes the intent, emptied
+    /// when it drains or is discarded, and reconciled against the outbox's
+    /// own list ([`Self::read_unsent_sends`]) for a discard made elsewhere.
+    /// RAM only: after a restart the bytes are gone with the store, and the
+    /// drain parks the intent `attachment_missing` (`devices.md` § Offline
+    /// compose → the restart floor).
+    queued_attachment_pins: RwLock<HashMap<String, Vec<String>>>,
     sort: RwLock<SortOrder>,
     search: RwLock<Option<String>>,
     /// The community room's search strip, while open — view state on one
@@ -743,15 +755,26 @@ impl ConversationsManager {
         // lock: read here, an insert could take a pin set from before a concurrent
         // `stage_attachment` registered its draft, then evict that draft's
         // just-inserted bytes (`conversations.md` § Attachments → *Retention*).
-        // Lock order is store, then drafts; nothing takes the store while holding
-        // a drafts lock.
+        // Lock order is store, then drafts, then the queued-intent pins; nothing
+        // takes the store while holding either of the others.
         self.attachments
             .write()
             .unwrap()
-            .insert(blob_hash.to_string(), bytes, || {
-                self.drafts.staged_attachment_hashes()
-            });
+            .insert(blob_hash.to_string(), bytes, || self.attachment_pins());
         true
+    }
+
+    /// Every hash the attachment store must not evict: what any compose draft
+    /// references (`DraftStore::staged_attachment_hashes`) and what any MLS
+    /// intent this manager queued still names (`queued_attachment_pins`) —
+    /// the user's own picks, both re-resolved by hash at send or drain
+    /// (`conversation-attachments.md` § Attachments → *Retention*).
+    fn attachment_pins(&self) -> HashSet<String> {
+        let mut pins = self.drafts.staged_attachment_hashes();
+        for hashes in self.queued_attachment_pins.read().unwrap().values() {
+            pins.extend(hashes.iter().cloned());
+        }
+        pins
     }
 
     /// Remember where `blob_hash`'s bytes rest, so a render that misses them
@@ -969,6 +992,7 @@ impl ConversationsManager {
             selected_message: RwLock::new(None),
             new_thread_active: RwLock::new(false),
             offline_queue: RwLock::new(None),
+            queued_attachment_pins: RwLock::new(HashMap::new()),
             sort: RwLock::new(SortOrder::default()),
             search: RwLock::new(None),
             room_search: RwLock::new(None),
@@ -5999,6 +6023,20 @@ impl ConversationsManager {
         }
     }
 
+    /// The leave door's fill (`reserved-folders.md` § The leave-flush
+    /// promise; `fauna_client_drafts::DraftsSync::save_on_leave`): the same
+    /// FILL as [`Self::restore_drafts_at`] — a thread's live compose the user
+    /// typed into keeps their text, an untouched one takes the resting draft,
+    /// and a moved `epoch` fills nothing — but WITHOUT the restored-recipient
+    /// probe. The session is leaving: the probe would spend the door's bounded
+    /// budget on a rail answer nobody will see, and the snapshot taken right
+    /// after carries the recipient's typed address either way. Returns the
+    /// snapshot to save, [`Self::drafts_snapshot_bytes`] after the fill.
+    pub fn fill_drafts_for_leave(&self, epoch: u64, bytes: &[u8]) -> Vec<u8> {
+        self.fill_restored_drafts(epoch, bytes);
+        self.drafts_snapshot_bytes()
+    }
+
     /// Top up the local actor's one-time key-package pool on the nest to
     /// `target`. Thin FFI-facing wrapper over the FaunaMls rail backend's
     /// [`RailBackend::ensure_keypackages`](crate::backend::RailBackend::ensure_keypackages)
@@ -6477,10 +6515,17 @@ impl ConversationsManager {
         // back, so keying it on `display()` would restore a same-handle
         // bystander's row on a failure that concerned someone else
         // ([`TypedAddress::same_participant`]).
-        let was_listed = self
-            .threads
-            .get(&id)
-            .is_some_and(|d| d.participants.iter().any(|p| p.same_participant(&addr)));
+        // Where they were listed, too: the rollback restores them to that slot
+        // rather than appending, so a failed removal leaves the roster's order
+        // — and every app's index-parallel `thread-member-chip[i]` — as it
+        // found it (an appended member re-seated each later chip under a
+        // different person, and a retry aimed at "the member's chip" by index
+        // removed someone else on a surface still painting the old order).
+        let listed_at = self.threads.get(&id).and_then(|d| {
+            d.participants
+                .iter()
+                .position(|p| p.same_participant(&addr))
+        });
         self.threads.remove_participant_from(&id, &addr);
         self.notify();
         let is_fauna_mls = self.threads.get(&id).map(|d| d.rail) == Some(Rail::FaunaMls);
@@ -6495,8 +6540,10 @@ impl ConversationsManager {
                 // truthfully), then surface why. Except on the residue: they
                 // are NOT still here, so the chip stays gone.
                 let unseated = matches!(e, BackendError::RemovalUnsevered { .. });
-                if was_listed && !unseated {
-                    self.threads.add_participant_to(&id, addr);
+                if let Some(at) = listed_at
+                    && !unseated
+                {
+                    self.threads.insert_participant_at(&id, at, addr);
                 }
                 tracing::warn!("remove participant failed: {e:?}");
                 self.notify();
@@ -7098,6 +7145,15 @@ impl ConversationsManager {
     /// naming the file, so the user attaches it again. It is never skipped: a
     /// skipped attachment is a message sent without the file the user attached
     /// (`conversations.md` § Persistence).
+    /// Whether every staged attachment `drafts` names still has its bytes in
+    /// this device's attachment store — what a queued send checks before it
+    /// seals, so a missing one parks under its own code instead of failing as
+    /// a send.
+    pub fn staged_attachments_resolve(&self, drafts: &[AttachmentDraft]) -> bool {
+        let store = self.attachments.read().unwrap();
+        drafts.iter().all(|d| store.peek(&d.blob_hash).is_some())
+    }
+
     fn resolve_attachments(
         &self,
         compose: &ComposeState,
@@ -8509,11 +8565,35 @@ impl ConversationsManager {
         let Some(queue) = self.offline_queue.read().unwrap().clone() else {
             return Ok(());
         };
-        let next: HashMap<String, String> = queue
+        // Pins taken before the read, so one queued while it runs is never
+        // mistaken for a row the outbox no longer holds.
+        let pinned_before: Vec<String> = self
+            .queued_attachment_pins
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let changes: Vec<_> = queue
             .unsent_changes()
             .await?
             .into_iter()
             .filter(|c| c.kind == MLS_INTENT_KIND)
+            .collect();
+        // A queued intent's pin lasts as long as its outbox row: one discarded
+        // through the app's generic unsent-changes surface rather than
+        // [`Self::discard_queued_send`] is let go here.
+        {
+            let held: HashSet<&str> = changes.iter().map(|c| c.intent_id.as_str()).collect();
+            let mut pins = self.queued_attachment_pins.write().unwrap();
+            for intent in pinned_before {
+                if !held.contains(intent.as_str()) {
+                    pins.remove(&intent);
+                }
+            }
+        }
+        let next: HashMap<String, String> = changes
+            .into_iter()
             .filter_map(|c| match c.state {
                 UnsentState::Unsent { reason_code } => Some((c.intent_id, reason_code)),
                 _ => None,
@@ -8564,6 +8644,10 @@ impl ConversationsManager {
         if !queue.discard_intent(intent).await? {
             return Ok(false);
         }
+        self.queued_attachment_pins
+            .write()
+            .unwrap()
+            .remove(&hex::encode(intent));
         if let Some(evicted) = self.threads.evict_message(&message_id) {
             self.persist_thread_history(&evicted.thread_id).await;
         }
@@ -8631,6 +8715,19 @@ impl ConversationsManager {
                 return Some(Err(e));
             }
         };
+        // Pin the intent's staged bytes before `record_sent` clears the draft
+        // that pins them now, so no insert between the two can evict them
+        // (`conversation-attachments.md` § Attachments → *Retention*).
+        if !compose.attachments.is_empty() {
+            self.queued_attachment_pins.write().unwrap().insert(
+                hex::encode(intent_id),
+                compose
+                    .attachments
+                    .iter()
+                    .map(|d| d.blob_hash.clone())
+                    .collect(),
+            );
+        }
         let outcome = crate::backend::SendOutcome {
             message_id: crate::offline_compose::queued_message_id(&intent_id),
             timestamp_ms: composed_at_ms,
@@ -8673,6 +8770,12 @@ impl ConversationsManager {
         let outcome = backend
             .send_queued(&detail, &compose, &attachments, intent_id)
             .await?;
+        // Sealed and sent: the bytes are no longer the only copy, so the pin
+        // lifts and they are an ordinary cache entry.
+        self.queued_attachment_pins
+            .write()
+            .unwrap()
+            .remove(&hex::encode(intent_id));
         // The queued copy gives way to the sent one (the nest's id, seq and
         // plane ref); a copy already gone (evicted, or a replayed drain) is
         // simply not there to remove.

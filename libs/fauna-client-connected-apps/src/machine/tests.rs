@@ -724,6 +724,263 @@ async fn an_unwired_machine_reads_the_roster_only_row() {
     assert_eq!(snap.error, None);
 }
 
+// ── The trust facet and history lens (connected-apps.md § The trust facet) ──
+
+/// The owner's folder set names as the consent seam lists them — no folder
+/// read is answered here; only the names a principal's grant resolves by.
+struct NamedSets(Vec<String>);
+
+#[async_trait::async_trait]
+impl fauna_atproto_settings_machine::consent_grant::ConsentFolderSeam for NamedSets {
+    async fn folder_for_consent(
+        &self,
+        _id: i64,
+    ) -> Option<fauna_atproto_settings_machine::consent_grant::ConsentFolder> {
+        None
+    }
+
+    async fn folders_for_consent(
+        &self,
+    ) -> Option<Vec<fauna_atproto_settings_machine::ConsentFolderOption>> {
+        None
+    }
+}
+
+#[async_trait::async_trait]
+impl fauna_client_capabilities::OwnedSetNames for NamedSets {
+    async fn owned_set_names(&self) -> Option<Vec<String>> {
+        Some(self.0.clone())
+    }
+}
+
+/// A machine wired with the seams over an owner log holding `events` (built
+/// from the owner's secret, so a folder grant id can be derived), and the
+/// owner's folder set names `sets` when `Some`.
+async fn machine_with_events(
+    events: impl FnOnce(&fauna_core::identity::ActorKeypair) -> Vec<fauna_core::grant_event::GrantEvent>,
+    sets: Option<Vec<String>>,
+) -> (Arc<ConnectedAppsMachine>, Arc<FakeConnectedAppsNestApi>) {
+    use fauna_client_capabilities::grant_log::{GrantEventSigner, KeypairGrantEventSigner};
+    use fauna_client_config::SuccessionLedgerStore;
+    let (m, api, _) = machine();
+    let owner = fauna_core::identity::ActorKeypair::generate();
+    let ledger = Arc::new(
+        fauna_client_config::test_helpers::FakeSuccessionLedgerStore::empty(owner.actor_id()),
+    );
+    let signer = KeypairGrantEventSigner::new(&owner);
+    let signed = events(&owner)
+        .into_iter()
+        .map(|e| signer.sign_grant_event(e).unwrap())
+        .collect();
+    ledger
+        .merge(
+            fauna_core::succession_ledger::SuccessionLedger::events_replica(
+                owner.actor_id(),
+                signed,
+            ),
+        )
+        .await
+        .unwrap();
+    let seams = ConsentGrantSeams::from_keypair(
+        &owner,
+        Arc::new(fauna_client_config::test_helpers::FakeKindManifestStore::empty()),
+        ledger,
+    );
+    let folders = sets.map(|s| {
+        Arc::new(NamedSets(s))
+            as Arc<dyn fauna_atproto_settings_machine::consent_grant::ConsentFolderSeam>
+    });
+    m.set_consent_grant_seams(Arc::new(ConsentGrantSeams { folders, ..seams }));
+    (m, api)
+}
+
+fn ext_read() -> fauna_core::grant_event::GrantEventScope {
+    fauna_core::grant_event::GrantEventScope {
+        class: "content.read".into(),
+        kind: Some("ext.app.example.com.notes".into()),
+        tier: None,
+    }
+}
+
+fn mint(
+    id: u8,
+    scope: Vec<fauna_core::grant_event::GrantEventScope>,
+    at: u64,
+) -> fauna_core::grant_event::GrantEvent {
+    fauna_client_capabilities::grant_log::build_mint_event(
+        [id; 16],
+        [9; 32],
+        scope,
+        0,
+        4_000_000_000,
+        at,
+    )
+}
+
+/// A principal holding a key and a live `ext.*` grant gets one grant row and
+/// one Minted entry, on the Now lens.
+#[tokio::test]
+async fn a_keyed_principal_with_a_live_grant_carries_its_trust_facet() {
+    let (m, api) = machine_with_events(|_| vec![mint(7, vec![ext_read()], 1)], None).await;
+    api.set_principals(vec![keyed_principal(1, CID)]);
+    m.refresh().await;
+    let trust = m.snapshot().principals[0].trust.clone().expect("a facet");
+    assert_eq!(trust.lens, TrustLens::Now);
+    assert_eq!(trust.grants.len(), 1);
+    assert_eq!(trust.grants[0].grant_id, vec![7; 16]);
+    assert_eq!(trust.grants[0].lasts_until, 4_000_000_000);
+    assert_eq!(
+        trust.grants[0].scope[0].kind.as_deref(),
+        Some("ext.app.example.com.notes")
+    );
+    assert_eq!(trust.history.len(), 1);
+    assert_eq!(
+        trust.history[0].kind,
+        fauna_client_pair::TrustEventKind::Mint
+    );
+}
+
+/// A keyed principal with no live grant has a facet with no grant — the
+/// explicit *holds no keys* state, never an absent facet.
+#[tokio::test]
+async fn a_keyed_principal_with_no_grant_has_an_empty_facet() {
+    let (m, api) = machine_with_events(|_| Vec::new(), None).await;
+    api.set_principals(vec![keyed_principal(1, CID)]);
+    m.refresh().await;
+    let trust = m.snapshot().principals[0].trust.clone().expect("a facet");
+    assert!(trust.grants.is_empty() && trust.history.is_empty());
+}
+
+/// A keyless principal, an app-password session, a signer client, a mail app
+/// password — and every row on a machine without the seams — carry no facet.
+#[tokio::test]
+async fn rows_that_cannot_have_a_facet_carry_none() {
+    let (m, api) = machine_with_events(|_| vec![mint(7, vec![ext_read()], 1)], None).await;
+    api.set_principals(vec![principal(2, "https://b.example/c.json", None, 2)]);
+    api.set_sessions(vec![session(3, "app_credential", 3)]);
+    api.set_bunker(vec![signer(4, "Nos", "active")]);
+    api.set_mail_credentials(vec![mail_credential("phone", "Phone", 5, false)]);
+    m.refresh().await;
+    let snap = m.snapshot();
+    assert_eq!(snap.principals.len(), 4);
+    assert!(
+        snap.principals.iter().all(|r| r.trust.is_none()),
+        "{snap:?}"
+    );
+
+    let (m, api, _) = machine();
+    api.set_principals(vec![keyed_principal(1, CID)]);
+    m.refresh().await;
+    assert!(m.snapshot().principals[0].trust.is_none());
+}
+
+/// A revoked grant leaves Now and stays in History, naming the scope it last
+/// carried; the second ceremony's grant is listed beside the first.
+#[tokio::test]
+async fn a_revoked_grant_leaves_now_and_stays_in_history() {
+    let (m, api) = machine_with_events(
+        |_| {
+            vec![
+                mint(7, vec![ext_read()], 1),
+                mint(8, vec![ext_read()], 2),
+                fauna_client_capabilities::grant_log::build_revoke_event([7; 16], [9; 32], 3),
+            ]
+        },
+        None,
+    )
+    .await;
+    api.set_principals(vec![keyed_principal(1, CID)]);
+    m.refresh().await;
+    let trust = m.snapshot().principals[0].trust.clone().unwrap();
+    let live: Vec<_> = trust.grants.iter().map(|g| g.grant_id[0]).collect();
+    assert_eq!(live, [8]);
+    let kinds: Vec<_> = trust
+        .history
+        .iter()
+        .map(|h| (h.kind, h.grant_id[0]))
+        .collect();
+    use fauna_client_pair::TrustEventKind::{Mint, Revoke};
+    assert_eq!(kinds, [(Revoke, 7), (Mint, 8), (Mint, 7)]);
+    assert!(
+        !trust.history[0].scope.is_empty(),
+        "a Revoke names the scope its grant last carried"
+    );
+}
+
+/// The lens flips per row key, survives a re-read, and resets on a visit.
+#[tokio::test]
+async fn the_lens_flips_per_row_and_resets_on_a_fresh_visit() {
+    let (m, api) = machine_with_events(|_| vec![mint(7, vec![ext_read()], 1)], None).await;
+    let other = PrincipalInfo {
+        holder_x25519: Some(fauna_protocol::ByteBuf::from(vec![8; 32])),
+        ..principal(2, "https://b.example/c.json", None, 2)
+    };
+    api.set_principals(vec![keyed_principal(1, CID), other]);
+    m.refresh().await;
+    let lenses = |m: &ConnectedAppsMachine| -> Vec<TrustLens> {
+        m.snapshot()
+            .principals
+            .iter()
+            .map(|r| r.trust.as_ref().unwrap().lens)
+            .collect()
+    };
+    let key = m.snapshot().principals[0].key.clone();
+    m.set_lens(key, TrustLens::History);
+    assert_eq!(lenses(&m), [TrustLens::History, TrustLens::Now]);
+    m.refresh().await;
+    assert_eq!(lenses(&m), [TrustLens::History, TrustLens::Now]);
+    m.reset_lenses();
+    assert_eq!(lenses(&m), [TrustLens::Now, TrustLens::Now]);
+}
+
+/// A principal's folder read grant names its folder on the Now row and the
+/// History lines; one over a set the owner no longer has reads as deleted;
+/// with no set names readable, neither is guessed.
+#[tokio::test]
+async fn a_principals_folder_grant_names_its_folder() {
+    let folder_read = || fauna_core::grant_event::GrantEventScope {
+        class: "content.read".into(),
+        kind: Some("folder".into()),
+        tier: None,
+    };
+    let events = move |owner: &fauna_core::identity::ActorKeypair| {
+        let id = fauna_client_capabilities::folder_principal_grant_id(
+            owner.secret_bytes(),
+            &[9; 32],
+            "photos",
+            0,
+        );
+        vec![
+            fauna_client_capabilities::grant_log::build_mint_event(
+                id,
+                [9; 32],
+                vec![folder_read()],
+                0,
+                4_000_000_000,
+                1,
+            ),
+            mint(5, vec![folder_read()], 2),
+        ]
+    };
+    let (m, api) = machine_with_events(events, Some(vec!["photos".into()])).await;
+    api.set_principals(vec![keyed_principal(1, CID)]);
+    m.refresh().await;
+    let trust = m.snapshot().principals[0].trust.clone().unwrap();
+    let named = Some(fauna_client_pair::TrustFolder::Named {
+        name: "photos".into(),
+    });
+    let folders: Vec<_> = trust.grants.iter().map(|g| g.folder.clone()).collect();
+    assert!(folders.contains(&named), "{folders:?}");
+    assert!(folders.contains(&Some(fauna_client_pair::TrustFolder::Deleted)));
+    assert!(trust.history.iter().any(|h| h.folder == named));
+
+    let (m, api) = machine_with_events(events, None).await;
+    api.set_principals(vec![keyed_principal(1, CID)]);
+    m.refresh().await;
+    let trust = m.snapshot().principals[0].trust.clone().unwrap();
+    assert!(trust.grants.iter().all(|g| g.folder.is_none()));
+}
+
 /// Without the seams the tray refuses a records approve and resolves nothing.
 #[tokio::test]
 async fn an_unwired_tray_refuses_a_records_approve() {
@@ -1456,6 +1713,59 @@ async fn an_app_password_sessions_writes_ride_its_row_in_the_cards_words() {
     );
 }
 
+/// Only a served principal's row opens a record: a principal no custodian
+/// served has nothing to open, and an app-password session's row carries its
+/// summary with no per-operation read behind it.
+#[tokio::test]
+async fn only_a_served_principals_row_opens_a_record() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![
+        served(1, "https://served.example/c.json"),
+        principal(2, "https://never.example/c.json", None, 2_000),
+    ]);
+    api.set_sessions(vec![AtprotoSessionInfo {
+        oracle: Some(fauna_protocol::principals::OracleSummary {
+            ops_in_window: 1,
+            requests_served: 1,
+            last_op: Some(oracle_op(40, "atproto.commit", "create x/1")),
+            ..Default::default()
+        }),
+        ..session(3, "app_credential", 10)
+    }]);
+    m.refresh().await;
+    let snap = m.snapshot();
+    let opens: Vec<_> = snap
+        .principals
+        .iter()
+        .map(|r| {
+            (
+                r.key.split(':').next().unwrap().to_owned(),
+                r.oracle.is_some(),
+                opens_record(r),
+            )
+        })
+        .collect();
+    assert!(
+        opens.contains(&("principal".into(), true, true)),
+        "{opens:?}"
+    );
+    assert!(
+        opens.contains(&("principal".into(), false, false)),
+        "{opens:?}"
+    );
+    assert!(
+        opens.contains(&("session".into(), true, false)),
+        "{opens:?}"
+    );
+    // The composed row text carries the same answer for a UniFFI / wasm shell.
+    for r in &snap.principals {
+        assert_eq!(
+            crate::compose::roster_row_text(r).opens_record,
+            opens_record(r)
+        );
+    }
+}
+
 #[test]
 fn an_unknown_class_reads_as_its_name_and_the_detail_is_control_stripped() {
     let row = oracle_op_row(&oracle_op(5, "future.op", "POST\u{1b}[2J evil.example\nx"));
@@ -1746,4 +2056,195 @@ async fn a_principal_with_no_oauth_grant_is_never_suspended() {
     m.refresh().await;
     let r = &m.snapshot().principals[0];
     assert!(!r.suspended && !r.paused && r.connected, "{r:?}");
+}
+
+/// The owner's folders as the card's folder picker reads them.
+struct PickerFolders(Option<Vec<fauna_atproto_settings_machine::ConsentFolderOption>>);
+
+#[async_trait::async_trait]
+impl fauna_atproto_settings_machine::ConsentFolderSeam for PickerFolders {
+    async fn folder_for_consent(
+        &self,
+        _id: i64,
+    ) -> Option<fauna_atproto_settings_machine::ConsentFolder> {
+        None
+    }
+    async fn folders_for_consent(
+        &self,
+    ) -> Option<Vec<fauna_atproto_settings_machine::ConsentFolderOption>> {
+        self.0.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl fauna_client_capabilities::OwnedSetNames for PickerFolders {
+    async fn owned_set_names(&self) -> Option<Vec<String>> {
+        None
+    }
+}
+
+fn picker_folder(
+    id: i64,
+    name: &str,
+    metadata_only: bool,
+) -> fauna_atproto_settings_machine::ConsentFolderOption {
+    fauna_atproto_settings_machine::ConsentFolderOption {
+        id,
+        name: name.into(),
+        metadata_only,
+        served_by_custody: false,
+    }
+}
+
+/// A machine wired with the consent seams over `folders`, listing one bare
+/// `fauna:folder:deposit` request (id 4) with its writer key attested.
+async fn machine_with_bare_deposit(
+    folders: Option<Vec<fauna_atproto_settings_machine::ConsentFolderOption>>,
+) -> (
+    Arc<ConnectedAppsMachine>,
+    Arc<FakeConnectedAppsNestApi>,
+    String,
+) {
+    let (m, api, _) = machine();
+    let owner = fauna_core::identity::ActorKeypair::generate();
+    let seams = ConsentGrantSeams::from_keypair(
+        &owner,
+        Arc::new(fauna_client_config::test_helpers::FakeKindManifestStore::empty()),
+        Arc::new(
+            fauna_client_config::test_helpers::FakeSuccessionLedgerStore::empty(owner.actor_id()),
+        ),
+    )
+    .with_folders(Arc::new(PickerFolders(folders)));
+    m.set_consent_grant_seams(Arc::new(seams));
+    api.set_consents(vec![NestConsentRow {
+        scopes: vec!["atproto".into(), "fauna:folder:deposit".into()],
+        holder_x25519: Some(vec![9; 32]),
+        writer_ed25519: Some(vec![0x33; 32]),
+        ..consent(4, "https://app.example.com/client-metadata.json")
+    }]);
+    m.refresh().await;
+    let id = m.snapshot().requests[0].consent_id_hex.clone();
+    (m, api, id)
+}
+
+/// A bare deposit card lists the owned folders that take a deposit, by
+/// name; nothing is chosen until the user chooses.
+#[tokio::test]
+async fn a_bare_deposit_card_lists_the_folders_that_take_a_deposit() {
+    let (m, _, _) = machine_with_bare_deposit(Some(vec![
+        picker_folder(42, "photos", false),
+        picker_folder(7, "docs", true),
+    ]))
+    .await;
+    let picker = m.snapshot().requests[0]
+        .folder_picker
+        .clone()
+        .expect("a bare folder card carries the picker");
+    let options: Vec<_> = picker
+        .options
+        .iter()
+        .map(|o| (o.id, o.name.as_str()))
+        .collect();
+    assert_eq!(options, [(42, "photos")]);
+    assert_eq!(picker.chosen, None);
+    assert_eq!(picker.none_eligible, None);
+}
+
+/// The choice reaches both the mint and the resolve: the deposit grant is
+/// minted before the resolve, and the resolve carries the chosen folder.
+#[tokio::test]
+async fn the_chosen_folder_reaches_the_mint_and_the_resolve() {
+    let (m, api, id) = machine_with_bare_deposit(Some(vec![
+        picker_folder(42, "photos", false),
+        picker_folder(9, "notes", false),
+    ]))
+    .await;
+    m.set_folder(id.clone(), 9);
+    assert_eq!(
+        m.snapshot().requests[0]
+            .folder_picker
+            .as_ref()
+            .unwrap()
+            .chosen,
+        Some(9)
+    );
+    m.resolve_request(id, true).await;
+    let order: Vec<_> = api
+        .calls()
+        .into_iter()
+        .filter(|c| matches!(c, FakeCall::MintGrant(_) | FakeCall::ResolveConsent(..)))
+        .map(|c| matches!(c, FakeCall::MintGrant(_)))
+        .collect();
+    assert_eq!(order, [true, false], "mint, then resolve");
+    assert_eq!(api.resolved_folders(), [Some(9)]);
+    assert_eq!(m.snapshot().error, None);
+    assert!(m.snapshot().requests.is_empty());
+}
+
+/// A folder that is not one of the card's eligible ones is not a choice;
+/// approving with no choice is refused before anything is minted or
+/// resolved, and the card stays.
+#[tokio::test]
+async fn an_ineligible_choice_changes_nothing_and_an_unchosen_approve_is_refused() {
+    let (m, api, id) = machine_with_bare_deposit(Some(vec![
+        picker_folder(42, "photos", false),
+        picker_folder(7, "docs", true),
+    ]))
+    .await;
+    m.set_folder(id.clone(), 7);
+    assert_eq!(
+        m.snapshot().requests[0]
+            .folder_picker
+            .as_ref()
+            .unwrap()
+            .chosen,
+        None
+    );
+    m.resolve_request(id, true).await;
+    assert!(
+        !api.calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::MintGrant(_) | FakeCall::ResolveConsent(..)))
+    );
+    assert!(m.snapshot().error.is_some());
+    assert_eq!(m.snapshot().requests.len(), 1);
+}
+
+/// No eligible folder: the picker offers nothing and says why; unreadable
+/// folders say that instead.
+#[tokio::test]
+async fn a_card_with_no_eligible_folder_carries_the_reason() {
+    let (m, _, _) = machine_with_bare_deposit(Some(vec![picker_folder(7, "docs", true)])).await;
+    let picker = m.snapshot().requests[0].folder_picker.clone().unwrap();
+    assert!(picker.options.is_empty());
+    assert_eq!(
+        picker.none_eligible.map(|t| t.key),
+        Some("atproto_settings.consent_folder_none_deposit".to_string())
+    );
+    let (m, _, _) = machine_with_bare_deposit(None).await;
+    let picker = m.snapshot().requests[0].folder_picker.clone().unwrap();
+    assert_eq!(
+        picker.none_eligible.map(|t| t.key),
+        Some("atproto_settings.consent_folder_unreadable".to_string())
+    );
+}
+
+/// A qualified folder card and an ordinary card show no picker.
+#[tokio::test]
+async fn a_qualified_or_ordinary_card_has_no_picker() {
+    let (m, api, _) = machine();
+    api.set_consents(vec![
+        NestConsentRow {
+            scopes: vec!["fauna:folder:deposit:42".into()],
+            ..consent(5, "https://a.example/c.json")
+        },
+        consent(6, "https://b.example/c.json"),
+    ]);
+    m.refresh().await;
+    assert!(
+        m.snapshot()
+            .requests
+            .iter()
+            .all(|r| r.folder_picker.is_none())
+    );
 }

@@ -106,6 +106,12 @@ public struct DmMessageBubble: View {
     /// tombstone off `message.deleted`. Gated on
     /// `message.canDelete` (the snapshot's own-or-governs-the-room flag).
     public var onDeleteMessage: (MessageId) -> Void
+    /// Remove this message from this nest's copy only —
+    /// `ConversationsManager.remove_message(thread, msg)`
+    /// (`bridged-adapter.md` § Removing bridged rows); the far side keeps its
+    /// copy and the bubble leaves the snapshot once the nest answers. Gated on
+    /// `message.canRemove`.
+    public var onRemoveMessage: (MessageId) -> Void
     /// Mark this (received) message as spam — the live `Insert` consumer
     /// (mail-spam.md § Encrypted-mode interaction + § Wire shapes `put_spam_model`
     /// `history_op`), threaded down from `ThreadDetailView` to
@@ -116,6 +122,16 @@ public struct DmMessageBubble: View {
     /// lacks `spam-model-sealed-at-rest`, exactly like a local moderation
     /// correction — there is no server-train fallback for client-only content.
     public var onMarkAsSpam: (MessageId) -> Void
+    /// `dm-message-retry-button` on an unsent own copy — the shared
+    /// `ConversationsManager.retry_queued_send` (a local outbox write; the
+    /// conversation's held remainder follows), threaded down from
+    /// `ConversationsVM` (`account-offline-mutation.md` § The unsent-changes
+    /// surface, point 2).
+    public var onRetryQueuedSend: (MessageId) -> Void
+    /// `dm-message-discard-confirm-button` — the shared
+    /// `ConversationsManager.discard_queued_send`, which deletes the intent and
+    /// takes the copy out of the thread.
+    public var onDiscardQueuedSend: (MessageId) -> Void
     /// Resolve a link-preview og:image `image_hash` to its public nest blob URL — threaded down from
     /// `ConversationsVM.linkPreviewImageURL` (D4 — render-model.md § D4). Reveal-gated by the caller
     /// (consulted only when the block's `revealed` is true); `nil` ⇒ the card paints
@@ -143,6 +159,9 @@ public struct DmMessageBubble: View {
         onAppealWithheld: @escaping (String) -> Void = { _ in },
         onToggleReaction: @escaping (MessageId, String) -> Void = { _, _ in },
         onDeleteMessage: @escaping (MessageId) -> Void = { _ in },
+        onRetryQueuedSend: @escaping (MessageId) -> Void = { _ in },
+        onDiscardQueuedSend: @escaping (MessageId) -> Void = { _ in },
+        onRemoveMessage: @escaping (MessageId) -> Void = { _ in },
         onMarkAsSpam: @escaping (MessageId) -> Void = { _ in },
         linkPreviewImageURL: @escaping (String) -> URL? = { _ in nil },
         onResolveLinkPreview: @escaping (String) -> Void = { _ in }
@@ -159,7 +178,10 @@ public struct DmMessageBubble: View {
         self.onAppealWithheld = onAppealWithheld
         self.onToggleReaction = onToggleReaction
         self.onDeleteMessage = onDeleteMessage
+        self.onRemoveMessage = onRemoveMessage
         self.onMarkAsSpam = onMarkAsSpam
+        self.onRetryQueuedSend = onRetryQueuedSend
+        self.onDiscardQueuedSend = onDiscardQueuedSend
         self.linkPreviewImageURL = linkPreviewImageURL
         self.onResolveLinkPreview = onResolveLinkPreview
     }
@@ -172,6 +194,10 @@ public struct DmMessageBubble: View {
     // the in-process driver). Each is scoped to one bubble's view identity.
     @State private var showActions = false
     @State private var confirmDelete = false
+    /// The discard confirm step on an unsent own copy (`dm-message-discard-button`
+    /// reveals `dm-message-discard-confirm-button`) — the delete confirm's shape.
+    @State private var confirmDiscard = false
+    @State private var confirmRemove = false
     @State private var showMorePicker = false
     @State private var moreEmoji = ""
     /// Session-local reveal for THIS message instance only — the mute stays;
@@ -228,6 +254,9 @@ public struct DmMessageBubble: View {
     /// bubbles clean when neither action is available).
     private var canReact: Bool { capabilities.supportsReactions }
     private var canDelete: Bool { message.canDelete }
+    /// The local remove (`bridged-adapter.md` § Removing bridged rows) — the
+    /// snapshot's `canRemove`, which follows `supportsLocalRemove`.
+    private var canRemove: Bool { message.canRemove }
     /// Mark-as-spam is offered on any received message (`!isOwn`) — you flag
     /// others' content as spam, not your own; unlike `canReact`/`canDelete` this
     /// is NOT capability-gated (mail-spam.md § Encrypted-mode interaction; mirrors
@@ -253,7 +282,16 @@ public struct DmMessageBubble: View {
             senderActor: senderActorHex, plaintext: message.body)
     }
     private var canReport: Bool { reportTarget != nil }
-    private var hasActions: Bool { canReact || canDelete || canMarkSpam || canReport }
+    /// An own copy the drain parked (`MessageSnapshot.queuedSend` = `.unsent`):
+    /// its ⋯ menu offers retry and discard, on that copy only
+    /// (`account-offline-mutation.md` § The unsent-changes surface, point 2).
+    private var isUnsentOwnCopy: Bool {
+        guard message.isOwn, case .unsent = message.queuedSend else { return false }
+        return true
+    }
+    private var hasActions: Bool {
+        canReact || canDelete || canRemove || canMarkSpam || canReport || isUnsentOwnCopy
+    }
 
     /// The shared report sheet's state (held by the content-policy store).
     @Environment(ContentPolicyStore.self) private var policyStore: ContentPolicyStore?
@@ -401,10 +439,14 @@ public struct DmMessageBubble: View {
         // § D4) → the manager folds `Resolved`/`Failed` onto the block + re-emits → the card paints.
         // Keyed on the resolving-url set so it fires once and settles (the feed card's fire-once
         // pattern). A deleted message carries no document blocks, so this is a no-op there.
+        // The kids build asks the nest for no preview: its card is compiled out, and a resolve
+        // would have the nest fetch the linked page on the kids app's behalf.
         .task(id: resolvingLinkPreviewUrls(message.document)) {
+            #if !FAUNA_KIDS
             for url in resolvingLinkPreviewUrls(message.document) {
                 onResolveLinkPreview(url)
             }
+            #endif
         }
         .imageLightbox(item: $lightboxItem)
     }
@@ -648,6 +690,28 @@ public struct DmMessageBubble: View {
                 .foregroundStyle(.secondary)
         }
 
+        // An own copy of a message sent with no nest (`MessageSnapshot.queuedSend`,
+        // the shared projection — `account-offline-mutation.md` § The
+        // unsent-changes surface, point 2): waiting, or not sent and why, in the
+        // `dm-message-undelivered` shape with the body still in view. The copy is
+        // the draft: retry and discard live in its ⋯ menu.
+        switch message.queuedSend {
+        case .queued:
+            automationText(Ids.dmMessageQueued, L.conversations.unified.dmMessageQueued)
+                .font(.caption2)
+                .italic()
+                .foregroundStyle(.secondary)
+        case .unsent(_, let reason):
+            automationText(
+                Ids.dmMessageUnsent,
+                L.conversations.unified.dmMessageUnsent(reason: renderLocalizedText(reason)))
+                .font(.caption2)
+                .italic()
+                .foregroundStyle(.red)
+        case nil:
+            EmptyView()
+        }
+
         // A Sent message the fresh-IP warm-up holds (`mail-deliverability.md`
         // § Enforcement at submission time): one indexed line right after
         // `dm-message-undelivered`, worded by the shared Rust door
@@ -770,6 +834,10 @@ public struct DmMessageBubble: View {
     /// clobbering the child ids on the XCUITest/a11y path.
     @ViewBuilder private var actionsMenu: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if isUnsentOwnCopy {
+                unsentCopyActions
+                if canReact || canDelete { Divider() }
+            }
             if canReact {
                 HStack(spacing: 4) {
                     ForEach(Self.quickSetEmojis, id: \.self) { emoji in
@@ -854,6 +922,37 @@ public struct DmMessageBubble: View {
                 }
             }
 
+            if canRemove {
+                // The local remove — the delete two-step's shape, the nest's
+                // copy only (`bridged-adapter.md` § Removing bridged rows).
+                if canReact || canDelete { Divider() }
+                if confirmRemove {
+                    HStack(spacing: 8) {
+                        Text(L.conversations.detail.removeMessageConfirmTitle)
+                            .font(.caption)
+                        Button(L.conversations.detail.removeMessageConfirm, role: .destructive) {
+                            performRemove()
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityIdentifier(Ids.dmMessageRemoveConfirmButton)
+                        .automationActivate(Ids.dmMessageRemoveConfirmButton) { performRemove() }
+                        .faunaGate("fauna.bridges.conversation.messages.remove")
+                        Button(L.common.cancel, role: .cancel) { confirmRemove = false }
+                            .buttonStyle(.borderless)
+                    }
+                } else {
+                    Button(role: .destructive) {
+                        confirmRemove = true
+                    } label: {
+                        Label(L.conversations.detail.removeMessage, systemImage: "tray.and.arrow.up")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier(Ids.dmMessageRemoveButton)
+                    .automationActivate(Ids.dmMessageRemoveButton) { confirmRemove = true }
+                }
+            }
+
             #if !FAUNA_KIDS
             if canMarkSpam {
                 // The live `Insert` consumer (mail-spam.md § Wire shapes) — trains the
@@ -861,7 +960,7 @@ public struct DmMessageBubble: View {
                 // sealed training-history row the `mail-spam` page renders + undoes
                 // (`APIClient.markMessageAsSpam`). Fire-and-forget, silent on any
                 // failure — matching `dm-message-delete-button`'s divider placement.
-                if canReact || canDelete { Divider() }
+                if canReact || canDelete || canRemove { Divider() }
                 Button {
                     performMarkAsSpam()
                 } label: {
@@ -881,7 +980,7 @@ public struct DmMessageBubble: View {
                 // Opens the shared report sheet (moderation.md § User-initiated
                 // reporting) — received messages with a plane ref only; the
                 // `ReportHost` the shell mounts paints it.
-                if canReact || canDelete || canMarkSpam { Divider() }
+                if canReact || canDelete || canRemove || canMarkSpam { Divider() }
                 Button {
                     openReport()
                 } label: {
@@ -917,9 +1016,68 @@ public struct DmMessageBubble: View {
     /// Confirm-step delete: dispatch the sender-only delete and dismiss the overflow
     /// (the manager optimistically marks `deleted`; the bubble repaints to the
     /// tombstone off the re-emitted snapshot).
+    /// Retry and a confirmed discard on an unsent own copy — the delete step's
+    /// inline-confirm shape (tui's `ActionsStep::ConfirmDiscard`).
+    @ViewBuilder private var unsentCopyActions: some View {
+        if confirmDiscard {
+            HStack(spacing: 8) {
+                Text(L.conversations.detail.discardMessageConfirmTitle)
+                    .font(.caption)
+                Button(L.conversations.detail.discardMessageConfirm, role: .destructive) {
+                    performDiscard()
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier(Ids.dmMessageDiscardConfirmButton)
+                .automationActivate(Ids.dmMessageDiscardConfirmButton) { performDiscard() }
+                Button(L.common.cancel, role: .cancel) { confirmDiscard = false }
+                    .buttonStyle(.borderless)
+            }
+        } else {
+            HStack(spacing: 8) {
+                Button {
+                    performRetry()
+                } label: {
+                    Label(L.conversations.detail.retrySend, systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier(Ids.dmMessageRetryButton)
+                .automationActivate(Ids.dmMessageRetryButton) { performRetry() }
+                Button(role: .destructive) {
+                    confirmDiscard = true
+                } label: {
+                    Label(L.conversations.detail.discardMessage, systemImage: "trash")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier(Ids.dmMessageDiscardButton)
+                .automationActivate(Ids.dmMessageDiscardButton) { confirmDiscard = true }
+            }
+        }
+    }
+
+    private func performRetry() {
+        onRetryQueuedSend(message.messageId)
+        showActions = false
+    }
+
+    private func performDiscard() {
+        onDiscardQueuedSend(message.messageId)
+        confirmDiscard = false
+        showActions = false
+    }
+
     private func performDelete() {
         onDeleteMessage(message.messageId)
         confirmDelete = false
+        showActions = false
+    }
+
+    /// Confirm-step local remove: dispatch it and dismiss the overflow (the
+    /// bubble leaves the re-emitted snapshot once the nest answers).
+    private func performRemove() {
+        onRemoveMessage(message.messageId)
+        confirmRemove = false
         showActions = false
     }
 

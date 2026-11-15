@@ -37,3 +37,12 @@ suspend fun ApiClient.nostrZapSignersAdd(signerPubkey: String, label: String) = 
 /** Excised — the *Zap signers* per-row remove control is not rendered in this flavor. */
 @Suppress("UNUSED_PARAMETER")
 suspend fun ApiClient.nostrZapSignersRemove(signerPubkey: String) = Unit
+
+/** Excised — this flavor never offers *Advertise on Nostr* (the withdrawal and
+ *  the capability read are compiled always; the act is `zaps`'s). */
+const val NOSTR_ADVERTISE_BUILT: Boolean = false
+
+/** Excised — the *Advertise on Nostr* verb is not offered in this flavor
+ *  ([NOSTR_ADVERTISE_BUILT] is false), so nothing reaches this. */
+@Suppress("UNUSED_PARAMETER")
+suspend fun ApiClient.nostrAdvertisePost(postId: String) = Unit

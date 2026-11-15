@@ -148,6 +148,10 @@ pub(crate) struct FeedPostOut {
     /// `None` = unpublished); the WS handler copies it onto
     /// `FeedPostItem.web_slug` → the ⋯-menu's own-post web verbs.
     pub web_slug: Option<String>,
+    /// The Nostr advertisement flag (`content_meta.nostr_advertised_at`,
+    /// `None` = not advertised); the WS handler copies it onto
+    /// `FeedPostItem.nostr_advertised_at` → the own-post advertise verb pair.
+    pub nostr_advertised_at: Option<u64>,
     /// Per-category content-label verdicts (`moderation.md` § Per-row badge
     /// data path); the WS handler copies them onto `FeedPostItem.labels` →
     /// the apps' `content-label-badge`.
@@ -194,6 +198,7 @@ impl From<&crate::db::FeedPostRow> for FeedPostOut {
             gated_tier: p.gated_tier.clone(),
             gated_room: p.gated_room.clone(),
             web_slug: p.web_slug.clone(),
+            nostr_advertised_at: p.nostr_advertised_at,
             labels: p.labels.clone(),
             author_display: None,
             home_nest_url: p.home_nest_url.clone(),
@@ -2311,6 +2316,7 @@ mod tests {
             gated_tier: None,
             gated_room: None,
             web_slug: None,
+            nostr_advertised_at: None,
             labels: vec![],
             author_display: None,
             home_nest_url: Some("https://remote.example".into()),

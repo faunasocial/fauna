@@ -88,7 +88,7 @@ mkdir -p /opt/fauna/maintenance /opt/fauna/maintenance-host
 
 ## Step 5 — Write the nest's setup file
 
-There is no Stable release of the nest software yet. Until the first one is out, the **Stable** image this file names has nothing in it, so a server set up this way has nothing to start; a numbered release is published on the **Test** channel, and the **Dev** channel's development builds are published. The file below is the shape the release will have.
+The **Stable** image this file names holds the nest software's released versions; a numbered release is published on the **Test** channel, and the **Dev** channel's development builds are published.
 
 Open a new, empty file:
 
@@ -394,7 +394,7 @@ know: they reconnect to it as the same server, with no warning that its identity
 
 ## If something doesn't work
 
-**Nothing starts.** Re-run the `up -d` command and read what it prints. Until the first Stable release is out, it is because there is no Stable image to download yet (see Step 5); otherwise it's almost always a typo in the setup file, a full disk, or no network.
+**Nothing starts.** Re-run the `up -d` command and read what it prints. It's almost always a typo in the setup file, a full disk, or no network.
 
 **Mail bounces with a temporary error.** The virus scanner isn't ready yet. Its
 first startup downloads signatures and takes a minute or two. Senders retry.

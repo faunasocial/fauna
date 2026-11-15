@@ -1565,4 +1565,136 @@ mod tests {
             "store swaps the served CertifiedKey"
         );
     }
+
+    /// The udp 7842 address-discovery handshake's reply size, measured on
+    /// loopback (`network-exposure.md` § Target posture → *P2P relay address
+    /// discovery*; `deployment-threat-model.md` § Concern 1a, M4): a counting
+    /// UDP forwarder sits between a QUIC client and the relay's discovery port,
+    /// one discovery handshake is driven, and the bytes the relay answers the
+    /// client's first flight with are printed beside the ratio
+    /// (`--nocapture` shows the line). The assertion pins the reflection bound
+    /// an off-path spoofer could buy: the reply to the first flight stays
+    /// within QUIC's 3× anti-amplification limit.
+    #[tokio::test]
+    async fn discovery_handshake_reply_to_the_first_flight_stays_within_three_times() {
+        use std::sync::Mutex;
+        use tokio::net::UdpSocket;
+
+        let (cert_pem, key_pem, relay_roots) = self_signed_pem();
+        let opts = RelayServerOptions {
+            https_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            http_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            key_cache_capacity: Some(KEY_CACHE_CAPACITY),
+            quic_bind: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+        };
+        let relay = spawn_relay(
+            opts,
+            server_config_from_pem(&cert_pem, &key_pem),
+            Arc::new(Members(vec![])),
+        )
+        .await
+        .expect("spawn relay with discovery");
+        let discovery = relay.quic_addr().expect("a quic_bind serves discovery");
+
+        // The forwarder: the client talks to `front`, `back` talks to the relay.
+        // Every datagram is logged in order as (from the client?, bytes).
+        let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let back = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        back.connect(discovery).await.unwrap();
+        let front_addr = front.local_addr().unwrap();
+        let log: Arc<Mutex<Vec<(bool, usize)>>> = Arc::default();
+        let client_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
+        let up = {
+            let (front, back, log, client_addr) = (
+                front.clone(),
+                back.clone(),
+                log.clone(),
+                client_addr.clone(),
+            );
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65_536];
+                while let Ok((n, from)) = front.recv_from(&mut buf).await {
+                    *client_addr.lock().unwrap() = Some(from);
+                    log.lock().unwrap().push((true, n));
+                    let _ = back.send(&buf[..n]).await;
+                }
+            })
+        };
+        let down = {
+            let (front, back, log, client_addr) = (
+                front.clone(),
+                back.clone(),
+                log.clone(),
+                client_addr.clone(),
+            );
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65_536];
+                while let Ok(n) = back.recv(&mut buf).await {
+                    log.lock().unwrap().push((false, n));
+                    let to = *client_addr.lock().unwrap();
+                    if let Some(to) = to {
+                        let _ = front.send_to(&buf[..n], to).await;
+                    }
+                }
+            })
+        };
+
+        // One discovery handshake, the client built from the public API alone.
+        let mut roots = rustls::RootCertStore::empty();
+        for der in relay_roots {
+            roots.add(der).expect("trust the relay's self-signed cert");
+        }
+        let client_tls = rustls::ClientConfig::builder_with_provider(ring_provider())
+            .with_safe_default_protocol_versions()
+            .expect("tls versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let ep = noq::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .expect("client endpoint");
+        let client = iroh_relay::quic::QuicClient::new(ep, client_tls);
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.create_conn(front_addr, "localhost"),
+        )
+        .await
+        .expect("discovery handshake in time")
+        .expect("discovery handshake");
+        // Let the trailing datagrams of the exchange arrive before reading the log.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(conn);
+        up.abort();
+        down.abort();
+        relay.shutdown().await.expect("relay shutdown");
+
+        let log = log.lock().unwrap().clone();
+        let first_flight: usize = log.iter().take_while(|(c, _)| *c).map(|(_, n)| n).sum();
+        let reply: usize = log
+            .iter()
+            .skip_while(|(c, _)| *c)
+            .take_while(|(c, _)| !*c)
+            .map(|(_, n)| n)
+            .sum();
+        let (client_total, relay_total) =
+            log.iter().fold(
+                (0, 0),
+                |(c, r), (from_client, n)| {
+                    if *from_client { (c + n, r) } else { (c, r + n) }
+                },
+            );
+        println!(
+            "udp 7842 discovery: first flight {first_flight} B, \
+             reply to it {reply} B, ratio {:.2}; whole exchange client {client_total} B / \
+             relay {relay_total} B in {} datagrams: {log:?}",
+            reply as f64 / first_flight as f64,
+            log.len(),
+        );
+        assert!(
+            first_flight > 0 && reply > 0,
+            "a handshake was exchanged: {log:?}"
+        );
+        assert!(
+            reply <= 3 * first_flight,
+            "the reply to the first flight ({reply} B) must stay within 3× it ({first_flight} B)"
+        );
+    }
 }

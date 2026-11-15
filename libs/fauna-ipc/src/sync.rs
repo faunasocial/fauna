@@ -574,6 +574,21 @@ pub enum RequestMethod {
     /// Additive variant (2026-10-02).
     GetCustodianFolderNames,
 
+    /// Set this device's "show on demand" preference for one set — the
+    /// desktops' `folder-on-demand-toggle` (`on-demand-files-shared-sets.md`
+    /// § Shared sets on a capability host, decision 3d, rule 5): the toggle is
+    /// device-local, default ON, held by the agent (it plans the presence
+    /// roots) and set by the app. `scoped_id` is the set's actor-scoped
+    /// identifier (`ActorScopedFolderRef::to_wire`, `<ref>@<actor hex>`), the
+    /// key the shared `OnDemandPrefs` store uses on every platform; one the
+    /// parser refuses is an error. Persisted before the reply, then the
+    /// agent re-plans. Replies [`ResponsePayload::Empty`]. Additive variant
+    /// (2026-11-11).
+    SetPresenceEnabled {
+        scoped_id: String,
+        enabled: bool,
+    },
+
     /// **Test-only.** Run exactly one custodian pull pass on the driver this
     /// process is *already hosting*, synchronously, and reply
     /// [`ResponsePayload::CustodianPassReport`] only once it has finished.
@@ -742,6 +757,7 @@ impl RequestMethod {
             Self::RecoverCustodianStore(_) => "RecoverCustodianStore",
             Self::GetCustodianRecover => "GetCustodianRecover",
             Self::GetCustodianFolderNames => "GetCustodianFolderNames",
+            Self::SetPresenceEnabled { .. } => "SetPresenceEnabled",
             #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
             Self::CustodianRunPassNow { .. } => "CustodianRunPassNow",
             #[cfg(any(test, debug_assertions, feature = "test-helpers"))]

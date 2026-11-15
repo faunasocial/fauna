@@ -239,6 +239,7 @@ struct PostDetailView: View {
                     quoteCount: Int(livePost.quoteCount),
                     likeCount: Int(livePost.likeCount),
                     isLiked: livePost.viewerLiked,
+                    likeState: livePost.likeState,
                     isReposted: livePost.viewerRepostId != nil,
                     onReply: { replyingTo = livePost },
                     onRepost: { Task { await vm.repostPost(postId: post.postId) } },

@@ -309,6 +309,11 @@ async fn run(
     // The engagement-cue sampling tick (`feed::cues`): dwell must keep accruing
     // while the user sits still on a card, and nothing else redraws then.
     let mut cue_tick = tokio::time::interval(feed::cues::SAMPLE_INTERVAL);
+    // The unsent-changes tick (`session::spawn_unsent_refresh`): the outbox's
+    // drains tell nothing to the surfaces that mark an unsent change, so the
+    // three re-read it while one of them is painted — a local store read.
+    let mut unsent_tick = tokio::time::interval(UNSENT_REFRESH_INTERVAL);
+    unsent_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     cue_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The blessed-grant auto-renew loop's tick (`ui/nests.md` § Expiry /
     // renewal → *Duration and blessing*): app-wide, not page-scoped — a blessed
@@ -392,6 +397,10 @@ async fn run(
             // registered and painted through one door, so a tallied error is an
             // error the user saw (`fauna_e2e_agent::PAINTED_ERRORS_KEY`).
             app.painted_errors.observe(registry.texts());
+            // The room this frame's layout gave each id-bearing text — read
+            // from the same page geometry the registry's `in-viewport` reads
+            // (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`).
+            app.painted_text_area.observe(page.laid_out_text());
             agent.publish(&app, None);
         }
 
@@ -560,6 +569,9 @@ async fn run(
             // frame the user actually sees. Gated on the post list having been
             // on screen at the last sample, so no other page is ever woken.
             _ = periodic_tick(&mut cue_tick, app.feed.cue_capture.showing()) => {}
+            _ = periodic_tick(&mut unsent_tick, unsent_surface_showing(&app)) => {
+                crate::session::spawn_unsent_refresh(&app);
+            }
             // The auto-renew tick — spawned, like the heartbeat above, so an
             // unreachable nest never stalls a redraw.
             _ = periodic_tick(
@@ -785,6 +797,21 @@ async fn press_hold(arbiter: &press::Arbiter) {
 /// here — `onboarding.md` § The pending-invite surface already asks for
 /// "first poll fires immediately when the page shows a hydrated
 /// `PendingReview`", which tui did not implement before this fix.
+/// How often a painted unsent-changes surface re-reads the outbox.
+const UNSENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a surface that marks an unsent change is painted: the feed, a
+/// conversation, or the account page's list — and there is an outbox to read.
+fn unsent_surface_showing(app: &app::App) -> bool {
+    use crate::pages::Page;
+    app.account_outbox.is_some()
+        && match app.page {
+            Page::Feed | Page::Conversations => true,
+            Page::Settings => app.settings.sub == crate::settings::SubPage::Account,
+            _ => false,
+        }
+}
+
 async fn periodic_tick(tick: &mut tokio::time::Interval, active: bool) {
     if active {
         tick.tick().await;

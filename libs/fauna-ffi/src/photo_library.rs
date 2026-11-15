@@ -146,6 +146,17 @@ pub async fn photo_library_set(
     })
 }
 
+/// The set this device's photo ingress is bound to, as its `FolderRef` wire
+/// string — the photo half of a phone's engine roster (`crate::engine_roster`,
+/// `succession-cut.md` ruling (11)(l)). Read off the device-local binding alone,
+/// never the nest, so it is cheap at launch; `None` when this device has never
+/// resolved its photo library. The binding outlives a paused backup, which
+/// counts it bound — a paused binding is still a binding.
+#[uniffi::export]
+pub fn photo_library_bound_ref(state_dir: String) -> Option<String> {
+    load_binding(&state_dir).map(|folder| folder.to_wire())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +171,7 @@ mod tests {
             None,
             "unbound before the first resolve"
         );
+        assert_eq!(photo_library_bound_ref(path.clone()), None);
 
         save_binding(
             &path,
@@ -169,6 +181,11 @@ mod tests {
             },
         );
         assert_eq!(load_binding(&path), Some(FolderRef::Local(42)));
+        assert_eq!(
+            photo_library_bound_ref(path),
+            Some(FolderRef::Local(42).to_wire()),
+            "the engine roster reads the bound set by identity"
+        );
     }
 
     #[test]

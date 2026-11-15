@@ -46,7 +46,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5 docker |
+| tui | ✅ full | 0.1.6 docker |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 

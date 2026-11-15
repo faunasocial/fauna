@@ -461,6 +461,7 @@ def test_current_when_the_channel_head_is_the_running_build(bench):
     assert bench.container()["Id"] == before, "a current box must not be re-created"
 
 
+@pytest.mark.feature("admin-logs")
 def test_hold_when_the_channel_head_is_older_than_the_running_build(bench):
     before = bench.container()["Id"]
     bench.registry.tag("test", bench.published[OLDER].index)
@@ -489,6 +490,7 @@ def test_hold_when_the_channel_head_is_older_than_the_running_build(bench):
     assert any(e["event"] == "decision.hold" for e in report["events"]), report
 
 
+@pytest.mark.feature("admin-logs")
 def test_a_pull_of_a_head_whose_blob_is_gone_is_reported_and_moves_nothing(bench):
     before = bench.container()["Id"]
     broken = bench.registry.with_missing_layer(bench.saved, BROKEN)

@@ -113,11 +113,16 @@ internal fun openSearchResult(
             )
         }
     }
-    // The Events page; opening the hit's `event_detail` by its `uidHash` (the
-    // Events rows' id) is tui's shape and lifts here with the events
-    // trickle-down — until then the jump lands on the page itself.
+    // The hit's own `event_detail`, over the Events page so Back lands on the
+    // list — tui's `open_event_detail` and ios's `pendingEventOpen` shape. The
+    // index's `uidHash` IS the Events rows' id (the CalDAV dedup key
+    // `FfiCalEvent.id` carries), so the detail route takes it as-is and
+    // `EventDetailScreen` loads the event by it — no locate read is owed.
     is SearchNav.Event -> {
-        { navController.navigate("events") }
+        {
+            navController.navigate("events")
+            navController.navigate("event/${URLEncoder.encode(nav.uidHash, "UTF-8")}")
+        }
     }
 }
 

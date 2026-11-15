@@ -85,6 +85,7 @@
   import { conversationTimestamp, byteSize } from '#lib/value-format';
   import { sourceGlyphEmoji } from '#lib/source-glyph';
   import { toArrayBufferView } from '#lib/bytes';
+  import { startUnsentTick } from '#lib/unsent-changes';
   import MarkdownToolbar from '#lib/components/MarkdownToolbar.svelte';
   import MarkdownEditor from '#lib/components/MarkdownEditor.svelte';
   import type { WasmConversationsManager } from '../../../static/fauna_wasm.js';
@@ -121,6 +122,10 @@
   // `room-leave-button` has opened `room-leave-confirm` (client-local, like the
   // rename overlay): leaving is an immediate act, not a staged policy edit.
   let roomLeaveConfirm = $state(false);
+  // `room-remove-button` → `room-remove-confirm` — the walk-out's twin, the
+  // nest's local remove of a whole bridged conversation (`bridged-adapter.md`
+  // § Removing bridged rows, rule 6). Immediate, never staged through Save.
+  let roomRemoveConfirm = $state(false);
   let roomDraft: unknown = $state(null);
   // Reply "To" line add-input buffer (client-local; the committed recipients
   // live in the shared `compose.reply_recipients`).
@@ -1138,6 +1143,7 @@
     roomSettingsOpen = false;
     roomDraft = null;
     roomLeaveConfirm = false;
+    roomRemoveConfirm = false;
   }
   // The walk-out. `room-leave-button` is greyed off `can_leave_room`; the
   // capability is RE-CHECKED here at open, not only at paint, so a greyed
@@ -1152,6 +1158,21 @@
     // One verb; the class picks the door inside the backend. The thread stays
     // in the leaver's list, and a refusal rides the page's `error-message`.
     if (id) run(async () => { await manager?.leaveRoom(id); });
+  }
+  // The local remove. Greyed off `capabilities.supports_local_remove`, and
+  // re-checked here at open like the walk-out. The confirm is one verb: the
+  // thread leaves the manager — and the selection with it, so the page goes
+  // back to the list — only once the nest answered; a refusal rides the
+  // page's `error-message` and the thread stays open.
+  function openRoomRemove() {
+    if (!detail?.capabilities?.supports_local_remove) return;
+    roomRemoveConfirm = true;
+  }
+  function confirmRoomRemove() {
+    const id = selectedId;
+    if (!roomRemoveConfirm) return;
+    cancelRoomSettings();
+    if (id) run(async () => { await manager?.removeThread(id); });
   }
   // The four staging gestures below carry no such guard on purpose: they are
   // reachable only from inside an OPEN editor, and the editor opens only where
@@ -1222,13 +1243,14 @@
     run(() => manager?.setNewThreadHomeNest(next));
   }
 
-  // The room's standing notice on the thread header, off the three projected
+  // The room's standing notice on the thread header, off the four projected
   // facts (which one speaks is decided in shared Rust).
   let roomNotice = $derived.by(() => {
     const room = detail?.room;
     if (!room) return null;
     return roomNoticeFor(
       !!room.awaiting_key,
+      !!room.severance_owed,
       !!room.moderation_unverified,
       !!room.bridge_disconnected,
     );
@@ -1299,11 +1321,15 @@
   let openActionsFor = $state<string | null>(null);
   let openMoreFor = $state<string | null>(null);
   let openDeleteConfirmFor = $state<string | null>(null);
+  let openRemoveConfirmFor = $state<string | null>(null);
+  let openDiscardConfirmFor = $state<string | null>(null);
 
   function closeMessageMenus() {
     openActionsFor = null;
     openMoreFor = null;
     openDeleteConfirmFor = null;
+    openRemoveConfirmFor = null;
+    openDiscardConfirmFor = null;
   }
   function toggleMessageActions(msgId: string) {
     if (openActionsFor === msgId) { closeMessageMenus(); return; }
@@ -1349,6 +1375,42 @@
     closeMessageMenus();
     openDeleteConfirmFor = msgId;
   }
+  function openRemoveConfirm(msgId: string) {
+    closeMessageMenus();
+    openRemoveConfirmFor = msgId;
+  }
+  function openDiscardConfirm(msgId: string) {
+    closeMessageMenus();
+    openDiscardConfirmFor = msgId;
+  }
+  // An unsent own copy (`queued_send.state == 'unsent'`; account-offline-mutation.md
+  // § The unsent-changes surface, point 2) offers retry and discard in its ⋯ menu,
+  // so `showUnsent` opens the ⋯ on it whatever else is offered (tui's `|| unsent`).
+  // `dm-message-retry-button` — re-arm the unsent own copy through the shared
+  // manager's queued-send door (a local outbox write; works with the nest down).
+  // The manager re-reads the outbox itself, so the copy repaints queued.
+  function retryQueuedSend(msgId: string) {
+    closeMessageMenus();
+    run(async () => { await manager?.retryQueuedSend(msgId); });
+  }
+  // `dm-message-discard-confirm-button` — delete the unsent own copy's intent
+  // and take the copy out of the thread (`discard_queued_send`).
+  function confirmDiscardQueuedSend(msgId: string) {
+    closeMessageMenus();
+    run(async () => { await manager?.discardQueuedSend(msgId); });
+  }
+  // The re-read edge (account-offline-mutation.md § The unsent-changes surface):
+  // the generic drain tells the app nothing when it parks or sends a queued
+  // message, so while a thread is open its queued own copies are re-read from
+  // this device's outbox on the shared unsent tick (tui's
+  // `spawn_unsent_refresh`), and the detail repaints. Stops on unmount.
+  onMount(() =>
+    startUnsentTick(async () => {
+      if (!manager || !selectedId) return; // manager-gate-ok: background re-read tick, not a user action
+      await manager.refreshUnsentSends();
+      refreshConversations();
+    }),
+  );
   // Pick an emoji (quick-set or grid) → toggle the reaction through the shared
   // manager (resolves Add vs Remove against self for that emoji), then close. The
   // optimistic aggregate update + the wire Reaction op both live in Rust; the page
@@ -1370,6 +1432,15 @@
     const id = selectedId;
     closeMessageMenus();
     if (id) run(async () => { await manager?.deleteMessage(id, msgId); });
+  }
+  // Confirm the local remove → the nest's copy only, never the far side's
+  // (`bridged-adapter.md` § Removing bridged rows, rule 1). The bubble leaves
+  // the snapshot once the nest answers; the manager refuses a message whose
+  // snapshot does not say `can_remove`.
+  function confirmRemove(msgId: string) {
+    const id = selectedId;
+    closeMessageMenus();
+    if (id) run(async () => { await manager?.removeMessage(id, msgId); });
   }
   // Mark-as-spam — the live `Insert` consumer (mail-spam.md § Wire shapes). Fire-and-forget:
   // trains the sealed tier-1 model over the retained decrypted body + writes a sealed
@@ -1732,9 +1803,11 @@
           {@const quote = quotedMessageBlock(msg.document)}
           {@const showReactions = !!caps?.supports_reactions}
           {@const showDelete = !!msg.can_delete}
+          {@const showRemove = !!msg.can_remove}
           {@const showFlagSpam = !msg.is_own}
           {@const showReport = !msg.is_own && msgReportTarget(msg) !== null}
-          {@const showActions = showReactions || showDelete || showFlagSpam || showReport}
+          {@const showUnsent = !!msg.is_own && msg.queued_send?.state === 'unsent'}
+          {@const showActions = showReactions || showDelete || showRemove || showFlagSpam || showReport || showUnsent}
           {#if msg.subject_line}
             <div data-testid={IDS.SUBJECT_DIVIDER} class="subject-divider">{msg.subject_line}</div>
           {/if}
@@ -1749,6 +1822,9 @@
                    reactions/⋯-actions all hidden. Mirrors windows `DmMessageBubble`'s
                    deleted bind + apple's early-return. -->
               <div data-testid={IDS.DM_MESSAGE_DELETED} class="message-deleted">{t.conversations.detail.message_deleted}</div>
+              <!-- Every collapsed arm keeps the bubble's timestamp (tui's
+                   `conversations/mod.rs` arms: the placeholder plus the timestamp). -->
+              <span data-testid={IDS.DM_MESSAGE_TIMESTAMP} data-selected={detail.selected_message_id === msg.message_id ? 'true' : undefined} class="bubble-time">{conversationTimestamp(msg.timestamp_ms)}</span>
             {:else if msg.legal_takedown_ref}
               <!-- Legal-takedown tombstone (moderation.md § Categories & enforcement item 1):
                    the nest withheld the sealed envelope under a legal obligation, so the bubble
@@ -1757,6 +1833,7 @@
                    `dm-message-legal-takedown`, the twin of `dm-message-deleted`. Twin of
                    linux `message_bubble.rs`'s early-return + the post `QuotedPost.svelte` paint. -->
               <div data-testid={IDS.DM_MESSAGE_LEGAL_TAKEDOWN} class="message-deleted message-legal-takedown">{resolveLocalized(legalTakedownTombstone(msg.legal_takedown_ref))}</div>
+              <span data-testid={IDS.DM_MESSAGE_TIMESTAMP} data-selected={detail.selected_message_id === msg.message_id ? 'true' : undefined} class="bubble-time">{conversationTimestamp(msg.timestamp_ms)}</span>
             {:else if adminBlockPaint(msg.admin_block_reason, msg.document) === 'in-place'}
               <!-- Admin-block notice (moderation.md § Admin block of a reported item):
                    the relay withheld the envelope after the admin blocked the record
@@ -1765,6 +1842,7 @@
                    keeps its body and paints the notice beside it, below the body.
                    Presentation only, no dedicated e2e id. -->
               <div class="message-deleted message-legal-takedown">{resolveLocalizedNested(adminBlockNotice(msg.admin_block_reason))}</div>
+              <span data-testid={IDS.DM_MESSAGE_TIMESTAMP} data-selected={detail.selected_message_id === msg.message_id ? 'true' : undefined} class="bubble-time">{conversationTimestamp(msg.timestamp_ms)}</span>
             {:else if regionPlaceholderMsg(msg)}
               <!-- A REGION verdict (`region-blocking.md` § The blocked render): the
                    placeholder in place of the body, ahead of the family arm (tui's
@@ -1874,6 +1952,10 @@
                  inline @State pattern. -->
             {#if openActionsFor === msg.message_id}
               <div data-testid={IDS.DM_MESSAGE_ACTIONS_MENU} class="actions-menu">
+                {#if showUnsent}
+                  <button data-testid={IDS.DM_MESSAGE_RETRY_BUTTON} class="delete-option" onclick={() => retryQueuedSend(msg.message_id)}>{t.conversations.detail.retry_send}</button>
+                  <button data-testid={IDS.DM_MESSAGE_DISCARD_BUTTON} class="delete-option" onclick={() => openDiscardConfirm(msg.message_id)}>{t.conversations.detail.discard_message}</button>
+                {/if}
                 {#if showReactions}
                   <!-- eslint-disable-next-line -->
                   {#each quickSetEmoji as emoji, qi}
@@ -1895,6 +1977,9 @@
                 {/if}
                 {#if showDelete}
                   <button data-testid={IDS.DM_MESSAGE_DELETE_BUTTON} class="delete-option" onclick={() => openDeleteConfirm(msg.message_id)}>{t.conversations.detail.delete_message}</button>
+                {/if}
+                {#if showRemove}
+                  <button data-testid={IDS.DM_MESSAGE_REMOVE_BUTTON} class="delete-option" onclick={() => openRemoveConfirm(msg.message_id)}>{t.conversations.detail.remove_message}</button>
                 {/if}
                 {#if showReport}
                   <button data-testid={IDS.DM_MESSAGE_REPORT_BUTTON} class="delete-option" onclick={() => openReport(msg)}>{t.conversations.detail.report_message}</button>
@@ -1921,6 +2006,20 @@
               <div class="delete-confirm">
                 <span class="confirm-title">{t.conversations.detail.delete_message_confirm_title}</span>
                 <button data-testid={IDS.DM_MESSAGE_DELETE_CONFIRM_BUTTON} class="delete-confirm-btn" onclick={() => confirmDelete(msg.message_id)}>{t.conversations.detail.delete_message_confirm}</button>
+              </div>
+            {/if}
+            <!-- The unsent own copy's discard confirm step: the delete two-step's shape. -->
+            {#if openDiscardConfirmFor === msg.message_id}
+              <div class="delete-confirm">
+                <span class="confirm-title">{t.conversations.detail.discard_message_confirm_title}</span>
+                <button data-testid={IDS.DM_MESSAGE_DISCARD_CONFIRM_BUTTON} class="delete-confirm-btn" onclick={() => confirmDiscardQueuedSend(msg.message_id)}>{t.conversations.detail.discard_message_confirm}</button>
+              </div>
+            {/if}
+            <!-- The local remove's confirm step: the delete two-step's shape. -->
+            {#if openRemoveConfirmFor === msg.message_id}
+              <div class="delete-confirm">
+                <span class="confirm-title">{t.conversations.detail.remove_message_confirm_title}</span>
+                <button data-testid={IDS.DM_MESSAGE_REMOVE_CONFIRM_BUTTON} class="delete-confirm-btn" use:offlineGate={{ kind: 'fauna.bridges.conversation.messages.remove' }} onclick={() => confirmRemove(msg.message_id)}>{t.conversations.detail.remove_message_confirm}</button>
               </div>
             {/if}
             <!-- Walk the shared `RenderDocument` the conversations manager already built
@@ -2028,6 +2127,15 @@
                  tui's `dm-message-undelivered` label (conversations.md § Element IDs). -->
             {#if msg.undelivered}
               <div data-testid={IDS.DM_MESSAGE_UNDELIVERED} class="message-undelivered">{t.conversations.unified.dm_message_undelivered}</div>
+            {/if}
+            <!-- An own copy of a message sent with no nest (`MessageSnapshot.queued_send`,
+                 the shared projection; account-offline-mutation.md § The unsent-changes
+                 surface, point 2): waiting, or not sent and why — the dm-message-undelivered
+                 shape, the body still in view. Twin of tui's two labels. -->
+            {#if msg.queued_send?.state === 'queued'}
+              <div data-testid={IDS.DM_MESSAGE_QUEUED} class="message-undelivered">{t.conversations.unified.dm_message_queued}</div>
+            {:else if msg.queued_send?.state === 'unsent'}
+              <div data-testid={IDS.DM_MESSAGE_UNSENT} class="message-undelivered">{t.conversations.unified.dm_message_unsent({ reason: resolveLocalized(msg.queued_send.reason) })}</div>
             {/if}
             <!-- An own sent mail the fresh-IP warm-up is holding back
                  (`MessageSnapshot.warmup_hold`; mail-deliverability.md § Enforcement at
@@ -2325,6 +2433,11 @@
         >
           <h3>{t.conversations.unified.thread_room_settings}</h3>
 
+          <!-- A policy-less room (a bridged room) opens this editor only for
+               its local remove (`RoomSettingsDraft::seed`): it has no policy,
+               roles, read or labelers to show, greyed or otherwise, so only
+               the walk-out and the remove are painted. -->
+          {#if detail.room?.policy}
           <label class="room-row">
             <span>{t.conversations.unified.room_join_rule_label}</span>
             <select
@@ -2459,6 +2572,7 @@
               onclick={saveRoomSettings}>{t.common.save}</button
             >
           </div>
+          {/if}
 
           <!-- The walk-out, below Save and OUTSIDE the staged set. Greyed —
                never hidden — for the owner, who hands the room over first. -->
@@ -2481,6 +2595,34 @@
                 disabled={!detail.capabilities?.can_leave_room}
                 use:offlineGate={{ kind: 'fauna.conversations.room.leave' }}
                 onclick={confirmRoomLeave}>{t.common.leave}</button
+              >
+            </div>
+          {/if}
+
+          <!-- The local remove, beside the walk-out and outside the staged
+               set. Greyed unless `capabilities.supports_local_remove` (a
+               bridged room today); its confirm is immediate. -->
+          <div class="overlay-actions">
+            <button
+              data-testid={IDS.ROOM_REMOVE_BUTTON}
+              class="action-btn"
+              disabled={!detail.capabilities?.supports_local_remove}
+              onclick={openRoomRemove}>{t.conversations.unified.room_remove}</button
+            >
+          </div>
+          {#if roomRemoveConfirm}
+            <div class="overlay-actions">
+              <button class="action-btn" onclick={() => (roomRemoveConfirm = false)}
+                >{t.common.cancel}</button
+              >
+              <button
+                data-testid={IDS.ROOM_REMOVE_CONFIRM}
+                class="action-btn primary"
+                use:offlineGate={{
+                  kind: 'fauna.bridges.conversation.rooms.remove',
+                  disabled: !detail.capabilities?.supports_local_remove,
+                }}
+                onclick={confirmRoomRemove}>{t.conversations.unified.room_remove_confirm}</button
               >
             </div>
           {/if}

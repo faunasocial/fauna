@@ -255,6 +255,46 @@ pub trait CustodyCeremonyStore: MaybeSendSync {
     /// generation tip resolves yet), the runtime gone — surface as
     /// [`StoreError::Save`]; the caller's write stays owed.
     async fn merge_custody(&self, replica: CustodyConfig) -> Result<CustodyConfig, StoreError>;
+    /// [`Self::merge_custody`] for the runtime's own MACHINERY — the ceremony
+    /// sink capturing a received payload, the drive pass marking a step —
+    /// whose write no surface waits on. Such a write is a **background
+    /// write**, a store-change notice source, so an OPEN Devices or Nests page
+    /// repaints the friend's accept and the owner's mint
+    /// (`account-runtime.md` § Multi-instance concurrency → *A runtime's own
+    /// pump is a source of the notice too*, part 2: the door carries a variant
+    /// per caller). A gesture keeps [`Self::merge_custody`]. The default is
+    /// that door, for a seam that has no notice to raise (a port, a fake).
+    async fn merge_custody_background(
+        &self,
+        replica: CustodyConfig,
+    ) -> Result<CustodyConfig, StoreError> {
+        self.merge_custody(replica).await
+    }
+}
+
+/// A custody seam whose every write goes through
+/// [`CustodyCeremonyStore::merge_custody_background`] — how the ceremony
+/// sink and the drive pass, which write through the generic read-join
+/// (`CeremonyRecords::update`), name themselves machinery at the door.
+pub struct BackgroundCustodyWrites<'a, S: ?Sized>(pub &'a S);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: CustodyCeremonyStore + ?Sized> CustodyCeremonyStore for BackgroundCustodyWrites<'_, S> {
+    async fn custody(&self) -> Result<CustodyConfig, StoreError> {
+        self.0.custody().await
+    }
+
+    async fn merge_custody(&self, replica: CustodyConfig) -> Result<CustodyConfig, StoreError> {
+        self.0.merge_custody_background(replica).await
+    }
+
+    async fn merge_custody_background(
+        &self,
+        replica: CustodyConfig,
+    ) -> Result<CustodyConfig, StoreError> {
+        self.0.merge_custody_background(replica).await
+    }
 }
 
 /// The **followed-public-folders** persistence seam — `fauna.state.follows`,
@@ -531,6 +571,16 @@ where
 
     async fn merge_custody(&self, replica: CustodyConfig) -> Result<CustodyConfig, StoreError> {
         self.current(true).await?.merge_custody(replica).await
+    }
+
+    async fn merge_custody_background(
+        &self,
+        replica: CustodyConfig,
+    ) -> Result<CustodyConfig, StoreError> {
+        self.current(true)
+            .await?
+            .merge_custody_background(replica)
+            .await
     }
 }
 

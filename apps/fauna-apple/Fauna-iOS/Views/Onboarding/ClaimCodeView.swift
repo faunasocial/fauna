@@ -1,3 +1,4 @@
+#if !FAUNA_KIDS
 import SwiftUI
 import FaunaKit
 
@@ -86,3 +87,4 @@ struct ClaimCodeView: View {
         Task { _ = await vm.machine.wizardSubmitClaimCode(code: code) }
     }
 }
+#endif // !FAUNA_KIDS

@@ -111,6 +111,14 @@ const REQUEST_URI_ENTROPY: usize = 32;
 /// ⚠ There is deliberately **no `DefaultBodyLimit` layer.** The body cap belongs
 /// after the DPoP gate, not before it, so it is applied by the handler's own
 /// [`axum::body::to_bytes`] call — see [`oauth_par`]'s `body` parameter.
+///
+/// **The drain wraps every route here, outside the budgets** — so a refusal
+/// written before the body is read (the DPoP gate's, a budget's `429`) still
+/// reaches a `Connection: close` client whose body arrives after its head,
+/// instead of being lost to a reset
+/// ([`crate::http_drain`] owns why; `authorization-server.md` § As built → *A
+/// refusal before the body drains it*). It reads only once the reply is
+/// decided, so the gate-before-body ordering above is untouched.
 pub fn routes(limiter: Arc<crate::oauth_as_rate_limit::EndpointLimiter>) -> Router<Arc<AppState>> {
     Router::new()
         .merge(
@@ -187,6 +195,9 @@ pub fn routes(limiter: Arc<crate::oauth_as_rate_limit::EndpointLimiter>) -> Rout
                     AUTHORIZATION_BUDGET,
                 )),
         )
+        .layer(axum::middleware::from_fn(
+            crate::http_drain::drain_unread_body,
+        ))
 }
 
 /// `POST /oauth/par` — RFC 9126 pushed authorization requests.

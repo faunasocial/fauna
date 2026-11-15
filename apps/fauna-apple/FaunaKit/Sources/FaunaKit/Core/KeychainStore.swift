@@ -318,8 +318,10 @@ public class KeychainStore {
     /// The attributes that address `plane`. macOS: the data-protection plane is selected by
     /// `kSecUseDataProtectionKeychain` and addressed through the family App ID access
     /// group; the legacy plane is the default file-based keychain, addressed exactly as the
-    /// store always has (no key at all — a synchronizable backup copy written there lands in
-    /// iCloud Keychain regardless, and an explicit `false` would refuse it). iOS: one
+    /// store always has (no key at all: `kSecAttrSynchronizable` routes a backup copy to the
+    /// data-protection keychain whichever plane the store writes, so on the legacy plane the
+    /// copy's add fails with −34018, is swallowed as the best-effort write it is, and the
+    /// iCloud backup toggle then rests OFF). iOS: one
     /// keychain, nothing to add for either. `forAdd` matters only to `Plane.legacyFile`,
     /// the one plane an add and a match address differently.
     static func planeAttributes(_ plane: Plane, forAdd: Bool = false) -> [String: Any] {

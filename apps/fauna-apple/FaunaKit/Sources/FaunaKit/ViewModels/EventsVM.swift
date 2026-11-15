@@ -369,7 +369,10 @@ public class EventsVM {
     /// (`reserved-folders.md` § The leave-flush promise): a leave door must
     /// not lose the debounce window's last edit. Called from each target's
     /// leave-door observer (window-close/quit on macOS, background
-    /// transition on iOS). Best-effort, matching the rail's own save
+    /// transition on iOS). Saves through the rail's leave face,
+    /// `FfiEventDraftsSync.saveDraftsOnLeave`, so a door taken before the
+    /// launch restore has lifted the save gate still saves, by one read of its
+    /// own and the rail's FILL rule. Best-effort, matching the rail's own save
     /// semantics — a failure here leaves the debounced write to have already
     /// covered most of the input, and the next restore picks up whatever did
     /// land.
@@ -377,9 +380,9 @@ public class EventsVM {
         draftsSaveTask?.cancel()
         draftsSaveTask = nil
         guard let sync = eventDraftsSync, let draft = resumableDraft else { return }
-        try? await sync.saveDrafts(summary: draft.summary, dtstart: draft.dtstart,
-                                    dtend: draft.dtend, description: draft.description,
-                                    location: draft.location)
+        await flushDraftsAutosave(logTarget: "fauna.events.drafts") {
+            try await sync.saveDraftsOnLeave(draft: draft)
+        }
     }
 
     /// Monotonic token for `events` re-queries, so a STALE one cannot overwrite

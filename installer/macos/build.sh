@@ -88,6 +88,7 @@ mkdir -p "$BUILD_DIR/payloads/sync"
 mkdir -p "$BUILD_DIR/payloads/bridge"
 mkdir -p "$BUILD_DIR/payloads/app"
 mkdir -p "$BUILD_DIR/payloads/tui"
+mkdir -p "$BUILD_DIR/payloads/doc"
 mkdir -p "$BUILD_DIR/scripts/nest"
 mkdir -p "$BUILD_DIR/scripts/sync"
 mkdir -p "$BUILD_DIR/scripts/bridge"
@@ -225,6 +226,24 @@ cp "$INSTALLER_DIR/fauna-uninstall" "$BUILD_DIR/payloads/bridge/"
 # the bundle's symlinks + the signature.
 cp -R "$APP_BUNDLE" "$BUILD_DIR/payloads/app/"
 
+# Documentation component: the licence texts and the notices file for every
+# binary the .pkg installs outside the app — the nest daemon, the sync agent,
+# the bridge supervisor, the terminal app and fauna-cli, the mail bridge's FFI
+# library and the Go mail bridge itself (the manifest's `macos-pkg-tools`,
+# installer/shipped-notices.toml) — at /usr/local/share/doc/fauna/, beside the
+# /usr/local prefix those binaries install under (shipped-notices.md § Per
+# channel, the macOS `.pkg` row). Its own component because any one of the four
+# tool components may be the only one ticked: each of their choices names it
+# (distribution.xml), so the files arrive with whichever is installed. The
+# generator reads the Go binary `just mail-bridge-build` wrote above; a
+# generator that refuses fails the build. (The app's own set is inside the
+# bundle, staged by `mac-app`.)
+echo "==> Staging the licence texts and the notices file for the tools..."
+( cd "$REPO_ROOT" && just shipped-notices-stage macos-pkg-tools "$BUILD_DIR/payloads/doc" )
+for f in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES; do
+    [ -s "$BUILD_DIR/payloads/doc/$f" ] || { echo "the doc payload lacks $f" >&2; exit 1; }
+done
+
 # --- Step 3a: Relocate the MDA's libfauna_ffi.dylib linkage ---
 # `just mail-bridge-build` links fauna-mail-bridge against the dylib by its
 # ABSOLUTE build path (otool confirms both the binary's load command AND the
@@ -348,12 +367,21 @@ pkgbuild --identifier social.fauna.tui \
     --install-location /usr/local/bin \
     "$BUILD_DIR/components/fauna-tui.pkg"
 
+# The documentation component: no scripts, just the three files under
+# /usr/local/share/doc/fauna (fauna-uninstall removes the directory).
+pkgbuild --identifier social.fauna.doc \
+    --version "$VERSION" \
+    --root "$BUILD_DIR/payloads/doc" \
+    --install-location /usr/local/share/doc/fauna \
+    "$BUILD_DIR/components/fauna-doc.pkg"
+
 # --- Step 6: Compute install sizes and generate distribution.xml ---
 size_app=$(du -sk "$BUILD_DIR/payloads/app" | awk '{print $1}')
 size_node=$(du -sk "$BUILD_DIR/payloads/node" | awk '{print $1}')
 size_sync=$(du -sk "$BUILD_DIR/payloads/sync" | awk '{print $1}')
 size_bridge=$(du -sk "$BUILD_DIR/payloads/bridge" | awk '{print $1}')
 size_tui=$(du -sk "$BUILD_DIR/payloads/tui" | awk '{print $1}')
+size_doc=$(du -sk "$BUILD_DIR/payloads/doc" | awk '{print $1}')
 
 sed -e "s/__VERSION__/$VERSION/g" \
     -e "s/__SIZE_APP__/$size_app/g" \
@@ -361,6 +389,7 @@ sed -e "s/__VERSION__/$VERSION/g" \
     -e "s/__SIZE_SYNC__/$size_sync/g" \
     -e "s/__SIZE_BRIDGE__/$size_bridge/g" \
     -e "s/__SIZE_TUI__/$size_tui/g" \
+    -e "s/__SIZE_DOC__/$size_doc/g" \
     "$INSTALLER_DIR/distribution.xml" > "$BUILD_DIR/distribution.xml"
 
 cp "$INSTALLER_DIR/resources/welcome.html" "$BUILD_DIR/resources/"
@@ -383,14 +412,14 @@ productbuild \
 if [ "$NOTARIZE" = true ]; then
     PKG="$REPO_ROOT/build/Fauna-${VERSION}.pkg"
     echo "==> Notarizing..."
-    xcrun notarytool submit "$PKG" \
+    "$REPO_ROOT/installer/macos/apple-retry.sh" xcrun notarytool submit "$PKG" \
         --apple-id "$FAUNA_APPLE_ID" \
         --team-id "$FAUNA_TEAM_ID" \
         --password "$FAUNA_NOTARY_PASSWORD" \
         --wait
 
     echo "==> Stapling..."
-    xcrun stapler staple "$PKG"
+    "$REPO_ROOT/installer/macos/apple-retry.sh" xcrun stapler staple "$PKG"
 fi
 
 # --- Step 9: Generate checksum ---

@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 /// A GObject type name — what `widget_name()` answers when no test id was set.
-fn is_test_id(name: &str) -> bool {
+pub(crate) fn is_test_id(name: &str) -> bool {
     !name.is_empty()
         && !(name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && !name.contains('-'))
 }

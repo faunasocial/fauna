@@ -108,5 +108,16 @@ interface OnDemandSetHost {
      */
     suspend fun sweepKeptRoot(): OnDemandSweep
 
+    /**
+     * A group set's review row's **use the other version** (`group-set.md`
+     * § Build design — the group set, decision 9): the shared
+     * `SyncEngine::restore_retained_version` on this host's engine worker, the
+     * set's one writer. [conflictId] is a row `syncSetReviewRows` read. Throws
+     * — the row kept, nothing written — when the bytes are gone or the file
+     * holds an edit not yet shared; the message is the user's to read.
+     */
+    suspend fun restoreRetainedVersion(conflictId: Long): Unit =
+        throw UnsupportedOperationException("this host keeps no review rows")
+
     fun close()
 }

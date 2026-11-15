@@ -55,7 +55,6 @@ import time
 
 import pytest
 
-from helpers.app_surface import require_surface
 from helpers.mail_client_ui import claim_enable_and_ready, deliver_inbound
 
 # `real_conversations`: windows (and macOS/iOS) start the REAL shared-Rust receive
@@ -163,5 +162,4 @@ def _run_full_roundtrip(app, nest, *, credential_kind):
 @pytest.mark.parametrize("credential_kind", ["oauthbearer", "plain"])
 @pytest.mark.feature("email-in-conversations")
 def test_full_client_ui_mail_roundtrip(app, unclaimed_mail_nest_ui, credential_kind):
-    require_surface(app.driver, "mail-full-roundtrip")
     _run_full_roundtrip(app, unclaimed_mail_nest_ui, credential_kind=credential_kind)

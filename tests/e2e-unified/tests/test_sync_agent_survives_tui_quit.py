@@ -1,7 +1,8 @@
 """The background sync helper keeps syncing after the app quits, and renews its
 own sign-in over the machine's store principal — with no app running and no
 identity key. (The module and test names keep "tui", the arm that led; the
-macos arm below is the same journey through macOS's own quit door.)
+macos and linux arms below are the same journey through each app's own quit
+door.)
 
 Owners: ``docs/goal/architecture/apps/sync-agent-credentials.md`` § Credential
 model (the agent renews its own bearer over the principal; *A rejected
@@ -28,6 +29,19 @@ macOS is deliberately not a quit (``apps/macos.md`` § Sync). The agent is
 named by the pid its socket answers with before the quit. The driver's
 teardown kills the app's whole process group, the agent included
 (``drivers/macos.py::_stop_app``), and the teardown check below asserts it.
+
+**The linux arm.** The GTK app's e2e agent is the direct child its
+``SystemdAgentSpawner`` spawns under e2e (``apps/fauna-linux/src/sync_agent.rs``),
+on the socket under the launch's private ``XDG_RUNTIME_DIR`` — no pin, the
+same "linux needs nothing" as ``helpers.sync_seats``. The app runs under
+``xvfb-run`` in a session of its own with no controlling tty, so no hangup
+reaches the agent when the app exits and no opt-in is needed. The quit door is
+the window close (``driver.window_close()``): the launch's private bus owns no
+tray host, so a close quits rather than hides (``drivers/linux.py::
+_wants_private_bus``). The agent is named by the pid its socket answers with
+before the quit. It stays in the launch's process group, which the driver's
+teardown kills whole (``drivers/linux.py::_stop_app`` → ``terminate_tree``),
+and the teardown check below asserts it.
 
 **How the renewal is forced, with no TTL hook.** ``fauna.sessions.revoke_all``
 ends every session of the account and closes their sockets ``4401``; the
@@ -66,13 +80,17 @@ pytestmark = [
     # macos joined 2026-11-09 (the arm in the module docstring). Its launch pins
     # its own agent, so the session-wide `real_sync_agent` marker is not needed.
     pytest.mark.macos,
+    # linux joined 2026-11-11 (the arm in the module docstring): every linux
+    # launch already runs its own agent on a private socket.
+    pytest.mark.linux,
 ]
 
 #: The folder's name on the nest.
 FOLDER = "agent-survives-quit"
 
 #: tui's quit: `exit-tab` → `should_quit` → the main loop ends. macOS's:
-#: `NSApp.terminate` and its bounded leave-flush.
+#: `NSApp.terminate` and its bounded leave-flush. linux's: the window close
+#: with no tray host, then `xvfb-run` tearing its display down.
 APP_EXIT_S = 30.0
 
 #: The agent answering on its socket after the quit — it never stopped, so this
@@ -87,7 +105,7 @@ RENEWAL_S = 120.0
 UPLOAD_S = 120.0
 
 
-@pytest.fixture(params=["tui", "macos"])
+@pytest.fixture(params=["tui", "macos", "linux"])
 def launch_client(request):
     """The app under test, in the ``--client``-filterable fixture shape."""
     if request.param not in get_available_apps():
@@ -115,9 +133,10 @@ def _launch(launch_client, request, nest_instance):
     from helpers.sync_seats import pin_macos_seat_sync_agent
 
     config = _build_app_config(launch_client, nest_instance, request)
-    pin_macos_seat_sync_agent(
-        config, agent_bin=request.getfixturevalue("macos_sync_agent_binary")
-    )
+    if launch_client == "macos":
+        pin_macos_seat_sync_agent(
+            config, agent_bin=request.getfixturevalue("macos_sync_agent_binary")
+        )
     driver = create_driver(launch_client)
     driver.launch(config)
     if isinstance(driver, InProcessAgentDriver):
@@ -130,9 +149,12 @@ def _launch(launch_client, request, nest_instance):
 
 
 def _quit(launch_client, driver) -> None:
-    """The app's real quit door: tui's `exit-tab`, macOS's ⌘Q."""
+    """The app's real quit door: tui's `exit-tab`, macOS's ⌘Q, linux's window
+    close."""
     if launch_client == "tui":
         driver.click("exit-tab")
+    elif launch_client == "linux":
+        driver.window_close()
     else:
         driver.quit_app()
 
@@ -140,7 +162,7 @@ def _quit(launch_client, driver) -> None:
 def _agent_pid(launch_client, driver, socket_path: str) -> int:
     """The pid of THIS launch's agent while the app still runs. tui's is the
     own-group leader the launch recorded, cross-checked against the socket's
-    peer. macOS's is the socket's peer itself."""
+    peer. macOS's and linux's is the socket's peer itself."""
     if launch_client == "tui":
         pgid = wait_until(
             lambda: driver.agent_pgid,

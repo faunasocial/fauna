@@ -22,7 +22,8 @@ reason: convention 15 compiles the automation surface out of release builds
 (``apps/fauna-tui/src/main.rs``: the agent and every ``FAUNA_E2E_*`` read are
 ``#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]``), so a release
 ``fauna-tui`` cannot be driven at all. The substitution is honest because
-``assemble-archive.sh`` reads nothing but the two files in ``--bin-dir`` and
+``assemble-archive.sh`` reads nothing but the files in ``--bin-dir`` (and the
+licence and notices files it stages beside them) and
 ``install.sh`` installs from beside itself: neither branches on a build
 configuration. ``test_install_scripts_branch_on_no_build_configuration`` pins
 that by reading both scripts.
@@ -42,6 +43,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 #: Where the installed product lives, relative to the repo root — untracked and
@@ -155,6 +157,21 @@ def stage_archive(repo_root: Path | str, debug_dir: Path | str) -> Path:
             )
     out = repo_root / _STAGING_RELPATH
     out.mkdir(parents=True, exist_ok=True)
+    # The archive's notices file, written by the real generator for this host's
+    # archive (shipped-notices.md § Per channel): the staging refuses without
+    # one, exactly as a release leg does. Its verdict lines are read, never the
+    # file — it is dependency-authored text.
+    notices = out / "THIRD-PARTY-NOTICES.generated"
+    artifact = "terminal-archive-macos" if sys.platform == "darwin" else "terminal-archive-linux"
+    gen = subprocess.run(
+        ["just", "shipped-notices", artifact, str(notices)],
+        capture_output=True, text=True, timeout=300, cwd=str(repo_root),
+    )
+    if gen.returncode != 0:
+        raise RuntimeError(
+            f"the notices generator refused {artifact} (rc={gen.returncode}):\n"
+            + "\n".join(ln for ln in gen.stdout.splitlines() if ln.startswith("shipped-notices"))
+        )
     proc = subprocess.run(
         [
             "bash",
@@ -162,6 +179,7 @@ def stage_archive(repo_root: Path | str, debug_dir: Path | str) -> Path:
             "--bin-dir", str(debug_dir),
             "--out", str(out),
             "--suffix", _SUFFIX,
+            "--notices", str(notices),
             "--no-tar",
         ],
         capture_output=True, text=True, timeout=120, cwd=str(repo_root),

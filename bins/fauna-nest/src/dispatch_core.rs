@@ -16,8 +16,9 @@
 //! - **per-actor** encodes a `Frame::Reply` to bytes and sends it through the
 //!   outbound slot its reader reserved when it admitted the request
 //!   (`RpcConnection::reply_slots` — the per-connection admission cap), caching
-//!   the **frame bytes** verbatim (a replay re-sends them as-is — the
-//!   established behavior);
+//!   the **frame bytes** (a replay re-stamps them with the *current*
+//!   correlation_id — a re-send on one connection is a new Request with a
+//!   new id, and the first attempt's would match nothing the caller holds);
 //! - **federation** builds a `Reply` and routes it through
 //!   `RpcDispatcher::send_reply`, caching the **(payload, ok)** so a replay
 //!   rebuilds the `Reply` with the *current* correlation_id — a federation
@@ -187,9 +188,9 @@ pub trait DispatchSink: Send + Sync + 'static {
     fn lookup_idempotent(&self, key: [u8; 16]) -> BoxFuture<'_, IdempotencyHit>;
 
     /// Replay a cached idempotency `Hit` for a *new* request at `correlation_id`.
-    /// Per-actor emits the cached frame verbatim (ignoring `correlation_id`,
-    /// preserving the established behavior); federation rebuilds the `Reply` with
-    /// `correlation_id`.
+    /// Per-actor re-stamps the cached frame with `correlation_id`; federation
+    /// rebuilds the `Reply` with `correlation_id`. Either way the replay answers
+    /// the request that asked, never the first attempt's id.
     fn replay(self: Arc<Self>, correlation_id: u64, cached: Bytes) -> BoxFuture<'static, ()>;
 
     /// Replay a durable-tier [`IdempotencyHit::HitRebuild`]: `payload` is the
@@ -458,6 +459,13 @@ pub async fn spawn_dispatch<S: DispatchSink>(
         (DispatchSubject::Id(id), true) => Some(*id),
         _ => None,
     };
+    // The payload's top-level keys — what a spared refusal matches
+    // (`rpc_hold_test_hook` § Refusal → *Sparing one request shape*).
+    #[cfg(feature = "test-hooks")]
+    let hold_fields: Vec<String> = match &req.payload {
+        Value::Map(map) => map.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
     // spawn-ok(request-scoped): one RPC, bounded by two named mechanisms — the
     // `MAX_INFLIGHT_HANDLERS` permit moved in above, and the per-kind
     // `tokio::time::timeout` the body wraps itself in. It does hold
@@ -483,8 +491,13 @@ pub async fn spawn_dispatch<S: DispatchSink>(
         // a test needs when no ordinary input provokes one.
         #[cfg(feature = "test-hooks")]
         if let crate::rpc_hold_test_hook::Verdict::Refuse(refusal) =
-            crate::rpc_hold_test_hook::hold_if_armed(&handler_state, &handler_kind, hold_actor)
-                .await
+            crate::rpc_hold_test_hook::hold_if_armed(
+                &handler_state,
+                &handler_kind,
+                hold_actor,
+                &hold_fields,
+            )
+            .await
         {
             return Err(crate::rpc_hold_test_hook::refused_error(refusal));
         }

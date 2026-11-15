@@ -2,7 +2,7 @@
 
 Authority: `docs/goal/architecture/testing.md` § Default app and nest mode
 (*Mode mechanics* — a run-level harness input, the `--app`/`--nest` class) and
-§ Default app and nest mode → *Android's run venue* ("any run-level way to name
+§ Default app and nest mode → *Android's emulator placement* ("any run-level way to name
 the device" is one of the three things that section lists as not built).
 
 WHY THIS FILE EXISTS. `drivers/android.py` has always
@@ -42,8 +42,8 @@ def _no_sdk_adb(monkeypatch):
 
 def test_the_flag_wins():
     assert android_device.resolve_device_serial(
-        "emulator-5554", {android_device.ENV_VAR: "R5CT1234"}
-    ) == "emulator-5554"
+        "emulator-5580", {android_device.ENV_VAR: "R5CT1234"}
+    ) == "emulator-5580"
 
 
 def test_the_env_is_the_fallback():
@@ -61,7 +61,7 @@ def test_a_blank_env_value_is_not_a_serial():
 
 
 def test_surrounding_whitespace_is_stripped():
-    assert android_device.resolve_device_serial("  emulator-5554 \n", {}) == "emulator-5554"
+    assert android_device.resolve_device_serial("  emulator-5580 \n", {}) == "emulator-5580"
 
 
 def test_a_present_but_empty_flag_is_an_error_not_a_default():
@@ -79,7 +79,7 @@ def test_a_present_but_empty_flag_is_an_error_not_a_default():
 
 _TWO_DEVICES = (
     "List of devices attached\n"
-    "emulator-5554\tdevice\n"
+    "emulator-5580\tdevice\n"
     "R5CT1234ABC\tdevice\n"
     "\n"
 )
@@ -87,7 +87,7 @@ _TWO_DEVICES = (
 
 def test_the_header_is_not_a_device():
     assert android_device.parse_adb_devices(_TWO_DEVICES) == [
-        ("emulator-5554", "device"),
+        ("emulator-5580", "device"),
         ("R5CT1234ABC", "device"),
     ]
 
@@ -97,9 +97,9 @@ def test_daemon_chatter_is_dropped():
         "* daemon not running; starting now at tcp:5037\n"
         "* daemon started successfully\n"
         "List of devices attached\n"
-        "emulator-5554\tdevice\n"
+        "emulator-5580\tdevice\n"
     )
-    assert android_device.parse_adb_devices(noisy) == [("emulator-5554", "device")]
+    assert android_device.parse_adb_devices(noisy) == [("emulator-5580", "device")]
 
 
 def test_empty_output_parses_to_nothing():
@@ -111,7 +111,7 @@ def test_empty_output_parses_to_nothing():
 
 
 def test_a_named_serial_must_be_the_one_attached():
-    assert android_device.device_present(_TWO_DEVICES, "emulator-5554")
+    assert android_device.device_present(_TWO_DEVICES, "emulator-5580")
     assert android_device.device_present(_TWO_DEVICES, "R5CT1234ABC")
     assert not android_device.device_present(_TWO_DEVICES, "R5CT9999XYZ")
 
@@ -127,11 +127,11 @@ def test_unauthorized_and_offline_are_not_usable():
     # skip instead.
     out = (
         "List of devices attached\n"
-        "emulator-5554\toffline\n"
+        "emulator-5580\toffline\n"
         "R5CT1234ABC\tunauthorized\n"
     )
     assert not android_device.device_present(out, None)
-    assert not android_device.device_present(out, "emulator-5554")
+    assert not android_device.device_present(out, "emulator-5580")
     assert not android_device.device_present(out, "R5CT1234ABC")
 
 
@@ -150,7 +150,7 @@ def test_a_serial_containing_the_word_device_is_not_a_state():
 def test_adb_argv_shape(monkeypatch):
     monkeypatch.setattr(android_device.shutil, "which", lambda name: None)
     assert android_device.adb_argv(None) == ["adb"]
-    assert android_device.adb_argv("emulator-5554") == ["adb", "-s", "emulator-5554"]
+    assert android_device.adb_argv("emulator-5580") == ["adb", "-s", "emulator-5580"]
 
 
 def test_adb_argv_puts_the_server_before_the_device(monkeypatch):
@@ -158,8 +158,8 @@ def test_adb_argv_puts_the_server_before_the_device(monkeypatch):
     # every invocation, ahead of the device selection.
     monkeypatch.setattr(android_device.shutil, "which", lambda name: None)
     assert android_device.adb_argv(None, _SERVER) == ["adb", "-L", _SERVER]
-    assert android_device.adb_argv("emulator-5554", _SERVER) == [
-        "adb", "-L", _SERVER, "-s", "emulator-5554",
+    assert android_device.adb_argv("emulator-5580", _SERVER) == [
+        "adb", "-L", _SERVER, "-s", "emulator-5580",
     ]
 
 
@@ -167,12 +167,12 @@ def test_adb_argv_resolves_the_executable_through_path(monkeypatch):
     # PATHEXT-aware on Windows, where a bare `adb` handed to CreateProcess does
     # not find an `adb.cmd` a shell would.
     monkeypatch.setattr(android_device.shutil, "which", lambda name: f"/sdk/{name}.cmd")
-    assert android_device.adb_argv("emulator-5554")[0] == "/sdk/adb.cmd"
+    assert android_device.adb_argv("emulator-5580")[0] == "/sdk/adb.cmd"
 
 
 # ── the adb server axis: `--adb-server` / `E2E_ADB_SERVER` ──────────────────
 
-_SERVER = "tcp:127.0.0.1:18509"
+_SERVER = "tcp:127.0.0.1:18508"
 
 
 def test_the_adb_server_flag_wins_over_the_env():
@@ -207,7 +207,7 @@ def test_a_hostless_spec_is_refused_because_adb_would_start_a_server_there():
 @pytest.mark.parametrize("spec", ["tcp:10.0.0.2:5037", "tcp:localhost:5037", "tcp:0.0.0.0:5037"])
 def test_a_non_loopback_adb_server_is_refused(spec):
     # adb's server protocol is an unauthenticated device shell (constraint 2 of
-    # *Android's run venue*). `localhost` is refused too: it is a NAME, and what
+    # *Android's emulator placement*). `localhost` is refused too: it is a NAME, and what
     # it resolves to is not this harness's to assume.
     with pytest.raises(android_device.AndroidDeviceError, match="non-loopback"):
         android_device.resolve_adb_server(spec, {})
@@ -246,7 +246,7 @@ def _capture_probe(monkeypatch, answer):
 
 def test_the_probe_asks_the_named_server_and_finds_the_named_device(monkeypatch):
     seen = _capture_probe(monkeypatch, _Ran(_TWO_DEVICES))
-    assert android_device.probe_device("emulator-5554", _SERVER)
+    assert android_device.probe_device("emulator-5580", _SERVER)
     assert seen[0][0] == ["adb", "-L", _SERVER, "devices"]
     assert seen[0][1]["timeout"] == 5
 
@@ -261,19 +261,63 @@ def test_an_unreachable_server_reads_as_no_device_not_as_an_error(monkeypatch):
     # What the real client does for a dead explicit-host socket (measured, see
     # `resolve_adb_server`): exit 1 at once, nothing on stdout.
     _capture_probe(monkeypatch, _Ran("", returncode=1))
-    assert not android_device.probe_device("emulator-5554", _SERVER)
+    assert not android_device.probe_device("emulator-5580", _SERVER)
 
 
 def test_a_probe_that_never_answers_is_false_at_its_timeout(monkeypatch):
     import subprocess
 
     _capture_probe(monkeypatch, subprocess.TimeoutExpired(cmd="adb", timeout=5))
-    assert not android_device.probe_device("emulator-5554", _SERVER)
+    assert not android_device.probe_device("emulator-5580", _SERVER)
 
 
 def test_a_missing_adb_is_false_not_a_crash(monkeypatch):
     _capture_probe(monkeypatch, FileNotFoundError("adb"))
     assert not android_device.probe_device(None, None)
+
+
+# ── a connect-address serial: the android emulator's devices ───────────────────
+#
+# `testing.md` § Default app and nest mode → *A2 amended — the design*, point 2:
+# the venue's emulators hang off the dev VM's own venue adb server by `adb
+# connect`, so their serials are their connect addresses, and a probe connects
+# first (idempotent: a tunnel that flapped is re-attached).
+
+_VENUE = "127.0.0.1:18509"
+
+
+def test_a_connect_address_serial_is_accepted_as_given():
+    assert android_device.resolve_device_serial(f" {_VENUE} ", {}) == _VENUE
+    assert android_device.resolve_device_serial(None, {android_device.ENV_VAR: _VENUE}) == _VENUE
+
+
+@pytest.mark.parametrize("serial, connect", [
+    (_VENUE, True), ("127.0.0.1:18510", True), ("emulator-5580", False),
+    ("R5CT1234", False), ("10.0.0.2:5555", False), (None, False),
+])
+def test_only_a_loopback_connect_address_is_connected(serial, connect):
+    assert android_device.is_connect_serial(serial) is connect
+
+
+def test_the_probe_connects_a_venue_device_before_listing(monkeypatch):
+    seen = _capture_probe(monkeypatch, _Ran(f"List of devices attached\n{_VENUE}\tdevice\n"))
+    assert android_device.probe_device(_VENUE, _SERVER)
+    assert [argv for argv, _ in seen] == [
+        ["adb", "-L", _SERVER, "connect", _VENUE],
+        ["adb", "-L", _SERVER, "devices"],
+    ]
+
+
+def test_a_local_device_is_never_connected(monkeypatch):
+    seen = _capture_probe(monkeypatch, _Ran(_TWO_DEVICES))
+    android_device.probe_device("emulator-5580", _SERVER)
+    assert all("connect" not in argv for argv, _ in seen)
+
+
+def test_a_failing_connect_never_raises_and_the_listing_decides(monkeypatch):
+    _capture_probe(monkeypatch, FileNotFoundError("adb"))
+    android_device.connect_device(_VENUE, _SERVER)
+    assert not android_device.probe_device(_VENUE, _SERVER)
 
 
 # ── run-level state ─────────────────────────────────────────────────────────
@@ -299,8 +343,8 @@ def test_conftest_can_push_the_adb_server_in():
 
 
 def test_conftest_can_push_the_serial_in():
-    android_device.set_device_serial("emulator-5554")
-    assert android_device.device_serial() == "emulator-5554"
+    android_device.set_device_serial("emulator-5580")
+    assert android_device.device_serial() == "emulator-5580"
 
 
 # ── the wiring itself, pinned at the source ─────────────────────────────────
@@ -379,9 +423,9 @@ def test_the_launch_config_carries_the_serial_and_the_nest_ports():
 
 
 def test_the_run_launch_facts_carry_the_serial_and_the_test_apk(tmp_path):
-    android_device.set_device_serial("emulator-5554")
+    android_device.set_device_serial("emulator-5580")
     facts = android_device.run_launch_facts(tmp_path)
-    assert facts["device_serial"] == "emulator-5554"
+    assert facts["device_serial"] == "emulator-5580"
     assert facts["test_apk"] == str(tmp_path / android_device.TEST_APK)
     android_device.set_device_serial(None)
     assert android_device.run_launch_facts(tmp_path)["device_serial"] is None
@@ -397,7 +441,7 @@ def test_the_run_launch_facts_carry_the_adb_server(tmp_path):
 
 def test_adb_is_found_off_path_under_the_sdk(tmp_path, monkeypatch):
     """A process without the login shell's PATH (the fleet broker's service,
-    which probes the android venue) still finds adb: `$ANDROID_HOME`'s
+    which probes the android emulator) still finds adb: `$ANDROID_HOME`'s
     platform-tools first, then the primary dev VM's `~/android-sdk`."""
     monkeypatch.setattr(android_device.shutil, "which", lambda _name: None)
     monkeypatch.setattr(android_device, "_sdk_adb", _REAL_SDK_ADB)

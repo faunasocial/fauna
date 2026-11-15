@@ -59,8 +59,9 @@ pub mod snapshots;
 #[cfg(all(feature = "rpc-glue", feature = "account-port", target_arch = "wasm32"))]
 pub use consent_grant::consent_grant_seams_over_port;
 pub use consent_grant::{
-    ConsentFolder, ConsentFolderSeam, ConsentGrantSeams, CustodyConsentFolders,
-    consent_folder_from, consent_folder_names, names_twin,
+    ConsentFolder, ConsentFolderOption, ConsentFolderSeam, ConsentGrantSeams,
+    CustodyConsentFolders, consent_folder_from, consent_folder_names, consent_folder_options,
+    consent_folder_options_from, folder_picker, names_twin, takes_folder_choice,
 };
 pub use contest::{ContestActor, DirectoryContestActor};
 #[cfg(any(test, feature = "test-helpers"))]

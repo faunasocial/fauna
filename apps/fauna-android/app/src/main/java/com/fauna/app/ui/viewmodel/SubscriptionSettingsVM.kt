@@ -3,7 +3,8 @@ package com.fauna.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
-import com.fauna.app.payments.paymentsClaimsRedeem
+import com.fauna.app.payments.ClaimRedeemResult
+import com.fauna.app.payments.paymentsClaimsRedeemAcrossNests
 import com.fauna.ffi.FfiMineSubscription
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -71,6 +72,11 @@ class SubscriptionSettingsVM @Inject constructor(
         }
     }
 
+    /** The redeem call, a seam only so the VM tests need no live nest:
+     *  `(code, authorIdHex, authorHomeUrl)`. */
+    internal var redeem: suspend (String, String?, String?) -> ClaimRedeemResult =
+        { code, author, home -> api.paymentsClaimsRedeemAcrossNests(code, author, home) }
+
     /** True right after a successful redeem — clears the input field once. */
     val claimRedeemed = MutableStateFlow(false)
 
@@ -88,7 +94,10 @@ class SubscriptionSettingsVM @Inject constructor(
             errorMessage.value = null
             _working.value = true
             try {
-                api.paymentsClaimsRedeem(trimmed)
+                // No home and no creator: this page knows neither, so the
+                // shared method redeems on this nest and never reads the author
+                // slot (the glue fills it with the redeemer's own id).
+                redeem(trimmed, null, null)
                 claimRedeemed.value = true
                 _subscriptions.value = api.subscriptionMineList()
             } catch (e: Exception) {

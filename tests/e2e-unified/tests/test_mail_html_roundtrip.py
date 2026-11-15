@@ -40,7 +40,6 @@ import time
 
 import pytest
 
-from helpers.app_surface import require_surface
 from helpers.budgets import UI_SETTLE_S
 from helpers.mail_client_ui import claim_enable_and_ready, deliver_inbound
 from helpers.waiting import wait_until
@@ -67,7 +66,6 @@ def test_html_mail_markdown_roundtrip(app, unclaimed_mail_nest_ui):
     text/html part; receive a real text/html email → rendered as formatted
     markdown (not raw tags). The two halves prove the bidirectional
     markdown-interchange feature on the lead app."""
-    require_surface(app.driver, "html-mail-markdown-roundtrip")
 
     nest = unclaimed_mail_nest_ui
     ctx = claim_enable_and_ready(app, nest, credential_kind="oauthbearer")
@@ -242,7 +240,6 @@ def test_html_mail_remote_image_blocked_until_reveal(app, unclaimed_mail_nest_ui
     the linux mock inject seam (which hard-codes PlainText — see the module
     docstring), so the HTML→markdown image path actually runs.
     """
-    require_surface(app.driver, "html-mail-inline-image")
 
     nest = unclaimed_mail_nest_ui
     ctx = claim_enable_and_ready(app, nest, credential_kind="oauthbearer")
@@ -467,7 +464,6 @@ def test_html_mail_keeps_quotes_lists_and_bold_italic_and_the_sent_copy_renders_
     docstring says why not the inject seam); the Sent half is a real send from
     the app, and its relayed `text/html` alternative is read too, so the copy
     the user sees and the mail that left agree."""
-    require_surface(app.driver, "html-mail-markdown-roundtrip")
 
     nest = unclaimed_mail_nest_ui
     ctx = claim_enable_and_ready(app, nest, credential_kind="oauthbearer")

@@ -96,7 +96,7 @@ class DevicesVMTest {
         // `init` beside the two above.
         val storeChangedTick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
         whenever(api.storeChangedTick).thenReturn(storeChangedTick)
-        val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext), FakeOnDemandToggle())
+        val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext), FakeOnDemandToggle(), NoSharePlaneReadings)
         return Fixture(vm, api, tick, reconnectTick, storeChangedTick)
     }
 

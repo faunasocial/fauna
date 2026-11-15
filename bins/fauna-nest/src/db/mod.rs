@@ -1449,6 +1449,12 @@ pub struct FeedPostRow {
     /// on the apps' `feed-post-actions-menu` ⋯ overflow.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_slug: Option<String>,
+    /// When the author advertised this sold post on Nostr
+    /// (`content_meta.nostr_advertised_at`, epoch seconds; `None` = not
+    /// advertised). Drives the wire `FeedPostItem.nostr_advertised_at` → the
+    /// own-post *Advertise on Nostr* / *Stop advertising* verb pair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nostr_advertised_at: Option<u64>,
     /// Per-category content-label verdicts (`moderation.md` § Per-row badge
     /// data path), one entry per category — the highest-confidence
     /// `content_labels` row. Drives the wire `FeedPostItem.labels` → the

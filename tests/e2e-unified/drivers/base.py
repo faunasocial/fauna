@@ -277,9 +277,11 @@ class PlatformDriver(ABC):
         Concrete with a NotImplementedError default: implemented where the
         driver owns its app child as a Popen (linux/macOS/tui via
         HttpBridgeDriver); windows asks the FlaUI bridge that owns the app to
-        kill it (`WindowsDriver.kill_uncleanly`). web (the "app" is a browser
-        page), ios (simctl owns it) and android need their own shapes — don't
-        fake them with a graceful quit.
+        kill it (`WindowsDriver.kill_uncleanly`); web closes the page and keeps
+        its context, ios SIGKILLs the pid `simctl launch` reported, and android
+        `run-as` SIGKILLs the pid its launch read on the device
+        (`AndroidBridgeDriver.kill_uncleanly`). Never fake one with a graceful
+        quit.
         """
         raise NotImplementedError(
             f"{type(self).__name__} has no unclean-kill primitive yet — the "

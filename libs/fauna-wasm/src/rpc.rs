@@ -875,6 +875,72 @@ fn keypair_from_secret_hex(secret_hex: &str) -> Result<ActorKeypair, JsValue> {
     Ok(ActorKeypair::from_secret(hex_array_32(secret_hex)?))
 }
 
+/// One entry of the successor's owed-nests list as the SPA receives it and
+/// hands it back to `recoveryDismissOwedNest` — the FFI's `FfiOwedNestEntry`,
+/// its keys as hex. The two lines are the shared selection; the SPA resolves
+/// them through `resolveLocalized` and never selects copy by `outcome_kind`.
+#[derive(Serialize, Deserialize)]
+struct OwedNestEntryJs {
+    /// The nest that keeps the entry, where its dismiss settles: `null` the
+    /// bound nest, else the linked keeper's 32-byte id, hex.
+    keeper: Option<String>,
+    /// The retired identity whose pairing named the owed nest, hex.
+    old_actor_id: String,
+    /// The owed nest's id, hex.
+    nest_id: String,
+    /// `recovery-kit-owed-nest-item-address`'s line. Not read back on a dismiss.
+    #[serde(default, skip_deserializing)]
+    address_copy: Option<fauna_core::localized::LocalizedText>,
+    /// `recovery-kit-owed-nest-item-outcome`'s line. Not read back on a dismiss.
+    #[serde(default, skip_deserializing)]
+    outcome_copy: Option<fauna_core::localized::LocalizedText>,
+    /// The outcome's arm as a stable token (`OwedOutcome::kind`) — for a test,
+    /// never to select copy by.
+    #[serde(default)]
+    outcome_kind: String,
+}
+
+impl OwedNestEntryJs {
+    fn keeper_bytes(&self) -> Result<Option<[u8; 32]>, JsValue> {
+        self.keeper.as_deref().map(hex_array_32).transpose()
+    }
+}
+
+fn owed_hex(value: &str, what: &str) -> Result<Vec<u8>, JsValue> {
+    hex::decode(value).map_err(|_| JsValue::from_str(&format!("owed-nest entry: malformed {what}")))
+}
+
+impl From<&fauna_client_recovery::owed_nests::OwedNestEntry> for OwedNestEntryJs {
+    fn from(e: &fauna_client_recovery::owed_nests::OwedNestEntry) -> Self {
+        Self {
+            keeper: e.keeper.map(hex::encode),
+            old_actor_id: hex::encode(&e.old_actor_id),
+            nest_id: hex::encode(&e.nest_id),
+            address_copy: Some(e.address_copy()),
+            outcome_copy: Some(e.outcome_copy()),
+            outcome_kind: e.outcome.kind().to_string(),
+        }
+    }
+}
+
+/// The successor's owed-nests list: `recovery-kit-owed-nests-status`'s line and
+/// the entries in the shared projection's order (the bound nest's first, then
+/// each linked keeper's) — the FFI's `FfiOwedNestsView`.
+#[derive(Serialize)]
+struct OwedNestsJs {
+    status: fauna_core::localized::LocalizedText,
+    entries: Vec<OwedNestEntryJs>,
+}
+
+impl From<&fauna_client_recovery::owed_nests::OwedNestsView> for OwedNestsJs {
+    fn from(v: &fauna_client_recovery::owed_nests::OwedNestsView) -> Self {
+        Self {
+            status: v.status(),
+            entries: v.entries.iter().map(OwedNestEntryJs::from).collect(),
+        }
+    }
+}
+
 // ── Recovery kit helpers (`settings.md` § Recovery kit) — shared behind the
 // `recoveryKit*` methods below. The tui/linux twins are
 // `apps/fauna-tui/src/settings/mod.rs`'s `recovery_identity` / `with_status` /
@@ -2584,6 +2650,73 @@ impl WsRpcClient {
                 .await
                 .map_err(err_to_js)?;
             Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// [`Self::bridges_add_follow`] sent now or queued with no nest (the
+    /// `OfflineQueued` composer over the tab's outbox, one drain scope per
+    /// followed account, account-offline-mutation.md § The offline-mutation
+    /// contract) → `true` when queued: the follow is not on the nest's list
+    /// until the drain, so the caller clears its error and changes no list;
+    /// `false` when sent.
+    #[wasm_bindgen(js_name = bridgesAddFollowOrQueue)]
+    pub fn bridges_add_follow_or_queue(
+        &self,
+        bridge_id: String,
+        id: String,
+        petname: Option<String>,
+        extra: JsValue,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let extra = optional_cbor(extra)?;
+            let queue = crate::offline_outbox::wired();
+            let composed = BridgesClient::new(client)
+                .add_follow_or_queue(
+                    queue
+                        .as_deref()
+                        .map(|q| q as &dyn fauna_core::offline_intent::OfflineIntentQueue),
+                    bridge_id,
+                    id,
+                    petname,
+                    extra,
+                )
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from_bool(matches!(
+                composed,
+                fauna_protocol::offline_intent::Composed::Queued(_)
+            )))
+        })
+    }
+
+    /// [`Self::bridges_remove_follow`] sent now or queued with no nest — the
+    /// same contract as [`Self::bridges_add_follow_or_queue`], under the same
+    /// per-account scope. `true` when queued: the account stays on the nest's
+    /// list until the drain.
+    #[wasm_bindgen(js_name = bridgesRemoveFollowOrQueue)]
+    pub fn bridges_remove_follow_or_queue(
+        &self,
+        bridge_id: String,
+        follow_id: String,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let queue = crate::offline_outbox::wired();
+            let composed = BridgesClient::new(client)
+                .remove_follow_or_queue(
+                    queue
+                        .as_deref()
+                        .map(|q| q as &dyn fauna_core::offline_intent::OfflineIntentQueue),
+                    bridge_id,
+                    follow_id,
+                )
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from_bool(matches!(
+                composed,
+                fauna_protocol::offline_intent::Composed::Queued(_)
+            )))
         })
     }
 
@@ -4939,6 +5072,53 @@ impl WsRpcClient {
         })
     }
 
+    /// Whether the nest advertises the `nostr-advertise` capability — the
+    /// `canAdvertise` input of [`crate::feed::post_nostr_advertise_verb`]
+    /// (monetization.md § The Nostr advertisement of a sold post → *Wire
+    /// compat*), over `NostrContentClient::advertise_supported`. Resolves to a
+    /// boolean.
+    #[wasm_bindgen(js_name = nostrAdvertiseSupported)]
+    pub fn nostr_advertise_supported(&self) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let yes = NostrContentClient::new(client)
+                .advertise_supported()
+                .await
+                .map_err(err_to_js)?;
+            Ok(wasm_bindgen::JsValue::from_bool(yes))
+        })
+    }
+
+    /// `fauna.nostr.advertise.set` — advertise one of the caller's own sold
+    /// posts (`postId`, 64 hex). Resolves to the act's epoch seconds as a
+    /// number; the nest's typed refusals reject verbatim. `zaps`-gated.
+    #[cfg(feature = "zaps")]
+    #[wasm_bindgen(js_name = nostrAdvertisePost)]
+    pub fn nostr_advertise_post(&self, post_id: String) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let at = NostrContentClient::new(client)
+                .advertise_post(post_id)
+                .await
+                .map_err(err_to_js)?;
+            Ok(wasm_bindgen::JsValue::from_f64(at as f64))
+        })
+    }
+
+    /// `fauna.nostr.advertise.clear` — stop advertising `postId`. Resolves to
+    /// `false` when it was not advertised. Ungated.
+    #[wasm_bindgen(js_name = nostrClearAdvertisement)]
+    pub fn nostr_clear_advertisement(&self, post_id: String) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let cleared = NostrContentClient::new(client)
+                .clear_advertisement(post_id)
+                .await
+                .map_err(err_to_js)?;
+            Ok(wasm_bindgen::JsValue::from_bool(cleared))
+        })
+    }
+
     /// `nostr.events.publish_signed` — relay-enqueue an event the browser's
     /// NIP-07 extension signed. `event_json` is the signed event's NIP-01 wire
     /// JSON exactly as the extension returned it; the nest verifies the
@@ -6737,6 +6917,85 @@ impl WsRpcClient {
             .await
             .map_err(|e| JsValue::from_str(&e))?;
             to_js(&recovery_status_view(&status))
+        })
+    }
+
+    /// The successor's owed-nests list (`settings.md` § Recovery kit → *The
+    /// successor's owed nests*) for the Settings Account hydrate → an
+    /// [`OwedNestsJs`], or `null` when nothing is owed: the bound nest's served
+    /// list (over this client's session) joined with this tab's account
+    /// runtime's last passes at every keeper — the bound one's and each linked
+    /// keeper's — through the shared `OwedNestsView::project`, the FFI door's
+    /// `recovery_owed_nests_view` and tui's hydrate.
+    ///
+    /// **Never rejects.** A failed read of the bound nest's list leaves its
+    /// entries out this time (logged); a tab with no runtime serving the
+    /// account reads every served entry as not yet tried.
+    #[wasm_bindgen(js_name = recoveryOwedNests)]
+    pub fn recovery_owed_nests_js(&self) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            use fauna_client_recovery::owed_nests::{OwedNestsView, read_owed_nests};
+            let served = match read_owed_nests(&client).await {
+                Ok(served) => served,
+                Err(e) => {
+                    tracing::warn!("[settings] owed-nests read failed: {e}");
+                    Vec::new()
+                }
+            };
+            let passes = crate::account_runtime::handle()
+                .and_then(|h| h.last_owed_nests())
+                .unwrap_or_default();
+            let bound = passes
+                .iter()
+                .find(|pass| pass.keeper.is_none())
+                .map(|pass| pass.deliveries());
+            let linked: Vec<_> = passes
+                .iter()
+                .filter_map(|pass| pass.keeper.map(|k| (k, pass.deliveries())))
+                .collect();
+            match OwedNestsView::project(&served, bound, &linked) {
+                Some(view) => to_js(&OwedNestsJs::from(&view)),
+                None => Ok(JsValue::NULL),
+            }
+        })
+    }
+
+    /// `recovery-kit-owed-nest-item-dismiss-confirm-button` — settle one entry
+    /// at its keeper on the user's word (the shared `dismiss_owed_nest`): a
+    /// bound entry over this client's session, a linked one over an owner
+    /// connection to its keeper through this tab's linked-nest dial. Resolves
+    /// `null` when the keeper settled — drop the entry — or the
+    /// `dismiss_failed_copy` line (a `LocalizedText`) to paint on
+    /// `error-message`.
+    ///
+    /// Rejects only on a malformed secret or entry key.
+    #[wasm_bindgen(js_name = recoveryDismissOwedNest)]
+    pub fn recovery_dismiss_owed_nest_js(
+        &self,
+        secret_hex: String,
+        entry: JsValue,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            use fauna_client_recovery::owed_nests::{
+                OwedNestEntry, OwedOutcome, dismiss_failed_copy, dismiss_owed_nest,
+            };
+            let entry: OwedNestEntryJs = from_js(entry)?;
+            let identity = keypair_from_secret_hex(&secret_hex)?;
+            let shared = OwedNestEntry {
+                keeper: entry.keeper_bytes()?,
+                old_actor_id: owed_hex(&entry.old_actor_id, "old_actor_id")?,
+                nest_id: owed_hex(&entry.nest_id, "nest_id")?,
+                address: None,
+                // The dismiss reads only the keeper and the settle key.
+                outcome: OwedOutcome::NotTried,
+            };
+            let dial = crate::account_runtime::linked_nest_dial(&identity.actor_id_hex());
+            match dismiss_owed_nest(&RecoveryClient::new(client), &dial, &shared).await {
+                Ok(()) => Ok(JsValue::NULL),
+                Err(reason) => to_js(&dismiss_failed_copy(&reason)),
+            }
         })
     }
 
@@ -9781,6 +10040,39 @@ fn asking_price_from_js_sats(
         })
 }
 
+/// The asking-price field's text as the sell composer and the *Change
+/// price…* dialog both read it — the shared
+/// `fauna_client_subscriptions::parse_asking_price_sats`, `fauna-ffi`'s
+/// `asking_price_parse` twin. Returns `{ sats: null }` for an empty field,
+/// `{ sats }` for a price, `{ i18nKey }` for text that is not one.
+#[wasm_bindgen(js_name = askingPriceParse)]
+pub fn asking_price_parse(text: &str) -> Result<JsValue, JsValue> {
+    match fauna_client_subscriptions::parse_asking_price_sats(text) {
+        Ok(sats) => to_js(&serde_json::json!({ "sats": sats })),
+        Err(e) => to_js(&serde_json::json!({ "i18nKey": e.i18n_key() })),
+    }
+}
+
+/// The *Change price…* dialog's two pre-filled fields from the selling tier's
+/// stored `price_hint` and `asking_price_sats` as `subscriptionsTiersList`
+/// answered them — the shared `fauna_client_subscriptions::sale_price_prefill`.
+/// Returns `{ priceHint, askingPrice }`, both strings (empty when unset).
+#[wasm_bindgen(js_name = salePricePrefill)]
+pub fn sale_price_prefill(
+    price_hint: Option<String>,
+    asking_price_sats: Option<f64>,
+) -> Result<JsValue, JsValue> {
+    let stored = asking_price_from_js_sats(asking_price_sats)?;
+    let p = fauna_client_subscriptions::sale_price_prefill_stored(
+        price_hint.as_deref(),
+        stored.as_ref(),
+    );
+    to_js(&serde_json::json!({
+        "priceHint": p.price_hint,
+        "askingPrice": p.asking_price,
+    }))
+}
+
 #[wasm_bindgen]
 impl WsRpcClient {
     // ── §1 My tiers ──────────────────────────────────────────────────────────
@@ -9888,6 +10180,57 @@ impl WsRpcClient {
                 .await
                 .map_err(err_to_js)?;
             Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// The *Change price…* save of a sold post (`monetization.md` § The
+    /// asking price → *Re-pricing a sold post*) — `fauna-ffi`'s
+    /// `sale_price_save` twin. `tierName`, `storedPriceHint` and
+    /// `storedAskingPriceSats` are the selling tier's fields as
+    /// `subscriptionsTiersList` answered them when the dialog opened;
+    /// `priceHint` and `askingPrice` the dialog's two field strings. Runs
+    /// the shared plan and its verbs in order (the update before any clear).
+    /// Resolves `{ outcome: "unchanged" }`, `{ outcome: "saved",
+    /// clearedAskingPrice }` or — nothing sent — `{ outcome: "refused",
+    /// i18nKey }`; a nest refusal rejects.
+    #[wasm_bindgen(js_name = subscriptionsSaveSalePrice)]
+    pub fn subscriptions_save_sale_price(
+        &self,
+        tier_name: String,
+        stored_price_hint: Option<String>,
+        stored_asking_price_sats: Option<f64>,
+        price_hint: String,
+        asking_price: String,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let stored = asking_price_from_js_sats(stored_asking_price_sats)?;
+            let edit = match fauna_client_subscriptions::plan_sale_price_edit_stored(
+                &tier_name,
+                stored_price_hint.as_deref(),
+                stored.as_ref(),
+                &price_hint,
+                &asking_price,
+            ) {
+                Ok(edit) => edit,
+                Err(e) => {
+                    return to_js(&serde_json::json!({
+                        "outcome": "refused",
+                        "i18nKey": e.i18n_key(),
+                    }));
+                }
+            };
+            if edit.is_empty() {
+                return to_js(&serde_json::json!({ "outcome": "unchanged" }));
+            }
+            SubscriptionsClient::new(client)
+                .apply_sale_price_edit(&edit)
+                .await
+                .map_err(err_to_js)?;
+            to_js(&serde_json::json!({
+                "outcome": "saved",
+                "clearedAskingPrice": edit.clears_asking_price(),
+            }))
         })
     }
 
@@ -10129,6 +10472,31 @@ impl WsRpcClient {
             let author_id = ActorId(hex_array_32(&author_id_hex)?);
             let tiers = SubscriptionsClient::new(client)
                 .offers_list(author_id)
+                .await
+                .map_err(err_to_js)?;
+            let rows: Vec<serde_json::Value> = tiers.iter().map(tier_item_to_web_json).collect();
+            to_js(&rows)
+        })
+    }
+
+    /// The Tiers-tab browse across nests — the web twin of `fauna-ffi`'s
+    /// `offers_list_across_nests`
+    /// (`SubscriptionsClient::offers_list_across_nests`, `subscriptions.md`
+    /// § Pillar 1 → *The offers browse across nests*): `subscriptionsOffersList`
+    /// when `home` is `null` or blank, and for an author homed on another nest
+    /// the read relayed to that home through this nest. Same row JSON as
+    /// `subscriptionsOffersList`.
+    #[wasm_bindgen(js_name = subscriptionsOffersListAcrossNests)]
+    pub fn subscriptions_offers_list_across_nests(
+        &self,
+        author_id_hex: String,
+        home: Option<String>,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let author_id = ActorId(hex_array_32(&author_id_hex)?);
+            let tiers = SubscriptionsClient::new(client)
+                .offers_list_across_nests(author_id, home)
                 .await
                 .map_err(err_to_js)?;
             let rows: Vec<serde_json::Value> = tiers.iter().map(tier_item_to_web_json).collect();

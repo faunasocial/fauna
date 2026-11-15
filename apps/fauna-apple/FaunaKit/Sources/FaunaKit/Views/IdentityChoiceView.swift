@@ -15,9 +15,13 @@ import SwiftUI
 /// sibling onboarding steps) — this view must not add one.
 public struct IdentityChoiceView: View {
     @Bindable var vm: OnboardingVM
+    /// The caller's live `appState.isAddingAccount`: an append-mode wizard
+    /// never paints the sign-out residue (`OnboardingVM.paintedSignOutResidue`).
+    private let isAddingAccount: Bool
 
-    public init(vm: OnboardingVM) {
+    public init(vm: OnboardingVM, isAddingAccount: Bool) {
         self.vm = vm
+        self.isAddingAccount = isAddingAccount
     }
 
     public var body: some View {
@@ -139,10 +143,10 @@ public struct IdentityChoiceView: View {
     ///
     /// The automation readers read the view model live, so a line replaced in
     /// place (the retry's refusal beside a sibling window) reads back as the
-    /// new one.
+    /// new one. Never over an append-mode wizard (`paintedSignOutResidue`).
     @ViewBuilder
     private var signOutResidue: some View {
-        if let residue = vm.signOutResidue {
+        if let residue = vm.paintedSignOutResidue(appending: isAddingAccount) {
             VStack(spacing: 8) {
                 Text(residue.line)
                     .font(.callout)

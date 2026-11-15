@@ -35,6 +35,15 @@ class FaunaApp : Application(), Configuration.Provider {
 
         /** The blessed-grant auto-renew pass at app foreground. */
         fun nestsAutoRenew(): com.fauna.app.service.NestsAutoRenew
+
+        /** The shared account runtime's foreground signal (phone peers stop in the background). */
+        fun accountRuntimeForeground(): com.fauna.app.service.AccountRuntimeForeground
+
+        /** The cross-user share plane's foreground edge (start in front, stop on ON_STOP). */
+        fun sharePlaneForeground(): com.fauna.app.service.SharePlaneForeground
+
+        /** The engine roster the launch folder pass's take-over reads. */
+        fun engineRoster(): com.fauna.app.core.EngineRoster
     }
 
     /**
@@ -94,6 +103,18 @@ class FaunaApp : Application(), Configuration.Provider {
         } catch (e: Throwable) {
             android.util.Log.w("FaunaApp", "log subscriber install failed", e)
             ShellLog.w("FaunaApp", "log subscriber install failed: ${e.message}")
+        }
+
+        // Lend the engine roster before any session is built, so the launch
+        // folder pass's take-over claims a marker only for a set no engine on
+        // this phone holds (succession-cut.md ruling (11)(l)); with none lent
+        // the pass claims nothing new.
+        try {
+            EntryPointAccessors.fromApplication(this, PushKickEntryPoint::class.java)
+                .engineRoster()
+                .install()
+        } catch (e: Throwable) {
+            ShellLog.w("FaunaApp", "engine roster install failed: ${e.message}")
         }
 
         // Install the disk-backed nest-identity pin store before the first
@@ -165,6 +186,21 @@ class FaunaApp : Application(), Configuration.Provider {
                 .register()
         } catch (e: Throwable) {
             ShellLog.w("FaunaApp", "nests auto-renew register failed: ${e.message}")
+        }
+        try {
+            EntryPointAccessors.fromApplication(this, PushKickEntryPoint::class.java)
+                .accountRuntimeForeground()
+                .register()
+        } catch (e: Throwable) {
+            ShellLog.w("FaunaApp", "account-runtime foreground register failed: ${e.message}")
+        }
+        // The cross-user share plane's foreground edge (phone peers run in front only).
+        try {
+            EntryPointAccessors.fromApplication(this, PushKickEntryPoint::class.java)
+                .sharePlaneForeground()
+                .register()
+        } catch (e: Throwable) {
+            ShellLog.w("FaunaApp", "share-plane foreground register failed: ${e.message}")
         }
     }
 }

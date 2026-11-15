@@ -562,6 +562,16 @@ private fun PolicyEditor(
                 modifier = Modifier.testTag(Ids.FAMILY_POLICY_CONTENT_NOTIFY_TOGGLE),
             )
         }
+        // The content-category honest bound (`family-policy-content-hint`,
+        // user-approved 2026-10-16; family-client-enforcement.md § Content
+        // policy → *Where it binds*): a rule on a category binds only where
+        // something labels it, and nsfw/commercial have no producer yet.
+        Text(
+            stringResource(R.string.family_policy_content_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testTag(Ids.FAMILY_POLICY_CONTENT_HINT),
+        )
         // ── Screen time (v1.x pillar 3, family-safety.md § Screen time) ──
         // The usage window is the hours the ward MAY use the account (so "no
         // device after 21:00" is the window 07:00-21:00) and may wrap

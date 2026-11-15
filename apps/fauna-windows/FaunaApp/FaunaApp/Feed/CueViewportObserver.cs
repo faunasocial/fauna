@@ -29,8 +29,8 @@ namespace FaunaApp.Feed;
 /// coordinate space) into <see cref="FfiCueTracker.Sample"/>, and reports whatever it
 /// returns via <c>FfiFeedManager.RecordObservation</c>.
 ///
-/// <para><b>Playback:</b> a list card's inline player (<c>Controls.VideoThumbnailView</c>)
-/// hands each progress reading and its end to the live page's tracker
+/// <para><b>Playback:</b> a list card's inline player (<c>Controls.InlineVideoSession</c>,
+/// which outlives the card a moved row rebuilds) hands each progress reading and its end to the live page's tracker
 /// (<see cref="NotePlayed"/> → <c>FfiCueTracker.NotePlayed</c>), which holds the post's
 /// unread peak and takes it for the post's media row at the next sample — the
 /// tracker-held form of the shared <c>CueRow.media_played_pm</c> contract — so the rows
@@ -118,9 +118,12 @@ internal sealed class CueViewportObserver
     /// Wire the observer: mark it the live capture, attach the
     /// scroll-position extra-sample hook, and start the tick at the shared
     /// <c>FaunaFfiMethods.CueSampleIntervalMs()</c> cadence (never a re-declared literal).
-    /// Call once from <c>FeedPage.Page_Loaded</c>, BEFORE <c>FfiFeedManager.HydrateCues()</c>
-    /// (puts are suppressed pre-hydrate anyway, so the ordering between wiring and
-    /// hydrate-completing is not itself a race).
+    /// Call once from <c>FeedPage</c>, only AFTER the manager's cue hydrate has returned
+    /// (<c>Core.FeedManagerHost.HydrateCuesOnceAsync</c>), as web's
+    /// <c>startCueCapture</c> and FaunaKit's <c>CueViewportObserver.run</c> do: a seat
+    /// that has not fetched its rollup measures nothing at all, so no verdict exists
+    /// that the fetched rollup would have to discard (engagement-cues.md § At rest).
+    /// A failed hydrate starts no capture; the next Feed-page load retries it.
     /// </summary>
     internal void Wire()
     {
@@ -206,7 +209,8 @@ internal sealed class CueViewportObserver
     /// </summary>
     private void Sample()
     {
-        if (Tracker is not { } tracker) return;
+        if (_manager() is not { } manager) return;
+        var tracker = Core.FeedManagerHost.CueTrackerFor(manager);
 
         var viewportHeight = _scrollViewer?.ViewportHeight ?? _list.ActualHeight;
         var referenceFrame = (UIElement?)_scrollViewer ?? _list;
@@ -220,6 +224,11 @@ internal sealed class CueViewportObserver
             windowPostIds.Add(post.PostId);
 
             if (_list.ContainerFromIndex(i) is not ListViewItem container) continue; // not realized
+            // A placeholder (muted, blocked, collapsed, region- or nest-withheld) hides
+            // what the post says, so it is no exposure: only a card whose post body is
+            // laid out is measured (CueSubject). The post stays in the window, so the
+            // tracker holds anything it had, uncredited.
+            if (!CueSubject.ShowsPost(container)) continue;
             double top;
             try
             {
@@ -234,7 +243,16 @@ internal sealed class CueViewportObserver
             rows.Add(new CueRow(post.PostId, top, container.ActualHeight, post.PlaysMedia, null));
         }
 
-        Emit(tracker.Sample(rows.ToArray(), windowPostIds.ToArray(), 0, viewportHeight, MonoNowMs(), WallNowMs()));
+        // A feed switch ends every exposure before the new feed is measured
+        // (`CueTracker::note_selection`, `WindowDropped`): the list reconciles by
+        // post id, so a post both feeds hold keeps its row in place and stays in the
+        // window, and neither the geometry nor the window would ever end it. The
+        // drained exposures go to the engine ahead of the sample's own, as on tui,
+        // linux, web, android and apple.
+        var wallNow = WallNowMs();
+        var switched = tracker.NoteSelection(manager.CueSelectionKey(), wallNow);
+        var sampled = tracker.Sample(rows.ToArray(), windowPostIds.ToArray(), 0, viewportHeight, MonoNowMs(), wallNow);
+        Emit(switched.Length == 0 ? sampled : [.. switched, .. sampled]);
     }
 
     /// <summary>The monotonic reading every sample passes (never a wall clock: an NTP

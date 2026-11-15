@@ -42,13 +42,13 @@ Stamped 2026-09-19 at 3ac2cf0c74.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
+| web | ✅ full | 0.1.6-dev+8cbf2a90 standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ✅ full | 0.1.2-dev+f5c0a21a.dirty standalone |
+| windows | ✅ full | 0.1.6-dev+8cbc32a3 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
+| ios | ✅ full | 0.1.6 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
+| tui | ✅ full | 0.1.6 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

@@ -36,7 +36,7 @@ use fauna_protocol::merge_policy::{
 use fauna_protocol::{RpcErrorClass, RpcRequester, decode_strict, encode_canonical};
 use fauna_sync_engine::account_runtime::{
     AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, CRED_NAMESPACE, DialPass,
-    RuntimePrincipal, StoreRoot, resolve_writer_key_serialized,
+    PeerLegPass, RuntimePrincipal, StoreRoot, resolve_writer_key_serialized,
 };
 use fauna_sync_engine::generation_tip::GenerationTrust;
 use fauna_transport::PathKind;
@@ -151,6 +151,7 @@ fn params(base: &Path, device: &str, listeners: &Listeners) -> AccountRuntimePar
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     }
 }
 
@@ -325,6 +326,76 @@ async fn a_preference_write_converges_over_a_relayed_dialed_leg_and_says_so() {
         dialed.admitted_relayed >= 1 && dialed.admitted_relayed <= dialed.admitted,
         "the sibling admitted over the relay must be counted as relayed: {dialed:?}"
     );
+}
+
+/// A phone's leg stops out of the foreground and comes back on return
+/// (`p2p-shared-set-build.md` § Phone peers — design, decision 2;
+/// `account-sync-plane.md` § Wormability walk, rule 5): while A's host says
+/// background, B's pass dials A's endpoint and admits nobody; once A's host
+/// says foreground and A's next pass binds, B converges A's preference over
+/// the dialed leg as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backgrounded_sibling_is_not_dialable_and_converges_once_foregrounded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base: PathBuf = tmp.path().to_path_buf();
+    let net = listeners();
+
+    let a_pub = premint_and_stage(&base, "a", &[]).await;
+    let _b_pub = premint_and_stage(&base, "b", &member_rows(&base, "a")).await;
+    premint_and_stage(&base, "a", &[enrollment_row(&base, "b")]).await;
+
+    let a = AccountStoreRuntime::start(params(&base, "a", &net))
+        .await
+        .expect("start A");
+    let value = canonical_encode(&SyncPrefsConfig {
+        default_conflict_policy: Some("after-the-foreground".into()),
+    })
+    .unwrap()
+    .to_vec();
+    let _ = a.put_preference(KIND_SYNC_PREFS, value).await;
+    await_listening(&net, &a_pub).await;
+
+    // A's app leaves the foreground: its leg is down when the call returns.
+    a.set_foreground(false).await.expect("A backgrounds");
+    assert_eq!(
+        a.reconcile_now().await.expect("A pass").peer_leg,
+        Some(PeerLegPass::Backgrounded)
+    );
+
+    let b = AccountStoreRuntime::start(params(&base, "b", &net))
+        .await
+        .expect("start B");
+    let report = b.reconcile_now().await.expect("B pass");
+    assert_eq!(
+        report.peer_dial.as_ref().map_or(0, |d| d.admitted),
+        0,
+        "a backgrounded sibling admits nobody: {:?}",
+        report.peer_dial
+    );
+    assert_eq!(
+        sync_prefs_of(&b).await,
+        None,
+        "nothing reached B from a backgrounded A"
+    );
+
+    // A's app returns: its next pass binds, and B converges.
+    a.set_foreground(true).await.expect("A foregrounds");
+    assert_eq!(
+        a.reconcile_now().await.expect("A pass").peer_leg,
+        Some(PeerLegPass::Bound)
+    );
+    await_listening(&net, &a_pub).await;
+    eventually("B converges A's preference once A is foregrounded", || {
+        let b = b.clone();
+        async move {
+            b.reconcile_now().await.expect("B pass");
+            sync_prefs_of(&b).await.as_deref() == Some("after-the-foreground")
+        }
+    })
+    .await;
+
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 /// The body of the two tests above: A writes a preference with no nest, B

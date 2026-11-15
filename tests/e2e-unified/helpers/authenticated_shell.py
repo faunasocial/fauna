@@ -49,6 +49,12 @@ SHELL_MARKERS = (
     "conversation-search-box",
     # iOS's root TabView container (`ui.yaml`: ios-scoped).
     "main-tab-view",
+    # The settings page's own content, reachable only signed in. Web's reload
+    # keeps the route it was on, and web's settings is a full-screen page with
+    # no tab bar — so a relaunch made from Settings lands there with no other
+    # marker on screen (the region stale-warning journey relaunches from the
+    # Status sub-page). The native relaunches land on their default view.
+    "settings-view",
 )
 
 

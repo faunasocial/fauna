@@ -1108,7 +1108,9 @@ pub struct DriveReport {
     /// Registry rows written through the door (both kinds).
     pub rows_written: usize,
     /// Owed actions attempted and still owed (post/write/deposit failures —
-    /// the next drive retries).
+    /// the next drive retries, and the conversations receive cycle is the
+    /// edge that runs it when nothing else does: `account-data-plane.md` §
+    /// Implementation status today → *The owed-drive retry edge*).
     pub still_owed: usize,
 }
 
@@ -1759,7 +1761,7 @@ pub fn apply_mark(
 /// stays owed and re-drives.
 impl<R> CustodyDepositor for crate::rpc::CapabilitiesClient<R>
 where
-    R: fauna_protocol::RpcRequester + Sync,
+    R: fauna_protocol::RpcRequester + fauna_core::MaybeSendSync,
 {
     async fn deposit(&self, blob_bytes: Vec<u8>) -> bool {
         self.mint(blob_bytes).await.is_ok()
@@ -1771,7 +1773,7 @@ where
 /// LWW upsert nest-side, so `false` simply stays owed and re-drives.
 impl<R> CustodyHostingDepositor for crate::custody_hosting::CustodyHostingClient<R>
 where
-    R: fauna_protocol::RpcRequester + Sync,
+    R: fauna_protocol::RpcRequester + fauna_core::MaybeSendSync,
 {
     async fn register(&self, deposit: &crate::custody_hosting::HostingDeposit) -> bool {
         matches!(

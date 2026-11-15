@@ -141,7 +141,10 @@ public func fileProviderRootDir(for identity: FileProviderDomainIdentity) throws
 /// actor scoping so the app reads the same path as the container's steward).
 /// Nothing outside the container is reachable from this sandbox — and, on
 /// macOS, the user domain is another consent domain entirely.
-private func fileProviderStateDir(actorIdHex: String) throws -> URL {
+/// The app seats the account's group-ring mirror here too
+/// (`FileProviderCoordinator.seatGroupRingMirror`), so the extension reads the
+/// file in its own root.
+func fileProviderStateDir(actorIdHex: String) throws -> URL {
     guard let stateDir = SyncStateDir.resolve(actorIdHex: actorIdHex, in: .container) else {
         throw FileProviderHostError.noAppGroupContainer
     }

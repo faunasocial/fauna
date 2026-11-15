@@ -104,6 +104,9 @@ struct CallbackCtx {
     /// This root's registered path, used to map a callback's full NormalizedPath
     /// back to a folder-relative path (each root maps under its own path).
     sync_root: PathBuf,
+    /// A reader's presence root ([`protect_reader_root`]): its listings create
+    /// every placeholder read-only.
+    read_only: bool,
 }
 
 /// Process-global map of live callback contexts, keyed by the root's
@@ -136,6 +139,15 @@ fn current_ctx(conn_key: i64) -> Option<(mpsc::UnboundedSender<HydrationCommand>
             cx.sync_root.to_string_lossy().into_owned(),
         )
     })
+}
+
+/// Is the root registered under `conn_key` a reader's? `false` for no root.
+fn ctx_read_only(conn_key: i64) -> bool {
+    ctx_map()
+        .lock()
+        .unwrap()
+        .get(&conn_key)
+        .is_some_and(|cx| cx.read_only)
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +338,7 @@ pub fn register_and_connect(
 ) -> Result<CfApiConnection> {
     let root = sync_root.to_string_lossy().into_owned();
     fauna_cfapi::register_sync_root(&root, SYNC_ROOT_DISPLAY)?;
-    connect_registered(sync_root, cmd_tx, TeardownMode::UnregisterOnDrop)
+    connect_registered(sync_root, cmd_tx, TeardownMode::UnregisterOnDrop, false)
 }
 
 /// The product's on-demand root connection — [`register_and_connect_shell`] plus
@@ -336,13 +348,19 @@ pub fn register_and_connect(
 /// cloud-only placeholders (`delete-propagation.md` § *An offline placeholder
 /// delete propagates*, decision (e)). The one constructor both the agent
 /// (`engine_driver::run_on_demand_root`) and the live tests connect through.
+///
+/// `read_only` connects a **reader's** presence root (`on-demand-files-shared-sets.md`
+/// § Shared sets on a capability host, decision 3d (4)): its listings create every child
+/// read-only, and every delete and rename another process makes under it is refused
+/// ([`notify_delete_callback`]). Its access list is [`protect_reader_root`]'s, made before.
 pub fn register_and_connect_product_root(
     sync_root: &Path,
     folder: &str,
     cmd_tx: mpsc::UnboundedSender<HydrationCommand>,
     state_db: PathBuf,
+    read_only: bool,
 ) -> Result<CfApiConnection> {
-    let mut conn = register_and_connect_shell(sync_root, folder, cmd_tx)?;
+    let mut conn = register_and_connect_shell_as(sync_root, folder, cmd_tx, read_only)?;
     conn.before_full_teardown(move || {
         let cleared =
             fauna_sync_engine::db::SyncDb::open(&state_db).and_then(|db| db.clear_seen_all());
@@ -398,10 +416,25 @@ pub fn registration_survived(sync_root: &Path) -> bool {
 /// registration belongs to the *binding*, and only a
 /// [`mark_root_for_full_teardown`]-flagged drop (unbind / re-bind / mode-flip)
 /// takes it down.
+///
+/// The live tests' entry (`cfapi_live_integration.rs`): the agent itself
+/// connects through [`register_and_connect_product_root`], the same lifecycle
+/// plus the seen-mark hygiene, so outside a test build this has no caller.
+#[cfg(test)]
 pub fn register_and_connect_shell(
     sync_root: &Path,
     folder: &str,
     cmd_tx: mpsc::UnboundedSender<HydrationCommand>,
+) -> Result<CfApiConnection> {
+    register_and_connect_shell_as(sync_root, folder, cmd_tx, false)
+}
+
+/// [`register_and_connect_shell`] for a writer's root or, `read_only`, a reader's.
+fn register_and_connect_shell_as(
+    sync_root: &Path,
+    folder: &str,
+    cmd_tx: mpsc::UnboundedSender<HydrationCommand>,
+    read_only: bool,
 ) -> Result<CfApiConnection> {
     let root = sync_root.to_string_lossy().into_owned();
     let display = sync_root_display_for(folder);
@@ -421,24 +454,41 @@ pub fn register_and_connect_shell(
     // crash-heal-proven way to refresh the filter side over ANY surviving
     // registration, shell-level included (the hold-harness sequence).
     fauna_cfapi::register_sync_root(&root, SYNC_ROOT_DISPLAY)?;
-    connect_registered(sync_root, cmd_tx, TeardownMode::KeepUnlessMarked)
+    // Registered, not yet connected: the root is made a reader's — or a writer's
+    // again — before the platform may list anything into it, so every placeholder
+    // a listing creates inherits the list. A reader's root that could not be
+    // refused is not connected (fail closed); a writer's that could not be lifted
+    // is served and says why.
+    if let Err(e) = protect_reader_root(sync_root, read_only) {
+        if read_only {
+            return Err(e.context("refusing a reader's root"));
+        }
+        tracing::warn!(error = %format!("{e:#}"), "lifting a reader's refusal off a writer's root failed");
+    }
+    connect_registered(sync_root, cmd_tx, TeardownMode::KeepUnlessMarked, read_only)
 }
 
 /// Shared tail of the two registration flows: connect the already-registered
-/// root, publish the callback context, wrap it in the drop guard.
+/// root, publish the callback context, wrap it in the drop guard. A reader's
+/// root registers the delete and rename notifications it refuses.
 fn connect_registered(
     sync_root: &Path,
     cmd_tx: mpsc::UnboundedSender<HydrationCommand>,
     teardown: TeardownMode,
+    read_only: bool,
 ) -> Result<CfApiConnection> {
     let root = sync_root.to_string_lossy().into_owned();
 
-    let key = match fauna_cfapi::connect(
+    let key = match fauna_cfapi::connect_with(
         &root,
         Some(fetch_data_callback),
         Some(cancel_callback),
         Some(fetch_placeholders_callback),
         Some(dehydrate_completion_callback),
+        read_only.then_some(fauna_cfapi::ChangeNotifications {
+            delete: Some(notify_delete_callback),
+            rename: Some(notify_rename_callback),
+        }),
     ) {
         Ok(key) => key,
         Err(e) => {
@@ -459,6 +509,7 @@ fn connect_registered(
         CallbackCtx {
             cmd_tx,
             sync_root: sync_root.to_path_buf(),
+            read_only,
         },
     );
 
@@ -468,19 +519,6 @@ fn connect_registered(
         teardown,
         before_full_teardown: None,
     })
-}
-
-/// Unregister a single shell sync-root entry — filter half first, then the
-/// shell (`SyncRootManager`) half, the full-teardown order (mirrors
-/// `CfApiConnection::drop`'s `KeepUnlessMarked` branch: the shell unregister
-/// fails while the root is still filter-connected). Best-effort on the filter
-/// half — an already-gone or unknown-path registration is fine, the shell
-/// entry is the part Explorer keeps rendering.
-fn unregister_shell_root(r: &fauna_cfapi::ShellSyncRoot) -> Result<()> {
-    if let Some(p) = &r.path {
-        let _ = fauna_cfapi::unregister_sync_root(p);
-    }
-    fauna_cfapi::unregister_sync_root_with_shell(&r.id)
 }
 
 /// Startup janitor: unregister **ghost** Fauna shell registrations — entries
@@ -506,7 +544,7 @@ pub fn sweep_ghost_shell_registrations() -> usize {
         if !is_ghost {
             continue;
         }
-        match unregister_shell_root(&r) {
+        match fauna_cfapi::unregister_shell_root(&r) {
             Ok(()) => {
                 tracing::info!(id = %r.id, path = ?r.path.as_deref().map(fauna_core::log_redact::log_path), "swept ghost shell sync root");
                 removed += 1;
@@ -539,7 +577,7 @@ pub fn unregister_all_shell_sync_roots() -> usize {
     };
     let mut removed = 0;
     for r in roots {
-        match unregister_shell_root(&r) {
+        match fauna_cfapi::unregister_shell_root(&r) {
             Ok(()) => {
                 tracing::info!(id = %r.id, path = ?r.path.as_deref().map(fauna_core::log_redact::log_path), "unregistered sync root at uninstall");
                 removed += 1;
@@ -548,6 +586,134 @@ pub fn unregister_all_shell_sync_roots() -> usize {
         }
     }
     removed
+}
+
+// ---------------------------------------------------------------------------
+// A reader's presence root, refused by the OS
+// ---------------------------------------------------------------------------
+//
+// `on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3d (4):
+// a reader's root is read-only by the OS's refusal. Measured on a live sync root
+// (`fauna-cfapi`'s `tests/live_reader_root.rs`, Windows 11 ARM64), which fixed the shape
+// below:
+//
+// - the access list goes on ONCE, at registration: this provider's own placeholder writes
+//   — a listing's TRANSFER_PLACEHOLDERS, an eager CfCreatePlaceholders, TRANSFER_DATA, the
+//   dehydrate and the update handle (`fauna_cfapi`'s WRITE_DAC fallback open) — all pass
+//   under it, and every placeholder a listing creates inherits it;
+// - this provider's plain file acts are refused like the user's (it runs as the user), so
+//   its one such act on a reader's root, a remote delete's unlink, grants itself `DELETE`
+//   on that one file first ([`own_delete`]);
+// - the provider's own plain read-only flip takes a file out of sync, so the flips of an
+//   existing tree go through `fauna_cfapi::set_read_only_keeping_sync`;
+// - the delete and rename notifications, acked with access denied, refuse another
+//   process's delete, rename and rmdir; the provider's own get none.
+
+/// `STATUS_ACCESS_DENIED` — a reader's root's answer to every delete and rename.
+const STATUS_ACCESS_DENIED: NTSTATUS = NTSTATUS(0xC000_0022_u32 as i32);
+
+/// `DELETE` — the right a remote delete's unlink grants itself under a reader's root.
+const DELETE: u32 = 0x0001_0000;
+
+/// Make `sync_root` a reader's root on the disk, or a writer's again — called before the
+/// root is connected, every time its engine starts, since the row's access may have moved
+/// while it was down. A reader's: the access list denying the user create, write, delete
+/// and rename ([`fauna_cfapi::deny_user_writes`]), then the read-only attribute on the
+/// root and on everything already in it (a demoted writer's tree), each kept in sync. A
+/// writer's: only a root that carries the list is touched — the attribute cleared first,
+/// still under the list, then the list lifted. A failed step is returned: the caller
+/// serves a reader's root only once it is refused (fail closed).
+pub fn protect_reader_root(sync_root: &Path, read_only: bool) -> Result<()> {
+    if read_only {
+        fauna_cfapi::deny_user_writes(sync_root)?;
+        walk_read_only(sync_root, true);
+        return Ok(());
+    }
+    if fauna_cfapi::denies_user_writes(sync_root)? {
+        walk_read_only(sync_root, false);
+        fauna_cfapi::allow_user_writes(sync_root)?;
+    }
+    Ok(())
+}
+
+/// A retired reader's root, its sync root already unregistered: lift the list and clear
+/// the read-only attribute over the tree, so whatever stays in the directory is the user's
+/// to manage — a directory the agent no longer serves is never left refused to its owner.
+/// Best-effort, each failure logged.
+pub fn release_reader_root(path: &Path) {
+    match fauna_cfapi::denies_user_writes(path) {
+        Ok(false) => return,
+        Ok(true) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "presence root: reading its access list failed");
+        }
+    }
+    walk_read_only(path, false);
+    if let Err(e) = fauna_cfapi::allow_user_writes(path) {
+        tracing::warn!(error = %e, "presence root: lifting a reader's access list failed");
+    }
+}
+
+/// Flip the read-only attribute on `dir` and everything under it, keeping each
+/// placeholder's in-sync state. A directory is walked before it is flipped; no link is
+/// followed. Each failure is logged and the walk goes on.
+fn walk_read_only(dir: &Path, read_only: bool) {
+    fn walk(path: &Path, read_only: bool) {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if kind.is_symlink() {
+                    continue;
+                }
+                if kind.is_dir() {
+                    walk(&entry.path(), read_only);
+                } else if let Err(e) =
+                    fauna_cfapi::set_read_only_keeping_sync(&entry.path(), read_only)
+                {
+                    tracing::warn!(error = %format!("{e:#}"), read_only, "presence root: a read-only flip failed");
+                }
+            }
+        }
+        if let Err(e) = fauna_cfapi::set_read_only_keeping_sync(path, read_only) {
+            tracing::warn!(error = %format!("{e:#}"), read_only, "presence root: a directory's read-only flip failed");
+        }
+    }
+    walk(dir, read_only);
+}
+
+/// Is `path` under a connected **reader's** root?
+pub fn under_reader_root(path: &Path) -> bool {
+    ctx_map()
+        .lock()
+        .unwrap()
+        .values()
+        .any(|cx| cx.read_only && path.starts_with(&cx.sync_root))
+}
+
+/// Unlink `path` under a reader's root: this process grants itself `DELETE` on that one
+/// file (an explicit allow, read before the root's inherited deny) and clears its
+/// read-only attribute, then unlinks it. Nothing at the path is not an error.
+pub fn own_delete(path: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(path).is_err() {
+        return Ok(());
+    }
+    fauna_cfapi::grant_own(path, DELETE)?;
+    fauna_cfapi::set_read_only(path, false)?;
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Is `sync_root` still registered — with the shell or the filter? A failed read answers
+/// `true`: a removal waits on it rather than taking a directory a binding may still serve.
+pub fn still_registered(sync_root: &Path) -> bool {
+    let root = sync_root.to_string_lossy();
+    let shell = fauna_cfapi::shell_registration_for(&root).map_or(true, |id| id.is_some());
+    let filter = fauna_cfapi::is_filter_registered(&root).unwrap_or(true);
+    shell || filter
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +789,8 @@ struct CfApiPlaceholderSink {
     /// carry a non-empty `FileIdentity` or cfapi rejects the whole batch
     /// (`fauna_cfapi::transfer_placeholders`).
     parent_rel: String,
+    /// The root is a reader's: every child is created read-only.
+    read_only: bool,
 }
 
 impl CfApiPlaceholderSink {
@@ -648,6 +816,7 @@ impl PlaceholderSink for CfApiPlaceholderSink {
                 size: c.size,
                 mtime: c.mtime,
                 is_dir: c.is_dir,
+                read_only: self.read_only,
             })
             .collect();
         let transfer = fauna_cfapi::transfer_placeholders(
@@ -753,6 +922,7 @@ unsafe extern "system" fn fetch_placeholders_callback(
                 transfer_key,
                 request_key,
                 parent_rel: parent_rel.clone(),
+                read_only: ctx_read_only(conn_key.0),
             };
             let _ = cmd_tx.send(HydrationCommand::Populate {
                 parent_rel,
@@ -767,6 +937,7 @@ unsafe extern "system" fn fetch_placeholders_callback(
                 transfer_key,
                 request_key,
                 parent_rel: String::new(),
+                read_only: false,
             };
             let _ = sink.transfer_placeholders(&[]);
         }
@@ -831,6 +1002,76 @@ unsafe extern "system" fn dehydrate_completion_callback(
             );
         }
     }
+}
+
+/// The process that made a callback's operation (`CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`).
+fn caller_pid(info: &CF_CALLBACK_INFO) -> Option<u32> {
+    (!info.ProcessInfo.is_null()).then(|| unsafe { (*info.ProcessInfo).ProcessId })
+}
+
+/// What a reader's root answers a delete or a rename: access denied — unless this process
+/// made it (the platform sends the provider none of its own, measured; answering one would
+/// refuse a remote delete's own unlink).
+fn reader_change_status(info: &CF_CALLBACK_INFO) -> NTSTATUS {
+    if caller_pid(info) == Some(std::process::id()) {
+        NTSTATUS(0)
+    } else {
+        STATUS_ACCESS_DENIED
+    }
+}
+
+/// NOTIFY_DELETE, registered on a **reader's** root only ([`connect_registered`]): a
+/// placeholder under it is about to be deleted. Refused — the platform holds the delete
+/// until this ack, and the deleting program sees the refusal (`on-demand-files-shared-sets.md`
+/// § Shared sets on a capability host, decision 3d (4)). Nothing is queued: a reader's
+/// engine never records a delete.
+unsafe extern "system" fn notify_delete_callback(
+    info: *const CF_CALLBACK_INFO,
+    _params: *const CF_CALLBACK_PARAMETERS,
+) {
+    if info.is_null() {
+        return;
+    }
+    // SAFETY: cfapi guarantees `info` valid for the callback duration.
+    let info = unsafe { &*info };
+    let status = reader_change_status(info);
+    if let Err(e) = fauna_cfapi::ack_delete(
+        &info.ConnectionKey,
+        info.TransferKey,
+        info.RequestKey,
+        status,
+    ) {
+        tracing::warn!(error = %e, "acknowledging a delete on a reader's root failed");
+    }
+    tracing::info!(
+        refused = status != NTSTATUS(0),
+        "a delete under a reader's root"
+    );
+}
+
+/// NOTIFY_RENAME on a reader's root — [`notify_delete_callback`]'s twin.
+unsafe extern "system" fn notify_rename_callback(
+    info: *const CF_CALLBACK_INFO,
+    _params: *const CF_CALLBACK_PARAMETERS,
+) {
+    if info.is_null() {
+        return;
+    }
+    // SAFETY: cfapi guarantees `info` valid for the callback duration.
+    let info = unsafe { &*info };
+    let status = reader_change_status(info);
+    if let Err(e) = fauna_cfapi::ack_rename(
+        &info.ConnectionKey,
+        info.TransferKey,
+        info.RequestKey,
+        status,
+    ) {
+        tracing::warn!(error = %e, "acknowledging a rename on a reader's root failed");
+    }
+    tracing::info!(
+        refused = status != NTSTATUS(0),
+        "a rename under a reader's root"
+    );
 }
 
 #[cfg(test)]
@@ -905,6 +1146,7 @@ mod tests {
             CallbackCtx {
                 cmd_tx: tx_a.clone(),
                 sync_root: PathBuf::from(r"C:\RootA"),
+                read_only: false,
             },
         );
         ctx_insert(
@@ -912,8 +1154,13 @@ mod tests {
             CallbackCtx {
                 cmd_tx: tx_b.clone(),
                 sync_root: PathBuf::from(r"C:\RootB"),
+                read_only: true,
             },
         );
+        // A reader's root is told apart by path — B's files, never A's.
+        assert!(under_reader_root(Path::new(r"C:\RootB\sub\f.txt")));
+        assert!(!under_reader_root(Path::new(r"C:\RootA\f.txt")));
+        assert!(ctx_read_only(key_b) && !ctx_read_only(key_a));
 
         // Key A resolves to A's own channel and A's own root path — never B's.
         let (sender_a, root_a) = current_ctx(key_a).expect("key A registered");
@@ -947,6 +1194,37 @@ mod tests {
         ctx_remove(key_b);
     }
 
+    // ── a reader's root ──
+
+    /// Every delete and rename another process makes under a reader's root is refused
+    /// with access denied; one this process makes is let through (the platform sends
+    /// none, measured — the answer only guards a remote delete's own unlink).
+    #[test]
+    fn a_readers_root_refuses_another_process_and_never_its_own() {
+        use windows::Win32::Storage::CloudFilters::CF_PROCESS_INFO;
+        let mut other = CF_PROCESS_INFO {
+            ProcessId: std::process::id().wrapping_add(1),
+            ..Default::default()
+        };
+        let mut own = CF_PROCESS_INFO {
+            ProcessId: std::process::id(),
+            ..Default::default()
+        };
+        let mut info = CF_CALLBACK_INFO {
+            ProcessInfo: &mut other,
+            ..Default::default()
+        };
+        assert_eq!(reader_change_status(&info), STATUS_ACCESS_DENIED);
+        info.ProcessInfo = &mut own;
+        assert_eq!(reader_change_status(&info), NTSTATUS(0));
+        info.ProcessInfo = std::ptr::null_mut();
+        assert_eq!(
+            reader_change_status(&info),
+            STATUS_ACCESS_DENIED,
+            "a caller the platform does not name is refused"
+        );
+    }
+
     // ── placeholder identity ──
 
     /// Every placeholder must carry a non-empty `FileIdentity` or cfapi rejects the entire
@@ -962,6 +1240,7 @@ mod tests {
             transfer_key: 0,
             request_key: 0,
             parent_rel: String::new(),
+            read_only: false,
         };
         assert_eq!(root_sink.child_rel("hello.txt"), "hello.txt");
 
@@ -970,6 +1249,7 @@ mod tests {
             transfer_key: 0,
             request_key: 0,
             parent_rel: "docs/2026".to_string(),
+            read_only: false,
         };
         assert_eq!(nested.child_rel("report.pdf"), "docs/2026/report.pdf");
     }

@@ -69,14 +69,14 @@ const RETIRED_KEY_MICROS: u64 = 1_000;
 /// — what the host's reader answers, counting its loads so a test can pin how
 /// often a build reads custody. `unreadable` models a host that cannot open
 /// the account's custody at all (a reader that always answers `Err`).
-struct TestCustody {
+pub(crate) struct TestCustody {
     held: FoldersConfig,
     unreadable: bool,
     loads: std::sync::atomic::AtomicUsize,
 }
 
 impl TestCustody {
-    fn holding(held: FoldersConfig) -> Arc<Self> {
+    pub(crate) fn holding(held: FoldersConfig) -> Arc<Self> {
         Arc::new(Self {
             held,
             unreadable: false,
@@ -84,7 +84,7 @@ impl TestCustody {
         })
     }
 
-    fn unreadable() -> Arc<Self> {
+    pub(crate) fn unreadable() -> Arc<Self> {
         Arc::new(Self {
             held: FoldersConfig::default(),
             unreadable: true,
@@ -149,16 +149,20 @@ fn store_sealed_fixture(
 /// Answers every kind immediately on the first attempt —
 /// unlike `connected_arm_heal_test.rs`'s arm-healing harness, nothing here
 /// ever needs to simulate a not-yet-connected nest.
-struct TestNest {
+pub(crate) struct TestNest {
     kinds: Mutex<Vec<String>>,
-    folder: FolderSummary,
+    pub(crate) folder: Mutex<Option<FolderSummary>>,
+    /// Answer `fauna.folders.list` with a typed refusal (an answer, never an
+    /// unreachable nest — decision 2″ (4)).
+    pub(crate) refuse_list: std::sync::atomic::AtomicBool,
 }
 
 impl TestNest {
-    fn new(folder: FolderSummary) -> Arc<Self> {
+    pub(crate) fn new(folder: FolderSummary) -> Arc<Self> {
         Arc::new(Self {
             kinds: Mutex::new(Vec::new()),
-            folder,
+            folder: Mutex::new(Some(folder)),
+            refuse_list: Default::default(),
         })
     }
 
@@ -191,10 +195,14 @@ fn reply_for(nest: &TestNest, kind: &str) -> (bool, Value) {
                 extra: Default::default(),
             }),
         ),
+        KIND_FOLDERS_LIST if nest.refuse_list.load(std::sync::atomic::Ordering::SeqCst) => (
+            false,
+            value_of(&RpcError::new("fauna.test.refused", "error.test.refused")),
+        ),
         KIND_FOLDERS_LIST => (
             true,
             value_of(&FoldersListReply {
-                folders: vec![nest.folder.clone()],
+                folders: nest.folder.lock().unwrap().iter().cloned().collect(),
                 ..Default::default()
             }),
         ),
@@ -213,7 +221,7 @@ fn reply_for(nest: &TestNest, kind: &str) -> (bool, Value) {
 /// harness, trimmed to a socket that is ready from the first request
 /// (`build_engine`'s own calls retry through the WS-RPC warm-up, so nothing
 /// here needs to simulate that race).
-fn stand_up_ws(
+pub(crate) fn stand_up_ws(
     nest: Arc<TestNest>,
 ) -> (
     Arc<NestClient>,
@@ -290,7 +298,7 @@ fn byte_plane_auth(server_uri: &str, keypair: ActorKeypair) -> Arc<AuthClient> {
 /// A currently owner-only (group-less), unserved summary for `name` — the
 /// shape `decide_engine_content_binding` resolves `Unbound` regardless of
 /// whether local/custody evidence says the set was served in the past.
-fn owner_only_unserved_summary(id: i64, name: &str) -> FolderSummary {
+pub(crate) fn owner_only_unserved_summary(id: i64, name: &str) -> FolderSummary {
     FolderSummary {
         id,
         name: name.to_string(),
@@ -718,14 +726,14 @@ async fn build_engine_refuses_a_ref_the_nest_does_not_list_even_beside_a_same_na
 const FOREIGN_GROUP: &[u8] = b"foreign-openmls-group";
 const HOME_NEST: &str = "http://127.0.0.1:7999";
 
-fn foreign_channel() -> [u8; 32] {
+pub(crate) fn foreign_channel() -> [u8; 32] {
     fauna_core::folder_keys::channel_id_for_group(FOREIGN_GROUP)
 }
 
 /// The member's custody record for the cross-nest set — what share-accept
 /// writes into custody (the home nest over plain http, so no pin to
 /// graduate).
-fn foreign_record() -> fauna_core::data::ForeignFolder {
+pub(crate) fn foreign_record() -> fauna_core::data::ForeignFolder {
     fauna_core::data::ForeignFolder {
         channel_id: foreign_channel(),
         mls_group_id: FOREIGN_GROUP.to_vec(),

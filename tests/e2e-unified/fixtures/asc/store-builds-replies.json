@@ -1,0 +1,45 @@
+{
+  "/v1/apps": {
+    "data": [
+      {"type": "apps", "id": "6804301687", "attributes": {"bundleId": "social.fauna.fauna", "name": "Fauna"}}
+    ]
+  },
+  "/v1/builds": {
+    "data": [
+      {
+        "type": "builds",
+        "id": "94c18c3e-a93b-4799-baef-531df478bdf9",
+        "attributes": {"version": "2", "processingState": "PROCESSING", "uploadedDate": "2026-11-12T09:00:00-08:00", "expired": false},
+        "relationships": {"preReleaseVersion": {"data": {"type": "preReleaseVersions", "id": "prv-016"}}}
+      },
+      {
+        "type": "builds",
+        "id": "0b5e1c2a-0000-4000-8000-000000000001",
+        "attributes": {"version": "1", "processingState": "VALID", "uploadedDate": "2026-11-11T08:30:50-08:00", "expired": false},
+        "relationships": {"preReleaseVersion": {"data": {"type": "preReleaseVersions", "id": "prv-016"}}}
+      }
+    ],
+    "included": [
+      {"type": "preReleaseVersions", "id": "prv-016", "attributes": {"version": "0.1.6", "platform": "IOS"}}
+    ]
+  },
+  "/v1/builds/0b5e1c2a-0000-4000-8000-000000000001/buildBetaDetail": {
+    "data": {"type": "buildBetaDetails", "id": "bbd-1", "attributes": {"internalBuildState": "READY_FOR_BETA_TESTING", "externalBuildState": "READY_FOR_BETA_SUBMISSION"}}
+  },
+  "/v1/builds/94c18c3e-a93b-4799-baef-531df478bdf9/buildBetaDetail": {
+    "_status": 403,
+    "_body": "{\"errors\":[{\"status\":\"403\",\"code\":\"FORBIDDEN_ERROR\"}]}"
+  },
+  "/v1/betaGroups": {
+    "data": [
+      {"type": "betaGroups", "id": "grp-ext", "attributes": {"name": "External", "isInternalGroup": false}},
+      {"type": "betaGroups", "id": "grp-int", "attributes": {"name": "Internal", "isInternalGroup": true}}
+    ]
+  },
+  "/v1/betaGroups/grp-int/relationships/builds": {
+    "data": [{"type": "builds", "id": "0b5e1c2a-0000-4000-8000-000000000001"}]
+  },
+  "/v1/betaGroups/grp-ext/relationships/builds": {
+    "data": []
+  }
+}

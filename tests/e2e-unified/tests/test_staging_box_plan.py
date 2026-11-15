@@ -642,10 +642,43 @@ def test_teardown_refuses_a_server_this_machine_did_not_record():
                             servers=[OLD], rrsets=[], rel=REL_APEX, at=T1)
 
 
-def test_teardown_is_for_the_acceptance_nest_alone():
-    with pytest.raises(sb.StagingPlanError, match="acceptance nest"):
-        sb.begin_recreation(state={**_built(), "domain": "test.fauna.build"},
-                            servers=[], rrsets=[], rel="test", at=T1)
+def test_every_fleet_box_is_recreatable_by_name_on_its_own_channel():
+    """org-nests.md § The three nests: the boxes are the fleet's, re-created as
+    the work needs — one table, every box the harness knows, each on its channel
+    and with a firewall reference that is another fleet box."""
+    from helpers import nest_mode
+    assert set(sb.RECREATABLE_BOXES) == (nest_mode.ACCEPTANCE_NEST_HOSTS
+                                         | nest_mode.DISPOSABLE_BOX_HOSTS)
+    assert sb.DEFAULT_RECREATE_BOX == ACCEPT
+    assert {h: r["channel"] for h, r in sb.RECREATABLE_BOXES.items()} == {
+        "fauna.build": "test", "test.fauna.build": "test", "dev.fauna.build": "dev"}
+    assert {h: r["firewall_reference"] for h, r in sb.RECREATABLE_BOXES.items()} == {
+        "fauna.build": "dev.fauna.build", "test.fauna.build": "dev.fauna.build",
+        "dev.fauna.build": "test.fauna.build"}
+    for host, row in sb.RECREATABLE_BOXES.items():
+        assert row["firewall_reference"] in sb.RECREATABLE_BOXES
+        assert row["firewall_reference"] != host
+        sb.image_tag_for(row["channel"])  # a channel the provisioning wizard knows
+    assert sb.recreatable_box("Test.Fauna.Build.")["host"] == "test.fauna.build"
+
+
+def test_teardown_is_for_fleet_boxes_alone():
+    with pytest.raises(sb.StagingPlanError, match="not a fleet box"):
+        sb.begin_recreation(state={**_built(), "domain": "nest.example.org"},
+                            servers=[], rrsets=[], rel="nest", at=T1)
+
+
+def test_a_staging_box_tears_down_like_the_acceptance_nest():
+    old = {**OLD, "name": "test-fauna-build"}
+    rrsets = [{"name": "test", "type": "A", "records": [{"value": "192.0.2.2"}]},
+              {"name": "@", "type": "A", "records": [{"value": "192.0.2.1"}]}]
+    plan = sb.begin_recreation(state={**_built(), "domain": "test.fauna.build"},
+                               servers=[old], rrsets=rrsets, rel="test", at=T1)
+    assert plan["servers"] == [old]
+    assert [r["name"] for r in plan["rrsets"]] == ["test"]  # never the apex's
+    assert plan["state"]["firewall_ids"] == [7]
+    assert plan["state"]["recreation_started_at"] == T1
+    assert "recreated_at" not in plan["state"]
 
 
 def test_a_rerun_after_a_half_done_teardown_finds_nothing_and_goes_on():

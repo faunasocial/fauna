@@ -66,8 +66,8 @@ Stamped 2026-11-07 at ac836c937b.
 | web | ✅ full | 0.1.5-dev+5f525618 docker |
 | linux | ✅ full | 0.1.5-dev+5f525618 docker |
 | windows | ⚠ partial | 0.1.5-dev+5f525618 docker |
-| macos | ⚠ partial | 0.1.5-dev+5f525618 docker |
-| ios | ⚠ partial | 0.1.5-dev+5f525618 docker |
+| macos | ✅ full | 0.1.5-dev+5f525618 docker |
+| ios | ✅ full | 0.1.5-dev+5f525618 docker |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+5f525618 docker |
 | android-kids | — absent | |
@@ -89,12 +89,12 @@ Stamped 2026-11-07 at ac836c937b.
 | 6 | app | `tests/e2e-unified/tests/test_bridges.py::test_the_search_toggle_and_cap_persist` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_bridges.py::test_a_follow_keeps_its_nickname` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_bridges.py::test_the_card_shows_the_linked_identity` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_an_admin_installs_a_plugin_from_its_card_and_uninstalls_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_an_admin_installs_a_plugin_from_its_card_and_uninstalls_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_user_connects_a_plugin_from_its_settings_card_and_disconnects_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 11 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_connected_bridge_app_is_listed_as_a_network_row_with_its_glyph` | web (linux): passed, linux (linux): passed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 12 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_bound_plugins_card_keeps_a_setting_edit` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 13 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_faulted_plugin_shows_its_fault_count_and_last_fault` | web (linux): passed, linux (linux): passed, macos (macos): failed, ios (macos): failed, tui (linux): passed, tui (windows): passed |
-| 13 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_plugin_that_refused_to_start_is_listed_stopped_with_its_reason` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_connected_bridge_app_is_listed_as_a_network_row_with_its_glyph` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_bound_plugins_card_keeps_a_setting_edit` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 13 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_faulted_plugin_shows_its_fault_count_and_last_fault` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 13 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_plugin_that_refused_to_start_is_listed_stopped_with_its_reason` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_plugin_ingress.py::test_a_plugins_declared_path_and_sub_name_answer_and_the_nests_own_stay_put` | nest (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_bridge_private_content_not_searchable.py::test_a_private_bridge_message_never_enters_search_and_a_public_one_does` | nest (linux): passed |
 <!-- features-render:end -->

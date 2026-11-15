@@ -109,6 +109,12 @@ public sealed partial class FeedPage : Page, IPostCardPage
         // rebuild. Raised off the UI thread — marshal back.
         Loaded += (_, _) => ContactOverlayNames.Moved += OnRegionChanged;
         Unloaded += (_, _) => ContactOverlayNames.Moved -= OnRegionChanged;
+        // The same re-read when the viewer's hide list moves — a report, a show-again,
+        // or the store-change re-read finding a show-again made on another device of
+        // the account (moderation.md § Corollary): Reported and ShowAgain are part of
+        // FeedPostItem.ContentEquals. May be raised off the UI thread.
+        Loaded += (_, _) => ContentPolicyCache.HiddenContentChanged += OnRegionChanged;
+        Unloaded += (_, _) => ContentPolicyCache.HiddenContentChanged -= OnRegionChanged;
     }
 
     private void OnRegionChanged() => DispatcherQueue.TryEnqueue(Refresh);
@@ -360,28 +366,11 @@ public sealed partial class FeedPage : Page, IPostCardPage
                 _ = RestoreFeedDraftsAsync(manager, feedDraftsSync);
 
             // Engagement-cue capture shell (engagement-cues.md §§ Cue vocabulary &
-            // derivation / At rest, task-6): wire the viewport observer BEFORE
-            // hydrating — mirrors linux's wire() then hydrate_cues() sequencing
-            // (puts are suppressed pre-hydrate anyway, so the ordering between
-            // wiring and hydrate-completing is not itself a race). The hydrate runs
-            // ONCE per manager (FeedManagerHost.HydrateCuesOnceAsync): it replaces
-            // the live engine, so a later Feed-page load re-running it would discard
-            // every verdict folded since. A hydrate failure (an unopenable rollup,
-            // never a merely-absent one) is reported on error-message and the page
-            // loads on, as linux's and tui's do; the report is a page error
-            // (ReportPageError), so it stays on the error line after the feed's own
-            // load below rather than being cleared by its first snapshot.
+            // derivation / At rest): started, NOT awaited — the feed below loads
+            // while the rollup is fetched, and the capture starts only once it has
+            // been (StartCueCaptureWhenHydratedAsync).
             _cueObserver = new CueViewportObserver(PostsList, () => _viewModel?.Manager, ReportPageError);
-            _cueObserver.Wire();
-            try
-            {
-                await Core.FeedManagerHost.HydrateCuesOnceAsync(manager);
-            }
-            catch (System.Exception ex)
-            {
-                ShellLog.Warn(nameof(FeedPage), $"cue rollup hydrate failed: {ex.Message}");
-                ReportPageError(Core.Services.Strings.Error(ex));
-            }
+            _ = StartCueCaptureWhenHydratedAsync(manager, _cueObserver);
 
             // Layer-B opt-in (engagement-cues.md § Layer B): the shared producer
             // contributes only while the manager's cached opt-in is true, and that
@@ -437,6 +426,41 @@ public sealed partial class FeedPage : Page, IPostCardPage
             LoadingRing.IsActive = false;
             LoadingRing.Visibility = Visibility.Collapsed;
         }
+    }
+
+    /// <summary>
+    /// Fetch the sealed <c>cues:v1</c> rollup, then start the engagement-cue capture —
+    /// in that order, as web's <c>startCueCapture</c> and FaunaKit's
+    /// <c>CueViewportObserver.run</c> do (engagement-cues.md § At rest: a device puts
+    /// nothing before it has hydrated, and here it measures nothing either, so no
+    /// verdict exists that the fetched rollup would discard). The hydrate runs ONCE per
+    /// manager (<c>Core.FeedManagerHost.HydrateCuesOnceAsync</c>): it replaces the live
+    /// engine, so a later Feed-page load re-running it would discard every verdict
+    /// folded since; a load after the first finds it done and wires the capture at once.
+    /// Not awaited by <see cref="Page_Loaded"/>, so the feed loads while the fetch is in
+    /// flight — or parked behind the e2e hydration hold.
+    ///
+    /// <para>A hydrate failure (an unopenable rollup, never a merely-absent one) is
+    /// reported on error-message and starts no capture, as on web; the feed loads on, as
+    /// linux's and tui's do, and the next load retries. The report is a page error
+    /// (<see cref="ReportPageError"/>), so it stays on the error line whether it lands
+    /// before or after the feed's own load. A page left before the hydrate returned
+    /// wires nothing: its teardown already ran.</para>
+    /// </summary>
+    private async Task StartCueCaptureWhenHydratedAsync(FfiFeedManager manager, CueViewportObserver observer)
+    {
+        try
+        {
+            await Core.FeedManagerHost.HydrateCuesOnceAsync(manager);
+        }
+        catch (System.Exception ex)
+        {
+            ShellLog.Warn(nameof(FeedPage), $"cue rollup hydrate failed: {ex.Message}");
+            ReportPageError(Core.Services.Strings.Error(ex));
+            return;
+        }
+        if (_navigatedAway || !ReferenceEquals(_cueObserver, observer)) return;
+        observer.Wire();
     }
 
     /// <summary>Surfaces a background/fire-and-forget failure on this page's
@@ -1167,28 +1191,19 @@ public sealed partial class FeedPage : Page, IPostCardPage
         // tick while this dialog is open (RepaintDetailLabel), not painted once.
         panel.Children.Add(BuildDetailLabelBadge(item.PostId));
 
-        // Post image (post-image) — painted from the folded `Image` block in the document
-        // (render-model.md § D6), the same media the list card shows, via the shared blob
-        // loader attached property (async, non-blocking; the bytes load stays client glue —
-        // render-model.md § The boundary). Closes the gap where the detail omitted the image.
-        // A gated post's pre-unlock teaser carries no Image block yet, so this is null here;
+        // The post's media — one post-image per picture and one video-thumbnail per video,
+        // in body order (render-model.md § D6b Accessors), the same elements the list card
+        // paints from the same shared fold, each publishing its settled alt (§ D6c → Proxied
+        // video, the alt paragraph). Pictures load through the shared blob loader attached
+        // property (async, non-blocking; the bytes load stays client glue — § The
+        // boundary); videos are the SAME VideoThumbnailView the card shows, so the detail
+        // plays inline exactly as the card does (§ D6c → Inline playback). A gated post's
+        // pre-unlock teaser carries no media blocks yet, so nothing is added here;
         // postImageInsertIndex marks the slot so UnlockGatedDetailAsync can insert the SAME
-        // element once the unlock lands.
+        // elements once the unlock lands.
         postImageInsertIndex = panel.Children.Count;
-        if (BuildPostDetailImageElement(item.Document, item.BlobHome) is { } postImage)
-            panel.Children.Add(postImage);
-
-        // Video thumbnail (video-thumbnail) — the D6b `Video` sibling of `Image`
-        // (render-model.md § Implementation status today), the detail-dialog twin of the
-        // list card's XAML render above: the SAME VideoThumbnailView, so the detail plays
-        // inline exactly as the card does (§ D6c → Inline playback), off the same block. A
-        // bridged post's `ProxiedVideo` paints its nest-relative path where the hash goes
-        // (§ D6c → Proxied video), is never byte-loaded before the tap, and plays off the
-        // ticketed path the shared decision answers for it. Like post-image, a gated post's
-        // teaser carries no Video block, so UnlockGatedDetailAsync inserts this SAME element
-        // right after the image slot once the unsealed document folds one in.
-        if (BuildPostDetailVideoElement(item.Document, item.BlobHome) is { } video)
-            panel.Children.Add(video);
+        foreach (var media in BuildPostDetailMediaElements(item.Document, item.BlobHome))
+            panel.Children.Add(media);
 
         // The author alone carries the id — the same resolved label the card paints (the
         // viewer's nickname, else the public name, else the canonical short id), as web's
@@ -1336,26 +1351,43 @@ public sealed partial class FeedPage : Page, IPostCardPage
         return panel;
     }
 
-    /// <summary>Builds the detail dialog's <c>post-image</c> element from <paramref
-    /// name="document"/>'s folded <c>Image</c> block — <c>null</c> when the document carries
-    /// no media (most posts). The one construction site for BOTH the initial
+    /// <summary>Builds the detail dialog's media elements from <paramref name="document"/>'s
+    /// folded media blocks, in body order — one <c>post-image</c> per picture and one
+    /// <c>video-thumbnail</c> per video of <see cref="DocumentRenderer.MediaElements"/>
+    /// (render-model.md § D6b <i>Accessors</i>), empty when the document carries no media
+    /// (most posts). The one construction site for BOTH the initial
     /// <see cref="BuildPostDetailPanel"/> build and <see cref="UnlockGatedDetailAsync"/>'s
-    /// post-unlock insert, so a gated post's pre-unlock teaser (no Image block) and its
-    /// unsealed document (one now folded in) paint through the identical element.
-    /// <para>A bridged post's <c>ProxiedImage</c> (render-model.md § D6c) paints here too
-    /// when the document has no blob image: an Image loaded by its nest-relative path, over
-    /// a placeholder that stands in until the bytes land, both inside a Button that carries
-    /// the <c>post-image</c> id — the list card's own shape (<c>PostImageButton</c> over
-    /// <c>PostImagePlaceholder</c>). The id cannot sit on the Image there, as it does for a
-    /// blob: an Image with no picture has no size, so UIA would read the slot offscreen for
-    /// exactly as long as the placeholder stands in. The Button has no click: the lightbox
-    /// is a page overlay, which the dialog covers.</para></summary>
-    private static FrameworkElement? BuildPostDetailImageElement(
-        uniffi.fauna_core.RenderDocument document, object? home = null)
+    /// post-unlock insert, so a gated post's pre-unlock teaser (no media blocks) and its
+    /// unsealed document (now folding them in) paint through the identical elements.</summary>
+    private static List<FrameworkElement> BuildPostDetailMediaElements(
+        uniffi.fauna_core.RenderDocument document, object? home)
+    {
+        var elements = new List<FrameworkElement>();
+        foreach (var media in DocumentRenderer.MediaElements(document))
+        {
+            if ((media.IsVideo ? BuildPostDetailVideoElement(media, home) : BuildPostDetailImageElement(media, home))
+                is { } element)
+                elements.Add(element);
+        }
+        return elements;
+    }
+
+    /// <summary>Builds one detail-dialog <c>post-image</c> element for a picture
+    /// <paramref name="media"/> element — <c>null</c> without a blob loader. It publishes the
+    /// element's settled <c>alt</c> beside its paint <c>state</c>
+    /// (<see cref="ImageHashBind.AltProperty"/>).
+    /// <para>A bridged post's <c>ProxiedImage</c> (render-model.md § D6c) is an Image loaded by
+    /// its nest-relative path, over a placeholder that stands in until the bytes land, both
+    /// inside a Button that carries the <c>post-image</c> id — the list card's own shape
+    /// (<c>PostImageButton</c> over <c>PostImagePlaceholder</c>). The id cannot sit on the Image
+    /// there, as it does for a blob: an Image with no picture has no size, so UIA would read
+    /// the slot offscreen for exactly as long as the placeholder stands in. The Button has no
+    /// click: the lightbox is a page overlay, which the dialog covers.</para></summary>
+    private static FrameworkElement? BuildPostDetailImageElement(PostMediaElement media, object? home)
     {
         if (PostCardBind.GetImageLoader() is not { } loader) return null;
-        var mediaHash = DocumentRenderer.MediaImageHash(document);
-        var proxiedPath = mediaHash is null ? DocumentRenderer.MediaProxiedPath(document) : null;
+        var mediaHash = media.Hash.Length > 0 ? media.Hash : null;
+        var proxiedPath = media.ProxiedPath.Length > 0 ? media.ProxiedPath : null;
         if (mediaHash is null && proxiedPath is null) return null;
 
         var postImage = new Image
@@ -1365,6 +1397,7 @@ public sealed partial class FeedPage : Page, IPostCardPage
             HorizontalAlignment = HorizontalAlignment.Left,
         };
         ImageHashBind.SetLoader(postImage, loader);
+        ImageHashBind.SetAlt(postImage, media.Alt);
         if (mediaHash is not null)
         {
             postImage.Margin = new Thickness(0, 4, 0, 4);
@@ -1413,22 +1446,20 @@ public sealed partial class FeedPage : Page, IPostCardPage
         return button;
     }
 
-    /// <summary>Builds the detail dialog's <c>video-thumbnail</c> element — the SAME
-    /// <see cref="Controls.VideoThumbnailView"/> the list card shows — from <paramref
-    /// name="document"/>'s folded <c>Video</c> or <c>ProxiedVideo</c> block; <c>null</c> when
-    /// the document carries no video. Like <see cref="BuildPostDetailImageElement"/>, the one
-    /// construction site for both the initial <see cref="BuildPostDetailPanel"/> build and
-    /// <see cref="UnlockGatedDetailAsync"/>'s post-unlock insert: a gated post's teaser folds
-    /// no video, and its unsealed document's sealed <c>Video</c> plays the opened bytes through
-    /// the view's held-bytes arm (render-model.md § D6c → Inline playback, answer (1)).</summary>
-    private static Controls.VideoThumbnailView? BuildPostDetailVideoElement(
-        uniffi.fauna_core.RenderDocument document, object? home)
+    /// <summary>Builds one detail-dialog <c>video-thumbnail</c> element — the SAME
+    /// <see cref="Controls.VideoThumbnailView"/> the list card shows — for a video
+    /// <paramref name="media"/> element (a <c>Video</c> or a <c>ProxiedVideo</c>), publishing
+    /// its settled <c>alt</c>. A gated post's unsealed document's sealed <c>Video</c> plays the
+    /// opened bytes through the view's held-bytes arm (render-model.md § D6c → Inline
+    /// playback, answer (1)).</summary>
+    private static Controls.VideoThumbnailView? BuildPostDetailVideoElement(PostMediaElement media, object? home)
     {
-        if (DocumentRenderer.MediaVideoBlock(document) is not { } videoBlock) return null;
+        if (media.Block is null) return null;
         var video = new Controls.VideoThumbnailView
         {
-            Block = videoBlock,
+            Block = media.Block,
             Home = home,
+            Alt = media.Alt,
             Margin = new Thickness(0, 4, 0, 0),
         };
         AutomationProperties.SetAutomationId(video, Ids.VideoThumbnail);
@@ -1559,16 +1590,19 @@ public sealed partial class FeedPage : Page, IPostCardPage
 
             // The pre-unlock teaser carried no media blocks, so BuildPostDetailPanel added no
             // post-image or video-thumbnail element for it; insert the same elements it would
-            // have built, at the slots they would have taken (the video right after the
-            // image), now that the unsealed document folds them in. Without the video insert
-            // a sealed video's detail never painted a video-thumbnail at all, so it could
-            // never be played inline.
-            var mediaSlot = System.Math.Min(postImageInsertIndex, panel.Children.Count);
-            if (BuildPostDetailImageElement(updated.document, home) is { } postImage)
-                panel.Children.Insert(mediaSlot++, postImage);
-            if (!panel.Children.OfType<Controls.VideoThumbnailView>().Any()
-                && BuildPostDetailVideoElement(updated.document, home) is { } video)
-                panel.Children.Insert(mediaSlot, video);
+            // have built, in body order at the slot they would have taken, now that the
+            // unsealed document folds them in. Without the video insert a sealed video's
+            // detail never painted a video-thumbnail at all, so it could never be played
+            // inline. A detail that already painted its media
+            // (a teaser that carried some) is left as it is, never doubled.
+            var painted = panel.Children.OfType<FrameworkElement>().Any(child =>
+                AutomationProperties.GetAutomationId(child) is Ids.PostImage or Ids.VideoThumbnail);
+            if (!painted)
+            {
+                var mediaSlot = System.Math.Min(postImageInsertIndex, panel.Children.Count);
+                foreach (var media in BuildPostDetailMediaElements(updated.document, home))
+                    panel.Children.Insert(mediaSlot++, media);
+            }
         }
         catch (System.Exception ex)
         {

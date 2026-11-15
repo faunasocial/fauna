@@ -54,7 +54,6 @@ import pytest
 
 from conftest import _make_user, _seeded_environment, get_available_apps
 from drivers import create_driver
-from helpers.app_surface import require_surface
 from helpers.e2e_session import e2e_login_device_id
 # The bridged and sealed seeds are the in-place witnesses' own fixtures: one
 # AP nest + remote media server, one dedicated gated nest (priority #2).
@@ -372,8 +371,6 @@ def test_a_bridged_video_hands_off_through_the_nest_proxy(
     from drivers.port_util import find_free_port
     from helpers.ap_nest import deliver_note, enable_ap
     from helpers.fake_follower import FakeFollower
-
-    require_surface("tui", "proxied-video-playback")
     nest = bridged_video_nest
     # The remote outlives this test (module scope): judge only this test's asks.
     seen_before = len(remote_media.requests)

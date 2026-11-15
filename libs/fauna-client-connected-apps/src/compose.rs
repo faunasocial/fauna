@@ -19,7 +19,7 @@ use fauna_atproto_settings_machine::{ConsentCardRow, ConsentSetRow};
 use fauna_core::localized::LocalizedText;
 use serde::{Deserialize, Serialize};
 
-use crate::snapshots::{ConnectedAppRow, OracleSummaryRow, VERBATIM_KEY, class};
+use crate::snapshots::{ConnectedAppRow, OracleOpRow, OracleSummaryRow, VERBATIM_KEY, class};
 
 /// What a row's facts line puts between its facts.
 pub const FACTS_SEPARATOR: &str = " · ";
@@ -59,6 +59,12 @@ pub struct RosterRowText {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub opens_settings_card: bool,
+    /// Whether the row opens its per-operation record
+    /// (`connected-apps-oracle-open`; [`crate::machine::opens_record`]) —
+    /// carried for the same reason.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub opens_record: bool,
 }
 
 impl RosterRowText {
@@ -152,28 +158,58 @@ pub fn oracle_lines_with(
         [("ops", ops), ("requests", requests)],
     )];
     lines.extend(oracle.last_op.as_ref().map(|op| {
-        let time = format_time(op.at_millis);
-        // The detail is a verbatim carrier (`machine::verbatim`): blank when it
-        // has no key or its one `text` argument is whitespace.
-        let bare = op.detail.key.is_empty()
-            || (op.detail.key == VERBATIM
-                && op
-                    .detail
-                    .args
-                    .get("text")
-                    .is_none_or(|t| t.trim().is_empty()));
-        let key = if bare {
-            "connected_apps.oracle_latest_bare"
-        } else {
-            "connected_apps.oracle_latest"
-        };
-        let mut nested = vec![("operation", op.words.clone())];
-        if !bare {
-            nested.push(("detail", op.detail.clone()));
-        }
-        ComposedText::with_nested(key, [("time", time.as_str())], nested)
+        op_text(
+            op,
+            &format_time(op.at_millis),
+            "connected_apps.oracle_latest",
+            "connected_apps.oracle_latest_bare",
+        )
     }));
     lines
+}
+
+/// One operation of an open per-operation record (`connected-apps-oracle-op`,
+/// `connected-apps.md` § Layout & flow, region 3): when, its class in the
+/// consent card's words, its detail verbatim — the same wording the summary's
+/// newest operation uses.
+///
+/// [`oracle_op_text_with`] with the shared local-clock formatter.
+#[cfg(feature = "local-clock")]
+pub fn oracle_op_text(op: &OracleOpRow) -> ComposedText {
+    oracle_op_text_with(op, &fauna_core::format::format_unix_local_ms)
+}
+
+/// [`oracle_op_text`] with the caller's time formatter (unix millis → text).
+pub fn oracle_op_text_with(op: &OracleOpRow, format_time: &dyn Fn(i64) -> String) -> ComposedText {
+    op_text(
+        op,
+        &format_time(op.at_millis),
+        "connected_apps.oracle_op",
+        "connected_apps.oracle_op_bare",
+    )
+}
+
+/// An operation's line in `full_key`'s shape, or `bare_key`'s when it carries
+/// no detail.
+fn op_text(op: &OracleOpRow, time: &str, full_key: &str, bare_key: &str) -> ComposedText {
+    // The detail is a verbatim carrier (`machine::verbatim`): blank when it
+    // has no key or its one `text` argument is whitespace.
+    let bare = op.detail.key.is_empty()
+        || (op.detail.key == VERBATIM
+            && op
+                .detail
+                .args
+                .get("text")
+                .is_none_or(|t| t.trim().is_empty()));
+    let mut nested = vec![("operation", op.words.clone())];
+    if !bare {
+        nested.push(("detail", op.detail.clone()));
+    }
+    ComposedText::with_nested(
+        if bare { bare_key } else { full_key },
+        [("time", time)],
+        nested,
+    )
 }
 
 /// One roster row's text (see [`RosterRowText`]): [`roster_row_text_with`]
@@ -261,6 +297,7 @@ pub fn roster_row_text_with(
         lines,
         facts,
         opens_settings_card: crate::machine::opens_settings_card(row),
+        opens_record: crate::machine::opens_record(row),
     }
 }
 

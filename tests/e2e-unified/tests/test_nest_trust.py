@@ -665,7 +665,6 @@ def test_retained_generations_render_and_restore_lands_at_the_destination(
     named generous budgets with deadline polls.
     """
     app = logged_in_app
-    app.nest_trust.require_retained_generations_supported()
 
     # The owner must be registered at the destination for the enroll handshake.
     # Idempotent across re-runs of the session-scoped nest.

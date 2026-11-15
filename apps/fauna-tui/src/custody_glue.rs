@@ -34,4 +34,9 @@ impl CustodyCeremonyObserver for TuiCeremonyObserver {
             .tx
             .send(UiMessage::Data(DataMessage::CustodyCeremonyMoved));
     }
+
+    fn drive_owed(&self) {
+        // The message loop answers the same way — one drive pass.
+        self.ceremony_moved(&[]);
+    }
 }

@@ -21,7 +21,8 @@
 
 use fauna_core::localized::LocalizedText;
 use fauna_core::offline_intent::{
-    IntentDescription, IntentTarget, MLS_INTENT_KIND, UnsentState, park_code,
+    IntentDescription, IntentTarget, MLS_INTENT_KIND, UnsentChange, UnsentState, hold_code,
+    park_code,
 };
 use serde::Deserialize;
 
@@ -77,6 +78,40 @@ pub fn state_text(state: &UnsentState) -> LocalizedText {
     }))
 }
 
+/// A held row's state in words, when [`UnsentChange::hold`] names what holds
+/// it rather than its scope's park — the row's state line in place of
+/// [`state_text`]'s *held*. A hold code this build does not name reads as
+/// the plain held line.
+pub fn hold_text(code: &str) -> LocalizedText {
+    LocalizedText::key(key(match code {
+        hold_code::CARRY_AWAITING_GROUP => "state_held_carry",
+        _ => "state_held",
+    }))
+}
+
+/// The state line of one unsent change: [`hold_text`] for a row that names
+/// its hold, else [`state_text`].
+pub fn change_state_text(change: &UnsentChange) -> LocalizedText {
+    match (&change.state, change.hold.as_deref()) {
+        (UnsentState::Held, Some(code)) => hold_text(code),
+        (state, _) => state_text(state),
+    }
+}
+
+/// Why one unsent change was not sent, in words: [`reason_text`] of its stored
+/// code on a not-sent row that carries one, `None` on every other row. An app
+/// renders a `Some` row's status line as `settings.unsent_changes.status_with_reason`
+/// over [`change_state_text`] and this, and a `None` row's as the state text
+/// alone — the one rule, here, so no app decides when a row says why.
+pub fn change_reason_text(change: &UnsentChange) -> Option<LocalizedText> {
+    match &change.state {
+        UnsentState::Unsent { reason_code } if !reason_code.is_empty() => {
+            Some(reason_text(reason_code))
+        }
+        _ => None,
+    }
+}
+
 /// A stored failure code in words — the drain's own park codes by name, any
 /// other code (the nest's error code) through the fallback, which names it.
 pub fn reason_text(code: &str) -> LocalizedText {
@@ -86,6 +121,7 @@ pub fn reason_text(code: &str) -> LocalizedText {
         park_code::MLS_NO_CHANNEL => Some("reason_mls_no_channel"),
         park_code::MLS_NOT_A_MEMBER => Some("reason_mls_not_a_member"),
         park_code::MLS_SEND_FAILED => Some("reason_mls_send_failed"),
+        park_code::MLS_ATTACHMENT_MISSING => Some("reason_mls_attachment_missing"),
         _ => None,
     };
     match named {
@@ -371,6 +407,8 @@ mod tests {
             "reason_mls_no_channel",
             "reason_mls_not_a_member",
             "reason_mls_send_failed",
+            "reason_mls_attachment_missing",
+            "state_held_carry",
             "reason_fallback",
         ];
         let en = include_str!("../../../i18n/strings/en.yaml");
@@ -572,6 +610,36 @@ mod tests {
         assert_eq!(
             state_text(&UnsentState::Held),
             LocalizedText::key(key("state_held"))
+        );
+    }
+
+    /// A row says why only when it is not sent and carries a code
+    /// (`change_reason_text`, the one rule every app's status line follows).
+    #[test]
+    fn only_a_not_sent_row_with_a_code_says_why() {
+        let row = |state: UnsentState| UnsentChange {
+            intent_id: "aa".to_string(),
+            kind: "fauna.posts.interact".to_string(),
+            scope: "posts.interact:p".to_string(),
+            state,
+            created_at: 0,
+            attempts: 0,
+            description: describe_intent("fauna.posts.interact", b""),
+            hold: None,
+        };
+        assert_eq!(change_reason_text(&row(UnsentState::Waiting)), None);
+        assert_eq!(change_reason_text(&row(UnsentState::Held)), None);
+        assert_eq!(
+            change_reason_text(&row(UnsentState::Unsent {
+                reason_code: String::new()
+            })),
+            None
+        );
+        assert_eq!(
+            change_reason_text(&row(UnsentState::Unsent {
+                reason_code: "not_found".to_string()
+            })),
+            Some(reason_text("not_found"))
         );
     }
 }

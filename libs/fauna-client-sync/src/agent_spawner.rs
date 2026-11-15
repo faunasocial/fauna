@@ -383,8 +383,37 @@ pub trait LingerControl {
     fn set(&self, enabled: bool) -> bool;
 }
 
-/// `loginctl` driving for the calling user (`--user` is implicit: `loginctl
-/// enable-linger` with no argument means "me").
+/// `loginctl show-user <uid> --value -p Linger`. The uid is named, never left
+/// implicit: with no argument `loginctl` means "the user of the caller's
+/// session", and a caller outside any logind session (a process under the
+/// user's systemd manager) reads an empty line — Unavailable on a box whose
+/// linger is readable.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linger_show_args(uid: u32) -> [String; 5] {
+    [
+        "show-user".into(),
+        uid.to_string(),
+        "--value".into(),
+        "-p".into(),
+        "Linger".into(),
+    ]
+}
+
+/// `loginctl enable-linger <uid>` / `disable-linger <uid>` — named for the
+/// same reason as [`linger_show_args`]; polkit still sees the caller's own
+/// uid, so the self-linger rule applies unchanged.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linger_set_args(enabled: bool, uid: u32) -> [String; 2] {
+    let verb = if enabled {
+        "enable-linger"
+    } else {
+        "disable-linger"
+    };
+    [verb.into(), uid.to_string()]
+}
+
+/// `loginctl` driving for the calling user, named by uid
+/// ([`linger_show_args`]).
 #[cfg(all(unix, not(target_os = "macos")))]
 pub struct LoginctlUser;
 
@@ -392,7 +421,7 @@ pub struct LoginctlUser;
 impl LingerControl for LoginctlUser {
     fn state(&self) -> LingerState {
         match Command::new("loginctl")
-            .args(["show-user", "--value", "-p", "Linger"])
+            .args(linger_show_args(getuid()))
             .output()
         {
             Ok(out) if out.status.success() => {
@@ -410,12 +439,9 @@ impl LingerControl for LoginctlUser {
     }
 
     fn set(&self, enabled: bool) -> bool {
-        let verb = if enabled {
-            "enable-linger"
-        } else {
-            "disable-linger"
-        };
-        match Command::new("loginctl").arg(verb).status() {
+        let args = linger_set_args(enabled, getuid());
+        let verb = args[0].as_str();
+        match Command::new("loginctl").args(&args).status() {
             Ok(status) if status.success() => true,
             Ok(status) => {
                 tracing::warn!("loginctl {verb} exited with {status}");
@@ -1020,9 +1046,10 @@ pub trait LaunchctlControl {
     fn kickstart(&self, label: &str) -> bool;
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 unsafe extern "C" {
-    /// libSystem's `getuid(2)` — always succeeds, no preconditions.
+    /// libc's `getuid(2)` — always succeeds, no preconditions. Names the
+    /// launchd `gui/<uid>` domain on macOS and the `loginctl` target on linux.
     safe fn getuid() -> u32;
 }
 
@@ -1272,6 +1299,24 @@ mod tests {
                 "{raw:?} must not resolve to a definite reading"
             );
         }
+    }
+
+    /// Every `loginctl` call names the calling user's uid. With no argument
+    /// `show-user` means "the user of the caller's session", and a caller
+    /// outside any logind session (a process under the user's systemd
+    /// manager, a `systemd-run --user` job) gets an empty line and exit 0 —
+    /// which parses as Unavailable on a box whose linger is perfectly
+    /// readable, so the toggle vanished; `enable-linger`/`disable-linger`
+    /// with no argument have the same "caller's session" reading.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn every_loginctl_call_names_the_calling_uid() {
+        assert_eq!(
+            linger_show_args(1000),
+            ["show-user", "1000", "--value", "-p", "Linger"]
+        );
+        assert_eq!(linger_set_args(true, 1000), ["enable-linger", "1000"]);
+        assert_eq!(linger_set_args(false, 1000), ["disable-linger", "1000"]);
     }
 
     // -- windows resolution order + harness arg forwarding (the C# lift) --

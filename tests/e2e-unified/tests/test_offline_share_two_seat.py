@@ -70,17 +70,54 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.macos,
     pytest.mark.windows,
+    # ios joined 2026-11-14 as the RECIPIENT seat of a
+    # macos sharer (`_PHONE_SHARER`): a phone dials out more easily than it is
+    # dialled (`p2p-shared-set-build.md` § Phone peers — design, decision 5),
+    # and one simulator hosts one seat of the app.
+    pytest.mark.ios,
+    # android joined 2026-11-14 the same way: the
+    # RECIPIENT seat of a tui sharer (`_PHONE_SHARER`) — one emulator hosts one
+    # seat of the app, and tui is android's partner seat in every other
+    # cross-app journey.
+    pytest.mark.android,
 ]
 
 #: Apps with a landed offline-share UI leg. Grow this — and the app's own
 #: marker above — together; a marker with no `_SUPPORTED_APPS` entry left
 #: `ceremony_seats` hardcoded to tui for a year.
-_SUPPORTED_APPS = ("tui", "linux", "macos", "windows")
+_SUPPORTED_APPS = ("tui", "linux", "macos", "windows", "ios", "android")
+
+#: The initiator a phone seat is the recipient of, per phone app. Every other
+#: app drives both seats itself; a phone is one seat per device, so its run
+#: pairs it with the desktop app sharing its FaunaKit code — android's with tui,
+#: the lead app (the item id stays `[ios]`/`[android]` — the recipient is the
+#: app under test).
+_PHONE_SHARER = {"ios": "macos", "android": "tui"}
 
 
 def _offline_share_apps():
     available = get_available_apps()
     return [c for c in _SUPPORTED_APPS if c in available]
+
+
+def _seat_params(*apps):
+    """``apps`` as fixture params: an iOS seat also carries
+    `ios_file_provider_app`, so the harness installs the appex-embedding
+    `Fauna-iOS` app and lifts the File Provider reconcile gate for it — its
+    seat in a group set is the File Provider domain (`group-set.md` § Build
+    design — the group set, decision 11).
+
+    ⚠ Keep this shape — a `*apps` helper over a filtered comprehension, used
+    with `indirect=True` — so the feature catalog's parse can name each test's
+    app set: read as unrestricted, the group journeys would fall back to the
+    module marks and credit an app the run deselects (android's outcomes 3 and
+    7, 2026-11-14)."""
+    return [
+        pytest.param(app, marks=[pytest.mark.ios_file_provider_app], id=app)
+        if app == "ios"
+        else app
+        for app in apps
+    ]
 
 
 # Named generous budgets. Each is far above any non-pathological version of the
@@ -137,7 +174,26 @@ def _seat(nest, app_path, app_name, name, request):
     # Inert for a seat with no group scope.
     _apply_share_plane_env(environment, app_name)
     config = {"app_path": app_path, "url": nest["url"], "environment": environment}
-    if app_name == "windows":
+    if app_name == "ios":
+        # The simulator seat's whole launch config (udid, runtime, the
+        # appex-embedding app for an `ios_file_provider_app` seat and its
+        # reconcile gate), with this file's environment over the harness's.
+        # The share plane waits on a conversations session, as on macos.
+        from conftest import _build_app_config
+
+        config = _build_app_config("ios", nest, request)
+        environment["FAUNA_E2E_REAL_CONVERSATIONS"] = "1"
+        config["environment"] = {**config.get("environment", {}), **environment}
+    elif app_name == "android":
+        # The emulator seat's whole launch config (device serial, bridge APK,
+        # the nest ports `adb reverse` maps), with this file's environment over
+        # the harness's. Only the keys the bridge forwards as intent extras
+        # reach the app (`_build_app_config`'s android branch says which).
+        from conftest import _build_app_config
+
+        config = _build_app_config("android", nest, request)
+        config["environment"] = {**config.get("environment", {}), **environment}
+    elif app_name == "windows":
         # Each seat its OWN sync agent — pipe, state and binary. tui and linux
         # get that from the private HOME/XDG world above; windows rendezvouses
         # on a machine-global pipe, and this launch config never passes through
@@ -197,19 +253,20 @@ def _seat(nest, app_path, app_name, name, request):
     return ActionLayer(driver), actor
 
 
-@pytest.fixture(params=_offline_share_apps())
+@pytest.fixture(params=_seat_params(*_offline_share_apps()))
 def offline_share_app(request):
     """The app under test; its id lands in the test name (``[tui]``/
     ``[linux]``), which is what conftest's ``--app`` filter reads. Both seats
     of a run share this one app — the ceremony is symmetric, and a
     tui-initiator/linux-recipient mix is a different (unwritten) journey, not
-    this one."""
+    this one — save a phone, the recipient of its `_PHONE_SHARER`."""
     return request.param
 
 
 @pytest.fixture()
 def ceremony_seats(nest_instance, offline_share_app, request):
-    """Two same-app seats, two accounts, one nest — the co-present pair.
+    """Two seats, two accounts, one nest — the co-present pair; the same app
+    on both, or a phone recipient of its desktop sharer.
 
     Two separate launches rather than two accounts in one app: the ceremony
     dials an **actor-keyed** endpoint, so one process holding both identities
@@ -217,16 +274,23 @@ def ceremony_seats(nest_instance, offline_share_app, request):
     HOME/XDG world (convention 10), so the two seats share no keyring, no
     config and no agent socket.
     """
-    app_path = request.getfixturevalue(f"{offline_share_app}_app_path")
+    initiator_app = _PHONE_SHARER.get(offline_share_app, offline_share_app)
+    initiator_path = request.getfixturevalue(f"{initiator_app}_app_path")
+    # A phone seat's app path is its launch config's (`_seat`).
+    recipient_path = (
+        None
+        if offline_share_app in _PHONE_SHARER
+        else request.getfixturevalue(f"{offline_share_app}_app_path")
+    )
 
     seats = []
     try:
         initiator, initiator_actor = _seat(
-            nest_instance, app_path, offline_share_app, "initiator", request
+            nest_instance, initiator_path, initiator_app, "initiator", request
         )
         seats.append(initiator)
         recipient, recipient_actor = _seat(
-            nest_instance, app_path, offline_share_app, "recipient", request
+            nest_instance, recipient_path, offline_share_app, "recipient", request
         )
         seats.append(recipient)
         yield (initiator, initiator_actor, recipient, recipient_actor)
@@ -731,14 +795,39 @@ def test_a_co_present_ceremony_completes_while_the_nest_is_unreachable(
 #: Apps whose group-scope folder row carries the `folder-location-*` binding
 #: form, so a seat can bind a local folder under a set shared in person. tui
 #: led (`group-set.md` § Build design — the group set), linux, windows and
-#: macos followed; the other apps' rows are label-only today and join this
-#: tuple with their lift.
-_GROUP_BIND_APPS = ("tui", "linux", "windows", "macos")
+#: macos followed.
+_GROUP_LOCATION_APPS = ("tui", "linux", "windows", "macos")
+
+#: Apps whose group-scope row gives the set a seat on this device: the
+#: location form above, or a phone's on-demand replica — the row's hide-only
+#: `folder-on-demand-toggle`, default ON, whose File Provider domain is the
+#: seat (decision 11; ios 2026-11-14), and on
+#: android the set under the Fauna root of its documents provider, whose
+#: kept root is the seat (2026-11-14).
+_GROUP_BIND_APPS = (*_GROUP_LOCATION_APPS, "ios", "android")
 
 
 def _group_bind_apps():
     available = get_available_apps()
-    return [c for c in _GROUP_BIND_APPS if c in available]
+    return _seat_params(*[c for c in _GROUP_BIND_APPS if c in available])
+
+
+def _group_location_apps():
+    available = get_available_apps()
+    return [c for c in _GROUP_LOCATION_APPS if c in available]
+
+
+#: Apps whose Folders page lists a group set's review rows and restores the
+#: kept version: every app with a seat in the set. A desktop reads them through
+#: its sync agent; ios reads them off its File Provider extension's state, the
+#: restore crossing to the extension (decision 9; ios 2026-11-14); android reads them in process off its documents
+#: provider's host state, and restores on that host (2026-11-14).
+_GROUP_REVIEW_APPS = (*_GROUP_LOCATION_APPS, "ios", "android")
+
+
+def _group_review_apps():
+    available = get_available_apps()
+    return _seat_params(*[c for c in _GROUP_REVIEW_APPS if c in available])
 
 
 GROUP_TRANSFER_BUDGET_S = 240.0
@@ -754,7 +843,214 @@ def _read_or_none(path):
         return None
 
 
-@pytest.mark.parametrize("offline_share_app", _group_bind_apps())
+PHONE_DOMAIN_BUDGET_S = 120.0
+"""For the phone's presence plan to list the landed group set and its
+reconcile to provision the extension and register the set's domain — a
+Folders refresh and one reconcile pass. Generous (convention 14)."""
+
+
+def _is_phone(app) -> bool:
+    from helpers.app_surface import app_name
+
+    return app_name(app.driver) in _PHONE_SHARER
+
+
+def _arrival_reader(seat, folder):
+    """Read one file's text under a seat's receiving folder, or ``None`` — a
+    host path everywhere but android, whose kept root lives in the app
+    sandbox and is read over ``run-as`` (``app_data_read``)."""
+    if _is_android(seat):
+
+        def read(name):
+            raw = seat.driver.app_data_read(f"{folder}/{name}")
+            return None if raw is None else raw.decode(errors="replace")
+
+        return read
+    return lambda name: _read_or_none(folder / name)
+
+
+def _is_android(app) -> bool:
+    from helpers.app_surface import app_name
+
+    return app_name(app.driver) == "android"
+
+
+def _android_on_demand_listing(phone) -> str:
+    """Every path under the app's on-demand kept roots and its sync state —
+    what the documents provider's hosts landed and where the ring mirror
+    rests — read over ``run-as`` the way the residue witnesses read the
+    sandbox, so no launch ends the seat."""
+    listed = phone.driver.app_data_listing("files", max_depth=5)
+    keep = [p for p in listed if "/on-demand/" in p or p.endswith("/sync") or "/sync/" in p]
+    return "\n".join(keep) or "<nothing under files/**/on-demand or files/**/sync>"
+
+
+def _android_seat_on_the_group_row(phone, actor, tmp_path):
+    """android's seat in a set shared in person, past the toggle the caller
+    asserted: the ring mirrored into the hosts' sync state dir (`group-set.md`
+    decision 12 — `installGroupRingMirror`, seated beside the custody install)
+    and the set's kept root, `files/on-demand/<actor>/group%3A<hex>/`
+    (`OwnedTree::for_set`), which the share plane's host build creates once
+    the presence plan lists the set (decision 11 (a)). Waited for while the
+    nest is still up. Returns the kept root's app-data relative path."""
+    from helpers.waiting import wait_until
+
+    actor_hex = actor["actor_id_hex"].lower()
+    kept_parent = f"files/on-demand/{actor_hex}/"
+
+    def _mirror():
+        listed = phone.driver.app_data_listing("files", max_depth=4)
+        return next((p for p in listed if p.endswith(f"{actor_hex}/sync/group-rings.sealed")), None)
+
+    wait_until(
+        _mirror,
+        PHONE_DOMAIN_BUDGET_S,
+        interval=1.0,
+        diagnose=lambda: (
+            "[receiver] the app never wrote the group-ring mirror into its sync "
+            "state dir — the seat (`GroupRingMirrorSeat.install`, beside the "
+            "custody install) or the runtime's write:\n"
+            + _android_on_demand_listing(phone)
+        ),
+    )
+
+    def _kept_root():
+        listed = phone.driver.app_data_listing("files", max_depth=4)
+        return next(
+            (
+                p
+                for p in listed
+                if p.startswith(kept_parent)
+                and p[len(kept_parent):].startswith("group%3A")
+                and "/" not in p[len(kept_parent):]
+            ),
+            None,
+        )
+
+    kept = wait_until(
+        _kept_root,
+        PHONE_DOMAIN_BUDGET_S,
+        interval=1.0,
+        diagnose=lambda: (
+            "[receiver] no kept root for the group set: the presence plan's "
+            "group source, the default-ON toggle store and the share plane's "
+            "host build are the links.\n"
+            + _android_on_demand_listing(phone)
+            + "\n"
+            + _seat_state("receiver", phone)
+        ),
+    )
+    # Kept past the emulator (convention 6): what the provider's hosts landed.
+    tmp_path.joinpath("receiver-tree.txt").write_text(_android_on_demand_listing(phone))
+    return kept
+
+
+def _phone_app_group(udid: str):
+    """The seat's app-group container holding its File Provider tree, read from
+    the host the way the share-pump and eviction witnesses read the replica, so
+    no launch ends the seat."""
+    from pathlib import Path
+
+    from tests.platform.ios.test_file_provider_eviction import _BUNDLE_ID, _sim
+
+    listed = _sim("get_app_container", udid, _BUNDLE_ID, "groups").stdout
+    groups = [Path(e.split(None, 1)[-1].strip()) for e in listed.splitlines() if e.strip()]
+    return next((g for g in groups if (g / "FileProvider").is_dir() or (g / "sync").is_dir()), None)
+
+
+def _phone_tree_listing(udid: str) -> str:
+    """Every file under the app group's `FileProvider/roots` and `sync` trees,
+    with its size — what the extension landed and what the app mirrored."""
+    base = _phone_app_group(udid)
+    if base is None:
+        return f"<no app group on {udid} holds a FileProvider or sync tree>"
+    lines = []
+    for top in ("FileProvider/roots", "sync"):
+        for dirpath, _dirs, files in os.walk(base / top):
+            for name in files:
+                path = os.path.join(dirpath, name)
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = -1
+                lines.append(f"{os.path.relpath(path, base)} ({size} B)")
+    return "\n".join(lines) or "<no files under FileProvider/roots or sync>"
+
+
+def _phone_seat_on_the_group_row(phone, row, actor, tmp_path):
+    """The phone's seat in a set shared in person: the group-scope row's
+    `folder-on-demand-toggle`, ON by default, and the File Provider domain
+    the app's reconcile registers for it (`group-set.md` § Build design — the
+    group set, decision 11 (a)), with the group's ring mirrored where the
+    extension reads it (decision 12). Waited for while the nest is still up:
+    the reconcile mints the extension's bearer at the nest.
+
+    Returns the set's staging root — the extension's kept root, where a group
+    body lands and stays (decision 11 (b)) — as a host path on ios, and on
+    android as the kept root's app-data relative path (the sandbox has no
+    host path; read it with :func:`_arrival_reader`).
+    """
+    import re
+
+    from helpers.waiting import wait_until
+
+    b = phone.backups
+    b.navigate_folders()
+    b.open_folder(row, probe="folder-on-demand-toggle")
+    assert b.on_demand_toggle_visible(), (
+        f"[receiver] the group-scope row {row!r} carries no folder-on-demand-toggle "
+        f"— a phone's seat in the set has no gesture; error={phone.error_text()!r}"
+    )
+    assert b.on_demand_toggle_state() == "on", (
+        "[receiver] the group set's on-demand presence must default ON "
+        f"(read {b.on_demand_toggle_state()!r})"
+    )
+    if _is_android(phone):
+        return _android_seat_on_the_group_row(phone, actor, tmp_path)
+
+    actor_hex = actor["actor_id_hex"].lower()
+    added =re.compile(r"\[fp\] added domain (group%3A[0-9a-f]{64})@" + actor_hex)
+
+    def _domain_component():
+        found = added.search(strip_ansi(phone.driver.app_stderr_text() or ""))
+        return found.group(1) if found else None
+
+    udid = phone.driver._launch_config["udid"]
+    component = wait_until(
+        _domain_component,
+        PHONE_DOMAIN_BUDGET_S,
+        interval=1.0,
+        diagnose=lambda: (
+            "[receiver] the phone's reconcile never registered the group set's "
+            "File Provider domain: the presence plan's group source, the "
+            "default-ON toggle store and the extension's provisioning are the "
+            "links.\n" + _seat_state("receiver", phone)
+        ),
+    )
+    # Kept past the simulator (convention 6): what the extension landed.
+    tmp_path.joinpath("receiver-tree.txt").write_text(_phone_tree_listing(udid))
+
+    def _mirror():
+        base = _phone_app_group(udid)
+        path = base / "sync" / actor_hex / "group-rings.sealed" if base else None
+        return path if path is not None and path.is_file() else None
+
+    wait_until(
+        _mirror,
+        PHONE_DOMAIN_BUDGET_S,
+        interval=1.0,
+        diagnose=lambda: (
+            "[receiver] the app never wrote the group-ring mirror into the "
+            "extension's state dir — the seat (`installGroupRingMirror`, at the "
+            "reconcile's provisioning) or the runtime's write:\n"
+            + _phone_tree_listing(udid)
+        ),
+    )
+    base = _phone_app_group(udid)
+    return base / "FileProvider" / "roots" / actor_hex / component
+
+
+@pytest.mark.parametrize("offline_share_app", _group_bind_apps(), indirect=True)
 # Documented-long (convention 9): a whole ceremony, two binds and a transfer.
 @pytest.mark.timeout(1200)
 @pytest.mark.feature("offline-sharing")
@@ -792,10 +1088,21 @@ def test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped(
     # both seats, but each is found by what its own page shows.
     sharer_folder = tmp_path / "sharer"
     sharer_folder.mkdir()
-    receiver_folder = tmp_path / "receiver"
-    receiver_folder.mkdir()
     bind_location_under_set(initiator, initiator_row, sharer_folder, seat="sharer")
-    bind_location_under_set(recipient, recipient_row, receiver_folder, seat="receiver")
+    if _is_phone(recipient):
+        # A phone binds no folder: its seat is the set's on-demand replica,
+        # and the gesture is the row's toggle — ON by default, so the domain
+        # is there without one (decision 11). Its arrival rests in the
+        # extension's kept root in the app-group container.
+        receiver_folder = _phone_seat_on_the_group_row(
+            recipient, recipient_row, _recipient_actor, tmp_path
+        )
+    else:
+        receiver_folder = tmp_path / "receiver"
+        receiver_folder.mkdir()
+        bind_location_under_set(
+            recipient, recipient_row, receiver_folder, seat="receiver"
+        )
 
     # The transfer needs each seat to serve its group feed to the other. Gated
     # HERE, not at the top, so the ceremony and both binds above keep running
@@ -817,17 +1124,18 @@ def test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped(
         payload = f"added after sharing in person — {os.urandom(8).hex()}\n"
         atomic_write(sharer_folder / name, payload)
 
+        arrived = _arrival_reader(recipient, receiver_folder)
         wait_until(
-            lambda: _read_or_none(receiver_folder / name) == payload,
+            lambda: arrived(name) == payload,
             GROUP_TRANSFER_BUDGET_S,
             interval=1.0,
             diagnose=lambda: (
                 f"[receiver] {name}: "
                 + (
                     "NEVER ARRIVED"
-                    if _read_or_none(receiver_folder / name) is None
+                    if arrived(name) is None
                     else "content mismatch: got "
-                    f"{_read_or_none(receiver_folder / name)!r}"
+                    f"{arrived(name)!r}"
                 )
                 + " with the nest stopped. The links: the sharer's engine "
                 "lifting its write into the group plane, the receiver's group "
@@ -836,6 +1144,15 @@ def test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped(
                 + agent_diagnosis(initiator, "sharer")
                 + "\n"
                 + agent_diagnosis(recipient, "receiver")
+                + (
+                    "\n[receiver] the provider's kept roots:\n"
+                    + _android_on_demand_listing(recipient)
+                    if _is_android(recipient)
+                    else "\n[receiver] the extension's tree:\n"
+                    + _phone_tree_listing(recipient.driver._launch_config["udid"])
+                    if _is_phone(recipient)
+                    else ""
+                )
             ),
         )
 
@@ -849,7 +1166,7 @@ def test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped(
         start_nest_in_place(nest_instance)
 
 
-@pytest.mark.parametrize("offline_share_app", _group_bind_apps())
+@pytest.mark.parametrize("offline_share_app", _group_review_apps(), indirect=True)
 # Documented-long (convention 9): a whole ceremony, two binds, a conflict that
 # converges and a restore that converges again.
 @pytest.mark.timeout(1200)
@@ -870,6 +1187,25 @@ def test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restor
     the other version" re-publishes the kept edit, which then stands on both
     seats. Which seat loses is the plane's to decide, so the test reads it off
     the file the two converge on.
+
+    A phone recipient (ios) binds no folder: its seat is the set's File
+    Provider domain (decision 11), its rows are read off the extension's state
+    in the app group, and its restore runs on the extension's engine. Its save
+    goes through the domain the way another app's coordinated write does (the
+    DEBUG `write` verb, a launch of the same app that ends the seat's process),
+    made BEFORE the sharer's while the seat is down — so neither save is over
+    the other, and the later one, the sharer's, wins: the phone is the seat
+    that reviews.
+
+    An android recipient's seat is the set under its documents provider's
+    root, whose kept root rests in the app sandbox (read over ``run-as``). Its
+    save is another app's write through the provider, made in the app's own
+    process by the bridge with the app in the background — where its share
+    plane is stopped (stop, not pause), waited for by the app's own log line —
+    so, as on ios, the phone's save comes first with its seat down, the
+    sharer's later one wins, and android is the seat that reviews: its own
+    list and restore are what the run witnesses, every run. Its rows are read
+    in process off the provider host's state and its restore runs on that host.
     """
     from helpers.folder_content import (
         agent_diagnosis,
@@ -878,37 +1214,80 @@ def test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restor
     )
     from helpers.waiting import wait_until
 
-    initiator, _initiator_actor, recipient, _recipient_actor = ceremony_seats
+    initiator, _initiator_actor, recipient, recipient_actor = ceremony_seats
     recipient_row, initiator_row = _share_in_person(ceremony_seats)
+    phone = _is_phone(recipient)
+    android = _is_android(recipient)
 
     sharer_folder = tmp_path / "sharer"
     sharer_folder.mkdir()
-    receiver_folder = tmp_path / "receiver"
-    receiver_folder.mkdir()
     bind_location_under_set(initiator, initiator_row, sharer_folder, seat="sharer")
-    bind_location_under_set(recipient, recipient_row, receiver_folder, seat="receiver")
+    if phone:
+        # The extension's kept root: where the fold lands a group body and
+        # where the restore writes the kept one back (decision 11 (b)).
+        receiver_folder = _phone_seat_on_the_group_row(
+            recipient, recipient_row, recipient_actor, tmp_path
+        )
+    else:
+        receiver_folder = tmp_path / "receiver"
+        receiver_folder.mkdir()
+        bind_location_under_set(
+            recipient, recipient_row, receiver_folder, seat="receiver"
+        )
     require_surface(initiator.driver, "group-set-feed")
+    receiver_read = _arrival_reader(recipient, receiver_folder)
 
     def diagnose():
         return (
             f"sharer={_read_or_none(sharer_folder / name)!r} "
-            f"receiver={_read_or_none(receiver_folder / name)!r}\n"
+            f"receiver={receiver_read(name)!r}\n"
             + agent_diagnosis(initiator, "sharer")
             + "\n"
             + agent_diagnosis(recipient, "receiver")
+            + (
+                "\n[receiver] the provider's kept roots:\n"
+                + _android_on_demand_listing(recipient)
+                if android
+                else "\n[receiver] the extension's tree:\n"
+                + _phone_tree_listing(recipient.driver._launch_config["udid"])
+                if phone
+                else ""
+            )
         )
 
     name = f"both-saved-{os.urandom(3).hex()}.txt"
     sharer_edit = f"the sharer's edit — {os.urandom(8).hex()}\n"
-    receiver_edit = f"the receiver's edit — {os.urandom(8).hex()}\n"
-    # Milliseconds apart, far inside one lift and one pump tick, so neither
-    # save can have been made over the other: the two rows are concurrent.
-    atomic_write(sharer_folder / name, sharer_edit)
-    atomic_write(receiver_folder / name, receiver_edit)
+    if android:
+        receiver_edit = f"the phone's edit — {os.urandom(8).hex()}\n"
+        # The set's document is its kept root's ref component, scoped to the
+        # account (`FaunaDocumentsProvider.parse`); the save is another app's
+        # create and write through the provider, made with the seat down.
+        set_doc = f"{receiver_folder.rsplit('/', 1)[-1]}@{recipient_actor['actor_id_hex'].lower()}"
+        _android_saves_with_its_seat_down(recipient, set_doc, name, receiver_edit)
+        atomic_write(sharer_folder / name, sharer_edit)
+        # The seat comes back in front: its share plane starts again, lifts
+        # the phone's save and folds the sharer's.
+        recipient.driver.hard_reload()
+    elif phone:
+        # One argv word through the simulator's launch: plain ASCII, no newline.
+        receiver_edit = f"the-phone-edit-{os.urandom(8).hex()}"
+        _phone_saves_through_its_domain(
+            recipient, receiver_folder, recipient_row, name, receiver_edit
+        )
+        atomic_write(sharer_folder / name, sharer_edit)
+        # The seat comes back: its share plane lifts the phone's save and
+        # folds the sharer's.
+        recipient.driver.hard_reload()
+    else:
+        receiver_edit = f"the receiver's edit — {os.urandom(8).hex()}\n"
+        # Milliseconds apart, far inside one lift and one pump tick, so neither
+        # save can have been made over the other: the two rows are concurrent.
+        atomic_write(sharer_folder / name, sharer_edit)
+        atomic_write(receiver_folder / name, receiver_edit)
 
     def converged():
         kept = _read_or_none(sharer_folder / name)
-        return kept is not None and kept == _read_or_none(receiver_folder / name)
+        return kept is not None and kept == receiver_read(name)
 
     wait_until(
         converged, GROUP_TRANSFER_BUDGET_S, interval=1.0, diagnose=diagnose
@@ -916,6 +1295,11 @@ def test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restor
     winner_edit = _read_or_none(sharer_folder / name)
     assert winner_edit in (sharer_edit, receiver_edit), diagnose()
     sharer_lost = winner_edit == receiver_edit
+    assert not (phone and sharer_lost), (
+        "[receiver] the phone saved first, with its seat down, so the sharer's "
+        "later save must win and the phone review — the plane kept the earlier "
+        f"save instead; {diagnose()}"
+    )
     loser, winner = (initiator, recipient) if sharer_lost else (recipient, initiator)
     loser_edit = sharer_edit if sharer_lost else receiver_edit
 
@@ -940,7 +1324,7 @@ def test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restor
     loser.driver.click("conflict-resolve-button", index=0)
     wait_until(
         lambda: _read_or_none(sharer_folder / name) == loser_edit
-        and _read_or_none(receiver_folder / name) == loser_edit,
+        and receiver_read(name) == loser_edit,
         GROUP_TRANSFER_BUDGET_S,
         interval=1.0,
         diagnose=lambda: f"the restored edit did not reach both seats; {diagnose()}",
@@ -954,6 +1338,84 @@ def test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restor
         diagnose=lambda: f"the used row stayed; error={loser.error_text()!r}",
     )
     assert winner.driver.count("conflict-resolve-button") == 0
+
+
+def _phone_saves_through_its_domain(phone, kept_root, row, name, text):
+    """The phone's own save of `name` in the group set: a coordinated write
+    into the set's File Provider domain (the DEBUG `FileProviderTestCLI`
+    `write` verb), which the extension ingests as the set's one writer — the
+    write a person makes in Files. The verb is a launch of the same app, so the
+    seat's state is pinned first and the seat stays down until the caller
+    brings it back. `kept_root` is the set's staging root, whose last
+    component is the domain's ref, escaped."""
+    from urllib.parse import unquote
+
+    from helpers.waiting import wait_until
+    from tests.platform.ios.test_file_provider_eviction import (
+        _extension_diagnostics,
+        _fauna,
+    )
+
+    drv = phone.driver
+    udid = drv._launch_config["udid"]
+    folder_ref = unquote(kept_root.name)
+    assert drv.preserve_state_across_relaunch(), "the iOS seat must pin its state"
+    outs: list[str] = []
+
+    # A host that cannot key the set yet refuses and rebuilds at its next
+    # request (`engine_lifecycle`), so that one answer is waited out.
+    def _written() -> bool:
+        outs.append(_fauna(udid, "write", folder_ref, row, name, text))
+        return "binding indeterminate" not in outs[-1]
+
+    wait_until(
+        _written,
+        PHONE_DOMAIN_BUDGET_S,
+        interval=5.0,
+        diagnose=lambda: f"{outs[-1]}\n{_extension_diagnostics(udid)}",
+    )
+    assert f"write OK: {name}" in outs[-1], (
+        f"[receiver] the phone's save through its domain failed: {outs[-1]}\n"
+        f"{_extension_diagnostics(udid)}"
+    )
+
+
+#: The android app's log line once its share plane is down (`SharePlaneHost`
+#: `STOPPED_LINE`, the background edge: stop, not pause).
+_ANDROID_PLANE_STOPPED = "share plane stopped"
+
+
+def _android_saves_with_its_seat_down(phone, set_doc, name, text):
+    """The android phone's own save of `name` in the group set, made with its
+    seat down: the app goes to the background (the HOME key, the real
+    `ON_STOP`), its share plane stops — waited for by the app's own log line,
+    never a sleep — and the save is another app's create and write through
+    the documents provider into `set_doc`, which the provider's host ingests
+    as the set's one writer. The process keeps running, so the bridge still
+    answers; the seat stays down until the caller brings the app back (its
+    state pinned first, as the ios seat's is)."""
+    from helpers.waiting import wait_until
+
+    drv = phone.driver
+    assert drv.preserve_state_across_relaunch(), "the android seat must pin its state"
+
+    def _stops():
+        return strip_ansi(drv.app_log_text() or "").count(_ANDROID_PLANE_STOPPED)
+
+    stops_before = _stops()
+    drv.enter_background()
+    wait_until(
+        lambda: _stops() > stops_before,
+        PHONE_DOMAIN_BUDGET_S,
+        interval=1.0,
+        diagnose=lambda: (
+            "[receiver] the app went to the background but its share plane "
+            "never logged its stop — the process lifecycle edge "
+            "(`SharePlaneForeground`) or `SharePlaneHost.stop`:\n"
+            + _seat_state("receiver", phone)
+        ),
+    )
+    drv.documents_write(drv.documents_create(set_doc, name), text.encode())
 
 
 @pytest.mark.feature("offline-sharing")

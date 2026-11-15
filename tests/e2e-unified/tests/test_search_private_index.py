@@ -13,7 +13,7 @@ run).
 each outcome in the phone's own shape. A phone builds no index
 (`content-index.md` § Build vs. query), so every journey whose hit is content
 the seat under test seeded is a desktop journey here, and each phone has a twin
-of each (the same six tests carry both phone marks; android's are not yet run,
+of each (the same eight tests carry both phone marks; android's are not yet run,
 the device venue being absent) in which a DESKTOP seat of the
 same account builds and the phone finds (`alice_builder_seats`): the desktop
 restores the phone's conversations from the `__mls` replica and its draft from
@@ -805,6 +805,7 @@ def test_mail_your_device_filed_as_junk_never_turns_up_in_search(
 
 @pytest.mark.tui
 @pytest.mark.linux
+@pytest.mark.macos
 @pytest.mark.real_conversations
 @pytest.mark.feature("private-search-index")
 def test_mail_indexed_before_a_mail_key_rotation_is_still_found_after_it(
@@ -827,7 +828,8 @@ def test_mail_indexed_before_a_mail_key_rotation_is_still_found_after_it(
     the mail goes unfound and this test fails rather than passing on a re-index.
 
     Mail only: calendar events share the class, its manifest and its key, and
-    are witnessed by outcome 12's test below.
+    are witnessed by outcome 12's test below. The phone's shape is the twin
+    after this one.
 
     A dedicated actor, as `test_mail_credentials.py::
     test_calendar_written_before_a_key_rotation_still_opens` uses, so the
@@ -915,6 +917,130 @@ def test_mail_indexed_before_a_mail_key_rotation_is_still_found_after_it(
         )
     finally:
         reset_search_page(app)
+
+
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.real_conversations
+@pytest.mark.feature("private-search-index")
+def test_a_phone_finds_mail_a_desktop_seat_indexed_and_still_after_a_mail_key_rotation(
+    app, request, mail_bridge_mta, nest_instance, alice_builder_seats
+):
+    """`private-search-index` outcome 11 on a phone — the twin of the desktop
+    witness above in the phone's real shape (`content-index.md` § Build vs.
+    query: "phones receive the segments and query the synced copy"). A mail is
+    delivered to a dedicated actor whose phone enabled mail; a DESKTOP seat of
+    the same account, launched after it, inherits the mail key through the
+    `fauna.state.mail` plane, walks the mailbox (`content-index-ingest.md`
+    § Ingest triggers, v1 — the backfill IS the receive walk) and publishes;
+    the phone finds the mail in the synced index. The keys are then rotated
+    from the phone's Settings → Mail and the phone, relaunched COLD, finds the
+    mail again — only through a prior generation's key in the grace ring
+    (`owner-key-material.md` § Implementation status today, the mail/calendar
+    index-segment key), since the synced pre-rotation segment was sealed
+    under it.
+
+    A dedicated actor, so the rotation cannot move the shared ``test_user``'s
+    keys under a later test; the seat is launched as that actor."""
+    from conftest import _login_app_as, _make_user
+    from tests.test_search_local_index import SENDER_DOMAIN, _deliver_inbound
+
+    from helpers.budgets import ORCHESTRATION_STEP_S
+
+    phone = app
+    user = _make_user(nest_instance)
+    _login_app_as(phone, request, nest_instance, user, verify_live_actor=True)
+    phone.mail_settings.navigate()
+    phone.mail_settings.ensure_mail_enabled()
+
+    domain = mail_bridge_mta.domain
+    tag = uuid.uuid4().hex[:10]
+    recipient = add_exact_alias(
+        nest_instance["url"], user["signing_key"], domain, f"rotphone{tag}"
+    )
+    needle = f"prerotphone{tag}qx"
+    raw = "\r\n".join([
+        f"From: External Sender <sender@{SENDER_DOMAIN}>",
+        f"To: {recipient}",
+        f"Subject: Before the rotation {needle}",
+        f"Message-ID: <{needle}@{SENDER_DOMAIN}>",
+        "Date: Mon, 25 May 2026 12:00:00 +0000",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        f"The {needle} minutes from the planning meeting.",
+    ]) + "\r\n"
+    _deliver_inbound(
+        mail_bridge_mta.mx_port, domain, recipient, raw.encode(),
+        time.monotonic() + 40.0,
+    )
+    email = S.search_page.badge_email
+
+    # A builder comes online: its launch walks the whole mailbox.
+    desktop, _ = alice_builder_seats.launch(user=user, nest=nest_instance)
+    desktop.search.navigate()
+    try:
+        wait_until(
+            lambda: found(desktop, needle, email),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"the desktop seat never indexed the mail carrying {needle!r} — "
+                "its mail arm never walked the account's mailbox (no mail key "
+                f"through the mail plane?); rows={rows(desktop)} "
+                f"error={desktop.error_text()!r} bridge log: {mail_bridge_mta.log_file}"
+            ),
+        )
+    finally:
+        reset_search_page(desktop)
+
+    phone.search.navigate()
+    try:
+        wait_until(
+            lambda: found(phone, needle, email),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"sanity: the phone never found the mail carrying {needle!r} in "
+                f"the index the desktop published BEFORE the rotation; "
+                f"rows={rows(phone)} error={phone.error_text()!r}"
+            ),
+        )
+    finally:
+        reset_search_page(phone)
+
+    phone.mail_settings.navigate()
+    phone.mail_settings.rotate_keys()
+    # Settled on the page's own state (convention 14), as the desktop witness does.
+    assert phone.mail_settings.wait_for_rotation_to_finish(ORCHESTRATION_STEP_S), (
+        "rotate-keys never finished: the confirm form is still open; "
+        f"error: {phone.mail_settings.page_error_text(timeout=2.0)!r}"
+    )
+    err = phone.mail_settings.page_error_text(timeout=2.0)
+    assert not err, f"rotate-keys should complete without error; got {err!r}"
+    assert phone.mail_settings.wait_for_enabled_status(timeout=ORCHESTRATION_STEP_S), (
+        "rotate-keys must settle to up to date; "
+        f"status={phone.mail_settings.status_text()!r}"
+    )
+
+    # Cold: the ring the phone reads the synced class with can only come from
+    # the custody the rotation wrote.
+    assert phone.driver.recover(), "client process relaunch (driver.recover()) failed"
+    _login_app_as(phone, request, nest_instance, user, verify_live_actor=True)
+
+    phone.search.navigate()
+    try:
+        wait_until(
+            lambda: found(phone, needle, email),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"the mail carrying {needle!r}, found before the rotation, is not "
+                "found after it — the relaunched phone did not reopen the synced "
+                "pre-rotation mail/calendar manifest through the grace key ring "
+                f"(fauna_client_index::MailcalKeyRing); rows={rows(phone)} "
+                f"error={phone.error_text()!r}"
+            ),
+        )
+    finally:
+        reset_search_page(phone)
 
 
 def _open_event_result_and_see_its_detail(app, needle, summary):
@@ -1043,6 +1169,7 @@ def test_an_event_on_your_calendar_is_found_by_search_and_still_after_a_mail_key
 
 
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("private-search-index")
 def test_a_phone_finds_and_opens_an_event_a_desktop_seat_indexed_and_still_after_a_mail_key_rotation(
@@ -1060,8 +1187,7 @@ def test_a_phone_finds_and_opens_an_event_a_desktop_seat_indexed_and_still_after
     the phone, relaunched COLD, finds the event again.
 
     A dedicated actor, so the rotation cannot move the shared ``test_user``'s
-    keys under a later test; the seat is launched as that actor. android
-    joins with its own Events-page arm."""
+    keys under a later test; the seat is launched as that actor."""
     from datetime import datetime, timedelta
 
     from conftest import _login_app_as, _make_user

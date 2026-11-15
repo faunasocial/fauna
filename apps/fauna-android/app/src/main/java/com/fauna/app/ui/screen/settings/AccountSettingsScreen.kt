@@ -26,11 +26,14 @@ import com.fauna.app.ui.components.PushNotificationsSection
 import com.fauna.app.ui.components.RecoveryKitSection
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.shareFileBytes
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.AccountSettingsVM
 import kotlinx.coroutines.launch
 import social.fauna.generated.Ids
+import uniffi.fauna_core.UnsentChange
+import uniffi.fauna_core.UnsentState
 
 @Composable
 fun AccountSettingsScreen(
@@ -62,6 +65,12 @@ fun AccountSettingsScreen(
     val switchError by vm.switchError.collectAsState()
     val pendingActions by vm.pendingActions.collectAsState()
     val pendingActionsError by vm.pendingActionsError.collectAsState()
+    val unsentChanges by vm.unsentChanges.collectAsState()
+    val unsentDiscardArmed by vm.unsentDiscardArmed.collectAsState()
+    // The unsent-changes re-read edge (account-offline-mutation.md § The
+    // unsent-changes surface): every ~2 s while this page is composed, the
+    // loop cancelled with the composition.
+    LaunchedEffect(Unit) { vm.refreshUnsentChangesWhileShown() }
 
     val context = LocalContext.current
     val appMessages = LocalAppMessages.current
@@ -197,6 +206,11 @@ fun AccountSettingsScreen(
             vm.deleteAccount()
         },
         onCancelPendingAction = { vm.cancelPendingAction(it) },
+        unsentChanges = unsentChanges,
+        unsentDiscardArmed = unsentDiscardArmed,
+        onRetryUnsentChange = vm::retryUnsentChange,
+        onDiscardUnsentChange = vm::armUnsentDiscard,
+        onConfirmDiscardUnsentChange = vm::confirmUnsentDiscard,
         onShowSignOutDialog = { showSignOutDialog = true },
         onDismissSignOutDialog = { showSignOutDialog = false },
         onConfirmSignOut = {
@@ -287,6 +301,18 @@ fun AccountSettingsContent(
     // § Absolute local timestamp display) — the pending-action row's
     // execute-after text; injected FFI-free for the same reason.
     absoluteLocal: (Long) -> String = { com.fauna.app.ui.util.ValueFormat.absoluteLocal(it) },
+    // The standing unsent-changes section's rows ([UnsentChangesCard]; `null` =
+    // not read yet), the row whose discard is armed, and the three outbox doors.
+    unsentChanges: List<UnsentChange>? = null,
+    unsentDiscardArmed: String? = null,
+    onRetryUnsentChange: (String) -> Unit = {},
+    onDiscardUnsentChange: (String) -> Unit = {},
+    onConfirmDiscardUnsentChange: (String) -> Unit = {},
+    // The row's words — the shared describer's label and the shared state /
+    // reason text (`unsentChangeStateText` / `unsentChangeReasonText`),
+    // resolved; injected FFI-free for the Robolectric harness.
+    describeUnsentChange: (UnsentChange) -> String = unsentDescriber(),
+    unsentChangeStatus: (UnsentChange) -> String = unsentStatusLine(),
     // The stateful Recovery kit section ([RecoveryKitSection], VM-backed) —
     // supplied by [AccountSettingsScreen]; empty under the Content harness.
     recoveryKitSection: @Composable () -> Unit = {},
@@ -454,6 +480,19 @@ fun AccountSettingsContent(
                 describePendingAction = describePendingAction,
                 absoluteLocal = absoluteLocal,
             )
+
+            // Unsent changes (account-offline-mutation.md § The unsent-changes
+            // surface, point 1) — STANDING, right after its sibling pending
+            // actions and in its shape. Mirrors tui's unsent_changes_elements.
+            UnsentChangesCard(
+                unsentChanges = unsentChanges,
+                discardArmed = unsentDiscardArmed,
+                onRetry = onRetryUnsentChange,
+                onDiscard = onDiscardUnsentChange,
+                onConfirmDiscard = onConfirmDiscardUnsentChange,
+                describe = describeUnsentChange,
+                status = unsentChangeStatus,
+            )
         }
     }
 
@@ -606,6 +645,117 @@ fun PendingActionsCard(
                     },
                     modifier = Modifier.testTag(Ids.PENDING_ACTION_ITEM),
                 )
+            }
+        }
+    }
+}
+
+/**
+ * An unsent change's kind and target in words — the shared describer's label
+ * ([UnsentChange.description]), resolved here and composed nowhere else.
+ */
+@Composable
+fun unsentDescriber(): (UnsentChange) -> String {
+    val context = LocalContext.current
+    return { row -> resolveLocalized(context, row.description.label) ?: row.kind }
+}
+
+/**
+ * An unsent change's state line: the shared state text
+ * (`com.fauna.ffi.unsentChangeStateText`) and, on a row that says why it was
+ * not sent, the shared reason (`unsentChangeReasonText`) through
+ * `settings.unsent_changes.status_with_reason`. Never re-derived here.
+ */
+@Composable
+fun unsentStatusLine(): (UnsentChange) -> String {
+    val context = LocalContext.current
+    return { row ->
+        val state = resolveLocalized(context, com.fauna.ffi.unsentChangeStateText(row)).orEmpty()
+        val reason = resolveLocalized(context, com.fauna.ffi.unsentChangeReasonText(row))
+        if (reason == null) state
+        else context.getString(R.string.settings_unsent_changes_status_with_reason)
+            .replace("{state}", state)
+            .replace("{reason}", reason)
+    }
+}
+
+/**
+ * The STANDING `unsent-changes-section` (`account-offline-mutation.md` § The
+ * offline-mutation contract → *The unsent-changes surface*, point 1;
+ * ui.yaml's seven `unsent-change*` ids) — [PendingActionsCard]'s sibling and
+ * shape: always present, its title answering in all three states (the bare
+ * title before the first read, the empty line once read and empty, the
+ * counted title with rows). One `unsent-change-item` per change in the shared
+ * model's order, its description and status line from the shared describer.
+ * Retry and discard are offered on a NOT-SENT row only; discard arms a
+ * confirm on that row first. Mirrors tui's `unsent_changes_elements`.
+ */
+@Composable
+fun UnsentChangesCard(
+    unsentChanges: List<UnsentChange>?,
+    discardArmed: String?,
+    onRetry: (String) -> Unit,
+    onDiscard: (String) -> Unit,
+    onConfirmDiscard: (String) -> Unit,
+    describe: (UnsentChange) -> String = unsentDescriber(),
+    status: (UnsentChange) -> String = unsentStatusLine(),
+) {
+    val title = when {
+        unsentChanges == null -> stringResource(R.string.settings_unsent_changes_title)
+        unsentChanges.isEmpty() -> stringResource(R.string.settings_unsent_changes_none)
+        else -> stringResource(R.string.settings_unsent_changes_title_count)
+            .replace("{count}", unsentChanges.size.toString())
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.testTag(Ids.UNSENT_CHANGES_SECTION),
+            )
+            unsentChanges?.forEach { row ->
+                val notSent = row.state is UnsentState.Unsent
+                Spacer(Modifier.height(8.dp))
+                Column(modifier = Modifier.fillMaxWidth().testTag(Ids.UNSENT_CHANGE_ITEM)) {
+                    Text(
+                        describe(row),
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.testTag(Ids.UNSENT_CHANGE_DESCRIPTION),
+                    )
+                    Text(
+                        status(row),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(Ids.UNSENT_CHANGE_STATUS),
+                    )
+                    if (notSent) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(
+                                onClick = { onRetry(row.intentId) },
+                                modifier = Modifier.testTag(Ids.UNSENT_CHANGE_RETRY_BUTTON),
+                            ) {
+                                Text(stringResource(R.string.settings_unsent_changes_retry))
+                            }
+                            TextButton(
+                                onClick = { onDiscard(row.intentId) },
+                                modifier = Modifier.testTag(Ids.UNSENT_CHANGE_DISCARD_BUTTON),
+                            ) {
+                                Text(stringResource(R.string.settings_unsent_changes_discard))
+                            }
+                            if (discardArmed == row.intentId) {
+                                TextButton(
+                                    onClick = { onConfirmDiscard(row.intentId) },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = MaterialTheme.colorScheme.error,
+                                    ),
+                                    modifier = Modifier.testTag(Ids.UNSENT_CHANGE_DISCARD_CONFIRM_BUTTON),
+                                ) {
+                                    Text(stringResource(R.string.settings_unsent_changes_discard_confirm))
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

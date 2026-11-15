@@ -15,8 +15,15 @@ daemon as a reader (``tests/platform/sync/test_catchup_permanent_skip.py`` and
 ``test_orchestrator.py``), which has since been removed
 (``architecture/apps/sync-agent.md`` § Headless deployment). The engine under
 test is the same ``fauna-sync-engine``; the seat that runs it is now an app's
-own ``fauna-sync-agent``: tui, the lead app, and macOS through the ``native``
-seat (``helpers/sync_seats.py``).
+own ``fauna-sync-agent``: tui, the lead app, and macOS, linux and windows
+through the ``native`` seat (``helpers/sync_seats.py``).
+
+**A windows seat is an on-demand root.** Every windows binding is a cfapi sync
+root, so a windows seat receives through the placeholder fold, never
+``pull_remote_changes``: a restarted seat's catch-up is the fold's whole-log
+read, and a backup place's kept file is the fold's delete declined
+(``SyncEngine::apply_folded_delete``). The skipped change and the edits made
+apart stay owed on windows (``SKIP_OWED``, ``APART_OWED``).
 
 The flow every test here asserts::
 
@@ -75,19 +82,42 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.macos,
     pytest.mark.linux,
+    pytest.mark.windows,
 ]
 
-# This journey's own owed legs, in `sync_seats.UNBUILT_MODES`' shape: tui,
-# macOS and linux run it; the windows native leg below lands with its app's
-# trickle-down, and landing deletes its entry.
-OWED_SEATS: dict = {
-    "win32": {"native": "the windows leg of `local-folder-sync` has not landed"},
+# Two tests' own owed legs, in `sync_seats.UNBUILT_MODES`' shape. Landing a
+# leg deletes its test's entry.
+#
+# The skip: an on-demand root's placeholder fold has no apply stage to refuse
+# in — it places a placeholder for content it never fetched, so content that
+# does not address its hash surfaces only when the file is opened, and it
+# drops a change whose path it cannot open without reporting it
+# (`SyncEngine::record_placeholders_from_changes`), where `conflicts.md`
+# § Skipped catch-up changes reach the review list names the resident sites
+# alone.
+SKIP_OWED: dict = {
+    "win32": {
+        "native": (
+            "a windows seat is an on-demand (cfapi) root, whose placeholder fold "
+            "neither refuses content that does not address its hash nor reports "
+            "a path it cannot open"
+        ),
+    },
+}
+# The apart edits: owed as before; no windows run has read this leg yet.
+APART_OWED: dict = {
+    "win32": {"native": "the windows leg of `local-folder-sync` outcome 25 has not landed"},
 }
 
-_SEAT_PAIRS = [
-    pytest.param(pair, id=sync_seats.seat_set_param_id(pair))
-    for pair in sync_seats.seat_sets_for_platform(sys.platform, unbuilt=OWED_SEATS)
-]
+
+def _seat_pairs(unbuilt=None) -> list:
+    return [
+        pytest.param(pair, id=sync_seats.seat_set_param_id(pair))
+        for pair in sync_seats.seat_sets_for_platform(sys.platform, unbuilt=unbuilt)
+    ]
+
+
+_SEAT_PAIRS = _seat_pairs()
 
 # Ceilings a green run never pays (convention 14).
 STARTUP_WINDOW = 180.0
@@ -249,7 +279,7 @@ def _upload_chunk_and_manifest(base: str, token: str, data: bytes, *,
 
 
 @pytest.mark.timeout(int(3 * STARTUP_WINDOW + 5 * WINDOW + 120))
-@pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
+@pytest.mark.parametrize("seat_pair", _seat_pairs(SKIP_OWED))
 @pytest.mark.feature("local-folder-sync")
 def test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest(
     nest_instance, request, seat_pair
@@ -497,7 +527,7 @@ _MARKERS = (b"<<<<<<<", b"=======", b">>>>>>>")
 
 
 @pytest.mark.timeout(int(2 * STARTUP_WINDOW + 8 * WINDOW + 120))
-@pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
+@pytest.mark.parametrize("seat_pair", _seat_pairs(APART_OWED))
 @pytest.mark.feature("local-folder-sync")
 def test_edits_made_apart_merge_cleanly_or_resolve_newest_wins_without_markers(
     nest_instance, request, seat_pair

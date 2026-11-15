@@ -98,7 +98,7 @@ fn admit_rate(
     now: u64,
 ) -> anyhow::Result<bool> {
     let actor_hex = hex::encode(account);
-    let (window_start, count): (u64, u32) = conn
+    let (window_start, count): (i64, u32) = conn
         .query_row(
             &format!(
                 "SELECT window_start, window_count FROM {table}
@@ -109,6 +109,7 @@ fn admit_rate(
         )
         .optional()?
         .unwrap_or((0, 0));
+    let window_start = u64::try_from(window_start)?;
     let Ok(next) = (RateWindow {
         window_start,
         count,
@@ -124,7 +125,12 @@ fn admit_rate(
              DO UPDATE SET window_start = excluded.window_start,
                            window_count = excluded.window_count"
         ),
-        params![actor_hex, principal_id, next.window_start, next.count],
+        params![
+            actor_hex,
+            principal_id,
+            i64::try_from(next.window_start)?,
+            next.count
+        ],
     )?;
     Ok(true)
 }
@@ -143,7 +149,7 @@ pub(crate) fn count_use(
             "UPDATE {table} SET use_count = use_count + 1, last_used_at = ?3
               WHERE actor_id = ?1 AND principal_id = ?2"
         ),
-        params![hex::encode(account), principal_id, now],
+        params![hex::encode(account), principal_id, i64::try_from(now)?],
     )?;
     Ok(())
 }

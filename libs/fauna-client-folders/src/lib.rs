@@ -117,6 +117,13 @@ pub use engine_binding::{
     resolve_engine_key_binding, resolve_engine_key_bindings, resolve_foreign_engine_key_bindings,
     retired_serve_custody,
 };
+// Which sets an engine on this device holds — the predicate the projection
+// walk's take-over asks before it claims an adoption marker
+// (`succession-cut.md` ruling (11)(l)); the desktop roster is the sync agent's.
+pub mod engine_bound;
+#[cfg(all(feature = "mls", not(target_arch = "wasm32"), any(unix, windows)))]
+pub use engine_bound::agent_bound_sets;
+pub use engine_bound::{EngineBoundSets, EngineHoldings};
 // The impure companion to `engine_binding`: read the folder-keys custody +
 // list folders + resolve every set's engine keys. The single content-key **produce** path,
 // credential-agnostic — the share host's pump on the seed arm, the desktop sync
@@ -132,10 +139,11 @@ pub use engine_keys::{
 // a capability host, decision 1′).
 pub mod key_reader;
 pub use key_reader::{
-    ADOPTION_MARKERS_META_KEY, CustodyNotices, FolderKeyReader, FolderKeyStore,
-    MemoryFolderKeyStore, UnreadableFolderKeys, custody_not_ready, decode_adoption_markers,
-    decode_refetch_request, encode_adoption_markers, encode_refetch_request,
-    refetch_request_meta_key,
+    ADOPTION_MARKERS_META_KEY, ADOPTION_WALKS_META_KEY, AdoptionWalk, CustodyNotices,
+    FolderKeyReader, FolderKeyStore, MemoryFolderKeyStore, UnreadableFolderKeys, custody_not_ready,
+    decode_adoption_markers, decode_adoption_walks, decode_refetch_request,
+    encode_adoption_markers, encode_adoption_walks, encode_refetch_request,
+    refetch_request_meta_key, upsert_adoption_walk,
 };
 /// The custody seam's crossing of web's account port.
 pub mod port;
@@ -161,9 +169,15 @@ pub use owned_set_names::{CustodyOwnedSetNames, read_owned_set_names};
 #[cfg(feature = "mls")]
 pub mod custody_ingest;
 #[cfg(feature = "mls")]
-pub use custody_ingest::{
-    FolderCustodyObserver, NestFolderCustodySink, NestFolderKeyResolver, record_signing,
-};
+pub use custody_ingest::{FolderCustodyObserver, NestFolderCustodySink, record_signing};
+// The shared-folder content-key resolver (name or identity → custody) touches
+// no MLS — a roster read + a custody read — so it carries its own feature,
+// which `mls` implies: the bearer-only sync agent renders sealed set names
+// through it without linking the MLS graph.
+#[cfg(feature = "nest-resolver")]
+pub mod key_resolver;
+#[cfg(feature = "nest-resolver")]
+pub use key_resolver::{NestFolderKeyResolver, PinnedFolderKeyResolver};
 // Leave a shared set: nest roster self-drop + local MLS-group forget. `mls`-gated
 // (drives `FaunaMlsBackend`'s home read and forget); builds on wasm too — web's
 // `foldersLeave` runs this same sequence (priority #2).
@@ -184,7 +198,7 @@ pub mod orchestration;
 #[cfg(feature = "mls")]
 pub mod served_reseal;
 #[cfg(feature = "mls")]
-pub use served_reseal::served_set_converge;
+pub use served_reseal::{served_set_converge, succession_take_over};
 // (The sentinel-gated pre-bind re-seal driver that once lived beside
 // `orchestration` — `reseal::run_pending_reseal` — was retired 2026-09-25: the
 // pass is the sync agent's ungated, idempotent

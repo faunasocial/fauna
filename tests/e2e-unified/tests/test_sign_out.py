@@ -41,7 +41,7 @@ import time
 
 import pytest
 
-from common.cred_store import attach_account_store, attach_cred_store
+from common.cred_store import INSTALL_DEVICE_SECRET_SLOT, attach_account_store, attach_cred_store
 from common.scope_store import attach_scope_store
 from helpers import app_surface
 from helpers.relaunch import pin_store_across_relaunch
@@ -1086,7 +1086,9 @@ _RECORD_WRITTEN_BUDGET_S = 15.0
 def _install_base(driver):
     """The install base a native seat keeps its records under — its flat erase
     base: tui's `<XDG_CONFIG_HOME>/fauna-tui`, linux's `<XDG_CONFIG_HOME>/fauna`
-    (`_serving_locks`)."""
+    (`_serving_locks`), windows' pinned data dir (`AccountStateDir.Base`),
+    android's on-device `files` (`filesDir`) — read through the store's
+    :meth:`ScopeStore.exists`, never a host ``Path.exists()``."""
     return attach_scope_store(app_surface.app_name(driver), driver).scope_roots()[0]
 
 
@@ -1120,6 +1122,9 @@ def test_a_launch_after_the_app_died_mid_sign_out_finishes_the_sign_out(
     from helpers.waiting import wait_until
 
     driver = app.driver
+    # The kill inside the stop is the driver's own primitive; an app whose
+    # driver has none is unbuilt for this witness, never a vacuous pass.
+    app_surface.require_surface(driver, "unclean-kill")
     client = app_surface.app_name(driver)
     user = _make_user(stoppable_nest)
     actor = user["actor_id_hex"]
@@ -1135,11 +1140,14 @@ def test_a_launch_after_the_app_died_mid_sign_out_finishes_the_sign_out(
     )
     base = _install_base(driver)
     record = base / _SIGN_OUT_RECORD_FILE
+    # android's records are on-device: every existence read goes through the
+    # scope store, which asks the device there and the host filesystem elsewhere.
+    on_disk = attach_scope_store(client, driver).exists
 
     stoppable_nest["stop"]()
     app.settings.press_sign_out()
     wait_until(
-        record.exists,
+        lambda: on_disk(record),
         _RECORD_WRITTEN_BUDGET_S,
         interval=0.05,
         diagnose=lambda: (
@@ -1150,7 +1158,7 @@ def test_a_launch_after_the_app_died_mid_sign_out_finishes_the_sign_out(
     )
     driver.kill_uncleanly()
 
-    assert record.exists(), "precondition: the dead process left its sign-out record"
+    assert on_disk(record), "precondition: the dead process left its sign-out record"
     assert secret_slot in creds.stored_accounts(), (
         "precondition: the kill must land inside the sign-out's stop, before the "
         "wipe — the secret was already gone, so this run would prove nothing about "
@@ -1167,11 +1175,16 @@ def test_a_launch_after_the_app_died_mid_sign_out_finishes_the_sign_out(
     def finished():
         last.clear()
         last.update(
-            slots=sorted(creds.stored_accounts() - {"signed-out/v1"}),
+            # Install-scoped rows name no account and a sign-out never takes them:
+            # the signed-out marker, and the install device secret an app with one
+            # secret store keeps beside the identity rows (windows; apple).
+            slots=sorted(
+                creds.stored_accounts() - {"signed-out/v1", INSTALL_DEVICE_SECRET_SLOT}
+            ),
             shared_slots=sorted(k for k in shared.stored_accounts() if actor in k),
-            scopes=[str(r / actor) for r in roots if (r / actor).exists()],
-            record=record.exists(),
-            residue=(base / _SIGN_OUT_RESIDUE_FILE).exists(),
+            scopes=[str(r / actor) for r in roots if on_disk(r / actor)],
+            record=on_disk(record),
+            residue=on_disk(base / _SIGN_OUT_RESIDUE_FILE),
         )
         return not any(last.values())
 

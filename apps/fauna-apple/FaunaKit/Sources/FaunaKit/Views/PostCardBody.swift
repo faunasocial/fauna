@@ -378,6 +378,7 @@ public struct PostCardBody: View {
                         quoteCount: Int(post.quoteCount),
                         likeCount: Int(post.likeCount),
                         isLiked: post.viewerLiked,
+                        likeState: post.likeState,
                         isReposted: post.viewerRepostId != nil,
                         onReply: onReply,
                         onRepost: { Task { await vm.repostPost(postId: post.postId) } },
@@ -406,6 +407,7 @@ public struct PostCardBody: View {
                     reportTarget: isOwn ? nil : reportPostTarget(
                         cid: post.postId, author: post.author, plaintext: post.body,
                         gated: post.gatedTier != nil || post.gatedRoom != nil),
+                    post: post, viewer: appState.session.actorId ?? "",
                     onNavigateToPersonalization: onNavigateToPersonalization)
             }
             .padding(.vertical, verticalPadding)

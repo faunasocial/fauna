@@ -228,6 +228,7 @@ async fn restore_file_version_on_a_resident_root_writes_the_restored_bytes_throu
             fauna_sync_engine::access_gate::AccessGate::new(),
             Some(Arc::clone(&signer)),
             Arc::new(fauna_client_folders::MemoryFolderKeyStore::default()),
+            fauna_sync_engine::engine_lifecycle::ReaderHosting::Refuse,
         ),
         fauna_sync_engine::engine_lifecycle::ResolvedBinding {
             folder: FOLDER.to_string(),

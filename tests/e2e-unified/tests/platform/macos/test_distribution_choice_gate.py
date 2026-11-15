@@ -52,6 +52,8 @@ import plistlib
 import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import quoteattr
 
 import pytest
 
@@ -230,4 +232,136 @@ def test_a_machine_exactly_AT_the_floor_is_admitted(tmp_path):
     )
     assert choice["choiceIsSelected"] == 1, (
         f"a machine exactly at the floor got the app choice unselected: {choice}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bridge requires Nest — the Windows-parity auto-deselect
+# ---------------------------------------------------------------------------
+#
+# installers/windows.md § Feature Tree: "If the user deselects Nest Service,
+# Bridge Service is automatically deselected as well." On macOS that is the
+# bridge choice's `enabled=` / `selected=` JavaScript in distribution.xml. Like
+# the app floor above, it is code only Apple's installer runs, so the proof hands
+# the shipped attributes to `installer -showChoicesAfterApplyingChangesXML`,
+# which applies a sequence of choice changes the way GUI clicks would and prints
+# the evaluated state (read-only, unprivileged, ~1 s). Measured while writing
+# this (2026-11-11): the tool does re-evaluate `selected=` on another choice's
+# change, so the Installer-window check this used to need is not needed.
+#
+# One edge the measurement also showed, and that is deliberate, not a gap: a
+# change list that sets bridge=1 directly while nest stays 0 leaves bridge
+# selected (the choice being changed takes the value it is given; only the
+# *other* choices' expressions re-run). In the GUI that click cannot happen — the
+# `enabled=` gate greys Bridge out while Nest is unticked — so only a scripted
+# install that names bridge alone gets bridge alone, which is that script's own
+# explicit choice.
+
+NEST = "social.fauna.nest"
+BRIDGE = "social.fauna.bridge"
+
+
+def _shipped_choice_attrs(choice_id: str) -> dict:
+    path = os.path.join(_repo_root(), "installer", "macos", "distribution.xml")
+    for choice in ET.parse(path).getroot().iter("choice"):
+        if choice.get("id") == choice_id:
+            return dict(choice.attrib)
+    raise AssertionError(f"{path} has no choice {choice_id!r}")
+
+
+def _nest_bridge_probe(tmp_path, bridge_attrs: dict, name: str) -> str:
+    """A payload-free archive with the shipped nest + bridge choices, verbatim."""
+
+    def element(attrs: dict) -> str:
+        return "<choice " + " ".join(f"{k}={quoteattr(v)}" for k, v in attrs.items()) + "/>"
+
+    dist = tmp_path / f"{name}.xml"
+    dist.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<installer-gui-script minSpecVersion="2">\n'
+        f"    <title>{name}</title>\n"
+        '    <options customize="always" require-scripts="false" hostArchitectures="arm64"/>\n'
+        f'    <choices-outline><line choice="{NEST}"/><line choice="{BRIDGE}"/></choices-outline>\n'
+        f"    {element(_shipped_choice_attrs(NEST))}\n"
+        f"    {element(bridge_attrs)}\n"
+        "</installer-gui-script>\n",
+        encoding="utf-8",
+    )
+    pkg = tmp_path / f"{name}.pkg"
+    out = subprocess.run(["productbuild", "--distribution", str(dist), str(pkg)],
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, f"productbuild rejected the probe:\n{out.stderr}\n{dist.read_text()}"
+    return str(pkg)
+
+
+def _after_changes(tmp_path, pkg: str, changes: list[tuple[str, int]]) -> dict:
+    """{choice: {attribute: value}} after applying `changes` in order, as macOS evaluates them."""
+    path = tmp_path / "changes.plist"
+    path.write_bytes(plistlib.dumps([
+        {"choiceIdentifier": cid, "choiceAttribute": "selected", "attributeSetting": value}
+        for cid, value in changes
+    ]))
+    out = subprocess.run(
+        ["installer", "-showChoicesAfterApplyingChangesXML", str(path), "-pkg", pkg, "-target", "/"],
+        capture_output=True, timeout=120,
+    )
+    assert out.returncode == 0, (
+        f"installer -showChoicesAfterApplyingChangesXML failed ({out.returncode}); an "
+        f"expression that raises shows up here:\n{out.stderr.decode(errors='replace')}"
+    )
+    state: dict = {}
+    for item in plistlib.loads(out.stdout):
+        state.setdefault(item["choiceIdentifier"], {})[item["choiceAttribute"]] = item["attributeSetting"]
+    assert NEST in state and BRIDGE in state, f"evaluated state lacks a choice: {state}"
+    return state
+
+
+def test_the_shipped_bridge_choice_carries_a_nest_gate():
+    """The static half: the attributes the behavioural probes below exercise are there."""
+    bridge = _shipped_choice_attrs(BRIDGE)
+    assert NEST in bridge.get("enabled", ""), (
+        f"the bridge choice's enabled= no longer depends on {NEST}: {bridge}"
+    )
+    assert NEST in bridge.get("selected", ""), (
+        f"the bridge choice's selected= no longer depends on {NEST}: {bridge}"
+    )
+    assert bridge.get("start_selected") == "false", f"bridge must default unselected: {bridge}"
+
+
+def test_ticking_both_server_components_keeps_both(tmp_path):
+    """The gate must not get in the way of the install it exists for."""
+    pkg = _nest_bridge_probe(tmp_path, _shipped_choice_attrs(BRIDGE), "both")
+    state = _after_changes(tmp_path, pkg, [(NEST, 1), (BRIDGE, 1)])
+    assert state[NEST]["selected"] == 1 and state[BRIDGE]["selected"] == 1, (
+        f"with Nest and Bridge both ticked, the shipped gate dropped one: {state}"
+    )
+    assert state[BRIDGE]["enabled"] is True, f"Bridge greyed out while Nest is ticked: {state}"
+
+
+def test_unticking_nest_unticks_and_greys_out_bridge(tmp_path):
+    """Windows parity: deselect Nest → Bridge is deselected too (and cannot be re-ticked)."""
+    pkg = _nest_bridge_probe(tmp_path, _shipped_choice_attrs(BRIDGE), "nestoff")
+    state = _after_changes(tmp_path, pkg, [(NEST, 1), (BRIDGE, 1), (NEST, 0)])
+    assert state[BRIDGE]["selected"] == 0, (
+        "unticking Nest left Bridge ticked — the selected= expression is not "
+        f"re-evaluated or has the wrong shape (windows.md § Feature Tree parity): {state}"
+    )
+    assert state[BRIDGE]["enabled"] is False, (
+        f"Bridge stays tickable with Nest unticked — the enabled= gate is inert: {state}"
+    )
+
+
+def test_without_the_gate_bridge_would_stay_ticked(tmp_path):
+    """The control: the same click sequence on the bridge choice minus its gate.
+
+    Without it, the probe above could pass because the tool simply reports a
+    choice unselected after any change; this shows the deselect is the gate's.
+    """
+    ungated = {k: v for k, v in _shipped_choice_attrs(BRIDGE).items()
+               if k not in ("enabled", "selected")}
+    pkg = _nest_bridge_probe(tmp_path, ungated, "ungated")
+    state = _after_changes(tmp_path, pkg, [(NEST, 1), (BRIDGE, 1), (NEST, 0)])
+    assert state[BRIDGE]["selected"] == 1, (
+        "even without the gate Bridge came back unticked, so the deselect probe "
+        f"proves nothing about the shipped expression: {state}"
     )

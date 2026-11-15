@@ -30,39 +30,92 @@ namespace FaunaApp.Services;
 /// nothing else changes: the first failure is logged once as <c>[badge]</c> (the e2e
 /// witness folds the app log into its failure message) and every later push is
 /// skipped, so a headless launch never pays a throwing WinRT call per snapshot.</para>
+///
+/// <para><b>One account at a time.</b> An actor change — sign-out, switch, factory
+/// reset — calls <see cref="EndAccount"/> before the outgoing account's conversations
+/// manager is swapped out (<c>ConversationsManagerHost.ResetForActorChange</c>): the
+/// badge is cleared at once, and a reading that manager's observer still has in flight
+/// is dropped by its <see cref="TaskbarBadgeTracker.Generation"/>. The decide-and-push
+/// is one step under <see cref="Gate"/>, so such a reading can never land between the
+/// clear and the next account's first push.</para>
 /// </summary>
 internal static class TaskbarBadgeService
 {
     private static readonly TaskbarBadgeTracker Tracker = new();
+    private static readonly object Gate = new();
     private static volatile bool _unavailable;
 
     /// <summary>
-    /// Push <paramref name="unreadTotal"/> to the taskbar badge, or clear it at zero.
-    /// Safe from any thread (the badge updater is agile); cheap on a repeat.
+    /// The account the badge belongs to now. A reader of the unread fold takes it once,
+    /// when it is built (<c>UnreadBadgeObserver</c>, one per conversations manager), and
+    /// hands it to every <see cref="Publish"/>.
     /// </summary>
-    internal static void Publish(uint unreadTotal)
+    internal static long Generation => Tracker.Generation;
+
+    /// <summary>
+    /// Push <paramref name="unreadTotal"/>, read for the account of
+    /// <paramref name="generation"/>, to the taskbar badge, or clear it at zero; a
+    /// reading of an account that has since ended is dropped. Safe from any thread (the
+    /// badge updater is agile); cheap on a repeat.
+    /// </summary>
+    internal static void Publish(uint unreadTotal, long generation)
     {
         if (_unavailable) return;
-        if (!Tracker.ShouldPush(unreadTotal)) return;
-        try
+        lock (Gate)
         {
-            var updater = BadgeUpdateManager.CreateBadgeUpdaterForApplication();
-            var payload = TaskbarBadgePolicy.Payload(unreadTotal);
-            if (payload is null)
+            if (_unavailable) return;
+            if (!Tracker.ShouldPush(unreadTotal, generation)) return;
+            try
             {
-                updater.Clear();
-                return;
+                var updater = BadgeUpdateManager.CreateBadgeUpdaterForApplication();
+                var payload = TaskbarBadgePolicy.Payload(unreadTotal);
+                if (payload is null)
+                {
+                    updater.Clear();
+                    return;
+                }
+                var xml = new XmlDocument();
+                xml.LoadXml(payload);
+                updater.Update(new BadgeNotification(xml));
             }
-            var xml = new XmlDocument();
-            xml.LoadXml(payload);
-            updater.Update(new BadgeNotification(xml));
+            catch (Exception ex)
+            {
+                MarkUnavailable(ex);
+            }
         }
-        catch (Exception ex)
+    }
+
+    /// <summary>
+    /// The signed-in account ended (sign-out, switch, factory reset): take its count off
+    /// the taskbar now, drop every reading still in flight for it, and let the next
+    /// account's first reading push whatever it is. Without this the OS would keep the
+    /// signed-out account's count on the button — it holds a badge across process exits
+    /// — because nothing reads the fold again until the next account's manager is built,
+    /// and after a sign-out none is.
+    /// </summary>
+    internal static void EndAccount()
+    {
+        lock (Gate)
         {
-            _unavailable = true;
-            ShellLog.Warn("TaskbarBadge",
-                $"[badge] taskbar badge unavailable (no package identity in this launch shape?): "
-                + $"{ex.GetType().Name}: {ex.Message}");
+            Tracker.EndAccount();
+            if (_unavailable) return;
+            try
+            {
+                BadgeUpdateManager.CreateBadgeUpdaterForApplication().Clear();
+                ShellLog.Info("TaskbarBadge", "[badge] cleared: the signed-in account ended");
+            }
+            catch (Exception ex)
+            {
+                MarkUnavailable(ex);
+            }
         }
+    }
+
+    private static void MarkUnavailable(Exception ex)
+    {
+        _unavailable = true;
+        ShellLog.Warn("TaskbarBadge",
+            $"[badge] taskbar badge unavailable (no package identity in this launch shape?): "
+            + $"{ex.GetType().Name}: {ex.Message}");
     }
 }

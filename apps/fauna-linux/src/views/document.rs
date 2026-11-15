@@ -667,6 +667,9 @@ fn build_attachment(
         placeholder.set_halign(gtk::Align::Start);
         placeholder.set_child(Some(&label));
         crate::testid::set_test_id(&placeholder, ids::DM_ATTACHMENT_IMAGE);
+        // A button whose label is a child widget has no `label` property, so the
+        // automation's text read would come back empty: declare the text it shows.
+        crate::testid::set_test_text(&placeholder, &declared);
         placeholder.connect_clicked(move |b| {
             let parent = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             crate::views::lightbox::show_image_lightbox_placeholder(

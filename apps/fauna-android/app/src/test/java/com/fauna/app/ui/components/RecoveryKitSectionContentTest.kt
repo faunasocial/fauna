@@ -13,6 +13,8 @@ import com.fauna.app.core.AftermathProgress
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.app.ui.viewmodel.RecoveryKitUiState
 import com.fauna.ffi.FfiDeadGenerations
+import com.fauna.ffi.FfiOwedNestEntry
+import com.fauna.ffi.FfiOwedNestsView
 import com.fauna.ffi.FfiRecoveryKitStatus
 import com.fauna.ffi.FfiSweepCopy
 import com.fauna.ffi.FfiSweepView
@@ -446,6 +448,73 @@ class RecoveryKitSectionContentTest {
         node(Ids.RECOVERY_KIT_LET_GO_BUTTON).assertIsEnabled()
         node(Ids.RECOVERY_KIT_LET_GO_BUTTON).performSemanticsAction(SemanticsActions.OnClick)
         assertEquals(listOf("let-go"), clicks)
+    }
+
+    // ── The successor's owed nests ──────────────────────────────────────────
+
+    private val owedEntry = FfiOwedNestEntry(
+        keeper = null,
+        oldActorId = ByteArray(32) { 1 },
+        nestId = ByteArray(32) { 2 },
+        addressCopy = LocalizedText("settings.recovery_kit.owed_nest_address", mapOf("address" to "https://owed.example")),
+        outcomeCopy = LocalizedText("settings.recovery_kit.owed_nest_not_tried", emptyMap()),
+        outcomeKind = "not-tried",
+    )
+    private val owedView = FfiOwedNestsView(
+        LocalizedText("settings.recovery_kit.owed_nests_status", mapOf("count" to "1")),
+        listOf(owedEntry),
+    )
+    private val owedArms = mutableListOf<FfiOwedNestEntry?>()
+
+    private fun renderOwed(state: RecoveryKitUiState) {
+        composeTestRule.setContent {
+            RecoveryKitSectionContent(
+                state = state,
+                onPhraseChange = {},
+                onCreate = {},
+                onReplace = {},
+                onLost = {},
+                onEscrowReseal = {},
+                onVeto = {},
+                onOwedDismissArm = { owedArms += it },
+                onOwedDismissConfirm = { clicks += "owed-confirm" },
+                pendingDays = { 12 },
+                qrMatrixOf = { null },
+            )
+        }
+    }
+
+    @Test
+    fun nothingOwedPaintsNoneOfTheSevenIds() {
+        renderOwed(RecoveryKitUiState(status = status("registered")))
+
+        assertAbsent(Ids.RECOVERY_KIT_OWED_NESTS_STATUS)
+        assertAbsent(Ids.RECOVERY_KIT_OWED_NEST_ITEM)
+    }
+
+    @Test
+    fun anOwedEntryRendersItsSharedLinesAndArmsTheDismiss() {
+        renderOwed(RecoveryKitUiState(status = status("registered"), owedNests = owedView))
+
+        node(Ids.RECOVERY_KIT_OWED_NESTS_STATUS).assertExists()
+        node(Ids.RECOVERY_KIT_OWED_NEST_ADDRESS).assertTextContains("https://owed.example")
+        node(Ids.RECOVERY_KIT_OWED_NEST_OUTCOME).assertTextContains("not tried", substring = true)
+        assertAbsent(Ids.RECOVERY_KIT_OWED_NEST_DISMISS_CONFIRM_BUTTON)
+        node(Ids.RECOVERY_KIT_OWED_NEST_DISMISS_BUTTON).performSemanticsAction(SemanticsActions.OnClick)
+        assertEquals(listOf<FfiOwedNestEntry?>(owedEntry), owedArms)
+    }
+
+    @Test
+    fun anArmedEntryOffersConfirmAndCancel() {
+        renderOwed(
+            RecoveryKitUiState(status = status("registered"), owedNests = owedView, owedDismissPending = owedEntry),
+        )
+
+        assertAbsent(Ids.RECOVERY_KIT_OWED_NEST_DISMISS_BUTTON)
+        node(Ids.RECOVERY_KIT_OWED_NEST_DISMISS_CONFIRM_BUTTON).performSemanticsAction(SemanticsActions.OnClick)
+        assertEquals(listOf("owed-confirm"), clicks)
+        node(Ids.RECOVERY_KIT_OWED_NEST_DISMISS_CANCEL_BUTTON).performSemanticsAction(SemanticsActions.OnClick)
+        assertEquals(listOf<FfiOwedNestEntry?>(null), owedArms)
     }
 
     @Test

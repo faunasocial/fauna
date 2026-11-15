@@ -198,8 +198,8 @@ def main(argv=None) -> int:
     w.add_argument("--static", type=Path)
     # A tree built inside the image's Dockerfile was compiled by the stage's
     # pinned clang, which the host running this script does not hold: the
-    # build exports that clang's `--version` output (the `wasm32-cc-version`
-    # stage) and the workflow hands it here, so the manifest records the
+    # build exports that clang's `--version` output (the `web-export`
+    # stage, beside the tree) and the workflow hands it here, so the manifest records the
     # compiler that built the tree, never a probe of the host.
     w.add_argument("--wasm32-cc-version-file", type=Path)
     c = sub.add_parser("check")

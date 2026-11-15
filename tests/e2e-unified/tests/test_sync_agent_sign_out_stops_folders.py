@@ -65,7 +65,9 @@ def _engines(client) -> list[dict]:
     return list(payload["Engines"])
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui", "macos"], indirect=True)
+@pytest.mark.parametrize(
+    "folder_share_owner_app", ["tui", "macos", "linux"], indirect=True
+)
 @pytest.mark.tui
 # macos joined 2026-11-09: its sign-out runs the same un-provision
 # (`sync-agent-credentials.md` § Credential model → *The signed-out reconcile*,
@@ -76,6 +78,12 @@ def _engines(client) -> list[dict]:
 @pytest.mark.macos
 @pytest.mark.real_sync_agent
 @pytest.mark.isolated_sync_agent
+# linux joined 2026-11-11: its sign-out runs the same un-provision
+# (`apps/fauna-linux/src/account_runtime.rs::stop_agent_then_store`) against the
+# direct child agent every e2e launch spawns, on the socket under the launch's
+# private XDG_RUNTIME_DIR — no pin (`helpers/sync_seats.py`, "linux needs
+# NOTHING here").
+@pytest.mark.linux
 @pytest.mark.real_conversations
 @pytest.mark.feature("local-folder-sync")
 def test_signing_out_stops_the_helper_serving_that_identitys_folders(

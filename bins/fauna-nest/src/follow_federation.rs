@@ -37,7 +37,8 @@ use fauna_core::subscription::types::{FollowIntent, FollowIntentKind};
 #[cfg(feature = "payments")]
 use fauna_protocol::payments::{ClaimRedeemReply, ClaimRedeemRequest};
 use fauna_protocol::subscriptions::{
-    KeyBlobGetReply, SubscribeReply, SubscribeRequest, UnsubscribeReply, UnsubscribeRequest,
+    KeyBlobGetReply, SubscribeReply, SubscribeRequest, TiersListReply, UnsubscribeReply,
+    UnsubscribeRequest,
 };
 use fauna_protocol::{RpcError, decode_strict};
 
@@ -64,6 +65,11 @@ pub const KEY_BLOB_FETCH_KIND: &str = "fauna.federation.follow.key_blob.fetch";
 /// [`FedFollowIntentRequest`] shape; the answer is the local door's
 /// [`ClaimRedeemReply`].
 pub const CLAIM_REDEEM_KIND: &str = "fauna.federation.claims.redeem";
+/// `fauna.federation.follow.offers.list` — a reader's nest reads an author's
+/// offered tiers from the author's home (`subscriptions.md` § Pillar 1 → *The
+/// offers browse across nests*). The answer is the local door's
+/// [`TiersListReply`], through the one shared offered-tiers function.
+pub const OFFERS_LIST_KIND: &str = "fauna.federation.follow.offers.list";
 
 /// The most pending requests from remote subscribers one hosted author holds:
 /// past it, a subscriber this nest has never seen is refused `rate_limited`
@@ -125,6 +131,13 @@ pub struct FedFollowKeyBlobFetchRequest {
     pub author: ActorId,
     pub tier: String,
     pub subscriber: ActorId,
+}
+
+/// `fauna.federation.follow.offers.list`'s request; the reply is the client
+/// wire's [`TiersListReply`], relayed unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedOffersListRequest {
+    pub author_id: ActorId,
 }
 
 // ── Errors ─────────────────────────────────────────────────────────────
@@ -557,6 +570,46 @@ pub(crate) async fn remote_key_blob(
             "the federated key-blob read",
         )),
         Err(e) => Err(relay_failed("relay the key-blob read to its home nest", e)),
+    }
+}
+
+/// `offers.list_remote`'s relay arm: an author this nest does not host is
+/// read from `home_url` — the peer resolved and pinned as the subscribe twin
+/// resolves it — and the home's [`TiersListReply`] forwarded unstored (no
+/// cache: tier definitions change at the author's will). A home predating the
+/// kind refuses it at its router, which [`map_peer_relay_error`] re-speaks as
+/// `fauna.federation.peer_nest_outdated`.
+///
+/// [`map_peer_relay_error`]: crate::rpc_errors::map_peer_relay_error
+pub(crate) async fn remote_offers_list(
+    state: &Arc<AppState>,
+    author: &[u8; 32],
+    home_url: &str,
+) -> Result<TiersListReply, RpcError> {
+    let home_url = home_url.trim().trim_end_matches('/');
+    let home_nest_id = state
+        .federation_pool
+        .resolve_peer_nest_id(home_url)
+        .await
+        .map_err(|e| relay_failed("resolve the author's home nest", e))?;
+    let req = FedOffersListRequest {
+        author_id: ActorId(*author),
+    };
+    match crate::federation_pool::originate_follow_offers_list(
+        &state.federation_pool,
+        state,
+        home_url,
+        &home_nest_id,
+        req,
+    )
+    .await
+    {
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
+            peer_err,
+            "the cross-nest offers browse",
+        )),
+        Err(e) => Err(relay_failed("relay the offers browse to its home nest", e)),
     }
 }
 
@@ -997,9 +1050,28 @@ fn key_blob_fetch_handler() -> RpcHandler {
     })
 }
 
+/// The home answers a reader's nest with what its own `offers.list` answers —
+/// the one shared [`offered_tiers`] body — and carries no reach gate beyond
+/// the nest signature: the same fields are public on its HTTP route. An
+/// author it does not host answers the empty list, never `not_found`, so the
+/// read is no hosting oracle.
+///
+/// [`offered_tiers`]: crate::subscription_handlers::offered_tiers
+fn offers_list_handler() -> RpcHandler {
+    Box::new(|state, _origin_nest_id, payload| {
+        Box::pin(async move {
+            let req: FedOffersListRequest = decode(&payload)?;
+            encode_reply(
+                &crate::subscription_handlers::offered_tiers(&state, &req.author_id.0).await?,
+            )
+        })
+    })
+}
+
 pub fn register_follow_federation_handlers(b: &mut FederationRouterBuilder) {
     for (kind, handler) in [
         (SUBSCRIBE_KIND, subscribe_handler()),
+        (OFFERS_LIST_KIND, offers_list_handler()),
         (UNSUBSCRIBE_KIND, unsubscribe_handler()),
         (STATE_KIND, state_handler()),
         (KEY_BLOB_FETCH_KIND, key_blob_fetch_handler()),
@@ -2116,5 +2188,99 @@ mod tests {
                 .unwrap();
             assert!(claim.redeemed_at.is_none());
         }
+    }
+
+    /// Seed the four tier shapes the browse must tell apart: an offered paid
+    /// tier carrying an asking price, a hidden tier, and a per-post tier.
+    async fn seed_offer_shapes(state: &Arc<AppState>, author: &[u8; 32]) {
+        let ask = fauna_protocol::subscriptions::TierAskingPrice {
+            value: 1000,
+            unit: fauna_protocol::subscriptions::UNIT_MSAT.into(),
+            extra: Default::default(),
+        };
+        let db = &state.db;
+        db.create_subscription_tier(
+            author,
+            "gold",
+            20,
+            Some("Top tier"),
+            Some("$10/mo"),
+            Some("https://pay.example/gold"),
+            false,
+            None,
+            Some(&ask),
+            false,
+        )
+        .await
+        .unwrap();
+        db.create_subscription_tier(
+            author,
+            "backstage",
+            30,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        db.create_subscription_tier(
+            author,
+            "post-unlock-1",
+            1,
+            None,
+            None,
+            None,
+            true,
+            Some("1".repeat(64).as_str()),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    fn offers_payload(author: [u8; 32]) -> Bytes {
+        let req = FedOffersListRequest {
+            author_id: ActorId(author),
+        };
+        Bytes::from(encode_canonical(&req).unwrap().to_vec())
+    }
+
+    /// `subscriptions.md` § Pillar 1 → *The offers browse across nests*: the
+    /// home answers what its own `offers.list` answers — the offered tier, no
+    /// hidden tier, no per-post tier, and no `asking_price` — to any
+    /// nest-signed peer, with no reach gate.
+    #[tokio::test]
+    async fn the_home_answers_a_hosted_authors_offered_tiers_with_the_three_withholdings() {
+        let state = fixture_state();
+        let author = hosted_author(&state).await;
+        seed_offer_shapes(&state, &author).await;
+
+        let reply = offers_list_handler()(state.clone(), STRANGER_NEST, offers_payload(author))
+            .await
+            .expect("the home serves the offers browse");
+        let reply: TiersListReply = fauna_protocol::decode_strict(&reply).unwrap();
+        let names: Vec<&str> = reply.tiers.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["gold"], "only the offered tier: {names:?}");
+        assert!(reply.tiers[0].asking_price.is_none());
+        assert_eq!(reply.tiers[0].price_hint.as_deref(), Some("$10/mo"));
+    }
+
+    /// An author the home does not host answers the empty list, never a
+    /// `not_found` — the read is no hosting oracle.
+    #[tokio::test]
+    async fn the_home_answers_an_unhosted_author_with_the_empty_list() {
+        let state = fixture_state();
+        let stranger = ActorKeypair::generate().actor_id().0;
+
+        let reply = offers_list_handler()(state.clone(), STRANGER_NEST, offers_payload(stranger))
+            .await
+            .expect("an unhosted author is the empty list, not an error");
+        let reply: TiersListReply = fauna_protocol::decode_strict(&reply).unwrap();
+        assert!(reply.tiers.is_empty());
     }
 }

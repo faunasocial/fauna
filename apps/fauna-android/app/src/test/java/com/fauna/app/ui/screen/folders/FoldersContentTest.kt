@@ -11,6 +11,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.fauna.app.R
 import com.fauna.app.ui.util.LocalConnectionState
 import com.fauna.app.ui.viewmodel.OnDemandRow
+import com.fauna.app.ui.viewmodel.GroupReviewRow
 import com.fauna.app.ui.viewmodel.OnDemandRowKey
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -326,12 +327,14 @@ class FoldersContentTest {
         onDemand: Map<OnDemandRowKey, OnDemandRow> = emptyMap(),
         unverifiedPublicFolders: Set<String> = emptySet(),
         accessRevoked: Set<OnDemandRowKey> = emptySet(),
+        groupReviewRows: List<GroupReviewPaint> = emptyList(),
     ) {
         composeTestRule.setContent {
             FoldersContent(
                 snapshot,
                 actions,
                 wizardActions,
+                groupReviewRows = groupReviewRows,
                 unverifiedPublicFolders = unverifiedPublicFolders,
                 folderActors = folderActors,
                 folderDeviceActivity = folderDeviceActivity,
@@ -487,6 +490,73 @@ class FoldersContentTest {
         composeTestRule.onNodeWithTag("conflict-resolve-button").assertTextEquals("Use the other version")
         composeTestRule.onNodeWithTag("conflict-resolve-button").performClick()
         assertEquals(5L, used)
+    }
+
+    // ── A group set's review rows (`group-set.md` § Build design — the group
+    // set, decision 9) continue the same flat list ─────────────────────────
+
+    private val groupRef = "group:" + "ab".repeat(32)
+
+    private fun groupRow(winningManifestHash: String? = "ee".repeat(32), fileInfo: String = "Shared folder ab12: notes.txt") =
+        GroupReviewPaint(
+            GroupReviewRow(
+                groupRef,
+                conflict(
+                    resolvedAt = 1L,
+                    resolution = "auto",
+                    winningManifestHash = winningManifestHash,
+                    hasOtherVersion = true,
+                    fileInfo = fileInfo,
+                ),
+            ),
+            LocalizedText("devices.conflict_badge_auto", emptyMap()),
+        )
+
+    @Test
+    fun aGroupReviewRowPaintsTheRowTrioWithNoNestConflicts() {
+        render(snapshot(conflicts = emptyList()), groupReviewRows = listOf(groupRow()))
+        composeTestRule.onNodeWithTag("conflict-type-badge").assertExists()
+        composeTestRule.onNodeWithTag("conflict-file-info").assertTextEquals("Shared folder ab12: notes.txt")
+        composeTestRule.onNodeWithTag("conflict-resolve-button").assertExists()
+    }
+
+    @Test
+    fun aGroupReviewRowFollowsTheNestRowsAndRestoresBySetNeverTheNestMachine() {
+        var nestUsed: Long? = null
+        var retained: Pair<String, Long>? = null
+        render(
+            snapshot(
+                conflicts = listOf(
+                    conflict(resolvedAt = 1L, winningManifestHash = "ff".repeat(32), hasOtherVersion = true, fileInfo = "photos: a/b.jpg"),
+                ),
+            ),
+            actions = FoldersActions(
+                onUseOtherVersion = { nestUsed = it },
+                onUseRetainedVersion = { ref, id -> retained = ref to id },
+            ),
+            groupReviewRows = listOf(groupRow()),
+        )
+        composeTestRule.onAllNodesWithTag("conflict-file-info")[0].assertTextEquals("photos: a/b.jpg")
+        composeTestRule.onAllNodesWithTag("conflict-file-info")[1].assertTextEquals("Shared folder ab12: notes.txt")
+        composeTestRule.onAllNodesWithTag("conflict-resolve-button")[1].performClick()
+        assertEquals(groupRef to 5L, retained)
+        assertNull(nestUsed)
+    }
+
+    @Test
+    fun aGroupReviewRowOverAWinningDeleteKeepsItsButton() {
+        // A winning delete has no head, and the edit is still kept: the gate is
+        // `hasOtherVersion` alone, and the nest rows' "awaiting device" caption
+        // never shows on a group row.
+        var retained: Pair<String, Long>? = null
+        render(
+            snapshot(conflicts = emptyList()),
+            actions = FoldersActions(onUseRetainedVersion = { ref, id -> retained = ref to id }),
+            groupReviewRows = listOf(groupRow(winningManifestHash = null)),
+        )
+        composeTestRule.onNodeWithText("Awaiting device").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("conflict-resolve-button").performClick()
+        assertEquals(groupRef to 5L, retained)
     }
 
     // ── Wizard step 1 — the name, and NOTHING ELSE (folders re-model phase 2

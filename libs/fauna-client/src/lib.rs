@@ -36,7 +36,7 @@ pub use chunk_download::{
     NestPublicChunkFetcher, graduate_home_nest_pin, open_authed_stream,
 };
 pub use client::{NestClient, SelfConnecting};
-pub use error::{NestClientError, SessionEndingVerdict};
+pub use error::{NestClientError, ReadFailure, SessionEndingVerdict};
 /// The channel-binding verification core moved to `fauna-anon-client` (the
 /// lowest crate both native bearer paths share); re-exported here so existing
 /// `fauna_client::cert_binding::…` paths keep resolving.

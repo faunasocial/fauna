@@ -84,9 +84,13 @@ _MLS_CALLERS = (
     "conftest.provision_foreign_handled_actor",
 )
 _LINUX_INSTALLER = ("tests.platform.linux.test_installer",)
-#: Reached only for a run that will build the MSI (`windows_msi_inputs_owed`).
-_WINDOWS_INSTALLER_MODULE = "tests.platform.windows.test_installer"
-_WINDOWS_INSTALLER = (_WINDOWS_INSTALLER_MODULE,)
+#: The windows MSI's one door, the session fixture `conftest.py::msi_path`,
+#: which every test that reads the MSI requests — the elevated install suite and
+#: the unelevated structure suite alike. An entry the MSI stages declares it in
+#: `fixtures`; it is reached only for a run that will build the MSI
+#: (`windows_msi_inputs_owed`), so the run's fixture closure alone never does.
+WINDOWS_MSI = "msi_path"
+_WINDOWS_MSI = (WINDOWS_MSI,)
 _MLS_FIXTURES = ("cross_nest_foreign_actor", "cross_nest_foreign_ephemeral")
 _LAUNCH_AGENT_PROBE = ("tests.real_session.test_sync_agent_launch_agent",)
 
@@ -158,40 +162,40 @@ REGISTRY: dict[str, HelperBin] = {
         HelperBin(
             "fauna-sync-agent", "fauna-sync-agent", "bin", profile="release",
             host_features=(("win32", ("e2e-agent",)),),
-            disk_gb=10, modules=_LINUX_INSTALLER + _WINDOWS_INSTALLER,
+            disk_gb=10, modules=_LINUX_INSTALLER, fixtures=_WINDOWS_MSI,
             sources=("bins/fauna-sync-agent",),
         ),
         HelperBin(
             "fauna-nest", "fauna-nest", "bin", profile="release", disk_gb=10,
             modules=_LINUX_INSTALLER, sources=("bins/fauna-nest",),
         ),
-        # The windows installer's release-profile INPUTS (`test_installer.py`'s
-        # `_build_msi` stages each from here).
+        # The windows MSI's release-profile INPUTS (`helpers/windows_installer.py`'s
+        # `build_msi` stages each from here).
         HelperBin(
             "fauna-nest-svc", "fauna-nest-service", "bin", profile="release",
-            disk_gb=10, modules=_WINDOWS_INSTALLER,
+            disk_gb=10, fixtures=_WINDOWS_MSI,
             sources=("apps/fauna-windows/fauna-nest-service", "bins/fauna-nest"),
         ),
         HelperBin(
             "fauna-bridge-svc", "fauna-bridge-service", "bin", profile="release",
-            disk_gb=10, modules=_WINDOWS_INSTALLER,
+            disk_gb=10, fixtures=_WINDOWS_MSI,
             sources=("apps/fauna-windows/fauna-bridge-service",),
         ),
         # The crate overrides `[lib] name = "fauna_shell"`, so the artifact is
         # fauna_shell.dll, not the package-name default fauna_shell_ext.dll.
         HelperBin(
             "fauna_shell", "fauna-shell-ext", "lib", profile="release",
-            modules=_WINDOWS_INSTALLER, sources=("apps/fauna-windows/shell-ext",),
+            fixtures=_WINDOWS_MSI, sources=("apps/fauna-windows/shell-ext",),
         ),
         # The TerminalApp feature ($(var.TuiBin), $(var.CliBin)) ships the
         # terminal app and the cli app's device shell beside the agent.
         HelperBin(
             "fauna-tui", "fauna-tui", "bin", profile="release", disk_gb=10,
-            modules=_WINDOWS_INSTALLER, sources=("apps/fauna-tui",),
+            fixtures=_WINDOWS_MSI, sources=("apps/fauna-tui",),
         ),
         HelperBin(
             "fauna-cli", "fauna-cli-device", "bin", profile="release", disk_gb=10,
-            modules=_WINDOWS_INSTALLER, sources=("apps/fauna-cli",),
+            fixtures=_WINDOWS_MSI, sources=("apps/fauna-cli",),
         ),
         # The macOS launchd probe's subject is the round trip through launchd, not
         # the compile: the crate's lib unit-test binary is built here and the test
@@ -387,16 +391,18 @@ def _reached_modules(items) -> set[str]:
 
 def windows_msi_inputs_owed(items) -> bool:
     """Whether a run collecting `items` will build the windows MSI, the one
-    reach that needs more than an import. The installer module stays collected
-    where it builds nothing — unelevated, its items skip-marked; past a fresh
-    stamp, `msi_path` returning the cached MSI — and an input built for either
-    is a cold release compile and a flavor switch nothing reads."""
-    if _WINDOWS_INSTALLER_MODULE not in _reached_modules(items):
-        return False
-    from common.nest import get_repo_root
+    reach that needs more than a closure. The door stays in the closure where
+    nothing reads the MSI — the install suite unelevated, its items
+    skip-marked; past a fresh stamp, `msi_path` returning the cached MSI — and
+    an input built for either is a cold release compile and a flavor switch
+    nothing reads. With no reader the tree is never walked."""
     from helpers import windows_installer
 
-    return windows_installer.msi_build_owed(str(get_repo_root()))
+    if not any(windows_installer.reads_msi(item) for item in items):
+        return False
+    from common.nest import get_repo_root
+
+    return windows_installer.msi_build_owed(str(get_repo_root()), items)
 
 
 def reached_entries(items, requested: set) -> list[HelperBin]:
@@ -405,8 +411,8 @@ def reached_entries(items, requested: set) -> list[HelperBin]:
     in registry order. Pure over the items' files, but for the windows MSI's
     gate (`windows_msi_inputs_owed`)."""
     reached_modules = _reached_modules(items)
-    if not windows_msi_inputs_owed(items):
-        reached_modules.discard(_WINDOWS_INSTALLER_MODULE)
+    if WINDOWS_MSI in requested and not windows_msi_inputs_owed(items):
+        requested = requested - {WINDOWS_MSI}
     return [
         entry
         for entry in REGISTRY.values()

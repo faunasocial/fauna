@@ -199,8 +199,12 @@ export function flushEventDraftNow(): Promise<void> {
   }
   if (!face || !current) return Promise.resolve();
   const { summary, dtstart, dtend, description, location } = current;
-  return face.saveDrafts(summary, dtstart, dtend, description, location).catch((e) => {
-    logMessage('debug', 'fauna_web::events', `leave-flush event draft failed: ${e}`);
+  // The leave save: it opens a save gate the launch restore has not lifted yet
+  // with one read of its own, never overwriting a resting draft with an
+  // untouched form (`leave_save_event_draft`, `reserved-folders.md` § The
+  // leave-flush promise).
+  return face.saveDraftsOnLeave(summary, dtstart, dtend, description, location).catch((e) => {
+    logMessage('warn', 'fauna_web::events', `leave-flush event draft failed: ${e}`);
   });
 }
 

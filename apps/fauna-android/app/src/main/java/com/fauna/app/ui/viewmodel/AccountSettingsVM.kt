@@ -24,6 +24,7 @@ import com.fauna.ffi.validateHandle
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -74,6 +75,20 @@ class AccountSettingsVM @Inject constructor(
     // first list read lands.
     val pendingActions = MutableStateFlow<List<FfiPendingActionSummary>?>(null)
     val pendingActionsError = MutableStateFlow<String?>(null)
+
+    // Unsent changes (`account-offline-mutation.md` § The offline-mutation
+    // contract → *The unsent-changes surface*, point 1) — the STANDING
+    // section after pending actions: every change this device's outbox holds
+    // that has not reached the nest, read from the shared model
+    // (`com.fauna.ffi.unsentChanges`) — never from the nest, so the list
+    // answers with the nest down. `null` = not read yet (the bare title, never
+    // a settled "nothing" claim); re-read every [UNSENT_REFRESH_MS] while the
+    // page is composed ([refreshUnsentChangesWhileShown]) and after a retry or
+    // discard. tui's `SettingsState::unsent_changes` is the twin.
+    val unsentChanges = MutableStateFlow<List<uniffi.fauna_core.UnsentChange>?>(null)
+    /** The intent id whose discard is armed (`unsent-change-discard-button`
+     *  pressed, `unsent-change-discard-confirm-button` showing on that row). */
+    val unsentDiscardArmed = MutableStateFlow<String?>(null)
 
     // ── Multi-account switcher (long-term-store.md § Multi-account evolution,
     // Stage 1) ── Holds no identity state of its own beyond a snapshot of the
@@ -203,6 +218,7 @@ class AccountSettingsVM @Inject constructor(
                 val line = when (blocked) {
                     is FfiEraseRemoveBlocked.ServedHere -> blocked.line
                     is FfiEraseRemoveBlocked.ServedElsewhere -> blocked.line
+                    is FfiEraseRemoveBlocked.CarryOwed -> blocked.line
                 }
                 switchError.value = resolveLocalized(context, line)
                 return@launch
@@ -276,6 +292,66 @@ class AccountSettingsVM @Inject constructor(
                 // basis for any other claim.
                 pendingActionsError.value = e.message
             }
+        }
+    }
+
+    /** One read of the unsent changes into [unsentChanges]. A failed read
+     *  keeps the last rows (a background read — kept off `error-message`, as
+     *  tui's `UnsentChangesRead(Err)` is); a discard armed on a row that has
+     *  left the list, or is no longer not-sent, has nothing left to confirm. */
+    suspend fun loadUnsentChanges() {
+        val rows = try {
+            com.fauna.ffi.unsentChanges()
+        } catch (e: Exception) {
+            android.util.Log.d("AccountSettingsVM", "unsent changes not re-read: ${e.message}")
+            return
+        }
+        val armed = unsentDiscardArmed.value
+        if (armed != null &&
+            rows.none { it.intentId == armed && it.state is uniffi.fauna_core.UnsentState.Unsent }
+        ) {
+            unsentDiscardArmed.value = null
+        }
+        if (unsentChanges.value != rows) unsentChanges.value = rows
+    }
+
+    /** The account page's re-read edge: the outbox's drains tell the app
+     *  nothing, so while the page is composed (the caller's `LaunchedEffect`
+     *  scope — cancelled when the page leaves) the list is re-read every
+     *  [UNSENT_REFRESH_MS], the first read at once. A local store read; no
+     *  nest is needed. tui's `session::spawn_unsent_refresh` is the twin. */
+    suspend fun refreshUnsentChangesWhileShown() {
+        while (true) {
+            loadUnsentChanges()
+            delay(UNSENT_REFRESH_MS)
+        }
+    }
+
+    /** `unsent-change-retry-button[i]` — re-arm the not-sent change through
+     *  the outbox's own door (never the nest), then re-read the list. */
+    fun retryUnsentChange(intentId: String) {
+        unsentDiscardArmed.value = null
+        viewModelScope.launch {
+            runCatching { com.fauna.ffi.retryUnsentChange(intentId) }
+                .onFailure { android.util.Log.w("AccountSettingsVM", "retry failed: ${it.message}") }
+            loadUnsentChanges()
+        }
+    }
+
+    /** `unsent-change-discard-button[i]` — arm the discard confirm on that row. */
+    fun armUnsentDiscard(intentId: String) {
+        unsentDiscardArmed.value = intentId
+    }
+
+    /** `unsent-change-discard-confirm-button[i]` — delete the not-sent change
+     *  (the one user-initiated deletion of a pending write) through the
+     *  outbox's own door, then re-read the list. */
+    fun confirmUnsentDiscard(intentId: String) {
+        unsentDiscardArmed.value = null
+        viewModelScope.launch {
+            runCatching { com.fauna.ffi.discardUnsentChange(intentId) }
+                .onFailure { android.util.Log.w("AccountSettingsVM", "discard failed: ${it.message}") }
+            loadUnsentChanges()
         }
     }
 
@@ -414,10 +490,10 @@ class AccountSettingsVM @Inject constructor(
             // onboarding surface this hands them (`principles.md` § The user
             // always controls their data); every word of the line is shared.
             // On the caller's dispatcher, as the erase it replaces ran: no agent
-            // exchange (`dismissAgent = false`), only the sweep.
+            // exchange (the gesture caller), only the sweep.
             val outcome = accountStores.finishSignOut(
                 SignOutCredentialEraser(registry, secureStorage),
-                dismissAgent = false,
+                caller = com.fauna.ffi.FfiFinishCaller.GESTURE,
                 written = recorded,
             )
             WidgetDataWorker.refoldForAccountSwitch(context)
@@ -444,5 +520,11 @@ class AccountSettingsVM @Inject constructor(
                 errorMessage.value = e.message
             }
         }
+    }
+
+    companion object {
+        /** How often the composed Account page re-reads the unsent changes
+         *  (tui's `UNSENT_REFRESH_INTERVAL`). */
+        const val UNSENT_REFRESH_MS = 2_000L
     }
 }

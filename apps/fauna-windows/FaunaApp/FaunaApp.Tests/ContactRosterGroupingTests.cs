@@ -88,6 +88,38 @@ public class ContactRosterGroupingTests
     }
 
     [Fact]
+    public void RosterQuery_NarrowsTheLiveSections_AndEveryRepaintKeepsTheNarrowing()
+    {
+        var vm = Loaded();
+        vm.RosterQuery = "userc";
+        Assert.Equal(new[] { C.ActorId }, vm.Sections.SelectMany(s => s).Select(r => r.ActorId).ToArray());
+
+        // A repaint (a name, an archive-link view, a reload) re-applies the query.
+        vm.RefreshNames();
+        Assert.Equal(new[] { C.ActorId }, vm.Sections.SelectMany(s => s).Select(r => r.ActorId).ToArray());
+        Assert.False(vm.RosterNarrowedToNothing);
+
+        vm.RosterQuery = "zzz";
+        Assert.Empty(vm.Sections);
+        Assert.True(vm.RosterNarrowedToNothing);
+
+        // A blank query is no query: the whole roster, and no "no matches".
+        vm.RosterQuery = "  ";
+        Assert.Equal(6, vm.Sections.SelectMany(s => s).Count());
+        Assert.False(vm.RosterNarrowedToNothing);
+    }
+
+    [Fact]
+    public void RosterNarrowedToNothing_IsNeverTheTrueEmptyRoster()
+    {
+        var vm = new ContactsViewModel(new MockNestRpcClient());
+        vm.RefreshNames();
+        vm.RosterQuery = "zzz";
+        Assert.Empty(vm.Sections);
+        Assert.False(vm.RosterNarrowedToNothing);
+    }
+
+    [Fact]
     public void RefreshNames_RebuildsTheSections()
     {
         var vm = Loaded();

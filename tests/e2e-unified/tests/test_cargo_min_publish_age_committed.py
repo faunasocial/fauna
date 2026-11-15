@@ -115,20 +115,54 @@ def _scanned_files() -> list[Path]:
     return [p for p in out if p.is_file() and "node_modules" not in p.parts and "target" not in p.parts]
 
 
-def test_the_override_is_not_committed_in_any_recipe_or_workflow():
+def _override_hits(repo: Path, files: list[Path]) -> list[str]:
+    """Every line of `files` that spells the override. No file is exempt.
+
+    The security-fix bypass is taken by the dependency round's own tool, for
+    one invocation, on the owner's word (release-integrity.md § Minimum
+    release age, condition (4)). That tool names the variable in one constant
+    assembled from parts, as this file does, so the plain spelling stays
+    absent from the whole tree and this walk needs no list of allowed files.
+    """
     hits = []
-    for path in _scanned_files():
+    for path in files:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         for number, line in enumerate(text.splitlines(), start=1):
             if _OVERRIDE_ENV in line:
-                hits.append(f"{path.relative_to(_REPO)}:{number}: {line.strip()[:160]}")
+                hits.append(f"{path.relative_to(repo).as_posix()}:{number}: {line.strip()[:160]}")
+    return hits
+
+
+def test_the_override_is_not_committed_in_any_recipe_or_workflow():
+    hits = _override_hits(_REPO, _scanned_files())
     assert not hits, (
         f"{_OVERRIDE_ENV} is set in a tracked file — it switches the minimum "
         "release age off for whatever that file runs:\n" + "\n".join(hits)
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("justfile", f"bump:\n    {_OVERRIDE_ENV}=allow cargo update\n"),
+        (".github/workflows/build.yml", f"env:\n  {_OVERRIDE_ENV}: allow\n"),
+        ("tools/quick-bump.sh", f"export {_OVERRIDE_ENV}=allow\n"),
+        ("tools/bump.py", f'os.environ["{_OVERRIDE_ENV}"] = "allow"\n'),
+        (".cargo/config.toml", f'[env]\n{_OVERRIDE_ENV} = "allow"\n'),
+        ("tests/e2e-unified/helpers/resolve.py", f'NAME = "{_OVERRIDE_ENV}"\n'),
+    ],
+)
+def test_the_override_in_any_file_is_a_hit(tmp_path: Path, name: str, text: str):
+    """Red on purpose: a recipe, a workflow, a config or any script that
+    spells the override is found, a bare constant holding its name included."""
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    hits = _override_hits(tmp_path, [path])
+    assert len(hits) == 1 and hits[0].startswith(f"{name}:"), hits
 
 
 def _deno_configs() -> list[Path]:

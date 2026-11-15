@@ -271,6 +271,17 @@ class ConversationsActions:
         legs land."""
         self.driver.click("new-conversation-cancel")
 
+    def open_new_conversation(self) -> None:
+        """Open the new-conversation composer from the conversations page and
+        wait for it to mount — nothing typed, nothing sent. On a two-pane app the
+        composer covers the selected thread without deselecting it, and
+        ``docs/goal/ui/conversations.md`` § When a thread is read says a covered
+        thread is not being read — the one closed-thread state every app shares.
+        Leave it with :meth:`step_out_of_new_conversation`."""
+        self.navigate()
+        self.driver.click("new-conversation-button")
+        self.driver.wait_for("recipient-picker-input", timeout=10.0)
+
     def step_out_of_new_conversation(self) -> None:
         """Step back out of the new-conversation composer WITHOUT discarding it —
         the everyday way out, which ``docs/goal/ui/conversations.md``
@@ -757,9 +768,13 @@ class ConversationsActions:
         the editor, so every member opens it. The greying is per control
         INSIDE — the selects and Save off `capabilities.can_set_policy`, the
         walk-out off `can_leave_room` — so a member's editor opens read-only
-        with only `room-leave-button` live."""
+        with only `room-leave-button` live.
+
+        Waits on `room-leave-button`, the one control every editor paints: a
+        policy-less room's (a bridged room, opened for its local remove —
+        `RoomSettingsDraft::seed`) carries no Save to wait on."""
         self.driver.click("thread-room-settings-button")
-        self.driver.wait_for("room-settings-save-button", timeout=10.0)
+        self.driver.wait_for("room-leave-button", timeout=10.0)
 
     def set_room_join_rule(self, rule: str) -> None:
         """Pick `rule` — `invite` (owner and admins) or `member-invite` (any
@@ -842,6 +857,42 @@ class ConversationsActions:
             f"{self.driver.diagnose('room-leave-confirm')} "
             f"{self.driver.diagnose('error-message')}"
         )
+
+    def remove_room(self, timeout_s: float = 30.0) -> None:
+        """Remove the whole open conversation from my nest, from the open
+        editor: `room-remove-button` → `room-remove-confirm`
+        (`bridged-adapter.md` § Removing bridged rows, rules 4 and 6).
+
+        Immediate like the walk-out, never staged through Save. Waits for the
+        confirm to go, which is the observable for "the remove was taken" —
+        the editor closes with the gesture, and the page goes back to the list
+        once the nest answered. A refusal surfaces on `error-message`.
+        """
+        self.driver.click("room-remove-button")
+        self.driver.wait_for("room-remove-confirm", timeout=10.0)
+        self.driver.click("room-remove-confirm")
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if not self.driver.is_visible("room-remove-confirm"):
+                return
+            time.sleep(0.25)
+        raise AssertionError(
+            f"room-remove-confirm stayed on screen {timeout_s}s after it was "
+            f"clicked: {self.driver.diagnose('room-remove-confirm')} "
+            f"{self.driver.diagnose('error-message')}"
+        )
+
+    def remove_message(self, message_index: int = 0, timeout_s: float = 10.0) -> None:
+        """Remove one message from my nest: ⋯ → `dm-message-remove-button` →
+        `dm-message-remove-confirm-button` — the nest's copy only, never the
+        far side's (`bridged-adapter.md` § Removing bridged rows, rule 1).
+        The delete two-step's shape; the bubble leaves when the nest answers.
+        """
+        self.open_message_actions(message_index=message_index, timeout_s=timeout_s)
+        self.driver.wait_for("dm-message-remove-button", timeout=timeout_s)
+        self.driver.click("dm-message-remove-button", index=0)
+        self.driver.wait_for("dm-message-remove-confirm-button", timeout=timeout_s)
+        self.driver.click("dm-message-remove-confirm-button", index=0)
 
     def save_room_settings(self, timeout_s: float = 30.0) -> None:
         """Click `room-settings-save-button` and wait for the editor to close.

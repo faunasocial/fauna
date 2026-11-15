@@ -396,6 +396,12 @@ private func appendInlines(
             piece.font = .body.monospaced()
             piece.backgroundColor = Color.secondary.opacity(0.18)
             attr.append(piece)
+        #if FAUNA_KIDS
+        case let .link(_, inner):
+            // The kids build excises outbound link opening: the label renders as inert body
+            // text — no link attribute, no accent (account-age-band.md, the kids-app bullet).
+            appendInlines(inner, to: &attr, bold: bold, italic: italic)
+        #else
         case let .link(href, inner):
             // The link label (recursing for nested emphasis) as one accent-coloured, linked run.
             // A malformed href that `URL(string:)` rejects renders as plain text.
@@ -406,6 +412,7 @@ private func appendInlines(
                 label.foregroundColor = .accentColor
             }
             attr.append(label)
+        #endif
         case let .bold(inner):
             appendInlines(inner, to: &attr, bold: true, italic: italic)
         case let .italic(inner):

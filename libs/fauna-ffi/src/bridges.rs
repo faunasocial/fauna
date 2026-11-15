@@ -515,6 +515,36 @@ impl FfiBridgesClient {
     fn client(&self) -> BridgesClient<Arc<NestClient>> {
         BridgesClient::new(Arc::clone(&self.nest))
     }
+
+    /// [`Self::add_follow_or_queue`] through an explicit queue.
+    async fn add_follow_through(
+        &self,
+        queue: Option<&dyn fauna_core::offline_intent::OfflineIntentQueue>,
+        bridge_id: String,
+        id: String,
+        petname: Option<String>,
+        extra: Option<FfiCborValue>,
+    ) -> Result<bool, FfiError> {
+        self.client()
+            .add_follow_or_queue(queue, bridge_id, id, petname, extra.map(Into::into))
+            .await
+            .map(crate::family::queued)
+            .map_err(crate::family::compose_err)
+    }
+
+    /// [`Self::remove_follow_or_queue`] through an explicit queue.
+    async fn remove_follow_through(
+        &self,
+        queue: Option<&dyn fauna_core::offline_intent::OfflineIntentQueue>,
+        bridge_id: String,
+        follow_id: String,
+    ) -> Result<bool, FfiError> {
+        self.client()
+            .remove_follow_or_queue(queue, bridge_id, follow_id)
+            .await
+            .map(crate::family::queued)
+            .map_err(crate::family::compose_err)
+    }
 }
 
 #[fauna_uniffi_async::export]
@@ -601,6 +631,39 @@ impl FfiBridgesClient {
             .remove_follow(bridge_id, follow_id)
             .await
             .map_err(stringify)
+    }
+
+    /// [`Self::add_follow`] sent now or queued with no nest (the
+    /// `OfflineQueued` composer, `account-offline-mutation.md` § The
+    /// offline-mutation contract), over the device outbox the first connection
+    /// word wired (`offline_outbox::DEVICE`), scoped to the followed account.
+    /// `true` = queued: the follow is not on the nest's list until the drain,
+    /// so a caller clears its error and changes no list; `false` = sent, and
+    /// the caller re-lists as after a follow.
+    pub async fn add_follow_or_queue(
+        &self,
+        bridge_id: String,
+        id: String,
+        petname: Option<String>,
+        extra: Option<FfiCborValue>,
+    ) -> Result<bool, FfiError> {
+        let queue = crate::family::device_queue();
+        self.add_follow_through(queue.as_deref(), bridge_id, id, petname, extra)
+            .await
+    }
+
+    /// [`Self::remove_follow`] sent now or queued with no nest — the same
+    /// contract as [`Self::add_follow_or_queue`], under the same per-account
+    /// scope. `true` = queued: the account stays on the nest's list until the
+    /// drain, so a caller changes no list.
+    pub async fn remove_follow_or_queue(
+        &self,
+        bridge_id: String,
+        follow_id: String,
+    ) -> Result<bool, FfiError> {
+        let queue = crate::family::device_queue();
+        self.remove_follow_through(queue.as_deref(), bridge_id, follow_id)
+            .await
     }
 
     /// `fauna.bridges.list_follow_requests` — the requests waiting on the
@@ -977,5 +1040,71 @@ mod tests {
         };
         let cbor: Value = params.into();
         assert!(matches!(cbor, Value::Map(_)));
+    }
+}
+
+#[cfg(test)]
+mod offline_composer_tests {
+    use super::*;
+    use fauna_client_testkit::RecordingQueue;
+
+    type Pair = (Result<bool, FfiError>, Result<bool, FfiError>);
+
+    fn follow_then_unfollow(queue: &RecordingQueue) -> Pair {
+        let c = FfiBridgesClient::from_nest(NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+        ));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let added = c
+                    .add_follow_through(
+                        Some(queue),
+                        "nostr".into(),
+                        "npub1alice".into(),
+                        None,
+                        None,
+                    )
+                    .await;
+                let removed = c
+                    .remove_follow_through(Some(queue), "nostr".into(), "npub1alice".into())
+                    .await;
+                (added, removed)
+            })
+    }
+
+    /// With no nest both doors answer QUEUED and rest in the outbox under the
+    /// followed account's scope, in order.
+    #[test]
+    fn a_follow_and_unfollow_with_no_nest_are_queued() {
+        let queue = RecordingQueue::new("disconnected");
+        let (added, removed) = follow_then_unfollow(&queue);
+        assert!(added.unwrap(), "no nest: the follow queued");
+        assert!(removed.unwrap(), "no nest: the unfollow queued");
+        let queued = queue.queued();
+        let kinds: Vec<_> = queued.iter().map(|q| q.0).collect();
+        assert_eq!(
+            kinds,
+            vec!["fauna.bridges.add_follow", "fauna.bridges.remove_follow"]
+        );
+        assert!(
+            queued
+                .iter()
+                .all(|q| q.1 == "bridges.follow:nostr:npub1alice")
+        );
+    }
+
+    /// Connected, both are sent (to this dummy nest they fail on the
+    /// transport) and nothing is queued.
+    #[test]
+    fn a_follow_with_the_nest_connected_is_sent_not_queued() {
+        let queue = RecordingQueue::new("connected");
+        let (added, removed) = follow_then_unfollow(&queue);
+        assert!(added.is_err(), "the follow was sent");
+        assert!(removed.is_err(), "the unfollow was sent");
+        assert!(queue.queued().is_empty());
     }
 }

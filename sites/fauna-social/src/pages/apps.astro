@@ -11,13 +11,18 @@ import Critter from '../components/Critter.astro';
 //   holds equal to the tree's own pins (release-integrity.md § Release signing →
 //   The official-apps list);
 // - `{downloads}`, the downloads table, built from installer/downloads.json:
-//   each cell links its file at the release of the newest version the release
-//   table records (docs/features/matrix.json's `versions`). The release
-//   workflow refuses to publish files the table disagrees with,
-//   so a cell never links a file its release lacks.
+//   each cell links its file at the release of THIS tree's product version
+//   (the root Cargo.toml's `[workspace.package] version`), the version whose
+//   release this deploy follows (product-version.md § The public website: the
+//   site deploys at the end of the release, once its files exist — and
+//   `fauna-publish deploy-site` refuses until the Release carries every file
+//   this table links). It once took the newest version the release table
+//   records, which at a version's sync point is still the PREVIOUS version
+//   (the table records a version only during its release), so 0.1.6's deploy
+//   linked 0.1.5 — four of those files 0.1.5 never had.
 import manifest from '../../../../installer/official-apps.json';
 import downloads from '../../../../installer/downloads.json';
-import matrix from '../../../../docs/features/matrix.json';
+import cargoToml from '../../../../Cargo.toml?raw';
 import { compiledContent, frontmatter as fm } from '../../../../docs/sites/fauna-social/apps.md';
 import { fill } from '../data/fill.ts';
 import { takeOpening } from '../data/copy.ts';
@@ -31,20 +36,11 @@ if (typeof repo !== 'string') {
 const releasesUrl = `${repo}/releases`;
 const releases = `<a href="${releasesUrl}">${releasesUrl.replace(/^https:\/\//, '')}</a>`;
 
-// The newest released version, by its numbers (0.1.10 after 0.1.9).
-const semver = (v: string) => v.split('.').map(Number);
-const newer = (a: string, b: string) => {
-  const [x, y] = [semver(a), semver(b)];
-  for (let i = 0; i < Math.max(x.length, y.length); i++) {
-    if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0);
-  }
-  return false;
-};
-const version = matrix.versions
-  .map((release: { version: string }) => release.version)
-  .reduce((best: string | null, v: string) => (best === null || newer(v, best) ? v : best), null);
+// This tree's product version: the `version` line of `[workspace.package]`.
+const workspace = cargoToml.split(/^\[workspace\.package\]\s*$/m)[1]?.split(/^\[/m)[0] ?? '';
+const version = /^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m.exec(workspace)?.[1] ?? null;
 if (version === null) {
-  throw new Error('docs/features/matrix.json records no released version');
+  throw new Error('Cargo.toml carries no [workspace.package] version');
 }
 
 interface Cell { label: string; file?: string; href?: string }

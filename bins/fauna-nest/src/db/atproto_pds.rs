@@ -1142,7 +1142,7 @@ impl CacheDb {
         let actor = *actor_id;
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction().context("begin admit atproto writes")?;
-        let window: Option<(u64, u32)> = tx
+        let window: Option<(i64, u32)> = tx
             .query_row(
                 "SELECT write_window_start, write_window_count FROM atproto_sessions
                   WHERE actor_id = ?1 AND session_id = ?2",
@@ -1154,6 +1154,8 @@ impl CacheDb {
         let Some((window_start, count)) = window else {
             return Ok(false);
         };
+        let window_start =
+            u64::try_from(window_start).context("negative atproto session window start")?;
         let mut window = RateWindow {
             window_start,
             count,
@@ -1167,7 +1169,13 @@ impl CacheDb {
         tx.execute(
             "UPDATE atproto_sessions SET write_window_start = ?3, write_window_count = ?4
               WHERE actor_id = ?1 AND session_id = ?2",
-            rusqlite::params![&actor[..], session_id, window.window_start, window.count],
+            rusqlite::params![
+                &actor[..],
+                session_id,
+                i64::try_from(window.window_start)
+                    .context("atproto session window start exceeds i64")?,
+                window.count
+            ],
         )
         .context("store atproto session window")?;
         tx.commit().context("commit admit atproto writes")?;

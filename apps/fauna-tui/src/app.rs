@@ -353,6 +353,11 @@ pub enum DataMessage {
     /// a drive pass or an announce round finished, or the sink captured a
     /// signal. The handler re-reads the Contacts rows while that page shows.
     ArchiveLinksMoved,
+    /// The unsent changes were re-read for the account page's list
+    /// (`session::spawn_unsent_refresh`): the rows, or why the outbox could
+    /// not be read (kept off `error-message` — a background read, the last
+    /// rows stay).
+    UnsentChangesRead(Result<Vec<fauna_core::offline_intent::UnsentChange>, String>),
     /// The sync-agent folder model's rendered binding set changed (a reconcile
     /// adopted or pushed a binding) — re-read + redraw, the payload-free observer
     /// tick shape (`FeedChanged` / `MediaChanged`).
@@ -674,7 +679,14 @@ pub fn apply_page_outcome(app: &mut App, outcome: PageOutcome) {
         PageOutcome::Notifications(o) => crate::notifications::apply_outcome(app, o),
         PageOutcome::Moderation(o) => crate::moderation::apply_outcome(app, o),
         PageOutcome::Report(o) => crate::report::apply_outcome(app, o),
-        PageOutcome::Profile(o) => crate::profile::apply_outcome(app, o),
+        PageOutcome::Profile(o) => {
+            crate::profile::apply_outcome(app, o);
+            // The header read moved the actor-home slot under an open Tiers
+            // tab: read the offers again from the new home.
+            if let Some(op) = crate::profile::offers_reload_op(app) {
+                app.spawn_page_op(PageOp::Profile(op));
+            }
+        }
         PageOutcome::Events(o) => crate::events::apply_outcome(app, o),
         PageOutcome::Settings(o) => crate::settings::apply_outcome(app, o),
         PageOutcome::Search(o) => crate::search::apply_outcome(app, o),
@@ -1282,6 +1294,11 @@ pub struct App {
     /// Fed by the render loop from each frame's registry, which only exists
     /// when the e2e agent does, so a production build never touches it.
     pub painted_errors: fauna_e2e_agent::PaintedErrorTally,
+    /// The id-bearing text the newest drawn frame gave no room — convention
+    /// 17's `painted-text-has-area` field (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`),
+    /// fed beside [`Self::painted_errors`] from the frame's own page geometry
+    /// ([`crate::ui::PaintedPage::laid_out_text`]), so only with an e2e agent.
+    pub painted_text_area: fauna_e2e_agent::PaintedTextArea,
     /// Per-page `error-message` text (ui.yaml: every page has one).
     pub errors: PageErrors,
     /// Whether the last nav-edge check ([`Self::sync_recovery_message_nav_edge`])
@@ -1805,6 +1822,7 @@ impl App {
             connection_reports: fauna_e2e_agent::ConnectionReports::default(),
             knock_notices: fauna_e2e_agent::KnockNotices::default(),
             painted_errors: fauna_e2e_agent::PaintedErrorTally::default(),
+            painted_text_area: fauna_e2e_agent::PaintedTextArea::default(),
             errors: PageErrors::new(),
             was_on_settings_account: false,
             stolen_ceremony_in_flight: false,
@@ -3165,7 +3183,11 @@ impl App {
         // the fact to the user, as `identity_choice`'s `sign-out-residue` view
         // — painted here, after `drop_authenticated_state` above cleared the
         // injected lines, so nothing earlier in the teardown can wipe it.
-        let outcome = crate::account_scope::finish(self, false, Some(recorded));
+        let outcome = crate::account_scope::finish(
+            self,
+            fauna_client_accounts::FinishCaller::Gesture,
+            Some(recorded),
+        );
         // The window serves no account now: put down the process holder's
         // instance lock and its shared-root serving lock, AFTER the erase (the
         // erase guard's probe already put our own down around itself). A
@@ -3311,6 +3333,11 @@ impl App {
     /// retry rebuilds the sweep off the retired identity's store and seed,
     /// both of which survive on this device by construction
     /// (`succession-propagation.md` § Propagation → *Own device fleet*).
+    ///
+    /// The kit is set owed here unconditionally, and that is safe: when a
+    /// sibling seat of this install is the one that ran the ceremony and is
+    /// still alive, the shared mint refuses this seat's first registration
+    /// (`fauna_client_recovery::kit_claim`) and the ceremony seat shows the kit.
     fn adopt_held_successor(&mut self, predecessor: &str, successor: &str) -> bool {
         if !crate::session::registry(self).adopt_held_successor(predecessor, successor) {
             return false;
@@ -3858,11 +3885,25 @@ impl App {
                     crate::session::spawn_ledger_aftermath(self);
                     // The offline outbox door the shared `OfflineQueued`
                     // composer queues through while there is no nest.
-                    self.account_outbox =
-                        Some(fauna_sync_engine::offline_intent_queue::AccountOutbox::new(
-                            handle.clone(),
-                            self.connection_state_word(),
-                        ));
+                    let outbox = fauna_sync_engine::offline_intent_queue::AccountOutbox::new(
+                        handle.clone(),
+                        self.connection_state_word(),
+                    );
+                    // The outbox carry (`succession-aftermath.md` § Re-key
+                    // scope, the device-local outbox row): a retired
+                    // identity's undrained outbox this device owes moves in
+                    // at the first app drain, its MLS rows once the live
+                    // conversations session holds their groups.
+                    match fauna_sync_engine::root::StoreRoot::platform() {
+                        Ok(root) => outbox.set_carry(Some(Arc::new(
+                            fauna_sync_engine::outbox_carry::OutboxCarry::new(
+                                crate::session::registry(self),
+                                root,
+                            ),
+                        ))),
+                        Err(e) => tracing::warn!("outbox carry unseated: {e:#}"),
+                    }
+                    self.account_outbox = Some(outbox);
                     crate::session::lend_offline_outbox(self);
                     // The deployment-seed custody leg (`box-recovery.md`
                     // § The plane-era recovery floor, (c) The writes): this
@@ -3949,6 +3990,21 @@ impl App {
             }
             // The rows' link prompts are a read of the archive folders: re-read
             // them only while the Contacts page is the one painted.
+            UiMessage::Data(DataMessage::UnsentChangesRead(read)) => match read {
+                Ok(rows) => {
+                    if self.settings.unsent_changes.as_ref() != Some(&rows) {
+                        // A discard armed on a row that has left the list
+                        // has nothing left to confirm.
+                        if let Some(armed) = self.settings.unsent_discard_armed.as_deref()
+                            && !rows.iter().any(|r| r.intent_id == armed)
+                        {
+                            self.settings.unsent_discard_armed = None;
+                        }
+                        self.settings.unsent_changes = Some(rows);
+                    }
+                }
+                Err(why) => tracing::debug!("unsent changes not re-read: {why}"),
+            },
             UiMessage::Data(DataMessage::ArchiveLinksMoved) => {
                 if self.page == Page::Contacts
                     && let Some(op) = crate::contacts::archive_views_op(&self.contacts)
@@ -4939,6 +4995,10 @@ pub(crate) mod tests {
     /// its dir and removes it when the last clone drops (`testing.md` § Test
     /// temp-dir hygiene).
     pub(crate) fn test_credentials() -> Arc<CredentialStore> {
+        // The install base goes private with the namespace: a reset's
+        // sign-out record must never be one a sibling test is finishing
+        // (`session::test_install_base`).
+        crate::session::test_install_base::arm();
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("fauna-tui-test-{}-{n}", std::process::id()));

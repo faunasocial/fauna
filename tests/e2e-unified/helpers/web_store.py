@@ -194,3 +194,59 @@ def origin_holdings(driver, needles: list[bytes]) -> dict:
     search that read nothing finds nothing."""
     arg = json.dumps([n.hex() for n in needles])
     return driver.eval_js(f"({_ORIGIN_HOLDINGS_JS.strip()})({arg})")
+
+
+#: The install-scoped sign-out record (`fauna_client_accounts::sign_out_record`)
+#: — outside the `fauna/` prefix the registry and the e2e agent sweep.
+SIGN_OUT_RECORD_KEY = "fauna_sign_out_record"
+
+#: The property a test's own holding connection is parked on.
+_HELD_STORE = "__fauna_e2e_held_account_store"
+
+
+def hold_account_store(driver, name: str) -> None:
+    """Open a second connection to the database `name` in `driver`'s page and
+    keep it — the web store fault injection. It registers no `versionchange`
+    handler, so it never closes for a delete: the browser answers the delete
+    request `blocked` and leaves it waiting, which is what a connection another
+    tab holds does. The waiting request runs once the holder lets go
+    (`release_account_store`)."""
+    opened = driver.eval_js(
+        "(async () => {"
+        f" window[{json.dumps(_HELD_STORE)}] = await new Promise((resolve, reject) => {{"
+        f"  const request = indexedDB.open({json.dumps(name)});"
+        "  request.onsuccess = () => resolve(request.result);"
+        "  request.onerror = () => reject(request.error);"
+        " });"
+        f" return window[{json.dumps(_HELD_STORE)}].name;"
+        "})()"
+    )
+    assert opened == name, f"the holding connection opened {opened!r}, expected {name!r}"
+
+
+def release_account_store(driver) -> None:
+    driver.eval_js(
+        f"(() => {{ window[{json.dumps(_HELD_STORE)}]?.close();"
+        f" delete window[{json.dumps(_HELD_STORE)}]; return true; }})()"
+    )
+
+
+def account_store_counts(driver, name: str) -> dict | None:
+    """Each object store of the database `name` → its record count, or None
+    when the origin holds no such database. Opened only when listed, so the
+    read never creates the store it inspects."""
+    return driver.eval_js(
+        "(async (name) => {"
+        " if (!(await indexedDB.databases()).some(d => d.name === name)) return null;"
+        " const db = await new Promise((ok, ko) => { const r = indexedDB.open(name);"
+        "  r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });"
+        " const out = {};"
+        " for (const s of Array.from(db.objectStoreNames)) {"
+        "  out[s] = await new Promise((ok, ko) => {"
+        "   const r = db.transaction(s, 'readonly').objectStore(s).count();"
+        "   r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });"
+        " }"
+        " db.close();"
+        " return out;"
+        f"}})({json.dumps(name)})"
+    )

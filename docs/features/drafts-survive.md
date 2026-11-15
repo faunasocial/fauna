@@ -72,13 +72,13 @@ Stamped 2026-09-19 at 8ac16765e4.
 |---|---|---|
 | web | ✅ full | 0.1.5 docker |
 | linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| windows | ⚠ partial | 0.1.6 docker |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| ios | ✅ full | 0.1.6 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.5-dev+859d84e8 standalone |
 | android-kids |  no run recorded | |
-| ios-kids | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| ios-kids | ⚠ partial | 0.1.6 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -110,6 +110,6 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 16 | app | `tests/e2e-unified/tests/test_account_switcher_linux.py::test_linux_a_new_message_draft_never_shows_under_another_identity` | linux (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_a_new_message_draft_never_shows_under_another_identity` | web (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_a_new_message_draft_never_shows_under_another_identity` | macos (macos): passed, ios (macos): passed |
-| 16 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_a_new_message_draft_never_shows_under_another_identity` | windows (windows): passed |
+| 16 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_a_new_message_draft_never_shows_under_another_identity` | windows (windows): failed |
 | 16 | app | `tests/e2e-unified/tests/test_account_switcher_android.py::test_android_a_new_message_draft_never_shows_under_another_identity` | — |
 <!-- features-render:end -->

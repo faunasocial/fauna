@@ -214,6 +214,56 @@ mod tests {
         );
     }
 
+    /// The replay cache MOVES with the account (`succession-repoint-axis.md`
+    /// § The declared re-point axis, the 2026-11-09 blockquote): a key
+    /// recorded under the retired identity — a send acked whose ack was lost
+    /// — is served to the successor's replay of the same key, which the
+    /// outbox carry hands it, so the effect lands once.
+    #[tokio::test]
+    async fn a_key_recorded_under_the_predecessor_is_served_to_the_successor() {
+        let db = db();
+        let (old, new) = ([7u8; 32], [9u8; 32]);
+        let key = [3u8; 16];
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "INSERT OR IGNORE INTO tiers (name, max_inbox_bytes, max_storage_bytes, \
+                 max_devices, max_blob_size) VALUES ('free', 1, 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (actor_id, tier, label, created_at, handle) \
+                 VALUES (?1, 'free', 'the label', 1, 'alice')",
+                rusqlite::params![old.as_slice()],
+            )
+            .unwrap();
+        }
+        db.insert_rpc_idempotent(
+            &old,
+            &key,
+            "fauna.posts.interact",
+            Some(b"liked"),
+            true,
+            1000,
+        )
+        .await
+        .unwrap();
+        db.record_succession(&old, &new, b"statement", 1)
+            .await
+            .unwrap()
+            .expect("the succession applies");
+        assert_eq!(
+            db.lookup_rpc_idempotent(&new, &key, 0).await.unwrap(),
+            Some(DurableReply {
+                payload: Some(b"liked".to_vec()),
+                ok: true
+            }),
+            "the successor's replay is served the recorded reply"
+        );
+        assert_eq!(db.lookup_rpc_idempotent(&old, &key, 0).await.unwrap(), None);
+    }
+
     /// First write wins: a racing duplicate of the same logical request cannot
     /// replace the recorded first outcome.
     #[tokio::test]

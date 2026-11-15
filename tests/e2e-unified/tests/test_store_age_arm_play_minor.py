@@ -22,7 +22,7 @@ Play twin (``src/storeAge/``: every Play-distributed build type, ``debug``
 among them — only ``foss`` compiles the inert one).
 
 **Environment.** Run on the fauna-e2e-play AVD:
-``--app android --device-serial emulator-5556``.
+``--app android --device-serial 127.0.0.1:18510``.
 Without an attached device carrying the Play Store and a signed-in Google
 account, the test skips as ``skip_environment`` naming that AVD; the Play Store
 sign-in itself is the owner's step on that AVD.
@@ -69,7 +69,7 @@ pytestmark = [pytest.mark.tier_4, pytest.mark.android]
 #: The device this file's tests need: the verify queue's drain reads it and
 #: runs a request for this file on that serial, not the venue's own AVD
 #: (delayed-testing.md § The verify queue, the device rule).
-E2E_DEVICE_SERIAL = "emulator-5556"
+E2E_DEVICE_SERIAL = "127.0.0.1:18510"
 
 #: The AVD this witness needs, named for the environment skip.
 PLAY_AVD = (

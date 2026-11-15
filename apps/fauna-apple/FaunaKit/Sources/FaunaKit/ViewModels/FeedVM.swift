@@ -76,6 +76,15 @@ public final class FeedVM {
     /// `hydrate` takes `api` as a parameter rather than storing one itself
     /// (mirroring `ContentPolicyStore.refresh(api:)`).
     public private(set) var api: APIClient?
+    /// The nest's `nostr-advertise` capability, read once per session when an
+    /// own post's ⋯ menu first opens (`nil` = unread; a failed read stays
+    /// unread so the next open retries). Dropped by ``reset()``.
+    public private(set) var nostrAdvertiseSupported: Bool?
+    #if !FAUNA_EXCISE_PAYMENTS
+    /// The open *Change price…* dialog (`feed-post-sale-price-dialog`), at most
+    /// one; dropped by ``reset()`` and by an account switch.
+    public var salePrice: SalePriceDialogState?
+    #endif
     private var observerBox: FeedObserverBox?
     private var searchTask: Task<Void, Never>?
     private var _observerTick: UInt64 = 0
@@ -300,6 +309,10 @@ public final class FeedVM {
         roomPostObservedManager = nil
         roomPostObserverBox = nil
         api = nil
+        nostrAdvertiseSupported = nil
+        #if !FAUNA_EXCISE_PAYMENTS
+        salePrice = nil
+        #endif
         configuredSecret = nil
         configuringSecret = nil
         isReconfiguring = false
@@ -474,16 +487,19 @@ public final class FeedVM {
     /// `ConversationsVM.flushDraftsNow` exactly (`flushDraftsAutosave`,
     /// `ViewModels/DraftsAutosave.swift`).
     ///
-    /// Cancels the debounced task first so the two cannot both fire, then runs
-    /// the save it would have run. A no-op when no `draftsSync`/`manager` is
-    /// attached (pre-configure / E2E), which is what lets the leave doors call
-    /// it unconditionally.
+    /// Cancels the debounced task first so the two cannot both fire, then saves
+    /// through the rail's leave face, `FfiFeedManager.saveDraftsOnLeave`, with
+    /// the snapshot read at the door — so a door taken before the launch load
+    /// has lifted the save gate still saves, by one read of its own. A no-op
+    /// when no `draftsSync`/`manager` is attached (pre-configure / E2E), which
+    /// is what lets the leave doors call it unconditionally.
     public func flushDraftsNow() async {
         draftsSaveTask?.cancel()
         draftsSaveTask = nil
         guard let sync = draftsSync, let manager else { return }
-        await flushDraftsAutosave(sync: sync, logTarget: "fauna.feed.drafts") {
-            manager.draftsSnapshotBytes()
+        let captured = manager.draftsSnapshotBytes()
+        await flushDraftsAutosave(logTarget: "fauna.feed.drafts") {
+            _ = try await manager.saveDraftsOnLeave(sync: sync, captured: captured)
         }
     }
 
@@ -723,7 +739,7 @@ public final class FeedVM {
 
     /// Write ``clientErrorMessage`` unconditionally — for a writer whose whole
     /// call frame is synchronous, so there is no account-switch window between
-    /// capture and write to guard against (`openPaymentURL`'s `setError`,
+    /// capture and write to guard against (`PostUnlockOfferTeaser.pay`'s unsafe-link refusal,
     /// `ComposeAttachButton`'s picker-open/cancel failures).
     public func setClientErrorMessage(_ message: String?) {
         clientErrorMessage = message
@@ -1175,8 +1191,18 @@ public final class FeedVM {
     /// of the mint) and `prepare_sell_post` (phase two) — because phase one
     /// decides the tier's rank and the two must agree.
     private static func askingPriceSats(_ sell: SellComposeState) -> UInt64? {
-        let trimmed = sell.askingPrice.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? nil : UInt64(trimmed)
+        if case .sats(let sats) = askingPriceParse(text: sell.askingPrice) { return sats }
+        return nil
+    }
+
+    /// The composer's refusal of a staged asking price that is not a price —
+    /// the shared `askingPriceParse` (the *Change price…* dialog's parse too);
+    /// `nil` for an empty field or a whole number of sats.
+    private static func askingPriceRefusal(_ sell: SellComposeState) -> String? {
+        if case .refused(let key) = askingPriceParse(text: sell.askingPrice) {
+            return L.lookup(key)
+        }
+        return nil
     }
 
     /// Seal the held pick for the composer's staged audience, upload it, and
@@ -1227,6 +1253,12 @@ public final class FeedVM {
             // `composeReady` — but a silent no-op here is exactly what e2e
             // point 11 forbids, so fail loudly rather than drop the post.
             preManagerComposeError = L.errors.feedNotReady
+            return
+        }
+        // A bad asking price is refused before anything is sealed, uploaded or
+        // minted (`compose-error`, the shared parse's own catalog string).
+        if let sell = composeSell, let refusal = Self.askingPriceRefusal(sell) {
+            composeGlueError = refusal
             return
         }
         // ── Seal the attachment for the staged audience, THEN upload it ──
@@ -1413,6 +1445,18 @@ public final class FeedVM {
     /// unreachable nest, a rejected subscribe) for the caller to surface.
     public func buyUnlockOffer(postId: String) async throws -> Bool? {
         try await manager?.buyUnlockOffer(postId: postId)
+    }
+    /// The sold post's external checkout (`gated-post-payment-link`) — the
+    /// manager's `pay_unlock_offer`: the subscribe to the resolved offer's tier
+    /// goes FIRST (across nests at the post's home), then the checkout URL the
+    /// shared rule composed, bound to the buyer's actor, comes back to hand to
+    /// the OS (`monetization.md` § Pillar 3 → *Buyer↔actor binding (Q4)*, the
+    /// Q13 rules (1) and (2)). `nil` = nothing to open (no resolved offer or
+    /// link, the caller's own post, an unsafe link — nothing subscribed then);
+    /// throws when the subscribe is refused, and nothing opens. Mirrors tui
+    /// `feed::Op::PayUnlockOffer`.
+    public func payUnlockOffer(postId: String) async throws -> String? {
+        try await manager?.payUnlockOffer(postId: postId)
     }
     /// Reveal a post's blocked remote images (D3 — render-model.md § D3). The manager flips its
     /// in-memory per-post reveal set and re-emits the snapshot with `RemoteImage.revealed = true`
@@ -1770,6 +1814,16 @@ public final class FeedVM {
     /// arm is idempotent per (actor, post), so a second tap moved nothing and
     /// a like could never be taken back. A failure reaches `error-message`
     /// (`runVerb`).
+    /// Re-read the outbox into each post's `likeState` (`queued` / `unsent`,
+    /// `account-offline-mutation.md` § The unsent-changes surface, point 2) —
+    /// the shared manager folds it at every snapshot. A read of this device's
+    /// store: no nest needed. Run on the feed page's unsent tick
+    /// (``View/unsentRefresh(_:)``), since the runtime's generic drain tells the
+    /// app nothing when it sends or parks a like.
+    public func refreshUnsentLikes() async {
+        guard let manager else { return }
+        try? await manager.refreshUnsentLikes()
+    }
     public func likePost(postId: String) async {
         await runVerb { try await $0.like(postId: postId) }
     }
@@ -1856,6 +1910,105 @@ public final class FeedVM {
         try? await manager?.deletePost(postId: postId)
     }
 
+    #if !FAUNA_EXCISE_PAYMENTS
+    /// Read the nest's `nostr-advertise` capability once (a failed read stays
+    /// unread). The generation guard drops a landing that crossed an account
+    /// switch.
+    public func readNostrAdvertiseSupported() async {
+        guard nostrAdvertiseSupported == nil, let api else { return }
+        let generation = managerGeneration
+        guard let supported = try? await api.nostrAdvertiseSupported() else { return }
+        guard generation == managerGeneration else { return }
+        nostrAdvertiseSupported = supported
+    }
+
+    /// `fauna.nostr.advertise.set`, then a feed re-read so the post's
+    /// `nostrAdvertisedAt` flips. A refusal lands in the feed's error slot.
+    public func advertisePostOnNostr(_ postId: String) async {
+        guard let api else { return }
+        let generation = managerGeneration
+        do {
+            try await api.nostrAdvertisePost(postId: postId)
+            await manager?.refreshCurrentFeed()
+        } catch {
+            guard let text = DisplayError.message(error) else { return }
+            landClientErrorMessage(
+                generation: generation, message: L.nostrAdvertise.errorAdvertise(message: text))
+        }
+    }
+
+    /// *Change price…* on a sold own post: read the selling tier
+    /// (`fauna.subscriptions.tiers.list`), then open the dialog pre-filled by the
+    /// shared `salePricePrefill`. A failed read lands in the feed's error slot and
+    /// opens nothing.
+    public func startSalePrice(postId: String, tierName: String) async {
+        guard let api else { return }
+        let generation = managerGeneration
+        do {
+            let tiers = try await api.listSubscriptionTiers()
+            guard generation == managerGeneration else { return }
+            guard let tier = tiers.first(where: { $0.name == tierName }) else {
+                landClientErrorMessage(
+                    generation: generation, message: L.salePrice.errorLoad(message: tierName))
+                return
+            }
+            let prefill = salePricePrefill(tier: tier)
+            salePrice = SalePriceDialogState(
+                postId: postId, tier: tier, hint: prefill.priceHint,
+                asking: prefill.askingPrice)
+        } catch {
+            guard let text = DisplayError.message(error) else { return }
+            landClientErrorMessage(
+                generation: generation, message: L.salePrice.errorLoad(message: text))
+        }
+    }
+
+    public func cancelSalePrice() { salePrice = nil }
+
+    /// Save the open dialog through the shared plan. Unchanged / Saved close it
+    /// (Saved re-reads the feed so an ended advertisement repaints); Refused keeps
+    /// it open with the shared parse's own string on `error-message`; a
+    /// nest refusal lands in the feed's error slot.
+    public func saveSalePrice() async {
+        guard let api, let dialog = salePrice else { return }
+        let generation = managerGeneration
+        do {
+            let result = try await api.saveSalePrice(
+                tier: dialog.tier, priceHint: dialog.hint, askingPrice: dialog.asking)
+            guard generation == managerGeneration else { return }
+            switch result {
+            case .refused(let key):
+                // The shared parse's own string on the page's `error-message`;
+                // the dialog stays open with what the author typed.
+                landClientErrorMessage(generation: generation, message: L.lookup(key))
+            case .unchanged:
+                salePrice = nil
+            case .saved:
+                salePrice = nil
+                await manager?.refreshCurrentFeed()
+            }
+        } catch {
+            guard let text = DisplayError.message(error) else { return }
+            landClientErrorMessage(
+                generation: generation, message: L.salePrice.errorSave(message: text))
+        }
+    }
+
+    /// `fauna.nostr.advertise.clear`, then a feed re-read.
+    public func stopAdvertisingPostOnNostr(_ postId: String) async {
+        guard let api else { return }
+        let generation = managerGeneration
+        do {
+            try await api.nostrClearAdvertisement(postId: postId)
+            await manager?.refreshCurrentFeed()
+        } catch {
+            guard let text = DisplayError.message(error) else { return }
+            landClientErrorMessage(
+                generation: generation, message: L.nostrAdvertise.errorStop(message: text))
+        }
+    }
+    #endif
+
     /// Through the manager (`FfiFeedManager.interact`), not the raw
     /// `APIClient.interactWithPost` — same rule as `deletePost` above. The
     /// interaction bar's four counts render from the manager snapshot
@@ -1912,3 +2065,14 @@ extension PostSummary: @retroactive Identifiable { public var id: String { postI
 extension FeedSummaryView: @retroactive Identifiable { public var id: String { feedId } }
 extension BridgeFeedView: @retroactive Identifiable {}
 #endif // !FAUNA_KIDS
+
+#if !FAUNA_EXCISE_PAYMENTS
+/// The *Change price…* dialog's state: the selling tier as read when it opened
+/// (the save plan compares the fields against it) and the two editable fields.
+public struct SalePriceDialogState: Equatable {
+    public let postId: String
+    public let tier: FfiTierItem
+    public var hint: String
+    public var asking: String
+}
+#endif

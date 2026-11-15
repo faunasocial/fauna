@@ -85,6 +85,18 @@ pub fn remove_account_served_here_copy() -> LocalizedText {
     LocalizedText::key(KEY_REMOVE_BLOCKED_SERVED_HERE)
 }
 
+/// Remove-account refused because the account is a retired identity whose
+/// unsent changes this device has not moved to its successor yet
+/// ([`crate::CarryOwed`]).
+const KEY_REMOVE_BLOCKED_CARRY_OWED: &str = "settings.remove_account_blocked_carry_owed";
+
+/// The line a seat paints when a remove-account is refused because the
+/// retired identity's unsent changes still wait to move to its successor:
+/// its remedy is the successor's unsent-changes list.
+pub fn remove_account_carry_owed_copy() -> LocalizedText {
+    LocalizedText::key(KEY_REMOVE_BLOCKED_CARRY_OWED)
+}
+
 /// The line a seat paints when the unreadable-index floor ("start over on this
 /// device") is refused because another window still serves an account its
 /// erase would reach — see [`remove_account_blocked_copy`] for why it is its

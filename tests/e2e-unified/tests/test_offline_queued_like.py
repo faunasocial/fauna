@@ -33,10 +33,10 @@ import time
 
 import pytest
 
-from common.nest import start_nest_in_place, stop_nest
+from common.nest import start_nest_in_place
 from helpers.fleet import poked_pass
+from helpers.nest_outage import hold_nest_down
 from helpers.waiting import wait_until
-from i18n.strings import S
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -50,9 +50,6 @@ pytestmark = [
 #: A post composed online reaching the seat's feed state.
 POST_S = 120.0
 
-#: The connection indicator leaving ``Connected`` once the nest is held down.
-DISCONNECT_S = 90.0
-
 #: The offline tap lighting the toggle (a local outbox write).
 QUEUE_S = 60.0
 
@@ -64,24 +61,6 @@ def _stamp() -> int:
     return int(time.time() * 1000) % 1_000_000
 
 
-def _hold_nest_down(app, nest_instance) -> None:
-    stop_nest(nest_instance, graceful=True)
-    status = {}
-
-    def disconnected() -> bool:
-        if not app.is_visible("connection-status"):
-            return False
-        status["text"] = app.driver.get_text("connection-status")
-        return status["text"] != S.common.connected
-
-    wait_until(
-        disconnected, DISCONNECT_S,
-        diagnose=lambda: (
-            f"connection-status still read {status.get('text')!r} with the nest "
-            "down — the seat never noticed the outage, so the like below would "
-            "not be offline at all"
-        ),
-    )
 
 
 @pytest.mark.feature("offline-aware-controls")
@@ -115,7 +94,7 @@ def test_a_like_given_offline_is_queued_kept_across_restart_and_reaches_the_nest
         "half of this outcome would be vacuous"
     )
 
-    _hold_nest_down(app, nest_instance)
+    hold_nest_down(app, nest_instance, act="the like below")
     try:
         app.feed.like_post(app.feed.card_index_by_id(post_id))
         seen: dict = {}

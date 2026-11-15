@@ -56,10 +56,13 @@ impl ArchiveSignalPoster for SessionPoster {
             .archive_channel_for(contact, None)
             .await
             .map_err(|e| ArchiveNestError::Transport(e.to_string()))?;
-        session
+        tracing::debug!(%channel, "archive link: the pair channel resolved; sending the signal");
+        let sent = session
             .send_archive_signal(&channel, bytes)
             .await
-            .map_err(|e| ArchiveNestError::Transport(e.to_string()))
+            .map_err(|e| ArchiveNestError::Transport(e.to_string()));
+        tracing::debug!(%channel, ok = sent.is_ok(), "archive link: the pair channel's send returned");
+        sent
     }
 }
 

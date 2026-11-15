@@ -26,6 +26,16 @@ DataTemplates here have no single bound type — several are filled by a generic
 helper, e.g. `SetChips<T>` — so this is usually the only option); (2) give the
 DataTemplate an `x:DataType` if it genuinely has one bound type throughout.
 
+A second rule, in the same binding scope: an `{x:Bind}` naming its DataTemplate's
+ROOT element (the template's first element, by `x:Name` or `Name`) does not
+compile. The XAML compiler holds a template's root as a `WeakReference`, and the
+binding's generated update call passes that reference where the element is
+wanted (CS1503 in the `.g.cs`). MSBuild does see this one, but only in the heavy
+app build, after the merge: `Controls/PostCardTemplates.xaml`'s
+`PostMediaImageTemplate` (2026-11-13) kept `main`'s Windows app from compiling
+until it was fixed. The fix: a bare `Grid` as the template's root, around the
+named element (a Grid has no automation peer, so the UIA tree is unchanged).
+
 Usage: python3 scripts/lint_winui_xbind_datatemplate_scope.py
 Exit 0 = clean, 1 = violations found.
 """
@@ -145,8 +155,56 @@ def find_unscoped_xbind_violations(xaml_text: str, *, source: str = "<text>") ->
                     line=_line_of(xaml_text, start),
                     element=name,
                     attribute=attribute,
-                    expression=expr + "}",
+                    expression=expr,
                 ))
+    return violations
+
+
+_NAME_ATTR_RE = re.compile(r'(?<![\w.:])(?:x:)?Name\s*=\s*(["\'])([A-Za-z_]\w*)\1')
+
+
+def find_root_name_xbind_violations(xaml_text: str, *, source: str = "<text>") -> list[Violation]:
+    """Return one Violation per `{x:Bind ...}` attribute that names, as an identifier
+    of its own, the root element of its nearest enclosing `<DataTemplate>` (the
+    template's first element child, named by `x:Name` or `Name`). The XAML compiler
+    holds a template's root as a WeakReference, and a binding naming it generates a
+    call passing the WeakReference where the element is wanted — CS1503 in the
+    generated `.g.cs`, so the app does not compile. A member after a dot
+    (`Item.Title`) is not the root."""
+    violations: list[Violation] = []
+    # one frame per open <DataTemplate>: [root name or None, root decided, depth]
+    stack: list[list] = []
+    for kind, name, tag_text, start in _iter_tags(xaml_text):
+        if name == "DataTemplate":
+            if kind == "open":
+                stack.append([None, False, 0])
+            elif kind == "close" and stack:
+                stack.pop()
+            continue
+        if not stack:
+            continue
+        frame = stack[-1]
+        if kind == "close":
+            frame[2] -= 1
+            continue
+        if not frame[1] and frame[2] == 0 and "." not in name:
+            m = _NAME_ATTR_RE.search(tag_text)
+            frame[0], frame[1] = (m.group(2) if m else None), True
+        root = frame[0]
+        if root:
+            token = re.compile(r"(?<![\w.:'\"])" + re.escape(root) + r"(?!\w)")
+            for m in _XBIND_ATTR_RE.finditer(tag_text):
+                attribute, _quote, expr = m.group(1), m.group(2), m.group(3)
+                if token.search(expr[len("{x:Bind"):]):
+                    violations.append(Violation(
+                        source=source,
+                        line=_line_of(xaml_text, start),
+                        element=name,
+                        attribute=attribute,
+                        expression=expr,
+                    ))
+        if kind == "open":
+            frame[2] += 1
     return violations
 
 
@@ -158,31 +216,50 @@ def iter_xaml_files(root: Path = WINUI_DIR):
         yield p
 
 
-def scan_repo(root: Path = WINUI_DIR) -> list[Violation]:
+def _scan(finder, root: Path) -> list[Violation]:
     out: list[Violation] = []
     for p in iter_xaml_files(root):
         try:
             rel = str(p.relative_to(ROOT))
         except ValueError:
             rel = str(p)
-        out.extend(find_unscoped_xbind_violations(p.read_text(encoding="utf-8"), source=rel))
+        out.extend(finder(p.read_text(encoding="utf-8"), source=rel))
     return out
+
+
+def scan_repo(root: Path = WINUI_DIR) -> list[Violation]:
+    return _scan(find_unscoped_xbind_violations, root)
+
+
+def scan_repo_roots(root: Path = WINUI_DIR) -> list[Violation]:
+    return _scan(find_root_name_xbind_violations, root)
 
 
 def main(argv=None) -> int:
     violations = scan_repo()
-    if not violations:
-        print("WinUI x:Bind DataTemplate-scope lint: OK (no unscoped x:Bind inside a DataTemplate).")
+    roots = scan_repo_roots()
+    if not violations and not roots:
+        print("WinUI x:Bind DataTemplate-scope lint: OK (no unscoped x:Bind inside a DataTemplate, "
+              "and none naming its template's root element).")
         return 0
     print("WinUI x:Bind DataTemplate-scope lint — FAILURES:\n")
     for v in violations:
         print(f"  {v.source}:{v.line}  <{v.element} {v.attribute}=\"{v.expression}\">")
-    print(f"\n{len(violations)} violation(s). Each DataTemplate above declares no x:DataType, "
-          "so its {x:Bind} has no binding context: it silently resolves to nothing, or — if it "
-          "is the template's only x:Bind — crashes the generated SetDataRoot the moment the "
-          "template is realized (see Controls/RecipientPicker.xaml for "
-          "the worked fix). Restore the binding to a literal value, or add x:DataType if the "
-          "template genuinely has one bound type.")
+    if violations:
+        print(f"\n{len(violations)} violation(s). Each DataTemplate above declares no x:DataType, "
+              "so its {x:Bind} has no binding context: it silently resolves to nothing, or — if it "
+              "is the template's only x:Bind — crashes the generated SetDataRoot the moment the "
+              "template is realized (see Controls/RecipientPicker.xaml for "
+              "the worked fix). Restore the binding to a literal value, or add x:DataType if the "
+              "template genuinely has one bound type.")
+    for v in roots:
+        print(f"  {v.source}:{v.line}  <{v.element} {v.attribute}=\"{v.expression}\">")
+    if roots:
+        print(f"\n{len(roots)} violation(s). Each {{x:Bind}} above names its DataTemplate's root "
+              "element, which the XAML compiler holds as a WeakReference: the generated code "
+              "passes the reference where the element is wanted and the app does not compile "
+              "(CS1503). Make the template's root a bare Grid around the named element (see "
+              "Controls/PostCardTemplates.xaml, PostMediaImageTemplate, for the worked fix).")
     return 1
 
 

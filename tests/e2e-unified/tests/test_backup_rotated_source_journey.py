@@ -30,11 +30,11 @@ Owner = the box's admin, the one identity that may rotate it; the destination is
 the session's ``second_nest``, where this function-scoped box's fresh admin is a
 fresh owner, so the seat this journey leaves there is nobody else's.
 
-**tui leads; linux, web, macos and ios follow** (`segment-backup-protocol.md` §
+**tui leads; linux, web, macos, ios, windows and android follow** (`segment-backup-protocol.md` §
 Implementation status today names the apps this journey is proven on). The carry
 is shared Rust every audit host already runs
 (``fauna_client_backup::audit::run_audit_pass``, called by tui, linux, the FFI
-(macos and ios) and the wasm SPA), so the other apps' arms are parity witnesses,
+(macos, ios, windows and android) and the wasm SPA), so the other apps' arms are parity witnesses,
 not new mechanism. Web rides the plain-HTTP ``rotatable_nest``
 behind ``rotatable_spa_url`` (as ``test_nest_rotation_admin_journey.py``).
 
@@ -60,12 +60,14 @@ from tests.test_backups import _backlog_count, _seed_one_mail_segment
 
 pytestmark = [
     pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
-    pytest.mark.macos, pytest.mark.ios, pytest.mark.windows,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.windows, pytest.mark.android,
 ]
 
-# windows rides the native `rotatable_tls_nest` branch below; its Backups page
-# runs the same shared audit pass through the FFI (`BackupsViewModel`).
-_SUPPORTED_APPS = ("tui", "linux", "web", "macos", "ios", "windows")
+# windows and android ride the native `rotatable_tls_nest` branch below; their
+# Backups pages run the same shared audit pass through the FFI (windows'
+# `BackupsViewModel`, android's `BackupDestinationsVM.refreshAudit` →
+# `ApiClient.backupAuditRunPass`).
+_SUPPORTED_APPS = ("tui", "linux", "web", "macos", "ios", "windows", "android")
 
 
 def _journey_clients():
@@ -96,7 +98,7 @@ class _JourneyEnv:
 def journey_env(request, journey_client, tmp_path):
     """Per-app launch harness + the function-scoped rotatable source box.
 
-    Native (tui/linux/macos/ios/windows) rides ``rotatable_tls_nest`` (real TLS); web rides the
+    Native (tui/linux/macos/ios/windows/android) rides ``rotatable_tls_nest`` (real TLS); web rides the
     plain-HTTP ``rotatable_nest`` behind ``rotatable_spa_url`` (a browser
     cannot pin the self-signed floor cert; the carry itself needs no pin)."""
     if journey_client == "web":

@@ -367,6 +367,12 @@ fn harness_against(nest: &str) -> Harness {
     std::fs::create_dir_all(db_path.parent().unwrap()).expect("create db dir");
     {
         let db = SyncDb::open(&db_path).expect("open per-folder db");
+        // A two-way seat its nest once answered `sync` for — the persisted last
+        // authoritative answer the resolver falls back to with no nest here. A seat
+        // that never heard one is unresolved, and an unresolved seat declines a
+        // peer's delete on the on-demand fold (`file-sync.md` § 4).
+        db.set_cached_sync_mode(fauna_sync_engine::config::SyncMode::Sync.as_cache_str())
+            .expect("seed the seat's last authoritative sync mode");
         // The hydrated file, exactly as a completed sync leaves it: local identity,
         // size and mtime matching the disk, so the boot sweep reads it unchanged
         // and reaches for no nest.
@@ -440,6 +446,7 @@ impl Harness {
                 fauna_sync_engine::access_gate::AccessGate::new(),
                 None,
                 std::sync::Arc::new(fauna_client_folders::MemoryFolderKeyStore::default()),
+                fauna_sync_engine::engine_lifecycle::ReaderHosting::Refuse,
             ),
             fauna_sync_engine::engine_lifecycle::ResolvedBinding {
                 folder: FOLDER.to_string(),
@@ -577,6 +584,8 @@ impl Harness {
                 RootBoot {
                     fresh_registration: true,
                     connect,
+                    // A reader's view boots with no write half, as the product's does.
+                    read_only: reach.is_read_only(),
                 },
                 cmd_rx,
                 serve.events.clone(),
@@ -795,7 +804,12 @@ async fn child_mounts_and_waits() {
     } else {
         Vec::new()
     };
-    let reach = Reach::open(Path::new(&root)).expect("child: open the reach");
+    // A presence root's view stands on `root` as its backing, mounted elsewhere.
+    let reach = match std::env::var_os(CHILD_PRESENCE_VAR) {
+        Some(presence) => Reach::open_backing(Path::new(&root), Path::new(&presence)),
+        None => Reach::open(Path::new(&root)),
+    }
+    .expect("child: open the reach");
     let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<HydrationCommand>();
     // The product's mount — crash guard included — or the bare one the boot
     // sweep's test needs a ghost from.
@@ -816,6 +830,9 @@ const CHILD_AUTO_UNMOUNT_VAR: &str = "FAUNA_FUSE_LIVE_CHILD_AUTO_UNMOUNT";
 /// Set: the child mounts as the product does ([`mount_over`], crash guard and
 /// all); unset, bare — no guard, so a kill leaves the ghost the boot sweep is for.
 const CHILD_GUARDED_VAR: &str = "FAUNA_FUSE_LIVE_CHILD_GUARDED";
+/// Set: the child mounts a presence root at this path, over the directory
+/// [`CHILD_ROOT_VAR`] names as its backing.
+const CHILD_PRESENCE_VAR: &str = "FAUNA_FUSE_LIVE_CHILD_PRESENCE";
 
 /// [`spawn_mounting_child`] mounting as the product does: with its crash guard.
 fn spawn_guarded_mounting_child(root: &Path) -> std::process::Child {
@@ -974,13 +991,13 @@ async fn a_ghost_mount_is_swept_at_boot() {
 
     let elsewhere = h._tmp.path().join("not-a-location");
     assert_eq!(
-        sweep_ghost_mounts(&[elsewhere]),
+        sweep_ghost_mounts(&[elsewhere], None),
         0,
         "a mount at a location that is not configured is not this sweep's"
     );
     assert!(h.mounted());
 
-    assert_eq!(sweep_ghost_mounts(std::slice::from_ref(&h.root)), 1);
+    assert_eq!(sweep_ghost_mounts(std::slice::from_ref(&h.root), None), 1);
     assert!(!h.mounted(), "the ghost is gone");
     assert_eq!(
         std::fs::read(h.root.join(REAL)).unwrap(),
@@ -1055,7 +1072,7 @@ async fn diag_auto_unmount_on_an_owner_only_mount() {
         read_dir_errno(&h.root)
     );
     // Leave nothing behind whatever the answer was.
-    sweep_ghost_mounts(std::slice::from_ref(&h.root));
+    sweep_ghost_mounts(std::slice::from_ref(&h.root), None);
 }
 
 /// **The design's gate.** With the mount up, the descriptor reach still names the
@@ -2549,4 +2566,257 @@ async fn renaming_a_directory_that_holds_placeholder_rows_answers_exdev() {
         assert!(h.entry("moved/deep.bin").is_none());
     };
     drive_until_asserted(loop_fut, driver).await;
+}
+
+// ---------------------------------------------------------------------------
+// Presence roots: a view over a private backing (`on-demand-files-linux.md`
+// § Linux FUSE binding, the presence-root bullet)
+// ---------------------------------------------------------------------------
+
+impl Harness {
+    /// A presence path for this harness's set — `<tmp>/Fauna/team`, created
+    /// empty and canonical. The harness's bound directory ([`Harness::root`])
+    /// is the root's private BACKING here: the mount point is elsewhere.
+    fn presence_path(&self) -> PathBuf {
+        let path = self._tmp.path().join("Fauna").join("team");
+        std::fs::create_dir_all(&path).expect("create the presence path");
+        path.canonicalize().expect("canonical presence path")
+    }
+}
+
+/// `perl -e <script> <args>` in another process; its exit code is the `errno`
+/// the act met (0 for success) — the observation a refused act makes.
+async fn errno_of(script: &'static str, args: Vec<PathBuf>) -> Option<i32> {
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("perl")
+            .arg("-e")
+            .arg(script)
+            .args(args)
+            .status()
+            .expect("spawn perl")
+            .code()
+    })
+    .await
+    .expect("perl task")
+}
+
+const PERL_WRITE: &str = "open(my $f, '>', $ARGV[0]) ? exit 0 : exit($! + 0)";
+const PERL_UNLINK: &str = "unlink($ARGV[0]) ? exit 0 : exit($! + 0)";
+const PERL_RENAME: &str = "rename($ARGV[0], $ARGV[1]) ? exit 0 : exit($! + 0)";
+const PERL_MKDIR: &str = "mkdir($ARGV[0]) ? exit 0 : exit($! + 0)";
+
+/// A WRITER's presence root: the view is mounted at the presence path over the
+/// private backing — another process lists the backing's hydrated file beside
+/// the placeholders, `cat` hydrates a placeholder INTO THE BACKING, and a file
+/// written through the view is adopted and uploaded. Unmounted, the presence
+/// path is an empty directory: the bytes stay in the backing.
+#[tokio::test]
+async fn a_writers_presence_root_lists_hydrates_and_uploads_over_its_backing() {
+    const FRESH: &str = "written through a presence root";
+
+    let nest = wiremock::MockServer::start().await;
+    let store = fauna_sync_engine::test_support::MockNest::new()
+        .mount(&nest)
+        .await;
+    let h = harness_against(&nest.uri());
+    let presence = h.presence_path();
+    let reach = Reach::open_backing(&h.root, &presence).expect("open the backing");
+    assert!(!reach.is_read_only());
+    let loop_fut = h.serve(&reach, CancellationToken::new());
+
+    let driver = async {
+        eventually(
+            || is_mounted(&presence),
+            Duration::from_secs(20),
+            "the presence root to mount",
+        )
+        .await;
+        assert!(!h.mounted(), "nothing is mounted over the backing");
+        assert_eq!(ls(&presence).await, vec!["cloud.txt", "real.txt", "sub"]);
+        assert_eq!(
+            cat(&presence.join("cloud.txt")).await,
+            cloud_bytes("cloud.txt", 1234)
+        );
+        assert_eq!(
+            std::fs::read(h.root.join("cloud.txt")).unwrap(),
+            cloud_bytes("cloud.txt", 1234),
+            "the hydration landed in the backing"
+        );
+        assert_eq!(h.entry("cloud.txt").unwrap().state, SyncState::Synced);
+
+        write_through(&presence.join("fresh.txt"), FRESH).await;
+        assert_eq!(
+            std::fs::read(h.root.join("fresh.txt")).unwrap(),
+            FRESH.as_bytes()
+        );
+        let want = ContentHash::of_raw(FRESH.as_bytes());
+        eventually(
+            || h.entry("fresh.txt").and_then(|r| r.local_hash) == Some(want),
+            Duration::from_secs(30),
+            "the watcher to adopt the file written through the presence root",
+        )
+        .await;
+        eventually(
+            || manifests(&store) > 0,
+            Duration::from_secs(30),
+            "the new file's bytes to reach the nest's byte plane",
+        )
+        .await;
+    };
+    drive_until_asserted(loop_fut, driver).await;
+
+    eventually(
+        || !is_mounted(&presence),
+        Duration::from_secs(10),
+        "the presence root to unmount with its loop",
+    )
+    .await;
+    assert!(
+        std::fs::read_dir(&presence).unwrap().next().is_none(),
+        "unmounted, the presence path is an empty directory"
+    );
+    assert_eq!(
+        visible_names(&h.root),
+        vec!["cloud.txt", "fresh.txt", REAL],
+        "the bytes stay agent-managed, in the backing"
+    );
+}
+
+/// A READER's presence root: mounted `ro` — another process lists it and `cat`
+/// hydrates a placeholder (the loop writes the backing, never the view), but
+/// writing a file, creating one, making a directory, deleting a placeholder
+/// and renaming a hydrated file each answer `EROFS`, and nothing is recorded:
+/// the rows are as they were and the nest's byte plane was sent nothing.
+#[tokio::test]
+async fn a_readers_presence_root_hydrates_and_refuses_every_mutation_with_erofs() {
+    let nest = wiremock::MockServer::start().await;
+    let store = fauna_sync_engine::test_support::MockNest::new()
+        .mount(&nest)
+        .await;
+    let h = harness_against(&nest.uri());
+    let presence = h.presence_path();
+    let reach = Reach::open_backing(&h.root, &presence)
+        .expect("open the backing")
+        .read_only(true);
+    let loop_fut = h.serve(&reach, CancellationToken::new());
+
+    let driver = async {
+        eventually(
+            || is_mounted(&presence),
+            Duration::from_secs(20),
+            "the presence root to mount",
+        )
+        .await;
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+        let presence_text = presence.to_string_lossy().into_owned();
+        let line = mountinfo
+            .lines()
+            .find(|l| l.contains(" - fuse.fauna ") && l.contains(&presence_text))
+            .expect("the presence mount's line");
+        assert!(
+            line.split(' ')
+                .nth(5)
+                .is_some_and(|opts| opts.split(',').any(|o| o == "ro")),
+            "the reader's view is mounted ro: {line}"
+        );
+        assert_eq!(ls(&presence).await, vec!["cloud.txt", "real.txt", "sub"]);
+        assert_eq!(
+            cat(&presence.join("cloud.txt")).await,
+            cloud_bytes("cloud.txt", 1234),
+            "a reader hydrates on open"
+        );
+        let before_real = h.entry(REAL).expect("the hydrated row");
+        let erofs = Some(libc::EROFS);
+        assert_eq!(
+            errno_of(PERL_WRITE, vec![presence.join(REAL)]).await,
+            erofs,
+            "write"
+        );
+        assert_eq!(
+            errno_of(PERL_WRITE, vec![presence.join("new.txt")]).await,
+            erofs,
+            "create"
+        );
+        assert_eq!(
+            errno_of(PERL_MKDIR, vec![presence.join("newdir")]).await,
+            erofs,
+            "mkdir"
+        );
+        assert_eq!(
+            errno_of(PERL_UNLINK, vec![presence.join("sub/deep.bin")]).await,
+            erofs,
+            "delete"
+        );
+        assert_eq!(
+            errno_of(
+                PERL_RENAME,
+                vec![presence.join(REAL), presence.join("moved.txt")]
+            )
+            .await,
+            erofs,
+            "rename"
+        );
+        // Give a watcher the time it would take to see anything.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(ls(&presence).await, vec!["cloud.txt", "real.txt", "sub"]);
+        assert_eq!(std::fs::read(h.root.join(REAL)).unwrap(), REAL_BYTES);
+        let after_real = h.entry(REAL).expect("the hydrated row");
+        assert_eq!(
+            (after_real.state, after_real.local_hash),
+            (before_real.state, before_real.local_hash)
+        );
+        assert_eq!(
+            h.entry("sub/deep.bin").map(|e| e.state),
+            Some(SyncState::Placeholder),
+            "the refused delete recorded nothing"
+        );
+        assert!(h.entry("new.txt").is_none() && h.entry("moved.txt").is_none());
+        assert_eq!(
+            manifests(&store),
+            0,
+            "nothing reached the nest's byte plane"
+        );
+    };
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// The boot sweep clears a presence root's leftover by its directory: a dead
+/// mount at `<presence dir>/<name>` that no configured location names.
+#[tokio::test]
+async fn a_presence_roots_ghost_is_swept_by_its_directory() {
+    let h = harness();
+    let presence = h.presence_path();
+    let dir = presence.parent().expect("the presence dir").to_path_buf();
+    // A guardless child mounts the presence root and is killed: the mount is
+    // left dead, as an agent killed with its guard leaves it.
+    let mut cmd = std::process::Command::new(std::env::current_exe().expect("this test binary"));
+    cmd.args([
+        "fuse_live_integration::child_mounts_and_waits",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+    ])
+    .env(CHILD_ROOT_VAR, &h.root)
+    .env(CHILD_PRESENCE_VAR, &presence)
+    .stdout(std::process::Stdio::null());
+    let mut child = cmd.spawn().expect("spawn the mounting child");
+    eventually(
+        || is_mounted(&presence),
+        Duration::from_secs(60),
+        "the child's presence mount",
+    )
+    .await;
+    child.kill().expect("kill -9 the mounting child");
+    child.wait().expect("reap the mounting child");
+    assert!(
+        is_mounted(&presence),
+        "the dead mount is still in the table"
+    );
+
+    assert_eq!(sweep_ghost_mounts(&[], Some(&dir)), 1);
+    assert!(!is_mounted(&presence));
+    assert!(
+        std::fs::read_dir(&presence).unwrap().next().is_none(),
+        "the presence path is an empty directory again"
+    );
 }

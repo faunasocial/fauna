@@ -1338,7 +1338,7 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     and what a peer that is not the nest is granted). **Not yet live-verified:**
     `test_self_signed_nest_client_legs.py` carries `pytest.mark.android`, but no android
     e2e run exists until the run venue's harness lands (`testing.md` § Default app and
-    nest mode → *Android's run venue*).
+    nest mode → *Android's emulator placement*).
   - **The native-player leg — reader BUILT 2026-10-08, windows' adapter BUILT 2026-10-09,
     linux' and android's BUILT 2026-10-10, apple's BUILT 2026-10-22 (ruled 2026-10-08, § Transport trust → *The native-player
     leg*).** The shared reader exists: `fauna_client::RangedNestReader`
@@ -1351,7 +1351,8 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     `VideoPlaybackResolver.ResolveAsync` opens the reader on the client's configured nest
     URL (`INestHttpClient.NestUrl` — the string the WS login minted on, so the pin key
     matches) + the projection's nest-relative path, off the UI thread, for both `Url`
-    arms (the public blob and the ticketed proxy path); `VideoThumbnailView` plays
+    arms (the public blob and the ticketed proxy path); the slot's `InlineVideoSession`
+    (shown by `VideoThumbnailView`) plays
     `MediaSource.CreateFromStream` over `RangedNestStream`, a WinRT `IRandomAccessStream`
     shell over `FaunaApp.Core`'s `RangedNestCursor`, and releases the reader with the
     player; nothing on windows hands the OS media stack a nest URL. **linux reads through

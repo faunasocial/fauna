@@ -212,6 +212,10 @@ class MainActivity : FragmentActivity() {
             // app-log's lowered size cap (`fauna_log::rolling::E2E_TOTAL_CAP_ENV`),
             // re-read by TestAgent.start once it is process env.
             "FAUNA_E2E_LOG_TOTAL_CAP_BYTES",
+            // The real-conversations receive loop's backstop cadence
+            // (`fauna-conversations` `poll_secs_override`, read via std::env
+            // when the session's receive loop starts at login).
+            "FAUNA_CONV_POLL_SECS",
         )
     }
 }

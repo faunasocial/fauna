@@ -36,7 +36,13 @@ import SwiftUI
     struct FolderOnDemandToggle: View {
         @Environment(FaunaClient.self) private var client: FaunaClient?
         let vm: DevicesMachineVM
-        let folder: FolderSummary
+        /// The set's bare `FolderRef` wire string — the key the presence plan
+        /// and the toggle store share (`local:1`, a member's ref, a group
+        /// set's `group:<hex>`); `nil` steers nothing.
+        let folderRef: String?
+        /// The set's name, the enrol gesture's `ensure_place` key (unused on a
+        /// `hideOnly` row).
+        let folderName: String
         let isBound: Bool
         /// Re-converge the FP domains after a flip; `nil` (no host app hook, e.g.
         /// previews) just persists the preference — the next launch reconcile
@@ -120,7 +126,7 @@ import SwiftUI
         /// and a session always has an actor; a row that somehow doesn't has
         /// no domain to steer, so the flip persists nothing.
         private var identity: FileProviderDomainIdentity? {
-            guard let actorHex = FaunaClient.activeActorIdHex, let folderId = folder.folderRef
+            guard let actorHex = FaunaClient.activeActorIdHex, let folderId = folderRef
             else { return nil }
             return FileProviderDomainIdentity(actorIdHex: actorHex, folderId: folderId)
         }
@@ -135,11 +141,24 @@ import SwiftUI
                 return
             }
             // Enrol first, re-plan second: the reconcile must see the place.
-            let name = folder.name
+            let name = folderName
             Task {
                 await vm.ensureFolderPlace(name: name, deviceId: deviceId)
                 onChanged?()
             }
+        }
+    }
+
+    extension FolderOnDemandToggle {
+        /// A row of the folder list (an owner's or a member's): the set's ref
+        /// and name are the summary's.
+        init(
+            vm: DevicesMachineVM, folder: FolderSummary, isBound: Bool,
+            onChanged: (() -> Void)?, hideOnly: Bool = false
+        ) {
+            self.init(
+                vm: vm, folderRef: folder.folderRef, folderName: folder.name, isBound: isBound,
+                onChanged: onChanged, hideOnly: hideOnly)
         }
     }
 

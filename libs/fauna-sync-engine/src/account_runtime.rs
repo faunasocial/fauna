@@ -496,6 +496,17 @@ pub struct AccountRuntimeParams<R> {
     /// (`fauna_client_account_runtime::build_params`); `None` delivers
     /// nothing, and the seedless agent delivers nothing whatever it is handed.
     pub owed_nests: Option<OwedNestDeliverer<R>>,
+    /// **Whether the app is in the foreground as the runtime starts** — the
+    /// driver's foreground seat begins from it
+    /// ([`DriverConfig::foreground`]), before the store thread spawns, so the
+    /// prologue pass of a runtime a phone starts out of front reads
+    /// background and its peer leg binds no listener and dials nothing
+    /// (`p2p-shared-set-build.md` § Phone peers — design, decision 2). A
+    /// later change still arrives through
+    /// [`AccountStoreHandle::set_foreground`]. `true` for every host with no
+    /// foreground lifecycle: the desktops, tui, the agent and the tests; the
+    /// phones' ffi passes the shell's last signal.
+    pub foreground: bool,
 }
 
 /// The native half of [`AccountRuntimeParams`] — what the store thread's
@@ -590,6 +601,7 @@ impl AccountStoreRuntime {
             enrollment_device_label,
             linked_nests,
             owed_nests,
+            foreground,
         } = params;
         // The driver and its handle are minted HERE, before the thread: the
         // handle is what this returns, and the driver's state — the app-fed
@@ -605,6 +617,7 @@ impl AccountStoreRuntime {
                 attested_predecessors: attested_predecessors.clone(),
                 enrollment_target_device_id: enrollment_target_device_id.clone(),
                 enrollment_device_label: enrollment_device_label.clone(),
+                foreground,
             },
             reconnects,
             pushes,
@@ -1393,7 +1406,10 @@ async fn worker<R>(
             store_dir.clone(),
             actor_id_hex.clone(),
         )
-        .with_seal_key(ReplicaSealKey::derive(&backup_key));
+        .with_seal_key(ReplicaSealKey::derive(&backup_key))
+        // The host's foreground signal lives on the driver, so a phone that
+        // reassembles while backgrounded still binds nothing.
+        .with_foreground(driver.foreground_seat());
         // What a second connection to this store opens from — the share
         // plane's group feed (`group-set.md` § decision 6) — seated afresh
         // at every assembly, so a reader finds the writer this assembly
@@ -2644,6 +2660,7 @@ mod tests {
                 // own machine, so its own row (`named_row`).
                 enrollment_target_device_id: named_row(device),
                 enrollment_device_label: None,
+                foreground: true,
             }
         }
 
@@ -6121,6 +6138,166 @@ mod tests {
         first.shutdown().await;
     }
 
+    /// **A runtime the host installs over a displaced one takes the engine
+    /// role at once, never at its backstop tick** (`account-runtime.md`
+    /// § Multi-instance concurrency → *A supersession hands the engine role
+    /// over*). Two assemblies of one account in one process — iOS's launch
+    /// start and its session start, both through `startAccountRuntime` —
+    /// contend for the singleton like two processes: whichever assembled
+    /// second found the lock held and started as a plain reader/writer. The
+    /// host then stopped the other, freeing the lock, and the survivor waited
+    /// out its backstop (an hour on every app host) as a non-holder: no fleet
+    /// walk, so a device enrolled meanwhile never verified and the phone's
+    /// removal of it was refused `NotAMember` (`devices` outcome 20, iOS,
+    /// measured 2026-11-11).
+    ///
+    /// Both arms of `finish` displace a runtime: the newer claim installs
+    /// first and the older is superseded (the order the phone logged), or the
+    /// older installs and the newer replaces it as `previous`.
+    #[tokio::test]
+    async fn a_runtime_installed_over_a_displaced_holder_takes_the_engine_role() {
+        use fauna_account_plane::account_driver::{AccountRuntimeHost, InstallOutcome, StopReason};
+
+        // The superseded arm: the older assembly holds the lock, the newer
+        // installs, then the older settles stale and is stopped.
+        let fx = fixture();
+        let host: AccountRuntimeHost = AccountRuntimeHost::new();
+        let older_claim = host.begin(());
+        let older = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("older runtime");
+        older.reconcile_now().await.expect("pass");
+        assert!(older.is_engine_holder(), "the older assembly took the lock");
+        let newer_claim = host.begin(());
+        let newer = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("newer runtime");
+        assert!(!newer.is_engine_holder(), "the lock is still the older's");
+        assert_eq!(
+            host.finish(newer_claim, newer.clone()).await,
+            InstallOutcome::Installed
+        );
+        assert_eq!(
+            host.finish(older_claim, older).await,
+            InstallOutcome::Superseded
+        );
+        eventually(
+            || newer.is_engine_holder(),
+            "the installed runtime took the role the superseded one freed",
+        )
+        .await;
+        host.take(StopReason::AccountSwitch)
+            .settled
+            .expect("installed")
+            .shutdown()
+            .await;
+
+        // The previous arm: the older installs as holder, the newer replaces it.
+        let fx = fixture();
+        let host: AccountRuntimeHost = AccountRuntimeHost::new();
+        let older_claim = host.begin(());
+        let older = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("older runtime");
+        older.reconcile_now().await.expect("pass");
+        assert_eq!(
+            host.finish(older_claim, older).await,
+            InstallOutcome::Installed
+        );
+        let newer_claim = host.begin(());
+        let newer = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("newer runtime");
+        assert!(
+            !newer.is_engine_holder(),
+            "the installed older holds the lock"
+        );
+        assert_eq!(
+            host.finish(newer_claim, newer.clone()).await,
+            InstallOutcome::Installed
+        );
+        eventually(
+            || newer.is_engine_holder(),
+            "the replacing runtime took the role its predecessor freed",
+        )
+        .await;
+        host.take(StopReason::AccountSwitch)
+            .settled
+            .expect("installed")
+            .shutdown()
+            .await;
+    }
+
+    /// **A runtime installed while a TEARDOWN's stop still drains takes the
+    /// engine role once that stop ends** (`account-runtime-roles.md`
+    /// § Multi-instance concurrency → *A supersession hands the engine role
+    /// over*, the teardown half). An apple session patch awaits the outgoing
+    /// client's teardown, but that stop is bounded: on a loaded iOS simulator
+    /// it lapsed with the old runtime still draining, so the next login's
+    /// assembly found `engine.lock` held and started as a non-holder — and with
+    /// the slot already emptied by `take`, no supersession of its own told it
+    /// the role came free. The seat's device was never registered and its
+    /// writes waited on assembly until the backstop tick.
+    ///
+    /// Two arms: the stop ends before the newcomer installs (the empty-slot
+    /// install's own nudge), or after it (the host's
+    /// `displaced_runtime_stopped`, which `finish_lapsed_stop` calls).
+    #[tokio::test]
+    async fn a_runtime_installed_beside_a_draining_teardown_takes_the_engine_role() {
+        use fauna_account_plane::account_driver::{AccountRuntimeHost, InstallOutcome, StopReason};
+
+        for stop_ends_before_install in [true, false] {
+            let fx = fixture();
+            let host: AccountRuntimeHost = AccountRuntimeHost::new();
+            let older_claim = host.begin(());
+            let older = AccountStoreRuntime::start(fx.params("a"))
+                .await
+                .expect("older runtime");
+            older.reconcile_now().await.expect("pass");
+            assert_eq!(
+                host.finish(older_claim, older).await,
+                InstallOutcome::Installed
+            );
+            // The teardown takes the installed runtime; its stop has not ended.
+            let draining = host
+                .take(StopReason::AccountSwitch)
+                .settled
+                .expect("installed");
+            let newer_claim = host.begin(());
+            let newer = AccountStoreRuntime::start(fx.params("a"))
+                .await
+                .expect("newer runtime");
+            assert!(
+                !newer.is_engine_holder(),
+                "the draining runtime still holds the lock"
+            );
+            if stop_ends_before_install {
+                draining.shutdown().await;
+                assert_eq!(
+                    host.finish(newer_claim, newer.clone()).await,
+                    InstallOutcome::Installed
+                );
+            } else {
+                assert_eq!(
+                    host.finish(newer_claim, newer.clone()).await,
+                    InstallOutcome::Installed
+                );
+                draining.shutdown().await;
+                host.displaced_runtime_stopped().await;
+            }
+            eventually(
+                || newer.is_engine_holder(),
+                "the installed runtime took the role the teardown's stop freed",
+            )
+            .await;
+            host.take(StopReason::AccountSwitch)
+                .settled
+                .expect("installed")
+                .shutdown()
+                .await;
+        }
+    }
+
     /// **The member re-fetch request crosses the two mounts of one store.**
     /// The engine's host (the desktop sync agent) stamps one device-local
     /// meta row per set; the app's custody-ingest sink reads it. Here the
@@ -6218,6 +6395,49 @@ mod tests {
             .load_listed()
             .await
             .expect("a listed replica answers its custody");
+        a.shutdown().await;
+    }
+
+    /// **A never-listed replica's grant-mark raise is refused as not ready,
+    /// never answered "nothing to raise"** (`account-client-lifecycle.md`
+    /// § The client-side lifecycle → *The first listing*, clause (3), the
+    /// cut's twin). A successor's first launch is such a replica: its fresh
+    /// store holds none of the predecessor's grant events until it lists the
+    /// fleet scope, so the aftermath's raise read an empty ledger, marked
+    /// nothing, and the pass's remint found nothing owed — after which the
+    /// listing landed the inherited grant on the Nests page, live and
+    /// unraised, with no later pass to ask about it (tui, a loaded Linux host,
+    /// measured 2026-11-13).
+    ///
+    /// Red-verified against the ungated raise: it answered `Ok(false)`.
+    #[tokio::test]
+    async fn a_never_listed_replicas_grant_mark_raise_is_refused_not_empty() {
+        use fauna_client_config::SuccessionLedgerStore;
+
+        let fx = fixture();
+        fx.fake.nest_unreachable.store(true, Ordering::SeqCst);
+        let a = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start a");
+        eventually(|| a.pump_cycles().1 > 0, "a's first pass ended").await;
+        let predecessor = fauna_core::identity::ActorKeypair::generate().actor_id();
+
+        let unlisted = tokio::time::timeout(
+            Duration::from_secs(5),
+            SuccessionLedgerStore::raise_grant_marks(&a, predecessor),
+        )
+        .await
+        .expect("the gate answers at once when no pass is in flight");
+        assert!(
+            unlisted.as_ref().is_err_and(|e| e.is_not_ready()),
+            "the raise was refused as not ready, got {unlisted:?}"
+        );
+
+        fx.fake.nest_unreachable.store(false, Ordering::SeqCst);
+        a.reconcile_now().await.expect("a lists");
+        SuccessionLedgerStore::raise_grant_marks(&a, predecessor)
+            .await
+            .expect("a listed replica raises over the ledger as it stands");
         a.shutdown().await;
     }
 

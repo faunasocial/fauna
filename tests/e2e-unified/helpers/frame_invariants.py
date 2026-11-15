@@ -1,11 +1,11 @@
 """Post-frame invariant checker — convention 17's layer (b).
 
-Owner: `docs/goal/architecture/e2e-conventions.md` § point 17 (ratified
-2026-08-03). Layer (a) is the tier_1 in-process walk (built on tui and linux);
-this is the layer that rides **every existing e2e test** and asserts a small
-catalogue of GENERAL invariants over the driver-visible state surface after
-each test's final frame — "this alone would have caught the collision bug on
-any test that ever visited Settings".
+Owner: `docs/goal/architecture/e2e-systematic-ui-walks.md` § The convention —
+convention 17 (ratified 2026-08-03). Layer (a) is the tier_1 in-process walk
+(built on tui and linux); this is the layer that rides **every existing e2e
+test** and asserts a small catalogue of GENERAL invariants over the
+driver-visible state surface after each test's final frame — "this alone
+would have caught the collision bug on any test that ever visited Settings".
 
 **Why a hand-authored suite needs it.** Every hand-written test drives one path
 and asserts one hand-picked outcome, so a defect in a state nobody wrote a test
@@ -76,7 +76,7 @@ The observing-not-failing half — the reason default-on is safe — is untouche
   to catch a temporarily-reverted real defect or an equivalent shape mutation
   before it counted as coverage; the evidence, including the defect the
   verification found in this very module, is recorded in
-  `e2e-conventions.md` § Implementation status today.
+  `e2e-systematic-ui-walks.md` § Implementation status today.
 """
 
 from pathlib import Path
@@ -431,6 +431,107 @@ def _check_nest_block_never_silent(state):
     return ""
 
 
+# A layout box under one device-independent pixel in either dimension shows a
+# human nothing. Layout rounding makes a starved column exactly 0; the margin
+# only keeps a sub-pixel residue from reading as area.
+_MIN_READABLE_DIP = 1.0
+
+
+def _is_size(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _has_area(width, height):
+    return width >= _MIN_READABLE_DIP and height >= _MIN_READABLE_DIP
+
+
+def _check_painted_text_has_area(state):
+    """A painted, id-bearing text element is laid out with area a human can read.
+
+    Bug class: **a starved text element.** A `*` column gets only what the
+    `Auto` columns beside it leave, so a narrow pane can give a title 0 px: its
+    box is empty, UIA reports it offscreen, a driver reads it NOT VISIBLE — and
+    a human sees no title at all, while every control beside it is on screen.
+    windows shipped it three times, one header at a time, each found by a
+    hand-written test that happened to read the starved element
+    (`ThreadHeader.xaml`'s comments: 2026-09-11, 2026-09-14, and a bridged
+    room's title at the 600-DIP default window on 2026-11-10). Nothing checked
+    the class: a page whose labels outgrow the default window shipped it until
+    some test read that one element.
+
+    The app publishes ``painted_text_area`` from its own layout, read once per
+    layout pass: ``{"starved": [entry, …]}``, every element that is reached
+    through ``Visible`` ancestors only, carries an automation id and non-empty
+    text of its own, and was given a layout box under one DIP in either
+    dimension — at most 16 entries, in tree order. Each entry is ``{"id",
+    "text", "width", "height", "pane", "depth"}``: the box in DIP, and ``pane``
+    the box of its nearest ancestor that HAS one (``null`` when none has — the
+    window itself is not laid out), ``depth`` the number of box-less ancestors
+    between them (0: the element's own parent starved it).
+
+    ⚠ The box is the ROOM the layout gave the element — its arranged size
+    capped by its layout slot and by every ancestor clipped to its own — never
+    its arranged size alone. A toolkit that arranges an element larger than its
+    slot keeps its desired size and clips it: on windows the starved title's
+    ``ActualWidth`` stays its text's width while a human sees none of it, and
+    the first red-verification of this entry, reading ``ActualWidth``, saw the
+    reverted header as laid out (`Testing/PaintedTextAreaObserver.cs` carries
+    the measurement).
+
+    ⚠ The verdict reads the published LAYOUT SIZE, never UIA's ``IsOffscreen``,
+    and never the bridge's ``/registry`` frame (which drops every offscreen
+    element, so a starved one is simply absent from it). ``IsOffscreen`` reads
+    an empty box and a box that is merely clipped or scrolled out of view the
+    same; only the second is legitimate, so the checker decides on the size
+    itself: an entry with area is never a violation, and neither is one whose
+    pane has none — nothing in a frame that shows nothing is starved. A
+    collapsed element is never published at all: the walk descends through
+    ``Visible`` elements only, the same rule that leaves it without a UIA peer.
+
+    `n/a` for an app that publishes no ``painted_text_area`` mapping.
+    """
+    record = state.get("painted_text_area", _ABSENT)
+    if record is _ABSENT:
+        return None
+    if not isinstance(record, dict):
+        return f"painted_text_area is {type(record).__name__}, not a mapping"
+    starved = record.get("starved", _ABSENT)
+    if not isinstance(starved, list):
+        shown = "absent" if starved is _ABSENT else type(starved).__name__
+        return f"painted_text_area.starved is {shown}, not a list"
+    found = []
+    for i, entry in enumerate(starved):
+        where = f"painted_text_area.starved[{i}]"
+        if not isinstance(entry, dict):
+            return f"{where} is {type(entry).__name__}, not a mapping"
+        element_id, text = entry.get("id"), entry.get("text")
+        if not isinstance(element_id, str) or not element_id:
+            return f"{where} names no element (id={element_id!r})"
+        if not isinstance(text, str):
+            return f"{where}.text is {text!r}, not text"
+        width, height = entry.get("width"), entry.get("height")
+        if not _is_size(width) or not _is_size(height):
+            return f"{where} has no layout size (width={width!r}, height={height!r})"
+        pane = entry.get("pane")
+        if pane is not None:
+            if not isinstance(pane, dict):
+                return f"{where}.pane is {type(pane).__name__}, not a mapping or null"
+            pane_w, pane_h = pane.get("width"), pane.get("height")
+            if not _is_size(pane_w) or not _is_size(pane_h):
+                return f"{where}.pane has no layout size (width={pane_w!r}, height={pane_h!r})"
+        if not text.strip() or _has_area(width, height):
+            continue
+        if pane is None or not _has_area(pane["width"], pane["height"]):
+            continue
+        found.append(
+            f"{element_id} ({text.strip()[:40]!r}) laid out {width:g}×{height:g} DIP "
+            f"in a {pane['width']:g}×{pane['height']:g} pane"
+        )
+    if found:
+        return "painted text with no area a human can read — " + "; ".join(found)
+    return ""
+
+
 # The catalogue. Few on purpose: each entry is a global property of ANY frame,
 # each names the bug class it catches, and none fires on a legitimate state.
 # Adding one is an adoption event, not an edit — it owes a red-verification.
@@ -441,6 +542,7 @@ INVARIANTS = (
     ("receive-loop-alive", _check_receive_loop_alive),
     ("region-block-never-silent", _check_region_block_never_silent),
     ("nest-block-never-silent", _check_nest_block_never_silent),
+    ("painted-text-has-area", _check_painted_text_has_area),
 )
 
 

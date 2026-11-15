@@ -1,7 +1,7 @@
 """The android device axis — which device this run drives, and whether it is there.
 
 `testing.md` § Default app and nest mode, *Mode mechanics* (a **run-level
-harness input**, the same class as `--app` / `--nest`) and *Android's run venue*
+harness input**, the same class as `--app` / `--nest`) and *Android's emulator placement*
 (constraint 3's third leg, "any run-level way to name the device").
 
 Sibling of `nest_mode.py`, and built in its shape for the same reason: the value
@@ -113,7 +113,7 @@ def resolve_adb_server(raw: str | None, environ=None) -> str | None:
     None means "adb's own default" -- a local server, started on demand, which
     is every run that is not a tunnelled-venue run. A value names a server that
     is ALREADY RUNNING somewhere else and is reached as a pure client
-    (`testing.md` § Default app and nest mode → *Android's run venue*).
+    (`testing.md` § Default app and nest mode → *Android's emulator placement*).
 
     The grammar is adb's own `-L` socket spec, narrowed to the one form that is
     safe here -- `tcp:127.0.0.1:<port>`:
@@ -137,7 +137,7 @@ def resolve_adb_server(raw: str | None, environ=None) -> str | None:
         if not text:
             raise AndroidDeviceError(
                 "--adb-server was given an empty value; pass a socket spec such "
-                "as tcp:127.0.0.1:18509, or omit the flag to use a local adb server"
+                "as tcp:127.0.0.1:18508, or omit the flag to use a local adb server"
             )
     else:
         env = os.environ if environ is None else environ
@@ -191,7 +191,7 @@ def adb_argv(serial: str | None, adb_server: str | None = None) -> list[str]:
     "file not found" although a shell finds it. The bare name stays the
     fallback so a missing adb still fails loudly at the first call. Off PATH —
     a process without the login shell's environment, like the fleet broker's
-    service probing the android venue — it is looked for under the SDK:
+    service probing the android emulator — it is looked for under the SDK:
     `$ANDROID_HOME/platform-tools`, then the primary dev VM's `~/android-sdk`.
     """
     argv = [shutil.which("adb") or _sdk_adb() or "adb"]
@@ -200,6 +200,29 @@ def adb_argv(serial: str | None, adb_server: str | None = None) -> list[str]:
     if serial:
         argv += ["-s", serial]
     return argv
+
+
+#: A serial that is a connect address: a device reached over TCP by `adb
+#: connect` -- the android emulator's emulators (`helpers/android_emu.py`).
+_CONNECT_SERIAL = re.compile(r"127\.0\.0\.1:\d{1,5}\Z")
+
+
+def is_connect_serial(serial: str | None) -> bool:
+    return bool(serial and _CONNECT_SERIAL.match(serial))
+
+
+def connect_device(serial: str | None, adb_server: str | None, timeout: float = 5) -> None:
+    """`adb connect <serial>` when the serial is a loopback connect address,
+    else nothing. Idempotent (adb answers `already connected`), so it is run
+    before every probe and launch: a tunnel that flapped is re-attached. Never
+    raises -- the probe that follows says whether the device is there."""
+    if not is_connect_serial(serial):
+        return
+    try:
+        subprocess.run([*adb_argv(None, adb_server), "connect", serial],
+                       capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def probe_device(serial: str | None, adb_server: str | None, timeout: float = 5) -> bool:
@@ -211,8 +234,10 @@ def probe_device(serial: str | None, adb_server: str | None, timeout: float = 5)
     android unavailable, which is the truth, rather than red.
 
     `-s` is deliberately not passed: `adb devices` lists every device, and the
-    serial is matched against that list by `device_present`.
+    serial is matched against that list by `device_present`. A connect-address
+    serial (the venue's) is `adb connect`ed first (`connect_device`).
     """
+    connect_device(serial, adb_server, timeout)
     try:
         result = subprocess.run(
             [*adb_argv(None, adb_server), "devices"],

@@ -674,7 +674,9 @@ def plan(cmd: list[str]) -> tuple[list[str], list[str], list[str] | None]:
     """(the `cargo fetch` prelude, the half run inside the boundary, the half run
     outside after it or None). `run` builds inside (`build` with the same
     selection) and runs outside; `test`/`bench` compile inside (`--no-run`) and
-    run outside, every unit then Fresh. Everything else runs inside as it is."""
+    run outside, every unit then Fresh — or, when a source changed during the
+    compile, refused outside and compiled again inside (`stale_loop`).
+    Everything else runs inside as it is."""
     i = subcommand_at(cmd)
     head = cmd[:i]
     toolchain = head[1:2] if len(head) > 1 and head[1].startswith("+") else []
@@ -751,6 +753,48 @@ def record(cmd: list[str], environ=None) -> None:
             f.write(shlex.join(cmd) + "\n")
 
 
+#: The outside half's RUSTC_WRAPPER, beside this file (shipped): cargo's probes
+#: pass to the real rustc, a compile is refused into the marker `STALE_ENV` names.
+REFUSE_RUSTC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cargo-boundary-refuse-rustc")
+#: The variable naming the marker the refuser writes a stale unit's crate into.
+STALE_ENV = "FAUNA_CARGO_BOUNDARY_STALE"
+#: How many times the line runs the inside half: the first compile and, each
+#: time the outside half found a unit stale, again — then it gives up.
+STALE_ATTEMPTS = 3
+
+
+def stale_loop(inside_line: str, outer: list[str], scratch: str | None = None) -> list[str]:
+    """The run/test split's lines after the prelude: the inside half, then the
+    outside half with RUSTC_WRAPPER the refuser (`REFUSE_RUSTC`), so it never
+    compiles — a unit made stale by a source edited during the inside compile is
+    refused into a marker, and the inside half compiles again; at most
+    `STALE_ATTEMPTS` inside halves, the outside half's own exit (a test's
+    failure included) ending the line whenever the marker stays empty. On
+    darwin the scratch is made before and removed after each inside half."""
+    rm_scratch = shlex.join(["rm", "-rf", "--", scratch]) if scratch else None
+    on_exit = (rm_scratch + "; " if rm_scratch else "") + 'rm -f -- "$stale"'
+    body = ([shlex.join(["mkdir", "-p", "--", scratch])] if scratch else []) + [inside_line]
+    if rm_scratch:
+        body.append(rm_scratch)
+    body += [
+        "rc=0",
+        f'{STALE_ENV}="$stale" RUSTC_WRAPPER={shlex.quote(REFUSE_RUSTC)} {shlex.join(outer)} || rc=$?',
+        'if [ ! -s "$stale" ]; then exit "$rc"; fi',
+        ': > "$stale"',
+    ]
+    gave_up = (f"{LINE} `{shlex.join(outer[:4])}…`: a source changed during each of "
+               f"{STALE_ATTEMPTS} compiles — giving up")
+    return [
+        'stale="$(mktemp "${TMPDIR:-/tmp}/cargo-boundary-stale.XXXXXX")"',
+        "trap " + shlex.quote(on_exit) + " EXIT",
+        f"for attempt in {' '.join(str(n) for n in range(1, STALE_ATTEMPTS + 1))}; do",
+        *["    " + b for b in body],
+        "done",
+        "echo " + shlex.quote(gave_up) + " >&2",
+        'exit "$rc"',
+    ]
+
+
 def argv(
     cmd: list[str],
     label: str | None = None,
@@ -765,7 +809,8 @@ def argv(
     caller's process scope, pid and lock fds carry the whole sequence: the
     `cargo fetch` prelude outside (its failure the command's), the inside half
     under `boundary_prefix` with the token set INSIDE, then the outside half if
-    the plan has one. Every COMPILING cargo on a platform with a primitive, and
+    the plan has one, never compiling (`stale_loop`: a unit a mid-build edit made
+    stale sends the line back inside). Every COMPILING cargo on a platform with a primitive, and
     no other; None for a cargo that compiles nothing, a command that is not
     cargo, a platform with no primitive (win32), a process already inside, or a
     self-hosted runner's remnant (a warning line). Raises BoundaryRefused on a
@@ -845,17 +890,15 @@ def argv(
         lines.append(shlex.join(["mkdir", "-p", "--", *paths]))
     if target:
         lines.append(tag_line(target))
-    if scratch:
-        # the scratch goes when the command ends, the compile's exit kept — so the
-        # inside half is not exec'd (an exec would drop the trap)
-        lines.append("trap " + shlex.quote(shlex.join(["rm", "-rf", "--", scratch])) + " EXIT")
+    rm_scratch = shlex.join(["rm", "-rf", "--", scratch]) if scratch else None
     if outer is None:
+        if scratch:
+            # the scratch goes when the command ends, the compile's exit kept — so the
+            # inside half is not exec'd (an exec would drop the trap)
+            lines.append("trap " + shlex.quote(rm_scratch) + " EXIT")
         lines.append(("" if scratch else "exec ") + inside_line)
     else:
-        lines += [inside_line]
-        if scratch:
-            lines += [shlex.join(["rm", "-rf", "--", scratch]), "trap - EXIT"]
-        lines.append("exec " + shlex.join(outer))
+        lines += stale_loop(inside_line, outer, scratch)
     if label is not None:
         print(boundary_line(cmd, label), file=sys.stderr, flush=True)
         record(cmd, env)

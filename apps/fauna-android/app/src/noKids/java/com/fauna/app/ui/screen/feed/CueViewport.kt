@@ -39,6 +39,10 @@ import uniffi.fauna_feed.PostSummary
  * player notes its progress on the tracker (`notePlayed`), which holds the per-post
  * peak itself, so the rows pass `mediaPlayedPm = null` and a video played to the end
  * derives the media watch-complete.
+ *
+ * A feed switch drains every exposure: each sample first hands the timeline's
+ * shared selection key ([FeedVM.cueSelectionKey]) to
+ * [FfiCueTracker.noteSelection] — the pair tui calls.
  */
 
 /**
@@ -104,7 +108,14 @@ class CueCapture internal constructor(
         val posts = posts()
         val mediaById = posts.associate { it.postId to it.playsMedia }
         val rows = cueRowsOf(layout.visibleItemsInfo, mediaById, CueSubjects::contains)
-        return tracker.sample(
+        // A feed switch ends every exposure before the new feed is measured
+        // (`CueTracker::note_selection`, `WindowDropped`): the list keys each
+        // row by its post id, so a post both feeds hold keeps its item in
+        // place and neither the geometry nor the window ever ends it.
+        val switched = vm.cueSelectionKey()
+            ?.let { tracker.noteSelection(it, System.currentTimeMillis().toULong()) }
+            .orEmpty()
+        return switched + tracker.sample(
             rows,
             posts.map { it.postId },
             layout.viewportStartOffset.toDouble(),

@@ -796,6 +796,33 @@ class SettingsActions:
         text = self.driver.get_text("recovery-kit-status")
         return "" if text == S.settings.recovery_kit.status_loading else text
 
+    # ── The successor's owed nests (settings.md § Recovery kit → *The
+    #    successor's owed nests*; succession-linked-nests.md § The road). ──
+
+    def owed_nests_status(self) -> str:
+        """The owed-nests line, or "" when nothing is owed (an absent line is
+        the honest empty state)."""
+        if not self.driver.is_visible_scrolled("recovery-kit-owed-nests-status"):
+            return ""
+        return self.driver.get_text("recovery-kit-owed-nests-status")
+
+    def owed_nest_count(self) -> int:
+        return self.driver.count("recovery-kit-owed-nest-item")
+
+    def owed_nest_addresses(self) -> list[str]:
+        return [t or "" for t in self.driver.get_texts("recovery-kit-owed-nest-address")]
+
+    def owed_nest_outcomes(self) -> list[str]:
+        return [t or "" for t in self.driver.get_texts("recovery-kit-owed-nest-outcome")]
+
+    def dismiss_owed_nest(self, index: int = 0) -> None:
+        """The two-step dismiss on entry ``index``: arm, then confirm (→
+        ``fauna.recovery.succession.owed_settle`` at the bound nest). Callers
+        poll ``owed_nest_count`` for the outcome."""
+        self.driver.click("recovery-kit-owed-nest-dismiss-button", index=index)
+        self.driver.wait_for("recovery-kit-owed-nest-dismiss-confirm-button", timeout=10.0)
+        self.driver.click("recovery-kit-owed-nest-dismiss-confirm-button")
+
     def sweep_status(self) -> str:
         """The succession ceremony's sweep line — what the sweep did — or "".
 

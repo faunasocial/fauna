@@ -63,38 +63,38 @@ Stamped 2026-11-07 at ac836c937b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
-| linux | ✅ full | 0.1.5-dev+52eff9ec standalone |
-| windows | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
+| web | ⚠ partial | 0.1.5-dev+413aa33d standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.6 docker |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+52eff9ec standalone |
+| tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_creating_a_recovery_kit_flips_the_status_and_shows_the_secret_once` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_replacing_the_kit_with_the_one_you_hold_mints_a_different_secret` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_creating_a_recovery_kit_flips_the_status_and_shows_the_secret_once` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_replacing_the_kit_with_the_one_you_hold_mints_a_different_secret` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_the_phrase_alone_restores_the_account_after_losing_every_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_phrase_that_names_no_account_asks_for_one_instead_of_failing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_an_identity_secret_is_never_taken_for_a_recovery_phrase` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_succession_fixture.py::test_the_fixture_registers_a_kit_the_nest_serves_back` | nest (linux): passed, nest (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_succession_fixture.py::test_a_kit_from_the_wrong_identity_is_refused` | nest (linux): passed, nest (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_recovery_kit_ceremonies.py::test_the_status_names_each_of_the_four_states_including_a_kit_made_elsewhere` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_recovery_kit_ceremonies.py::test_a_lost_kit_is_replaced_with_the_identity_alone_and_waits_out_its_window` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_recovery_kit_ceremonies.py::test_a_replacement_you_did_not_ask_for_is_cancelled_with_the_kit_you_hold` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_recovery_kit_ceremonies.py::test_a_kit_whose_phrase_cannot_restore_is_repaired_without_retiring_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_recovery_kit_ceremonies.py::test_the_status_names_each_of_the_four_states_including_a_kit_made_elsewhere` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_recovery_kit_ceremonies.py::test_a_lost_kit_is_replaced_with_the_identity_alone_and_waits_out_its_window` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_recovery_kit_ceremonies.py::test_a_replacement_you_did_not_ask_for_is_cancelled_with_the_kit_you_hold` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_recovery_kit_ceremonies.py::test_a_kit_whose_phrase_cannot_restore_is_repaired_without_retiring_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_after_a_replace_the_new_phrase_restores_and_the_old_one_does_not` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_restore_with_no_sealed_copy_to_restore_from_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_restore_of_an_identity_that_moved_on_routes_to_the_import` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_the_phrase_alone_restores_the_account_after_losing_every_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_copied_kit_restores_the_account_with_nothing_typed_but_the_kit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 14 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_kit_replaced_after_a_succession_still_restores_the_predecessor_corpus` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 15 | app | `tests/e2e-unified/tests/test_custody_recovery_copy_journey.py::test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_custody_recovery_copy_journey.py::test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 16 | app | `tests/e2e-unified/tests/test_recovery_kit_let_go.py::test_a_dead_generation_is_named_and_let_go_only_on_the_confirm_word` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 17 | nest | `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_a_replacement_the_old_key_co_signs_becomes_the_head_at_once` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_the_seed_alone_cannot_replace_a_registered_key_at_once` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_anyone_reads_an_identitys_chain_without_an_account` | nest (linux): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_a_replacement_the_old_key_co_signs_becomes_the_head_at_once` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_the_seed_alone_cannot_replace_a_registered_key_at_once` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_anyone_reads_an_identitys_chain_without_an_account` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

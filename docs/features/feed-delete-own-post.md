@@ -40,13 +40,13 @@ Stamped 2026-11-01 at a6047fbd8b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+962dc452 standalone |
-| linux | ✅ full | 0.1.5-dev+962dc452 standalone |
-| windows | ✅ full | 0.1.2-dev+83a219a8 standalone |
+| web | ✅ full | 0.1.5-dev+2e8014b4 standalone |
+| linux | ✅ full | 0.1.5-dev+00668dad standalone |
+| windows | ✅ full | 0.1.6-dev+8438e5ce standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+962dc452 standalone |
+| ios | ✅ full | 0.1.6-dev+8438e5ce standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+962dc452 standalone |
+| tui | ✅ full | 0.1.6-dev+8438e5ce standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

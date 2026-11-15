@@ -10,9 +10,10 @@
   // here — .shell, the sidebar's base box model, .content, and their
   // mobile counterparts. Everything that differs per shell — .tab and its
   // hover/active states (real gap/padding/font-size/transition deltas
-  // between the three), the connection-status indicator (root + admin
-  // only; settings renders none), nav-back/title/logo chrome — stays in
-  // each caller's own style block, scoped to markup the caller defines
+  // between the three), nav-back/title/logo chrome — stays in
+  // each caller's own style block (the connection-status indicator, the same
+  // on all three, is its own ConnectionStatusIndicator component), scoped to
+  // markup the caller defines
   // in its own sidebar/main snippet: Svelte scopes a snippet's elements
   // to the component that AUTHORED the snippet, not the one that renders
   // it, so this frame can render the callers' markup without owning its

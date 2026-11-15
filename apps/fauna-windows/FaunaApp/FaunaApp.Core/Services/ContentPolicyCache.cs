@@ -62,6 +62,26 @@ internal sealed record ContentPolicyInputs(
     }
 
     /// <summary>
+    /// The show-again control on a reported placeholder (moderation.md § Corollary —
+    /// the reporter's hide is theirs to undo): the hidden ids one press of
+    /// <c>content-policy-show-again-button</c> removes and the button's label, naming
+    /// the scope (the item, or the whole account). Asked with the SAME keys as
+    /// <see cref="ItemVerdictFor"/> — the item's report key and its author's actor id
+    /// — and decided in shared Rust (<c>reported_show_again</c>), never compared here.
+    /// <c>null</c> when nothing of the viewer's matched, so the placeholder is not
+    /// their own report. An empty hide list short-circuits without the FFI, like the
+    /// item verdict (android's <c>ContentPolicyInputs.showAgainFor</c>).
+    /// </summary>
+    public ShowAgainOffer? ShowAgainFor(string? itemId, string? authorId)
+    {
+        var hidden = HiddenContent ?? System.Array.Empty<string>();
+        if (hidden.Length == 0 || (itemId is null && authorId is null)) return null;
+        return FaunaFfiMethods.ReportedShowAgain(hidden, itemId ?? "", authorId) is { } s
+            ? new ShowAgainOffer(s.@ids, Strings.Resolve(s.@label))
+            : null;
+    }
+
+    /// <summary>
     /// The client render verdict for one item's <paramref name="labels"/> — one
     /// of <c>"show" | "badge" | "collapse" | "block"</c>, resolved by the shared
     /// <c>FaunaFfiMethods.ContentRenderVerdict</c> (strictest-wins compose of the
@@ -86,6 +106,20 @@ internal sealed record ContentPolicyInputs(
 /// <c>show | badge | collapse | block</c> and whether the viewer's report is what
 /// hid it (paint "You reported this", not the family-policy notice).</summary>
 internal readonly record struct ItemVerdict(string Verdict, bool Reported);
+
+/// <summary>The show-again a reported placeholder offers
+/// (<see cref="ContentPolicyInputs.ShowAgainFor"/>): the hidden ids one press removes,
+/// each through one <c>unhide_reported</c>, and the label already resolved. A public
+/// record so the post-card and the conversation bubble can bind it (the generated
+/// <c>FfiShowAgain</c> is UniFFI-internal); equal by content, ids in order, so a row
+/// whose offer moved — the account hidden on top of the post, say — rebuilds.</summary>
+public sealed record ShowAgainOffer(IReadOnlyList<string> Ids, string Label)
+{
+    public bool Equals(ShowAgainOffer? other) =>
+        other is not null && Label == other.Label && Ids.SequenceEqual(other.Ids);
+
+    public override int GetHashCode() => System.HashCode.Combine(Label, Ids.Count);
+}
 
 /// <summary>
 /// Process-lifetime holder for the current <see cref="ContentPolicyInputs"/> +
@@ -189,12 +223,18 @@ public static class ContentPolicyCache
     }
 
     /// <summary>
-    /// Set the owner's hidden-content list (what their own reports hid, loaded by
-    /// <c>load_hidden_content</c> and returned whole by every <c>hide_reported</c>).
-    /// Merges: leaves the guardian and own-threshold halves exactly as they were.
-    /// An item's verdict is read once at construction, so the surface that changed
-    /// the list re-syncs its rows (an equal-by-content row is kept in place).
+    /// Raised after <see cref="SetHiddenContent"/> changed the list — a report's hide,
+    /// a show-again's un-hide, or the store-change re-read finding the list moved on
+    /// another device of the account (<see cref="ContentPolicyPreloader.RefreshHiddenContentAsync"/>).
+    /// An item's verdict and its show-again are read once at construction, so every
+    /// open surface that paints them re-syncs its rows on this (an equal-by-content
+    /// row is kept in place). Raised on whatever thread set the list — a subscriber
+    /// marshals to its own, as <see cref="RegionPlaneHost.Changed"/>'s do.
     /// </summary>
+    internal static event Action? HiddenContentChanged;
+
+    /// <summary>Whether <paramref name="hidden"/> is the list already held (no list
+    /// and an empty one are the same answer).</summary>
     internal static bool HiddenContentEquals(string[]? hidden)
     {
         lock (_gate)
@@ -204,13 +244,29 @@ public static class ContentPolicyCache
         }
     }
 
+    /// <summary>
+    /// Set the owner's hidden-content list (what their own reports hid, loaded by
+    /// <c>load_hidden_content</c> and returned whole by every <c>hide_reported</c> and
+    /// <c>unhide_reported</c>). Merges: leaves the guardian and own-threshold halves
+    /// exactly as they were. Raises <see cref="HiddenContentChanged"/> when the list
+    /// moved, outside the gate.
+    /// </summary>
     internal static void SetHiddenContent(string[]? hidden)
     {
+        bool moved;
         lock (_gate)
         {
+            var held = _inputs.HiddenContent ?? Array.Empty<string>();
+            moved = !held.AsSpan().SequenceEqual(hidden ?? Array.Empty<string>());
             _inputs = _inputs with { HiddenContent = hidden is { Length: > 0 } ? hidden : null };
         }
+        if (moved) HiddenContentChanged?.Invoke();
     }
+
+    /// <summary>The show-again under the current snapshot — see
+    /// <see cref="ContentPolicyInputs.ShowAgainFor"/>.</summary>
+    internal static ShowAgainOffer? ShowAgainFor(string? itemId, string? authorId) =>
+        _inputs.ShowAgainFor(itemId, authorId);
 
     /// <summary>The item verdict under the current snapshot — see
     /// <see cref="ContentPolicyInputs.ItemVerdictFor"/>.</summary>

@@ -100,6 +100,7 @@ pytestmark = [
         "(no Apple Developer cert). Read-path mechanism proven headlessly at the FFI seam instead.",
     ),
     pytest.mark.tier_3,
+    pytest.mark.macos,
 ]
 
 # BLAKE3 derive_key contexts — MUST match `libs/fauna-core/src/crypto.rs`
@@ -153,6 +154,29 @@ def _run_host(binary: str, *args: str, check: bool = True) -> subprocess.Complet
     if check and proc.returncode != 0:
         raise AssertionError(
             f"`Fauna {' '.join(args[:1])}` failed ({proc.returncode}): "
+            f"{proc.stdout.strip()} {proc.stderr.strip()}"
+        )
+    return proc
+
+
+def _provision(binary: str, *args: str) -> subprocess.CompletedProcess:
+    """`Fauna provision`, declared an environment skip when the app-group
+    data-protection Keychain refuses the credential write (errSecMissingEntitlement
+    -34018): the box holds a signing identity but the build embeds no provisioning
+    profile, so no appex on it can read its capability — a box property, not an
+    app one (convention 7). Every other failure is the test's red."""
+    from helpers.app_surface import skip_environment
+
+    proc = _run_host(binary, "provision", *args, check=False)
+    if proc.returncode != 0 and "-34018" in proc.stdout + proc.stderr:
+        skip_environment(
+            "the app-group data-protection Keychain refused `provision` "
+            "(errSecMissingEntitlement -34018): this box's build embeds no "
+            "provisioning profile; the appex path runs once one lands"
+        )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"`Fauna provision` failed ({proc.returncode}): "
             f"{proc.stdout.strip()} {proc.stderr.strip()}"
         )
     return proc
@@ -324,8 +348,8 @@ def test_file_provider_read_path(nest_instance, fauna_fp_host_app):
         # ── Provision the app-dead capability + register the domain
         # (identifier = the set's ref scoped to the provisioned account,
         # display name = the set name). ──
-        _run_host(
-            fauna, "provision", url, owner["actor_id_bytes"].hex(), device_id.hex(),
+        _provision(
+            fauna, url, owner["actor_id_bytes"].hex(), device_id.hex(),
             "fp-ext", backup_key.hex(), owner["token"],
         )
         _run_host(fauna, "register", folder_ref, set_name)

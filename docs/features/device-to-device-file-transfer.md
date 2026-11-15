@@ -66,6 +66,8 @@ Stamped 2026-10-01 at dfa27a899f.
     - `tests/e2e-unified/tests/test_device_direct_path_admits_only_your_devices.py::test_a_device_that_is_not_yours_fetches_nothing_and_yours_fetch_only_ciphertext`
 18. [app] A device holding a file only as an on-demand placeholder never downloads it just to hand it to another device — `docs/goal/behavior/relay-serving.md` § Relay serving
     - `tests/e2e-unified/tests/test_device_placeholder_serves_no_sibling.py::test_a_placeholder_is_never_downloaded_to_hand_to_another_device`
+    - `tests/e2e-unified/tests/platform/macos/test_file_provider_relay_seat_macos.py::test_the_file_provider_extension_serves_its_kept_body_and_declines_a_placeholder`
+    - `tests/e2e-unified/tests/platform/ios/test_file_provider_relay_seat_ios.py::test_the_ios_file_provider_seat_serves_under_the_foreground_lease_and_withdraws_in_the_background`
 19. [app] A folder whose contents you keep off your nest still passes its files directly between your devices, so the nest never holds them even in passing — `docs/goal/behavior/file-sync.md` § Content residency
     - `tests/e2e-unified/tests/test_device_to_device_file_transfer.py::test_a_file_moves_straight_between_two_of_your_devices`
 
@@ -80,7 +82,7 @@ Stamped 2026-10-01 at dfa27a899f.
 | macos | 🚧 unbuilt | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.5 docker |
+| tui | ⚠ partial | 0.1.5-dev+ccc487af.dirty standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -120,6 +122,8 @@ Stamped 2026-10-01 at dfa27a899f.
 | 17 | app | `tests/e2e-unified/tests/test_device_direct_path_admits_only_your_devices.py::test_a_device_that_is_not_yours_fetches_nothing_and_yours_fetch_only_ciphertext` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 17 | app | absent by design on ios, android, android-kids, ios-kids | — |
 | 18 | app | `tests/e2e-unified/tests/test_device_placeholder_serves_no_sibling.py::test_a_placeholder_is_never_downloaded_to_hand_to_another_device` — requires `on-demand-replica-serve-seat` (not built: web, macos, ios, android, android-kids, ios-kids) | linux (linux): passed, windows (windows): failed, tui (linux): passed, tui (windows): failed |
+| 18 | app | `tests/e2e-unified/tests/platform/macos/test_file_provider_relay_seat_macos.py::test_the_file_provider_extension_serves_its_kept_body_and_declines_a_placeholder` | — |
+| 18 | app | `tests/e2e-unified/tests/platform/ios/test_file_provider_relay_seat_ios.py::test_the_ios_file_provider_seat_serves_under_the_foreground_lease_and_withdraws_in_the_background` | — |
 | 18 | app | absent by design on ios, android, android-kids, ios-kids | — |
 | 19 | app | `tests/e2e-unified/tests/test_device_to_device_file_transfer.py::test_a_file_moves_straight_between_two_of_your_devices` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 19 | app | absent by design on ios, android, android-kids, ios-kids | — |

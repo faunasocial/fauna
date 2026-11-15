@@ -4971,17 +4971,23 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // The durable idempotency tier (db/rpc_idempotency.rs) — a replay
         // cache of the actor's own recorded replies; nothing to keep once the
         // actor is gone, and the rows expire on their own 7-day sweep anyway.
+        //
+        // MOVES on succession (ruled 2026-11-09, reversing the first `Stay`;
+        // `succession-repoint-axis.md` § The declared re-point axis, *The
+        // replay cache MOVES*): the outbox carry hands a retired identity's
+        // undrained intents to its successor with their idempotency keys
+        // kept, so the successor DOES replay a predecessor's key — exactly
+        // when the predecessor's send was acked and the ack lost. Under `Stay`
+        // that effect lands twice; moved, the successor is served the
+        // recorded reply once. The keys are 16 random client bytes, so the
+        // successor's own rows cannot collide with the moved ones, and the
+        // table's one reader is the per-actor sink's miss consult, keyed by
+        // the connection's actor.
         table: "rpc_idempotency",
         column: "actor_id",
         key: ActorKey::Blob,
         policy: Policy::Purge,
-        succession: Succession::Stay(
-            "a replay cache keyed to the retired identity's own envelope keys: the successor's \
-             client mints fresh keys, so no replay of its ever matches these rows; the retired \
-             identity can no longer authenticate to be served them; and the 7-day retention \
-             sweep collects them regardless — moving them would serve one identity replies \
-             recorded for another, for zero benefit",
-        ),
+        succession: Succession::Move(MoveShape::Plain),
         // EXPORT RULING (the account-record plane). A
         // replay cache: the actor's own recorded WS-RPC replies, keyed by
         // idempotency key, swept at 7 days. Its own entry comment already says
@@ -7453,7 +7459,7 @@ fn read_actor_rows(
     let mut stmt = conn
         .prepare(&sql)
         .with_context(|| format!("prepare export read for {}", entry.table))?;
-    let names: Vec<String> = stmt.column_names().iter().map(|n| n.to_string()).collect();
+    let names: Vec<String> = stmt.column_names().map(|n| n.to_string()).collect();
     let keep: Vec<usize> = (0..names.len())
         .filter(|i| !omit.contains(&names[*i].as_str()))
         .collect();
@@ -7675,7 +7681,7 @@ fn gather_conv_records(
         let mut stmt = conn
             .prepare(&sql)
             .context("prepare conv export record read")?;
-        let names: Vec<String> = stmt.column_names().iter().map(|n| n.to_string()).collect();
+        let names: Vec<String> = stmt.column_names().map(|n| n.to_string()).collect();
         let keep: Vec<usize> = (0..names.len()).collect();
         let params = rusqlite::params_from_iter(chunk.iter().map(|c| c.as_slice()));
         let mut rows = stmt.query(params).context("conv export record read")?;
@@ -12162,7 +12168,7 @@ mod tests {
             let stmt = conn
                 .prepare(&format!("SELECT * FROM {} LIMIT 0", entry.table))
                 .unwrap_or_else(|e| panic!("prepare column read for {}: {e}", entry.table));
-            let cols: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+            let cols: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
             for col in cols {
                 if omit.contains(&col.as_str()) {
                     continue;

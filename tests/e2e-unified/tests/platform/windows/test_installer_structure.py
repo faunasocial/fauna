@@ -2,7 +2,11 @@
 
 Queries the MSI database directly via the Windows Installer API (msi.dll)
 to verify the feature tree, component mappings, and file table without
-actually installing anything.
+actually installing anything. The MSI comes through its one door,
+`conftest.py::msi_path`, which builds it when its inputs are newer than its
+stamp: building needs no elevation, so this suite runs green in an unelevated
+run — the verify queue's on Windows included — with no leg skipped on a missing
+or stale build.
 """
 
 import ctypes
@@ -13,7 +17,11 @@ import sys
 
 import pytest
 
-pytestmark = [pytest.mark.skipif(sys.platform != "win32", reason="Windows-only"), pytest.mark.tier_3]
+# The MSI is this suite's subject too: the door's publish and WiX link are
+# charged to the first test that asks (e2e-conventions.md point 9: a subject
+# build stays in its test, on a 3600 s clock).
+pytestmark = [pytest.mark.skipif(sys.platform != "win32", reason="Windows-only"), pytest.mark.tier_3,
+              pytest.mark.timeout(3600)]
 
 
 # ── MSI database helpers ──
@@ -109,14 +117,18 @@ class MsiDatabase:
 # ── Fixture ──
 
 @pytest.fixture(scope="session")
-def msi_db():
-    """Open the built MSI for structural queries."""
-    repo = _get_repo_root()
-    msi_path = os.path.join(repo, "build", "installer", "Fauna-Setup-arm64.msi")
-    if not os.path.exists(msi_path):
-        pytest.skip(f"MSI not found at {msi_path}. Build it first.")
+def msi_db(msi_path):
+    """Open the MSI, built or cached by its door, for structural queries."""
     with MsiDatabase(msi_path) as db:
         yield db
+
+
+# The three licence files Notices.wxs installs: component id → file name.
+NOTICE_COMPONENTS = {
+    "LicenseMitTxt": "LICENSE-MIT.txt",
+    "LicenseApacheTxt": "LICENSE-APACHE.txt",
+    "ThirdPartyNoticesTxt": "THIRD-PARTY-NOTICES.txt",
+}
 
 
 def _product_version(msi_db):
@@ -258,10 +270,24 @@ class TestComponentMappings:
         assert "DataDirRegistry" in fc["Nest"]
 
     def test_terminal_app_has_tui_and_cli(self, msi_db):
-        """TerminalApp ships the terminal app and the cli app's device shell and
-        nothing else (TerminalApp.wxs; installers/tui.md § Decisions, decision 4)."""
+        """TerminalApp ships the terminal app and the cli app's device shell, and
+        beside them only the licence files every top-level feature carries
+        (TerminalApp.wxs; installers/tui.md § Decisions, decision 4)."""
         fc = self._feature_components(msi_db)
-        assert fc["TerminalApp"] == {"FaunaTuiExe", "FaunaCliExe"}
+        assert fc["TerminalApp"] == {"FaunaTuiExe", "FaunaCliExe"} | set(NOTICE_COMPONENTS)
+
+    def test_every_top_level_feature_carries_the_licence_files(self, msi_db):
+        """Every feature is deselectable, so the three licence files ride each
+        top-level one (Notices.wxs): whichever subset an install takes — the
+        headless `ADDLOCAL=Nest` included — installs them (shipped-notices.md
+        § Per channel, the Windows MSI row)."""
+        fc = self._feature_components(msi_db)
+        top = {f for (f,) in msi_db.query(
+            "SELECT Feature FROM Feature WHERE Feature_Parent IS NULL")}
+        assert top, "the MSI has no top-level feature"
+        for feature in sorted(top):
+            missing = set(NOTICE_COMPONENTS) - fc.get(feature, set())
+            assert not missing, f"top-level feature {feature} does not carry {sorted(missing)}"
 
     def test_bridge_has_bridge_exe(self, msi_db):
         fc = self._feature_components(msi_db)
@@ -324,6 +350,24 @@ class TestFileTable:
 
     def test_sync_exe_present(self, msi_db):
         assert "fauna-sync-agent.exe" in self._files(msi_db)
+
+    def test_the_licence_files_sit_in_installfolder_and_are_not_empty(self, msi_db):
+        """LICENSE-MIT.txt, LICENSE-APACHE.txt and THIRD-PARTY-NOTICES.txt beside
+        the binaries (shipped-notices.md § Per channel, the Windows MSI row), each
+        with a size: read from the File table, never the text — the notices file
+        is dependency-authored."""
+        rows = msi_db.query(
+            "SELECT `File`.`FileName`, `File`.`FileSize`, `File`.`Component_`, "
+            "`Component`.`Directory_` FROM `File`, `Component` "
+            "WHERE `File`.`Component_` = `Component`.`Component`")
+        by_component = {comp: (raw.split("|")[-1], size, directory)
+                        for raw, size, comp, directory in rows}
+        for comp, name in NOTICE_COMPONENTS.items():
+            assert comp in by_component, f"{name}: no {comp} component in the File table"
+            got_name, size, directory = by_component[comp]
+            assert got_name == name, f"{comp} installs {got_name}, not {name}"
+            assert directory == "INSTALLFOLDER", f"{name} lands in {directory}, not INSTALLFOLDER"
+            assert int(size or 0) > 0, f"{name} is empty in the built MSI"
 
     def test_tui_exe_present(self, msi_db):
         """The terminal app rides the MSI as its signed Windows form
@@ -534,12 +578,12 @@ class TestSyncAgentSubsystem:
     can't expose the subsystem (the exe is LZX-compressed in the embedded cabinet),
     so this reads the *staged* binary — the exact bytes `wix build` harvests."""
 
-    def test_staged_sync_agent_is_gui_subsystem(self):
+    def test_staged_sync_agent_is_gui_subsystem(self, msi_path):
         repo = _get_repo_root()
         # Both staging roots: `stage/` is where the installer README's hand build
-        # stages, `build/installer/stage/` is where test_installer.py's
-        # `_build_msi` does. Reading only the first skipped this gate for every
-        # MSI the test builder produced.
+        # stages, `build/installer/stage/` is where the door's `build_msi` does
+        # (requested above, so a stale MSI is rebuilt and staged first). Reading
+        # only the first skipped this gate for every MSI the test builder produced.
         candidates = [
             os.path.join(repo, *root, arch, "fauna-sync-agent.exe")
             for root in (("stage",), ("build", "installer", "stage"))
@@ -547,11 +591,13 @@ class TestSyncAgentSubsystem:
         ]
         present = [p for p in candidates if os.path.exists(p)]
         if not present:
+            # The door built or returned the MSI, so its build staged the agent:
+            # only a stage removed by hand after that build is missing here.
             pytest.skip(
                 "no staged fauna-sync-agent.exe under stage/{arm64,x64}/ or "
-                "build/installer/stage/{arm64,x64}/ — build the MSI first "
-                "(apps/fauna-windows/installer/README.md § Building from a "
-                "clean checkout)"
+                f"build/installer/stage/{{arm64,x64}}/, though {msi_path} is built: its "
+                "stage was removed after the build — delete build/installer/build.stamp "
+                "so the door rebuilds and restages it"
             )
         for p in present:
             sub = _pe_subsystem(p)

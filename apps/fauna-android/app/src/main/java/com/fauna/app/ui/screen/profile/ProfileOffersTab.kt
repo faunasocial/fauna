@@ -6,7 +6,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -14,13 +13,16 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
+import com.fauna.app.core.UrlOpener
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.components.ClaimRedeemPair
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.ProfileOffersVM
 import com.fauna.ffi.FfiTierItem
 import uniffi.fauna_core.OfferStatus
+import uniffi.fauna_core.isSafePaymentUrl
 import social.fauna.generated.Ids
 
 /**
@@ -41,6 +43,11 @@ import social.fauna.generated.Ids
 @Composable
 fun ProfileOffersSection(
     targetActorIdHex: String,
+    /** The page's actor-home slot (`ProfileVM.actorHomeSlot`; `null` = this
+     * nest): where the offers are read and where a per-row Subscribe and its
+     * payment link subscribe (the home the header follow passes). The header
+     * read may replace it after the first load; the effect below re-reads then. */
+    home: String? = null,
     /** Bumped by every `profile-tiers-tab` activation — see [reloadToken] in the
      * `LaunchedEffect` key below. */
     reloadToken: Int = 0,
@@ -51,6 +58,7 @@ fun ProfileOffersSection(
     val pendingTiers by vm.pendingTiers.collectAsState()
     val working by vm.working.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val redeemInput by vm.redeemInput.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
 
@@ -62,7 +70,10 @@ fun ProfileOffersSection(
     // — i.e. after a detour through Posts — so a re-click while already on Tiers,
     // which is exactly how a subscriber asks "did the author approve me yet?",
     // read nothing. There is no push kind for a subscribe grant to answer it.
-    LaunchedEffect(targetActorIdHex, reloadToken) { vm.load(targetActorIdHex) }
+    // Keyed on the home slot too: the header read replacing it re-reads the
+    // offers from the new home (`subscriptions.md` § Pillar 1 → *The offers
+    // browse across nests*), tui's `offers_reload_op`.
+    LaunchedEffect(targetActorIdHex, home, reloadToken) { vm.load(targetActorIdHex, home) }
 
     ProfileOffersContent(
         offers = offers,
@@ -72,7 +83,25 @@ fun ProfileOffersSection(
         statusFor = { tierName -> com.fauna.ffi.offerStatus(tierName, statusTier, tierName in pendingTiers) },
         statusLabel = { status -> resolveLocalized(context, com.fauna.ffi.offerStatusLabel(status)).orEmpty() },
         working = working,
-        onSubscribe = { tier -> vm.subscribe(targetActorIdHex, tier) },
+        onSubscribe = { tier -> vm.subscribe(targetActorIdHex, tier, home) },
+        redeemCode = redeemInput,
+        onRedeemCodeChange = vm::setRedeemInput,
+        // The follow's home, as the Subscribe above carries it.
+        onRedeem = { vm.redeemClaim(targetActorIdHex, home) },
+        // The payment link: the shared https-only guard refuses an unsafe link up
+        // front (F-CL2 anti-phishing-redirect; the error shows, nothing is sent),
+        // else the subscribe goes first and the composed checkout URL opens
+        // through the app's one opener (`monetization.md` § Pillar 3 →
+        // *Buyer↔actor binding (Q4)*).
+        onPaymentLink = { tier, url ->
+            if (isSafePaymentUrl(url)) {
+                vm.payTo(targetActorIdHex, tier, url, home) { checkout ->
+                    UrlOpener.open(context, checkout)
+                }
+            } else {
+                appMessages.showError(context.getString(R.string.subscriptions_unsafe_payment_url))
+            }
+        },
     )
 }
 
@@ -83,6 +112,11 @@ fun ProfileOffersContent(
     statusLabel: (OfferStatus) -> String,
     working: Boolean,
     onSubscribe: (String) -> Unit,
+    redeemCode: String = "",
+    onRedeemCodeChange: (String) -> Unit = {},
+    onRedeem: () -> Unit = {},
+    /** `subscription-offer-payment-link` pressed on the row for (tier, payment URL). */
+    onPaymentLink: (String, String) -> Unit = { _, _ -> },
 ) {
     Column(
         modifier = Modifier
@@ -113,9 +147,24 @@ fun ProfileOffersContent(
                         statusLabel = statusLabel,
                         working = working,
                         onSubscribe = { onSubscribe(tier.name) },
+                        onPaymentLink = { url -> onPaymentLink(tier.name, url) },
                     )
                 }
             }
+        }
+        // The redeem pair (`profile.md` § Layout & flow → *Another's profile*):
+        // the `subscription-settings` pair, here carrying this creator's home, so
+        // a code minted on another nest redeems from the creator's profile. Paints
+        // with no offer rows too. Same family compile condition and the same
+        // `fauna.payments.claims.redeem` gate as the settings pair (one shared
+        // composable); lifts tui's OTHER Tiers tab.
+        if (BuildConfig.PAYMENTS) {
+            ClaimRedeemPair(
+                code = redeemCode,
+                onCodeChange = onRedeemCodeChange,
+                working = working,
+                onRedeem = onRedeem,
+            )
         }
     }
 }
@@ -131,8 +180,8 @@ private fun OfferRow(
     statusLabel: (OfferStatus) -> String,
     working: Boolean,
     onSubscribe: () -> Unit,
+    onPaymentLink: (String) -> Unit,
 ) {
-    val uriHandler = LocalUriHandler.current
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_OFFER_ROW)) {
         Column(
             modifier = Modifier.padding(12.dp),
@@ -176,16 +225,22 @@ private fun OfferRow(
                 )
                 if (BuildConfig.PAYMENTS) {
                     tier.paymentUrl?.let { url ->
-                        OutlinedButton(
-                            onClick = { uriHandler.openUri(url) },
-                            modifier = Modifier.testTag(Ids.SUBSCRIPTION_OFFER_PAYMENT_LINK),
-                        ) { Text(stringResource(R.string.subscriptions_payment_url)) }
+                        // The payment link subscribes before it opens the
+                        // checkout, so it declares the subscribe's kind too
+                        // (linux `offers.rs` declares the same on its button).
+                        val payGate = faunaGate("fauna.subscriptions.subscribe", enabled = !working)
+                        Column {
+                            OutlinedButton(
+                                onClick = { onPaymentLink(url) },
+                                enabled = payGate.enabled,
+                                modifier = Modifier.testTag(Ids.SUBSCRIPTION_OFFER_PAYMENT_LINK),
+                            ) { Text(stringResource(R.string.subscriptions_payment_url)) }
+                            DisabledControlReasonText(payGate.reason)
+                        }
                     }
                 }
-                // `fauna.subscriptions.subscribe` is OnlineOnly. The payment-link
-                // button beside it opens an external URL and declares nothing —
-                // it issues no wire kind at all. The page's own predicate (not
-                // already active, nothing in flight) is handed over.
+                // `fauna.subscriptions.subscribe` is OnlineOnly. The page's own
+                // predicate (not already active, nothing in flight) is handed over.
                 val subscribeGate = faunaGate(
                     "fauna.subscriptions.subscribe",
                     enabled = !working && status != OfferStatus.ACTIVE,

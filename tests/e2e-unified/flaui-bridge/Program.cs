@@ -265,6 +265,11 @@ class Program
             Environment.Exit(SelfTest.PackedAttrChecks());
             return;
         }
+        if (args.Length > 0 && args[0] == "--self-test-capture-content")
+        {
+            Environment.Exit(SelfTest.CaptureContentChecks());
+            return;
+        }
         if (args.Length > 0 && args[0] == "--self-test-launch-status")
         {
             Environment.Exit(SelfTest.LaunchStatus());

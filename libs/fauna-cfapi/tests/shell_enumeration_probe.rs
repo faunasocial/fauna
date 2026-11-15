@@ -18,6 +18,11 @@ use windows::core::HSTRING;
 #[test]
 #[ignore = "measurement probe: run with --ignored --nocapture"]
 fn measure_shell_enumeration_surfaces() {
+    // Its shell registration lives in a `tempfile` dir: held under the live
+    // tests' lock so the dev fleet's leftover-root sweep spares it (test_roots).
+    let _serial = fauna_ipc::test_support::NamedMutexTestGuard::acquire(
+        fauna_cfapi::test_roots::SHELL_TEST_MUTEX,
+    );
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("probe-root");
     std::fs::create_dir_all(&dir).expect("mkdir");

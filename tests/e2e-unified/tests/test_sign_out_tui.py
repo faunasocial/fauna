@@ -1,4 +1,4 @@
-"""tier_3 e2e (tui, linux, macos): a later retry of a sign-out's leftovers never removes a
+"""tier_3 e2e (tui, linux, macos, web): a later retry of a sign-out's leftovers never removes a
 store a later sign-in adopted — whichever window retries.
 
 ``docs/goal/architecture/apps/account-scoping.md`` § The scoping taxonomy →
@@ -54,9 +54,36 @@ record) and its store root the ``sync`` sibling beside it (``AppleScopeStore``),
 and its Remove Again re-runs the same shared ``fauna_client_accounts`` routine
 (``SignOutResidueSurface.finish``). iOS has no leg of this shape: the OS admits
 one instance per app (``account-scoping.md`` § Concurrent instances), so no
-second window can adopt the store while the first stays signed out. web and
-android follow the trickle-down: neither has a second window sharing a
-filesystem store root, so each needs an arm of its own.
+second window can adopt the store while the first stays signed out.
+
+**android** has one process and one registry, so no window can adopt the store
+while another stays signed out: there the promise rests on decision 3 alone
+(``account-scoping.md`` § Erasure follows scope → *The sign-out record is on
+all 7 apps*, *the registry gate*) — a run nobody asked for, the launch, neither
+re-sweeps nor paints while the registry names an account, and Remove Again is
+painted only on the signed-out ``identity_choice``. Its arm
+(``test_android_…``) is that gate's witness: the same two faults, injected as
+the app's own uid with ``run-as`` (the e2e build is debuggable) on the account
+store container (``files/account-store``, ``AccountStores.kt``); the sign-in
+again is a seeded relaunch (the precondition carve-out window B uses), and a
+second relaunch stands in for the later window. Nothing the sign-in adopted
+and wrote may be lost, the residue record must be left as the sign-out wrote
+it (the record waits), and the line must not be painted while signed in —
+on the add-account wizard's ``identity_choice`` included.
+
+**web** has no filesystem store root and no unlistable base, so it has the arm
+its own residue class takes (§ *Erasure follows scope*, the web paragraph: a
+store delete another connection blocks is the residue, and *an account the
+registry names again is someone's store again, left untouched and dropped from
+the record*). Its two windows are two tabs of one browser context, which share
+the origin's registry and stores as two windows of one app share a store root:
+tab A signs out while the test holds the account's database open, so the
+delete is blocked and the residue view comes up; tab B opens, signs into the
+same identity once the hold is let go — the browser runs the delete it had
+waiting, so B writes a store of its own — and closes; then A presses Remove
+Again. web's every load re-sweeps (decision 2), so B opens while the store is
+still held, and B's sign-in itself runs no sweep: A's press is the one that
+decides.
 """
 from __future__ import annotations
 
@@ -64,6 +91,7 @@ import contextlib
 import json
 import os
 import stat
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -76,15 +104,23 @@ from common.scope_store import AppleScopeStore, XdgScopeStore
 from conftest import _seeded_environment, get_available_apps
 from drivers import create_driver
 from helpers import app_surface
+from helpers.waiting import await_session_actor
 from i18n.strings import S
 
-pytestmark = [
-    pytest.mark.tier_3,
-    pytest.mark.tui,
-    pytest.mark.linux,
-    pytest.mark.macos,
-    pytest.mark.host_platform("linux", "macos"),
-]
+pytestmark = [pytest.mark.tier_3]
+
+
+def _desktop(test):
+    """The two-window arms' marks — per test, not module-wide, so the android
+    arm below is neither selected for these apps nor gated on a host OS."""
+    for mark in (
+        pytest.mark.tui,
+        pytest.mark.linux,
+        pytest.mark.macos,
+        pytest.mark.host_platform("linux", "macos"),
+    ):
+        test = mark(test)
+    return test
 
 #: The xdg apps and each one's flat base under ``XDG_CONFIG_HOME``
 #: (``XdgScopeStore``).
@@ -118,11 +154,18 @@ def _world(app):
             "home": os.path.join(base, "home"),
             "credential_dir": os.path.join(base, "credentials"),
         }
-    return {
+    world = {
         "xdg_base": os.path.join(base, "xdg"),
         "credential_dir": os.path.join(base, "credentials"),
         "keyring_app": f"fauna-e2e-{app}-residue-world-{os.path.basename(base)}",
     }
+    if sys.platform == "darwin":
+        # tui on macOS relocates its install home per launch, and the account
+        # store follows that home (`drivers/tui.py::build_launch_env`), not
+        # `XDG_CONFIG_HOME` — so the two windows share it only when the world
+        # pins it, the way the macos arm above pins its `home`.
+        world["home"] = os.path.join(base, "home")
+    return world
 
 
 def _seed(nest_instance, actor, secret, device):
@@ -154,7 +197,13 @@ def _scope_roots(app, driver) -> tuple[Path, Path]:
     if app == "macos":
         roots = AppleScopeStore(app, driver.app_support_dir()).scope_roots()
     else:
-        roots = XdgScopeStore(app, driver.config_home, _FLAT_BASE[app]).scope_roots()
+        # The store root the driver's own launch resolved (`<home>/Library/
+        # Application Support/Fauna/sync` for tui on macOS, `%LOCALAPPDATA%`
+        # on windows, XDG on linux) — never re-derived from `config_home`.
+        roots = XdgScopeStore(
+            app, driver.config_home, _FLAT_BASE[app],
+            getattr(driver, "_resolved_store_root", None),
+        ).scope_roots()
     return roots[0], roots[-1]
 
 
@@ -262,7 +311,21 @@ def _run(request, nest_instance, residue_app, fault):
         a = ActionLayer(a_driver)
         flat, store_root = _scope_roots(app, a_driver)
         scope = store_root / actor
-        assert scope.is_dir() and any(scope.iterdir()), (
+
+        def built() -> bool:
+            with contextlib.suppress(OSError):
+                return scope.is_dir() and any(scope.iterdir())
+            return False
+
+        # A session reads "serving" before its account store is assembled on
+        # every app that spawns the assembly (macOS starts the runtime on a task
+        # after the bearer mint; shared Rust opens the store on a spawned task),
+        # so the scope is waited for on the launch budget, never read at once —
+        # `test_erase_refused_other_instance.py`'s poll over the same roots.
+        deadline = time.monotonic() + LAUNCH_BUDGET_S
+        while not built() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert built(), (
             "precondition: the signed-in window must have built the account's scope "
             f"under the shared store root — that is the store B adopts — but {scope} "
             f"is missing or empty (root holds {sorted(_tree(store_root))[:20]})"
@@ -324,6 +387,7 @@ def _residue_log(log: str) -> str:
     )[-4000:]
 
 
+@_desktop
 @pytest.mark.feature("account")
 def test_a_residue_retry_never_erases_under_a_base_a_later_sign_in_adopted(
     request, nest_instance, residue_app
@@ -370,6 +434,7 @@ def test_a_residue_retry_never_erases_under_a_base_a_later_sign_in_adopted(
     )
 
 
+@_desktop
 @pytest.mark.feature("account")
 def test_a_residue_retry_leaves_an_actor_scope_a_later_sign_in_wrote_below(
     request, nest_instance, residue_app
@@ -408,4 +473,333 @@ def test_a_residue_retry_leaves_an_actor_scope_a_later_sign_in_wrote_below(
     assert not out["line"], (
         "the adopted scope is dropped from the record and nothing else was left, so "
         f"the view must be gone — it reads {out['line']!r}"
+    )
+
+
+# --- android: one process, one registry — the registry gate's witness -------
+
+#: The account store container android hands shared Rust
+#: (`AccountStores.accountStoreContainerDir()`), relative to the app's data
+#: directory; each actor's scope is ``<container>/<actor>``.
+_ANDROID_CONTAINER = "files/account-store"
+
+#: The residue record under android's flat base (`filesDir`).
+_ANDROID_RECORD = f"files/{RESIDUE_FILE}"
+
+
+def _android_launch(request, nest_instance, seed):
+    """Own the android driver (the shared ``app`` fixture's reset would wipe the
+    seed — `test_account_switcher_android.py`'s reason too)."""
+    from helpers import android_device
+
+    driver = create_driver("android")
+    driver.launch({
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": _seeded_environment(request, nest_instance),
+        "app_path": request.getfixturevalue("android_app_path"),
+        **android_device.run_launch_facts(Path(__file__).resolve().parents[3]),
+    })
+    return driver
+
+
+def _android_recorded(raw: bytes | None) -> dict[str, object]:
+    """Recorded path → its fingerprint, each path as the app wrote it (absolute
+    under the app's data directory, or relative to `filesDir`)."""
+    try:
+        record = json.loads(raw) if raw else None
+    except ValueError:
+        return {}
+    return {e["path"]: e.get("fingerprint") for e in (record or {}).get("paths", [])}
+
+
+def _android_lookup(recorded: dict[str, object], rel: str):
+    """``(found, fingerprint)`` of the recorded entry naming app-data path
+    `rel` (``files/…``), however the record spelled it."""
+    tail = rel.removeprefix("files/")
+    for path, fingerprint in recorded.items():
+        if path.rstrip("/").endswith("/" + rel) or path.rstrip("/") == tail:
+            return True, fingerprint
+    return False, None
+
+
+def _run_android(request, nest_instance, arm):
+    """A faulted sign-out; the sign-in again (a seeded relaunch); a later
+    relaunch. Asserts the shared android half and returns what the caller
+    asserts on."""
+    user = create_actor_and_register(
+        nest_instance["port"], admin_signing_key=nest_instance["admin"]["signing_key"]
+    )
+    actor, secret = user["actor_id_hex"], bytes(user["signing_key"]).hex()
+    scope = f"{_ANDROID_CONTAINER}/{actor}"
+    driver = None
+    originals: dict[str, int] = {}
+    try:
+        driver = _android_launch(request, nest_instance,
+                                 _seed(nest_instance, actor, secret, "residue-android"))
+        await_session_actor(driver, actor, budget_s=LAUNCH_BUDGET_S, what="the seeded launch")
+        a = ActionLayer(driver)
+        assert driver.app_data_tree(scope), (
+            "precondition: the signed-in app must have built the account's scope in "
+            "its account store container — the store the sign-in again adopts — but "
+            f"{scope} is missing or empty ({driver.app_data_listing(_ANDROID_CONTAINER)[:20]})"
+        )
+
+        if arm == "base":
+            container_mode = driver.app_data_dir_modes(_ANDROID_CONTAINER)[_ANDROID_CONTAINER]
+            originals = {_ANDROID_CONTAINER: container_mode}
+            faulted = {_ANDROID_CONTAINER: 0o000}
+        else:
+            originals = driver.app_data_dir_modes(scope)
+            faulted = {d: 0o555 for d in originals}
+        try:
+            driver.app_data_chmod(faulted)
+            probe = _ANDROID_CONTAINER if arm == "base" else scope
+            if not driver.app_data_denies(probe, listing=arm == "base"):
+                app_surface.skip_environment(
+                    "the app's own uid reads/writes through the injected mode bits on "
+                    "this device, so the fault is never injected and the test would "
+                    "pass for the wrong reason"
+                )
+            a.settings.sign_out()
+            line = a.onboarding.sign_out_residue_text()
+            deadline = time.monotonic() + LOCAL_BUDGET_S
+            while not line and time.monotonic() < deadline:
+                line = a.onboarding.sign_out_residue_text()
+            assert line, (
+                "precondition: the faulted sign-out must leave the residue view up on "
+                "identity_choice; sign-out-residue-message is absent (record="
+                f"{driver.app_data_read(_ANDROID_RECORD)!r}, app log tail:\n"
+                f"{driver.app_stderr_text()[-3000:]})"
+            )
+        finally:
+            driver.app_data_chmod(originals)
+        record = driver.app_data_read(_ANDROID_RECORD)
+        recorded = _android_recorded(record)
+
+        # Sign in to the same account again: a seeded relaunch (the launch
+        # config still carries the seed), which adopts the surviving store and
+        # writes into it — under a registry that names the account, so the
+        # launch's finish must skip the re-sweep.
+        before = driver.app_data_tree(scope)
+        assert driver.recover(), "the relaunch that signs in again did not come up"
+        await_session_actor(driver, actor, budget_s=LAUNCH_BUDGET_S, what="the sign-in again")
+        deadline = time.monotonic() + LAUNCH_BUDGET_S
+        adopted = driver.app_data_tree(scope)
+        while adopted == before and time.monotonic() < deadline:
+            time.sleep(0.2)
+            adopted = driver.app_data_tree(scope)
+        assert adopted and adopted != before, (
+            "precondition: the sign-in again must have adopted the surviving store "
+            f"and written into it, but {scope} reads the same as before it "
+            f"({sorted(before)[:20]}) — nothing a later run could erase was written"
+        )
+
+        # A later launch, signed in (the store pinned across it).
+        assert driver.preserve_state_across_relaunch(), "the android relaunch pin was refused"
+        assert driver.recover(), "the later relaunch did not come up"
+        await_session_actor(driver, actor, budget_s=LAUNCH_BUDGET_S, what="the later launch")
+        after = driver.app_data_tree(scope)
+        log = driver.app_stderr_text()
+
+        lost = _lost(adopted, after)
+        assert not lost, (
+            "a launch while the registry names an account must not re-sweep the "
+            "residue record (account-scoping.md § Erasure follows scope → the "
+            "sign-out record is on all 7 apps, decision 3, the registry gate), but "
+            f"what the sign-in again adopted under {scope} is gone: {lost[:30]} "
+            f"(record={record!r}; residue log:\n{_residue_log(log)})"
+        )
+        now = driver.app_data_read(_ANDROID_RECORD)
+        assert now == record, (
+            "while the registry names an account the launch neither re-sweeps nor "
+            "paints — the record waits (decision 3) — but the residue record moved "
+            f"across the two signed-in launches: {record!r} → {now!r}"
+        )
+        assert not a.onboarding.sign_out_residue_showing(), (
+            "the residue line must not be painted while signed in (decision 3)"
+        )
+
+        # The add-account wizard's identity_choice is signed in too: no line.
+        driver.set_state({"nav": {"stack": [{"view": "settings"},
+                                            {"view": "settings", "id": "account"}]}})
+        driver.wait_for("account-add-button", timeout=LOCAL_BUDGET_S)
+        driver.click("account-add-button")
+        driver.wait_for("create-identity-button", timeout=LOCAL_BUDGET_S)
+        assert not a.onboarding.sign_out_residue_showing(), (
+            "the add-account wizard mounts identity_choice while the registry names "
+            "an account: Remove Again must not be reachable there (decision 3), but "
+            f"sign-out-residue is painted ({a.onboarding.sign_out_residue_text()!r})"
+        )
+        return {"recorded": recorded, "scope": scope}
+    finally:
+        if driver is not None:
+            with contextlib.suppress(Exception):
+                driver.app_data_chmod(originals)
+            driver.teardown()
+            # The device outlives the test: leave no residue record for a later
+            # test's signed-out identity_choice to paint.
+            with contextlib.suppress(Exception):
+                driver.app_data_remove([_ANDROID_RECORD, scope, f"files/{actor}",
+                                        f"databases/{actor}"])
+
+
+@pytest.mark.android
+@pytest.mark.feature("account")
+def test_android_a_launch_never_re_sweeps_a_base_a_later_sign_in_adopted(
+    request, nest_instance
+):
+    """Rule 3's base arm on android: the account store container unlistable at
+    sign-out ⇒ the record holds it as a BASE with no fingerprint; the sign-in
+    again adopts ``<container>/<actor>/`` and writes; no later launch removes
+    any of it, and the record waits."""
+    out = _run_android(request, nest_instance, "base")
+    found, fingerprint = _android_lookup(out["recorded"], _ANDROID_CONTAINER)
+    assert found and fingerprint is None, (
+        "precondition: the unlistable container must be on the residue record as a "
+        "BASE (no fingerprint) — the arm under test — but the record holds "
+        f"{out['recorded']!r}"
+    )
+
+
+@pytest.mark.android
+@pytest.mark.feature("account")
+def test_android_a_launch_never_re_sweeps_an_actor_scope_a_later_sign_in_wrote_below(
+    request, nest_instance
+):
+    """Rule 3's actor-scope arm on android: the scope tree read-only at
+    sign-out ⇒ the record holds ``<container>/<actor>/`` with a fingerprint;
+    the sign-in again writes one level down; no later launch removes any of
+    it, and the record waits."""
+    out = _run_android(request, nest_instance, "actor_scope")
+    found, fingerprint = _android_lookup(out["recorded"], out["scope"])
+    assert found and fingerprint is not None, (
+        "precondition: the read-only scope must be on the residue record as an "
+        "actor scope WITH a fingerprint — the arm under test — but the record holds "
+        f"{out['recorded']!r}"
+    )
+
+
+# ── web: two tabs of one browser context ─────────────────────────────────────
+
+#: A load or a press finishing a recorded sign-out: one boot, one credential
+#: wipe, one database delete (`test_sign_out_web.RECONCILE_S`).
+RECONCILE_S = 60.0
+
+
+@pytest.mark.web
+@pytest.mark.feature("account")
+def test_a_residue_retry_leaves_a_store_another_tab_signed_back_into(
+    app, request, nest_instance
+):
+    """Rule 3's web arm: a recorded account the registry names again — tab B
+    signed back into it after A's sign-out left its store behind — is someone's
+    store again. A's Remove Again must leave B's store whole and drop the
+    account from the record, and the view goes (nothing else was left)."""
+    from conftest import _make_user
+
+    from helpers import enrollment, web_store
+    from helpers.waiting import wait_until
+
+    user = _make_user(nest_instance)
+    actor = user["actor_id_hex"]
+    store = f"{web_store.ACCOUNT_STORE_ROOT}/{actor}"
+    tab_a = app.driver
+    owing = S.settings.sign_out_residue(count="1")
+
+    def record():
+        return json.loads(web_store.read_key(tab_a, web_store.SIGN_OUT_RECORD_KEY) or "null")
+
+    def await_line(a: ActionLayer, what: str) -> None:
+        last: dict = {}
+
+        def reads():
+            last["line"] = a.onboarding.sign_out_residue_text()
+            return owing in (last["line"] or "")
+
+        wait_until(
+            reads, RECONCILE_S, interval=0.5,
+            diagnose=lambda: (
+                f"{what}: sign-out-residue-message must read {owing!r} but reads "
+                f"{last.get('line')!r}; error-message {a.error_text()!r}, record "
+                f"{record()!r}, origin {web_store.account_store_names(tab_a)}"
+            ),
+        )
+
+    enrollment.sign_in(app, request, nest_instance, user)
+    enrollment.await_enrollment(app, nest_instance["url"], user)
+    assert store in web_store.account_store_names(tab_a)["indexeddb"], (
+        "precondition: the signed-in account's store must exist to be held open"
+    )
+
+    tab_b = None
+    web_store.hold_account_store(tab_a, store)
+    try:
+        app.settings.sign_out()
+        await_line(app, "tab A, after a sign-out whose store delete is blocked")
+        # Opened while the store is still held: B's load re-sweeps too, and its
+        # delete waits behind the same holder, so the record keeps the account.
+        tab_b = tab_a.open_same_context_tab()
+        b = ActionLayer(tab_b)
+        await_line(b, "tab B's load, over the still-held store")
+    finally:
+        # The browser runs the deletes it had waiting: the old store goes.
+        web_store.release_account_store(tab_a)
+    assert record() == {"wipe_owed": False, "accounts": [actor]}, (
+        "precondition: the account whose store survived the sign-out must be on the "
+        f"sign-out record — the residue A's press retries — but it reads {record()!r}"
+    )
+
+    try:
+        # B signs back into the identity and writes a store of its own.
+        enrollment.sign_in(b, request, nest_instance, user)
+        enrollment.await_enrollment(b, nest_instance["url"], user)
+        written = web_store.account_store_counts(tab_b, store)
+        assert written and any(written.values()), (
+            "precondition: tab B's sign-in must have written the account's store, but "
+            f"it reads {written!r} — the retry below would then be erasing nothing "
+            "anybody uses, which is correct and witnesses nothing"
+        )
+    finally:
+        if tab_b is not None:
+            tab_b.teardown()
+    adopted = web_store.account_store_counts(tab_a, store)
+    named = web_store.read_index(tab_a) or {}
+    assert actor in json.dumps(named) and record() == {
+        "wipe_owed": False, "accounts": [actor]
+    }, (
+        "precondition: with B closed, the registry must name the account again while "
+        f"the record still owes it — registry {named!r}, record {record()!r}; B's "
+        "sign-in must run no sweep, so A's press is the one that decides"
+    )
+
+    app.onboarding.retry_sign_out_residue()
+    after: dict = {}
+
+    def settled() -> bool:
+        after.update(
+            showing=app.onboarding.sign_out_residue_showing(),
+            line=app.onboarding.sign_out_residue_text(),
+            record=record(),
+            counts=web_store.account_store_counts(tab_a, store),
+        )
+        return not after["showing"] and after["record"] is None
+
+    wait_until(
+        settled, RECONCILE_S, interval=0.5,
+        diagnose=lambda: (
+            "the account the registry names again leaves the record and nothing else "
+            f"was left, so Remove Again must clear the record and the view — {after}"
+        ),
+    )
+    lost = sorted(
+        name for name, count in (adopted or {}).items()
+        if (after["counts"] or {}).get(name, 0) < count
+    )
+    assert after["counts"] is not None and not lost, (
+        "a residue retry must leave alone a store an account signed back into "
+        "(account-scoping.md § Erasure follows scope → the residue surface, rule 3; "
+        "the web paragraph: an account the registry names again is someone's store "
+        f"again), but Remove Again took {store!r} from {adopted!r} to "
+        f"{after['counts']!r} (object stores that lost records: {lost})"
     )

@@ -76,6 +76,16 @@ async fn spawn_relay_with_heartbeat(heartbeat: fauna_nest::ws::WsHeartbeatPolicy
 /// hands its secret to `nostr-sdk` as hex, exactly like a user importing a key
 /// into a real client).
 async fn link_custodial(state: &AppState, actor_hex: &str) -> Keypair {
+    // The `users` row the signer's door reads the account's authority from
+    // (`bunker::account_stands`): a real account has one, and with none the
+    // bunker answers every request, `connect` included, `unauthorized`.
+    // Only a 32-byte hex actor is an account id; the relay-only tests' text
+    // ids never reach the bunker.
+    if let Ok(bytes) = hex::decode(actor_hex)
+        && let Ok(actor) = <[u8; 32]>::try_from(bytes.as_slice())
+    {
+        state.db.create_user(&actor, "free", "test").await.unwrap();
+    }
     let nest_key = state.nest_identity.signing_key.to_bytes();
     let kp = Keypair::generate();
     let encrypted = encrypt_nostr_privkey(&nest_key, &kp.secret_bytes()).unwrap();
@@ -682,6 +692,11 @@ async fn kind5_delete_from_a_real_client() {
     anon.disconnect().await;
 }
 
+/// The S6 account: a 32-byte hex actor id, so its `users` row can be seated.
+fn nip46_actor() -> String {
+    "ee".repeat(32)
+}
+
 /// S6 — the third-party NIP-46 interop leg (`nostr.md` § The nest as the
 /// user's NIP-46 signer): rust-nostr's real NIP-46 client (`nostr-connect`,
 /// what Amethyst-class apps embed via the SDK) consumes a minted
@@ -695,13 +710,13 @@ async fn nip46_third_party_client_connects_and_signs() {
     use nostr_connect::prelude::*;
 
     let relay = spawn_relay().await;
-    let user_kp = link_custodial(&relay.state, "actor-nip46").await;
+    let user_kp = link_custodial(&relay.state, &nip46_actor()).await;
 
     // Mint the invite exactly as `fauna.nostr.bunker.create_invite` does.
     let inv = {
         let now = fauna_core::data::Timestamp::now_secs() as u64;
         let conn = relay.state.db.conn().await;
-        fauna_nest::nostr::bunker::create_invite(&conn, "actor-nip46", now).unwrap()
+        fauna_nest::nostr::bunker::create_invite(&conn, &nip46_actor(), now).unwrap()
     };
     let bunker_uri = format!(
         "bunker://{}?relay={}&secret={}",

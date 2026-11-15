@@ -107,6 +107,7 @@ public final class AccountSwitcherVM {
         switch blocked {
         case .servedHere(let line): return line
         case .servedElsewhere(_, let line): return line
+        case .carryOwed(let line): return line
         }
     }
 

@@ -1196,13 +1196,22 @@ class OfflineGateTest {
         render(FfiConnectionState.DISCONNECTED) { ScrollHost { Offers() } }
         composeTestRule.onNodeWithTag("subscription-offer-subscribe-button")
             .performScrollTo().assertIsNotEnabled()
-        composeTestRule.onNodeWithText(needsNest()).assertIsDisplayed()
+        // The OTHER Tiers tab's claim redeem pair carries the same gate as the
+        // settings pair: the commit gates, the buffer stays live. Two closed
+        // controls → two reason lines.
+        composeTestRule.onNodeWithTag("subscription-claim-redeem-button")
+            .performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("subscription-claim-redeem-input")
+            .performScrollTo().assertIsEnabled()
+        composeTestRule.onAllNodesWithText(needsNest()).assertCountEquals(2)
     }
 
     @Test
     fun offerSubscribeIsLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) { ScrollHost { Offers() } }
         composeTestRule.onNodeWithTag("subscription-offer-subscribe-button")
+            .performScrollTo().assertIsEnabled()
+        composeTestRule.onNodeWithTag("subscription-claim-redeem-button")
             .performScrollTo().assertIsEnabled()
         composeTestRule.onNodeWithText(needsNest()).assertDoesNotExist()
     }
@@ -3920,6 +3929,7 @@ class OfflineGateTest {
     private fun EventsUnderTest(
         selectedCalendar: FaunaCalendar? = calendar(),
         invitedEvents: List<EventSummary> = emptyList(),
+        events: List<EventSummary> = emptyList(),
         draft: State<FfiEventDrafts?> = remember { mutableStateOf(null) },
         onDraftEdited: (
             summary: String, dtstart: String, dtend: String, description: String, location: String,
@@ -3930,7 +3940,7 @@ class OfflineGateTest {
             calendars = listOf(calendar()),
             selectedCalendar = selectedCalendar,
             visibleCalendarIds = setOf("cal-1"),
-            events = emptyList(),
+            events = events,
             invitedEvents = invitedEvents,
             visibleEvents = emptyList(),
             isLoading = false,
@@ -4067,9 +4077,11 @@ class OfflineGateTest {
 
     @Test
     @Config(qualifiers = "h1280dp")
-    fun theInvitedEventRsvpButtonsGate_whileTheComposeOpenerStaysLive() {
+    fun theAgendaCardRsvpButtonsGate_whileTheComposeOpenerStaysLive() {
+        // The trio lives on the agenda event card since the invited quick-list
+        // dropped its duplicate; the card's RSVP re-PUTs the VEVENT.
         render(FfiConnectionState.DISCONNECTED) {
-            EventsUnderTest(selectedCalendar = null, invitedEvents = listOf(invited()))
+            EventsUnderTest(events = listOf(invited()))
         }
         composeTestRule.onNodeWithTag("event-rsvp-going").assertIsNotEnabled()
         composeTestRule.onNodeWithTag("event-rsvp-interested").assertIsNotEnabled()
@@ -4081,9 +4093,9 @@ class OfflineGateTest {
 
     @Test
     @Config(qualifiers = "h1280dp")
-    fun theInvitedEventRsvpButtonsAreLiveWhenConnected() {
+    fun theAgendaCardRsvpButtonsAreLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) {
-            EventsUnderTest(selectedCalendar = null, invitedEvents = listOf(invited()))
+            EventsUnderTest(events = listOf(invited()))
         }
         composeTestRule.onNodeWithTag("event-rsvp-going").assertIsEnabled()
         composeTestRule.onNodeWithTag("event-rsvp-interested").assertIsEnabled()

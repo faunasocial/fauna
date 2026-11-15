@@ -40,6 +40,11 @@ public sealed partial class FamilyPage : Page
         // under the hood (FfiFamilyClient.SaveContentRules).
         RulesEditor.SaveButtonControl.FaunaGate("fauna.family.policy.update");
         RulesEditor.SaveHandler = SaveContentRulesAsync;
+        // The reach policy's save is the same OnlineOnly kind, so it greys
+        // offline beside the feature editor's Save and Remove (family-safety.md
+        // § Implementation status today, the guardian host's third settled
+        // thing; witness test_family_offline_controls.py).
+        PolicySaveButton.FaunaGate("fauna.family.policy.update");
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)

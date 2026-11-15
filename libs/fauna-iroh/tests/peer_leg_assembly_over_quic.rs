@@ -244,6 +244,7 @@ async fn the_runtime_assembled_listener_admits_and_refuses_over_real_quic() {
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("assembly is offline-safe");

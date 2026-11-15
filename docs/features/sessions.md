@@ -82,13 +82,13 @@ Stamped 2026-11-01 at a6047fbd8b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1e755069 standalone |
-| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
-| windows | ✅ full | 0.1.5-dev+1e755069 standalone |
+| web | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| windows | ✅ full | 0.1.5-dev+f0ab40ba standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+fa996fbb standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+1e755069 standalone |
+| tui | ✅ full | 0.1.6-dev+2f2257c1 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 

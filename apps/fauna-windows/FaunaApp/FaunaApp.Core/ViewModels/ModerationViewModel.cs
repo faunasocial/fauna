@@ -371,6 +371,10 @@ public partial class ModerationViewModel : ViewModelBase
         // the shared fauna_core::format::confidence_percent (no per-app
         // (m + 5) / 10 — value-formatting.md § Confidence percent).
         var confidencePercent = (int)FaunaFfiMethods.ConfidencePercent(r.confidencePerMille);
+        // A row another nest delivered names its issuer through the shared fold's
+        // `issued_by` (moderation.md § Legal takedown → The author homed on another
+        // nest) — resolved, never derived here from `issuer_nest`.
+        string? issuedBy = r.issuedBy is { } suffix ? Strings.Resolve(suffix) : null;
         return new ModerationRow(
             ContentId: r.contentId,
             ContentType: r.contentType,
@@ -378,28 +382,46 @@ public partial class ModerationViewModel : ViewModelBase
             CategoryIcon: style.icon,
             CategoryAccent: style.accent,
             ActionLabel: actionLabel ?? string.Empty,
+            ActionLine: ActionLine(actionLabel, issuedBy),
             ConfidencePercent: confidencePercent,
             IsLocal: r.source == QueueRowSource.Local,
-            BadgeAttributes: BadgeAttributes(r.category, confidencePercent, actionLabel),
+            BadgeAttributes: BadgeAttributes(r.category, confidencePercent, actionLabel, r.issuerNest),
             // The shared rule: only a nest-issued decision has anything to appeal.
             IsAppealable: FaunaFfiMethods.RowIsAppealable(r));
     }
 
+    /// <summary>The row's painted action line: the resolved action label, then — on a
+    /// row another nest delivered — the shared <c>issued_by</c> suffix
+    /// (<c>"{label} · {issued_by}"</c>, as tui paints it; moderation.md § Legal takedown →
+    /// <i>The author homed on another nest</i>). Blank for a local detection, which
+    /// carries no action. The <c>action</c> fact stays the bare label.</summary>
+    internal static string ActionLine(string? actionLabel, string? issuedBy) =>
+        actionLabel is null ? string.Empty
+        : issuedBy is null ? actionLabel
+        : $"{actionLabel} · {issuedBy}";
+
     /// <summary>The <c>content-label-badge</c>'s automation attributes (moderation.md
     /// § Element IDs → <i>Queue row facts</i>): <c>confidence</c>, the whole percent with
     /// its <c>%</c> exactly as the row paints it, and <c>action</c>, the resolved action
-    /// label — absent on a local detection, which carries none. UIA gives the badge one
-    /// HelpText, so they ride one <see cref="AutomationAttributePack"/>; the shared
-    /// category key the badge styles from rides with them, so a local row's pack still
-    /// holds two pairs. A lone pair would read back as a bare value
-    /// (<c>flaui-bridge/PackedAttr.cs</c>), answering <c>action</c> with the whole
-    /// <c>confidence=…</c> pair instead of nothing.</summary>
-    internal static string BadgeAttributes(string category, int confidencePercent, string? actionLabel)
+    /// label — absent on a local detection, which carries none — and <c>issuer</c>, the
+    /// deciding nest's domain on a row another nest delivered (<c>QueueRow.issuer_nest</c>
+    /// from the shared fold; absent on this nest's own decision and on a local
+    /// detection). UIA gives the badge one HelpText, so they ride one
+    /// <see cref="AutomationAttributePack"/>; the shared category key the badge styles
+    /// from rides with them, so a local row's pack still holds two pairs. A lone pair
+    /// would read back as a bare value (<c>flaui-bridge/PackedAttr.cs</c>), answering
+    /// <c>action</c> with the whole <c>confidence=…</c> pair instead of nothing.</summary>
+    internal static string BadgeAttributes(
+        string category, int confidencePercent, string? actionLabel, string? issuerNest = null)
     {
-        var confidence = ("confidence", $"{confidencePercent}%");
-        return actionLabel is null
-            ? AutomationAttributePack.Pack(("category", category), confidence)
-            : AutomationAttributePack.Pack(("category", category), confidence, ("action", actionLabel));
+        var pairs = new List<(string Key, string Value)>
+        {
+            ("category", category),
+            ("confidence", $"{confidencePercent}%"),
+        };
+        if (actionLabel is not null) pairs.Add(("action", actionLabel));
+        if (issuerNest is not null) pairs.Add(("issuer", issuerNest));
+        return AutomationAttributePack.Pack(pairs.ToArray());
     }
 }
 
@@ -422,7 +444,9 @@ public record ReportLedgerRowView(string ReportId, string Line, bool CanWithdraw
 /// ref the <c>train-correction-button</c> acts on (a server row trains
 /// <c>fauna.moderation.train</c>; a local row removes the client-side flag).
 /// <see cref="BadgeAttributes"/> is the badge's packed HelpText
-/// (<see cref="ModerationViewModel.BadgeAttributes"/>).
+/// (<see cref="ModerationViewModel.BadgeAttributes"/>). <see cref="ActionLine"/> is what
+/// the row paints: the action label, suffixed with the shared <c>issued_by</c> on a row
+/// another nest delivered (<see cref="ModerationViewModel.ActionLine"/>).
 /// </summary>
 public record ModerationRow(
     string ContentId,
@@ -431,6 +455,7 @@ public record ModerationRow(
     string CategoryIcon,
     string CategoryAccent,
     string ActionLabel,
+    string ActionLine,
     int ConfidencePercent,
     bool IsLocal,
     string BadgeAttributes,

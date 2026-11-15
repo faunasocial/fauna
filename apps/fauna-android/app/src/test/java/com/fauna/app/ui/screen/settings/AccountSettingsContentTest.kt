@@ -369,4 +369,14 @@ class AccountSettingsContentTest {
             .performScrollTo().performClick()
         assertEquals(42L, cancelledId)
     }
+
+    // ── Unsent changes (account-offline-mutation.md § The unsent-changes
+    // surface) — the section stands on the page after pending actions even
+    // before its first read; its states are UnsentChangesCardTest's.
+    @Test
+    fun unsentChangesSectionStandsOnThePageBeforeItsFirstRead() {
+        render()
+        composeTestRule.onNodeWithTag("unsent-changes-section").assertExists()
+            .assertTextEquals("Unsent changes")
+    }
 }

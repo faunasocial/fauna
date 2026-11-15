@@ -24,6 +24,13 @@
      *  ♥, so the state has to be visible; `aria-pressed` makes the button the
      *  toggle it now is rather than an action that only ever fires once. */
     viewer_liked?: boolean;
+    /** The heart's state word, the shared snapshot's `PostSummary.like_state`
+     *  (`on | off | queued | unsent` — folded from `viewer_liked` and the
+     *  outbox, `account-offline-mutation.md` § The unsent-changes surface,
+     *  point 2), published as `data-state` (tui's `state` attr). No app
+     *  decides it; activating an `unsent` heart retries inside the shared
+     *  manager's like door, so the gesture is unchanged. */
+    like_state?: string;
     /** The repost TOGGLE's lit state, off the shared snapshot's
      *  `viewer_repost_id` (feed.md § Interaction bar → Repost, ratified
      *  2026-08-10) — same idiom as `viewer_liked` above. */
@@ -38,13 +45,14 @@
     repost_count = 0,
     quote_count = 0,
     viewer_liked = false,
+    like_state = 'off',
     viewer_reposted = false,
     oninteract,
   }: Props = $props();
 </script>
 
 <div class="post-actions">
-  <button class="action-btn" class:liked={viewer_liked} aria-pressed={viewer_liked} data-testid={IDS.FEED_LIKE_BUTTON} title={t.feed.like_tooltip} aria-label={t.feed.like_tooltip} onclick={() => oninteract(post_id, 'like')}>
+  <button class="action-btn" class:liked={viewer_liked} aria-pressed={viewer_liked} data-state={like_state} data-testid={IDS.FEED_LIKE_BUTTON} title={t.feed.like_tooltip} aria-label={t.feed.like_tooltip} onclick={() => oninteract(post_id, 'like')}>
     <span class="icon" aria-hidden="true">♥</span>{#if like_count > 0}<span class="count">{like_count}</span>{/if}
   </button>
   <button class="action-btn" data-testid={IDS.FEED_REPLY_BUTTON} title={t.common.reply} aria-label={t.common.reply} onclick={() => oninteract(post_id, 'reply')}>

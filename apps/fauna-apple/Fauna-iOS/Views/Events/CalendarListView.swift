@@ -226,6 +226,47 @@ struct CalendarListView: View {
                     }
                 }
             }
+            // The view-mode toggle sits at the top of the page, never in the
+            // navigation bar: there, beside the two trailing buttons, it left the
+            // principal `page-heading` no width on a phone (convention 17's
+            // painted-text-has-area read 'Events' laid out 0x42 pt in the
+            // 393-pt bar), so the page showed no title.
+            .safeAreaInset(edge: .top) {
+                HStack(spacing: 2) {
+                    // Toggle order comes from the shared
+                    // `calendarViewModes()`, not a local `allCases`.
+                    ForEach(calendarViewModes(), id: \.self) { mode in
+                        Button(mode.displayLabel) {
+                            vm.viewMode = mode
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(viewMode == mode ? .accentColor : .secondary)
+                        .controlSize(.small)
+                        .accessibilityIdentifier(mode.accessibilityId)
+                        // The driver clicks the per-mode id (calendar-view-*),
+                        // not the segmented control's own id, to switch views.
+                        .automationActivate(mode.accessibilityId) { vm.viewMode = mode }
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(Ids.eventsViewToggle)
+                .automationSelect(
+                    Ids.eventsViewToggle,
+                    // The shared lowercase wire word, not a capitalized
+                    // Swift `rawValue` — apple was the only app publishing
+                    // the latter.
+                    value: { viewMode.wire },
+                    set: { wire in
+                        if let match = calendarViewModes().first(where: { $0.wire == wire }) {
+                            vm.viewMode = match
+                        }
+                    }
+                )
+                .padding(.horizontal)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.bar)
+            }
             .pageTitle(L.events.title)
             // State-driven detail push: `selectEvent` (from an event-card tap OR
             // the in-process driver OR a month-grid select) populates
@@ -251,38 +292,6 @@ struct CalendarListView: View {
                 vm.selectedEvent = nil
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    HStack(spacing: 2) {
-                        // Toggle order comes from the shared
-                        // `calendarViewModes()`, not a local `allCases`.
-                        ForEach(calendarViewModes(), id: \.self) { mode in
-                            Button(mode.displayLabel) {
-                                vm.viewMode = mode
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(viewMode == mode ? .accentColor : .secondary)
-                            .controlSize(.small)
-                            .accessibilityIdentifier(mode.accessibilityId)
-                            // The driver clicks the per-mode id (calendar-view-*),
-                            // not the segmented control's own id, to switch views.
-                            .automationActivate(mode.accessibilityId) { vm.viewMode = mode }
-                        }
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier(Ids.eventsViewToggle)
-                    .automationSelect(
-                        Ids.eventsViewToggle,
-                        // The shared lowercase wire word, not a capitalized
-                        // Swift `rawValue` — apple was the only app publishing
-                        // the latter.
-                        value: { viewMode.wire },
-                        set: { wire in
-                            if let match = calendarViewModes().first(where: { $0.wire == wire }) {
-                                vm.viewMode = match
-                            }
-                        }
-                    )
-                }
                 ToolbarItem(placement: .primaryAction) {
                     HStack(spacing: 12) {
                         Button { vm.showNewCalendar.toggle() } label: {

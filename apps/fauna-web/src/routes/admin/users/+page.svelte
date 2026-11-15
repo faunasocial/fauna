@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { identity } from '#lib/store';
+  import { identity, familyStatusTick } from '#lib/store';
   import {
     adminUsersList,
     adminUsersListAll,
@@ -10,6 +10,7 @@
     adminUsersCancelEviction,
     adminAdminsAdd,
     adminAdminsRemove,
+    familyTransfer,
     adminPendingActionsList,
     adminPendingActionApprove,
     adminPendingActionCancel,
@@ -37,6 +38,7 @@
   import {
     mailServingStatusLabel,
     adminUserRowControls,
+    adminUserGuardianLabel,
     adminPickerOption,
     registrationModeOptions,
     ageBandOptions,
@@ -188,6 +190,36 @@
 
   function secret(): string | null {
     return $identity?.secretHex ?? null;
+  }
+
+  // The viewing admin's raw actor id — what the shared take-over offer keys on.
+  let viewerActor = $derived(
+    ($identity?.actorId ? actorIdFromHex($identity.actorId) : null) ?? undefined,
+  );
+
+  // The admin take-over's armed confirm (family-safety.md § App surface →
+  // Admin take-over; tui's `take_over_armed`): the ward's actor hex, captured
+  // at arm time so a re-read that re-orders the rows cannot retarget it. One
+  // row armed at a time; `null` while un-armed.
+  let takeOverArmed = $state<string | null>(null);
+
+  // Confirm disarms BEFORE it dispatches `fauna.family.transfer { ward, self }`
+  // (a self-proposal the nest completes at once), then re-reads the page and
+  // the layout's family status, so `family-tab` reveals the ward.
+  async function confirmTakeOver() {
+    const ward = takeOverArmed;
+    takeOverArmed = null;
+    const s = secret();
+    const wardId = ward ? actorIdFromHex(ward) : null;
+    if (!s || !wardId || !viewerActor) return;
+    actionError = '';
+    try {
+      await familyTransfer(s, wardId, viewerActor);
+      familyStatusTick.update((n) => n + 1);
+      await refresh();
+    } catch (e) {
+      actionError = e instanceof Error ? e.message : String(e);
+    }
   }
 
   function defaultTier(): string {
@@ -621,7 +653,11 @@
   <section data-testid={IDS.ADMIN_USERS_REGISTRATION_SECTION} class="section">
     <h2>{t.admin.users_page.section_registration}</h2>
     {#if registrationMode === null}
-      <p class="muted">{t.admin.users_page.registration_mode_unknown({ mode: unknownMode ?? '—' })}</p>
+      <!-- The mode control's id stays on the read-only reading (tui's shape), so
+           every reader of the posture finds the raw mode the nest reported. -->
+      <p class="muted" data-testid={IDS.ADMIN_USERS_REGISTRATION_MODE_SELECT}>
+        {t.admin.users_page.registration_mode_unknown({ mode: unknownMode ?? '' })}
+      </p>
     {:else}
       <label class="field">
         <span>{t.admin.users_page.registration_mode_label}</span>
@@ -801,7 +837,9 @@
     {:else}
       <ul class="list">
         {#each users as user, i (actorHex(user.actor_id))}
-          {@const controls = adminUserRowControls(user)}
+          {@const controls = adminUserRowControls(user, viewerActor)}
+          {@const guardian = adminUserGuardianLabel(user)}
+          {@const armed = takeOverArmed === actorHex(user.actor_id)}
           <li class="row" data-testid={IDS.USER_ROW} data-index={i}>
             <code class="actor" data-testid={IDS.USER_ACTOR_ID} title={actorHex(user.actor_id)}
               >{shortId(actorHex(user.actor_id))}</code>
@@ -866,6 +904,41 @@
                 data-testid={IDS.ADMIN_USERS_REMOVE_ADMIN_BUTTON}
                 data-index={i}
                 onclick={() => removeAdmin(user)}>{t.admin.users_page.remove_admin}</button>
+            {/if}
+            <!-- The admin take-over of a supervised account (family-safety.md § App
+                 surface → Admin take-over): the guardian label and the offer are the
+                 SHARED decisions over wasm; the button arms an inline confirm on this
+                 row, one row armed at a time. -->
+            {#if guardian !== undefined}
+              <div class="take-over">
+                <span class="muted" data-testid={IDS.ADMIN_USERS_SUPERVISED_BY} data-index={i}
+                  >{t.admin.users_page.supervised_by({ guardian })}</span>
+                {#if controls.take_over && !armed}
+                  <button
+                    class="btn"
+                    data-testid={IDS.ADMIN_USERS_TAKE_OVER_BUTTON}
+                    data-index={i}
+                    onclick={() => (takeOverArmed = actorHex(user.actor_id))}
+                    >{t.admin.users_page.take_over}</button>
+                {/if}
+                {#if armed}
+                  <span data-testid={IDS.ADMIN_USERS_TAKE_OVER_CONFIRM_SUMMARY} data-index={i}
+                    >{t.admin.users_page.take_over_confirm_summary({
+                      ward: adminPickerOption(user),
+                      guardian,
+                    })}</span>
+                  <button
+                    class="btn danger"
+                    data-testid={IDS.ADMIN_USERS_TAKE_OVER_CONFIRM_BUTTON}
+                    data-index={i}
+                    onclick={confirmTakeOver}>{t.admin.users_page.take_over_confirm}</button>
+                  <button
+                    class="btn"
+                    data-testid={IDS.ADMIN_USERS_TAKE_OVER_CANCEL_BUTTON}
+                    data-index={i}
+                    onclick={() => (takeOverArmed = null)}>{t.admin.users_page.take_over_cancel}</button>
+                {/if}
+              </div>
             {/if}
           </li>
         {/each}
@@ -958,6 +1031,14 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.375rem 0;
+    flex-wrap: wrap;
+  }
+  /* The supervised row's take-over line wraps beneath the row's controls. */
+  .take-over {
+    flex-basis: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     flex-wrap: wrap;
   }
   .actor {

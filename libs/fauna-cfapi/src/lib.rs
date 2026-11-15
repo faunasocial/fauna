@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use windows::Win32::Foundation::{HANDLE, NTSTATUS};
 use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_BASIC_INFO,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO,
 };
 use windows::core::HSTRING;
 
@@ -42,6 +42,15 @@ const PROVIDER_GUID: windows::core::GUID = windows::core::GUID::from_values(
 /// that; the opt-*out* is `CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT`, which we
 /// deliberately do not pass. (Beware `CF_POPULATION_POLICY_ALWAYS_FULL`: it tells the
 /// platform the namespace is always local and FETCH_PLACEHOLDERS is then *never* sent.)
+///
+/// **The reparse point appears at registration instead when the registering process
+/// already holds a live connection to another root of this provider**: the new root is
+/// `REPARSE_POINT | OFFLINE | RECALL_ON_DATA_ACCESS` from `CfRegisterSyncRoot` on. A root
+/// merely registered, or connected and since disconnected, does not count, and no other
+/// process's roots change either shape (measured 2026-11-11, same test). So a process
+/// serving several roots sees the second shape on every root it registers after its first
+/// connect: nothing may read the reparse point's absence as "registered, not yet
+/// connected".
 pub fn register_sync_root(path: &str, display_name: &str) -> Result<()> {
     let path_h = HSTRING::from(path);
     let name_h = HSTRING::from(display_name);
@@ -313,6 +322,25 @@ pub fn list_shell_sync_roots() -> Result<Vec<ShellSyncRoot>> {
     }
 }
 
+/// Unregister one [`list_shell_sync_roots`] entry whole: the filter half first,
+/// then the shell (`SyncRootManager`) half — the full-teardown order, since
+/// [`unregister_sync_root_with_shell`] fails while the root is still
+/// filter-connected. Best-effort on the filter half: an already-gone or
+/// unknown-path registration is fine, the shell entry is the part Explorer
+/// keeps rendering. The one home of that order for every whole-entry sweep (the
+/// agent's ghost janitor and uninstall cleanup, the dev fleet's test-root sweep).
+pub fn unregister_shell_root(r: &ShellSyncRoot) -> Result<()> {
+    if let Some(p) = &r.path {
+        let _ = unregister_sync_root(p);
+    }
+    unregister_sync_root_with_shell(&r.id)
+}
+
+/// The dev fleet's sweep of the test sync roots a killed test run leaves
+/// registered — test scaffolding, compiled out of a shipped artifact.
+#[cfg(any(debug_assertions, feature = "test-helpers"))]
+pub mod test_roots;
+
 /// The Fauna shell registration covering `path`, if any — the query the product
 /// host's startup reconcile keys off (shell-registered already → just re-connect;
 /// absent → shell-register, over any leftover filter registration in place).
@@ -370,9 +398,41 @@ pub fn connect(
     fetch_placeholders_cb: CF_CALLBACK,
     dehydrate_completion_cb: CF_CALLBACK,
 ) -> Result<CF_CONNECTION_KEY> {
+    connect_with(
+        path,
+        fetch_cb,
+        cancel_cb,
+        fetch_placeholders_cb,
+        dehydrate_completion_cb,
+        None,
+    )
+}
+
+/// The two pre-operation notifications a **reader's** root registers
+/// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3d (4)):
+/// `NOTIFY_DELETE` and `NOTIFY_RENAME` fire BEFORE a placeholder under the root is deleted
+/// or renamed and hold the operation until the provider acknowledges it — with
+/// [`ack_delete`] / [`ack_rename`], whose status decides. A reader's root answers every one
+/// with access denied. A writer's root registers neither: the platform then never waits on
+/// this provider for a delete or a rename.
+#[derive(Clone, Copy)]
+pub struct ChangeNotifications {
+    pub delete: CF_CALLBACK,
+    pub rename: CF_CALLBACK,
+}
+
+/// [`connect`], registering [`ChangeNotifications`] beside the four callbacks when given.
+pub fn connect_with(
+    path: &str,
+    fetch_cb: CF_CALLBACK,
+    cancel_cb: CF_CALLBACK,
+    fetch_placeholders_cb: CF_CALLBACK,
+    dehydrate_completion_cb: CF_CALLBACK,
+    notifications: Option<ChangeNotifications>,
+) -> Result<CF_CONNECTION_KEY> {
     let path_h = HSTRING::from(path);
 
-    let callbacks = [
+    let mut callbacks = vec![
         CF_CALLBACK_REGISTRATION {
             Type: CF_CALLBACK_TYPE_FETCH_DATA,
             Callback: fetch_cb,
@@ -389,12 +449,22 @@ pub fn connect(
             Type: CF_CALLBACK_TYPE_NOTIFY_DEHYDRATE_COMPLETION,
             Callback: dehydrate_completion_cb,
         },
-        // Sentinel: CF_CALLBACK_TYPE_NONE terminates the array.
-        CF_CALLBACK_REGISTRATION {
-            Type: CF_CALLBACK_TYPE_NONE,
-            Callback: None,
-        },
     ];
+    if let Some(n) = notifications {
+        callbacks.push(CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_DELETE,
+            Callback: n.delete,
+        });
+        callbacks.push(CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_RENAME,
+            Callback: n.rename,
+        });
+    }
+    // Sentinel: CF_CALLBACK_TYPE_NONE terminates the array.
+    callbacks.push(CF_CALLBACK_REGISTRATION {
+        Type: CF_CALLBACK_TYPE_NONE,
+        Callback: None,
+    });
 
     let key = unsafe {
         CfConnectSyncRoot(
@@ -514,6 +584,68 @@ pub fn transfer_failed(
     Ok(())
 }
 
+/// Acknowledge a `NOTIFY_DELETE` ([`ChangeNotifications`]): `status` success lets the delete
+/// proceed, any failure status (a reader's root answers `STATUS_ACCESS_DENIED`) refuses it,
+/// and the deleting program sees the refusal.
+pub fn ack_delete(
+    connection_key: &CF_CONNECTION_KEY,
+    transfer_key: i64,
+    request_key: i64,
+    status: NTSTATUS,
+) -> Result<()> {
+    let op_info = CF_OPERATION_INFO {
+        StructSize: std::mem::size_of::<CF_OPERATION_INFO>() as u32,
+        Type: CF_OPERATION_TYPE_ACK_DELETE,
+        ConnectionKey: *connection_key,
+        TransferKey: transfer_key,
+        RequestKey: request_key,
+        ..Default::default()
+    };
+    let mut op_params = CF_OPERATION_PARAMETERS {
+        ParamSize: cf_size_of_op_param::<CF_OPERATION_PARAMETERS_0_7>(),
+        Anonymous: CF_OPERATION_PARAMETERS_0 {
+            AckDelete: CF_OPERATION_PARAMETERS_0_7 {
+                Flags: CF_OPERATION_ACK_DELETE_FLAG_NONE,
+                CompletionStatus: status,
+            },
+        },
+    };
+    unsafe {
+        CfExecute(&op_info, &mut op_params).context("CfExecute(AckDelete) failed")?;
+    }
+    Ok(())
+}
+
+/// Acknowledge a `NOTIFY_RENAME` ([`ChangeNotifications`]) — [`ack_delete`]'s twin.
+pub fn ack_rename(
+    connection_key: &CF_CONNECTION_KEY,
+    transfer_key: i64,
+    request_key: i64,
+    status: NTSTATUS,
+) -> Result<()> {
+    let op_info = CF_OPERATION_INFO {
+        StructSize: std::mem::size_of::<CF_OPERATION_INFO>() as u32,
+        Type: CF_OPERATION_TYPE_ACK_RENAME,
+        ConnectionKey: *connection_key,
+        TransferKey: transfer_key,
+        RequestKey: request_key,
+        ..Default::default()
+    };
+    let mut op_params = CF_OPERATION_PARAMETERS {
+        ParamSize: cf_size_of_op_param::<CF_OPERATION_PARAMETERS_0_6>(),
+        Anonymous: CF_OPERATION_PARAMETERS_0 {
+            AckRename: CF_OPERATION_PARAMETERS_0_6 {
+                Flags: CF_OPERATION_ACK_RENAME_FLAG_NONE,
+                CompletionStatus: status,
+            },
+        },
+    };
+    unsafe {
+        CfExecute(&op_info, &mut op_params).context("CfExecute(AckRename) failed")?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Directory population (CfExecute TRANSFER_PLACEHOLDERS)
 // ---------------------------------------------------------------------------
@@ -543,9 +675,29 @@ pub struct PlaceholderInfo {
     pub size: u64,
     pub mtime: i64,
     pub is_dir: bool,
+    /// The entry is created carrying `FILE_ATTRIBUTE_READONLY` — every placeholder and
+    /// directory of a reader's root does (`on-demand-files-shared-sets.md` § Shared sets on
+    /// a capability host, decision 3d (4); [`deny_user_writes`]).
+    pub read_only: bool,
 }
 
 impl PlaceholderInfo {
+    /// The `FileAttributes` this entry is created with: a directory or a normal file,
+    /// read-only on a reader's root.
+    fn attributes(&self) -> u32 {
+        let base = if self.is_dir {
+            FILE_ATTRIBUTE_DIRECTORY.0
+        } else {
+            FILE_ATTRIBUTE_NORMAL.0
+        };
+        if self.read_only {
+            // NORMAL is valid only alone; a read-only file is READONLY by itself.
+            (base & !FILE_ATTRIBUTE_NORMAL.0) | FILE_ATTRIBUTE_READONLY.0
+        } else {
+            base
+        }
+    }
+
     /// The final path component — what cfapi wants as `RelativeFileName` (the entry's
     /// name relative to the directory being populated). `docs/report.pdf` → `report.pdf`.
     fn leaf(&self) -> &str {
@@ -665,11 +817,8 @@ pub fn transfer_placeholders(
         .zip(&names)
         .map(|(e, name_h)| {
             let ft = unix_to_filetime(e.mtime);
-            let (attrs, size) = if e.is_dir {
-                (FILE_ATTRIBUTE_DIRECTORY.0, 0i64)
-            } else {
-                (FILE_ATTRIBUTE_NORMAL.0, e.size as i64)
-            };
+            let attrs = e.attributes();
+            let size = if e.is_dir { 0i64 } else { e.size as i64 };
             let identity = e.identity();
             CF_PLACEHOLDER_CREATE_INFO {
                 RelativeFileName: windows::core::PCWSTR(name_h.as_ptr()),
@@ -780,10 +929,11 @@ pub fn create_placeholder(parent: &Path, entry: &PlaceholderInfo) -> Result<()> 
     }
 
     let ft = unix_to_filetime(entry.mtime);
-    let (attrs, size) = if entry.is_dir {
-        (FILE_ATTRIBUTE_DIRECTORY.0, 0i64)
+    let attrs = entry.attributes();
+    let size = if entry.is_dir {
+        0i64
     } else {
-        (FILE_ATTRIBUTE_NORMAL.0, entry.size as i64)
+        entry.size as i64
     };
 
     let mut placeholder = CF_PLACEHOLDER_CREATE_INFO {
@@ -1029,22 +1179,9 @@ pub fn update_placeholder_raw(
     flags: CF_UPDATE_FLAGS,
     dehydrate_range: Option<&[CF_FILE_RANGE]>,
 ) -> Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Storage::FileSystem::{FileBasicInfo, GetFileInformationByHandleEx};
-    /// `FILE_SHARE_READ` alone: no other handle may write, delete or rename while ours is open.
-    const FILE_SHARE_READ: u32 = 0x0000_0001;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "open {} excluding writers (held open for writing elsewhere?)",
-                path.display()
-            )
-        })?;
+    let file = open_excluding_writers(path, 0)?;
     let handle = HANDLE(file.as_raw_handle());
     let mut current = FILE_BASIC_INFO::default();
     unsafe {
@@ -1206,10 +1343,7 @@ pub fn provider_push_data(
 /// file, where no later write could be told apart. Such a volume keeps its files honestly
 /// pending instead.
 pub fn set_in_sync(path: &Path, usn: i64) -> Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
-    /// `FILE_SHARE_READ` alone: no other handle may write, delete or rename while ours is open.
-    const FILE_SHARE_READ: u32 = 0x0000_0001;
     /// Required to open a directory handle at all; harmless on a regular file.
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     anyhow::ensure!(
@@ -1218,20 +1352,8 @@ pub fn set_in_sync(path: &Path, usn: i64) -> Result<()> {
          journal, so a newer write could not be told apart)",
         path.display()
     );
-    // Write access because `CfSetInSyncState` requires WRITE_DATA on its handle; a plain
-    // Win32 handle, because the oplock-protected one cannot carry this share mode.
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(FILE_SHARE_READ)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "open {} excluding writers (held open for writing elsewhere?)",
-                path.display()
-            )
-        })?;
+    // A plain Win32 handle, because the oplock-protected one cannot carry this share mode.
+    let file = open_excluding_writers(path, FILE_FLAG_BACKUP_SEMANTICS)?;
     let handle = HANDLE(file.as_raw_handle());
     let now =
         usn_of_handle(handle).with_context(|| format!("re-read the USN of {}", path.display()))?;
@@ -1480,6 +1602,441 @@ pub fn pin_state(path: &Path) -> Result<PinState> {
 }
 
 // ---------------------------------------------------------------------------
+// A reader's root, refused by the OS
+// ---------------------------------------------------------------------------
+
+/// The rights a reader's root denies the user (`on-demand-files-shared-sets.md` § Shared
+/// sets on a capability host, decision 3d (4)): `FILE_WRITE_DATA` (= `FILE_ADD_FILE` on a
+/// directory), `FILE_APPEND_DATA` (= `FILE_ADD_SUBDIRECTORY`), `FILE_DELETE_CHILD` and
+/// `DELETE` — creating, writing, deleting and renaming (a rename is a delete of the old
+/// name). Attribute writes stay allowed: the platform's pin verbs (*Always keep on this
+/// device*, *Free up space*) are attribute writes, and a reader keeps both.
+pub const READER_DENIED_RIGHTS: u32 = 0x0002 | 0x0004 | 0x0040 | 0x0001_0000;
+
+/// The current user's SID, owned by a `LocalAlloc` the guard frees.
+struct UserSid(windows::Win32::Security::PSID);
+
+impl UserSid {
+    fn current() -> Result<Self> {
+        use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
+        let s = HSTRING::from(current_user_sid_string()?);
+        let mut sid = windows::Win32::Security::PSID::default();
+        unsafe { ConvertStringSidToSidW(&s, &mut sid) }.context("ConvertStringSidToSidW")?;
+        Ok(Self(sid))
+    }
+}
+
+impl Drop for UserSid {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(self.0.0),
+            ));
+        }
+    }
+}
+
+/// `path`'s DACL and the security descriptor that owns it (freed by the guard).
+struct Dacl {
+    sd: windows::Win32::Security::PSECURITY_DESCRIPTOR,
+    acl: *mut windows::Win32::Security::ACL,
+}
+
+impl Dacl {
+    fn of(path: &Path) -> Result<Self> {
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::DACL_SECURITY_INFORMATION;
+        let name = HSTRING::from(path.as_os_str());
+        let mut sd = windows::Win32::Security::PSECURITY_DESCRIPTOR::default();
+        let mut acl: *mut windows::Win32::Security::ACL = std::ptr::null_mut();
+        unsafe {
+            GetNamedSecurityInfoW(
+                &name,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut acl),
+                None,
+                &mut sd,
+            )
+        }
+        .ok()
+        .with_context(|| format!("GetNamedSecurityInfoW({})", path.display()))?;
+        Ok(Self { sd, acl })
+    }
+
+    /// The DACL's explicit (non-inherited) entries.
+    fn explicit_entries(&self) -> Result<ExplicitEntries> {
+        use windows::Win32::Security::Authorization::GetExplicitEntriesFromAclW;
+        let mut entries = ExplicitEntries {
+            list: std::ptr::null_mut(),
+            count: 0,
+        };
+        if self.acl.is_null() {
+            return Ok(entries);
+        }
+        unsafe { GetExplicitEntriesFromAclW(self.acl, &mut entries.count, &mut entries.list) }
+            .ok()
+            .context("GetExplicitEntriesFromAclW")?;
+        Ok(entries)
+    }
+}
+
+/// A `GetExplicitEntriesFromAclW` array, freed by the guard. Each entry's trustee SID
+/// points into the array's own allocation, so a copied entry is valid only while the
+/// guard lives.
+struct ExplicitEntries {
+    list: *mut windows::Win32::Security::Authorization::EXPLICIT_ACCESS_W,
+    count: u32,
+}
+
+impl ExplicitEntries {
+    fn as_slice(&self) -> &[windows::Win32::Security::Authorization::EXPLICIT_ACCESS_W] {
+        if self.list.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.list, self.count as usize) }
+        }
+    }
+}
+
+impl Drop for ExplicitEntries {
+    fn drop(&mut self) {
+        if !self.list.is_null() {
+            unsafe {
+                let _ = windows::Win32::Foundation::LocalFree(Some(
+                    windows::Win32::Foundation::HLOCAL(self.list as *mut core::ffi::c_void),
+                ));
+            }
+        }
+    }
+}
+
+impl Drop for Dacl {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(self.sd.0),
+            ));
+        }
+    }
+}
+
+/// Is `entry` the reader's deny entry for `sid` — a `DENY_ACCESS` of every
+/// [`READER_DENIED_RIGHTS`] right to that SID?
+fn is_reader_deny(
+    entry: &windows::Win32::Security::Authorization::EXPLICIT_ACCESS_W,
+    sid: &UserSid,
+) -> bool {
+    use windows::Win32::Security::Authorization::{DENY_ACCESS, TRUSTEE_IS_SID};
+    entry.grfAccessMode == DENY_ACCESS
+        && entry.Trustee.TrusteeForm == TRUSTEE_IS_SID
+        && entry.grfAccessPermissions & READER_DENIED_RIGHTS == READER_DENIED_RIGHTS
+        && unsafe {
+            windows::Win32::Security::EqualSid(
+                windows::Win32::Security::PSID(entry.Trustee.ptstrName.0 as *mut _),
+                sid.0,
+            )
+        }
+        .is_ok()
+}
+
+/// Write `entries` as `path`'s explicit DACL entries. Inheritance stays on: the inherited
+/// entries are re-derived from the parent by the call, and every inheritable entry here
+/// reaches the existing subtree.
+fn set_explicit_entries(
+    path: &Path,
+    entries: &[windows::Win32::Security::Authorization::EXPLICIT_ACCESS_W],
+    old: Option<*const windows::Win32::Security::ACL>,
+) -> Result<()> {
+    use windows::Win32::Security::Authorization::{
+        SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
+    };
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, UNPROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    let mut acl: *mut windows::Win32::Security::ACL = std::ptr::null_mut();
+    unsafe { SetEntriesInAclW(Some(entries), old, &mut acl) }
+        .ok()
+        .context("SetEntriesInAclW")?;
+    // No entries at all comes back as a NULL ACL, and a NULL DACL is NOT "no explicit
+    // entries": set, it reads as a protected everyone-full-access DACL on the object and
+    // leaves every child an EMPTY one — nobody may open anything (measured on a live sync
+    // root: the root `D:PAINO_ACCESS_CONTROL`, each child `D:AI`; `tests/live_reader_root.rs`
+    // asserts the lift leaves a child writable). An empty explicit
+    // list is an initialized, empty ACL, to which the call adds the inherited entries.
+    let mut empty = [0u64; 2]; // an ACL header, 8-byte aligned
+    let dacl = if acl.is_null() {
+        let empty_acl = empty.as_mut_ptr() as *mut windows::Win32::Security::ACL;
+        unsafe {
+            windows::Win32::Security::InitializeAcl(
+                empty_acl,
+                std::mem::size_of::<windows::Win32::Security::ACL>() as u32,
+                windows::Win32::Security::ACL_REVISION,
+            )
+        }
+        .context("InitializeAcl")?;
+        empty_acl
+    } else {
+        acl
+    };
+    let name = HSTRING::from(path.as_os_str());
+    let set = unsafe {
+        SetNamedSecurityInfoW(
+            &name,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(dacl),
+            None,
+        )
+    };
+    if !acl.is_null() {
+        unsafe {
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(acl as *mut core::ffi::c_void),
+            ));
+        }
+    }
+    set.ok()
+        .with_context(|| format!("SetNamedSecurityInfoW({})", path.display()))
+}
+
+/// Make `root` a **reader's** root on the access list: an inheritable entry denying the
+/// current user [`READER_DENIED_RIGHTS`] on the root and everything under it, existing and
+/// to come. Idempotent. The user owns the root and so may still rewrite its list — the
+/// change the OS then lets through is never uploaded (the engine is built read-only).
+pub fn deny_user_writes(root: &Path) -> Result<()> {
+    use windows::Win32::Security::Authorization::{
+        DENY_ACCESS, EXPLICIT_ACCESS_W, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows::Win32::Security::SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    let sid = UserSid::current()?;
+    let dacl = Dacl::of(root)?;
+    if dacl
+        .explicit_entries()?
+        .as_slice()
+        .iter()
+        .any(|e| is_reader_deny(e, &sid))
+    {
+        return Ok(());
+    }
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: READER_DENIED_RIGHTS,
+        grfAccessMode: DENY_ACCESS,
+        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: windows::core::PWSTR(sid.0.0 as *mut u16),
+            ..Default::default()
+        },
+    };
+    let old = (!dacl.acl.is_null()).then_some(dacl.acl as *const _);
+    set_explicit_entries(root, &[entry], old)?;
+    tracing::info!(root = %root.display(), "reader's root: the user's writes denied");
+    Ok(())
+}
+
+/// Lift [`deny_user_writes`]: remove the reader's deny entry from `root`, keeping every
+/// other explicit entry; the subtree's inherited copies go with it. Idempotent.
+pub fn allow_user_writes(root: &Path) -> Result<()> {
+    let sid = UserSid::current()?;
+    let dacl = Dacl::of(root)?;
+    let entries = dacl.explicit_entries()?;
+    if !entries.as_slice().iter().any(|e| is_reader_deny(e, &sid)) {
+        return Ok(());
+    }
+    // The kept entries' trustees point into `entries`, alive until the write is done.
+    let kept: Vec<_> = entries
+        .as_slice()
+        .iter()
+        .filter(|e| !is_reader_deny(e, &sid))
+        .copied()
+        .collect();
+    set_explicit_entries(root, &kept, None)?;
+    tracing::info!(root = %root.display(), "reader's root lifted: the user's writes allowed");
+    Ok(())
+}
+
+/// Grant the current user `rights` on `path` alone — an explicit, non-inherited allow
+/// entry, which the access check reads before the reader's inherited deny. The agent runs
+/// as the user, so its own act on one object of a reader's root (a remote delete, a
+/// replaced copy) is refused like the user's until it grants itself that object first;
+/// the user's owner rights (`WRITE_DAC`) are what let it. Undone by [`revoke_own`].
+pub fn grant_own(path: &Path, rights: u32) -> Result<()> {
+    use windows::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows::Win32::Security::NO_INHERITANCE;
+    let sid = UserSid::current()?;
+    let dacl = Dacl::of(path)?;
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: rights,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: windows::core::PWSTR(sid.0.0 as *mut u16),
+            ..Default::default()
+        },
+    };
+    let old = (!dacl.acl.is_null()).then_some(dacl.acl as *const _);
+    set_explicit_entries(path, &[entry], old)
+}
+
+/// Remove every explicit allow entry for the current user from `path` — what
+/// [`grant_own`] added. Idempotent.
+pub fn revoke_own(path: &Path) -> Result<()> {
+    use windows::Win32::Security::Authorization::{GRANT_ACCESS, SET_ACCESS, TRUSTEE_IS_SID};
+    let sid = UserSid::current()?;
+    let dacl = Dacl::of(path)?;
+    let entries = dacl.explicit_entries()?;
+    let is_own_allow = |e: &windows::Win32::Security::Authorization::EXPLICIT_ACCESS_W| {
+        (e.grfAccessMode == GRANT_ACCESS || e.grfAccessMode == SET_ACCESS)
+            && e.Trustee.TrusteeForm == TRUSTEE_IS_SID
+            && unsafe {
+                windows::Win32::Security::EqualSid(
+                    windows::Win32::Security::PSID(e.Trustee.ptstrName.0 as *mut _),
+                    sid.0,
+                )
+            }
+            .is_ok()
+    };
+    if !entries.as_slice().iter().any(is_own_allow) {
+        return Ok(());
+    }
+    let kept: Vec<_> = entries
+        .as_slice()
+        .iter()
+        .filter(|e| !is_own_allow(e))
+        .copied()
+        .collect();
+    set_explicit_entries(path, &kept, None)
+}
+
+/// Does `root` carry the reader's deny entry ([`deny_user_writes`])?
+pub fn denies_user_writes(root: &Path) -> Result<bool> {
+    let sid = UserSid::current()?;
+    let dacl = Dacl::of(root)?;
+    let present = dacl
+        .explicit_entries()?
+        .as_slice()
+        .iter()
+        .any(|e| is_reader_deny(e, &sid));
+    Ok(present)
+}
+
+/// Set or clear `FILE_ATTRIBUTE_READONLY` on `path`, every other settable attribute (the
+/// pin bits among them) kept. An attribute write, never a data open: a cloud-only
+/// placeholder stays cloud-only.
+pub fn set_read_only(path: &Path, read_only: bool) -> Result<()> {
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAGS_AND_ATTRIBUTES, GetFileAttributesW, INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
+    };
+    /// The attributes `SetFileAttributesW` takes; the rest (directory, reparse point,
+    /// recall-on-*) are the file system's and are refused if passed.
+    const SETTABLE: u32 =
+        0x1 | 0x2 | 0x4 | 0x20 | 0x80 | 0x100 | 0x1000 | 0x2000 | 0x0008_0000 | 0x0010_0000;
+    let name = HSTRING::from(path.as_os_str());
+    let attrs = unsafe { GetFileAttributesW(&name) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        return Err(windows::core::Error::from_win32())
+            .with_context(|| format!("GetFileAttributesW({})", path.display()));
+    }
+    let has = attrs & FILE_ATTRIBUTE_READONLY.0 != 0;
+    if has == read_only {
+        return Ok(());
+    }
+    let mut next = attrs & SETTABLE & !FILE_ATTRIBUTE_NORMAL.0;
+    if read_only {
+        next |= FILE_ATTRIBUTE_READONLY.0;
+    } else {
+        next &= !FILE_ATTRIBUTE_READONLY.0;
+    }
+    if next == 0 {
+        next = FILE_ATTRIBUTE_NORMAL.0;
+    }
+    unsafe { SetFileAttributesW(&name, FILE_FLAGS_AND_ATTRIBUTES(next)) }
+        .with_context(|| format!("SetFileAttributesW({})", path.display()))
+}
+
+/// [`set_read_only`] on a placeholder of this provider's own root, its in-sync state kept.
+/// The read-only attribute is one `CF_INSYNC_POLICY_TRACK_ALL` tracks, so a plain attribute
+/// write clears the in-sync bit even when the provider makes it (measured,
+/// `tests/live_reader_root.rs`), and a not-in-sync placeholder refuses every later update
+/// and dehydrate. So a
+/// placeholder in sync is flipped by ONE `CfUpdatePlaceholder` — its attributes alone with
+/// the bit flipped, `VERIFY_IN_SYNC | MARK_IN_SYNC`, nothing dehydrated — which refuses a
+/// file a write took out of sync and leaves the flipped one in sync (a re-assert after a
+/// plain write races the filter's own follow-up write: measured, the USN of a cloud-only
+/// placeholder moved again after the flip), through a handle that reads no data, so a
+/// cloud-only file stays cloud-only ([`open_metadata_only`]). A file not in sync, or not
+/// a placeholder, takes the plain write.
+pub fn set_read_only_keeping_sync(path: &Path, read_only: bool) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Storage::FileSystem::{FileBasicInfo, GetFileInformationByHandleEx};
+    /// Required to open a directory handle at all; harmless on a regular file.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let in_sync =
+        placeholder_state(path).is_ok_and(|state| state & CF_PLACEHOLDER_STATE_IN_SYNC.0 != 0);
+    if !in_sync {
+        return set_read_only(path, read_only);
+    }
+    let file = open_metadata_only(path, FILE_FLAG_BACKUP_SEMANTICS)?;
+    let handle = HANDLE(file.as_raw_handle());
+    let mut basic = FILE_BASIC_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            &mut basic as *mut FILE_BASIC_INFO as *mut core::ffi::c_void,
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }
+    .with_context(|| format!("read the basic info of {}", path.display()))?;
+    if (basic.FileAttributes & FILE_ATTRIBUTE_READONLY.0 != 0) == read_only {
+        return Ok(());
+    }
+    let attrs = if read_only {
+        (basic.FileAttributes & !FILE_ATTRIBUTE_NORMAL.0) | FILE_ATTRIBUTE_READONLY.0
+    } else {
+        basic.FileAttributes & !FILE_ATTRIBUTE_READONLY.0
+    };
+    // The attributes ALONE: without PASSTHROUGH_FS_METADATA the platform skips every zero
+    // field, so the times and the size are left as they are.
+    let metadata = CF_FS_METADATA {
+        BasicInfo: FILE_BASIC_INFO {
+            FileAttributes: attrs,
+            ..FILE_BASIC_INFO::default()
+        },
+        FileSize: 0,
+    };
+    let result = unsafe {
+        CfUpdatePlaceholder(
+            handle,
+            Some(&metadata),
+            None, // the identity stays
+            0,
+            None, // nothing dehydrated
+            CF_UPDATE_FLAG_VERIFY_IN_SYNC | CF_UPDATE_FLAG_MARK_IN_SYNC,
+            None,
+            None,
+        )
+    };
+    drop(file);
+    result.with_context(|| {
+        format!(
+            "CfUpdatePlaceholder(read-only {read_only}, verify + mark in sync) on {}",
+            path.display()
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1493,6 +2050,74 @@ pub fn open_file_handle(path: &Path) -> Result<HANDLE> {
             .context("CfOpenFileWithOplock failed")?
     };
     Ok(handle)
+}
+
+/// `FILE_SHARE_READ` alone: no other handle may write, delete or rename while ours is open.
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const FILE_READ_DATA: u32 = 0x0001;
+const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+const WRITE_DAC: u32 = 0x0004_0000;
+const SYNCHRONIZE: u32 = 0x0010_0000;
+
+/// Open `path` for a placeholder update ([`update_placeholder_raw`], [`set_in_sync`]) with a
+/// share mode that shuts out every other writer, deleter and renamer while the handle is open
+/// (`FILE_SHARE_READ` alone) — a plain Win32 handle, since the oplock-protected one cannot
+/// carry it. `flags` are extra open flags (`FILE_FLAG_BACKUP_SEMANTICS` for a directory).
+///
+/// **Read + write, as every root always opened — or, refused that, read data + `WRITE_DAC`.**
+/// The write open is what refuses an update while another process holds the file open for
+/// writing OR shutting writers out (the contract [`supersede_placeholder`] and
+/// [`set_in_sync`] state). A **reader's** root refuses it outright: its access list denies
+/// the user — whom this provider runs as — write data, and its files carry the read-only
+/// attribute, which refuses any open for write. The platform's placeholder updates take the
+/// owner's `WRITE_DAC` in place of write data on their handle, and `WRITE_DAC` is never
+/// denied to the owner, so an access refusal falls back to read data + `WRITE_DAC` (measured,
+/// `tests/live_reader_root.rs`, Windows 11 ARM64: `CfUpdatePlaceholder` with supersede's
+/// flags through that handle succeeds on a read-only in-sync placeholder under the list). The
+/// read data is load-bearing: an open asking no data access skips the share-mode check
+/// altogether, and a writer holding the file would no longer refuse the update. A sharing
+/// violation is never retried — a held file refuses, and the caller retries later.
+fn open_excluding_writers(path: &Path, flags: u32) -> Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let context = || {
+        format!(
+            "open {} excluding writers (held open for writing elsewhere?)",
+            path.display()
+        )
+    };
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(flags)
+        .open(path)
+    {
+        Ok(file) => Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_DATA | FILE_READ_ATTRIBUTES | WRITE_DAC | SYNCHRONIZE)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(flags)
+            .open(path)
+            .with_context(context),
+        Err(e) => Err(e).with_context(context),
+    }
+}
+
+/// Open `path` for an update of its METADATA ALONE ([`set_read_only_keeping_sync`]): the
+/// owner's `WRITE_DAC` with no data access at all. This process opening a cloud-only
+/// placeholder for read data asks for its bytes — a `FETCH_DATA` of the whole file, measured
+/// by `tests/live_reader_root.rs` — so a flip through [`open_excluding_writers`] would hydrate
+/// every cloud-only file of a demoted root. Asking no data access, it also skips the share
+/// check, so it shuts out no writer: its callers flip under a reader's access list, where no
+/// one may write, and the update's `VERIFY_IN_SYNC` refuses a file a write took out of sync.
+fn open_metadata_only(path: &Path, flags: u32) -> Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | WRITE_DAC | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(flags)
+        .open(path)
+        .with_context(|| format!("open {} for a metadata update", path.display()))
 }
 
 /// Close a file handle. Uses `CfCloseHandle` which properly releases the oplock.
@@ -1622,6 +2247,7 @@ mod tests {
             size: 12,
             mtime: 1_700_000_000,
             is_dir: false,
+            read_only: false,
         };
 
         // cfapi wants ONLY the leaf as RelativeFileName ("It should consist only of the file
@@ -1664,6 +2290,33 @@ mod tests {
         );
         // TransferData's variant is sized the same; pin it too, since hydration rides it.
         assert_eq!(cf_size_of_op_param::<CF_OPERATION_PARAMETERS_0_0>(), member);
+    }
+
+    /// A reader's root creates every placeholder and directory read-only, and `NORMAL`
+    /// never rides beside another attribute (the platform takes it only alone).
+    #[test]
+    fn a_readers_placeholders_are_created_read_only() {
+        let file = |is_dir, read_only| PlaceholderInfo {
+            rel_path: "a".to_string(),
+            size: 1,
+            mtime: 0,
+            is_dir,
+            read_only,
+        };
+        assert_eq!(file(false, false).attributes(), FILE_ATTRIBUTE_NORMAL.0);
+        assert_eq!(file(true, false).attributes(), FILE_ATTRIBUTE_DIRECTORY.0);
+        assert_eq!(file(false, true).attributes(), FILE_ATTRIBUTE_READONLY.0);
+        assert_eq!(
+            file(true, true).attributes(),
+            FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0
+        );
+    }
+
+    /// Only the reader's own deny entry is the one [`allow_user_writes`] removes: the
+    /// mask must cover all four rights, and nothing else.
+    #[test]
+    fn the_readers_denied_rights_are_create_write_delete_and_rename() {
+        assert_eq!(READER_DENIED_RIGHTS, 0x0001_0046);
     }
 
     #[test]

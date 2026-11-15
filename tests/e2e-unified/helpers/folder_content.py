@@ -218,6 +218,28 @@ def on_demand_root_stands(location: Path) -> bool:
     return on_demand_mount_stands(location)
 
 
+def on_demand_root_served(location: Path) -> bool:
+    """Whether the agent's on-demand root over ``location`` stands AND a provider
+    is serving it right now — the state in which another process may create a file
+    inside it. On linux a FUSE mount in the mount table is the served root. On
+    windows the registration :func:`on_demand_root_stands` reads comes first
+    (``cfapi_host.rs`` registers, then connects), and a write into a registered root
+    no provider is connected to is refused by the filter: the population request
+    it raises reaches nobody, and Python reads the refusal as ``OSError: [Errno
+    22] Invalid argument``. So windows also asks the filter for the root's
+    provider (``helpers.windows_cfapi.sync_root_provider``) and wants a live
+    connection, never DISCONNECTED or TERMINATED.
+
+    Wait on this before writing into a just-bound root. A wait for the root to
+    come DOWN keeps :func:`on_demand_root_stands`: a disconnected root that is
+    still registered has not come down."""
+    if sys.platform == "win32":
+        from helpers.windows_cfapi import provider_connected
+
+        return on_demand_root_stands(location) and provider_connected(location)
+    return on_demand_mount_stands(location)
+
+
 def bind_location_under_set(app, set_name: str, location: Path, *, seat: str) -> int:
     """Bind ``location`` under ``set_name``'s expander and wait for the row.
 

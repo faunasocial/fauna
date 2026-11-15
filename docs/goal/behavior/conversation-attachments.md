@@ -65,7 +65,7 @@ grow every other member's process by 640 MiB per message until the OS killed it,
 traffic did the same more slowly. The bytes rest elsewhere — on the room's home nest
 (`conversation-rooms.md` § The home nest → *Attachment bytes*, pinned past the blob GC by the
 plaintext refs, § Encryption at rest → *Attachment reachability*) or in the INBOX segment record
-(SMTP) — so the device holds a *cache*, and a cache has a budget. Three rules, one shared-Rust home
+(SMTP) — so the device holds a *cache*, and a cache has a budget. Its rules have one shared-Rust home
 (`libs/fauna-conversations/src/store/attachments.rs`, the manager's `attachments` field):
 
 - **The store holds at most `ATTACHMENT_STORE_BUDGET_BYTES` (128 MiB), the same on all 7 apps,
@@ -86,6 +86,19 @@ plaintext refs, § Encryption at rest → *Attachment reachability*) or in the I
   store lock, and staging inserted before registering, so a receive-path insert on a store at budget
   could evict the bytes the user had just picked. What `send` does when a draft's bytes are missing
   anyway — a restored draft — is § Persistence's.
+- **A queued send's staged attachment is pinned until its intent leaves the outbox (ratified and
+  BUILT 2026-11-11).** An offline MLS send queues an intent naming its attachments by hash and
+  clears the draft that pinned them ([`devices.md`](devices.md) § Offline compose); the drain
+  re-resolves the bytes by hash, so the manager pins every hash a queued intent it holds still
+  names — taken as the outbox accepts the intent, before the draft clears, so no insert sees the
+  bytes unpinned — and lifts the pin when the intent is sent or discarded (a discard made through
+  the app's generic unsent-changes surface is reconciled at the manager's next read of the outbox).
+  A parked intent stays pinned: retry may still send it. Same bound as the draft pin — the user's
+  own picks. **The pin is RAM, like the store:** after a relaunch the bytes are gone, and the drain
+  parks the intent `fauna.outbox.mls.attachment_missing` rather than send without the file — the
+  restored draft's floor (§ Persistence), for the same reason a disk-backed store was rejected
+  below. Pinned by
+  `fauna_mls_backend_tests.rs::a_queued_intents_staged_attachment_outlives_eviction_until_it_drains`.
 - **An evicted attachment is fetched again where it can be.** On the FaunaMls rail the receive loop
   remembers, per handle, where the bytes rest and which key opens them — channel, sealed content
   address, declared size, and the MLS epoch or the room generation (`AttachmentCoordinates`,

@@ -72,6 +72,7 @@ from tests.platform.macos.test_file_provider_read_path import (
 pytestmark = [
     pytest.mark.skipif(sys.platform != "darwin", reason="the iOS simulator runs on macOS only"),
     pytest.mark.tier_3,
+    pytest.mark.ios,
 ]
 
 _APPLE_DIR = Path(__file__).resolve().parents[5] / "apps" / "fauna-apple"

@@ -432,16 +432,13 @@ fn map_summary(s: fauna_client_folders::folders::FolderSummary) -> FfiFolder {
     }
 }
 
-/// Every set the account holds, as the shared presence plan takes it — the
-/// body of both presence doors ([`FfiFoldersClient::presence_sets`] in the
-/// app process, `capability_host_presence_sets` beside the capability hosts),
-/// which differ only in whose custody they read. The member-visible folder
-/// list, this device's place on each OWN folder (never asked for a member
-/// row: the roster read resolves a folder by name among the caller's own),
-/// the `groups` the door's own source lists — the store, read strictly, in
+/// Every set the account holds, as the shared presence plan takes it — both
+/// presence doors' one body, lifted into shared Rust
+/// ([`fauna_folders_machine::on_demand_presence::presence_sets_over`], which
+/// the desktop sync agent reads too). The doors differ only in whose custody
+/// they read and where their `groups` come from: the store, read strictly, in
 /// the app process; the app's mirror beside the capability hosts
-/// (`group-set.md` § Build design — the group set, decisions 11 (a) and 12)
-/// — then [`fauna_folders_machine::on_demand_presence::held_sets`]'s rules.
+/// (`group-set.md` § Build design — the group set, decisions 11 (a) and 12).
 /// Any failed read is an error, never an empty answer.
 #[cfg(feature = "folders")]
 pub(crate) async fn presence_sets_over<R>(
@@ -453,32 +450,16 @@ pub(crate) async fn presence_sets_over<R>(
 where
     R: fauna_client_folders::FolderKeyReader + ?Sized,
 {
-    let rows = client
-        .list_owned_and_shared()
-        .await
-        .map_err(stringify)?
-        .folders;
-    let mut own_place_accepts = std::collections::BTreeMap::new();
-    for row in rows.iter().filter(|r| r.role.as_deref() != Some("member")) {
-        let roster = client
-            .members_list(row.name.clone())
-            .await
-            .map_err(stringify)?;
-        own_place_accepts.insert(
-            row.id,
-            fauna_protocol::folders::SeatRead::find(&roster.members, device_id_hex)
-                .delivers_presence(),
-        );
-    }
-    let custody = custody.load().await.map_err(|e| FfiError::General {
-        msg: format!("folder-key custody unreadable: {e:#}"),
-    })?;
-    Ok(fauna_folders_machine::on_demand_presence::held_sets(
-        &rows,
-        &custody,
-        &own_place_accepts,
+    fauna_folders_machine::on_demand_presence::presence_sets_over(
+        client,
+        device_id_hex,
+        custody,
         groups,
-    ))
+    )
+    .await
+    .map_err(|e| FfiError::General {
+        msg: format!("{e:#}"),
+    })
 }
 
 /// The app-process door's group source: the held group sets off the mounted

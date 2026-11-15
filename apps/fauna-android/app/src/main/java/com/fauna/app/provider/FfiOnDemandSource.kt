@@ -6,6 +6,7 @@ import com.fauna.app.core.AccountStores
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.SessionAccount
 import com.fauna.app.core.ShellLog
+import com.fauna.app.p2pshare.GroupRingMirrorSeat
 import com.fauna.ffi.FfiBearerProvider
 import com.fauna.ffi.FfiChangeSignerProvider
 import com.fauna.ffi.FfiFileProviderAck
@@ -23,10 +24,13 @@ import com.fauna.ffi.installCapabilityHostCustody
 import com.fauna.ffi.machineChangeSigner
 import com.fauna.ffi.machineRetainedKeyCustody
 import com.fauna.ffi.mintBearer
+import com.fauna.ffi.onDemandHost
 import com.fauna.ffi.onDemandParkedPresences
 import com.fauna.ffi.onDemandPresencePlan
 import com.fauna.ffi.syncSetPark
+import com.fauna.ffi.syncSetReviewRows
 import dagger.hilt.android.qualifiers.ApplicationContext
+import uniffi.fauna_devices_machine.ConflictSummary
 import uniffi.fauna_devices_machine.FolderSummary
 import uniffi.fauna_folders_machine.PresenceSet
 import uniffi.fauna_folders_machine.SetPark
@@ -115,6 +119,16 @@ class FfiOnDemandSource @Inject constructor(
 
     override fun activeActorHex(): String? = currentAccount()?.actorHex
 
+    /**
+     * The relay seat's two inputs for the signed-in account — the actor id and
+     * the sync device id every host of this account is built with (the same
+     * bytes [host] passes to `appDeadOwnedTree`), or null when signed out.
+     * The seat announces the hosts as that device (`relay-serving.md`
+     * § Relay serving → *Which seats hold*, android's provider row).
+     */
+    fun relaySeatInputs(): Pair<ByteArray, ByteArray>? =
+        currentAccount()?.let { HexUtil.hexToBytes(it.actorHex) to it.deviceId }
+
     override fun liveHosts(): Map<String, OnDemandSetHost> = HashMap(hosts)
 
     override val reconciled: Flow<Unit> get() = reconcileTicks
@@ -132,6 +146,26 @@ class FfiOnDemandSource @Inject constructor(
         desired.values.map { it.first }
     }
 
+    /**
+     * The sets this provider binds an engine to — the plan's presences plus any
+     * host still open — for the engine roster ([com.fauna.app.core.EngineRoster],
+     * `succession-cut.md` ruling (11)(l)). Unlike [sets], a plan that could not
+     * be read THROWS rather than answering empty: an empty answer would let the
+     * take-over claim a set this provider presents.
+     */
+    suspend fun boundScopedIds(): List<String> = lock.withLock {
+        val acct = currentAccount() ?: throw IllegalStateException("no account to plan the on-demand sets of")
+        if (desired.isEmpty()) replan(acct)
+        (desired.keys + hosts.keys).toList()
+    }
+
+    /**
+     * The scoped ids the last plan presents — read as held, never re-planning.
+     * The share plane's host watch rides [reconciled], which every re-plan
+     * emits, so a read that re-planned would feed its own trigger.
+     */
+    fun desiredScopedIds(): List<String> = desired.keys.toList()
+
     override suspend fun host(scopedId: String): OnDemandSetHost? {
         hosts[scopedId]?.let { return it }
         return lock.withLock {
@@ -139,6 +173,12 @@ class FfiOnDemandSource @Inject constructor(
             val acct = currentAccount() ?: return@withLock null
             if (desired.isEmpty()) runCatching { replan(acct) }
             val folderId = desired[scopedId]?.second ?: return@withLock null
+            // One host per set, one writer per set (`p2p-shared-set-build.md`
+            // § Phone peers — design, decision 1): ask the process-wide registry
+            // for a live host of this set before building one.
+            onDemandHost(HexUtil.hexToBytes(acct.actorHex), folderId)?.let { live ->
+                return@withLock FfiSetHost(live).also { hosts[scopedId] = it }
+            }
             val ffi = FfiFileProviderHost.appDeadOwnedTree(
                 acct.dialUrl,
                 HexUtil.hexToBytes(acct.actorHex),
@@ -166,6 +206,13 @@ class FfiOnDemandSource @Inject constructor(
                     OnDemandIdentity(it.scopedId, ref, folder.role == "member" && folder.access != "writer")
                 }
             }
+        }.getOrNull()
+    }
+
+    override suspend fun identifyRef(folderRef: String): OnDemandIdentity? = withContext(Dispatchers.IO) {
+        val actorHex = currentAccount()?.actorHex ?: return@withContext null
+        runCatching {
+            actorScopedFolderRef(actorHex, folderRef)?.let { OnDemandIdentity(it.scopedId, folderRef) }
         }.getOrNull()
     }
 
@@ -223,6 +270,28 @@ class FfiOnDemandSource @Inject constructor(
         if (presented.isEmpty()) runCatching { sets(refresh = false) }
         val stateDir = accountStores.syncStateDir()
         presented.values.map { it.name to parkRead(stateDir, it.folderId) }
+    }
+
+    /**
+     * A group set's review rows, read in-process off the set's state DB in the
+     * hosts' state dir — the same cross-process WAL read as [parkRead] — and
+     * mapped once in shared Rust (`syncSetReviewRows`, `group-set.md` § Build
+     * design — the group set, decision 9).
+     */
+    override suspend fun groupReviewRows(folderRef: String, setLabel: String): List<ConflictSummary> =
+        withContext(Dispatchers.IO) {
+            syncSetReviewRows(accountStores.syncStateDir(), folderRef, setLabel)
+        }
+
+    /**
+     * *Use the other version* on the set's own host — the one the share plane
+     * and the provider share (one host per set, one writer per set) — so the
+     * restore runs on the engine worker that owns the set's tree.
+     */
+    override suspend fun restoreRetainedVersion(folderRef: String, conflictId: Long) {
+        val id = identifyRef(folderRef) ?: throw IllegalStateException("signed out")
+        val host = host(id.scopedId) ?: throw IllegalStateException("this set is not on this device")
+        host.restoreRetainedVersion(conflictId)
     }
 
     override suspend fun setShown(scopedId: String, shown: Boolean) = withContext(Dispatchers.IO) {
@@ -344,6 +413,13 @@ class FfiOnDemandSource @Inject constructor(
                 machineRetainedKeyCustody(actor, accountStores.accountStoreContainerDir()),
             )
         }.onFailure { ShellLog.w(TAG, "retained-key custody not installed: ${it.message}") }
+        // The group ring reaches the hosts the same way (`group-set.md` § Build
+        // design — the group set, decision 12): seat the hosts' state dir once
+        // per account and the runtime writes the sealed ring mirror there, which
+        // a `group:` host's key reader opens. One seat call, never a per-event one.
+        runCatching {
+            GroupRingMirrorSeat.install(HexUtil.hexToBytes(actorHex), accountStores.syncStateDir())
+        }.onFailure { ShellLog.w(TAG, "group-ring mirror not seated: ${it.message}") }
         return synchronized(this) {
             account ?: Account(actorHex, secret, dialUrl, deviceId, backupKey, signer).also { account = it }
         }
@@ -383,6 +459,7 @@ class FfiOnDemandSource @Inject constructor(
         override suspend fun refresh() = ffi.refresh()
         override suspend fun sweepKeptRoot() =
             ffi.sweepKeptRoot().let { OnDemandSweep(it.recorded, it.pending, it.evicted) }
+        override suspend fun restoreRetainedVersion(conflictId: Long) = ffi.restoreRetainedVersion(conflictId)
         override fun close() = ffi.close()
 
         private fun FfiFileProviderItem.toItem() =

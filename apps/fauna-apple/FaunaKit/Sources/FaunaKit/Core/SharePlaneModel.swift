@@ -74,19 +74,24 @@ public final class SharePlaneModel {
     /// - Parameters:
     ///   - ownerSecretHex: THIS instance's own secret (`FaunaClient`'s
     ///     `ownSecretHex`), never the active-account pointer.
-    ///   - provisioner: the app's own sync-agent provisioner — the plane's two agent
-    ///     verbs ride it. macOS runs a real external `fauna-sync-agent`; android (and
-    ///     iOS) run none, which is why those legs are not this call.
-    ///   - spoolDir: app-private scratch for in-flight peer downloads.
+    ///   - access: the replica host's two seams — the sync agent's on macOS
+    ///     (`agentReplicaAccess`), the File Provider extension's on iOS
+    ///     (`foreignReplicaAccess`).
+    ///   - spoolDir: scratch for in-flight peer downloads — app-private on macOS;
+    ///     on iOS in the app-group container, because the extension that lands
+    ///     the bodies reads it.
+    ///   - prepareSpool: run on the spool once it exists, before the plane can
+    ///     write into it (iOS excludes it from device backup).
     public func start(
-        api: APIClient, ownerSecretHex: String, provisioner: FfiSyncAgentProvisioner,
-        spoolDir: URL
+        api: APIClient, ownerSecretHex: String, access: FfiReplicaAccess,
+        spoolDir: URL, prepareSpool: (URL) throws -> Void = { _ in }
     ) async {
         do {
             try FileManager.default.createDirectory(
                 at: spoolDir, withIntermediateDirectories: true)
+            try prepareSpool(spoolDir)
             try await api.startSharePlane(
-                ownerSecret: hex_to_data(ownerSecretHex), provisioner: provisioner,
+                ownerSecret: hex_to_data(ownerSecretHex), access: access,
                 spoolDir: spoolDir.path,
                 listener: SharePlaneRepaintListener { [weak self] in
                     Task { @MainActor in self?.refresh() }
@@ -98,6 +103,14 @@ public final class SharePlaneModel {
                 message: "[share-plane] start failed; the peer-transfer surface stays absent "
                     + "this session: \(error)")
         }
+    }
+
+    /// Stop the plane (iOS's background edge) and repaint: a stopped plane is
+    /// "this device is not running the plane", which the surface renders as
+    /// nothing at all.
+    public func stop(api: APIClient) async {
+        await api.stopSharePlane()
+        refresh()
     }
 }
 

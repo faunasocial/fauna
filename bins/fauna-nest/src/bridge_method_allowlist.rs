@@ -2257,6 +2257,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.subscriptions.tiers.clear_field" => matches!(class, User),
         "fauna.subscriptions.tiers.delete" => matches!(class, User),
         "fauna.subscriptions.offers.list" => matches!(class, User),
+        "fauna.subscriptions.offers.list_remote" => matches!(class, User),
         "fauna.subscriptions.post_unlock.get" => matches!(class, User),
         "fauna.subscriptions.mine.list" => matches!(class, User),
         // `ThirdParty`: the `fauna:follow:write` arm (`authorization-server.md`
@@ -7021,6 +7022,29 @@ mod tests {
             assert!(
                 !is_permitted(class, "fauna.profile.get_remote"),
                 "fauna.profile.get_remote should be denied for {class:?}"
+            );
+        }
+    }
+
+    /// The offers browse relay is the `_remote` family's shape: `User` only
+    /// (`federation.md` § Federation residue surface, the *Offers browse
+    /// across nests* row).
+    #[test]
+    fn offers_list_remote_user_only() {
+        for class in [CallerClass::User, CallerClass::Admin] {
+            assert!(is_permitted(
+                class,
+                "fauna.subscriptions.offers.list_remote"
+            ));
+        }
+        for class in [
+            CallerClass::ThirdParty,
+            CallerClass::BridgeMta,
+            CallerClass::BridgeMda,
+        ] {
+            assert!(
+                !is_permitted(class, "fauna.subscriptions.offers.list_remote"),
+                "fauna.subscriptions.offers.list_remote should be denied for {class:?}"
             );
         }
     }

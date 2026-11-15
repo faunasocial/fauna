@@ -131,12 +131,14 @@ def _factory_reset_and_wait() -> str:
     from nacl.signing import SigningKey
 
     from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers import box_actions
 
     sk = SigningKey(bytes.fromhex(SECRET))
     actor = bytes(sk.verify_key)
 
     with WsRpcAdminClient(URL, actor_id=actor, signing_key=bytes(sk)) as adm:
         reply = adm.call("fauna.admin.factory_reset", {})
+    box_actions.record(URL, "factory reset over the admin wire (fauna.admin.factory_reset)")
     claim_code = reply["claim_code"]
     assert claim_code, f"factory_reset returned no claim code: {reply!r}"
 

@@ -24,7 +24,8 @@
 //! doesn't emit), and its select applies `users_update` LIVE + re-reads.
 
 use fauna_client_admin::{
-    RegistrationMode, admin_user_row_controls, age_band_options, registration_mode_options,
+    RegistrationMode, admin_picker_option, admin_user_guardian_label, admin_user_row_controls,
+    age_band_options, registration_mode_options,
 };
 use fauna_i18n::strings::admin as t;
 use fauna_ui_ids as ids;
@@ -588,7 +589,7 @@ fn user_list_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Elemen
         // offers — never re-derived from `eviction`/`is_admin` here (`admin.md`
         // § Where logic lives; the rule crosses three eviction states × the admin
         // guard and is easy to get wrong). An admin row offers none of the three.
-        let controls = admin_user_row_controls(user);
+        let controls = admin_user_row_controls(user, &state.viewer_actor);
         if controls.evict {
             els.push(
                 Element::gesture_button(
@@ -643,6 +644,65 @@ fn user_list_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Elemen
                 )
                 .within(ids::USER_ROW, i),
             );
+        }
+
+        // SCOPED under `user-row[i]`: the admin take-over of a supervised
+        // account (`family-safety.md` § App surface → *Admin take-over*). The
+        // guardian label and the offer are the SHARED decisions; the button
+        // arms an inline confirm on this row (one row armed at a time).
+        if let Some(guardian) = admin_user_guardian_label(user) {
+            els.push(
+                Element::label(
+                    ids::ADMIN_USERS_SUPERVISED_BY,
+                    t::users_page::supervised_by(&guardian),
+                )
+                .within(ids::USER_ROW, i),
+            );
+            let armed = state
+                .take_over_armed
+                .as_deref()
+                .is_some_and(|ward| ward == user.actor_id.as_ref());
+            if controls.take_over && !armed {
+                els.push(
+                    Element::gesture_button(
+                        ids::ADMIN_USERS_TAKE_OVER_BUTTON,
+                        t::users_page::TAKE_OVER,
+                        true,
+                        Gesture::Admin(Action::ArmTakeOver { row: i }),
+                    )
+                    .within(ids::USER_ROW, i),
+                );
+            }
+            if armed {
+                els.push(
+                    Element::label(
+                        ids::ADMIN_USERS_TAKE_OVER_CONFIRM_SUMMARY,
+                        t::users_page::take_over_confirm_summary(
+                            &admin_picker_option(user),
+                            &guardian,
+                        ),
+                    )
+                    .within(ids::USER_ROW, i),
+                );
+                els.push(
+                    Element::gesture_button(
+                        ids::ADMIN_USERS_TAKE_OVER_CONFIRM_BUTTON,
+                        t::users_page::TAKE_OVER_CONFIRM,
+                        true,
+                        Gesture::Admin(Action::ConfirmTakeOver),
+                    )
+                    .within(ids::USER_ROW, i),
+                );
+                els.push(
+                    Element::gesture_button(
+                        ids::ADMIN_USERS_TAKE_OVER_CANCEL_BUTTON,
+                        t::users_page::TAKE_OVER_CANCEL,
+                        true,
+                        Gesture::Admin(Action::CancelTakeOver),
+                    )
+                    .within(ids::USER_ROW, i),
+                );
+            }
         }
     }
 
@@ -1018,6 +1078,74 @@ mod tests {
                 "admin-users-make-admin-button"
             ],
             "suspended row: restore + make-admin, no remove-admin"
+        );
+    }
+
+    /// The admin take-over (`family-safety.md` § App surface → *Admin
+    /// take-over*): a row another account guards names the guardian and offers
+    /// the button; a row the viewer guards names them with no button; arming
+    /// paints the confirm trio on that row alone, and cancel disarms.
+    #[test]
+    fn take_over_offers_and_arms_on_a_supervised_row() {
+        use fauna_protocol::admin::AdminUserGuardian;
+        let viewer = vec![0xAA; 32];
+        let mut ward = user(0x03, "free", "kiddo");
+        ward.guardian = Some(AdminUserGuardian {
+            actor_id: ByteBuf::from(vec![0x04; 32]),
+            handle: Some("parent".to_string()),
+            ..Default::default()
+        });
+        let mut own_ward = user(0x05, "free", "mine");
+        own_ward.guardian = Some(AdminUserGuardian {
+            actor_id: ByteBuf::from(viewer.clone()),
+            ..Default::default()
+        });
+        let plain = user(0x06, "free", "plain");
+        let mut app = app_on_users(snapshot(vec![ward, own_ward, plain], 3));
+        app.admin.users.viewer_actor = viewer.clone();
+
+        let row_ids = |app: &crate::app::App, row: usize| -> Vec<String> {
+            users_elements(&app.admin)
+                .into_iter()
+                .filter(|e| {
+                    e.path.first().map(|p| p.1) == Some(row)
+                        && (e.id.contains("supervised-by") || e.id.contains("take-over"))
+                })
+                .map(|e| e.id)
+                .collect()
+        };
+        assert_eq!(
+            row_ids(&app, 0),
+            vec!["admin-users-supervised-by", "admin-users-take-over-button"]
+        );
+        assert_eq!(row_ids(&app, 1), vec!["admin-users-supervised-by"]);
+        assert!(row_ids(&app, 2).is_empty());
+        let label = users_elements(&app.admin)
+            .into_iter()
+            .find(|e| e.id == "admin-users-supervised-by")
+            .unwrap();
+        assert_eq!(label.text, "Supervised by parent");
+
+        assert!(apply_local(&mut app, Action::ArmTakeOver { row: 0 }).is_none());
+        assert_eq!(
+            row_ids(&app, 0),
+            vec![
+                "admin-users-supervised-by",
+                "admin-users-take-over-confirm-summary",
+                "admin-users-take-over-confirm-button",
+                "admin-users-take-over-cancel-button"
+            ]
+        );
+        let summary = users_elements(&app.admin)
+            .into_iter()
+            .find(|e| e.id == "admin-users-take-over-confirm-summary")
+            .unwrap();
+        assert!(summary.text.contains("kiddo") && summary.text.contains("parent"));
+
+        assert!(apply_local(&mut app, Action::CancelTakeOver).is_none());
+        assert_eq!(
+            row_ids(&app, 0),
+            vec!["admin-users-supervised-by", "admin-users-take-over-button"]
         );
     }
 

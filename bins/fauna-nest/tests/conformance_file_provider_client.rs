@@ -992,17 +992,13 @@ async fn app_dead_host_write_path_records_create_rename_delete_over_real_wire() 
         ack.acked,
         "the real nest must record the FP host's create (recorded-ack gate)"
     );
-    // The staging root after a recorded upload (measured 2026-09-27 for the
-    // phone-peer design, `p2p-shared-set-build.md` § Phone peers — design, decision 3): nothing
-    // removes the staged body once the nest records it — neither the host's
-    // ingest nor the appex's `createItem` — so iOS's kept root keeps every body
-    // it ever uploaded, beside the OS's own hydrated copy. A demotion on record
-    // (or on the reconcile's confirm) is the design's to build; when it lands,
-    // this assertion flips.
-    assert_eq!(
-        std::fs::read(root.join("new.txt")).expect("the staged body is still in the staging root"),
-        WRITTEN,
-        "a recorded upload leaves its body in the staging root, byte-for-byte"
+    // The staging root after a recorded upload (`p2p-shared-set-build.md`
+    // § *Built — iOS's leg*): the host demotes a served write's staged copy on
+    // the engine's dehydration proof once the nest records it, so the staging
+    // root keeps only what the nest cannot serve; the OS keeps its own copy.
+    assert!(
+        !root.join("new.txt").exists(),
+        "a recorded upload's staged body leaves the staging root"
     );
 
     // A FRESH host (new state dir) sees the create purely via the nest.
@@ -1179,8 +1175,11 @@ async fn app_dead_host_retried_ingest_of_a_recorded_write_still_acks() {
     .expect("first ingest");
     assert!(first.acked, "the first ingest records and acks");
 
-    // The retry: same staged bytes, same rel — the record already landed, so
-    // the honest skip must ack (and must not claim a content change).
+    // The retry: the OS re-drives the write, so the appex materializes the
+    // same bytes at the same rel again (the first ingest's record demoted the
+    // staged copy) — the record already landed, so the honest skip must ack
+    // (and must not claim a content change).
+    std::fs::write(root.join("retry.txt"), BYTES).unwrap();
     let retry = tokio::time::timeout(
         Duration::from_secs(30),
         writer.ingest("retry.txt".to_string()),
@@ -1194,6 +1193,13 @@ async fn app_dead_host_retried_ingest_of_a_recorded_write_still_acks() {
          skip) — an always-false skip would make the OS re-drive this write forever"
     );
     assert!(!retry.content_changed, "a vacuous retry moves no content");
+    // The re-staged copy is a second copy of bytes the nest serves: the
+    // settle after the acked retry removes it, as it removed the first
+    // (`p2p-shared-set-build.md` § *Built — iOS's leg*).
+    assert!(
+        !root.join("retry.txt").exists(),
+        "the retried write's re-staged copy must leave the staging root"
+    );
 }
 
 /// The **M3 conflict arm** over the real wire: when the OS's `baseVersion` no
@@ -2515,6 +2521,44 @@ async fn capability_host_opens_a_bound_set_from_custody_under_its_backup_key() {
             "the {who}'s host decrypts to the exact plaintext"
         );
     }
+}
+
+/// The share leg's cached writer roster on a capability host: a host that ran
+/// while the nest answered leaves the set's roster in the set's state DB, so a
+/// host the OS relaunches cold with the nest down — decision 2″'s build on the
+/// binding record — judges a peer-served row by it, as the desktop agent's
+/// resident engine does (`p2p.md` § Peer-served change-row provenance; the
+/// reader's "offline since launch" stand-in, `writer-signed-change-records.md`
+/// ruling (11)(i)). Before this, only the resident loop refreshed the cache, so
+/// iOS's extension refused every offline-authored row from the owner: "the
+/// cached roster records no writer role for the row's writer on this set".
+#[tokio::test]
+async fn capability_host_caches_the_writer_roster_for_a_cold_offline_build() {
+    let s = shared_set().await;
+    s.owner_uploads("bound.txt", PROOF_CONTENT, s.owner_keys().await)
+        .await;
+
+    let (host, root) = s.host(B_SECRET, B_HOST_DEVICE);
+    within("enumerate", host.enumerate(String::new()))
+        .await
+        .expect("the member's host serves the bound set");
+
+    let db = SyncDb::open(
+        s.folder_ref
+            .state_db_path(std::path::Path::new(&root.state_path())),
+    )
+    .expect("the set's state db opens beside the host's own connection");
+    let roster = db.cached_share_roster().expect("the cached roster reads");
+    let owner = hex::encode(actor_of(A_SECRET));
+    assert!(
+        roster.writers.contains(&owner),
+        "the host's start caches the set's writers, the owner among them (got {roster:?})"
+    );
+    assert_eq!(
+        roster.owner.as_deref(),
+        Some(owner.as_str()),
+        "the cached read names the set's owner"
+    );
 }
 
 /// Flow 2 — decision 2's fail-closed arm: B's custody holds generation 1 while a

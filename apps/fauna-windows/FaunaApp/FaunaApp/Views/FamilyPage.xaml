@@ -265,7 +265,8 @@
                                Opacity="0.7"
                                TextWrapping="Wrap" />
 
-                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicySaveButton}"
+                    <Button x:Name="PolicySaveButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicySaveButton}"
                             Style="{StaticResource AccentButtonStyle}"
                             Click="SavePolicy_Click"
                             Content="{loc:Localize Key=family/policy_save_button}" />

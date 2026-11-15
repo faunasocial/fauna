@@ -66,8 +66,8 @@ use std::sync::Arc;
 use fauna_client::NestClient;
 use fauna_client_account_runtime::{
     ACCOUNT_RUNTIME_STOP_BUDGET, AccountRuntimeHost, AppRuntimeInputs, InstallOutcome,
-    ResolveContext, SandboxedStoreContainer, StopReason, build_params, resolve_and_start,
-    stop_account_runtime, with_session_wakes,
+    ResolveContext, SandboxedStoreContainer, StopOutcome, StopReason, build_params,
+    finish_lapsed_stop, resolve_and_start, stop_account_runtime, with_session_wakes,
 };
 use fauna_sync_engine::account_runtime::{AccountStoreHandle, MembershipSource};
 
@@ -84,6 +84,38 @@ use fauna_sync_engine::account_runtime::{AccountStoreHandle, MembershipSource};
 /// and must carry the tokio handle its wait is driven on, every caller here is
 /// already async and awaits the stop directly.
 static HOST: AccountRuntimeHost = AccountRuntimeHost::new();
+
+/// The app's last foreground signal ([`set_foreground`]), process-wide so a
+/// runtime that installs while the app is backgrounded — or one an account
+/// switch starts afresh — begins from it rather than from the runtime's own
+/// foreground default. `true` until a shell says otherwise: macOS and
+/// windows never call it.
+static FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// The phone's foreground lifecycle for the same-account peer leg
+/// (`account-sync-plane.md` § Wormability walk, rule 5;
+/// `p2p-shared-set-build.md` § Phone peers — design, decision 2): remember
+/// the signal, then hand it to the live runtime, if any —
+/// `AccountStoreHandle::set_foreground`, which on leaving stands the legs
+/// down before it returns. Returning runs one pass now, so the leg binds
+/// again without waiting for the backstop.
+pub(crate) async fn set_foreground(foreground: bool) {
+    FOREGROUND.store(foreground, std::sync::atomic::Ordering::SeqCst);
+    let Some(handle) = handle() else {
+        return;
+    };
+    apply_foreground(&handle, foreground).await;
+}
+
+async fn apply_foreground(handle: &AccountStoreHandle, foreground: bool) {
+    if let Err(e) = handle.set_foreground(foreground).await {
+        tracing::debug!("account runtime: foreground signal not delivered ({e})");
+        return;
+    }
+    if foreground && let Err(e) = handle.reconcile_now().await {
+        tracing::debug!("account runtime: the return-to-foreground pass did not run ({e})");
+    }
+}
 
 /// What the app brings that no shared code can derive.
 pub(crate) struct HostInputs {
@@ -174,6 +206,16 @@ pub(crate) fn install(
         #[cfg(feature = "recovery-aftermath")]
         ledger_pass,
     } = inputs;
+    // The outbox carry (`succession-aftermath.md` § Re-key scope, the
+    // device-local outbox row) — seated here, the one place the registry and
+    // the store root are both known: every app drain loop of the process's
+    // outbox carries first what a retired identity this device owes left
+    // undrained, and the unsent-changes list shows what has not moved yet.
+    #[cfg(feature = "feed-manager")]
+    crate::offline_outbox::DEVICE.seat_carry(crate::offline_outbox::carry_for(
+        accounts.as_deref(),
+        store_container.as_ref().map(|c| c.dir.clone()),
+    ));
     // One registry walk, off THIS session's own actor (never the registry's
     // "active" account — a bound launch may differ), read here on the
     // caller's thread before the spawn. `HostInputs::accounts` owns why it is
@@ -234,7 +276,11 @@ pub(crate) fn install(
                 Arc::clone(&nest),
                 &nest_url,
             )?;
-            let params = with_session_wakes(params, reconnects, pushes);
+            let mut params = with_session_wakes(params, reconnects, pushes);
+            // The shell's last foreground signal seeds the driver's seat
+            // before the store thread spawns, so a start out of front runs
+            // its prologue backgrounded and binds no peer leg at all.
+            params.foreground = FOREGROUND.load(std::sync::atomic::Ordering::SeqCst);
 
             resolve_and_start(
                 params,
@@ -258,6 +304,14 @@ pub(crate) fn install(
             Ok(handle) => match HOST.finish(claim, handle).await {
                 InstallOutcome::Installed => {
                     tracing::info!("account runtime: mounted the account store for this session");
+                    // A shell that backgrounded while this runtime assembled,
+                    // after the seat was seeded: the signal found no handle to
+                    // deliver to, so it is applied now.
+                    if !FOREGROUND.load(std::sync::atomic::Ordering::SeqCst)
+                        && let Some(handle) = HOST.handle()
+                    {
+                        apply_foreground(&handle, false).await;
+                    }
                     on_store_installed(&sessions);
                     // The succession ledger's post-store-ready pass — one of
                     // its two edges; the other is the post-auth aftermath
@@ -429,7 +483,7 @@ fn on_store_installed(sessions: &crate::caldav_client::SchedulingSessionHolder) 
     #[cfg(feature = "contact-overlays")]
     overlay_seam::store_changed();
     #[cfg(feature = "conversations-session")]
-    wire_conversation_seams(sessions);
+    wire_every_stashed_session(sessions);
     // The store edge of the conversations door: a session built before the
     // store staged it with no runtime to start on.
     #[cfg(feature = "conversations-session")]
@@ -463,6 +517,7 @@ pub(crate) fn wire_conversation_seams(sessions: &crate::caldav_client::Schedulin
     let Some(session) = sessions.lock().ok().and_then(|held| held.clone()) else {
         return;
     };
+    remember_session_holder(sessions);
     let Some(store) = handle() else {
         return;
     };
@@ -476,6 +531,62 @@ pub(crate) fn wire_conversation_seams(sessions: &crate::caldav_client::Schedulin
     fauna_client_account_runtime::conversation_seams::wire(&session, store, &rt);
     #[cfg(feature = "contact-overlays")]
     overlay_seam::wired_by_session(&session.manager());
+}
+
+/// Every session holder that has stashed a session in this process, oldest
+/// stash first — the store edge's reach ([`wire_every_stashed_session`]).
+///
+/// The store is one per process ([`HOST`]) but a session holder is one per
+/// [`crate::FfiNestClient`], and an apple seat builds more than one client at
+/// a launch, each with its own holder and its own `start_account_runtime`.
+/// The install that wins is the newest claim, which need not belong to the
+/// client whose session the app reads from. When both sessions were stashed
+/// before the store landed, the session edge of each found no store and wired
+/// nothing, and the store edge wired only the installer's holder. The other
+/// session then had no group-reception key seam, so founding a community
+/// room on it failed with "this app cannot key a community room". That was
+/// measured on iOS as a 90 s founder-binding timeout that hit some seats and
+/// not others. Only the order the two installs land in decides which.
+#[cfg(feature = "conversations-session")]
+static SESSION_HOLDERS: std::sync::Mutex<Vec<std::sync::Weak<SessionSlot>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The slot a [`crate::caldav_client::SchedulingSessionHolder`] points at.
+#[cfg(feature = "conversations-session")]
+type SessionSlot = std::sync::Mutex<Option<Arc<fauna_conversations::ConversationsSession>>>;
+
+/// Record `sessions` as the most recently stashed holder (moved to the end
+/// if already known), and forget holders whose client has gone.
+#[cfg(feature = "conversations-session")]
+fn remember_session_holder(sessions: &crate::caldav_client::SchedulingSessionHolder) {
+    let mut holders = SESSION_HOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+    holders.retain(|held| {
+        held.strong_count() > 0 && !std::ptr::eq(held.as_ptr(), Arc::as_ptr(sessions))
+    });
+    holders.push(Arc::downgrade(sessions));
+}
+
+/// The store edge's half of [`wire_conversation_seams`]: wire every live
+/// holder this process has stashed a session in ([`SESSION_HOLDERS`]), not
+/// only the installing client's. They are wired oldest stash first, so the
+/// newest session is wired last and what its siblings record
+/// (`overlay_seam`'s seat, the manager-level seams a later registration
+/// replaces) is the newest session's. `installer` is wired even when it never
+/// stashed through the session edge.
+#[cfg(feature = "conversations-session")]
+fn wire_every_stashed_session(installer: &crate::caldav_client::SchedulingSessionHolder) {
+    let mut holders: Vec<crate::caldav_client::SchedulingSessionHolder> = SESSION_HOLDERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect();
+    if !holders.iter().any(|held| Arc::ptr_eq(held, installer)) {
+        holders.push(Arc::clone(installer));
+    }
+    for holder in &holders {
+        wire_conversation_seams(holder);
+    }
 }
 
 /// Start the conversations door the session factory staged, on the runtime
@@ -600,10 +711,14 @@ pub(crate) mod overlay_seam {
 /// the next one signs in. A plain quit does NOT come here — see the module
 /// docs.
 ///
-/// Complete by the time it returns: the FFI callers are already async, so the
-/// sign-out *awaits* the stop rather than racing it — which is what makes the
-/// erase each shell runs next (`account_state_erase_all_scopes` /
-/// `account_state_erase_scope`) meet a closed store.
+/// Complete by the time it returns **within its budget**: the FFI callers are
+/// already async, so the sign-out *awaits* the stop rather than racing it —
+/// which is what makes the erase each shell runs next
+/// (`account_state_erase_all_scopes` / `account_state_erase_scope`) meet a
+/// closed store. A stop that lapses the budget returns at the lapse and goes
+/// on closing in the background (`fauna_client_account_runtime::closing`); a
+/// shell whose erase must meet the closed store then awaits
+/// [`account_runtime_stores_closed`] too.
 ///
 /// ⚠ **The wait covers an assembly still in flight, not only a settled store.**
 /// `AccountStoreRuntime::start` opens the database on its own OS thread before
@@ -638,13 +753,52 @@ pub(crate) async fn teardown(reason: StopReason) {
     // `reason` is the shell's own statement of whether the credential erase
     // follows (`StopReason`): a sign-out retires the machine's enrollment
     // nest-side on the way out, a switch leaves it enrolled.
-    stop_account_runtime(
+    //
+    // A stop that lapses its budget is finished in the background, and the
+    // runtime the next login installs meanwhile is then handed the engine role
+    // (`finish_lapsed_stop`) — an apple session patch awaits this teardown and
+    // builds the next client straight after it.
+    let settled = stopping.settled.clone();
+    let outcome = stop_account_runtime(
         stopping.settled,
         stopping.pending,
         ACCOUNT_RUNTIME_STOP_BUDGET,
         reason,
     )
     .await;
+    if outcome == StopOutcome::BudgetElapsed
+        && let Some(store) = settled
+    {
+        finish_lapsed_stop(&HOST, store, reason);
+    }
+}
+
+/// Wait until every account-runtime stop that lapsed its budget has closed
+/// its store — `true` — or until `CLOSING_STORES_BUDGET` lapses — `false`,
+/// logged loudly. Instant when nothing lapsed.
+///
+/// [`teardown`] returns when its own budget lapses
+/// (`ACCOUNT_RUNTIME_STOP_BUDGET`), so a shell's switch is never held by a
+/// slow store; the rest of the stop goes on in the background
+/// (`fauna_client_account_runtime::closing`). A shell whose erase can follow
+/// a stop it did not await — windows, whose teardowns are fire-and-forget and
+/// whose every erase waits behind one barrier over them
+/// (`AccountRuntimeStops`) — awaits this inside that barrier, so the barrier
+/// covers the store's close and not just the stop's budget
+/// (`apps/account-scoping.md` § Erasure follows scope). A free function, not
+/// a client method: the runtime is a process global, and the barrier runs
+/// after the clients that stopped it are disposed. The remove-account gesture
+/// waits the same set itself (`remove_account_gesture`).
+///
+/// Additive (2026-11-13).
+#[fauna_uniffi_async::export]
+pub async fn account_runtime_stores_closed() -> bool {
+    fauna_client_account_runtime::closing_stores()
+        .closed(
+            fauna_client_account_runtime::CLOSING_STORES_BUDGET,
+            "erase after a stop",
+        )
+        .await
 }
 
 /// The member half of the content-scope set, read off whatever
@@ -842,6 +996,7 @@ pub(crate) mod tests {
                 // The machine's named row — never read here (no nest answers enrollment).
                 enrollment_target_device_id: "ab".repeat(32),
                 enrollment_device_label: None,
+                foreground: true,
             })
             .await
             .expect("the store starts with no nest")
@@ -980,6 +1135,31 @@ pub(crate) mod tests {
             assert!(
                 delivered(&session, &thread).await,
                 "the store edge wired the read-position seam"
+            );
+            teardown(StopReason::AccountSwitch).await;
+        }
+
+        /// Two clients in one process, each with its own holder, both stashed
+        /// before the store lands, and the store installed through the OTHER
+        /// client's holder. The app's session must still be wired (the iOS
+        /// founder-binding red, [`SESSION_HOLDERS`]).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_store_installed_by_another_client_wires_this_clients_session() {
+            let _host = HOST_TESTS.lock().await;
+            teardown(StopReason::AccountSwitch).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let installer: SchedulingSessionHolder = Arc::new(Mutex::new(None));
+            let apps: SchedulingSessionHolder = Arc::new(Mutex::new(None));
+
+            let (installers_session, _) = a_session();
+            stash_session(&installer, &installers_session);
+            let (session, thread) = a_session();
+            stash_session(&apps, &session);
+            assert_eq!(unread(&session, &thread), 0, "no store yet: nothing wired");
+            install_store(a_store(tmp.path()).await, &installer).await;
+            assert!(
+                delivered(&session, &thread).await,
+                "the store edge wired the session another client's holder stashed"
             );
             teardown(StopReason::AccountSwitch).await;
         }

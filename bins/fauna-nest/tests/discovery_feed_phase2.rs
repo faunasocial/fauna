@@ -67,6 +67,26 @@ fn test_state_with_events() -> (Arc<AppState>, tokio::sync::mpsc::Receiver<FeedE
 }
 
 /// Spawn a test server and return the base URL.
+/// Polls `ready` every 100 ms until it holds or `POLL_DEADLINE` passes. A
+/// fixed sleep sized to the poller's interval reads a half-finished poll on a
+/// loaded machine (the hit count bumped after the contributor row lands); the
+/// assertions that follow still state what must hold, this only waits for it.
+const POLL_DEADLINE: Duration = Duration::from_secs(30);
+
+async fn wait_until<F, Fut>(mut ready: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + POLL_DEADLINE;
+    while tokio::time::Instant::now() < deadline {
+        if ready().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn spawn_server(state: Arc<AppState>) -> String {
     let app = fauna_nest::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -270,7 +290,21 @@ async fn discovery_ingested_post_indexes_the_peers_real_source_token() {
         shutdown_rx,
     );
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_until(|| async {
+        nest_a
+            .db
+            .get_post_source(&bluesky_post_id)
+            .await
+            .unwrap()
+            .is_some()
+            && nest_a
+                .db
+                .get_post_origin_nest_url(&bluesky_post_id)
+                .await
+                .unwrap()
+                .is_some()
+    })
+    .await;
 
     assert_eq!(
         nest_a
@@ -425,7 +459,27 @@ async fn scenario_8_2_discovery_feed_with_referral_chain() {
     );
 
     // ── 11. Wait for initial poll + referral chain discovery ───────────
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    let bob_author = bob.actor_id().0.to_vec();
+    let charlie_author = charlie.actor_id().0.to_vec();
+    wait_until(|| async {
+        let feed_posts = nest_a
+            .db
+            .query_feed(&rules, FilterCombination::All, &[], None, 50)
+            .await
+            .unwrap();
+        let contributors = nest_a.db.list_contributors(&feed_id).await.unwrap();
+        let settled = |author: &[u8]| {
+            contributors.iter().any(|c| {
+                c.author_id.as_deref() == Some(author)
+                    && c.hit_count >= 1
+                    && c.poll_priority == "hot"
+            })
+        };
+        feed_posts.iter().any(|p| p.author == bob_author)
+            && settled(&bob_author)
+            && settled(&charlie_author)
+    })
+    .await;
 
     // ── 12. Assert all spec assertions (§12.3) ─────────────────────────
 
@@ -441,7 +495,6 @@ async fn scenario_8_2_discovery_feed_with_referral_chain() {
     );
 
     // Check that Bob's post is present (at least one post authored by Bob)
-    let bob_author = bob.actor_id().0.to_vec();
     let bob_posts: Vec<_> = feed_posts
         .iter()
         .filter(|p| p.author == bob_author)
@@ -453,7 +506,6 @@ async fn scenario_8_2_discovery_feed_with_referral_chain() {
 
     // 12b. Charlie discovered via referral chain
     let contributors = nest_a.db.list_contributors(&feed_id).await.unwrap();
-    let charlie_author = charlie.actor_id().0.to_vec();
     let charlie_contributor = contributors
         .iter()
         .find(|c| c.author_id.as_deref() == Some(&charlie_author[..]));
@@ -511,7 +563,21 @@ async fn scenario_8_2_discovery_feed_with_referral_chain() {
     create_tagged_post(&nest_c, &charlie, "More Rust from Charlie!", &["rust"]).await;
 
     // ── 14. Wait for follow-up poll ────────────────────────────────────
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    wait_until(|| async {
+        let posts = nest_a
+            .db
+            .query_feed(&rules, FilterCombination::All, &[], None, 50)
+            .await
+            .unwrap();
+        let contributors = nest_a.db.list_contributors(&feed_id).await.unwrap();
+        posts.len() >= 3
+            && contributors
+                .iter()
+                .filter(|c| c.author_id.as_ref().map(|a| a.len()) == Some(32))
+                .count()
+                >= 2
+    })
+    .await;
 
     // ── 15. Assert >= 3 posts in nest_a's feed ─────────────────────────
     let feed_posts_after = nest_a

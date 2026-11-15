@@ -692,6 +692,7 @@ mod tests {
             nest_read: None,
             labelers: None,
             awaiting_key: false,
+            severance_owed: false,
             moderation_unverified: false,
             bridge_disconnected: false,
             pending_invites: None,

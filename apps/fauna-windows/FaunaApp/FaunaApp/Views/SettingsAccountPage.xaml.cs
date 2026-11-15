@@ -328,7 +328,6 @@ public sealed partial class SettingsAccountPage : Page
         await _viewModel.LoadCommand.ExecuteAsync(null);
         FaunaApp.Core.Logs.E2eTrace.Write("[account-page] after LoadCommand");
 
-        HandleText.Text = _viewModel.Handle ?? "--";
         NestUrlText.Text = _viewModel.NestUrl ?? "--";
 
         await HydrateRecoveryKitAsync();
@@ -967,9 +966,6 @@ public sealed partial class SettingsAccountPage : Page
 
         switch (e.PropertyName)
         {
-            case nameof(SettingsViewModel.Handle):
-                HandleText.Text = _viewModel.Handle ?? "--";
-                break;
             case nameof(SettingsViewModel.NestUrl):
                 NestUrlText.Text = _viewModel.NestUrl ?? "--";
                 break;
@@ -1025,8 +1021,9 @@ public sealed partial class SettingsAccountPage : Page
         // A format-invalid handle is rejected client-side by the VM's shared-
         // validator pre-check (no RPC) and surfaces in `error-message`; a *taken*
         // handle stays server-authoritative (settings.md § Where logic lives →
-        // Handle change). HandleText is NOT updated here; it refreshes on the next
-        // account load once the pending action executes (matching linux / apple).
+        // Handle change). Nothing here paints the new handle: the Status sub-page's
+        // identity cell shows the cached one, which the next verify reply refreshes
+        // once the pending action executes (matching linux / apple).
         _viewModel.NewHandle = newHandle;
         await _viewModel.ChangeHandleCommand.ExecuteAsync(null);
         RenderError(_viewModel.ErrorMessage);

@@ -66,6 +66,13 @@ data class GroupScope(
     val memberCount: UInt,
     /** Who minted it — `null` on the initiator's own set. */
     val sharedBy: String?,
+    /**
+     * The set's `FolderRef::Group` wire form (`group:<64-hex>`,
+     * `FfiGroupScope.folder_id`) — the ref its `folder-on-demand-toggle`
+     * preference and its documents-provider presence are keyed by
+     * (`group-set.md` § Build design — the group set, decision 11 (a)).
+     */
+    val folderId: String,
 )
 
 /** Both halves of the Folders page's group surface, from one read. Mirrors `FfiGroupShareViews`. */

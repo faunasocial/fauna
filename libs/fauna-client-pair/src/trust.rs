@@ -583,6 +583,17 @@ pub fn grant_bound_note(scope: Vec<TrustScope>) -> LocalizedText {
     )
 }
 
+/// The honest-bound note on a principal's live key (`nest-trust-grant-bound-note`
+/// on a Connected apps row): `nests.md` § Honest bound's standing-keyed wording
+/// in the app's voice, "disconnecting" for the row's one revoke
+/// (`connected-apps.md` § The trust facet and history lens → *The Now lens*).
+/// A principal's keys are `ext.*` kinds, all standing-keyed, so there is no
+/// regime to pick.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn principal_grant_bound_note() -> LocalizedText {
+    LocalizedText::key("connected_apps.trust_bound_note")
+}
+
 // ── shell-facing labels: shared enum → i18n key mapping ─────────────
 //
 // Each maps a shared trust type to a `LocalizedText` — a key plus (optional)
@@ -712,13 +723,97 @@ pub fn grant_scope_labels(
         .collect()
 }
 
+/// The labels a third-party principal's grant row or History line renders
+/// as (`connected-apps.md` § The trust facet and history lens → *The words
+/// rule for `ext.*` kinds*). A kind of the `ext.*` family is named the way the
+/// consent card named it: its publisher, then each kind's name label verbatim
+/// and in quotes, then *read and write* for a kind the grant also carries a
+/// `content.write` tuple for, else *read only* — one line per publisher and
+/// mode, so a grant whose kinds differ marks each kind. Every other tuple
+/// (a folder read, a consent twin's kind) is [`scope_label_in_folder`]'s, and
+/// an empty scope (a `Revoke`) is [`grant_scope_labels`]'.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn principal_scope_labels(
+    scope: Vec<TrustScope>,
+    folder: Option<TrustFolder>,
+) -> Vec<LocalizedText> {
+    if scope.is_empty() {
+        return grant_scope_labels(scope, folder);
+    }
+    let ext_of = |s: &TrustScope| -> Option<fauna_core::ext_kind::ExtKind> {
+        GrantEventScope {
+            class: s.class.clone(),
+            kind: s.kind.clone(),
+            tier: s.tier.clone(),
+        }
+        .base_kind()?
+        .parse()
+        .ok()
+    };
+    let written: Vec<fauna_core::ext_kind::ExtKind> = scope
+        .iter()
+        .filter(|s| s.class == fauna_core::grant_event::CLASS_CONTENT_WRITE)
+        .filter_map(ext_of)
+        .collect();
+    // (publisher, read-and-write) → the kind names, each once, in tuple order.
+    let mut groups: Vec<((String, bool), Vec<String>)> = Vec::new();
+    let mut labels = Vec::new();
+    for tuple in &scope {
+        let Some(kind) = ext_of(tuple) else {
+            let label = scope_label_in_folder(tuple, folder.clone());
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+            continue;
+        };
+        let key = (kind.publisher().to_string(), written.contains(&kind));
+        let name = kind.name().to_string();
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, names)) if names.contains(&name) => {}
+            Some((_, names)) => names.push(name),
+            None => groups.push((key, vec![name])),
+        }
+    }
+    let mut out: Vec<LocalizedText> = groups
+        .into_iter()
+        .map(|((publisher, read_write), names)| {
+            let kinds = names
+                .iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            LocalizedText::key_args(
+                if read_write {
+                    "connected_apps.trust_scope_ext_rw"
+                } else {
+                    "connected_apps.trust_scope_ext_ro"
+                },
+                [("publisher", publisher.as_str()), ("kinds", kinds.as_str())],
+            )
+        })
+        .collect();
+    out.extend(labels);
+    out
+}
+
 /// Localized label for a grant's [`TrustLiveness`] (`nest-trust-grant-status`).
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn status_label(l: TrustLiveness) -> LocalizedText {
+    trust_status_label(l, true)
+}
+
+/// The one status door, choosing by whether the row's trust can be renewed
+/// from its page: a nest's grant can (*renew to resume*); a third-party
+/// principal's cannot — only the app asking again mints for it, so its
+/// Expired row says so (`connected-apps.md` § The trust facet and history
+/// lens → *No per-grant Renew*).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn trust_status_label(l: TrustLiveness, can_renew: bool) -> LocalizedText {
     LocalizedText::key(match l {
         TrustLiveness::Active => "nests.status_active",
         TrustLiveness::ExpiringSoon => "nests.status_expiring",
-        TrustLiveness::Expired => "nests.status_expired",
+        TrustLiveness::Expired if can_renew => "nests.status_expired",
+        TrustLiveness::Expired => "connected_apps.trust_status_expired",
         TrustLiveness::AutoRenewing => "nests.status_auto_renewing",
     })
 }
@@ -835,6 +930,120 @@ mod label_tests {
             kind: kind.map(String::from),
             tier: tier.map(String::from),
         }
+    }
+
+    /// The `content.write` tuple as a records-rw consent mints it: the kind
+    /// with the writer factor folded in.
+    fn write(kind: &str) -> TrustScope {
+        let t = fauna_mls::wrapped_blob::ScopeTuple::content_write(kind, &[7; 32]);
+        scope(&t.class, t.kind.as_deref(), None)
+    }
+
+    fn ext_line(l: &LocalizedText) -> (&str, &str, &str) {
+        (
+            l.key.as_str(),
+            l.args.get("publisher").map(String::as_str).unwrap_or(""),
+            l.args.get("kinds").map(String::as_str).unwrap_or(""),
+        )
+    }
+
+    #[test]
+    fn principal_scope_names_one_ext_kind_read_and_write() {
+        let labels = principal_scope_labels(
+            vec![
+                scope("content.read", Some("ext.example.com.notes"), None),
+                write("ext.example.com.notes"),
+            ],
+            None,
+        );
+        assert_eq!(labels.len(), 1);
+        assert_eq!(
+            ext_line(&labels[0]),
+            (
+                "connected_apps.trust_scope_ext_rw",
+                "example.com",
+                "\"notes\""
+            )
+        );
+    }
+
+    #[test]
+    fn principal_scope_names_several_kinds_verbatim_and_read_only() {
+        let labels = principal_scope_labels(
+            vec![
+                scope("content.read", Some("ext.example.com.notes"), None),
+                scope("content.read", Some("ext.example.com.reading-list"), None),
+            ],
+            None,
+        );
+        assert_eq!(labels.len(), 1);
+        assert_eq!(
+            ext_line(&labels[0]),
+            (
+                "connected_apps.trust_scope_ext_ro",
+                "example.com",
+                "\"notes\", \"reading-list\""
+            )
+        );
+    }
+
+    #[test]
+    fn principal_scope_marks_each_kind_when_modes_differ() {
+        let labels = principal_scope_labels(
+            vec![
+                scope("content.read", Some("ext.example.com.notes"), None),
+                write("ext.example.com.notes"),
+                scope("content.read", Some("ext.example.com.tags"), None),
+            ],
+            None,
+        );
+        assert_eq!(
+            labels.iter().map(ext_line).collect::<Vec<_>>(),
+            vec![
+                (
+                    "connected_apps.trust_scope_ext_rw",
+                    "example.com",
+                    "\"notes\""
+                ),
+                (
+                    "connected_apps.trust_scope_ext_ro",
+                    "example.com",
+                    "\"tags\""
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn principal_scope_keeps_a_folder_read_and_a_revoke_named() {
+        let folder = Some(TrustFolder::Named {
+            name: "photos".into(),
+        });
+        let labels = principal_scope_labels(
+            vec![scope("content.read", Some("folder"), None)],
+            folder.clone(),
+        );
+        assert_eq!(labels[0].key, "nests.scope_folder");
+        assert_eq!(
+            principal_scope_labels(Vec::new(), folder)[0].key,
+            "nests.scope_folder"
+        );
+    }
+
+    #[test]
+    fn a_principal_expired_row_says_the_app_will_ask_again() {
+        assert_eq!(
+            trust_status_label(TrustLiveness::Expired, false).key,
+            "connected_apps.trust_status_expired"
+        );
+        assert_eq!(
+            status_label(TrustLiveness::Expired).key,
+            "nests.status_expired"
+        );
+        assert_eq!(
+            trust_status_label(TrustLiveness::Active, false).key,
+            "nests.status_active"
+        );
     }
 
     #[test]
@@ -1254,7 +1463,7 @@ pub(crate) fn project_grant(
 }
 
 /// The owner's folder grant id → set-name map ([`TrustFolderNames::resolve`]).
-pub(crate) type FolderSetNames = std::collections::BTreeMap<[u8; 16], String>;
+pub type FolderSetNames = std::collections::BTreeMap<[u8; 16], String>;
 
 /// A grant's folder through the shared [`view_model::principal_grant_folder`],
 /// or `None` when the set names could not be resolved — never a `Deleted`
@@ -1286,10 +1495,7 @@ pub(crate) fn project_mint_option(
     }
 }
 
-pub(crate) fn project_history(
-    h: HistoryEntry,
-    folders: Option<&FolderSetNames>,
-) -> TrustHistoryRow {
+pub fn project_history(h: HistoryEntry, folders: Option<&FolderSetNames>) -> TrustHistoryRow {
     let folder = folder_of(&h.grant_id, &h.scope, folders);
     TrustHistoryRow {
         folder,
@@ -1301,6 +1507,16 @@ pub(crate) fn project_history(
         window_end: h.window_end as i64,
         at: h.at as i64,
     }
+}
+
+/// Project one of a third-party principal's live grants for its Connected
+/// apps row (`connected-apps.md` § The trust facet and history lens): the
+/// Nests row's own [`TrustGrantRow`], with no post-succession review mark — a
+/// principal's grant is minted at a consent card, never carried across a
+/// succession by the aftermath's re-mint. `folders` names a folder read
+/// grant's folder; `None` when the owner's set names could not be read.
+pub fn project_principal_grant(g: GrantView, folders: Option<&FolderSetNames>) -> TrustGrantRow {
+    project_grant(g, &[], folders)
 }
 
 /// Map a UI-supplied [`TrustScope`] to the crate's mint-side

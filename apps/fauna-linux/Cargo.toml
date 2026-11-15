@@ -762,6 +762,9 @@ c2pa = { workspace = true, features = ["file_io"] }
 # `RecordingQueue` — the outbox double the family page's composer tests
 # queue into (the same double fauna-tui's family tests use).
 fauna-client-testkit = { path = "../../libs/fauna-client-testkit" }
+# The in-memory `__drafts` nest (`fauna_client_drafts::testing`) the three
+# drafts rails' leave-door tests save against.
+fauna-client-drafts = { path = "../../libs/fauna-client-drafts", features = ["test-helpers"] }
 # Test builds never reach the live OS keyring — see the `no-live-keyring`
 # feature in libs/fauna-credential-store/Cargo.toml (dev-dependencies ONLY).
 fauna-credential-store = { workspace = true, features = ["no-live-keyring"] }

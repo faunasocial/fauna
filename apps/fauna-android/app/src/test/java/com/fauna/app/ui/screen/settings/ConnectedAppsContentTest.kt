@@ -18,6 +18,8 @@ import uniffi.fauna_atproto_settings_machine.ConsentCardRow
 import uniffi.fauna_atproto_settings_machine.ConsentInstallRow
 import uniffi.fauna_atproto_settings_machine.ConsentInstallSettingRow
 import uniffi.fauna_atproto_settings_machine.ConsentSetRow
+import uniffi.fauna_atproto_settings_machine.FolderOption
+import uniffi.fauna_atproto_settings_machine.FolderPicker
 import uniffi.fauna_client_connected_apps.BlockedAppRow
 import uniffi.fauna_client_connected_apps.ConnectedAppRow
 import uniffi.fauna_client_connected_apps.ConnectedAppsSnapshot
@@ -395,6 +397,49 @@ class ConnectedAppsContentTest {
 
     /** A key replacement's card says what the approve ends; an ordinary card
      *  paints nothing of the kind. */
+    // ── The card's folder picker (`connected-apps-request-folder`) ─────────
+
+    private fun folderCard(chosen: Long?, options: List<FolderOption> = listOf(FolderOption(7L, "Drop box"), FolderOption(9L, "Photos"))) =
+        request().copy(
+            folderPicker = FolderPicker(
+                options = options,
+                chosen = chosen,
+                noneEligible = if (options.isEmpty()) LocalizedText("atproto_settings.consent_folder_none_deposit", emptyMap()) else null,
+            ),
+        )
+
+    @Test
+    fun aBareFolderCardHoldsApproveUntilAFolderIsChosen() {
+        render(snapshot = snapshot(requests = listOf(folderCard(chosen = null))))
+        composeTestRule.onNodeWithTag("connected-apps-request-folder")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, ""))
+        composeTestRule.onNodeWithTag("connected-apps-request-approve").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("connected-apps-request-decline").assertIsEnabled()
+    }
+
+    @Test
+    fun aChosenFolderEnablesApproveAndRidesThePickersToken() {
+        render(snapshot = snapshot(requests = listOf(folderCard(chosen = 9L))))
+        composeTestRule.onNodeWithTag("connected-apps-request-folder")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "9"))
+            .assertTextContains("Photos")
+        composeTestRule.onNodeWithTag("connected-apps-request-approve").assertIsEnabled()
+    }
+
+    @Test
+    fun aCardNoFolderCanTakeSaysWhyAndCannotBeApproved() {
+        render(snapshot = snapshot(requests = listOf(folderCard(chosen = null, options = emptyList()))))
+        composeTestRule.onNodeWithText("None of your folders can receive files", substring = true).assertExists()
+        composeTestRule.onNodeWithTag("connected-apps-request-approve").assertIsNotEnabled()
+    }
+
+    @Test
+    fun anOrdinaryCardPaintsNoFolderPicker() {
+        render(snapshot = snapshot(requests = listOf(request())))
+        composeTestRule.onAllNodesWithTag("connected-apps-request-folder").assertCountEquals(0)
+        composeTestRule.onNodeWithTag("connected-apps-request-approve").assertIsEnabled()
+    }
+
     @Test
     fun aKeyReplacingCardSaysWhatTheApproveEnds() {
         val replacing = request().copy(ends = LocalizedText("connected_apps.consent_ends_holder", emptyMap()))

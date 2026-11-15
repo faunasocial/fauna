@@ -286,6 +286,9 @@ def test_provider_product_mapping_covers_only_its_own_payments(app, payments_nes
     retries it) and mints nothing — `{"status":"ignored","reason":
     "product_not_mapped"}` — while a payment naming the mapped product mints
     a claim as before."""
+    # The product field is the journey's subject, so an app that has not built
+    # it declares so before anything launches (convention 7).
+    require_surface(app.driver, "subscription-provider-form-product")
     admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
     author = create_actor_and_register(
         payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
@@ -474,7 +477,11 @@ def test_provider_webhook_url_preview(app, payments_nest):
     assert webhook_url.endswith(expected_path), (
         f"webhook URL should end with {expected_path!r}, got {webhook_url!r}"
     )
-    assert subs.driver.is_visible("subscription-provider-form-webhook-url-copy-button"), (
+    # A scrolled read: the provider form opens below the tier list, and on windows
+    # `is_visible` is the viewport's `!IsOffscreen` — an earlier test in the file
+    # leaves the page scrolled, and the button read "not visible" one scroll away
+    # (passed alone, failed in-file, 2026-11-10).
+    assert subs.driver.is_visible_scrolled("subscription-provider-form-webhook-url-copy-button"), (
         "the webhook URL should be copyable"
     )
     subs.close_provider_form()
@@ -682,7 +689,6 @@ def test_manual_claim_void(app, payments_nest):
     from clients.ws_rpc_admin_client import RpcCallError
 
     _gate_new_ids(app)
-    require_surface(app.driver, "subscription-claim-void-button")
     admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
     author = create_actor_and_register(
         payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
@@ -759,8 +765,6 @@ def test_the_payment_link_subscribes_first_and_binds_the_checkout(
     paid row is ``test_a_payment_backed_request_shows_the_paid_badge``'s).
     The opened URL is read from the session's opener record (``opened_urls``),
     never a browser."""
-    require_surface(app.driver, "payment-link-subscribes-first")
-    app.profile.require_other_profile_offers_browse_supported()
     admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
     author = create_actor_and_register(
         payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,

@@ -984,3 +984,200 @@ def test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room(bridged_app, consent_
     conv.open_thread_by_id(thread.thread_id)
     assert conv.room_class() == "transport-only", conv.room_class()
     _await_text(app, NOSTR_BODY)
+
+
+# ── The user's local remove (bridged-adapter.md § Removing bridged rows) ────
+#
+# Production data flow, one sentence each:
+# - the message: the user opens a bridged bubble's ⋯ → `dm-message-remove-button`
+#   → `dm-message-remove-confirm-button` → the manager's `remove_message`
+#   (refused unless the snapshot says `can_remove`) → the Bridged rail's
+#   `BridgedSink::remove_messages` → the glue's
+#   `fauna.bridges.conversation.messages.remove` → the nest tombstones the row
+#   (`removed`, its sealed content emptied) and answers → the manager forgets
+#   the row and the bubble leaves; nothing reaches the bridge's outbox, and the
+#   bridge re-serving the same far id is answered `duplicate`.
+# - the room: the user opens the room editor (`thread-room-settings-button`,
+#   live on a bridged room because it carries the local remove) →
+#   `room-remove-button` → `room-remove-confirm` → `remove_thread` →
+#   `fauna.bridges.conversation.rooms.remove` → the nest tombstones every row
+#   and hides the room from `rooms.list` → the manager forgets the thread and
+#   the page goes back to the list without it → the peer's next message, a far
+#   id never seen, reopens the room holding only that message.
+
+REMOVE_ROOM = "!remove-one:example.org"
+REMOVE_PEER = "@carol:example.org"
+KEPT_BODY = "this one stays on my nest"
+REMOVED_BODY = "this one I remove from my nest"
+GONE_ROOM = "!remove-all:example.org"
+GONE_PEER = "@dave:example.org"
+GONE_BODY = "a conversation I remove whole"
+RETURN_BODY = "dave writes again after the remove"
+
+
+def _deposit_reply(session, key, *, far_room_id, far_message_id, sender, body) -> dict:
+    """:func:`_deposit`'s message half alone (the room already stands),
+    answering the deposit's own reply — its ``duplicate``."""
+    mlkem_ek = bytes(key["key"]["mlkem_ek"])
+    return _ok(
+        session,
+        "fauna.bridges.conversation.deposit",
+        {
+            "far_room_id": far_room_id,
+            "far_message_id": far_message_id,
+            "sender": sender,
+            "sealed_content": fauna_ffi.bridged_seal_for_user(
+                bytes(key["key"]["mls_pubkey"]), mlkem_ek, body.encode()
+            ),
+            "created_at": 1,
+        },
+    )
+
+
+def _inbox(nest, room_id) -> list[dict]:
+    with alice_client(nest) as ws:
+        return ws.call("fauna.bridges.conversation.inbox.fetch", {"room_id": room_id})[
+            "messages"
+        ]
+
+
+def _open_peer_thread(app, conv, peer, body):
+    """Navigate, wait for ``peer``'s bridged row, open it and wait for ``body``."""
+    conv.navigate()
+
+    def _row():
+        return next((t for t in conv.list_threads() if peer in (t.label or "")), None)
+
+    thread = wait_until(
+        _row,
+        RECEIVE_CYCLE_S,
+        diagnose=lambda: (
+            f"no thread for {peer}; threads={_threads(conv)!r}, error: {_page_error(app)!r}"
+        ),
+    )
+    assert thread.rail == "Bridged", thread.rail
+    conv.open_thread_by_id(thread.thread_id)
+    _await_text(app, body)
+    return thread
+
+
+@pytest.mark.feature("conversations")
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+def test_removing_a_bridged_message_takes_only_my_nests_copy(
+    bridged_app, consent_nest, metadata_server
+):
+    app = bridged_app
+    nest = consent_nest
+    conv = app.conversations
+    session, _holder, key = _consented_bridge(nest, metadata_server)
+    for far_id, body in (("$remove-kept", KEPT_BODY), ("$remove-gone", REMOVED_BODY)):
+        _deposit(
+            session, key, far_room_id=REMOVE_ROOM, far_message_id=far_id,
+            sender=REMOVE_PEER, body=body,
+        )
+
+    _open_peer_thread(app, conv, REMOVE_PEER, REMOVED_BODY)
+    _await_text(app, KEPT_BODY)
+
+    # ── The user removes one message through the ⋯ menu. Every bubble here is
+    #    the peer's, so each carries its ⋯ and the indices line up. ──
+    texts = app.driver.get_texts("dm-message-text")
+    index = next(i for i, t in enumerate(texts) if REMOVED_BODY in (t or ""))
+    conv.remove_message(message_index=index)
+
+    def _removed():
+        now = app.driver.get_texts("dm-message-text")
+        gone = not any(REMOVED_BODY in (t or "") for t in now)
+        kept = any(KEPT_BODY in (t or "") for t in now)
+        return gone and kept
+
+    wait_until(
+        _removed,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"bubbles: {app.driver.get_texts('dm-message-text')!r}, "
+            f"error: {_page_error(app)!r}"
+        ),
+    )
+
+    # ── The nest holds a tombstone for it and the kept row as it was. ──
+    room = next(r for r in _rooms(nest) if r["far_room_id"] == REMOVE_ROOM)
+    assert room["last_removed_at"] > 0, room
+    rows = _inbox(nest, room["room_id"])
+    # The wire omits `removed` while it is false (an additive field).
+    assert sorted(bool(m.get("removed")) for m in rows) == [False, True], rows
+    assert all(len(m["sealed_content"]) == 0 for m in rows if m.get("removed")), rows
+
+    # ── The far side is not told: nothing for this room in the bridge's outbox,
+    #    and the bridge re-serving the same far message stores nothing. ──
+    items = _ok(session, "fauna.bridges.conversation.outbox.fetch", {})["items"]
+    assert not [i for i in items if i["far_room_id"] == REMOVE_ROOM], items
+    again = _deposit_reply(
+        session, key, far_room_id=REMOVE_ROOM, far_message_id="$remove-gone",
+        sender=REMOVE_PEER, body=REMOVED_BODY,
+    )
+    assert again.get("duplicate"), (
+        f"a removed row keeps its dedup key, so a re-served far id is a duplicate: {again!r}"
+    )
+    assert len(_inbox(nest, room["room_id"])) == 2
+    session.ws.close()
+
+
+@pytest.mark.feature("conversations")
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+def test_removing_a_bridged_conversation_hides_it_until_the_peer_writes_again(
+    bridged_app, consent_nest, metadata_server
+):
+    app = bridged_app
+    nest = consent_nest
+    conv = app.conversations
+    session, _holder, key = _consented_bridge(nest, metadata_server)
+    _deposit(
+        session, key, far_room_id=GONE_ROOM, far_message_id="$gone-1",
+        sender=GONE_PEER, body=GONE_BODY,
+    )
+    _open_peer_thread(app, conv, GONE_PEER, GONE_BODY)
+
+    # ── The room editor opens on a bridged room for its remove, and the
+    #    remove is live there. ──
+    conv.open_room_settings()
+    assert app.driver.is_enabled("room-remove-button"), app.driver.diagnose(
+        "room-remove-button"
+    )
+    conv.remove_room()
+
+    def _gone():
+        return not any(GONE_PEER in (t.label or "") for t in conv.list_threads())
+
+    wait_until(
+        _gone,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"threads={_threads(conv)!r}, error: {_page_error(app)!r}",
+    )
+    assert not [r for r in _rooms(nest) if r["far_room_id"] == GONE_ROOM], (
+        "rooms.list must omit a removed room"
+    )
+    items = _ok(session, "fauna.bridges.conversation.outbox.fetch", {})["items"]
+    assert not [i for i in items if i["far_room_id"] == GONE_ROOM], items
+
+    # ── The peer writes again: the conversation comes back with only that. ──
+    _deposit(
+        session, key, far_room_id=GONE_ROOM, far_message_id="$gone-2",
+        sender=GONE_PEER, body=RETURN_BODY,
+    )
+    _open_peer_thread(app, conv, GONE_PEER, RETURN_BODY)
+    texts = app.driver.get_texts("dm-message-text")
+    assert not any(GONE_BODY in (t or "") for t in texts), (
+        f"the removed conversation's rows stay removed when it reopens: {texts!r}"
+    )
+    session.ws.close()

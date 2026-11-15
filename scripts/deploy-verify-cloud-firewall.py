@@ -24,7 +24,10 @@ gate spends none of that budget; it talks only to api.hetzner.cloud):
      asserts the SAFETY INVARIANT:
        (a) at least one cloud firewall is applied — a fully-detached server
            means the cloud-side layer is silently gone (inbound wide open up
-           to ufw), which is exactly the drift to catch;
+           to ufw), which is exactly the drift to catch — save on
+           `LIFTABLE_HOST` once the owner's lift is recorded in its
+           re-creation state (`uat-recreate.py lift`), where no firewall is
+           the recorded state;
        (b) NO applied inbound rule covers an internal-only port
            {3000, 8443, 8444, 8080} — from ANY source: the loopback-trust
            model has no legitimate off-box caller for these, so even an
@@ -110,6 +113,17 @@ SIBLING_HOSTS = ("dev.fauna.build", "test.fauna.build", "fauna.build")
 # one home: the binaries gate's :22 exception and the firewall copy's door rule
 # both read it here, because this file ships and the binaries gate does not.
 ADMITTED_22_HOST = "dev.fauna.build"
+
+
+#: The one box whose firewall the owner may lift (org-nests.md § fauna.build
+#: → *Exposure*): once the lift is recorded in the box's re-creation state on
+#: the dev host, a server with no applied firewall is the recorded state, not
+#: drift (invariant (a) waived; (b), (d), (e) hold for whatever stays). Every
+#: other box, and this one unlifted, with none still reds.
+LIFTABLE_HOST = "fauna.build"
+#: Where the re-creation keeps the box's state on the dev host
+#: (tests/e2e-unified/helpers/staging_box.py `STATE_DIR`).
+_STATE_DIR = "~/.config/fauna/staging-box"
 
 
 class _TransientApiError(Exception):
@@ -248,6 +262,28 @@ def _resolve_siblings(own_host: str) -> set[str]:
     return out
 
 
+def _state_file(host: str):
+    from pathlib import Path
+
+    return Path(os.path.expanduser(_STATE_DIR)) / f"{host}.json"
+
+
+def _lift_recorded(host: str) -> dict | None:
+    """The owner's recorded lift of host's firewall, or None: only for
+    `LIFTABLE_HOST`, read off the re-creation state this machine keeps
+    (`uat-recreate.py lift` writes it); a missing or unreadable file is no lift."""
+    if host != LIFTABLE_HOST:
+        return None
+    try:
+        state = json.loads(_state_file(host).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict) or state.get("domain") != host:
+        return None
+    lift = state.get("firewall_lifted")
+    return lift if isinstance(lift, dict) and lift.get("word") else None
+
+
 class _Posture:
     """Evaluation result: hard violations, advisories, and the human-review
     allow table."""
@@ -257,6 +293,7 @@ class _Posture:
         self.warnings: list[str] = []
         self.allow_table: list[str] = []
         self.cannot_verify_reason: str | None = None
+        self.lifted: dict | None = None
 
 
 def _evaluate_posture(
@@ -264,10 +301,12 @@ def _evaluate_posture(
     statuses: dict,
     server: dict | None = None,
     sibling_networks: list | None = None,
+    lift: dict | None = None,
 ) -> _Posture:
     """Assert the safety invariant over the firewalls applied to the server.
     `statuses` maps firewall id → apply status ("applied" / "pending").
-    `server` (its private_net) and `sibling_networks` feed (e) and (d)."""
+    `server` (its private_net) and `sibling_networks` feed (e) and (d).
+    `lift` (the owner's recorded lift, `_lift_recorded`) waives (a) alone."""
     result = _Posture()
 
     # (e) no provider private network — the provider's firewalls do not filter it.
@@ -279,6 +318,9 @@ def _evaluate_posture(
         )
 
     # (a) ≥1 cloud firewall applied — a detached box = the layer silently gone.
+    if not applied_firewalls and lift:
+        result.lifted = lift
+        return result
     if not applied_firewalls:
         result.violations.append(
             "no cloud firewall is applied to the server — the provider-side "
@@ -480,7 +522,7 @@ def main() -> int:
     applied = [fw for fw in firewalls if fw.get("id") in statuses]
 
     siblings = _sibling_networks(servers, server, _resolve_siblings(host))
-    result = _evaluate_posture(applied, statuses, server, siblings)
+    result = _evaluate_posture(applied, statuses, server, siblings, lift=_lift_recorded(host))
 
     for line in result.allow_table:
         print(f"  inbound: {line}")
@@ -501,6 +543,14 @@ def main() -> int:
     if result.cannot_verify_reason:
         print(f"GATE G1-cloud ERROR: {result.cannot_verify_reason}", file=sys.stderr)
         return 2
+
+    if result.lifted:
+        print(
+            f"GATE G1-cloud: PASS — no firewall applied: {host}'s firewall is lifted on "
+            f"the owner's word ({result.lifted.get('word')!r}, {result.lifted.get('at')}); "
+            "no private network is attached."
+        )
+        return 0
 
     print(
         f"GATE G1-cloud: PASS — {len(applied)} firewall(s) applied, no rule "

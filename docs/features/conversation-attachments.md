@@ -67,13 +67,13 @@ Stamped 2026-09-19 at e9152e3330.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+646e0070 standalone |
-| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| web | ✅ full | 0.1.6-dev+5c83561c standalone |
+| linux | ✅ full | 0.1.6-dev+5c83561c standalone |
 | windows | ⚠ partial | 0.1.6-dev+7d5142cf standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.7-dev+c0e2aa0e standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -110,5 +110,5 @@ Stamped 2026-09-19 at e9152e3330.
 | 10 | app | `tests/e2e-unified/tests/test_conversations_mail_attachments.py::test_camera_and_location_details_are_removed_from_a_file_before_it_is_sent` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_conversations_attachment_c2pa.py::test_a_received_signed_picture_shows_a_provenance_badge` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_conversations_image_lightbox.py::test_received_attachment_image_click_opens_lightbox` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 13 | app | `tests/e2e-unified/tests/test_conversations_image_lightbox_placeholder.py::test_a_picture_without_its_bytes_opens_the_lightbox_as_its_placeholder` | macos (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_conversations_image_lightbox_placeholder.py::test_a_picture_without_its_bytes_opens_the_lightbox_as_its_placeholder` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

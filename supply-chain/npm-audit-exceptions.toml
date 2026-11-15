@@ -26,3 +26,31 @@ id = "GHSA-gcqx-w48m-w2h4"
 package = "deepmerge"
 reason = "No fixed release exists (4.3.1 is the newest). It reaches the web tree only through the Svelte Vite build plugin, which merges the build's own configuration objects at build time; it is not in the shipped bundle and never sees user or network data. Owner-approved in bump round 17 (2026-11-05) knowing it runs in the build. Remove when a fixed deepmerge, or a plugin release without it, clears the 7-day age."
 recorded = "2026-11-05"
+
+[[exception]]
+tree = "sites/fauna-social"
+id = "GHSA-r3h5-4585-7x3w"
+package = "astro"
+reason = "The fix (7.4.7) was published on 2026-11-13, inside the 7-day minimum release age. The finding is in the image endpoint of Astro's Node server adapter. The site is built with output 'static' (sites/fauna-social/astro.config.mjs) and its lock holds no Node adapter package, so no server endpoint of Astro's exists in what is deployed: the pages are files. Carried from 0.1.6 (astro 7.3.5); the bump is a queued need."
+recorded = "2026-11-13"
+
+[[exception]]
+tree = "sites/fauna-social"
+id = "GHSA-mh32-jxcr-mh9f"
+package = "astro"
+reason = "The fix (7.4.5 and later; the queued need takes 7.4.7) was published on 2026-11-13, inside the 7-day minimum release age. The finding needs a template that renders an element under a dynamic tag name with attributes an attacker controls. No page or component under sites/fauna-social/src uses a dynamic tag name, and every page is rendered at build time from the repository's own files, with no visitor input. Carried from 0.1.6 (astro 7.3.5); the bump is a queued need."
+recorded = "2026-11-13"
+
+[[exception]]
+tree = "apps/fauna-web"
+id = "GHSA-mw6w-2fmv-pvw3"
+package = "@sveltejs/kit"
+reason = "The fix (3.1.1) was published on 2026-11-13, inside the 7-day minimum release age. The finding is a crash of the framework's Node server adapter when a reroute hook rewrites a malformed path. The web app is built with the static adapter (apps/fauna-web/vite.config.ts), its lock holds no Node adapter, and its source has no reroute hook; the nest serves the built files and runs none of the framework's server code. Carried from 0.1.6 (kit 3.0.0); the bump is a queued need."
+recorded = "2026-11-13"
+
+[[exception]]
+tree = "apps/fauna-web"
+id = "GHSA-jf9x-2fg2-hx4w"
+package = "@sveltejs/adapter-static"
+reason = "The fix was published on 2026-11-13, inside the 7-day minimum release age. The finding is in the route configuration the adapter writes for one hosting service's deployments. The web app is not deployed there: the nest serves the built files and reads no such configuration. Carried from 0.1.6 (adapter-static 4.0.0); the bump is a queued need."
+recorded = "2026-11-13"

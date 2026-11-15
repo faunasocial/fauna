@@ -4,6 +4,12 @@ title: Your nest serves the app
 section: your nest
 goal: docs/goal/behavior/web-content-hosting.md § Serving the SPA is artifact wiring
 guide: docs/guides/install.md § The no-install option: the web app
+absences:
+  linux (outcome 8): "docs/goal/behavior/onboarding.md § 2. Handle entry (`handle_entry`)"
+  windows (outcome 8): "docs/goal/behavior/onboarding.md § 2. Handle entry (`handle_entry`)"
+  macos (outcome 8): "docs/goal/behavior/onboarding.md § 2. Handle entry (`handle_entry`)"
+  ios (outcome 8): "docs/goal/behavior/onboarding.md § 2. Handle entry (`handle_entry`)"
+  android (outcome 8): "docs/goal/behavior/onboarding.md § 2. Handle entry (`handle_entry`)"
 ---
 
 ## What a user gets
@@ -46,14 +52,14 @@ Stamped 2026-11-07 at b844c771f6.
 | App | Status | Stamp |
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+99dc4c58 standalone |
-| linux | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
-| windows | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
-| macos | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
-| ios | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
-| android | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| linux | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| windows | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| macos | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| ios | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| android | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 | tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
-| android-kids | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
-| ios-kids | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| android-kids | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| ios-kids | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -72,4 +78,5 @@ Stamped 2026-11-07 at b844c771f6.
 | 8 | app | `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_an_unclassifiable_nest_hint_is_dropped_silently` | web (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_onboarding_nest_hint_tui.py::test_the_nest_hint_prefills_the_domain_part_and_the_check_still_runs` | tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_onboarding_nest_hint_tui.py::test_an_unclassifiable_nest_hint_is_dropped_silently` | tui (linux): passed |
+| 8 | app | absent by design on linux, windows, macos, ios, android, android-kids, ios-kids | — |
 <!-- features-render:end -->

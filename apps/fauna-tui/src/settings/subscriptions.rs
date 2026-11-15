@@ -13,8 +13,10 @@
 //! **All data comes from shared Rust** (priority #2): the list is one
 //! `SubscriptionsClient::mine_list` read (`fauna.subscriptions.mine.list`, the
 //! caller-scoped enumeration), unsubscribe is the thin
-//! `SubscriptionsClient::unsubscribe`, redemption the thin
-//! `PaymentsClient::claims_redeem`, and the creator column's handle-or-hex
+//! `SubscriptionsClient::unsubscribe`, redemption
+//! `PaymentsClient::claims_redeem_across_nests` with no home (the one call
+//! shape both redeem doors use — the profile Tiers tab's names the creator's
+//! home), and the creator column's handle-or-hex
 //! choice is `fauna_core::format::author_display_label`. This module owns no
 //! business rule.
 //!
@@ -123,9 +125,14 @@ pub(crate) enum ConsumerOp {
         leave: Leave,
         secret_hex: SecretString,
     },
-    /// `subscription-claim-redeem-button` — `fauna.payments.claims.redeem`.
+    /// `subscription-claim-redeem-button` — `fauna.payments.claims.redeem`
+    /// through `PaymentsClient::claims_redeem_across_nests` with home `None`
+    /// (this page knows no creator, so the code redeems on this nest).
     #[cfg(feature = "payments")]
-    RedeemClaim(String),
+    RedeemClaim {
+        code: String,
+        secret_hex: SecretString,
+    },
 }
 
 /// The page's whole outcome: the fresh list (or the message to surface), plus
@@ -162,11 +169,19 @@ pub(crate) async fn run(nest: Arc<NestClient>, op: ConsumerOp) -> ConsumerRead {
             }
         }
         #[cfg(feature = "payments")]
-        ConsumerOp::RedeemClaim(code) => PaymentsClient::new(Arc::clone(&nest))
-            .claims_redeem(code)
-            .await
-            .map(|_| claim_redeemed = true)
-            .map_err(|e| format!("redeem claim: {e}")),
+        ConsumerOp::RedeemClaim { code, secret_hex } => {
+            match ActorKeypair::from_secret_hex(secret_hex.as_str()) {
+                // No home named, so the method redeems on this nest and never
+                // reads `author_id`: the page has no creator in hand, and the
+                // convention for that slot is the redeemer's own id.
+                Ok(me) => PaymentsClient::new(Arc::clone(&nest))
+                    .claims_redeem_across_nests(code, &me, me.actor_id(), None)
+                    .await
+                    .map(|_| claim_redeemed = true)
+                    .map_err(|e| format!("redeem claim: {e}")),
+                Err(e) => Err(format!("redeem claim: {e}")),
+            }
+        }
     };
     match mutation {
         Ok(()) => ConsumerRead {
@@ -324,7 +339,7 @@ pub(super) fn subscriptions_elements(app: &crate::app::App) -> Vec<Element> {
 /// the whole section (this gate included) absent from the artifact, where this
 /// one only greys the button in a build that HAS the plane.
 #[cfg(feature = "payments")]
-fn redeem_gate(state: &SettingsState) -> Option<String> {
+pub(crate) fn redeem_gate(state: &SettingsState) -> Option<String> {
     fauna_client_features::gate_reason(
         state.features.as_deref().unwrap_or(&[]),
         "payments",

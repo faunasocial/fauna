@@ -546,6 +546,17 @@ window.__faunaTestAgent = {
       // the one-line changed notice naming the nest (`nest-rules.md` § Acceptance
       // at joining, and a change of rules — it adds no element id): null while
       // there is none.
+      // Convention 17's `painted-text-has-area` record (`#lib/e2e-painted-text-area`,
+      // kept by the shared Rust in the core wasm chunk). OMITTED — never null —
+      // when the SPA has no hook or the chunk has no leg yet: an absent key is n/a
+      // to the checker, a published null a shape violation.
+      ...(() => {
+        const area =
+          typeof window.__fauna_paintedTextArea === "function"
+            ? window.__fauna_paintedTextArea()
+            : null;
+        return area === null || area === undefined ? {} : { painted_text_area: area };
+      })(),
       ...(typeof window.__fauna_nestBlockRender === "function"
         ? { nest_block_render: window.__fauna_nestBlockRender() }
         : {}),

@@ -65,11 +65,64 @@ CHANNEL_SEND = "fauna.conversations.channel.send"
 """The kind the removal commit is posted by — refused, so the send fails."""
 
 
+def _chip_texts(seat) -> str:
+    """Every painted chip's text in index order — the chip a click at index
+    ``i`` lands on, so a removal that hits the wrong member names itself."""
+    try:
+        return f"[thread-member-chip texts: {seat.app.driver.get_texts('thread-member-chip')!r}]"
+    except Exception as exc:  # noqa: BLE001 — a diagnostic never masks the failure
+        return f"[thread-member-chip texts: <{type(exc).__name__}: {exc}>]"
+
+
+def _chips_match_roster(app, conv, t) -> bool:
+    """The painted chips are exactly the roster: one chip per listed
+    participant, live. ``thread-member-chip[i]`` is index-parallel with
+    ``participant_actor_ids`` only once the count agrees, so a chip is driven
+    only over a painted roster that has caught up with the projected one (the
+    failed removal's rollback re-orders it)."""
+    return (
+        t is not None
+        and conv.member_chip_count() == len(t.participant_actor_ids)
+        and app.driver.is_enabled("thread-member-chip")
+        and _chips_paint_roster(app, t)
+    )
+
+
+def _chips_paint_roster(app, t) -> bool:
+    """Each painted chip names, in order, the participant the projection lists
+    at its index — a count that agrees is not enough: a header still painting
+    an earlier roster of the same size (a re-order, a swap) drives the wrong
+    removal from the right index. The chip text may carry a localized role
+    mark, so it must CONTAIN the display, never equal it; an app whose
+    serializer ships no ``participant_displays`` yet is checked on the count
+    alone."""
+    displays = t.participant_displays
+    if not displays:
+        return True
+    texts = app.driver.get_texts("thread-member-chip")
+    return len(texts) == len(displays) and all(
+        d in text for d, text in zip(displays, texts)
+    )
+
+
+def _remove_by_chip(owner, view, target, clicks: list) -> None:
+    """Tap the chip ``index_of`` names for ``target``, first recording what
+    the tap is aimed at — the roster order, the index and every painted chip's
+    text — so a removal that lands on someone else says which chip it hit."""
+    i = index_of(view, target.actor_hex)
+    clicks.append(
+        f"[click {len(clicks) + 1}: index {i} for {target.actor_hex[:12]}… over "
+        f"roster {[a[:12] for a in view.participant_actor_ids]}; {_chip_texts(owner)}]"
+    )
+    owner.app.conversations.remove_member(i)
+
+
 def _diag(seat) -> str:
     return "\n".join(
         [
             seat_element(seat, "error-message"),
             seat_element(seat, "thread-member-chip"),
+            _chip_texts(seat),
             seat_story(seat),
             seat_log(seat, "remove", "commit", "pending", "channel.send"),
         ]
@@ -105,18 +158,18 @@ def test_a_removal_the_nest_turns_away_fails_visibly_and_a_retry_completes_it(
         lambda: thread_by_channel(owner.app, channel),
         lambda t: t is not None
         and len(t.participant_actor_ids) == 2
-        and conv.member_chip_count() >= 2
-        and owner.app.driver.is_enabled("thread-member-chip"),
+        and _chips_match_roster(owner.app, conv, t),
         MESSAGE_BUDGET_S,
-        diagnose=lambda: seat_story(owner),
+        diagnose=lambda: _diag(owner),
     )
 
     # ── the removal meets a refused send ─────────────────────────────────
     refusal_prefix = S.conversations.unified.error_remove_participant(message="")
     envelopes_before = len(conv_api.channel_fetch(port, owner.actor, channel, after=0))
+    clicks: list[str] = []
     refuse_rpc(port, CHANNEL_SEND)
     try:
-        conv.remove_member(index_of(owner_open, member.actor_hex))
+        _remove_by_chip(owner, owner_open, member, clicks)
         wait_for_refused_rpc(port, CHANNEL_SEND)
         failed = wait_for(
             "the failed removal reaching the page's error line",
@@ -142,17 +195,27 @@ def test_a_removal_the_nest_turns_away_fails_visibly_and_a_retry_completes_it(
         lambda: thread_by_channel(owner.app, channel),
         lambda t: t is not None
         and member.actor_hex in t.participant_actor_ids
-        and owner.app.driver.is_enabled("thread-member-chip"),
+        and witness.actor_hex in t.participant_actor_ids
+        and _chips_match_roster(owner.app, conv, t),
         MESSAGE_BUDGET_S,
         diagnose=lambda: _diag(owner),
     )
-    conv.remove_member(index_of(retry_view, member.actor_hex))
+    _remove_by_chip(owner, retry_view, member, clicks)
     wait_for(
         "the owner's roster dropping the member on the retry",
         lambda: thread_by_channel(owner.app, channel),
         lambda t: t is not None and member.actor_hex not in t.participant_actor_ids,
         MEMBERSHIP_BUDGET_S,
-        diagnose=lambda: _diag(owner),
+        diagnose=lambda: "\n".join([*clicks, _diag(owner)]),
+    )
+    wait_for(
+        "the owner's chips repainting the roster without the member",
+        lambda: thread_by_channel(owner.app, channel),
+        lambda t: t is not None
+        and conv.member_chip_count() == len(t.participant_actor_ids)
+        and _chips_paint_roster(owner.app, t),
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: "\n".join([*clicks, _diag(owner)]),
     )
     assert not owner.app.has_error(), (
         f"the retried removal lands cleanly: {owner.app.error_text()!r}\n{_diag(owner)}"

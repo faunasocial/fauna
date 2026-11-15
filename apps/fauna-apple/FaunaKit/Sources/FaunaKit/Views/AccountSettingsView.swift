@@ -317,6 +317,17 @@ public struct AccountSettingsView: View {
                 if let error = vm.pendingActionsError {
                     ErrorBanner(message: error)
                 }
+
+                // Unsent changes (account-offline-mutation.md § The unsent-changes
+                // surface, point 1) — STANDING, right after pending actions: every
+                // change this device holds that has not reached the nest, read
+                // from the device outbox (never the nest), with retry and a
+                // confirmed discard on a not-sent row. Mirrors tui's section.
+                // Its outbox reads ride `feed-manager`, which the kids flavor
+                // excises (UnsentChangesSection.swift).
+                #if !FAUNA_KIDS
+                UnsentChangesSection()
+                #endif
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)

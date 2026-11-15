@@ -293,7 +293,7 @@ func ensureNestConnectedNeverStrandsAClient() throws {
                                to: "public func subscribeReconnects()")
     let capture = try #require(body.range(of: "let stillThisActor = sameActorSince()"),
                                "ensureNestConnected no longer captures the actor generation before connecting")
-    let connect = try #require(body.range(of: "try await client.connect()"))
+    let connect = try #require(body.range(of: "try await client.ensureConnected()"))
     let guardStmt = try #require(
         body.range(of: "guard stillThisActor() else {", range: connect.upperBound..<body.endIndex),
         "ensureNestConnected no longer re-checks the actor after connect() — a switch landing mid-connect caches the outgoing actor's client")

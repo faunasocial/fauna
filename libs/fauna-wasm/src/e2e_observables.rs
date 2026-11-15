@@ -85,3 +85,52 @@ pub fn knock_notices_record_for_test(key: Option<String>, text: String, replace_
 pub fn knock_notices_for_test() -> String {
     KNOCK_NOTICES.with_borrow(|log| log.json().to_string())
 }
+
+// The web leg of `fauna_e2e_agent::PAINTED_TEXT_AREA_KEY` — convention 17's
+// `painted-text-has-area` field, kept by the shared
+// `fauna_e2e_contract::PaintedTextArea` (tui's and windows' builder too) and
+// fed by the SPA's DOM measure (`#lib/e2e-painted-text-area.ts`), one call per
+// painted frame, since only the page knows the room its layout gave.
+#[cfg(feature = "test-helpers")]
+thread_local! {
+    static PAINTED_TEXT_AREA: RefCell<fauna_e2e_contract::PaintedTextArea> =
+        RefCell::new(fauna_e2e_contract::PaintedTextArea::default());
+}
+
+/// Record one painted frame's id-bearing text elements, in tree order: element
+/// `i` is `ids[i]` showing `texts[i]`, given `widths[i]`×`heights[i]` CSS px of
+/// room, its pane `pane_widths[i]`×`pane_heights[i]` (`NaN` when it has none)
+/// and `depths[i]` box-less ancestors between them. The shared record keeps the
+/// starved ones only, so the caller passes every element it measured.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = paintedTextAreaObserveForTest)]
+pub fn painted_text_area_observe_for_test(
+    ids: Vec<String>,
+    texts: Vec<String>,
+    widths: Vec<f64>,
+    heights: Vec<f64>,
+    pane_widths: Vec<f64>,
+    pane_heights: Vec<f64>,
+    depths: Vec<u32>,
+) {
+    let frame = (0..ids.len()).map(|i| {
+        let pane_w = pane_widths.get(i).copied().unwrap_or(f64::NAN);
+        let pane_h = pane_heights.get(i).copied().unwrap_or(f64::NAN);
+        fauna_e2e_contract::LaidOutText {
+            id: ids[i].clone(),
+            text: texts.get(i).cloned().unwrap_or_default(),
+            width: widths.get(i).copied().unwrap_or(0.0),
+            height: heights.get(i).copied().unwrap_or(0.0),
+            pane: (pane_w.is_finite() && pane_h.is_finite()).then_some((pane_w, pane_h)),
+            depth: depths.get(i).copied().unwrap_or(0),
+        }
+    });
+    PAINTED_TEXT_AREA.with_borrow_mut(|area| area.observe(frame));
+}
+
+/// The `painted_text_area` state value, as JSON text.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = paintedTextAreaForTest)]
+pub fn painted_text_area_for_test() -> String {
+    PAINTED_TEXT_AREA.with_borrow(|area| area.json().to_string())
+}

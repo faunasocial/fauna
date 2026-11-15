@@ -1614,6 +1614,23 @@ public partial class App : Application
         }
 #endif
 
+        // Before the collision probe — the launch law's first read of the registry —
+        // whatever a sign-out cut short owes is finished: the sync agent dismissed,
+        // the wipe, each recorded account's erase, the residue re-sweep — so this
+        // launch never offers the chooser for an account being signed out, never
+        // routes Online over it and never takes an instance lock for it
+        // (account-scoping.md § Erasure follows scope → The sign-out record is on
+        // all 7 apps, decision 3). Off the UI thread, before the window exists. A
+        // refused finish whose record still owes its wipe FAILS CLOSED (decision 4):
+        // no collision probe, no session material, no launch machine — the fresh
+        // wizard at identity_choice painting the refusal line, whose Remove Again
+        // re-runs the finish. The single-instance gate below still runs, so when
+        // the window that refused it is the primary, the redirect raises it and
+        // its own sign-out records again and finishes both.
+        var launchFinish = await FinishAtLaunchAsync();
+        var launchFailedClosed = launchFinish.FailsClosed;
+        _launchSignOutResidue = launchFinish.Residue;
+
         // Did this plain launch collide with a live instance of the account it would
         // open (account-scoping.md § Concurrent instances → "the colliding
         // instance's surface")? Answered HERE, before the single-instance gate
@@ -1622,7 +1639,7 @@ public partial class App : Application
         // it would never be decided at all. linux states the same constraint for
         // GApplication's D-Bus uniqueness, which is the first of the three things
         // it warns chooser platforms about.
-        var collided = DetectLaunchCollision(launchBinding);
+        var collided = !launchFailedClosed && DetectLaunchCollision(launchBinding);
 
         // Single-instance gate (apps/windows.md § App Lifecycle, principle 1):
         // if another instance is already running, signal it to surface its window
@@ -1867,8 +1884,17 @@ public partial class App : Application
         //    launch takes the ACTIVE account's — the account the launch machine
         //    below routes on — straight from the registry, the only store. After
         //    --reset (or on a fresh install) there is no active account and every
-        //    local is null.
-        if (launchBinding is null)
+        //    local is null. A launch whose sign-out finish failed closed reads no
+        //    account at all: the registry still names the accounts being signed
+        //    out, and this launch must neither come up as one nor lock it.
+        if (launchFailedClosed)
+        {
+            secretHex = null;
+            nestUrl = null;
+            _deviceId = null;
+            _handle = null;
+        }
+        else if (launchBinding is null)
         {
             // Bare locals (still needed by StartMainAppAsync / SerializeState / the
             // test agent). The cached handle pre-populates settings/status views so
@@ -2036,6 +2062,9 @@ public partial class App : Application
             // `painted_errors`' feed (fauna_e2e_agent::PAINTED_ERRORS_KEY): read
             // every painted frame's error surfaces from the app's own tree.
             Testing.PaintedErrorObserver.Install(_window, rootFrame);
+            // `painted_text_area`'s feed (convention 17's `painted-text-has-area`):
+            // every painted, id-bearing text element laid out with no area.
+            Testing.PaintedTextAreaObserver.Install(_window, rootFrame);
         }
 #endif
 
@@ -2197,9 +2226,8 @@ public partial class App : Application
                         wizardRegistry.LaunchPersistence());
                     wizardSelfAddressObserver.Machine = machine;
                     _selfAddressHealObserver = wizardSelfAddressObserver;
-                    await machine.Start();
-                    await DispatchLaunchSnapshotAsync(
-                        machine, machine.Snapshot(), rootFrame, account, newSecret, newNestUrl,
+                    await DriveLaunchAsync(
+                        machine, machine.Start, rootFrame, account, newSecret, newNestUrl,
                         onOnboardingCompleted);
                     // Now that the authenticated session exists, hand the four
                     // intents to the ONE shared post-claim serving-enablement step
@@ -2262,6 +2290,10 @@ public partial class App : Application
             // same reason as the switch and sign-out arms
             // (`Core.Services.E2eSessionCounters.RecordSessionTeardown`).
             Core.Services.E2eSessionCounters.RecordSessionTeardown();
+            // The re-onboard supersedes a launch still in flight: its verdict is
+            // dropped when it lands (Core.Services.LaunchCurrency). The re-claim's own
+            // launch, built at the wizard's completion, is held afresh.
+            Core.Services.LaunchCurrency.Shared.RetireInFlight();
             // A factory reset is a named actor-change boundary even though the
             // re-claim keeps this identity: the wiped nest invalidates whatever
             // every one of these surfaces had converged on (a standing critical
@@ -2294,20 +2326,36 @@ public partial class App : Application
         // is replaced / on next identity load (see the ttl-loop note below).
         SignOutHandler = () =>
         {
+            // The leaving identity — the account this window serves, the one its
+            // instance lock names — read before anything below rebinds it.
+            var leavingActor = _cryptoService is { HasKey: true } leavingCrypto ? leavingCrypto.ActorIdHex : null;
+            // The sign-out's DECISION, on disk before anything else: after
+            // SettingsAccountPage asked SignOutBlocked, before the teardown is
+            // counted and before the first await. `sign-out-record.json` under the
+            // install base names every account the registry lists plus this
+            // window's, and owes the wipe, so a process killed anywhere after this
+            // line — inside the runtime's stop, typically — is finished by the next
+            // launch (account-scoping.md § Erasure follows scope → The sign-out
+            // record is on all 7 apps, decision 1). The accounts it recorded ride to
+            // this gesture's own finish below.
+            var recorded = Core.Services.SignOutResidueSurface.RecordSignOut(SignOutResidueSeat, leavingActor);
             // A sign-out is a session teardown — counted synchronously here, at the
             // top of the deciding handler and before the DispatcherQueue re-root
             // below, for the same reason the switch arm counts where it does
             // (`Core.Services.E2eSessionCounters.RecordSessionTeardown`).
             Core.Services.E2eSessionCounters.RecordSessionTeardown();
+            // A teardown supersedes a launch still in flight: its verdict is dropped
+            // when it lands, never rendered over the wizard this re-roots to
+            // (Core.Services.LaunchCurrency).
+            Core.Services.LaunchCurrency.Shared.RetireInFlight();
             // The leave-flush, before DropActorScopedState drops the managers its
             // snapshots read; the erase below waits for it, because the erase retires
             // this machine's enrollment and the PUTs ride that session
             // (FlushDraftRailsAsync's own contract).
             var draftsFlushed = FlushDraftRailsAsync();
-            // The leaving identity, read before anything below rebinds it: its push
-            // row is dropped on its own still-live client before the erase.
+            // The leaving identity's push row is dropped on its own still-live
+            // client before the erase.
             var leavingRpc = _rpcClient;
-            var leavingActor = _cryptoService is { HasKey: true } leavingCrypto ? leavingCrypto.ActorIdHex : null;
             var leavingDevice = account.ResolveDeviceId();
             // Sign-out is local-only (credentials wiped below), but nothing the
             // outgoing account converged on may survive into whatever account signs
@@ -2324,8 +2372,8 @@ public partial class App : Application
             }
 
             // The wipe runs OFF the UI thread and the navigation is enqueued after
-            // it, rather than both together on the dispatcher. `ClearCredentialNamespace`
-            // now waits for the account runtime to stop before erasing
+            // it, rather than both together on the dispatcher. `FinishSignOut`
+            // waits for the account runtime to stop before erasing
             // (ReleaseAccountScopedStoresBeforeErase — an open store cannot be removed on
             // windows), and that wait on the UI thread would freeze the window for
             // its duration. Nothing in the wipe touches XAML: it is the credential
@@ -2347,10 +2395,11 @@ public partial class App : Application
                 // without a real agent neither touches the box's installed
                 // fauna-sync-agent.exe nor stalls on a dead-pipe connect).
                 //
-                // What the erase left is RECORDED before the wizard is built
-                // (install-scoped, so it outlives this process) and handed to
-                // identity_choice's sign-out-residue view — account-scoping.md
-                // § Erasure follows scope → the residue surface.
+                // The erase is the one sign-out routine over the record written at
+                // the top of this handler (FinishSignOut); what it left is RECORDED
+                // before the wizard is built (install-scoped, so it outlives this
+                // process) and handed to identity_choice's sign-out-residue view —
+                // account-scoping.md § Erasure follows scope → the residue surface.
                 // Push: the leaving identity drops its own row before the
                 // credential erase — the last point its authority is in hand
                 // (common.md § Push Notifications → *Registration*, the sign-out
@@ -2363,7 +2412,7 @@ public partial class App : Application
                 await ErasePrecondition.AwaitUnprovisionThenErase(
                     HydrationSessionEnabled,
                     UnprovisionSyncAgentAsync,
-                    () => residue = RecordSignOutResidue(ClearCredentialNamespace()));
+                    () => residue = FinishSignOut(recorded));
                 _ = _window.DispatcherQueue.TryEnqueue(() =>
                     rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
                         _nestClient, _cryptoService, account,
@@ -2396,6 +2445,12 @@ public partial class App : Application
             //     `barrier` performs, making the teardown invisible to the
             //     negative assert that reads this.
             Core.Services.E2eSessionCounters.RecordSessionTeardown();
+            // The switch supersedes a launch still in flight from here, not only
+            // once step 5 holds its own machine: the awaits between (the leave
+            // gesture, the unprovision) are windows in which an older verdict would
+            // otherwise land as current and render over this teardown
+            // (Core.Services.LaunchCurrency).
+            Core.Services.LaunchCurrency.Shared.RetireInFlight();
 
             // 3c. The torn-down shell is no longer an authenticated session, even
             //     though its MainPage stays on screen until the rebuild navigates.
@@ -2512,9 +2567,10 @@ public partial class App : Application
                     switchSelfAddressObserver, registry.LaunchPersistence());
                 switchSelfAddressObserver.Machine = switchMachine;
                 _selfAddressHealObserver = switchSelfAddressObserver;
-                await switchMachine.Start();
-                await DispatchLaunchSnapshotAsync(
-                    switchMachine, switchMachine.Snapshot(), rootFrame, account,
+                // Held before its start: a launch still in flight (the cold one, a
+                // Retry) is superseded by this one, and its verdict is dropped.
+                await DriveLaunchAsync(
+                    switchMachine, switchMachine.Start, rootFrame, account,
                     newSecretHex, newNestUrl ?? baseUrl, onOnboardingCompleted);
             }
             catch (Exception ex)
@@ -2764,9 +2820,8 @@ public partial class App : Application
                         abandonSelfAddressObserver, abandonRegistry.LaunchPersistence());
                     abandonSelfAddressObserver.Machine = machine;
                     _selfAddressHealObserver = abandonSelfAddressObserver;
-                    await machine.Start();
-                    await DispatchLaunchSnapshotAsync(
-                        machine, machine.Snapshot(), rootFrame, account,
+                    await DriveLaunchAsync(
+                        machine, machine.Start, rootFrame, account,
                         account.SecretHex, account.NestUrl ?? baseUrl,
                         onOnboardingCompleted);
                 }
@@ -2785,26 +2840,50 @@ public partial class App : Application
         // there's an identity).
         try
         {
-            // The CLI overrides were seeded into the registry at boot, so the
-            // machine routes on the active account with no override plumbing.
-            //
-            // A BOUND instance routes on ITS account instead: the bound adapter
-            // resolves the named account and never consults or moves `active`.
-            // Pairing it with the session-material read
-            // above is what makes a bound launch actually work — routing the
-            // machine on the bound account while the session came up as the
-            // active one is precisely the inert-bound-launch blocker.
-            var persistence = launchBinding is null
-                ? registry.LaunchPersistence()
-                : registry.BoundLaunchPersistence(launchBinding);
-            var selfAddressObserver = new Core.Services.SelfAddressHealObserver();
-            var machine = new LaunchMachine(selfAddressObserver, persistence);
-            selfAddressObserver.Machine = machine;
-            _selfAddressHealObserver = selfAddressObserver;
-            await machine.Start();
-            await DispatchLaunchSnapshotAsync(
-                machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
-                onOnboardingCompleted);
+            if (launchFailedClosed)
+            {
+                // The sign-out finish failed closed (above): no machine routes over
+                // the registry. The fresh wizard, painting the refusal line; its
+                // Remove Again re-runs the finish, and once that finish has wiped,
+                // identity_choice is exactly where an empty registry routes.
+                ShellLog.Warn("App",
+                    "[launch] the sign-out finish failed closed — identity_choice with the refusal line, no launch machine");
+                rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
+                    _nestClient, _cryptoService, account,
+                    OnOnboardingCompleted: onOnboardingCompleted,
+                    SignOutResidue: TakeLaunchSignOutResidue()));
+            }
+            else
+            {
+                // The CLI overrides were seeded into the registry at boot, so the
+                // machine routes on the active account with no override plumbing.
+                //
+                // A BOUND instance routes on ITS account instead: the bound adapter
+                // resolves the named account and never consults or moves `active`.
+                // Pairing it with the session-material read
+                // above is what makes a bound launch actually work — routing the
+                // machine on the bound account while the session came up as the
+                // active one is precisely the inert-bound-launch blocker.
+                var persistence = launchBinding is null
+                    ? registry.LaunchPersistence()
+                    : registry.BoundLaunchPersistence(launchBinding);
+                var selfAddressObserver = new Core.Services.SelfAddressHealObserver();
+                var machine = new LaunchMachine(selfAddressObserver, persistence);
+                selfAddressObserver.Machine = machine;
+                _selfAddressHealObserver = selfAddressObserver;
+                // launch_progress while the sign-in check runs: the account the app
+                // is trying, from the registry's cache — blank on a first launch
+                // (onboarding.md § App-launch routing → The cached identity on the
+                // launch surfaces). The dispatch below navigates away from it.
+                rootFrame.Navigate(typeof(Views.LaunchProgressPage), ReadLaunchIdentityLine());
+                // The agent is already up (Testing.TestAgent.Start above), so an e2e
+                // session patch can land while this start is in flight; a dropped
+                // verdict falls through to the window decision below like a routed one,
+                // and whatever superseded it navigates away from launch_progress.
+                await DriveLaunchAsync(
+                    machine, machine.Start, rootFrame, account, secretHex, baseUrl,
+                    onOnboardingCompleted);
+            }
         }
         catch (Exception ex)
         {
@@ -2813,9 +2892,13 @@ public partial class App : Application
             var navParam = new ServiceClients(
                 _nestClient, _cryptoService, account,
                 SeedSecret: secretHex,
-                OnOnboardingCompleted: onOnboardingCompleted);
+                OnOnboardingCompleted: onOnboardingCompleted,
+                SignOutResidue: secretHex is null ? TakeLaunchSignOutResidue() : null);
             rootFrame.Navigate(typeof(OnboardingPage), navParam);
         }
+        // The launch's residue paints on the cold launch's first identity_choice
+        // or nowhere: a later landing (a switch, a sign-out) carries its own.
+        _launchSignOutResidue = null;
 
         _window.Closed += (s, e) =>
         {
@@ -2869,6 +2952,70 @@ public partial class App : Application
         // unsaved drafts are persisted on the way down. apps/windows.md
         // § App Lifecycle, "Cooperative shutdown for installers".
         RestartManagerService.Initialize();
+    }
+
+    /// <summary>
+    /// One asynchronous launch drive, rendered only while it is still the launch this
+    /// app holds (<c>onboarding.md</c> § App-launch routing → <i>A verdict renders only
+    /// while its own launch is still the current one</i>; multiple-accounts outcome 17).
+    /// <paramref name="drive"/> awaits <paramref name="machine"/>: a fresh machine's
+    /// <c>Start()</c>, or a Retry/Trust re-send on the machine already on screen.
+    ///
+    /// <para>The machine is held in <see cref="Core.Services.LaunchCurrency"/> BEFORE the
+    /// first await. A newer drive replaces it, and every superseding path clears it: the
+    /// e2e session patch, sign-out and the factory-reset re-onboard. A verdict that lands
+    /// after that is dropped whole, so nothing is rendered and nothing is torn down;
+    /// whatever superseded it owns the routing. It is an ownership test, never an "is a
+    /// session present?" one: the held launch's verdict still routes in full over a live
+    /// session, which the <c>IdentityChanged</c> teardown depends on.</para>
+    ///
+    /// <para>A drive that THROWS has delivered its verdict too. It is counted like any
+    /// other, and the caller's fallback renders it only while the launch is current.</para>
+    /// </summary>
+    private async Task DriveLaunchAsync(
+        LaunchMachine machine,
+        Func<Task> drive,
+        Frame rootFrame,
+        ISessionAccount account,
+        string? secretHex,
+        string baseUrl,
+        System.Action onOnboardingCompleted)
+    {
+        var currency = Core.Services.LaunchCurrency.Shared;
+        currency.Begin(machine);
+        try
+        {
+            await drive();
+        }
+        catch (Exception ex)
+        {
+            if (currency.Deliver(machine)) throw;
+            ShellLog.Info("App", $"[launch] a superseded launch failed ({ex.GetType().Name}) — dropping it");
+            ForgetDroppedLaunch(machine);
+            return;
+        }
+        if (!currency.Deliver(machine))
+        {
+            ForgetDroppedLaunch(machine);
+            return;
+        }
+        await DispatchLaunchSnapshotAsync(
+            machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl, onOnboardingCompleted);
+    }
+
+    /// <summary>
+    /// A dropped launch takes its session field with it. The self-address observer built
+    /// for its machine is what <see cref="CurrentLaunchIdentity"/> reads, so left in place
+    /// it would answer for the newer session with the superseded launch's identity. A
+    /// newer launch has already installed its own observer, so this clears only one that
+    /// still belongs to the dropped machine (the e2e session patch builds none).
+    /// </summary>
+    private void ForgetDroppedLaunch(LaunchMachine machine)
+    {
+        if (_selfAddressHealObserver is { } observer && ReferenceEquals(observer.Machine, machine))
+        {
+            _selfAddressHealObserver = null;
+        }
     }
 
     /// <summary>
@@ -3015,19 +3162,17 @@ public partial class App : Application
             {
                 // Cold start — no identity in the store. Wizard at IdentityChoice.
                 //
-                // A signed-out launch re-sweeps a residue a previous sign-out
-                // recorded FIRST, silently, and paints the sign-out-residue view
-                // only if something is still left (account-scoping.md § Erasure
-                // follows scope → the residue surface). Off the UI thread — it is
-                // file I/O over the recorded scopes — and before the Navigate, so
-                // the wizard's first frame already tells the truth.
-                var residueSeat = SignOutResidueSeat;
-                var residue = await Task.Run(
-                    () => Core.Services.SignOutResidueSurface.RecheckAtLaunch(residueSeat));
+                // A signed-out launch paints what the launch's own sign-out finish
+                // left (FinishAtLaunchAsync, which ran before anything read the
+                // registry: the record a dead sign-out left, then the residue
+                // record's silent re-sweep) — the sign-out-residue view, only if
+                // something is still left (account-scoping.md § Erasure follows
+                // scope → The sign-out record is on all 7 apps, decision 3). Taken
+                // once, so only the cold launch's first identity_choice paints it.
                 rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
                     _nestClient, _cryptoService, account,
                     OnOnboardingCompleted: onOnboardingCompleted,
-                    SignOutResidue: residue));
+                    SignOutResidue: TakeLaunchSignOutResidue()));
                 return;
             }
 
@@ -3178,10 +3323,15 @@ public partial class App : Application
                     Refusal: refusal,
                     OnConfirmStartOver: () =>
                     {
-                        // The same erase a sign-out runs, so what it leaves is
-                        // recorded and painted the same way — a start-over that
-                        // could not remove everything must say so too.
-                        var residue = RecordSignOutResidue(ClearCredentialNamespace());
+                        // The same routine a sign-out runs, behind the same record:
+                        // the unreadable index names nobody, so the record owes the
+                        // wipe with no accounts, and its finish sweeps every scope
+                        // under the bases (account-scoping.md § Erasure follows scope
+                        // → The sign-out record is on all 7 apps, decision 1). What
+                        // it leaves is recorded and painted the same way — a
+                        // start-over that could not remove everything must say so too.
+                        var recorded = Core.Services.SignOutResidueSurface.RecordSignOut(SignOutResidueSeat, null);
+                        var residue = FinishSignOut(recorded);
                         rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
                             _nestClient, _cryptoService, account,
                             OnOnboardingCompleted: onOnboardingCompleted,
@@ -3247,13 +3397,9 @@ public partial class App : Application
                 ShellLog.Warn("App", $"[launch] phase=Offline(sign-in-refused): {snap.@lastError}");
                 var ctx = new Views.LaunchSignInRefusedContext(
                     Message: snap.@lastError ?? string.Empty,
-                    Retry: async () =>
-                    {
-                        await machine.RetrySilentChallenge();
-                        await DispatchLaunchSnapshotAsync(
-                            machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
-                            onOnboardingCompleted);
-                    },
+                    Retry: () => DriveLaunchAsync(
+                        machine, machine.RetrySilentChallenge, rootFrame, account, secretHex, baseUrl,
+                        onOnboardingCompleted),
                     Fallthrough: () => FallThroughToWizard(rootFrame, account, secretHex, onOnboardingCompleted));
                 rootFrame.Navigate(typeof(Views.LaunchSignInRefusedPage), ctx);
                 return;
@@ -3274,13 +3420,9 @@ public partial class App : Application
                     ShellLog.Warn("App", $"[launch] phase=Offline(transient): {lastError}");
                 }
                 var ctx = new Views.LaunchRetryContext(
-                    Retry: async () =>
-                    {
-                        await machine.RetrySilentChallenge();
-                        await DispatchLaunchSnapshotAsync(
-                            machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
-                            onOnboardingCompleted);
-                    },
+                    Retry: () => DriveLaunchAsync(
+                        machine, machine.RetrySilentChallenge, rootFrame, account, secretHex, baseUrl,
+                        onOnboardingCompleted),
                     Fallthrough: () => FallThroughToWizard(rootFrame, account, secretHex, onOnboardingCompleted),
                     // box-recovery.md § Recovery UI (step 4), surviving-device
                     // entry: RevealLaunchRecoverButtonAsync below already read
@@ -3297,7 +3439,8 @@ public partial class App : Application
                     Retire: () => OpenNestRetireFromLaunch(rootFrame, baseUrl, () =>
                         DispatchLaunchSnapshotAsync(
                             machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
-                            onOnboardingCompleted)));
+                            onOnboardingCompleted)),
+                    IdentityLine: ReadLaunchIdentityLine());
                 rootFrame.Navigate(typeof(Views.LaunchRetryPage), ctx);
                 // Best-effort, fired AFTER the retry surface paints (never
                 // blocks it): a transiently-failing saved nest may still answer
@@ -3363,13 +3506,9 @@ public partial class App : Application
                 // `identity_fork` bit; the heads it names are the phase's own. The page
                 // then paints the fork sentence and NO trust button.
                 var ctx = new Views.LaunchIdentityChangedContext(
-                    Trust: async () =>
-                    {
-                        await machine.TrustNestIdentity();
-                        await DispatchLaunchSnapshotAsync(
-                            machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
-                            onOnboardingCompleted);
-                    },
+                    Trust: () => DriveLaunchAsync(
+                        machine, machine.TrustNestIdentity, rootFrame, account, secretHex, baseUrl,
+                        onOnboardingCompleted),
                     Fallthrough: () => FallThroughToWizard(rootFrame, account, secretHex, onOnboardingCompleted),
                     IsFork: snap.@identityFork,
                     PinnedHex: changed.@pinnedHex,
@@ -3388,13 +3527,9 @@ public partial class App : Application
                 ShellLog.Warn("App",
                     $"[launch] unexpected phase after Start: {snap.@phase}");
                 var ctx = new Views.LaunchRetryContext(
-                    Retry: async () =>
-                    {
-                        await machine.RetrySilentChallenge();
-                        await DispatchLaunchSnapshotAsync(
-                            machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
-                            onOnboardingCompleted);
-                    },
+                    Retry: () => DriveLaunchAsync(
+                        machine, machine.RetrySilentChallenge, rootFrame, account, secretHex, baseUrl,
+                        onOnboardingCompleted),
                     Fallthrough: () => FallThroughToWizard(rootFrame, account, secretHex, onOnboardingCompleted),
                     Recover: (boxes) =>
                     {
@@ -3407,7 +3542,8 @@ public partial class App : Application
                     Retire: () => OpenNestRetireFromLaunch(rootFrame, baseUrl, () =>
                         DispatchLaunchSnapshotAsync(
                             machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
-                            onOnboardingCompleted)));
+                            onOnboardingCompleted)),
+                    IdentityLine: ReadLaunchIdentityLine());
                 rootFrame.Navigate(typeof(Views.LaunchRetryPage), ctx);
                 if (secretHex is not null && rootFrame.Content is Views.LaunchRetryPage retryPage)
                 {
@@ -3612,6 +3748,29 @@ public partial class App : Application
     /// device's own store (<c>DeploymentSeedCustody.LoadRecoverableBoxesAsync</c>
     /// never throws), so a surviving device still offers every box it custodies.
     /// </summary>
+    /// <summary>
+    /// <c>launch-identity-label</c>'s text for <c>launch_progress</c> and
+    /// <c>launch_retry</c>: the bound (else active) account's cached
+    /// <c>handle@domain · tier</c>, the shared <c>FfiAccountRegistry.LaunchIdentityLine</c>
+    /// (<c>onboarding.md</c> § App-launch routing → <i>The cached identity on the launch
+    /// surfaces</i>) — the call tui, linux, android and FaunaKit make. Null while the cache
+    /// holds no handle, and on a registry read that failed (logged): the label is then
+    /// absent, and the surface itself still paints.
+    /// </summary>
+    private static string? ReadLaunchIdentityLine()
+    {
+        try
+        {
+            using var registry = CredentialStore.Registry();
+            return registry.LaunchIdentityLine();
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("App", $"[launch] the cached identity could not be read: {ex.Message}");
+            return null;
+        }
+    }
+
     private static async Task RevealLaunchRecoverButtonAsync(Views.LaunchRetryPage page, string nestUrl, string secretHex)
     {
         byte[] ownerSecret;
@@ -4020,6 +4179,11 @@ public partial class App : Application
         // connection (the same _rpcClient). Native twin of linux's reconnect pump
         // (apps/fauna-linux/src/client.rs → WsEvent::Reconnected).
         _rpcClient.StartReconnectPump();
+        // The session's identity follow (long-term-store.md § Cross-app server-data
+        // cache): every identity this session's own bearer mint confirms lands in the
+        // account's cached handle/domain/tier, which the Settings identity cell and the
+        // launch surfaces paint. Idempotent; ends with the client.
+        _rpcClient.StartSelfIdentityFollow();
         // Knock push pump (app-lifetime): drives the OS knock toast + the contacts
         // roster refresh off the shared FfiNestClient.SubscribeKnocks stream. Twin of
         // linux app.rs WsEvent::Push(PushEvent::Knock). Started on the UI thread so
@@ -5252,6 +5416,12 @@ public partial class App : Application
             // prompt is a native OS dialog with no test ID
             // (`fauna_e2e_agent::ACTIVATION_GESTURES_KEY`).
             ["activation_gestures"] = Core.Services.E2eSessionCounters.ActivationGestures,
+            // Every delivered launch verdict, rendered or dropped — the barrier
+            // test_launch_superseded_verdict.py's negative assert rests on, at the
+            // same top-level depth as tui/linux/web/android/apple
+            // (`fauna_e2e_agent::LAUNCH_VERDICTS_KEY`). Counted in DriveLaunchAsync,
+            // the one seam every asynchronous launch drive passes.
+            ["launch_verdicts"] = Core.Services.LaunchCurrency.Shared.Observable,
             // Convention 14's other sweep-side causal barrier — same top-level
             // depth as tui/linux/web/android, a two-getter read over the
             // process-wide registry (`fauna_e2e_agent::ALERT_SWEEP_PASSES_KEY`).
@@ -5381,6 +5551,14 @@ public partial class App : Application
             // `{"count", "showing"}` (`fauna_e2e_agent::PAINTED_ERRORS_KEY`). Fed
             // by `Testing.PaintedErrorObserver`; counted by shared Rust.
             ["painted_errors"] = DecodeObservable(Core.Services.E2eLoudSurfaces.PaintedErrorsJson()),
+            // Convention 17's `painted-text-has-area` field
+            // (`helpers/frame_invariants.py::_check_painted_text_has_area` owns the
+            // contract): `{"starved": [{"id", "text", "width", "height", "pane",
+            // "depth"}]}`, every painted, id-bearing text element of the last
+            // laid-out frame whose box is under one DIP. Fed by
+            // `Testing.PaintedTextAreaObserver`; a reference read, as this ack path
+            // requires.
+            ["painted_text_area"] = Testing.PaintedTextAreaObserver.State(),
             // Every knock push the knock-toast arm received and every toast it
             // showed — `{"seen", "fired": [{"key", "text", "replace_id"}]}`
             // (`fauna_e2e_agent::KNOCK_NOTICES_KEY`, notifications outcome 15).
@@ -6178,8 +6356,8 @@ public partial class App : Application
     /// process has a young heap under no pressure, so in practice it never does. Two
     /// measured consequences, both permanent for the rest of the process's life:</para>
     /// <list type="number">
-    ///   <item>the account-state erase (<c>ClearCredentialNamespace</c> → shared
-    ///   <c>erase_all_account_scopes</c>, a <c>remove_dir_all</c> over the actor scope
+    ///   <item>the account-state erase (<c>FinishSignOut</c> → the shared sign-out
+    ///   routine's <c>erase_all_account_scopes</c>, a <c>remove_dir_all</c> over the actor scope
     ///   dir) fails with Windows <c>ERROR_SHARING_VIOLATION</c> — <c>os error 32</c>
     ///   — because <c>mls.db</c> and its <c>.lock</c> are still open. It is swallowed
     ///   as a WARN, so a sign-out silently leaves the user's conversations readable on
@@ -6488,8 +6666,8 @@ public partial class App : Application
             // Sign-out-shaped, not the switch stop: the only two callers that
             // reach this branch with a still-live `_rpcClient` are the real
             // sign-out (`SignOutHandler`) and the unreadable-index "start over"
-            // path, and both erase the credential namespace right after this
-            // returns — the case `StopAccountRuntimeForSignOutAsync` exists for
+            // path, and both run the sign-out routine's wipe right after this
+            // returns (`FinishSignOut`) — the case `StopAccountRuntimeForSignOutAsync` exists for
             // (`NestRpcClient.StopAccountRuntimeForSignOutAsync`'s own doc). The
             // e2e `reset`/`logout` arms never reach this `if`: they call
             // `DisposeNestClients` first, which already nulls `_rpcClient` and
@@ -6511,86 +6689,154 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Erase the WHOLE credential namespace: every account's per-actor slots and
-    /// the index (<c>long-term-store.md</c> § Cleanup contract).
+    /// The e2e reset/logout arms' wipe: the WHOLE credential namespace (every
+    /// account's per-actor slots and the index, <c>long-term-store.md</c> § Cleanup
+    /// contract) and every account's scoped stores, with no sign-out record and no
+    /// residue record. Delete-only, so a crash mid-wipe cannot resurrect the
+    /// identity being erased.
     ///
-    /// <para>This is the erase behind sign-out and the e2e reset/logout arms. With
-    /// several accounts on one install, a narrower wipe would leave some account's
-    /// secret sitting in Credential Manager referenced by nothing. Delete-only, so
-    /// a crash mid-wipe cannot resurrect the identity being erased.</para>
+    /// <para>Not the sign-out's erase any more: a real sign-out and the
+    /// unreadable-index start-over record their decision first and run the one
+    /// sign-out routine (<see cref="FinishSignOut"/>). These arms are a test
+    /// boundary, not a journey a user watches, so what they leave is discarded —
+    /// a record here would make every test's own reset look like a failed sign-out
+    /// at the next relaunch.</para>
     /// </summary>
-    /// <returns>
-    /// What the two erases left: the account-scoped sweep (<c>null</c> when it
-    /// failed outright) and the credential registry's read-back. A caller a
-    /// user is watching — <see cref="SignOutHandler"/> and the unreadable-index
-    /// start-over — hands both to <see cref="RecordSignOutResidue"/>, which
-    /// records and paints them (<c>account-scoping.md</c> § Erasure follows
-    /// scope → <i>the residue surface</i>); the e2e reset/logout arms discard
-    /// them — they are a test boundary, not a journey a user watches, and a
-    /// record there would make every test's own reset look like a failed
-    /// sign-out at the next relaunch.
-    /// </returns>
-    private static (uniffi.fauna_ffi.FfiEraseSweep? Sweep, uniffi.fauna_ffi.FfiCredentialSweep Credentials)
-        ClearCredentialNamespace()
+    private static void ClearCredentialNamespace()
     {
         // ⚠ FIRST, before anything is erased — see the method's own doc.
         ReleaseAccountScopedStoresBeforeErase();
 
-        using var registry = CredentialStore.Registry();
-        // What still reads back after the erase — the only witness this seat has,
-        // since the foreign store's delete reports nothing (a Credential Manager
-        // refusal is swallowed). Folded into the notice below; dropping it painted
-        // a clean "Signed out" over surviving credentials until 2026-09-13
-        // (account-scoping.md § Erasure follows scope).
-        var credentials = registry.ClearAll();
-
-        // The ONE clear point for what a succession hands across its own account
-        // switch (identity-succession.md § The RecoveryKey → At succession). ⚠ Not
-        // the switch teardown, deliberately: those fields belong to the OUTGOING
-        // identity's ceremony and the teardown they have to survive IS that
-        // ceremony's closing act. A wipe is different — it destroys every identity
-        // on the box, so there is no successor left to owe a kit to and no
-        // predecessor row left for that kit to seal.
-        Core.Services.SuccessionHandoff.ClearOnCredentialWipe();
-        // Same reasoning: a sign-in follow-up queued for an identity the wipe
-        // destroys has nobody left to run as.
-        Core.Services.PostSignInHandoff.Clear();
+        using (var registry = CredentialStore.Registry())
+        {
+            registry.ClearAll();
+        }
+        ForgetHandoffsOfWipedIdentities();
 
         // Erasure follows scope (account-scoping.md § Erasure follows scope): a
-        // sign-out / factory-reset that wiped only the credential namespace would
-        // leave every account's MLS store, drafts and backup state readable on disk
-        // — the same bug as leaving fauna/{actor}/secret behind. Drop every scoped
-        // store; install-scoped state (logs, host-keyed
-        // pin store, config-replica, app settings) is unnamed and survives.
-        var sweep = Core.Services.AccountStateDir.EraseAll();
+        // reset that wiped only the credential namespace would leave every
+        // account's MLS store, drafts and backup state readable on disk. Drop
+        // every scoped store; install-scoped state (logs, host-keyed pin store,
+        // config-replica, app settings) is unnamed and survives.
+        Core.Services.AccountStateDir.EraseAll();
         ActiveActorHex = null;
         // The window serves no account now: put down the process holder's
-        // instance lock and its shared-root serving lock, AFTER the erase — a
-        // holder kept past here made this signed-out window a "sibling" to every
-        // later sign-out of the account it left (account-scoping.md § Concurrent
-        // instances → An erase refuses while a sibling serves the account).
+        // instance lock and its shared-root serving lock, AFTER the erase.
         Core.Services.SessionInstance.Release();
-        return (sweep, credentials);
+    }
+
+    /// <summary>
+    /// <b>The sign-out's tail</b> — the gesture's call of the one sign-out routine
+    /// (<c>account-scoping.md</c> § Erasure follows scope → <i>The sign-out record is
+    /// on all 7 apps</i>, decision 3), over the record <see cref="SignOutHandler"/>
+    /// (or the unreadable-index start-over) wrote at its top. Blocking: run it off
+    /// the UI thread where a window is up.
+    ///
+    /// <para>The runtime's stop first (<see cref="ReleaseAccountScopedStoresBeforeErase"/>
+    /// — an open store is an unerasable store on windows), then the routine: the
+    /// serving question, the wipe, each recorded account's scopes and auxiliary
+    /// slots, the residue re-sweep, the residue record written before the sign-out
+    /// record clears. The sync agent is not the routine's to dismiss here — this
+    /// gesture's own <c>AwaitUnprovisionThenErase</c> awaited its un-provision
+    /// already. Then the window serves no account: the process holder's instance
+    /// lock and its shared-root serving lock go down AFTER the erase — a holder kept
+    /// past here made this signed-out window a "sibling" to every later sign-out of
+    /// the account it left (§ Concurrent instances → <i>An erase refuses while a
+    /// sibling serves the account</i>).</para>
+    /// </summary>
+    /// <returns>The <c>sign-out-residue</c> view to paint — what the run left, or the
+    /// refusal line when another window began serving a recorded account between
+    /// the page's <c>SignOutBlocked</c> and this run (the record then stands for the
+    /// next launch); <c>null</c> when clean.</returns>
+    private static Core.Services.ISignOutResidueSurface? FinishSignOut(string[]? written)
+    {
+        // ⚠ FIRST, before anything is erased — ReleaseAccountScopedStoresBeforeErase's
+        // own doc.
+        ReleaseAccountScopedStoresBeforeErase();
+        ForgetHandoffsOfWipedIdentities();
+
+        Core.Services.ISignOutResidueSurface? residue = null;
+        try
+        {
+            residue = Core.Services.SignOutResidueSurface.Finish(
+                SignOutResidueSeat, uniffi.fauna_ffi.FfiFinishCaller.Gesture, written).Residue;
+        }
+        catch (Exception ex)
+        {
+            // Said nothing about the disk: the record stands, and the next launch
+            // finishes what this run did not.
+            ShellLog.Warn("App", $"[sign-out] the gesture's finish failed: {ex.Message}");
+        }
+        ActiveActorHex = null;
+        Core.Services.SessionInstance.Release();
+        return residue;
+    }
+
+    /// <summary>
+    /// The handoffs a credential wipe leaves nobody to run as. The ONE clear point
+    /// for what a succession hands across its own account switch
+    /// (<c>identity-succession.md</c> § The RecoveryKey → At succession). ⚠ Not the
+    /// switch teardown, deliberately: those fields belong to the OUTGOING identity's
+    /// ceremony and the teardown they have to survive IS that ceremony's closing
+    /// act. A wipe is different — it destroys every identity on the box, so there is
+    /// no successor left to owe a kit to and no predecessor row left for that kit to
+    /// seal; and a sign-in follow-up queued for an identity the wipe destroys has
+    /// nobody left to run as.
+    /// </summary>
+    private static void ForgetHandoffsOfWipedIdentities()
+    {
+        Core.Services.SuccessionHandoff.ClearOnCredentialWipe();
+        Core.Services.PostSignInHandoff.Clear();
     }
 
     /// <summary>
     /// Where this seat's sign-out erases — the arguments
     /// <c>AccountStateDir.EraseAll</c> and <c>SignOutBlocked</c> are called with
     /// (the install base, and the shared per-user store root as a <c>null</c>
-    /// container) — plus the one credential store's registry view. What the
-    /// residue face needs to record, re-sweep and re-check.
+    /// container) — plus the one credential store's registry view. What the one
+    /// sign-out routine needs to record, finish and re-sweep.
     /// </summary>
     private static Core.Services.ResidueSeat SignOutResidueSeat =>
         new(Core.Services.AccountStateDir.Base, null, CredentialStore.Registry);
 
     /// <summary>
-    /// Record what <see cref="ClearCredentialNamespace"/> left and return the
-    /// <c>sign-out-residue</c> view to paint, or <c>null</c> on a clean erase —
-    /// built after BOTH erases, so it answers for the whole sign-out.
+    /// <b>The launch's call of the one sign-out routine</b>, before anything reads
+    /// the registry (<c>account-scoping.md</c> § Erasure follows scope → <i>The
+    /// sign-out record is on all 7 apps</i>, decision 3): a sign-out a dead process
+    /// recorded is finished — the sync agent dismissed from each recorded account,
+    /// the wipe, each account's erase — and the residue record re-swept silently
+    /// while nobody is signed in. Nothing of this process is open yet, so there is
+    /// no store to release and no lock to put down. Off the UI thread: file I/O and
+    /// up to the agent's budget per recorded account.
+    ///
+    /// <para>A finish that throws is logged and launches over what is there — the
+    /// records still stand for the next launch.</para>
     /// </summary>
-    private static Core.Services.ISignOutResidueSurface? RecordSignOutResidue(
-        (uniffi.fauna_ffi.FfiEraseSweep? Sweep, uniffi.fauna_ffi.FfiCredentialSweep Credentials) erased)
-        => Core.Services.SignOutResidueSurface.Record(SignOutResidueSeat, erased.Sweep, erased.Credentials);
+    private static async Task<Core.Services.SignOutFinishOutcome> FinishAtLaunchAsync()
+    {
+        var seat = SignOutResidueSeat;
+        try
+        {
+            return await Task.Run(() => Core.Services.SignOutResidueSurface.Finish(
+                seat, uniffi.fauna_ffi.FfiFinishCaller.Launch, null));
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("App", $"[sign-out] the launch's finish failed ({ex.Message}) — launching over what is there");
+            return Core.Services.SignOutFinishOutcome.Nothing;
+        }
+    }
+
+    /// <summary>
+    /// What the launch's sign-out finish (<see cref="FinishAtLaunchAsync"/>) left to
+    /// paint, until the cold launch's first <c>identity_choice</c> takes it — the
+    /// one landing it was reported to. Cleared once the cold launch's dispatch
+    /// returns, so a later landing never paints a launch's stale line.
+    /// </summary>
+    private Core.Services.ISignOutResidueSurface? _launchSignOutResidue;
+
+    private Core.Services.ISignOutResidueSurface? TakeLaunchSignOutResidue() =>
+        System.Threading.Interlocked.Exchange(ref _launchSignOutResidue, null);
 
 #if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
@@ -6683,6 +6929,12 @@ public partial class App : Application
                     // runtime — and account-store.db — open, and every reset's erase
                     // failed with os error 32 (ErasePrecondition.BeginUnprovisionThenTearDown
                     // owns the why).
+                    //
+                    // A launch still in flight is retired first, as the real sign-out
+                    // does: a launch surface is launch-scoped, never test-scoped, so a
+                    // verdict the previous test left in flight must not paint over the
+                    // next one (Core.Services.LaunchCurrency).
+                    Core.Services.LaunchCurrency.Shared.RetireInFlight();
                     var eraseAfterUnprovision = ErasePrecondition.BeginUnprovisionThenTearDown(
                         HydrationSessionEnabled, UnprovisionSyncAgentAsync,
                         () => DisposeNestClients(signOut: true),
@@ -6754,7 +7006,8 @@ public partial class App : Application
                     };
                 case "logout":
                     // Sign-out-shaped, same reasoning — and the same un-provision-first
-                    // ordering — as the "reset" arm above.
+                    // ordering — as the "reset" arm above, the launch retirement too.
+                    Core.Services.LaunchCurrency.Shared.RetireInFlight();
                     var logoutEraseAfterUnprovision = ErasePrecondition.BeginUnprovisionThenTearDown(
                         HydrationSessionEnabled, UnprovisionSyncAgentAsync,
                         () => DisposeNestClients(signOut: true),
@@ -6804,6 +7057,17 @@ public partial class App : Application
             var session = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, System.Text.Json.JsonElement>>(sessionEl.GetRawText());
             if (session != null)
             {
+                // An authenticated patch IS the session now, so a launch still in
+                // flight is superseded: retire it, and its verdict is dropped when it
+                // lands rather than rendered over the session built below
+                // (Core.Services.LaunchCurrency; linux's and tui's session patches
+                // retire at the same point). Synchronous, in the command body, so the
+                // retirement precedes every state read the patch's ack unblocks.
+                if (session.TryGetValue("authenticated", out var supersedes)
+                    && supersedes.ValueKind == System.Text.Json.JsonValueKind.True)
+                {
+                    Core.Services.LaunchCurrency.Shared.RetireInFlight();
+                }
                 // Who was signed in before this patch — read BEFORE the secret arm
                 // below replaces the crypto service, so the re-point can tell a
                 // same-actor re-establish (the identity lives on) from a change of
@@ -6990,6 +7254,11 @@ public partial class App : Application
                             // `StartMainAppAsync` call is unaffected.
                             rpc?.StartReconnectPump();
                             Core.Logs.E2eTrace.Write("[cmd-session] after StartReconnectPump (UI thread)");
+                            // The identity follow too: this login reaches no launch
+                            // machine, so the session's own mint is the cache's only
+                            // writer here (the handle the patch wrote carries no domain
+                            // or tier) — FaunaKit's e2e session patch starts it the same.
+                            rpc?.StartSelfIdentityFollow();
 
                             var navParam = new ServiceClients(client, crypto, account, conv, Rpc: rpc);
                             rootFrame.Navigate(typeof(Views.MainPage), navParam);
@@ -7789,9 +8058,9 @@ internal record ServiceClients(
     /// <summary>
     /// What a sign-out's erase could not remove, while it still owes work
     /// (<c>account-scoping.md</c> § Erasure follows scope → <i>the residue
-    /// surface</i>) — from <c>SignOutResidueSurface.Record</c> after a
-    /// sign-out or start-over, or <c>RecheckAtLaunch</c> on a signed-out
-    /// launch; <c>null</c> when nothing is owed. <see cref="Views.OnboardingPage"/>
+    /// surface</i>) — what the one sign-out routine
+    /// (<c>SignOutResidueSurface.Finish</c>) left after a sign-out or start-over,
+    /// or at a signed-out launch; <c>null</c> when nothing is owed. <see cref="Views.OnboardingPage"/>
     /// hands it once in <c>OnNavigatedTo</c> to
     /// <c>OnboardingViewModel.SignOutResidue</c>, which
     /// <c>IdentityChoiceView</c> paints as the <c>sign-out-residue</c> view.

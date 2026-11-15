@@ -89,5 +89,5 @@ Stamped 2026-11-07 at ac836c937b.
 | 12 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_policy_save_asking_the_impossible_is_refused` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_no_forensic_report_is_kept_while_forensic_reports_are_not_opted_in` | nest (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_daily_report_goes_only_where_allowed_and_never_counts_our_own_domains` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_peer_mail_the_perimeter_refuses_is_counted_with_disposition_reject` | nest (linux): passed |
+| 15 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_peer_mail_the_perimeter_refuses_is_counted_with_disposition_reject` | nest (linux): passed, nest (windows): passed |
 <!-- features-render:end -->

@@ -364,19 +364,53 @@ impl<T> AccountRuntimeHost<T> {
         // below run after the guard is dropped — nothing may `.await` under a
         // `std::sync::Mutex`.
         let step = self.state().settle_install(claim.0, handle);
-        match step {
+        // Either arm can stop a runtime that held this store's engine
+        // singleton while the one installed beside it assembled — two
+        // assemblies of one account in one process contend like two processes,
+        // so the later found the lock held and started as a non-holder. Once
+        // the stop has returned (it answers after the lock drops), the
+        // installed runtime is told to re-try the election now, or it would
+        // pump nothing until its backstop tick (`account-runtime.md`
+        // § Multi-instance concurrency → *A supersession hands the engine
+        // role over*). Read from the slot after the stop: a teardown may have
+        // emptied it, and then there is no one to tell.
+        //
+        // The empty-slot install is told too: a TEARDOWN (`take` + the host's
+        // stop) emptied the slot before this assembly claimed, and its stop may
+        // still have been draining when this runtime elected — so this one
+        // found the lock held and started as a non-holder, with no
+        // supersession of its own to hand the role over. A holder ignores the
+        // nudge, so a process's first install pays one command. A stop that
+        // outlives even this install is [`Self::displaced_runtime_stopped`]'s.
+        let outcome = match step {
             InstallStep::Superseded(handle, reason) => {
                 // The reason is the superseding teardown's, not a default: see
                 // `HostState::superseded_stop_reason`.
                 stop_one(&handle, reason).await;
                 InstallOutcome::Superseded
             }
-            InstallStep::Installed(previous) => {
-                if let Some((previous, _)) = previous {
-                    previous.shutdown().await;
-                }
+            InstallStep::Installed(None) => InstallOutcome::Installed,
+            InstallStep::Installed(Some((previous, _))) => {
+                previous.shutdown().await;
                 InstallOutcome::Installed
             }
+        };
+        self.displaced_runtime_stopped().await;
+        outcome
+    }
+
+    /// A runtime of this store that the installed one displaced has now
+    /// stopped — tell the installed runtime, if any, so a non-holder re-tries
+    /// the engine election at once rather than at its backstop tick
+    /// (`account-runtime.md` § Multi-instance concurrency → *A supersession
+    /// hands the engine role over*). [`Self::finish`] calls it after its own
+    /// stops; a host calls it when a teardown's stop that lapsed its budget
+    /// finally completes (`fauna-client-account-runtime`'s
+    /// `finish_lapsed_stop`), because by then the next login's runtime may
+    /// have installed as a non-holder beside the lock the slow stop still held.
+    pub async fn displaced_runtime_stopped(&self) {
+        if let Some(installed) = self.handle() {
+            installed.engine_role_vacated().await;
         }
     }
 

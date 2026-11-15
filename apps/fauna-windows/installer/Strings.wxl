@@ -4,6 +4,8 @@
 
 <WixLocalization Culture="en-US" xmlns="http://wixtoolset.org/schemas/v4/wxl">
 
-  <String Id="WelcomeDlgDescription" Value="The Setup Wizard will install Fauna on your computer. Fauna is a decentralised social platform where you own your data. Click Next to choose which components to install, or Cancel to exit." />
+  <!-- public-text: windows-installer-descriptions -->
+  <String Id="WelcomeDlgDescription" Value="The Setup Wizard will install Fauna on your computer. Fauna is free, open-source social software; your data lives on your own devices. Click Next to continue, or Cancel to exit." />
+  <!-- public-text-end: windows-installer-descriptions -->
 
 </WixLocalization>

@@ -197,6 +197,39 @@ def agent_binary():
     return str(helper_bin("fauna-sync-agent"))
 
 
+#: Fauna's licence texts and the app's notices file, in every packaging's
+#: documentation directory (shipped-notices.md § Per channel, the Linux desktop
+#: row). The notices file is dependency-authored text: presence and size only.
+DOC_FILES = ("LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def desktop_notices():
+    """The app's notices file at the path every packaging copies from, written by
+    the recipe the release build depends on (`just linux-desktop-notices`). The
+    generator's verdict lines are read on failure, never the file."""
+    root = _get_repo_root()
+    rc = subprocess.run(
+        ["just", "linux-desktop-notices"], capture_output=True, text=True,
+        timeout=300, cwd=root,
+    )
+    verdicts = "\n".join(ln for ln in rc.stdout.splitlines() if ln.startswith("shipped-notices"))
+    assert rc.returncode == 0, f"the notices generator refused linux-desktop:\n{verdicts}"
+    path = os.path.join(root, "build", "shipped-notices", "linux-desktop", "THIRD-PARTY-NOTICES")
+    assert os.path.getsize(path) > 0
+    return path
+
+
+def _assert_doc_files(doc_dir, repo_root):
+    for name in DOC_FILES:
+        path = os.path.join(doc_dir, name)
+        assert os.path.isfile(path) and os.path.getsize(path) > 0, f"{path} not installed"
+    for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+        with open(os.path.join(doc_dir, name), "rb") as a, \
+                open(os.path.join(repo_root, name), "rb") as b:
+            assert a.read() == b.read(), f"{doc_dir}/{name} is not the repository's {name}"
+
+
 @pytest.fixture(scope="session")
 def nest_binary():
     """The release `fauna-nest` with the email feature (prebuilt)."""
@@ -245,6 +278,21 @@ def deb_path(desktop_binary, agent_binary, repo_root):
         # Stage icon
         icon_src = os.path.join(repo_root, "apps", "fauna-linux", "fauna.svg")
         shutil.copy2(icon_src, os.path.join(icons_dir, "fauna.svg"))
+
+        # Stage the licence texts, the notices file and the copyright file,
+        # where debian/rules and dh_installdocs put them
+        doc_dir = os.path.join(stage_dir, "usr", "share", "doc", "fauna-desktop")
+        os.makedirs(doc_dir, exist_ok=True)
+        shutil.copy2(os.path.join(repo_root, "LICENSE-MIT"), os.path.join(doc_dir, "LICENSE-MIT"))
+        shutil.copy2(os.path.join(repo_root, "LICENSE-APACHE"), os.path.join(doc_dir, "LICENSE-APACHE"))
+        shutil.copy2(
+            os.path.join(repo_root, "build", "shipped-notices", "linux-desktop", "THIRD-PARTY-NOTICES"),
+            os.path.join(doc_dir, "THIRD-PARTY-NOTICES"),
+        )
+        shutil.copy2(
+            os.path.join(repo_root, "apps", "fauna-linux", "packaging", "debian", "copyright"),
+            os.path.join(doc_dir, "copyright"),
+        )
 
         # Stage debian control
         control_src = os.path.join(
@@ -317,6 +365,7 @@ class TestShellScript:
                 "Binary not executable"
             assert os.access(os.path.join(prefix, "bin", "fauna-sync-agent"), os.X_OK), \
                 "Sync agent not executable"
+            _assert_doc_files(os.path.join(prefix, "share", "doc", "fauna-desktop"), repo_root)
         finally:
             rc = subprocess.run(
                 ["bash", install_sh, "--uninstall"],
@@ -332,6 +381,8 @@ class TestShellScript:
         assert not os.path.exists(
             os.path.join(prefix, "share", "applications", "social.fauna.fauna.desktop")
         ), ".desktop still exists after uninstall"
+        assert not os.path.exists(os.path.join(prefix, "share", "doc", "fauna-desktop")), \
+            "the documentation directory still exists after uninstall"
         shutil.rmtree(prefix, ignore_errors=True)
 
     @pytest.mark.parametrize("has_fusermount3", [False, True])
@@ -352,6 +403,8 @@ class TestShellScript:
         (target / "release").mkdir(parents=True)
         for name in ("fauna-desktop", "fauna-sync-agent"):
             (target / "release" / name).write_text("#!/bin/sh\n")
+        notices = tmp_path / "THIRD-PARTY-NOTICES"
+        notices.write_text("stand-in notices\n")
 
         tools = tmp_path / "bin"
         tools.mkdir()
@@ -373,6 +426,7 @@ class TestShellScript:
                 "HOME": str(tmp_path / "home"),
                 "PREFIX": str(tmp_path / "prefix"),
                 "CARGO_TARGET_DIR": str(target),
+                "SHIPPED_NOTICES": str(notices),
             },
         )
         assert rc.returncode == 0, f"Install failed: {rc.stdout}{rc.stderr}"
@@ -502,6 +556,9 @@ class TestDebPackage:
             assert os.path.isfile(
                 "/usr/share/applications/social.fauna.fauna.desktop"
             ), ".desktop not installed"
+            _assert_doc_files("/usr/share/doc/fauna-desktop", _get_repo_root())
+            assert os.path.isfile("/usr/share/doc/fauna-desktop/copyright"), \
+                "the Debian copyright file is not installed"
         finally:
             result = subprocess.run(
                 ["dpkg", "-r", "fauna-desktop"],
@@ -636,12 +693,26 @@ class TestAppImage:
                 desktop_src, os.path.join(appdir, "social.fauna.fauna.desktop")
             )
 
+            # The licence texts and the notices file, in the AppDir's
+            # documentation directory (shipped-notices.md § Per channel). This
+            # fixture IS the AppDir's staging — the channel has no recipe
+            # (installers/linux-desktop.md § AppImage).
+            doc_dir = os.path.join(appdir, "usr", "share", "doc", "fauna-desktop")
+            os.makedirs(doc_dir, exist_ok=True)
+            shutil.copy2(os.path.join(repo_root, "LICENSE-MIT"), doc_dir)
+            shutil.copy2(os.path.join(repo_root, "LICENSE-APACHE"), doc_dir)
+            shutil.copy2(
+                os.path.join(repo_root, "build", "shipped-notices", "linux-desktop", "THIRD-PARTY-NOTICES"),
+                doc_dir,
+            )
+
             assert os.path.isfile(apprun), "AppRun missing"
             assert os.access(apprun, os.X_OK), "AppRun not executable"
             assert os.path.isfile(os.path.join(usr_bin, "fauna-desktop")), \
                 "Binary missing from AppDir"
             assert os.path.isfile(os.path.join(usr_bin, "fauna-sync-agent")), \
                 "Sync agent missing from AppDir"
+            _assert_doc_files(doc_dir, repo_root)
         finally:
             shutil.rmtree(appdir, ignore_errors=True)
 

@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from helpers.app_surface import require_surface, require_surface
 from i18n.strings import S
 
 # reclaim_cycle: the events area's representative in the post-reclaim gate — under
@@ -82,7 +81,6 @@ def test_month_day_cell_click_opens_day_view(logged_in_app):
 
     # Day 15 is always inside the current month the grid opens on.
     target = date.today().replace(day=15).isoformat()
-    require_surface(logged_in_app.driver, "events-day-cell")
     assert ev.has_day_cell(target), (
         f"the month grid exposes no events-day-cell-{target}: "
         f"{logged_in_app.driver.diagnose(f'events-day-cell-{target}')}"
@@ -155,7 +153,6 @@ def test_month_double_click_day_cell_opens_new_event_prefilled(logged_in_app):
 
     # Day 15 is always inside the current month the grid opens on.
     target = date.today().replace(day=15).isoformat()
-    require_surface(logged_in_app.driver, "events-day-cell")
     assert ev.has_day_cell(target), (
         f"the month grid exposes no events-day-cell-{target}: "
         f"{logged_in_app.driver.diagnose(f'events-day-cell-{target}')}"
@@ -640,17 +637,9 @@ def test_event_card_rsvp(logged_in_app):
     AFTER the card click to confirm the RSVP actually persisted against the
     right event, not just that the button didn't error.
 
-    Gated on the surface registry's ``event-card-rsvp`` entry.
-    This file carries no app markers, so it collects everywhere. The gate was
-    added 2026-07-31 for tui (found by the day-cell slice's adjacent-suite
-    sweep, the same class as `test_contacts.py`'s `contacts-no-matches`) and
-    **tui built the surface later that day**, so its one remaining consumer is
-    **android**, which paints `event-rsvp-*` only on the separate
-    invited-events quick-list and not on the main event-card — events.md
-    § Implementation status today, ui.yaml's `event-card` platform note.
-    Since 2026-10-25 the gate reads the registry instead of probing the card:
-    a probe that skips on absence would also hide a regression on an app that
-    had built it. Android's lift adds it to the entry.
+    Ungated since 2026-11-11: the `event-card-rsvp` registry entry was
+    deleted as finished when android, the last app, moved its trio from the
+    separate invited-events quick-list onto the agenda `event-card`.
 
     The ``>= 1`` is not the vacuous presence check it resembles: a
     Fauna-created event starts with an **empty** roster and no ORGANIZER
@@ -664,7 +653,6 @@ def test_event_card_rsvp(logged_in_app):
     ev.create_calendar(cal_name)
     ev.select_calendar(cal_name)
     ev.create_event("Standup", _future_dt(10, 9), _future_dt(10, 9, 30))
-    require_surface(logged_in_app.driver, "event-card-rsvp")
     ev.rsvp_on_card("Standup", status="going")
     assert ev.event_rsvp_count("Standup") >= 1, (
         f"card-level RSVP should have registered an attendee: "
@@ -700,7 +688,6 @@ def test_event_invite_attendee(logged_in_app):
     `AttendeeRow` renders the resulting roster). android e2e enablement remains
     its own follow-up (the docstring above's per-app split).
     """
-    require_surface(logged_in_app.driver, "email-attendee-encrypted-caldav")
     cal_name = _unique("invite-cal")
     ev = logged_in_app.events
     ev.navigate()
@@ -762,8 +749,6 @@ def test_pan_moves_one_visible_range_per_view(logged_in_app):
     ev = logged_in_app.events
     ev.navigate()
 
-    require_surface(logged_in_app.driver, "caltime-pan-visible-range")
-
     ev.switch_view("day")
     start = ev.date_label()
 
@@ -815,8 +800,6 @@ def test_pan_is_inert_in_the_date_unfiltered_agenda(logged_in_app):
     """
     ev = logged_in_app.events
     ev.navigate()
-
-    require_surface(logged_in_app.driver, "caltime-pan-visible-range")
 
     # The anchor as the finest-grained view renders it, before anything moves.
     ev.switch_view("day")

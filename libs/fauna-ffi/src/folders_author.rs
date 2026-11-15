@@ -861,7 +861,7 @@ mod tests {
     /// undecodable group id reads `false` (the badge then shows its plain
     /// reading), never a panic. The forked → `true` half needs a live engine
     /// and is pinned by the engine's own tests
-    /// (`fauna_mls_backend_tests::a_future_epoch_stall_marks_the_folder_seat_forked…`).
+    /// (`fauna_mls_backend_tests::a_claim_proven_fork_marks_the_folder_seat_forked…`).
     #[test]
     fn a_departed_session_or_bad_group_id_answers_not_forked() {
         let query = SessionMlsQuery {

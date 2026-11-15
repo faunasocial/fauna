@@ -1017,8 +1017,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 # caller's poll retry — matching the race-tolerant behavior the
                 # GTK/AT-SPI drivers already have.
                 try:
+                    # An explicit `data-test-text` declaration wins over the
+                    # inference below — the web peer of linux's
+                    # `testid::set_test_text` and android's declared semantics
+                    # text, for a container whose text content would fold its
+                    # buttons' captions into the read (the pull-back confirm's
+                    # title, consequence and preflight lines, one per line).
                     text = root.locator(_selector(eid)).nth(idx).evaluate(
-                        "el => { const t = el.tagName.toLowerCase();"
+                        "el => { if (el.hasAttribute('data-test-text'))"
+                        " return el.getAttribute('data-test-text');"
+                        " const t = el.tagName.toLowerCase();"
                         " if (t === 'input' && (el.type === 'checkbox' || el.type === 'radio'))"
                         " return el.labels && el.labels.length"
                         " ? (el.labels[0].textContent ?? '').trim() : '';"

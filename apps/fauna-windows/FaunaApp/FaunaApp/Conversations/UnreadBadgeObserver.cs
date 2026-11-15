@@ -25,15 +25,23 @@ namespace FaunaApp.Conversations;
 /// next. The number is never computed here — <c>UnreadTotal()</c> is the shared
 /// <c>fauna_conversations::sum_unread</c> over every thread of the account (priority #2),
 /// so this glue holds no tally of its own.</para>
+///
+/// <para>Each reading carries the account generation this observer was built under
+/// (<see cref="TaskbarBadgeService.Generation"/>, taken in the constructor — the manager's
+/// factory runs only after an actor change has ended the previous account), so a read
+/// still in flight when the account ends is dropped rather than repainting the
+/// signed-out account's count over the clear.</para>
 /// </summary>
 internal sealed class UnreadBadgeObserver : SnapshotObserver
 {
     private readonly ConversationsManager _manager;
+    private readonly long _generation;
     private int _pending;
 
     public UnreadBadgeObserver(ConversationsManager manager)
     {
         _manager = manager;
+        _generation = TaskbarBadgeService.Generation;
     }
 
     public void OnChanged()
@@ -48,6 +56,6 @@ internal sealed class UnreadBadgeObserver : SnapshotObserver
         uint total;
         try { total = _manager.UnreadTotal(); }
         catch { return; /* a manager mid-teardown at an actor change — the successor's observer reconciles */ }
-        TaskbarBadgeService.Publish(total);
+        TaskbarBadgeService.Publish(total, _generation);
     }
 }

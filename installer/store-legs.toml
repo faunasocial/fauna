@@ -1,0 +1,15 @@
+# How far each store leg goes at a release (docs/goal/architecture/installers/
+# store-review.md § The store legs, *How far each leg goes*). One table per
+# store; `furthest` is "testing" (every 0.1.x release: the testing track, and
+# for the App Store the external group's Beta App Review) or "public" (the
+# store's public listing as well). "public" is written only on the owner's
+# word for that store's first public release. Read by scripts/_store_legs.py.
+
+[play]
+furthest = "testing"
+
+[app-store]
+furthest = "testing"
+
+[microsoft-store]
+furthest = "testing"

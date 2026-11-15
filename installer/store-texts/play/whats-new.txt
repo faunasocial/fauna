@@ -1,0 +1,3 @@
+Version: any
+
+A new test build of Fauna. To get started you need a nest. If someone you trust already runs one and has invited you, use their invitation; otherwise the app guides you through setting one up. Create your identity, enter your handle, and the app tells you what happens next. Then try the feed, a message to someone you know, and reporting a post from the post's menu.

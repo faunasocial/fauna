@@ -5,6 +5,7 @@ import com.fauna.app.provider.OnDemandToggle
 import com.fauna.app.provider.OnDemandToggleState
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import uniffi.fauna_devices_machine.ConflictSummary
 import uniffi.fauna_devices_machine.FolderSummary
 
 /**
@@ -36,6 +37,9 @@ class FakeOnDemandToggle(
         return OnDemandIdentity("local%3A" + folder.id + "@" + "aa".repeat(32), ref)
     }
 
+    override suspend fun identifyRef(folderRef: String): OnDemandIdentity =
+        OnDemandIdentity(folderRef.replace(":", "%3A") + "@" + "aa".repeat(32), folderRef)
+
     override suspend fun read(sets: List<OnDemandIdentity>): Map<String, OnDemandToggleState> =
         sets.associate {
             it.scopedId to OnDemandToggleState(prefs[it.scopedId] ?: true, it.folderRef in stronger, it.folderRef in parked)
@@ -49,5 +53,23 @@ class FakeOnDemandToggle(
 
     override suspend fun replan() {
         log += "replan"
+    }
+
+    /** Each group set's review rows by ref; a ref in [reviewReadFails] throws on read. */
+    val reviewRows = mutableMapOf<String, List<ConflictSummary>>()
+    val reviewReadFails = mutableSetOf<String>()
+    /** The restore's refusal message, or `null` to restore (the row then leaves). */
+    var restoreRefusal: String? = null
+
+    override suspend fun groupReviewRows(folderRef: String, setLabel: String): List<ConflictSummary> {
+        log += "review $folderRef $setLabel"
+        if (folderRef in reviewReadFails) error("database is locked")
+        return reviewRows[folderRef].orEmpty()
+    }
+
+    override suspend fun restoreRetainedVersion(folderRef: String, conflictId: Long) {
+        log += "restore $folderRef $conflictId"
+        restoreRefusal?.let { throw com.fauna.ffi.FfiException.General(it) }
+        reviewRows[folderRef] = reviewRows[folderRef].orEmpty().filter { it.id != conflictId }
     }
 }

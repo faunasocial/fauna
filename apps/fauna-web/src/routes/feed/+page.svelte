@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { startUnsentTick } from '#lib/unsent-changes';
   import { onStoreChange } from '#lib/store-change';
   import { identity, reconnectTick, onActorChange } from '#lib/store';
   import { registerActorScopedReset } from '#lib/actorScope';
@@ -9,6 +10,7 @@
   import {
     getFeedManager,
     refreshArchiveCommentsIfReady,
+    refreshUnsentLikesIfReady,
     feedSnapshot,
     onFeedDraftRestored,
     refreshFeed,
@@ -426,6 +428,11 @@
     !!r.placeholder && 'region' in r.placeholder && r.placeholder.verb === 'block';
   const nestBlocks = (r: ReturnType<typeof postRender>) =>
     !!r.placeholder && 'domain' in r.placeholder && r.placeholder.verb === 'block';
+  // The heart's queued/unsent word moves with every outbox drain, which tells the
+  // app nothing, so while the feed shows its likes are re-read from this
+  // device's outbox on the shared unsent tick (account-offline-mutation.md
+  // § The unsent-changes surface). Stops on unmount.
+  onMount(() => startUnsentTick(refreshUnsentLikesIfReady));
   onMount(() =>
     registerRegionBlockCounter('feed', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -706,14 +713,20 @@
    *  restore FILLS*). Whitespace alone is not authorship. */
   function paintLateRestore() {
     if (!manager) return; // manager-gate-ok: restore-landed listener, not a user action
-    const untouched =
+    if (composerUntouched()) paintCompose(manager);
+  }
+
+  /** Whether the user has authored nothing into the composer. Whitespace alone
+   *  is not authorship. */
+  function composerUntouched(): boolean {
+    return (
       !composeBody.trim() &&
       !composeTags.trim() &&
       !gateTier &&
       !gateRoom &&
       !gatePreview.trim() &&
-      !sellSelected;
-    if (untouched) paintCompose(manager);
+      !sellSelected
+    );
   }
 
   // ── Per-post lazy augmentation (mirrors linux post_list.rs's render-time
@@ -922,10 +935,13 @@
         // below — no new upload glue (mirrors linux `client.rs::submit_post`'s
         // sell branch). An empty price is a price_hint of `undefined`, not `''`.
         manager.updateComposeSell(true, sent.sellPrice, sent.sellAskingPrice, sent.sellSubscribersFree, sent.gatePreview);
-        // Empty or unparseable means no machine price — the minted tier
-        // stays a tip target forever (monetization.md § The asking price).
-        const askingPriceRaw = sent.sellAskingPrice.trim() ? Number(sent.sellAskingPrice.trim()) : undefined;
-        const askingPriceSats = Number.isFinite(askingPriceRaw) ? askingPriceRaw : undefined;
+        // The field is read by the one shared rule: an empty field is no
+        // machine price (the minted tier stays a tip target — monetization.md
+        // § The asking price); text that is not a whole number of sats is
+        // REFUSED on `compose-error` (the manager stamps the rule's catalog
+        // key and this throws into the catch below, which leaves it standing),
+        // never read as "no price".
+        const askingPriceSats = manager.composeSellAskingPriceSats() ?? undefined;
         let sellAttached: any = restoredAttachment();
         let sealed: Uint8Array | null = null;
         try {
@@ -1379,6 +1395,10 @@
       // BROWSER console — `logMessage` alone writes to the wasm log ring, which
       // no page renders and no e2e can read, so it would have left this exactly
       // as silent as no catch at all.
+      // Whether this is the page's first manager — the composer may have been
+      // typed into before any manager existed — or an actor change on a
+      // mounted page.
+      const firstForPage = manager === null;
       try {
         manager = await getFeedManager();
       } catch (e) {
@@ -1399,7 +1419,16 @@
       // launch restore is not awaited by `getFeedManager()` (its load retries a
       // lost read for minutes), so it may land after this read: the
       // `onFeedDraftRestored` door paints it then, into an untouched composer.
-      paintCompose(manager);
+      //
+      // One exception, the FILL rule at the page's own edge (feed.md
+      // § Persistence, *A restore FILLS*): text typed before the page's FIRST
+      // manager existed never reached it (`syncCompose` forwards through
+      // `manager?.`), so here it is handed over rather than painted over — and
+      // ahead of a leave door's flush waiting on the same build
+      // (`flushDraftsNow`). On an actor change the composer is the previous
+      // actor's and is painted over, as above.
+      if (firstForPage && !composerUntouched()) syncCompose();
+      else paintCompose(manager);
       // Hydrate the content-policy render state (guardian floor + own spam
       // thresholds) BEFORE the first feed load, so posts render with the right
       // verdict on their first paint (family-safety.md § Content policy).

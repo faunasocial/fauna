@@ -75,6 +75,7 @@ fun AdminUsersScreen(
     val unknownRegistrationMode by vm.unknownRegistrationMode.collectAsState()
     val maxFreeUsers by vm.maxFreeUsers.collectAsState()
     val ageVerificationRequired by vm.ageVerificationRequired.collectAsState()
+    val takeOverArmed by vm.takeOverArmed.collectAsState()
 
     LaunchedEffect(Unit) { vm.refresh() }
 
@@ -119,8 +120,30 @@ fun AdminUsersScreen(
         onPrevPage = vm::prevPage,
         onSaveRegistration = vm::saveRegistration,
         onAdmitUser = { actor, handle, tier, guardian, band -> vm.admitUser(actor, handle, tier, guardian, band, admitActorHint) },
+        rowControls = { com.fauna.ffi.adminUserRowControls(it, vm.viewerActor()) },
+        takeOver = TakeOverUi(
+            armed = takeOverArmed,
+            onArm = vm::armTakeOver,
+            onConfirm = vm::confirmTakeOver,
+            onCancel = vm::cancelTakeOver,
+        ),
     )
 }
+
+/**
+ * The admin take-over's row state and callbacks (family-safety.md § App
+ * surface → *Admin take-over*): [armed] is the armed ward's actor id (`null`
+ * un-armed); [guardianLabel] is the SHARED
+ * `fauna_client_admin::admin_user_guardian_label`, injected FFI-free so the
+ * Robolectric harness stays off the native path.
+ */
+class TakeOverUi(
+    val armed: ByteArray? = null,
+    val onArm: (FfiAdminUser) -> Unit = {},
+    val onConfirm: () -> Unit = {},
+    val onCancel: () -> Unit = {},
+    val guardianLabel: (FfiAdminUser) -> String? = { com.fauna.ffi.adminUserGuardianLabel(it) },
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -201,6 +224,9 @@ fun AdminUsersContent(
     // Robolectric harness stays off the native path; do NOT re-derive it from
     // `eviction`/`isAdmin` client-side — the shared decision is unit-tested.
     rowControls: (FfiAdminUser) -> FfiAdminUserRowControls = { com.fauna.ffi.adminUserRowControls(it) },
+    // The admin take-over of a supervised row (family-safety.md § App surface →
+    // Admin take-over) — the armed ward and its callbacks.
+    takeOver: TakeOverUi = TakeOverUi(),
     // Shared `fauna_client_admin::admin_picker_option` — the option text a
     // guardian picker offers: the handle, falling back to the full actor hex
     // (admin.md § 2 → What identifies a user in an admin picker). Injected
@@ -280,7 +306,7 @@ fun AdminUsersContent(
             UsersSection(
                 users, userTotal, userOffset, tiers, onSetUserTier, hexFull, mailServingStatusLabel,
                 onEvictUser, onSuspendUser, onCancelEviction, onMakeAdmin, onRemoveAdmin,
-                rowControls, onNextPage, onPrevPage, totalPages, currentPage,
+                rowControls, onNextPage, onPrevPage, totalPages, currentPage, takeOver, guardianOption,
             )
             HorizontalDivider()
             PendingActionsSection(pendingActions, onApprovePendingAction, onCancelPendingAction, absoluteLocal)
@@ -987,6 +1013,8 @@ private fun UsersSection(
     onPrevPage: () -> Unit,
     totalPages: (Long, Long) -> Long,
     currentPage: (Long, Long) -> Long,
+    takeOver: TakeOverUi,
+    guardianOption: (FfiAdminUser) -> String,
 ) {
     Column(modifier = Modifier.testTag(Ids.ADMIN_USERS_LIST_SECTION)) {
         Text(
@@ -1004,7 +1032,7 @@ private fun UsersSection(
             UserRow(
                 user, tiers, onSetUserTier, hexFull, mailServingStatusLabel,
                 onEvictUser, onSuspendUser, onCancelEviction, onMakeAdmin, onRemoveAdmin,
-                rowControls,
+                rowControls, takeOver, guardianOption,
             )
         }
         // Pagination (admin.md § Users — limit/offset on `fauna.admin.users.list`).
@@ -1056,6 +1084,8 @@ private fun UserRow(
     onMakeAdmin: (FfiAdminUser) -> Unit,
     onRemoveAdmin: (FfiAdminUser) -> Unit,
     rowControls: (FfiAdminUser) -> FfiAdminUserRowControls,
+    takeOver: TakeOverUi,
+    guardianOption: (FfiAdminUser) -> String,
 ) {
     val controls = rowControls(user)
     Column(
@@ -1164,6 +1194,48 @@ private fun UserRow(
                         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.testTag(Ids.ADMIN_USERS_REMOVE_ADMIN_BUTTON),
                     ) { Text(stringResource(R.string.admin_users_page_remove_admin)) }
+                }
+            }
+        }
+        // The admin take-over of a supervised account (family-safety.md § App
+        // surface → *Admin take-over*): the guardian label and the offer are the
+        // SHARED decisions; the button arms an inline confirm on this row, one
+        // row armed at a time (the VM holds the armed ward by actor id).
+        takeOver.guardianLabel(user)?.let { guardian ->
+            val armed = takeOver.armed?.contentEquals(user.actorId) == true
+            Text(
+                stringResourceFmt(R.string.admin_users_page_supervised_by, guardian),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.ADMIN_USERS_SUPERVISED_BY),
+            )
+            if (controls.takeOver && !armed) {
+                TextButton(
+                    onClick = { takeOver.onArm(user) },
+                    modifier = Modifier.testTag(Ids.ADMIN_USERS_TAKE_OVER_BUTTON),
+                ) { Text(stringResource(R.string.admin_users_page_take_over)) }
+            }
+            if (armed) {
+                Text(
+                    stringResourceFmt(
+                        R.string.admin_users_page_take_over_confirm_summary,
+                        guardianOption(user),
+                        guardian,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.ADMIN_USERS_TAKE_OVER_CONFIRM_SUMMARY),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = takeOver.onConfirm,
+                        enabled = faunaGate("fauna.family.transfer").enabled,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        modifier = Modifier.testTag(Ids.ADMIN_USERS_TAKE_OVER_CONFIRM_BUTTON),
+                    ) { Text(stringResource(R.string.admin_users_page_take_over_confirm)) }
+                    TextButton(
+                        onClick = takeOver.onCancel,
+                        modifier = Modifier.testTag(Ids.ADMIN_USERS_TAKE_OVER_CANCEL_BUTTON),
+                    ) { Text(stringResource(R.string.admin_users_page_take_over_cancel)) }
                 }
             }
         }

@@ -90,6 +90,7 @@ import re
 import subprocess
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 REPO = Path(__file__).resolve().parents[3]
 #: The run's own output, relative to the repository root — the one path whose
@@ -962,7 +963,7 @@ def _load_artifacts(path: Path) -> list:
 def record_release(ledger_dir: Path = LEDGER, *, version: str, commit: str,
                    image_digest: str | None, image: str | None = None,
                    public_commit: str | None = None,
-                   today: str | None = None) -> Path:
+                   today: str | None = None, correction: dict | None = None) -> Path:
     """Append this candidate run's row to the release table; return the file written.
 
     § Tag gate and release table. The row is `(version, commit, image_digest, date,
@@ -986,6 +987,12 @@ def record_release(ledger_dir: Path = LEDGER, *, version: str, commit: str,
     the Sync-Point trailer) passes that commit here as `public_commit`, recorded beside
     the digest it names (§ Tag gate and release table, "Promotion copies the tested
     digest").
+
+    **A correction run appends to the version's row and moves nothing else.** Given
+    `correction` (`{date, carried, excluded}`, `release_gate.record_candidate`), the
+    row keyed on the version's commit — never the correction tree's — gains one entry
+    in its `corrections` list; its date and `candidate_run` stay the version's own
+    run's (release-table.md § Release-candidate run, the correction-run paragraph).
     """
     ledger_dir.mkdir(parents=True, exist_ok=True)
     path = ledger_dir / "releases.json"
@@ -1000,8 +1007,14 @@ def record_release(ledger_dir: Path = LEDGER, *, version: str, commit: str,
     if row is None:
         row = {"promoted": False}
         releases.append(row)
-    row.update({"version": version, "commit": commit, "image_digest": image_digest,
-                "date": stamp_date, "candidate_run": stamp_date})
+    if correction is None or not row.get("candidate_run"):
+        row.update({"version": version, "commit": commit, "image_digest": image_digest,
+                    "date": stamp_date, "candidate_run": stamp_date})
+    if correction is not None:
+        row.setdefault("corrections", []).append(
+            {"date": correction.get("date") or stamp_date,
+             "carried": list(correction.get("carried") or []),
+             "excluded": dict(sorted((correction.get("excluded") or {}).items()))})
     if image:
         row["image"] = image
     if public_commit:
@@ -1125,13 +1138,22 @@ def release_candidate_verdict(mode, repo: Path = REPO,
     """`(refusal, public_commit)` for a run mode: `release_candidate_refusal` plus the
     public build commit the release row records beside the digest — `None` for a
     private build, whose `FAUNA_BUILD_COMMIT` IS the row's commit."""
+    check = release_candidate_check(mode, repo=repo, public_clone=public_clone)
+    return check.refusal, check.public_commit
+
+
+def release_candidate_check(mode, repo: Path = REPO,
+                            public_clone: Path | None = None) -> CandidateCheck:
+    """`release_candidate_check_for_image` for a run mode — what the plugin asks, so
+    the release row can be keyed on the version's commit of a correction tree."""
     if not getattr(mode, "is_docker", False):
-        return ("a candidate run goes against the nest IMAGE (`--nest docker:<image>`)",
-                None)
+        return CandidateCheck(
+            "a candidate run goes against the nest IMAGE (`--nest docker:<image>`)")
     image = getattr(mode, "argument", None)
     if not image:
-        return "`--nest docker` names no image; a candidate run needs the exact tag", None
-    return release_candidate_verdict_for_image(image, repo=repo, public_clone=public_clone)
+        return CandidateCheck(
+            "`--nest docker` names no image; a candidate run needs the exact tag")
+    return release_candidate_check_for_image(image, repo=repo, public_clone=public_clone)
 
 
 def release_candidate_refusal_for_image(image: str, repo: Path = REPO,
@@ -1146,16 +1168,112 @@ def release_candidate_refusal_for_image(image: str, repo: Path = REPO,
                                                public_clone=public_clone)[0]
 
 
+#: The test-side paths a correction tree may change beyond the version's commit
+#: (release-table.md § Release-candidate run → *A test-side correction after the cut
+#: reaches the verdict through a correction run*): the test tree, the run's own ledger
+#: output, and Rust compiled only under the `e2e-harness` feature — each Rust entry
+#: pinned behind that `cfg` by the release gate's tests — and the release gate's own
+#: script, which writes the run's record and ships in no artifact (a correction tree
+#: branched at a version's commit must carry the gate that accepts it; the entry is
+#: excised from the public tree, which carries no gate). A directory ends in `/`;
+#: anything else names one file.
+TEST_SIDE_PATHS = (
+    "tests/",
+    "docs/features/ledger/",
+    "libs/fauna-ffi/src/cabi/",
+)
+
+_CHERRY_PICK_RE = re.compile(r"\(cherry picked from commit ([0-9a-f]{7,40})\)")
+
+
+class CandidateCheck(NamedTuple):
+    """The candidate precondition's whole answer.
+
+    `refusal` is `None` when the run may stamp a bare version; `public_commit` is the
+    public build commit recorded beside the digest (`None` for a private build);
+    `commit` is the VERSION's commit the release row is keyed on — HEAD for the two
+    older shapes, the commit beneath the carried commits for a correction tree; and
+    `carried` the main commits a correction tree carries (empty otherwise)."""
+
+    refusal: str | None
+    public_commit: str | None = None
+    commit: str | None = None
+    carried: list = []
+
+
 def release_candidate_verdict_for_image(image: str, repo: Path = REPO,
                                         public_clone: Path | None = None) -> tuple:
-    """`(refusal, public_commit)` for an image — see `release_candidate_verdict`.
+    """`(refusal, public_commit)` for an image — `release_candidate_check_for_image`
+    without the version commit and the carried commits."""
+    check = release_candidate_check_for_image(image, repo=repo, public_clone=public_clone)
+    return check.refusal, check.public_commit
 
-    The commit precondition has two passing shapes (feature-catalog.md § Tag gate and
-    release table, "Promotion copies the tested digest"): the image was built from
-    HEAD itself, or it is the PUBLIC repository's build of the tree published from
-    HEAD — its `FAUNA_BUILD_COMMIT` a public commit whose `Sync-Point:` trailer names
-    HEAD (`public_build_refusal`). The row stays keyed on the private HEAD either way;
-    the second shape also hands back the public commit to record beside the digest.
+
+def _is_test_side(path: str) -> bool:
+    return any(path.startswith(entry) if entry.endswith("/") else path == entry
+               for entry in TEST_SIDE_PATHS)
+
+
+def _git_ok(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True, timeout=60)
+
+
+def correction_refusal(version_commit: str, head: str, repo: Path = REPO,
+                       main_ref: str = "origin/main") -> tuple:
+    """`(refusal, carried)` — why HEAD is NOT a correction tree of `version_commit`.
+
+    A correction tree is the version's commit plus commits that (i) change only
+    `TEST_SIDE_PATHS` and (ii) each carry the `(cherry picked from commit <sha>)`
+    trailer of a commit that is an ancestor of `main_ref`: a correction lands on main
+    first and is carried back, never written on the side. `carried` lists those main
+    commits, oldest first, when the tree passes."""
+    if _git_ok(repo, "merge-base", "--is-ancestor", version_commit, head).returncode:
+        return (f"the version's commit {version_commit[:12]} is not an ancestor of HEAD "
+                f"{head[:12]}"), []
+    changed = _git_ok(repo, "diff", "--name-only", version_commit, head)
+    if changed.returncode:
+        return f"`git diff` {version_commit[:12]}..HEAD failed", []
+    product = [p for p in changed.stdout.splitlines() if p and not _is_test_side(p)]
+    if product:
+        shown = ", ".join(product[:6]) + (f", … {len(product) - 6} more"
+                                          if len(product) > 6 else "")
+        return (f"HEAD changes paths outside the test side beyond the version's commit "
+                f"{version_commit[:12]} ({shown}) — a change there is a new commit, a "
+                f"new image and a new run"), []
+    revs = _git_ok(repo, "rev-list", "--reverse", f"{version_commit}..{head}")
+    if revs.returncode:
+        return f"`git rev-list` {version_commit[:12]}..HEAD failed", []
+    carried = []
+    for rev in revs.stdout.split():
+        body = _git_ok(repo, "log", "-1", "--format=%B", rev).stdout
+        found = _CHERRY_PICK_RE.findall(body)
+        if not found:
+            return (f"commit {rev[:12]} carries no `(cherry picked from commit <sha>)` "
+                    f"trailer — a correction lands on main first and is carried back "
+                    f"with `git cherry-pick -x`"), []
+        source = found[-1]
+        if _git_ok(repo, "merge-base", "--is-ancestor", source, main_ref).returncode:
+            return (f"commit {rev[:12]} was cherry-picked from {source[:12]}, which is "
+                    f"not on {main_ref} — a correction lands on main first"), []
+        resolved = _git_ok(repo, "rev-parse", f"{source}^{{commit}}").stdout.strip()
+        carried.append(resolved or source)
+    return None, carried
+
+
+def release_candidate_check_for_image(image: str, repo: Path = REPO,
+                                      public_clone: Path | None = None,
+                                      main_ref: str = "origin/main") -> CandidateCheck:
+    """The candidate precondition for an image — see `release_candidate_verdict`.
+
+    The commit precondition has three passing shapes (release-table.md §
+    Release-candidate run): the image was built from HEAD itself; it is the PUBLIC
+    repository's build of the tree published from HEAD — its `FAUNA_BUILD_COMMIT` a
+    public commit whose `Sync-Point:` trailer names HEAD (`public_build_refusal`); or
+    HEAD is a CORRECTION TREE of the commit either older shape would accept
+    (`correction_refusal`). The row is keyed on that private version commit every
+    time; the public shape also hands back the public commit to record beside the
+    digest, the correction shape the main commits it carries.
     """
     # The same `tree_dirt` the ordinary run MARKS by — one definition of dirt, two
     # callers, so the gate can never call clean what the mark calls dirty or vice
@@ -1163,14 +1281,14 @@ def release_candidate_verdict_for_image(image: str, repo: Path = REPO,
     # where the run's is a mark, because a bare stamp claims the released artifact.
     dirt = tree_dirt(repo)
     if dirt is None:
-        return "`git status` failed; the tree must be provably clean", None
+        return CandidateCheck("`git status` failed; the tree must be provably clean")
     if dirt:
-        return "the working tree is not clean", None
+        return CandidateCheck("the working tree is not clean")
 
     try:
         env, digests = _inspect_image(image)
     except Exception as exc:
-        return f"`docker inspect {image}` failed ({exc})", None
+        return CandidateCheck(f"`docker inspect {image}` failed ({exc})")
 
     build_commit = ""
     for entry in env:
@@ -1179,23 +1297,55 @@ def release_candidate_verdict_for_image(image: str, repo: Path = REPO,
             build_commit = value.strip()
     head = head_commit(repo)
     if not build_commit:
-        return f"{image} carries no FAUNA_BUILD_COMMIT", None
+        return CandidateCheck(f"{image} carries no FAUNA_BUILD_COMMIT")
     public_commit = None
+    version_commit = head
+    carried: list = []
     if not head or build_commit != head:
         unpaired = (public_build_refusal(build_commit, head, public_clone=public_clone,
                                          repo=repo)
                     if head else "HEAD is unknown")
         if unpaired:
-            return (f"{image} was built from {build_commit[:12]}, HEAD is "
+            # The third shape: the commit an older shape would accept, under HEAD.
+            version_commit, public_commit, why_not = _version_commit_under(
+                build_commit, head, repo, public_clone) if head else (None, None, "")
+            correction = ("no version commit to correct" + (f" ({why_not})" if why_not
+                                                            else ""))
+            if version_commit:
+                correction, carried = correction_refusal(version_commit, head, repo,
+                                                         main_ref)
+            if correction:
+                return CandidateCheck(
+                    f"{image} was built from {build_commit[:12]}, HEAD is "
                     f"{(head or '?')[:12]} — a candidate run witnesses its own commit, "
-                    f"or the public build of the tree published from it, and this is "
-                    f"neither: {unpaired}"), None
-        public_commit = build_commit
+                    f"the public build of the tree published from it, or a correction "
+                    f"tree of either, and this is none: {unpaired}; as a correction "
+                    f"tree: {correction}")
+        else:
+            public_commit = build_commit
     if not digests:
-        return (f"{image} has no registry digest — a locally built image has none, and "
-                "a candidate is always the immutable `:sha-<commit>` tag the pipeline "
-                "pushed"), None
-    return None, public_commit
+        return CandidateCheck(
+            f"{image} has no registry digest — a locally built image has none, and "
+            "a candidate is always the immutable `:sha-<commit>` tag the pipeline "
+            "pushed")
+    return CandidateCheck(None, public_commit, version_commit, carried)
+
+
+def _version_commit_under(build_commit: str, head: str, repo: Path,
+                          public_clone: Path | None) -> tuple:
+    """`(version commit, public commit, why not)` — the private commit an older shape
+    would accept for this image, when it lies under HEAD: the build commit itself for a
+    private build, or the commit a public build's Sync-Point names."""
+    if not _git_ok(repo, "merge-base", "--is-ancestor", build_commit, head).returncode:
+        return build_commit, None, ""
+    short, why = sync_point_of(build_commit, public_clone=public_clone, repo=repo)
+    if not short:
+        return None, None, (f"{build_commit[:12]} is not under HEAD, and as a public "
+                            f"build: {why}")
+    full = _git_ok(repo, "rev-parse", "--verify", "-q", f"{short}^{{commit}}").stdout.strip()
+    if not full:
+        return None, None, f"the Sync-Point {short} names no commit of this repository"
+    return full, build_commit, ""
 
 
 def _inspect_image(image: str) -> tuple:

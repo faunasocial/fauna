@@ -124,10 +124,11 @@ public class SubscriptionsSettingsViewModelTests
         {
             MockNestRpcClient.MakeMineSubscription(Alice, "gold", "pending", handle: "alice"),
         };
-        await vm.RedeemClaimAsync("  ABC123  ");
+        var accepted = await vm.RedeemClaimAsync("  ABC123  ");
 
-        Assert.Equal("ABC123", rpc.LastClaimsRedeem);
-        Assert.Contains("PaymentsClaimsRedeem", rpc.Calls);
+        Assert.True(accepted);
+        Assert.Equal("ABC123", rpc.LastClaimsRedeem?.Code);
+        Assert.Contains("PaymentsClaimsRedeemAcrossNests", rpc.Calls);
         // Re-read must have happened: the queued grant now renders as a pending row.
         Assert.Single(vm.Subscriptions);
         Assert.Equal("pending", vm.Subscriptions[0].Status);
@@ -139,9 +140,25 @@ public class SubscriptionsSettingsViewModelTests
         var rpc = new MockNestRpcClient();
         var vm = new SubscriptionsSettingsViewModel(rpc);
 
-        await vm.RedeemClaimAsync("   ");
+        Assert.False(await vm.RedeemClaimAsync("   "));
 
-        Assert.DoesNotContain("PaymentsClaimsRedeem", rpc.Calls);
+        Assert.DoesNotContain("PaymentsClaimsRedeemAcrossNests", rpc.Calls);
+    }
+
+    /// This page knows no creator: the redeem goes through the cross-nest method
+    /// with no home (the plain redeem on this nest) and the author slot left to the
+    /// caller's own id — the one call shape both redeem doors use.
+    [Fact]
+    public async Task RedeemClaimAsync_NamesNoHomeAndNoCreator()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = new SubscriptionsSettingsViewModel(rpc);
+
+        await vm.RedeemClaimAsync("ABC123");
+
+        Assert.NotNull(rpc.LastClaimsRedeem);
+        Assert.Null(rpc.LastClaimsRedeem!.Value.AuthorHomeUrl);
+        Assert.Null(rpc.LastClaimsRedeem!.Value.AuthorId);
     }
 
     [Fact]
@@ -150,7 +167,7 @@ public class SubscriptionsSettingsViewModelTests
         var rpc = new MockNestRpcClient { NextError = "fauna.payments.claim_not_found" };
         var vm = new SubscriptionsSettingsViewModel(rpc);
 
-        await vm.RedeemClaimAsync("NOSUCH1234");
+        Assert.False(await vm.RedeemClaimAsync("NOSUCH1234"));
 
         Assert.NotNull(vm.ErrorMessage);
     }

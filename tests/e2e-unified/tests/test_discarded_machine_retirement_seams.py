@@ -5,7 +5,7 @@ Owner: ``docs/goal/architecture/e2e-launch-isolation.md`` § The convention —
 convention 10, *A discarded driver retires its machine*. The journey pin is
 ``test_discarded_machine_retirement.py``, which runs the whole retirement
 against a live nest. This file pins what that journey rests on and what a
-machine with no android venue can still check: the two seams
+machine with no android emulator can still check: the two seams
 ``drivers/http_bridge.py::_retire_discarded_machine`` reads —
 ``_discards_machine_at_teardown`` (does this driver own its machine?) and
 ``_current_slots`` (which actors does the machine hold?) — as web and android

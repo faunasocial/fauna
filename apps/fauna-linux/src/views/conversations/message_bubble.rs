@@ -43,7 +43,7 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 
-use fauna_conversations::message::{MessageId, MessageSnapshot};
+use fauna_conversations::message::{MessageId, MessageSnapshot, QueuedSendState};
 // QUICKSET_EMOJIS: the shared quick-set (identical order on all apps;
 // conversations.md § Reactions & message delete), so the Rust-native apps
 // can never drift on the set.
@@ -739,6 +739,35 @@ fn append_full_content(
         bubble.append(&undelivered);
     }
 
+    // An own copy of a message sent with no nest (`MessageSnapshot::
+    // queued_send`, the shared projection; account-offline-mutation.md § The
+    // unsent-changes surface, point 2): waiting, or not sent and why — the
+    // dm-message-undelivered shape, the body still in view. The copy is the
+    // draft: retry and discard live in its ⋯ menu. Twin of tui's labels of the
+    // same ids.
+    let queued_line = match &msg.queued_send {
+        Some(QueuedSendState::Queued) => Some((
+            crate::i18n::strings::conversations::unified::DM_MESSAGE_QUEUED.to_string(),
+            ids::DM_MESSAGE_QUEUED,
+        )),
+        Some(QueuedSendState::Unsent { reason, .. }) => Some((
+            crate::i18n::strings::conversations::unified::dm_message_unsent(
+                &reason.resolve(crate::i18n::strings::lookup),
+            ),
+            ids::DM_MESSAGE_UNSENT,
+        )),
+        None => None,
+    };
+    if let Some((text, id)) = queued_line {
+        let line = gtk::Label::new(Some(&text));
+        line.add_css_class("dim-label");
+        line.set_halign(gtk::Align::Start);
+        line.set_xalign(0.0);
+        line.set_wrap(true);
+        crate::testid::set_test_id(&line, id);
+        bubble.append(&line);
+    }
+
     // An own sent mail the fresh-IP warm-up is holding back
     // (`MessageSnapshot::warmup_hold`; `mail-deliverability.md` § Enforcement at
     // submission time): when it goes out and how many are ahead of it, in the
@@ -817,6 +846,9 @@ fn append_full_content(
     // exactly like a local moderation correction).
     let can_react = caps.supports_reactions;
     let can_delete = msg.can_delete;
+    // The local remove — the nest's copy only (`bridged-adapter.md`
+    // § Removing bridged rows, rules 1 and 6), off the snapshot's flag.
+    let can_remove = msg.can_remove;
     let can_flag_spam = !msg.is_own;
     // Report (`dm-message-report-button`, moderation.md § User-initiated
     // reporting → App surface): a RECEIVED message that carries a plane
@@ -825,12 +857,17 @@ fn append_full_content(
     let report_target = (!msg.is_own)
         .then(|| crate::report::message_target(msg))
         .flatten();
-    if can_react || can_delete || can_flag_spam || report_target.is_some() {
+    // An unsent own copy (`queued_send` = Unsent) carries the ⋯ for its retry
+    // and discard even where nothing else would offer it (tui's `|| unsent`).
+    let unsent = msg.is_own && matches!(msg.queued_send, Some(QueuedSendState::Unsent { .. }));
+    if can_react || can_delete || can_remove || can_flag_spam || unsent || report_target.is_some() {
         let actions_btn = build_actions_button(
             msg,
             thread_id,
             can_react,
             can_delete,
+            can_remove,
+            unsent,
             can_flag_spam,
             report_target,
             client,
@@ -926,7 +963,9 @@ fn build_reaction_pills(
 /// quick-set / delete children stay out of the showing widget tree until the ⋯
 /// button pops it up — the e2e "flyout opened" signal). `can_react` adds the
 /// reaction quick-set + the GTK emoji-chooser "more" button; `can_delete` adds
-/// the delete → confirm two-step; `can_flag_spam` adds the mark-as-spam item.
+/// the delete → confirm two-step; `can_remove` the local remove's two-step;
+/// `unsent` (an own copy the outbox parked) its retry and discard → confirm;
+/// `can_flag_spam` adds the mark-as-spam item.
 /// The caller only constructs this when at least one is available.
 #[allow(clippy::too_many_arguments)]
 fn build_actions_button(
@@ -934,6 +973,8 @@ fn build_actions_button(
     thread_id: &ThreadId,
     can_react: bool,
     can_delete: bool,
+    can_remove: bool,
+    unsent: bool,
     can_flag_spam: bool,
     report_target: Option<fauna_client_moderation::ReportTarget>,
     client: &Rc<FaunaClient>,
@@ -954,6 +995,74 @@ fn build_actions_button(
     menu.set_margin_start(6);
     menu.set_margin_end(6);
     crate::testid::set_test_id(&menu, ids::DM_MESSAGE_ACTIONS_MENU);
+
+    if unsent {
+        // The unsent own copy's doors (account-offline-mutation.md § The
+        // unsent-changes surface, point 2): retry re-arms its intent; discard
+        // is the delete two-step's shape — `dm-message-discard-button` reveals
+        // the prompt and `dm-message-discard-confirm-button`, which deletes the
+        // intent and takes the copy out of the thread. Both are this device's
+        // outbox, never the nest: no wire kind declared, so they stay live
+        // with the nest down — which is when they matter.
+        let retry = gtk::Button::with_label(s::RETRY_SEND);
+        retry.add_css_class("flat");
+        crate::testid::set_test_id(&retry, ids::DM_MESSAGE_RETRY_BUTTON);
+        {
+            let mid = msg.message_id.clone();
+            let rt = rt.clone();
+            let pop = popover.clone();
+            retry.connect_clicked(move |_| {
+                pop.popdown();
+                let mid = mid.clone();
+                rt.spawn(async move {
+                    crate::conversations::manager().retry_queued_send(mid).await;
+                });
+            });
+        }
+
+        let discard = gtk::Button::with_label(s::DISCARD_MESSAGE);
+        discard.add_css_class("flat");
+        discard.add_css_class("destructive-action");
+        crate::testid::set_test_id(&discard, ids::DM_MESSAGE_DISCARD_BUTTON);
+
+        let prompt = gtk::Label::new(Some(s::DISCARD_MESSAGE_CONFIRM_TITLE));
+        prompt.add_css_class("dim-label");
+        prompt.set_visible(false);
+
+        let confirm = gtk::Button::with_label(s::DISCARD_MESSAGE_CONFIRM);
+        confirm.add_css_class("destructive-action");
+        confirm.set_visible(false);
+        crate::testid::set_test_id(&confirm, ids::DM_MESSAGE_DISCARD_CONFIRM_BUTTON);
+
+        {
+            let discard2 = discard.clone();
+            let prompt = prompt.clone();
+            let confirm2 = confirm.clone();
+            discard.connect_clicked(move |_| {
+                discard2.set_visible(false);
+                prompt.set_visible(true);
+                confirm2.set_visible(true);
+            });
+        }
+        {
+            let mid = msg.message_id.clone();
+            let rt = rt.clone();
+            let pop = popover.clone();
+            confirm.connect_clicked(move |_| {
+                pop.popdown();
+                let mid = mid.clone();
+                rt.spawn(async move {
+                    crate::conversations::manager()
+                        .discard_queued_send(mid)
+                        .await;
+                });
+            });
+        }
+        menu.append(&retry);
+        menu.append(&discard);
+        menu.append(&prompt);
+        menu.append(&confirm);
+    }
 
     if can_react {
         let quickset = gtk::Box::new(gtk::Orientation::Horizontal, 2);
@@ -1065,6 +1174,60 @@ fn build_actions_button(
             });
         }
         menu.append(&del);
+        menu.append(&prompt);
+        menu.append(&confirm);
+    }
+
+    if can_remove {
+        // The local remove (`bridged-adapter.md` § Removing bridged rows,
+        // rule 1): the delete two-step's shape, but the nest's copy only —
+        // `dm-message-remove-button` reveals the prompt and
+        // `dm-message-remove-confirm-button`, which calls the shared
+        // `remove_message`; the bubble leaves once the nest answered.
+        let remove = gtk::Button::with_label(s::REMOVE_MESSAGE);
+        remove.add_css_class("flat");
+        remove.add_css_class("destructive-action");
+        crate::testid::set_test_id(&remove, ids::DM_MESSAGE_REMOVE_BUTTON);
+
+        let prompt = gtk::Label::new(Some(s::REMOVE_MESSAGE_CONFIRM_TITLE));
+        prompt.add_css_class("dim-label");
+        prompt.set_visible(false);
+
+        let confirm = gtk::Button::with_label(s::REMOVE_MESSAGE_CONFIRM);
+        confirm.add_css_class("destructive-action");
+        confirm.set_visible(false);
+        crate::testid::set_test_id(&confirm, ids::DM_MESSAGE_REMOVE_CONFIRM_BUTTON);
+        crate::offline_gate::declare_wire_kind(
+            &confirm,
+            fauna_protocol::bridged_conversations::KIND_MESSAGES_REMOVE,
+        );
+
+        {
+            let remove2 = remove.clone();
+            let prompt = prompt.clone();
+            let confirm2 = confirm.clone();
+            remove.connect_clicked(move |_| {
+                remove2.set_visible(false);
+                prompt.set_visible(true);
+                confirm2.set_visible(true);
+            });
+        }
+        {
+            let tid = thread_id.clone();
+            let mid = msg.message_id.clone();
+            let rt = rt.clone();
+            let pop = popover.clone();
+            confirm.connect_clicked(move |_| {
+                pop.popdown();
+                let (tid, mid) = (tid.clone(), mid.clone());
+                rt.spawn(async move {
+                    crate::conversations::manager()
+                        .remove_message(tid, mid)
+                        .await;
+                });
+            });
+        }
+        menu.append(&remove);
         menu.append(&prompt);
         menu.append(&confirm);
     }

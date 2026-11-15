@@ -11,7 +11,9 @@
 //! because every later step destroys something a refusal cannot give back; the
 //! registry removal as the one decision point, landing before the first await;
 //! the nest half over the slots that removal took into memory; and the erase
-//! only after the nest half has closed the store it assembled over.
+//! only after the nest half has closed the store it assembled over — both
+//! behind the stores still closing (`fauna_client_account_runtime::closing`),
+//! where a stop that lapsed its budget finishes.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -62,6 +64,14 @@ pub async fn remove_account_gesture(
         tracing::warn!("[settings/account] remove-account REFUSED ({blocked:?}) — {actor_id_hex}");
         return Ok(Some(blocked));
     }
+    if let Some(owed) = crate::erase_guard::remove_account_carry_owed(
+        &registry,
+        container_dir.clone(),
+        &actor_id_hex,
+    ) {
+        tracing::warn!("[settings/account] remove-account REFUSED (carry owed) — {actor_id_hex}");
+        return Ok(Some(owed));
+    }
     // The removal joins the sign-out record before its registry step, so the
     // store that step's crash-safety argument leaves unreached is finished by
     // the next launch's `sign_out_finish` (`account-scoping.md` § Erasure
@@ -84,6 +94,15 @@ pub async fn remove_account_gesture(
             crate::general_err(e)
         })?;
     let removed = Arc::new(removed);
+    // Behind every stop still closing a store, first: the account removed may
+    // be the one this process served a moment ago, and a switch's stop that
+    // lapsed its budget goes on closing that account's store in the
+    // background — the nest half below assembles over the same store, and the
+    // erase deletes it (`fauna_client_account_runtime::closing`'s module
+    // docs). Instant when nothing lapsed; bounded and loud when it lapses.
+    let closing = fauna_client_account_runtime::closing_stores();
+    let budget = fauna_client_account_runtime::CLOSING_STORES_BUDGET;
+    closing.closed(budget, "remove-account").await;
     if removed.holds_device_authorization() {
         let own_device_id = removed.device_id();
         // The outcome's log line is the shared routine's own.
@@ -102,6 +121,9 @@ pub async fn remove_account_gesture(
             },
         )
         .await;
+        // The nest half's own runtime, if its stop or its assembly lapsed:
+        // handed to the same set, and closed before the erase meets its store.
+        closing.closed(budget, "remove-account").await;
     }
     let store_root = crate::account_state::store_root_for(container_dir.map(PathBuf::from));
     for base in &base_dirs {

@@ -337,6 +337,10 @@ pub mod fakes {
         /// The owner's stored profile bytes — `set_profile` replaces them,
         /// `own_profile_base` serves them.
         profile: Mutex<Option<Vec<u8>>>,
+        /// Every folder listing and file read fails as a transport fault —
+        /// a login whose folder keys are not readable yet (the account
+        /// runtime still assembling).
+        folders_down: Mutex<bool>,
         #[cfg(not(target_arch = "wasm32"))]
         post_created: Arc<tokio::sync::Notify>,
     }
@@ -364,9 +368,25 @@ pub mod fakes {
                 followers_subscribers: Mutex::new(std::collections::BTreeSet::new()),
                 foreign_posts: Mutex::new(BTreeMap::new()),
                 profile: Mutex::new(None),
+                folders_down: Mutex::new(false),
                 #[cfg(not(target_arch = "wasm32"))]
                 post_created: Arc::new(tokio::sync::Notify::new()),
             }
+        }
+
+        /// From now on every folder listing and file read fails as a
+        /// transport fault, until called again with `false`.
+        pub fn set_folders_down(&self, down: bool) {
+            *self.folders_down.lock().expect("fake nest") = down;
+        }
+
+        fn folders_readable(&self) -> Result<(), ArchiveNestError> {
+            if *self.folders_down.lock().expect("fake nest") {
+                return Err(ArchiveNestError::Transport(
+                    "folder-key custody: the account runtime is not running".into(),
+                ));
+            }
+            Ok(())
         }
 
         /// The owner's stored profile bytes, as the last `set_profile` left
@@ -581,6 +601,7 @@ pub mod fakes {
         }
 
         async fn list_archive_folders(&self) -> Result<Vec<ArchiveFolderRef>, ArchiveNestError> {
+            self.folders_readable()?;
             Ok(self
                 .folders
                 .lock()
@@ -628,6 +649,7 @@ pub mod fakes {
             folder: &str,
             path: &str,
         ) -> Result<Option<Vec<u8>>, ArchiveNestError> {
+            self.folders_readable()?;
             Ok(self
                 .folders
                 .lock()

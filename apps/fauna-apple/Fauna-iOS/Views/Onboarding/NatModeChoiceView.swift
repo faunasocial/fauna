@@ -1,3 +1,4 @@
+#if !FAUNA_KIDS
 import SwiftUI
 import FaunaKit
 
@@ -91,3 +92,4 @@ struct NatModeChoiceView: View {
         Task { _ = await vm.machine.submitNatModeChoice() }
     }
 }
+#endif // !FAUNA_KIDS

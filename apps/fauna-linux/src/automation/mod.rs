@@ -20,5 +20,6 @@ pub mod agent;
 pub mod find;
 pub mod link;
 pub mod observables;
+pub mod painted_text_area;
 pub mod registry;
 pub mod server;

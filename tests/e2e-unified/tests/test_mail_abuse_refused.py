@@ -704,10 +704,6 @@ def silent_resolver_mta(
 
 
 @pytest.mark.feature("mail-abuse-refused")
-# The e2e cdylib flavor exists on Linux and macOS; on Windows the shipped and the
-# e2e bridge stage beside one `fauna_ffi.dll`, so there is no seam-carrying
-# library for this bridge to load yet.
-@pytest.mark.host_platform("linux", "macos")
 def test_a_message_whose_sender_cannot_be_checked_in_time_is_put_off_with_451(
     silent_resolver_mta,
 ):

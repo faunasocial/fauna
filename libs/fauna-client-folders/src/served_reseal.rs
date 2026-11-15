@@ -11,8 +11,9 @@
 
 use std::sync::Arc;
 
+use fauna_core::crypto::BackupKey;
 use fauna_core::folder_keys::FolderKeyResolver;
-use fauna_core::identity::ActorKeypair;
+use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_core::nest_reseal::ServedSetConverge;
 
 use crate::{FolderKeyReader, NestFolderKeyResolver};
@@ -63,6 +64,58 @@ pub fn served_set_converge(
         fauna_media_machine::served_reseal::served_set_walk(nest, keypair, resolver, device_id)
             .with_predecessors(predecessors),
     )
+}
+
+/// The take-over where no engine runs for the set (`succession-cut.md` ruling
+/// (11)(l)) over a native session — what a face with no engine for a set
+/// wires into [`crate::orchestration::FoldersAuthor::with_succession_take_over`].
+/// `predecessors` as [`served_set_converge`]'s: the account's attested
+/// predecessor ids, which tell the walk's judge a retired identity's row is
+/// the owner chain's. `predecessor_keys`: the same chain's owner roots, each
+/// paired with its identity (`AccountRegistry::predecessor_backup_keys_by_actor`)
+/// — what a head resting under a retired owner root opens under before the
+/// walk re-seals it under the current one.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn succession_take_over(
+    nest: Arc<fauna_client::NestClient>,
+    keypair: &ActorKeypair,
+    custody: Arc<dyn FolderKeyReader>,
+    device_id: String,
+    predecessors: Vec<[u8; 32]>,
+    predecessor_keys: Vec<(ActorId, BackupKey)>,
+) -> Arc<dyn fauna_core::nest_reseal::SuccessionTakeOver> {
+    let resolver: Arc<dyn FolderKeyResolver> =
+        Arc::new(NestFolderKeyResolver::new(nest.clone(), custody));
+    Arc::new(fauna_media_machine::succession_take_over::take_over_walk(
+        nest,
+        keypair,
+        resolver,
+        device_id,
+        predecessors,
+        predecessor_keys,
+    ))
+}
+
+/// [`succession_take_over`] over the SPA's browser session (`WsRpcClient`).
+#[cfg(target_arch = "wasm32")]
+pub fn succession_take_over(
+    nest: fauna_rpc_wasm::WsRpcClient,
+    keypair: &ActorKeypair,
+    custody: Arc<dyn FolderKeyReader>,
+    device_id: String,
+    predecessors: Vec<[u8; 32]>,
+    predecessor_keys: Vec<(ActorId, BackupKey)>,
+) -> Arc<dyn fauna_core::nest_reseal::SuccessionTakeOver> {
+    let resolver: Arc<dyn FolderKeyResolver> =
+        Arc::new(NestFolderKeyResolver::new(nest.clone(), custody));
+    Arc::new(fauna_media_machine::succession_take_over::take_over_walk(
+        nest,
+        keypair,
+        resolver,
+        device_id,
+        predecessors,
+        predecessor_keys,
+    ))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

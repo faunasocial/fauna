@@ -17,6 +17,13 @@ default = []
 # It forwards `fauna-client-policy/uniffi` for the same reason:
 # `joining_nest_rules` returns that crate's `NestRulesSummary` record.
 uniffi = ["dep:uniffi", "fauna-provisioning/uniffi", "fauna-core/uniffi", "fauna-launch-machine/uniffi", "fauna-client-policy/uniffi", "dep:fauna-uniffi-async"]
+# The kids build's input (`account-age-band.md` § The account age band, the
+# kids-app bullet, item (4)): the kids app keeps onboarding only as joining a
+# nest by invite, so under this feature a handle check never offers to set a
+# nest up or claim one — it ends in the terminal `kids_no_joinable_nest` line
+# (machine.rs `kids_excises`). Turned on only by `fauna-ffi`'s `kids-floor`,
+# the one feature only the kids FFI flavor carries.
+kids = []
 # Test helpers — CountingObserver, set_step_for_test.
 test-observer = []
 # The E2E bridge surface (`call_machine_method*`). Forwards to the native trust

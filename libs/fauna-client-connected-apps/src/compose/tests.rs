@@ -24,6 +24,7 @@ fn row() -> ConnectedAppRow {
         mail: None,
         signer_burned: false,
         oracle: None,
+        trust: None,
     }
 }
 
@@ -233,6 +234,27 @@ fn the_oracle_summary_counts_then_names_the_newest_operation() {
     assert!(text(&r)[2].ends_with(": Sign an event"));
 }
 
+#[test]
+fn a_record_operation_reads_when_then_the_operation_then_its_detail() {
+    let mut op = OracleOpRow {
+        at_millis: 1_700_000_000_000,
+        class: "atproto.service_auth".into(),
+        words: LocalizedText::key_arg(VERBATIM_KEY, "text", "Sign in to a service"),
+        detail: LocalizedText::key_arg(VERBATIM_KEY, "text", "did:web:x app.bsky.feed.getFeed"),
+    };
+    let when = format_unix_local_ms(op.at_millis);
+    assert_eq!(
+        oracle_op_text(&op).resolve(lookup),
+        format!("{when} · Sign in to a service — did:web:x app.bsky.feed.getFeed")
+    );
+    // A blank detail drops the dash, as the summary's newest operation does.
+    op.detail = LocalizedText::key_arg(VERBATIM_KEY, "text", " ");
+    assert_eq!(
+        oracle_op_text(&op).resolve(lookup),
+        format!("{when} · Sign in to a service")
+    );
+}
+
 fn card() -> ConsentCardRow {
     ConsentCardRow {
         consent_id_hex: "abcd".into(),
@@ -243,6 +265,7 @@ fn card() -> ConsentCardRow {
         sets: vec![],
         ends: None,
         install: None,
+        folder_picker: None,
     }
 }
 

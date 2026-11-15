@@ -3164,11 +3164,11 @@ impl StoreBackend for SqliteBackend {
                     r.get::<_, String>(2)?,
                     r.get::<_, Vec<u8>>(3)?,
                     r.get::<_, String>(4)?,
-                    r.get::<_, u64>(5)?,
+                    row_u64(r, 5)?,
                     r.get::<_, String>(6)?,
                     r.get::<_, u32>(7)?,
-                    r.get::<_, u64>(8)?,
-                    r.get::<_, Option<u64>>(9)?,
+                    row_u64(r, 8)?,
+                    row_opt_u64(r, 9)?,
                     r.get::<_, bool>(10)?,
                     r.get::<_, Option<String>>(11)?,
                 ))
@@ -3276,6 +3276,20 @@ impl StoreBackend for SqliteBackend {
 
 /// Seconds since epoch — the outbox's `created_at`/`last_attempt_at` stamps
 /// (same resolution as `SyncDb`'s `transfer_queue`).
+/// An unsigned column, read as the signed integer SQLite stores and refused when negative
+/// (`rusqlite` 0.39 no longer reads a `u64` directly).
+fn row_u64(r: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u64> {
+    let v: i64 = r.get(idx)?;
+    u64::try_from(v).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(idx, v))
+}
+
+/// [`row_u64`] for a nullable column.
+fn row_opt_u64(r: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<u64>> {
+    let v: Option<i64> = r.get(idx)?;
+    v.map(|v| u64::try_from(v).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(idx, v)))
+        .transpose()
+}
+
 fn now_epoch_secs() -> i64 {
     fauna_core::data::Timestamp::now_secs_or_zero()
 }
@@ -3704,7 +3718,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let backend = SqliteBackend::open(dir.path()).unwrap();
+        let mut backend = SqliteBackend::open(dir.path()).unwrap();
         backend.conn.busy_handler(Some(note_the_wait)).unwrap();
 
         let returned = Arc::new(AtomicBool::new(false));

@@ -98,6 +98,19 @@
 //! is never refused by a scoped gate. `refused` counts only the requests
 //! actually turned away.
 //!
+//! **Sparing one request shape.** `…/refuse?spare=<field>` refuses the kind
+//! except for a request whose payload map names `field` at its top level,
+//! which runs as usual (combinable with `as` and `actor`). It exists for a kind
+//! one host calls for two different reads: `fauna.sync.changes.list` serves a
+//! set's file rows and, with `item_class`, the account's state entries. The
+//! per-file-cap journey (`p2p-shared-set.md` § Wormability walk, rule 8) must
+//! keep the nest path off a set's new row, but on iOS the replica host is a
+//! File Provider extension the OS relaunches cold, and its engine build reads
+//! its folder-key custody through the state-entry walk, so a refusal of the
+//! whole kind refuses the build itself. `spare=item_class` turns away the file
+//! rows and lets the custody walk through. The field is a name, never a value:
+//! a test spares a request shape, not a request it predicted.
+//!
 //! ## Dropping the reply — the lost-reply sibling
 //!
 //! `POST …/{kind}/drop-reply` switches the gate to the third failure a client
@@ -305,6 +318,10 @@ pub struct HoldGate {
     /// every other counter at zero and reads to the test as "never arrived",
     /// when it arrived and was given up on by the client.
     abandoned: AtomicUsize,
+    /// A refusing gate's spared field (`POST …/refuse?spare=<field>`, module
+    /// doc § Refusal → *Sparing one request shape*): a request whose payload
+    /// names it passes. Cleared by every other mode change.
+    spare: Mutex<Option<String>>,
 }
 
 impl HoldGate {
@@ -317,7 +334,37 @@ impl HoldGate {
             dropped: AtomicUsize::new(0),
             passing: AtomicUsize::new(0),
             abandoned: AtomicUsize::new(0),
+            spare: Mutex::new(None),
         }
+    }
+
+    fn set_spare(&self, spare: Option<String>) {
+        *self.spare.lock().expect("rpc_hold spare mutex poisoned") = spare;
+    }
+
+    /// Whether a refusing gate spares a request whose payload names `fields`.
+    fn spares(&self, fields: &[String]) -> bool {
+        matches!(self.current(), Mode::Refuse(_) | Mode::RefuseFor { .. })
+            && self
+                .spare
+                .lock()
+                .expect("rpc_hold spare mutex poisoned")
+                .as_ref()
+                .is_some_and(|field| fields.iter().any(|f| f == field))
+    }
+
+    /// [`Self::park_as`] for a request whose payload names `fields` at its
+    /// top level — what a spared refusal matches.
+    async fn park_request(
+        &self,
+        shutdown: watch::Receiver<bool>,
+        actor: Option<[u8; 32]>,
+        fields: &[String],
+    ) -> Verdict {
+        if self.spares(fields) {
+            return Verdict::Pass;
+        }
+        self.park_as(shutdown, actor).await
     }
 
     /// Arm with no pass budget — the unit tests' shorthand; the route always
@@ -331,6 +378,7 @@ impl HoldGate {
     /// stored BEFORE the mode flips, so a request arriving in between sees the
     /// gate still open rather than a hold with no budget.
     fn arm_after(&self, pass: usize) {
+        self.set_spare(None);
         self.passing.store(pass, Ordering::SeqCst);
         // `send_replace`, never `send`: `Sender::send` FAILS — and leaves the
         // value untouched — when no receiver is currently subscribed, which is
@@ -344,6 +392,7 @@ impl HoldGate {
     /// § Holding until shutdown). No pass budget: the window under test is the
     /// first request's.
     fn arm_until_shutdown(&self) {
+        self.set_spare(None);
         self.passing.store(0, Ordering::SeqCst);
         self.mode.send_replace(Mode::HoldUntilShutdown);
     }
@@ -377,6 +426,7 @@ impl HoldGate {
     /// count *after* the wake-up has been signalled — the waiters may not have
     /// been scheduled yet, so this is the count so far, not a completion proof.
     fn release(&self) -> usize {
+        self.set_spare(None);
         self.passing.store(0, Ordering::SeqCst);
         // `send_replace` for the same reason as `arm` — and here it also wakes
         // every current waiter, which is the whole point.
@@ -614,10 +664,20 @@ impl RpcHoldRegistry {
 /// mutex-guarded map lookup that misses.
 ///
 /// `actor` is the actor the request is served as on the per-actor plane, or
-/// `None` (federation, principal) — what a scoped refusal matches.
-pub async fn hold_if_armed(state: &AppState, kind: &str, actor: Option<[u8; 32]>) -> Verdict {
+/// `None` (federation, principal) — what a scoped refusal matches; `fields`
+/// are the top-level keys of the request's payload map — what a spared
+/// refusal matches.
+pub async fn hold_if_armed(
+    state: &AppState,
+    kind: &str,
+    actor: Option<[u8; 32]>,
+    fields: &[String],
+) -> Verdict {
     match state.rpc_hold.existing(kind) {
-        Some(gate) => gate.park_as(state.ws.subscribe_shutdown(), actor).await,
+        Some(gate) => {
+            gate.park_request(state.ws.subscribe_shutdown(), actor, fields)
+                .await
+        }
         None => Verdict::Pass,
     }
 }
@@ -680,6 +740,10 @@ struct RefuseQuery {
     /// only*; absent refuses every caller.
     #[serde(default)]
     actor: Option<String>,
+    /// A payload field whose presence spares a request (module doc § Refusal
+    /// → *Sparing one request shape*); absent refuses every request shape.
+    #[serde(default)]
+    spare: Option<String>,
 }
 
 /// `POST /api/v1/test/rpc-hold/{kind}/hold-until-shutdown` — park every
@@ -701,8 +765,9 @@ async fn arm_hold_until_shutdown(
     Json(json!({ "ok": true, "kind": kind })).into_response()
 }
 
-/// `POST /api/v1/test/rpc-hold/{kind}/refuse[?as=outdated|unauthenticated][&actor=<hex>]`
-/// — answer every request of `kind` (only `actor`'s, when named) with
+/// `POST /api/v1/test/rpc-hold/{kind}/refuse[?as=outdated|unauthenticated][&actor=<hex>][&spare=<field>]`
+/// — answer every request of `kind` (only `actor`'s, when named; none whose
+/// payload names `spare`) with
 /// [`refused_error`] of that flavour until `release`, including any parked by
 /// an earlier hold. Returns `{"ok": true, "kind": <kind>}`.
 async fn refuse_kind(
@@ -717,6 +782,9 @@ async fn refuse_kind(
         ))
         .into_response();
     }
+    // The spare is set BEFORE the mode flips, so a request arriving in between
+    // meets the refusal already sparing its shape.
+    state.rpc_hold.gate(&kind).set_spare(query.spare.clone());
     match query.actor.as_deref() {
         None => state.rpc_hold.gate(&kind).refuse(query.refusal),
         Some(hex_actor) => match hex::decode(hex_actor)
@@ -801,6 +869,7 @@ async fn hold_status(
                 Mode::RefuseFor { actor, .. } => Some(hex::encode(actor)),
                 _ => None,
             },
+            "sparing": gate.spare.lock().expect("rpc_hold spare mutex poisoned").clone(),
             "dropping": matches!(gate.current(), Mode::DropReply | Mode::DropReplyOnce),
             "holding": gate.holding.load(Ordering::SeqCst),
             "passing": gate.passing.load(Ordering::SeqCst),
@@ -816,6 +885,7 @@ async fn hold_status(
             "until_shutdown": false,
             "refusing": false,
             "refusing_actor": null,
+            "sparing": null,
             "dropping": false,
             "holding": 0,
             "passing": 0,
@@ -1055,6 +1125,38 @@ mod tests {
         gate.release();
         assert_eq!(gate.park(no_shutdown()).await, Verdict::Pass);
         assert_eq!(gate.refused.load(Ordering::SeqCst), 2);
+    }
+
+    /// A spared refusal turns away every request of the kind but one whose
+    /// payload names the spared field, which passes uncounted; a release
+    /// forgets the spare.
+    #[tokio::test]
+    async fn a_refusal_sparing_a_field_passes_a_request_naming_it() {
+        let gate = HoldGate::new();
+        let spared = ["item_class".to_string(), "since".to_string()];
+        let other = ["folder".to_string(), "since".to_string()];
+        gate.set_spare(Some("item_class".into()));
+        gate.refuse(Refusal::Unknown);
+        assert_eq!(
+            gate.park_request(no_shutdown(), None, &spared).await,
+            Verdict::Pass
+        );
+        assert_eq!(
+            gate.park_request(no_shutdown(), None, &other).await,
+            Verdict::Refuse(Refusal::Unknown)
+        );
+        assert_eq!(gate.refused.load(Ordering::SeqCst), 1);
+
+        gate.release();
+        gate.refuse(Refusal::Unknown);
+        assert_eq!(
+            gate.park_request(no_shutdown(), None, &spared).await,
+            Verdict::Refuse(Refusal::Unknown),
+            "a release forgets the spare"
+        );
+
+        let parsed: RefuseQuery = serde_json::from_value(json!({"spare": "item_class"})).unwrap();
+        assert_eq!(parsed.spare.as_deref(), Some("item_class"));
     }
 
     /// A scoped refusal turns away the named actor's requests only: another

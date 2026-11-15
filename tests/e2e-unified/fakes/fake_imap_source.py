@@ -280,25 +280,19 @@ def session_cert_for(hostname: str) -> tuple[str, str]:
 
 def session_preset_redirect() -> tuple[str, int]:
     """The preset-host redirect seed's one entry, as ``(host, port)``: the
-    Outlook preset's host and the loopback port leased for it this session.
+    Outlook preset's host and the loopback port taken for it this session.
 
-    Leased on first use and held until the session ends — the app reads the map
+    Taken on first use and held until the session ends — the app reads the map
     out of its launch environment and the drivers are session-scoped, as for
-    the Microsoft authority's port — through `helpers.android_venue.nest_port`,
-    the seam `acme_pebble.lease_directory_port` uses, so a venue run gets a
-    port the device can reach. A test's `FakeImapSource(..., port=port)` binds
+    the Microsoft authority's port; the device reaches it through the run's
+    `adb reverse`, like any nest port. A test's `FakeImapSource(..., port=port)` binds
     it (`e2e-gated-seeds.md` § The preset-host redirect seed).
     """
     global _SESSION_REDIRECT_PORT
     if _SESSION_REDIRECT_PORT is None:
-        import atexit
-
         from drivers.port_util import find_free_port
-        from helpers import android_venue
 
-        port, release = android_venue.nest_port(find_free_port)
-        atexit.register(release)
-        _SESSION_REDIRECT_PORT = port
+        _SESSION_REDIRECT_PORT = find_free_port()
     return OUTLOOK_IMAP_HOST, _SESSION_REDIRECT_PORT
 
 

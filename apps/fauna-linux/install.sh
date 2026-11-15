@@ -9,6 +9,11 @@ set -e
 #   ./install.sh --uninstall       — remove installed files
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# The app's notices file, written by `just linux-release` (its dependency
+# `linux-desktop-notices`) at the one path every Linux packaging copies from.
+# SHIPPED_NOTICES names another copy of that same file (the tier_1 test's).
+NOTICES="${SHIPPED_NOTICES:-$REPO_ROOT/build/shipped-notices/linux-desktop/THIRD-PARTY-NOTICES}"
 if [ -n "${CARGO_TARGET_DIR:-}" ]; then
     BINARY="$CARGO_TARGET_DIR/release/fauna-desktop"
     AGENT_BINARY="$CARGO_TARGET_DIR/release/fauna-sync-agent"
@@ -36,6 +41,11 @@ INSTALL_AGENT="$PREFIX/bin/fauna-sync-agent"
 APP_ID="social.fauna.fauna"
 INSTALL_DESKTOP="$PREFIX/share/applications/$APP_ID.desktop"
 INSTALL_ICON="$PREFIX/share/icons/hicolor/scalable/apps/fauna.svg"
+# Fauna's two licence texts and the app's THIRD-PARTY-NOTICES, in the prefix's
+# documentation directory, named after the Debian package (shipped-notices.md
+# § Per channel, the Linux desktop row).
+INSTALL_DOC="$PREFIX/share/doc/fauna-desktop"
+DOC_FILES="LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES"
 # The client-written systemd user unit (the app installs it at first
 # post-auth, not this script). User-mode uninstall runs AS that user, so it is
 # the one channel that can remove the unit; root-scope uninstalls leave other
@@ -94,6 +104,15 @@ uninstall() {
         removed=$((removed + 1))
     fi
 
+    for doc in $DOC_FILES; do
+        if [ -f "$INSTALL_DOC/$doc" ]; then
+            rm -f "$INSTALL_DOC/$doc"
+            echo "  Removed $INSTALL_DOC/$doc"
+            removed=$((removed + 1))
+        fi
+    done
+    rmdir "$INSTALL_DOC" 2>/dev/null || true
+
     if [ "$removed" -eq 0 ]; then
         echo "Nothing to remove — Fauna does not appear to be installed at $PREFIX."
         exit 0
@@ -116,6 +135,11 @@ install_fauna() {
         echo "Run: just linux-release"
         exit 1
     fi
+    if [ ! -s "$NOTICES" ]; then
+        echo "Error: the app's notices file was not found at $NOTICES"
+        echo "Run: just linux-release"
+        exit 1
+    fi
 
     echo "Installing Fauna to $PREFIX..."
 
@@ -125,6 +149,13 @@ install_fauna() {
     echo "  Installed $INSTALL_BIN"
     install -Dm755 "$AGENT_BINARY" "$INSTALL_AGENT"
     echo "  Installed $INSTALL_AGENT"
+
+    # The licence texts and the notices file (copied, never read: the notices
+    # file is dependency-authored text)
+    install -Dm644 "$REPO_ROOT/LICENSE-MIT" "$INSTALL_DOC/LICENSE-MIT"
+    install -Dm644 "$REPO_ROOT/LICENSE-APACHE" "$INSTALL_DOC/LICENSE-APACHE"
+    install -Dm644 "$NOTICES" "$INSTALL_DOC/THIRD-PARTY-NOTICES"
+    echo "  Installed $INSTALL_DOC/ ($DOC_FILES)"
 
     # Desktop file
     install -Dm644 "$SCRIPT_DIR/packaging/$APP_ID.desktop" "$INSTALL_DESKTOP"

@@ -61,6 +61,7 @@ class BoundFolderDoor:
 
     def __init__(self, app, set_name: str, folder: Path, *, seat: str) -> None:
         self.app, self.folder, self.seat = app, folder, seat
+        self.last_read_why = ""
         folder.mkdir(parents=True, exist_ok=True)
         bind_location_under_set(app, set_name, folder, seat=seat)
 
@@ -74,7 +75,12 @@ class BoundFolderDoor:
     def read(self, name: str) -> str | None:
         """``name``'s text in the bound folder — the seat's engine opened it —
         or ``None`` while it is not there."""
-        return _read_or_none(self.folder / name)
+        text = _read_or_none(self.folder / name)
+        self.last_read_why = "" if text is not None else (
+            f"not in the bound folder; it holds "
+            f"{sorted(p.name for p in self.folder.iterdir()) if self.folder.is_dir() else '<no folder>'!r}"
+        )
+        return text
 
     def diagnosis(self) -> str:
         return agent_diagnosis(self.app, self.seat)
@@ -90,9 +96,23 @@ class MediaPageDoor:
         self.app, self.value, self.scratch, self.seat = app, filter_value, scratch, seat
         scratch.mkdir(parents=True, exist_ok=True)
         self.upload_answers: list[str] = []
+        #: Why the last :meth:`read` answered ``None`` — the listing did not
+        #: name the file, or the download failed (a missing generation fails
+        #: closed) — kept for a caller's diagnosis (convention 6).
+        self.last_read_why = ""
 
     def _scoped(self) -> list[str]:
         media = self.app.media
+        # A detail another reader left open (`_member_opens_and_reads` keeps it
+        # after its download) covers the list on a phone — a modal sheet on iOS
+        # — so the re-entry below would read an empty listing under it. Measured
+        # on iOS 2026-11-11: the member opened and read the owner's file, and
+        # this door's read of the same file one line later answered `None`.
+        try:
+            if self.app.driver.is_visible("media-item-detail"):
+                media.close_detail()
+        except Exception:  # noqa: BLE001 — nothing open, or already closing
+            pass
         media.reenter()
         media.ensure_loaded()
         media.set_filter(self.value, offer_timeout=_FILTER_OFFER_S)
@@ -153,17 +173,24 @@ class MediaPageDoor:
         while the set's listing does not show it or the download produces no
         file (a missing key fails closed — no plaintext)."""
         media = self.app.media
+        self.last_read_why = ""
         try:
             names = self._scoped()
-        except Exception:  # noqa: BLE001 — not offered / repainting: not readable yet
+        except Exception as exc:  # noqa: BLE001 — not offered / repainting: not readable yet
+            self.last_read_why = f"the filter {self.value!r} was not offered: {exc!r}"
             return None
         if name not in names:
+            self.last_read_why = f"the listing does not name it; it names {names!r}"
             return None
         try:
             media.open_item_detail(names.index(name))
             media.wait_for_version_count(1)
             return media.download_open_item(timeout=_DOWNLOAD_S).decode()
-        except Exception:  # noqa: BLE001 — no plaintext this tick
+        except Exception as exc:  # noqa: BLE001 — no plaintext this tick
+            self.last_read_why = (
+                f"listed, but the download gave no plaintext: {exc!r}; "
+                f"error-message={self.app.error_text()!r}"
+            )
             return None
         finally:
             try:
@@ -201,6 +228,18 @@ def seat_file_door(
 
     if surface_built("bound-location-upload-witness", app_name(app.driver)):
         return BoundFolderDoor(app, set_name, tmp_path / f"{seat}-bound", seat=seat)
+    return seat_media_door(app, set_name, tmp_path, seat=seat, shared_from=shared_from)
+
+
+def seat_media_door(
+    app, set_name: str, tmp_path: Path, *, seat: str, shared_from: tuple | None = None
+) -> "MediaPageDoor":
+    """``app``'s Media-page door to ``set_name`` on EVERY app, a bound-folder
+    app included — the door whose listing judges each row
+    (``succession-cut.md`` ruling (11)(c): a history row is never the item). A
+    bound folder proves only that the bytes rest on disk, which a file the
+    listing drops still does; a witness asserting that a file is ADMITTED reads
+    it here. Arguments as :func:`seat_file_door`'s."""
     value = set_name
     if shared_from is not None:
         from tests.api import conv_api

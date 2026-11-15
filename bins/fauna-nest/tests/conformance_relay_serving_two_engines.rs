@@ -491,7 +491,7 @@ async fn an_on_demand_replica_serves_a_body_it_hydrated_and_declines_a_placehold
     engine_c.set_serve_body(Arc::new(
         fauna_sync_engine::share_body::OnDemandBodySource::new(
             kept.clone(),
-            cache.clone(),
+            Some(cache.clone()),
             SyncDb::open(&db_path).unwrap(),
         ),
     ));

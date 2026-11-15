@@ -83,27 +83,31 @@ Stamped 2026-10-21 at 77c610862e.
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow`
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered`
     - `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_share_action_routes_open_the_create_surface_and_the_member_share_flow`
+    - `tests/e2e-unified/tests/platform/windows/test_file_manager_share.py::test_the_share_routes_open_the_create_surface_and_the_member_share_flow`
 29. [app] The file manager offers Share on a file only when that file can carry a link — `docs/goal/behavior/share-links.md` § Windows Explorer's Share leaf
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made`
     - `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_provider_items_carry_share_only_where_a_link_or_member_share_can_be_made`
+    - `tests/e2e-unified/tests/platform/windows/test_file_manager_share.py::test_the_agent_answers_share_only_where_a_link_or_member_share_can_be_made`
 30. [app] Choosing Share on a shared folder from the file manager opens that folder's member sharing in the app, and a sub-folder inside it offers no Share — `docs/goal/behavior/share-links.md` § Windows Explorer's Share leaf
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made`
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow`
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered`
     - `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_share_action_routes_open_the_create_surface_and_the_member_share_flow`
     - `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_provider_items_carry_share_only_where_a_link_or_member_share_can_be_made`
+    - `tests/e2e-unified/tests/platform/windows/test_file_manager_share.py::test_the_agent_answers_share_only_where_a_link_or_member_share_can_be_made`
+    - `tests/e2e-unified/tests/platform/windows/test_file_manager_share.py::test_the_share_routes_open_the_create_surface_and_the_member_share_flow`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1e755069 standalone |
-| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
+| web | ✅ full | 0.1.6-dev+8cbf2a90 standalone |
+| linux | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 | windows | ⚠ partial | 0.1.5-dev+97d945a3 standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+1e755069 standalone |
-| android | ⚠ partial | 0.1.5-dev+1e755069 standalone |
+| ios | ⚠ partial | 0.1.6 docker |
+| android | ⚠ partial | 0.1.6 docker |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
@@ -142,14 +146,18 @@ Stamped 2026-10-21 at 77c610862e.
 | 28 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow` | linux (linux): passed |
 | 28 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered` | linux (linux): passed |
 | 28 | app | `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_share_action_routes_open_the_create_surface_and_the_member_share_flow` | macos (macos): passed, ios (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/platform/windows/test_file_manager_share.py::test_the_share_routes_open_the_create_surface_and_the_member_share_flow` | — |
 | 28 | app | absent by design on web, android, tui, android-kids | — |
 | 29 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made` | linux (linux): passed |
 | 29 | app | `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_provider_items_carry_share_only_where_a_link_or_member_share_can_be_made` | macos (macos): passed, ios (macos): passed |
+| 29 | app | `tests/e2e-unified/tests/platform/windows/test_file_manager_share.py::test_the_agent_answers_share_only_where_a_link_or_member_share_can_be_made` | — |
 | 29 | app | absent by design on web, android, tui, android-kids | — |
 | 30 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made` | linux (linux): passed |
 | 30 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow` | linux (linux): passed |
 | 30 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered` | linux (linux): passed |
 | 30 | app | `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_share_action_routes_open_the_create_surface_and_the_member_share_flow` | macos (macos): passed, ios (macos): passed |
 | 30 | app | `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_provider_items_carry_share_only_where_a_link_or_member_share_can_be_made` | macos (macos): passed, ios (macos): passed |
+| 30 | app | `tests/e2e-unified/tests/platform/windows/test_file_manager_share.py::test_the_agent_answers_share_only_where_a_link_or_member_share_can_be_made` | — |
+| 30 | app | `tests/e2e-unified/tests/platform/windows/test_file_manager_share.py::test_the_share_routes_open_the_create_surface_and_the_member_share_flow` | — |
 | 30 | app | absent by design on web, android, tui, android-kids | — |
 <!-- features-render:end -->

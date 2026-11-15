@@ -541,7 +541,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_func_room_notice_for()
 		})
-		if checksum != 6628 {
+		if checksum != 36050 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_room_notice_for: UniFFI API checksum mismatch")
 		}
@@ -1102,6 +1102,15 @@ func uniffiCheckChecksums() {
 		if checksum != 43253 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_fauna_roster_actors: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_fill_drafts_for_leave()
+		})
+		if checksum != 10088 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_fill_drafts_for_leave: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2473,6 +2482,16 @@ type ConversationsManagerInterface interface {
 	// harvest (`identity-succession.md` § The succession statement → *the
 	// harvest wait*).
 	FaunaRosterActors() []ActorId
+	// The leave door's fill (`reserved-folders.md` § The leave-flush
+	// promise; `fauna_client_drafts::DraftsSync::save_on_leave`): the same
+	// FILL as [`Self::restore_drafts_at`] — a thread's live compose the user
+	// typed into keeps their text, an untouched one takes the resting draft,
+	// and a moved `epoch` fills nothing — but WITHOUT the restored-recipient
+	// probe. The session is leaving: the probe would spend the door's bounded
+	// budget on a rail answer nobody will see, and the snapshot taken right
+	// after carries the recipient's typed address either way. Returns the
+	// snapshot to save, [`Self::drafts_snapshot_bytes`] after the fill.
+	FillDraftsForLeave(epoch uint64, bytes []byte) []byte
 	// The handle `person` is currently seated under in the owner's own
 	// threads, for the two review surfaces that render a person **outside any
 	// one group** and therefore have no chip to read a name off.
@@ -4034,6 +4053,26 @@ func (_self *ConversationsManager) FaunaRosterActors() []ActorId {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_conversations_fn_method_conversationsmanager_fauna_roster_actors(
 				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// The leave door's fill (`reserved-folders.md` § The leave-flush
+// promise; `fauna_client_drafts::DraftsSync::save_on_leave`): the same
+// FILL as [`Self::restore_drafts_at`] — a thread's live compose the user
+// typed into keeps their text, an untouched one takes the resting draft,
+// and a moved `epoch` fills nothing — but WITHOUT the restored-recipient
+// probe. The session is leaving: the probe would spend the door's bounded
+// budget on a rail answer nobody will see, and the snapshot taken right
+// after carries the recipient's typed address either way. Returns the
+// snapshot to save, [`Self::drafts_snapshot_bytes`] after the fill.
+func (_self *ConversationsManager) FillDraftsForLeave(epoch uint64, bytes []byte) []byte {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBytesINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_method_conversationsmanager_fill_drafts_for_leave(
+				_pointer, FfiConverterUint64INSTANCE.Lower(epoch), FfiConverterBytesINSTANCE.Lower(bytes), _uniffiStatus),
 		}
 	}))
 }
@@ -8435,6 +8474,20 @@ type RoomSnapshot struct {
 	// a record it cannot open. Painted as `thread-room-notice`'s
 	// `awaiting-key` state ([`RoomSnapshot::notice`]).
 	AwaitingKey bool
+	// Whether this community room **owes a re-key**: someone was removed and
+	// the mint that seals them out of new traffic has not landed — the home
+	// nest's floor answer `severance_owed`, as this device last read it
+	// (`community-rooms.md` § The three classes → *Community* → *A removal's
+	// re-key is owed until it lands*). Every seated device reads the same
+	// floor, so every one says so; an owner's or admin's next tend pass pays
+	// the debt without a gesture, and the floor read that shows it paid
+	// clears this.
+	//
+	// `false` for every other class, for a room whose floor this device has
+	// not read, and for a floor that carries no answer. Painted as
+	// `thread-room-notice`'s `rekey-pending` state ([`RoomSnapshot::notice`]),
+	// which yields to `awaiting_key`.
+	SeveranceOwed bool
 	// Whether this room carries **moderation this device could not verify**:
 	// an owner's or admin's floor delete record is parked because the chain
 	// under the policy version it names rests on a name this device holds no
@@ -8499,6 +8552,7 @@ func (r *RoomSnapshot) Destroy() {
 	FfiDestroyerOptionalBool{}.Destroy(r.NestRead)
 	FfiDestroyerOptionalSequenceString{}.Destroy(r.Labelers)
 	FfiDestroyerBool{}.Destroy(r.AwaitingKey)
+	FfiDestroyerBool{}.Destroy(r.SeveranceOwed)
 	FfiDestroyerBool{}.Destroy(r.ModerationUnverified)
 	FfiDestroyerBool{}.Destroy(r.BridgeDisconnected)
 	FfiDestroyerOptionalSequenceRoomPendingInviteSnapshot{}.Destroy(r.PendingInvites)
@@ -8524,6 +8578,7 @@ func (c FfiConverterRoomSnapshot) Read(reader io.Reader) RoomSnapshot {
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalSequenceRoomPendingInviteSnapshotINSTANCE.Read(reader),
 		FfiConverterOptionalRoomSearchSnapshotINSTANCE.Read(reader),
 	}
@@ -8545,6 +8600,7 @@ func (c FfiConverterRoomSnapshot) Write(writer io.Writer, value RoomSnapshot) {
 	FfiConverterOptionalBoolINSTANCE.Write(writer, value.NestRead)
 	FfiConverterOptionalSequenceStringINSTANCE.Write(writer, value.Labelers)
 	FfiConverterBoolINSTANCE.Write(writer, value.AwaitingKey)
+	FfiConverterBoolINSTANCE.Write(writer, value.SeveranceOwed)
 	FfiConverterBoolINSTANCE.Write(writer, value.ModerationUnverified)
 	FfiConverterBoolINSTANCE.Write(writer, value.BridgeDisconnected)
 	FfiConverterOptionalSequenceRoomPendingInviteSnapshotINSTANCE.Write(writer, value.PendingInvites)
@@ -9950,7 +10006,7 @@ func (_ FfiDestroyerRoomClass) Destroy(value RoomClass) {
 
 // The room's standing notice — what `thread-room-notice` states on the
 // thread header while one holds (`ui/conversations.md` § Element IDs).
-// Derived from three shared room facts, so no app re-decides which one speaks.
+// Derived from four shared room facts, so no app re-decides which one speaks.
 type RoomNotice uint
 
 const (
@@ -9958,14 +10014,18 @@ const (
 	// `community-rooms.md` § Implementation status today → *A newcomer's
 	// walk waits for its key-in*).
 	RoomNoticeAwaitingKey RoomNotice = 1
+	// Someone was removed and the room's re-key has not landed yet
+	// ([`RoomSnapshot::severance_owed`]; `community-rooms.md` § The three
+	// classes → *Community* → *A removal's re-key is owed until it lands*).
+	RoomNoticeRekeyPending RoomNotice = 2
 	// Some of the room's moderation could not be verified on this device
 	// ([`RoomSnapshot::moderation_unverified`]; `conversation-rooms.md` §
 	// Roles and authorization → *Members verify what they paint*).
-	RoomNoticeModerationUnverified RoomNotice = 2
+	RoomNoticeModerationUnverified RoomNotice = 3
 	// A bridged room no live bridge serves — readable, never writable
 	// ([`RoomSnapshot::bridge_disconnected`]; `apps/bridges.md` § Phase G →
 	// *When the bridge stops serving*).
-	RoomNoticeBridgeDisconnected RoomNotice = 3
+	RoomNoticeBridgeDisconnected RoomNotice = 4
 )
 
 type FfiConverterRoomNotice struct{}
@@ -13524,11 +13584,11 @@ func RoomNoticeAttrToken(notice RoomNotice) string {
 
 // FFI-exported twin of [`RoomNotice::for_facts`] — which notice, if any,
 // `thread-room-notice` states for a room's `awaiting_key`,
-// `moderation_unverified` and `bridge_disconnected`.
-func RoomNoticeFor(awaitingKey bool, moderationUnverified bool, bridgeDisconnected bool) *RoomNotice {
+// `severance_owed`, `moderation_unverified` and `bridge_disconnected`.
+func RoomNoticeFor(awaitingKey bool, severanceOwed bool, moderationUnverified bool, bridgeDisconnected bool) *RoomNotice {
 	return FfiConverterOptionalRoomNoticeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
-			inner: C.uniffi_fauna_conversations_fn_func_room_notice_for(FfiConverterBoolINSTANCE.Lower(awaitingKey), FfiConverterBoolINSTANCE.Lower(moderationUnverified), FfiConverterBoolINSTANCE.Lower(bridgeDisconnected), _uniffiStatus),
+			inner: C.uniffi_fauna_conversations_fn_func_room_notice_for(FfiConverterBoolINSTANCE.Lower(awaitingKey), FfiConverterBoolINSTANCE.Lower(severanceOwed), FfiConverterBoolINSTANCE.Lower(moderationUnverified), FfiConverterBoolINSTANCE.Lower(bridgeDisconnected), _uniffiStatus),
 		}
 	}))
 }

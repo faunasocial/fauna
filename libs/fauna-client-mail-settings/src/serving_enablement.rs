@@ -238,7 +238,10 @@ pub async fn provision_dav_mailbox_at_first_setup<R: RpcRequester>(
     }
 }
 
-/// First-authenticated-setup mail provision. Discriminates on `am_i_admin`:
+/// First-authenticated-setup mail provision. First, a custody that already
+/// holds a mailbox is restored, never minted over
+/// ([`MailSettingsMachine::restore_mailbox_at_claim`]). Otherwise it
+/// discriminates on `am_i_admin`:
 ///
 /// - **Admin claim**: iff `admin_enable_email`, mint the admin's own mailbox via
 ///   [`MailSettingsMachine::enable_mail_with_generated_password`], whose final
@@ -255,6 +258,25 @@ pub async fn provision_mail_at_first_setup<R: RpcRequester + Clone>(
 ) {
     let account = fauna_client_account::AccountClient::new(nest.clone());
     let is_admin = account.am_i_admin().await.map(|r| r.admin).unwrap_or(false);
+    // A custody that already holds a mailbox — the same identity reclaiming a
+    // factory-reset box, or a rebuilt one — is restored onto this nest, never
+    // minted over; a sentinel standing is resumed here (`mail-credentials.md`
+    // § A nest that lost the mailbox, rule 3). Only the admin claim's
+    // enable-email choice turns the deployment subsystem on.
+    match machine
+        .restore_mailbox_at_claim(is_admin && admin_enable_email)
+        .await
+    {
+        Ok(true) => {
+            tracing::info!("first setup: the account's mailbox was restored from its custody");
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!("provision_mail_at_first_setup(restore): {e:?}");
+            return;
+        }
+    }
 
     if is_admin {
         if admin_enable_email {

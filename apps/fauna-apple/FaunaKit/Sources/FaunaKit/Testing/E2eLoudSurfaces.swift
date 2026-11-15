@@ -2,7 +2,7 @@ import Foundation
 
 /// The loud surfaces' e2e seams on macOS + iOS — `fauna_e2e_agent::
 /// {ALERT_SWEEP_WAKE, RECONNECT_BACKOFF, CONNECTION_REPORTS_KEY,
-/// PAINTED_ERRORS_KEY, KNOCK_NOTICES_KEY}`, which own the cross-app contracts. Every one is a thin
+/// PAINTED_ERRORS_KEY, PAINTED_TEXT_AREA_KEY, KNOCK_NOTICES_KEY}`, which own the cross-app contracts. Every one is a thin
 /// call into `fauna-ffi`'s `test-helpers` exports (`e2e_seams.rs`,
 /// `critical_alerts.rs`), so apple counts, parses and wakes with the same Rust
 /// as tui, linux, web and windows (windows' `E2eLoudSurfaces.cs` is the sibling
@@ -21,6 +21,7 @@ public enum E2eLoudSurfaces {
 
     private static let connectionReports = FfiConnectionReportsForTest()
     private static let paintedErrors = FfiPaintedErrorTallyForTest()
+    private static let paintedTextArea = FfiPaintedTextAreaForTest()
     private static let knockNotices = FfiKnockNoticesForTest()
     private static var paintedFrameQueued = false
     private static var lastShown = ""
@@ -70,10 +71,19 @@ public enum E2eLoudSurfaces {
     }
 
     /// Feed the tally one frame: every visible element with text. The tally
-    /// applies the contract's error-surface predicate itself.
+    /// applies the contract's error-surface predicate itself. The same pass
+    /// feeds `painted_text_area` (convention 17) the room each such element was
+    /// given; the shared record keeps the starved ones.
     private static func observePaintedFrame() {
         paintedErrors.observe(frame: AutomationRegistry.shared.paintedTexts().map {
             FfiPaintedElement(id: $0.id, text: $0.text)
+        })
+        paintedTextArea.observe(frame: AutomationRegistry.shared.laidOutTexts().map {
+            FfiLaidOutText(
+                id: $0.id, text: $0.text,
+                width: Double($0.room.width), height: Double($0.room.height),
+                pane: $0.room.pane.map { FfiLayoutSize(width: Double($0.width), height: Double($0.height)) },
+                depth: UInt32($0.room.depth))
         })
         // One log line per change of what is painted, never per frame: the
         // evidence a count that did (or did not) move can be checked against.
@@ -84,7 +94,7 @@ public enum E2eLoudSurfaces {
         }
     }
 
-    /// The `connection_reports`, `painted_errors` and `knock_notices` state
+    /// The `connection_reports`, `painted_errors`, `painted_text_area` and `knock_notices` state
     /// values, decoded (a raw JSON string would double-encode at the wire).
     /// Published unconditionally: all three are process-wide and start at zero
     /// (both apple targets have built the knock toast, so an empty
@@ -96,6 +106,7 @@ public enum E2eLoudSurfaces {
         var fragment: [String: Any] = [:]
         for (key, json) in [("connection_reports", connectionReports.json()),
                             ("painted_errors", paintedErrors.json()),
+                            ("painted_text_area", paintedTextArea.json()),
                             ("knock_notices", knockNotices.json())] {
             if let data = json.data(using: .utf8),
                let value = try? JSONSerialization.jsonObject(with: data) {

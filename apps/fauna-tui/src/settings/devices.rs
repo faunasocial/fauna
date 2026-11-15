@@ -1200,6 +1200,7 @@ mod tests {
             peer_transport: None,
             enrollment_target_device_id: "ab".repeat(32),
             enrollment_device_label: None,
+            foreground: true,
         })
         .await
         .expect("the scratch runtime starts")

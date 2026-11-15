@@ -77,6 +77,8 @@ pub mod group_sweep;
 #[cfg(feature = "conversations-witness")]
 pub mod harvest;
 pub mod kit;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod kit_claim;
 /// The post-store-ready half of the aftermath — the succession-ledger legs
 /// every host runs once at its account-store-ready edge, off the durable
 /// ceremony park.
@@ -88,6 +90,10 @@ pub mod linked_fanout;
 /// The signed-out door's ceremony: the seed-signed `fauna.account.lockout`.
 pub mod lockout;
 pub mod nest;
+/// The successor's owed nests as Settings lists them, with the dismiss
+/// that settles one on the user's word (`succession-linked-nests.md`
+/// § The road).
+pub mod owed_nests;
 pub mod replacement;
 pub mod restore;
 pub mod status;

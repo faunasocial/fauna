@@ -188,7 +188,7 @@ fn authorize(
 
     // 6. The rate ceiling; a refused operation does not consume the window.
     let actor_hex = hex::encode(account);
-    let (window_start, count): (u64, u32) = conn
+    let (window_start, count): (i64, u32) = conn
         .query_row(
             "SELECT window_start, window_count FROM atproto_oracle_principals
               WHERE actor_id = ?1 AND principal_id = ?2",
@@ -197,6 +197,7 @@ fn authorize(
         )
         .optional()?
         .unwrap_or((0, 0));
+    let window_start = u64::try_from(window_start)?;
     let Ok(next) = (RateWindow {
         window_start,
         count,
@@ -209,7 +210,12 @@ fn authorize(
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (actor_id, principal_id)
          DO UPDATE SET window_start = excluded.window_start, window_count = excluded.window_count",
-        params![actor_hex, principal_id, next.window_start, next.count],
+        params![
+            actor_hex,
+            principal_id,
+            i64::try_from(next.window_start)?,
+            next.count
+        ],
     )?;
 
     Ok(Ok(Admitted {
@@ -234,7 +240,7 @@ fn record(
     conn.execute(
         "UPDATE atproto_oracle_principals SET use_count = use_count + 1, last_used_at = ?3
           WHERE actor_id = ?1 AND principal_id = ?2",
-        params![actor_hex, principal_id, now],
+        params![actor_hex, principal_id, i64::try_from(now)?],
     )?;
     conn.execute(
         "INSERT INTO atproto_oracle_ops (actor_id, principal_id, at, class, detail)
@@ -242,7 +248,7 @@ fn record(
         params![
             actor_hex,
             principal_id,
-            now,
+            i64::try_from(now)?,
             CLASS.name(),
             format!("{} {}", admitted.aud, admitted.lxm)
         ],

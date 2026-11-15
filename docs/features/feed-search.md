@@ -39,7 +39,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+2e8014b4 standalone |
 | linux | ✅ full | 0.1.5-dev+00668dad standalone |
-| windows | ✅ full | 0.1.2-dev+6d8dc256.dirty standalone |
+| windows | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 | android |  no run recorded | |

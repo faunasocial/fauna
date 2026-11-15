@@ -839,6 +839,40 @@ public final class AdminNestVM: BusyAdminCommandVM {
         }
     }
 
+    /// The handle the in-process post-reset re-claim seeds the wizard with — the
+    /// macOS `factoryResetReonboard` and iOS twin, run right after `factoryReset()`
+    /// returned the code. It is the pending-factory-reset slot's handle, the one
+    /// `factoryReset()` just qualified through the shared `qualifyReclaimHandle` and
+    /// persisted, so the in-process re-claim and a relaunch's resume claim under the
+    /// SAME handle. The session's own handle is the BARE localpart the nest stores; a
+    /// re-claim under it reads as a non-domain handle and derives every serving intent
+    /// off, so the mailbox never comes back (`mail-credentials.md` § A nest that lost
+    /// the mailbox; `mail-bridge-lifecycle.md` § Factory reset → re-claim handle
+    /// sourcing). With no slot for this nest (the store changed underneath us), the
+    /// session handle is qualified by the same shared rule — never re-derived inline.
+    nonisolated public static func reclaimHandle(
+        slotNestUrl: String?, slotHandle: String?,
+        sessionHandle: String, domain: String?, nestUrl: String
+    ) -> String {
+        if slotNestUrl == nestUrl, let slotHandle, !slotHandle.isEmpty {
+            return slotHandle
+        }
+        return qualifyReclaimHandle(handle: sessionHandle, domain: domain, nestUrl: nestUrl)
+    }
+
+    /// ``reclaimHandle(slotNestUrl:slotHandle:sessionHandle:domain:nestUrl:)`` over
+    /// the served account's slot and cached domain — the store `factoryReset()` wrote.
+    nonisolated public static func reclaimHandle(
+        sessionHandle: String, nestUrl: String, keychain: KeychainStore = KeychainStore()
+    ) -> String {
+        let pending = FaunaAccounts.launchPersistence(keychain: keychain).loadPendingFactoryReset()
+        return reclaimHandle(
+            slotNestUrl: pending?.nestUrl, slotHandle: pending?.handle,
+            sessionHandle: sessionHandle,
+            domain: FaunaAccounts.sessionMaterial(keychain: keychain)?.domain,
+            nestUrl: nestUrl)
+    }
+
     /// Whether the serving-port field (`admin-nest-serving-port-*`) is editable:
     /// only on a direct-listener nest that isn't mid-request. A router-fronted nest
     /// pins the external port (served on 443 by the deployment), so the field is

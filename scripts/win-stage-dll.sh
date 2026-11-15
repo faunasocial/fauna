@@ -8,16 +8,27 @@
 # Every aside is then deleted best-effort — this pass's and any earlier one's;
 # one still mapped refuses the delete and is simply retried next pass.
 #
-# Called from INSIDE `_windows-ffi-flavor`'s gated build command, so it only
-# ever runs for a build that recipe just performed
+# A slot already holding the same bytes is left alone: the Go/cgo recipes stage
+# their runtime dlls on EVERY call, built or not, and a mail bridge or seal
+# helper running from this checkout keeps them mapped — a plain `cp` there
+# failed the next run's prebuild with `Device or resource busy` though nothing
+# had changed (measured 2026-11-10 on Windows, a tui run beside a windows run
+# from one checkout).
+#
+# Called from INSIDE `_windows-ffi-flavor`'s gated build command and from
+# `_windows-go-cgo-build`'s runtime-dll staging
 # (build-target-layout-windows.md § Cargo target dir layout (win)).
 set -euo pipefail
 src=$1
 dst=$2
-if [ -e "$dst" ]; then
-    mv -f "$dst" "$dst.old.$$.$RANDOM"
+if [ -e "$dst" ] && cmp -s "$src" "$dst"; then
+    :
+else
+    if [ -e "$dst" ]; then
+        mv -f "$dst" "$dst.old.$$.$RANDOM"
+    fi
+    cp "$src" "$dst"
 fi
-cp "$src" "$dst"
 for old in "$dst".old.*; do
     [ -e "$old" ] && rm -f "$old" 2>/dev/null || true
 done

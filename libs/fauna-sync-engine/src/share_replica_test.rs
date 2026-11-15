@@ -494,3 +494,164 @@ async fn the_door_resumes_an_interrupted_pull_and_keeps_the_cursor_rule() {
     assert_eq!(cursor, 6, "an un-sequenced row moves no cursor");
     assert_eq!(r.kept("cabin-draft.txt").as_deref(), Some(&draft[..]));
 }
+
+/// iOS's replica ([`StagingTree`]): the File Provider extension's staging
+/// root is the kept root, and its OS owns the cache
+/// (`p2p-shared-set-build.md` § *Phone peers — design*, decision 3).
+mod staging {
+    use super::*;
+    use crate::always_resident::share_ingest_on_demand;
+    use crate::peer_share_ingest_test::Blob;
+    use crate::provider_face::owned_tree::StagingTree;
+
+    struct Staged {
+        _dir: tempfile::TempDir,
+        tree: StagingTree,
+        engine: SyncEngine,
+    }
+
+    fn staged() -> Staged {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = StagingTree::new(dir.path().join("staging"));
+        std::fs::create_dir_all(tree.staging_root()).unwrap();
+        let engine = ingest_engine(tree.staging_root().to_path_buf());
+        engine
+            .db()
+            .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
+            .unwrap();
+        Staged {
+            _dir: dir,
+            tree,
+            engine,
+        }
+    }
+
+    impl Staged {
+        async fn door(
+            &self,
+            rows: &[fauna_protocol::peer_share::PeerShareChange],
+            blobs: &[&Blob],
+        ) {
+            let spool = tempfile::tempdir().unwrap();
+            spool_blobs(spool.path(), blobs);
+            share_ingest_on_demand(
+                &self.engine,
+                &self.tree,
+                &PEER_ACTOR_HEX,
+                &encoded(rows),
+                spool.path().to_path_buf(),
+            )
+            .await
+            .expect("door");
+        }
+
+        fn staged(&self, rel: &str) -> Option<Vec<u8>> {
+            std::fs::read(self.tree.staging_root().join(rel)).ok()
+        }
+
+        fn state(&self, rel: &str) -> Option<SyncState> {
+            self.engine.db().get_entry(rel).unwrap().map(|e| e.state)
+        }
+    }
+
+    /// The door over the staging root: the un-sequenced body lands there,
+    /// `fetchContents`' kept-root lookup answers with it, and the engine
+    /// never uploads it as this device's write; a sequenced row lands none.
+    #[tokio::test]
+    async fn the_door_lands_the_unsequenced_body_in_staging_and_the_kept_lookup_serves_it() {
+        let s = staged();
+        let draft = holiday_bytes();
+        let blob = sealed_blob(&draft);
+        let recorded = sealed_blob(b"recorded while the nest was reachable");
+        s.door(
+            &[
+                peer_row(4, "recorded.txt", recorded.manifest_hash, "create"),
+                pending_row("cabin/draft.mp4", blob.manifest_hash),
+            ],
+            &[&blob, &recorded],
+        )
+        .await;
+
+        assert_eq!(s.staged("cabin/draft.mp4").as_deref(), Some(&draft[..]));
+        assert_eq!(
+            s.tree.kept_body(&s.engine, "cabin/draft.mp4").unwrap(),
+            Some(s.tree.staging_root().join("cabin/draft.mp4")),
+            "fetchContents answers from the kept root before the nest"
+        );
+        assert!(
+            s.engine
+                .holds_provisional_peer_body("cabin/draft.mp4")
+                .unwrap(),
+            "the engine's upload door refuses it as a write intent"
+        );
+        assert_eq!(
+            s.staged("recorded.txt"),
+            None,
+            "a sequenced row lands no body"
+        );
+        assert_eq!(s.state("recorded.txt"), Some(SyncState::Placeholder));
+        assert_eq!(s.tree.kept_body(&s.engine, "recorded.txt").unwrap(), None);
+    }
+
+    /// A staged copy that is neither a peer's unconfirmed body nor the
+    /// recorded head is never handed to the OS as the file.
+    #[tokio::test]
+    async fn the_kept_lookup_never_serves_a_staged_copy_the_head_moved_past() {
+        let s = staged();
+        let recorded = sealed_blob(b"the head the nest recorded");
+        s.door(
+            &[peer_row(4, "notes.txt", recorded.manifest_hash, "create")],
+            &[&recorded],
+        )
+        .await;
+        std::fs::write(
+            s.tree.staging_root().join("notes.txt"),
+            b"an older staged copy",
+        )
+        .unwrap();
+        assert_eq!(s.tree.kept_body(&s.engine, "notes.txt").unwrap(), None);
+    }
+
+    /// Confirm: the nest recorded exactly the landed bytes — demotion is
+    /// deletion (the row a placeholder, the staged copy gone); the OS keeps
+    /// its own copy or fetches the nest's.
+    #[tokio::test]
+    async fn a_confirmed_body_is_demoted_by_deleting_it_from_staging() {
+        let s = staged();
+        let blob = sealed_blob(&holiday_bytes());
+        let rel = "cabin/draft.mp4";
+        s.door(&[pending_row(rel, blob.manifest_hash)], &[&blob])
+            .await;
+
+        let nest_row = peer_row(9, rel, blob.manifest_hash, "create").change;
+        let fold = s.engine.fold_changes_for_test(&[nest_row]).expect("fold");
+        assert_eq!(fold.overlay.confirmed, [rel]);
+        s.tree
+            .settle_peer_bodies(&s.engine, &fold.overlay)
+            .expect("settle");
+        assert_eq!(s.staged(rel), None, "deleted from staging");
+        assert_eq!(s.state(rel), Some(SyncState::Placeholder));
+        assert_eq!(s.tree.kept_body(&s.engine, rel).unwrap(), None);
+    }
+
+    /// Supersede: the nest recorded another head — the landed body is
+    /// dropped, and never recorded as this replica's change.
+    #[tokio::test]
+    async fn a_superseded_body_is_dropped_from_staging() {
+        let s = staged();
+        let blob = sealed_blob(&holiday_bytes());
+        let rel = "cabin/draft.mp4";
+        s.door(&[pending_row(rel, blob.manifest_hash)], &[&blob])
+            .await;
+
+        let winner = sealed_blob(b"the re-cut everyone preferred");
+        let nest_row = peer_row(9, rel, winner.manifest_hash, "create").change;
+        let fold = s.engine.fold_changes_for_test(&[nest_row]).expect("fold");
+        assert_eq!(fold.overlay.superseded.len(), 1);
+        s.tree
+            .settle_peer_bodies(&s.engine, &fold.overlay)
+            .expect("settle");
+        assert_eq!(s.staged(rel), None, "the landed body yielded");
+        assert!(s.engine.db().own_changes_since(0, 10).unwrap().is_empty());
+    }
+}

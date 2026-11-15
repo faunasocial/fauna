@@ -729,6 +729,9 @@ class _OnboardingHandle_checkOutcome:
     def local_no_nest(*, domain: str) -> str:
         return f"No nest is running at {domain}. Start a nest there, then check again."
     @staticmethod
+    def kids_no_joinable_nest(*, domain: str) -> str:
+        return f"There is no nest at {domain} you can join. Ask for an invite to a nest that is already set up."
+    @staticmethod
     def already_on_nest_handle_matches(*, handle: str) -> str:
         return f"Welcome back, {handle}."
     @staticmethod
@@ -1206,6 +1209,7 @@ class _Feed:
     def compose_attachment_missing(*, filename: str) -> str:
         return f"Attach {filename} again — the file is not on this device."
     compose_sell_price_invalid = "Enter a smaller price"
+    compose_sell_price_not_whole = "Enter the price as a whole number of sats"
     compose_sell_rank_unavailable = "Could not check your tiers to price this post — try again"
     compose_sell_account_not_ready = "Your account is still loading on this device — try again in a moment"
     compose_sell_tier_unavailable = "Could not set up this sale — try again"
@@ -1311,6 +1315,13 @@ class _ConversationsDetail:
     delete_message = "Delete message"
     delete_message_confirm = "Delete"
     delete_message_confirm_title = "Delete message?"
+    retry_send = "Send again"
+    discard_message = "Discard message"
+    discard_message_confirm = "Discard"
+    discard_message_confirm_title = "Discard this unsent message?"
+    remove_message = "Remove from my nest"
+    remove_message_confirm = "Remove"
+    remove_message_confirm_title = "Remove this message from your nest? The other side keeps its copy."
     message_deleted = "This message was deleted"
     selected_message = "Your search result"
     message_actions = "More actions"
@@ -1385,8 +1396,13 @@ class _ConversationsUnified:
     bridged_no_recipient_key = "This account has no mail key yet, so a copy of the message cannot be kept. Set up mail, then send again."
     room_notice_moderation_unverified = "Some moderation in this room couldn't be verified on this device, so the affected messages are still shown."
     room_notice_awaiting_key = "Waiting for a room key — messages will appear once an owner or admin keys you in."
+    room_notice_rekey_pending = "Someone was removed from this room. The room is being re-keyed — this finishes on its own."
     room_notice_bridge_disconnected = "The app that carried this conversation is no longer connected. You can still read it, but you can't send."
     dm_message_undelivered = "Not delivered — the app that carried this conversation was disconnected before it went out."
+    dm_message_queued = "Waiting to send"
+    @staticmethod
+    def dm_message_unsent(*, reason: str) -> str:
+        return f"Not sent — {reason}"
     @staticmethod
     def dm_message_warmup_deferred(*, date: str) -> str:
         return f"Delivery deferred until {date} per IP warm-up schedule."
@@ -1405,6 +1421,8 @@ class _ConversationsUnified:
     room_history_policy_full = "The whole conversation"
     thread_room_settings = "Room settings"
     room_leave = "Leave room"
+    room_remove = "Remove conversation from my nest"
+    room_remove_confirm = "Remove — the other side keeps its copy"
     room_home_nest_yes = "Home nest joins: yes"
     room_home_nest_no = "Home nest joins: no"
     room_nest_read_yes = "Home nest reads this room: yes"
@@ -1921,6 +1939,12 @@ class _Atproto_settings:
         return f"Some of that comes from {nsid}:"
     consent_approve_button = "Approve"
     consent_deny_button = "Deny"
+    consent_folder_label = "Folder:"
+    consent_folder_prompt = "Choose a folder"
+    consent_folder_none_deposit = "None of your folders can receive files from an app — each keeps only its file list on your nest. Let one folder store its files on your nest first."
+    consent_folder_none_read = "None of your folders is shared with apps for reading. Turn on serving for a folder first."
+    consent_folder_none_both = "None of your folders can both receive files from an app and be read by one. Use a folder that stores its files on your nest and is served."
+    consent_folder_unreadable = "Your folders could not be read just now, so none can be chosen. Try again in a moment."
     @staticmethod
     def error_refresh(*, message: str) -> str:
         return f"Failed to load app credentials: {message}"
@@ -3540,12 +3564,36 @@ class _SettingsRecovery_kit:
     @staticmethod
     def drafts_reseal_failed(*, reason: str) -> str:
         return f"Your unsent drafts could not be recovered yet: {reason}. They are safe, and this will be retried the next time you sign in."
+    @staticmethod
+    def owed_nests_status(*, count: str) -> str:
+        return f"{count} other server(s) your previous identity was linked to have not yet been told your account moved. Your devices keep trying on their own. If you do not recognise a server below, or no longer use it, you can remove it from the list."
+    @staticmethod
+    def owed_nest_address(*, address: str) -> str:
+        return f"{address}"
+    owed_nest_address_none = "No address was recorded for this server."
+    owed_nest_not_tried = "This device has not tried this server yet."
+    owed_nest_landed = "This server now knows your account moved."
+    owed_nest_no_address = "There is no address to reach this server at."
+    owed_nest_unreachable = "This server could not be reached the last time this device tried. It will try again."
+    owed_nest_other_nest = "A different server answered at this address, so nothing was sent. This device will not try it again until the app is restarted."
+    @staticmethod
+    def owed_nest_refused(*, code: str) -> str:
+        return f"This server did not accept the move of your account ({code}). It will be tried again."
+    owed_nest_no_seed = "This server needs your previous identity's key to accept the move, and this device does not have it. A device that holds it will deliver it."
+    owed_nest_chain_forked = "This server holds a different recovery key for your previous identity, so it cannot accept the move."
+    owed_nest_successor_exists = "An account for your new identity already exists on this server. The move lands once that account is deleted there."
+    owed_nest_waiting = "Waiting to try this server again."
+    owed_nest_dismiss = "Remove from list"
+    owed_nest_dismiss_confirm = "Remove — stop trying this server"
+    @staticmethod
+    def owed_nest_dismiss_failed(*, reason: str) -> str:
+        return f"This server could not be removed from the list: {reason}. Try again."
 
 
 class _SettingsIcloud_backup:
     title = "iCloud Backup"
     toggle = "Back up identity to iCloud Keychain"
-    footer = "When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place."
+    footer = "When off (the default), your identity stays out of iCloud. On iPhone and iPad, turn it on to let iCloud Keychain restore your identity on a new device; the Mac app cannot make the copy yet. Adding a device and your recovery kit remain the main ways to have your identity in more than one place."
 
 
 class _SettingsPush_notifications:
@@ -3723,6 +3771,17 @@ class _SettingsPending_actions:
 
 
 class _SettingsUnsent_changes:
+    title = "Unsent changes"
+    @staticmethod
+    def title_count(*, count: str) -> str:
+        return f"Unsent changes ({count})"
+    none = "Every change has reached your nest."
+    @staticmethod
+    def status_with_reason(*, state: str, reason: str) -> str:
+        return f"{state} — {reason}"
+    retry = "Send again"
+    discard = "Discard"
+    discard_confirm = "Discard for good"
     kind_like = "Like on a post"
     kind_unlike = "Removed like on a post"
     kind_post_interaction = "Interaction on a post"
@@ -3751,12 +3810,14 @@ class _SettingsUnsent_changes:
         return f"{kind}"
     state_waiting = "Waiting to send"
     state_held = "Waiting behind a change that was not sent"
+    state_held_carry = "Waiting for the conversation to move to your new identity"
     state_unsent = "Not sent"
     reason_unknown_kind = "This version of the app cannot send this change"
     reason_undecodable = "This change could not be read"
     reason_mls_no_channel = "The conversation could not be found"
     reason_mls_not_a_member = "You are no longer a member of this conversation"
     reason_mls_send_failed = "The message could not be sent"
+    reason_mls_attachment_missing = "An attachment of this message is no longer on this device"
     @staticmethod
     def reason_fallback(*, code: str) -> str:
         return f"Your nest refused this change ({code})"
@@ -3947,6 +4008,7 @@ class _Settings:
     sign_out_blocked_other_window = "Still signed in — another Fauna window is using this account on this device. Close it, then sign out again."
     remove_account_blocked_other_window = "Not removed — another Fauna window is using that account on this device. Close it, then remove the account again."
     remove_account_blocked_this_window = "Not removed — this window is using that account. Close this window, then remove the account from another one."
+    remove_account_blocked_carry_owed = "Not removed — this account still has changes waiting to move to your new identity. Sign in as your new identity and send or discard them first."
     @staticmethod
     def switch_refused_no_secret(*, account: str) -> str:
         return f"Not switched — this device can no longer sign in as {account}: its secret key is missing here. You are still on the identity you were using. To use {account} here again, add it back with its secret key or recovery kit."
@@ -4033,6 +4095,9 @@ class _Nests:
     custody_restore_unchecked = "Restored — but this device couldn't confirm that the nest that answered is the one your records name for this address. Your records stand; check the address with whoever runs that nest."
     trusted_to_read = "Trusted to read:"
     scope_mail = "Mail — and the spam-filter model and training history derived from it"
+    scope_materialize_mail = "Keeps your mail searchable"
+    scope_materialize_calendar = "Keeps your calendar searchable"
+    scope_materialize_card = "Keeps your contacts searchable"
     scope_calendar = "Calendar"
     scope_card = "Contacts"
     scope_posts = "Posts"
@@ -4061,6 +4126,9 @@ class _Nests:
     grant_unattested_mark = "Given before you recovered this account — still active. Keep it, or revoke it if you don't recognise it."
     grant_keep_button = "Keep"
     bound_note_standing = "On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation."
+    bound_note_materialize_mail = "On an honest nest, revoking deletes this nest's searchable copy of your mail and its key, and stops it reading more. It cannot un-see what was already read."
+    bound_note_materialize_calendar = "On an honest nest, revoking deletes this nest's searchable copy of your calendar and its key, and stops it reading more. It cannot un-see what was already read."
+    bound_note_materialize_card = "On an honest nest, revoking deletes this nest's searchable copy of your contacts and its key, and stops it reading more. It cannot un-see what was already read."
     bound_note_bounded_mail = "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it."
     @staticmethod
     def history_minted(*, scope: str, when: str) -> str:
@@ -4101,6 +4169,12 @@ class _Nests:
     mint_button = "Add trust…"
     mint_scope_placeholder = "Choose what to trust it with…"
     mint_option_mail = "Read and filter my mail — and the spam-filter model and training history derived from it"
+    mint_option_materialize_mail = "Keep my mail searchable on this nest"
+    mint_option_materialize_calendar = "Keep my calendar searchable on this nest"
+    mint_option_materialize_card = "Keep my contacts searchable on this nest"
+    mint_materialize_note = "While this is on, this nest can read your mail and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your mail — it cannot undo what a hostile nest already read."
+    mint_materialize_calendar_note = "While this is on, this nest can read your calendar and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your calendar — it cannot undo what a hostile nest already read."
+    mint_materialize_card_note = "While this is on, this nest can read your contacts and keeps a searchable copy of them on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your contacts — it cannot undo what a hostile nest already read."
     mint_option_calendar = "Read my calendar"
     @staticmethod
     def mint_option_paywalled(*, tier: str) -> str:
@@ -4242,6 +4316,32 @@ class _Web_publish:
     @staticmethod
     def error_paywall_link(*, message: str) -> str:
         return f"Failed to create paywall link: {message}"
+
+
+class _Nostr_advertise:
+    advertise = "Advertise on Nostr"
+    stop = "Stop advertising on Nostr"
+    confirm_title = "Advertise this post on Nostr?"
+    confirm = "Advertise"
+    confirm_body = "Your post's public teaser and its price will be published to your nest's relay and to your Nostr relays. Anyone on Nostr can read them, and a zap of at least that price whose receipt is signed by one of your zap signers can buy the post for the person who sent it. If you stop advertising, the note is deleted from your nest's relay and, while your nest holds your Nostr key, your Nostr relays are asked to delete their copies, but some may keep them."
+    @staticmethod
+    def error_advertise(*, message: str) -> str:
+        return f"Failed to advertise the post on Nostr: {message}"
+    @staticmethod
+    def error_stop(*, message: str) -> str:
+        return f"Failed to stop advertising the post on Nostr: {message}"
+
+
+class _Sale_price:
+    button = "Change price…"
+    title = "Change price"
+    @staticmethod
+    def error_load(*, message: str) -> str:
+        return f"Failed to read the post's price: {message}"
+    @staticmethod
+    def error_save(*, message: str) -> str:
+        return f"Failed to change the price: {message}"
+    advertised_note = "This post is advertised on Nostr. If you save a new machine price while your nest holds your Nostr key, the note is replaced with one carrying the new price; if you remove the machine price, the post stops being advertised. Relays that kept a copy of the old note may still show it."
 
 
 class _Mail_aliases:
@@ -4554,7 +4654,7 @@ class _Mail_import:
 
 class _Archive_import:
     title = "Import from other services"
-    description = "Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest."
+    description = "Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest."
     unavailable = "Importing needs a session that holds your identity key; this one does not."
     source_title = "Step 1 — Where the archive comes from"
     source_help_facebook = "On Facebook, open Settings & privacy → Settings → Accounts Center → Your information and permissions → Download your information. Choose \"Download to device\", format JSON, any media quality. The download link expires after a few days, so save the zip as soon as it is ready."
@@ -5033,6 +5133,15 @@ class _AdminUsers_page:
     suspend_default_reason = "Suspended by admin"
     make_admin = "Make Admin"
     remove_admin = "Remove Admin"
+    @staticmethod
+    def supervised_by(*, guardian: str) -> str:
+        return f"Supervised by {guardian}"
+    take_over = "Take over"
+    @staticmethod
+    def take_over_confirm_summary(*, ward: str, guardian: str) -> str:
+        return f"Take over supervision of {ward} from {guardian}? You become the guardian at once, a pending hand-over is withdrawn, and you manage the policy from your Family page."
+    take_over_confirm = "Confirm take-over"
+    take_over_cancel = "Cancel"
     prev_page = "Previous"
     next_page = "Next"
     @staticmethod
@@ -6895,10 +7004,10 @@ class _Subscriptions:
     redeem = "Redeem"
     @staticmethod
     def claim_delivery_dm(*, code: str) -> str:
-        return f"Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs."
+        return f"Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app, open the author's profile and enter the code under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs."
     @staticmethod
     def claim_delivery_dm_link(*, code: str, url: str) -> str:
-        return f"Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs."
+        return f"Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. You can also enter it in a Fauna app, on the author's profile under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs."
     offer_status_none = "Not subscribed"
     offer_status_pending = "Pending approval"
     offer_status_active = "Subscribed"
@@ -7052,12 +7161,12 @@ class _ErrorBluesky:
 
 
 class _ErrorNostr:
-    not_linked = "This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first."
+    not_linked = "This needs a linked Nostr key, and none is linked for you. Link one on the Nostr page first."
     no_custodial_key = "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page."
     no_relays_configured = "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first."
     replies_off = "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page."
     not_sold = "Only a post you sell can be advertised on Nostr. Sell this post first."
-    no_asking_price = "This post has no price yet, so a zap could not buy it. Set a price first, then advertise it."
+    no_asking_price = "This post has no asking price, so a zap could not buy it and it can't be advertised. To advertise a post you sell, choose Sell this post… when you write it and give it an asking price in sats."
 
 
 class _ErrorNest:
@@ -7067,6 +7176,13 @@ class _ErrorNest:
 
 class _ErrorBackup:
     writer_seat_held = "This destination already keeps your account's backup from another box. Nothing was added."
+
+
+class _ErrorPayments:
+    claim_not_found = "No claim matches this code. Check it and try again."
+    claim_already_redeemed = "This code has already been used."
+    claim_voided = "This code was cancelled by the creator and can no longer be used."
+    claim_admits_elsewhere = "This code is a membership of the creator's nest. Use it as an invite code when you join that nest. It has not been used."
 
 
 class _ErrorFederation:
@@ -7131,6 +7247,7 @@ class _Error:
     nostr = _ErrorNostr
     nest = _ErrorNest
     backup = _ErrorBackup
+    payments = _ErrorPayments
     federation = _ErrorFederation
     protocol = _ErrorProtocol
     email = _ErrorEmail
@@ -7200,6 +7317,7 @@ class _Errors:
     recovery_prior_kit_required = "A recovery key is already registered. Enter your current kit to replace it, or use the seed-alone replacement option instead."
     recovery_prior_kit_mismatch = "That kit does not match the one currently registered for this identity."
     recovery_kit_for_another_account = "That recovery kit belongs to a different account, not this one. Nothing was changed."
+    recovery_kit_minted_elsewhere = "The window that replaced this identity is creating its new recovery kit and will show it there."
     @staticmethod
     def recovery_prior_escrow_unreadable(*, reason: str) -> str:
         return f"Your existing recovery data could not be read ({reason}), so replacing it now would destroy it. Try again from a device and connection that can read it."
@@ -7606,6 +7724,15 @@ class _Connected_apps:
     @staticmethod
     def oracle_latest_bare(*, time: str, operation: str) -> str:
         return f"Most recent, {time}: {operation}"
+    oracle_open = "Show what Fauna did for this app"
+    oracle_close = "Hide what Fauna did for this app"
+    @staticmethod
+    def oracle_op(*, time: str, operation: str, detail: str) -> str:
+        return f"{time} · {operation} — {detail}"
+    @staticmethod
+    def oracle_op_bare(*, time: str, operation: str) -> str:
+        return f"{time} · {operation}"
+    oracle_empty = "Nothing recorded for this app yet"
     blocked_heading = "Blocked apps"
     blocked_hint = "Requests from these apps are never shown to you."
     @staticmethod
@@ -7635,6 +7762,15 @@ class _Connected_apps:
     @staticmethod
     def install_setting(*, label: str, kind: str) -> str:
         return f"{label} ({kind})"
+    @staticmethod
+    def trust_scope_ext_rw(*, publisher: str, kinds: str) -> str:
+        return f"Keys to your records published by {publisher}: {kinds} — read and write"
+    @staticmethod
+    def trust_scope_ext_ro(*, publisher: str, kinds: str) -> str:
+        return f"Keys to your records published by {publisher}: {kinds} — read only"
+    trust_status_expired = "Expired — the app will ask again if it needs them"
+    trust_empty = "This app holds no keys to your records"
+    trust_bound_note = "On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and does not yet block content arriving after you disconnect."
 
 
 class _Share_link:
@@ -7725,6 +7861,8 @@ class S:
     mail_settings = _Mail_settings
     web_settings = _Web_settings
     web_publish = _Web_publish
+    nostr_advertise = _Nostr_advertise
+    sale_price = _Sale_price
     mail_aliases = _Mail_aliases
     mail_spam = _Mail_spam
     mail_export = _Mail_export

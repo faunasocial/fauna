@@ -151,9 +151,18 @@ internal static class ConversationsManagerHost
     /// login reused the manager holding the OUTGOING identity's rails, threads and
     /// drafts. Lazy, so the fresh manager is not constructed until something actually
     /// asks for <see cref="Instance"/> afterwards.</para>
+    ///
+    /// <para>The taskbar badge ends with the account, FIRST (apps/windows.md § Home-screen
+    /// widget): the outgoing manager's <see cref="UnreadBadgeObserver"/> is the only thing
+    /// that reads the fold, and the fresh manager below is not even built after a
+    /// sign-out, so without this the OS would keep painting the signed-out account's
+    /// count. Before the swap, so the successor's observer — built by the new factory on
+    /// the next <see cref="Instance"/> read — takes the NEW account generation, and a read
+    /// the outgoing observer still has in flight is dropped.</para>
     /// </summary>
     public static void ResetForActorChange()
     {
+        FaunaApp.Services.TaskbarBadgeService.EndAccount();
         lock (Gate)
         {
             // Only if something actually asked for it — reading `.Value` on an

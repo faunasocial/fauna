@@ -17,6 +17,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
+import com.fauna.app.ui.components.ClaimRedeemPair
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
@@ -160,35 +161,14 @@ fun SubscriptionSettingsContent(
                     claimCode = ""
                     onClaimRedeemedConsumed()
                 }
-                Text(
-                    stringResource(R.string.subscriptions_redeem_claim_title),
-                    style = MaterialTheme.typography.titleMedium,
+                // The pair is shared with the OTHER profile Tiers tab's redeem
+                // door (`ClaimRedeemPair`); this page owns its own buffer.
+                ClaimRedeemPair(
+                    code = claimCode,
+                    onCodeChange = { claimCode = it },
+                    working = working,
+                    onRedeem = { onRedeemClaim(claimCode) },
                 )
-                // The commit gates, not the buffer: the claim-code input beside
-                // it stays live so a code can be pasted with no nest. Hoisted
-                // above the Row so the reason can render under both.
-                val redeemGate = faunaGate(
-                    "fauna.payments.claims.redeem",
-                    enabled = !working,
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedTextField(
-                        value = claimCode,
-                        onValueChange = { claimCode = it },
-                        singleLine = true,
-                        label = { Text(stringResource(R.string.subscriptions_claim_code)) },
-                        modifier = Modifier.weight(1f).testTag(Ids.SUBSCRIPTION_CLAIM_REDEEM_INPUT),
-                    )
-                    Button(
-                        onClick = { onRedeemClaim(claimCode) },
-                        enabled = redeemGate.enabled,
-                        modifier = Modifier.testTag(Ids.SUBSCRIPTION_CLAIM_REDEEM_BUTTON),
-                    ) { Text(stringResource(R.string.subscriptions_redeem)) }
-                }
-                DisabledControlReasonText(redeemGate.reason)
             }
         }
     }

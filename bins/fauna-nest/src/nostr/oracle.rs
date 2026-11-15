@@ -121,7 +121,7 @@ pub fn bind(
         "INSERT INTO nostr_oracle_clients (actor_id, principal_id, client_pubkey, created_at)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (actor_id, principal_id) DO UPDATE SET client_pubkey = excluded.client_pubkey",
-        params![actor_hex, principal_id, client_pubkey, now],
+        params![actor_hex, principal_id, client_pubkey, i64::try_from(now)?],
     )?;
     Ok(Ok(()))
 }
@@ -141,7 +141,7 @@ pub fn authorize(
 ) -> Result<std::result::Result<OracleAdmission, OracleRefusal>> {
     use OracleRefusal::{RateLimited, Unauthorized};
 
-    let client: Option<(i64, Vec<u8>, u64, u32)> = conn
+    let client: Option<(i64, Vec<u8>, i64, u32)> = conn
         .query_row(
             "SELECT id, principal_id, window_start, window_count FROM nostr_oracle_clients
               WHERE actor_id = ?1 AND client_pubkey = ?2",
@@ -152,6 +152,7 @@ pub fn authorize(
     let Some((client_id, principal_id, window_start, window_count)) = client else {
         return Ok(Err(Unauthorized));
     };
+    let window_start = u64::try_from(window_start)?;
     let Ok(owner) = hex::decode(actor_hex) else {
         return Ok(Err(Unauthorized));
     };
@@ -231,7 +232,7 @@ pub fn authorize(
     };
     conn.execute(
         "UPDATE nostr_oracle_clients SET window_start = ?2, window_count = ?3 WHERE id = ?1",
-        params![client_id, next.window_start, next.count],
+        params![client_id, i64::try_from(next.window_start)?, next.count],
     )?;
     Ok(Ok(OracleAdmission {
         client_id,
@@ -279,7 +280,7 @@ pub fn record(
     conn.execute(
         "UPDATE nostr_oracle_clients SET use_count = use_count + 1, last_used_at = ?2
           WHERE id = ?1",
-        params![admission.client_id, now],
+        params![admission.client_id, i64::try_from(now)?],
     )?;
     let Some(class) = admission.class else {
         return Ok(());
@@ -290,7 +291,7 @@ pub fn record(
         params![
             actor_hex,
             admission.client_id,
-            now,
+            i64::try_from(now)?,
             class.name(),
             op_detail(req)?
         ],

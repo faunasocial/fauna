@@ -155,11 +155,50 @@ class ConnectedAppsVM @Inject constructor(
 
     fun blockRequest(consentIdHex: String) = run { it.blockRequest(consentIdHex) }
 
+    /**
+     * Choose the folder on a bare folder-plane request card
+     * (`connected-apps-request-folder`) — local to the shared machine, no nest
+     * call; the card's Approve then mints over it.
+     */
+    fun setFolder(consentIdHex: String, id: Long) {
+        val m = machine ?: return
+        m.setFolder(consentIdHex, id)
+        snapshot.value = m.snapshot()
+    }
+
     fun unblock(clientId: String) = run { it.unblock(clientId) }
 
     /** The account's external-apps switch (`atproto-external-apps-enable`): the
      *  machine writes and re-reads, and the toggle paints the re-read. */
     fun setExternalAppsEnabled(enabled: Boolean) = run { it.setExternalAppsEnabled(enabled) }
+
+    /**
+     * Show the Now or History lens of a principal row's trust facet — page-local
+     * in the shared machine, no nest call. A visit builds a fresh machine, so
+     * every row starts on Now (`connected-apps.md` § The trust facet and history
+     * lens → *Lens state*).
+     */
+    fun setLens(key: String, lens: uniffi.fauna_client_pair.TrustLens) {
+        val m = machine ?: return
+        m.setLens(key, lens)
+        snapshot.value = m.snapshot()
+    }
+
+    /**
+     * The record's open control (`connected-apps-oracle-open`) toggles: the one
+     * open record closes, any other row's opens — the machine keeps one open at
+     * a time and reads it on demand (`connected-apps.md` § Layout & flow,
+     * region 3). A visit builds a fresh machine, so every row starts closed.
+     */
+    fun toggleRecord(key: String) {
+        val m = machine ?: return
+        if (m.snapshot().record?.key == key) {
+            m.closeRecord()
+            snapshot.value = m.snapshot()
+        } else {
+            run { it.openRecord(key) }
+        }
+    }
 
     fun armRevoke(key: String) {
         revokeArmed.value = key

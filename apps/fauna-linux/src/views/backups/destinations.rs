@@ -87,7 +87,7 @@ use fauna_protocol::backup::BackupDestinationStatusItem as BackupDestinationStat
 use crate::async_helper::{hydrate_with_retry, spawn_with_snapshot};
 use crate::client::{FaunaClient, bound_source_nest};
 use crate::i18n::strings::backups as s;
-use crate::testid::set_test_id;
+use crate::testid::{set_test_id, set_test_text};
 
 /// One async round-trip's result: the freshly-persisted destination list, or an
 /// error string surfaced in the page `error-message`.
@@ -1596,12 +1596,32 @@ fn open_reseed_confirm(ctx: &Rc<Ctx>, source: Option<String>) {
         }
         return;
     }
-    ctx.w.reseed_title.set_text(s::BACKUP_RESEED_CONFIRM_TITLE);
-    ctx.w.reseed_body.set_text(s::BACKUP_RESEED_CONFIRM_BODY);
+    fill_reseed_confirm(
+        &ctx.w,
+        s::BACKUP_RESEED_CONFIRM_TITLE,
+        s::BACKUP_RESEED_CONFIRM_BODY,
+    );
     *ctx.reseed_preflight.borrow_mut() = None;
     *ctx.reseed_source.borrow_mut() = source;
     ctx.w.reclaim_modal.set_visible(false);
     ctx.w.reseed_modal.set_visible(true);
+}
+
+/// Fill `backup-destination-reseed-confirm-modal`'s title and body, and
+/// declare the modal's text as title then body, one line each — so a driver's
+/// read of the modal is title, consequence, then each preflight line, never
+/// the label join with the buttons' captions (`ui/backups.md` § Restore after
+/// losing the nest: the lines are the modal's body, no id of their own; tui
+/// registers the same text).
+fn fill_reseed_confirm(w: &Widgets, title: &str, body: &str) {
+    w.reseed_title.set_text(title);
+    w.reseed_body.set_text(body);
+    set_test_text(&w.reseed_modal, &reseed_confirm_text(title, body));
+}
+
+/// The modal's declared text: the title, then the body, one line each.
+fn reseed_confirm_text(title: &str, body: &str) -> String {
+    format!("{title}\n{body}")
 }
 
 /// The pull-back confirm's body: the consequence sentence, then one line per
@@ -1665,14 +1685,11 @@ fn start_pull_back_preflight(
                             .iter()
                             .map(crate::report::resolve_nested)
                             .collect();
-                    ctx_render
-                        .w
-                        .reseed_title
-                        .set_text(&s::backup_reseed_pull_back_confirm_title(&name));
-                    ctx_render
-                        .w
-                        .reseed_body
-                        .set_text(&pull_back_confirm_body(&name, &lines));
+                    fill_reseed_confirm(
+                        &ctx_render.w,
+                        &s::backup_reseed_pull_back_confirm_title(&name),
+                        &pull_back_confirm_body(&name, &lines),
+                    );
                     *ctx_render.reseed_preflight.borrow_mut() = Some(preflight);
                     *ctx_render.reseed_source.borrow_mut() = source;
                     ctx_render.w.reclaim_modal.set_visible(false);
@@ -3125,6 +3142,18 @@ mod tests {
     /// The pull-back confirm's body is the consequence sentence followed by one
     /// line per preflight line, in order (`backups.md` § Restore after losing
     /// the nest).
+    #[test]
+    fn the_confirm_modal_reads_as_title_consequence_then_each_preflight_line() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (modal, _, _, _, _) = build_reseed_modal();
+            let body = pull_back_confirm_body("Home nest", &["mail: unvouched".to_string()]);
+            set_test_text(&modal, &reseed_confirm_text("Pull back", &body));
+            let text = crate::automation::find::text_of(modal.upcast_ref());
+            let head = s::backup_reseed_pull_back_confirm_body("Home nest");
+            assert_eq!(text, format!("Pull back\n{head}\nmail: unvouched"));
+        });
+    }
+
     #[test]
     fn the_pull_back_confirm_body_carries_the_preflight_lines() {
         let lines = vec!["first line".to_string(), "second line".to_string()];

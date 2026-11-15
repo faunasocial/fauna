@@ -92,6 +92,29 @@ impl Ovh {
         Ok(resp.json().await?)
     }
 
+    /// A signed GET of one path under `/1.0/cloud/project`, returned as raw
+    /// JSON — for the live witness alone, which has to print values the
+    /// adapter's own calls filter away (a region's `type` and `status`, a
+    /// region's image names, a booted instance's image and billing)
+    /// (`registry.md` § Server offers follow the location → *OVH*, the witness
+    /// bullet). Read-only and confined to the project tree; nothing in the
+    /// product calls it.
+    #[doc(hidden)]
+    pub async fn witness_get(
+        &self,
+        client: &Client,
+        path: &str,
+    ) -> Result<serde_json::Value, ProvisionError> {
+        if !path.starts_with("/1.0/cloud/project") {
+            return Err(ProvisionError::Other(format!(
+                "witness_get reads only /1.0/cloud/project paths, not {path:?}"
+            )));
+        }
+        let timestamp = self.get_timestamp(client).await?;
+        self.get_json(client, &format!("{}{path}", self.api_base), timestamp)
+            .await
+    }
+
     /// The account's subsidiary (`GET /1.0/me`) — which public catalogue
     /// prices it; a consumer key that cannot read it is not a usable
     /// credential.

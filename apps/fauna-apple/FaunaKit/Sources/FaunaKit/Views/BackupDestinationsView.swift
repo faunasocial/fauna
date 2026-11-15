@@ -429,12 +429,23 @@ public struct BackupDestinationsView: View {
             ?? L.backups.backupReseedConfirmTitle
     }
 
+    private var reseedConfirmBody: String {
+        vm.reseedPulledFromName.map { L.backups.backupReseedPullBackConfirmBody(name: $0) }
+            ?? L.backups.backupReseedConfirmBody
+    }
+
+    /// The modal's whole text for the driver: title, body, then each preflight
+    /// line, one per line — the reading tui registers too.
+    private var reseedConfirmText: String {
+        ([reseedConfirmTitle, reseedConfirmBody] + vm.reseedPreflightLines)
+            .joined(separator: "\n")
+    }
+
     private var reseedConfirm: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(reseedConfirmTitle)
                 .font(.headline)
-            Text(vm.reseedPulledFromName.map { L.backups.backupReseedPullBackConfirmBody(name: $0) }
-                ?? L.backups.backupReseedConfirmBody)
+            Text(reseedConfirmBody)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -462,7 +473,7 @@ public struct BackupDestinationsView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.backupDestinationReseedConfirmModal)
         .automationValue(Ids.backupDestinationReseedConfirmModal,
-                         text: { reseedConfirmTitle })
+                         text: { reseedConfirmText })
     }
 
     /// `backup-reclaim-confirm-modal` — a plain confirm, no re-type. Reclaiming

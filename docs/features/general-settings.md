@@ -9,6 +9,7 @@ absences:
   ios: "docs/goal/architecture/apps/common.md § Desktop Residency"
   android: "docs/goal/architecture/apps/common.md § Desktop Residency"
   tui: "docs/goal/architecture/apps/common.md § Desktop Residency"
+  macos (outcome 3): "docs/goal/architecture/apps/macos.md § Window close"
 ---
 
 ## What a user gets
@@ -51,7 +52,7 @@ Stamped 2026-09-22 at e9f79fdf25.
 | web | — absent | |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.5-dev+a73ed62e.dirty standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | — absent | |
 | android | — absent | |
 | tui | — absent | |
@@ -72,5 +73,6 @@ Stamped 2026-09-22 at e9f79fdf25.
 | 2 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_j_autostart_stays_hidden_only_when_it_lands_in_the_main_app` | linux (linux): passed, windows (windows): passed, macos (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_tray_close_to_tray.py::test_close_to_tray_defaults_on_for_a_fresh_install` | linux (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_windows_close_to_tray.py::test_close_to_tray_defaults_on_for_a_fresh_install` | windows (windows): passed |
+| 3 | app | absent by design on macos | — |
 | 4 | app | `tests/e2e-unified/tests/test_autostart_choice.py::test_start_at_login_is_a_choice_that_survives_a_relaunch` | linux (linux): passed, windows (windows): passed, macos (macos): passed |
 <!-- features-render:end -->

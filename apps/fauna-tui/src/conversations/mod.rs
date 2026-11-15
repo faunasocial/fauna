@@ -243,6 +243,15 @@ pub enum Action {
     /// `room-settings-save-button`: leaving is an immediate act, not a policy
     /// edit, and the room's class picks the door beneath it in shared Rust.
     ConfirmRoomLeave,
+    /// `room-remove-button` — open the remove confirm. Local; greyed at paint
+    /// unless `capabilities.supports_local_remove` (a bridged room today;
+    /// `bridged-adapter.md` § Removing bridged rows, rule 6).
+    StartRoomRemove,
+    /// `room-remove-confirm` — remove the nest's copy of the whole
+    /// conversation (`manager.remove_thread`). Async → [`Op::RemoveThread`].
+    /// Immediate like the walk-out, never staged through
+    /// `room-settings-save-button`.
+    ConfirmRoomRemove,
     /// `room-pending-invite-withdraw-button[i]` — withdraw the invitation
     /// pending on the open room for `invitee_actor_hex` (the row's own
     /// `RoomPendingInviteSnapshot::invitee_actor_hex`;
@@ -343,6 +352,22 @@ pub enum Action {
     /// `dm-message-delete-confirm-button` — post the cooperative tombstone
     /// (`manager.delete_message`). Async → [`Op`]; closes the overlay.
     ConfirmDeleteMessage,
+    /// `dm-message-retry-button` — re-arm the overlay's unsent own copy
+    /// (`manager.retry_queued_send`; a local outbox write, the channel's held
+    /// remainder following). Async → [`Op`]; closes the overlay.
+    RetryQueuedSend,
+    /// `dm-message-discard-button` — reveal the discard confirm step. Sync.
+    StartDiscardQueuedSend,
+    /// `dm-message-discard-confirm-button` — delete the unsent own copy's
+    /// intent and take the copy out of the thread
+    /// (`manager.discard_queued_send`). Async → [`Op`]; closes the overlay.
+    ConfirmDiscardQueuedSend,
+    /// `dm-message-remove-button` — reveal the remove's confirm step, the
+    /// delete two-step's shape. Sync.
+    StartRemoveMessage,
+    /// `dm-message-remove-confirm-button` — remove the nest's copy of the
+    /// message (`manager.remove_message`). Async → [`Op`]; closes the overlay.
+    ConfirmRemoveMessage,
     /// `dm-message-mark-as-spam-button` — train the sealed tier-1 spam model over
     /// this received (`!is_own`) message's body (`mail-spam.md` § Training signal
     /// sources 1). Async → [`Op`]; closes the overlay (one flyout hop, no confirm
@@ -434,6 +459,15 @@ impl Action {
             // OnlineOnly, so the
             // gate's answer is the same either way.
             Action::ConfirmRoomLeave => Some("fauna.conversations.room.leave"),
+            // The local removes are the bridged family's two remove kinds,
+            // both OnlineOnly: the nest is the store, and nothing is removed
+            // from the manager before it answers.
+            Action::ConfirmRemoveMessage => {
+                Some(fauna_protocol::bridged_conversations::KIND_MESSAGES_REMOVE)
+            }
+            Action::ConfirmRoomRemove => {
+                Some(fauna_protocol::bridged_conversations::KIND_ROOMS_REMOVE)
+            }
             // The withdrawal is the room plane's revoke door on the home
             // nest — the invitation's envelope is consumed there, so no nest
             // means nothing to withdraw.
@@ -519,6 +553,7 @@ impl Action {
             | Action::ToggleRoomSearch
             // The opener; its commit gesture (ConfirmRoomLeave) carries the call.
             | Action::StartRoomLeave
+            | Action::StartRoomRemove
             | Action::SetRoomJoinRule(_)
             | Action::SetRoomHistoryPolicy(_)
             | Action::ToggleRoomAdmin { .. }
@@ -540,6 +575,12 @@ impl Action {
             | Action::OpenMessageActions { .. }
             | Action::StartReactionEntry
             | Action::StartDeleteMessage
+            // The unsent own copy's doors are this device's outbox: they work
+            // with the nest down, which is when they matter.
+            | Action::RetryQueuedSend
+            | Action::StartDiscardQueuedSend
+            | Action::ConfirmDiscardQueuedSend
+            | Action::StartRemoveMessage
             | Action::RevealMuted { .. }
             | Action::RevealContent { .. }
             // The lightbox re-paints bytes the device already holds.
@@ -612,6 +653,9 @@ pub struct ConversationsState {
     /// `ActionsStep::ConfirmDelete` shape, kept beside the draft because the
     /// departure is not one of the draft's staged edits.
     pub room_leave_confirm: bool,
+    /// Whether `room-remove-button` has opened its confirm — the
+    /// [`Self::room_leave_confirm`] twin.
+    pub room_remove_confirm: bool,
     /// The `room-search-field` buffer — the typed, not-yet-submitted query.
     /// Local like [`Self::rename_draft`]: the manager takes the query only on
     /// submit (`room_search`) and holds what it last asked, not what is typed.
@@ -750,6 +794,10 @@ pub enum ActionsStep {
     Menu,
     /// The destructive-action confirm step revealed by `dm-message-delete-button`.
     ConfirmDelete,
+    /// The destructive-action confirm step revealed by `dm-message-discard-button`.
+    ConfirmDiscard,
+    /// The confirm step revealed by `dm-message-remove-button`.
+    ConfirmRemove,
     /// The free-entry emoji prompt revealed by `dm-reaction-more-button`.
     EmojiEntry,
 }
@@ -814,6 +862,7 @@ pub fn init(tx: &UnboundedSender<UiMessage>) -> ConversationsState {
         rename_draft: None,
         room_settings: None,
         room_leave_confirm: false,
+        room_remove_confirm: false,
         room_search_draft: String::new(),
         reply_recipient_draft: String::new(),
         lightbox: None,
@@ -1120,6 +1169,7 @@ pub fn cancel_detail_overlay(state: &mut ConversationsState) {
     state.rename_draft = None;
     state.room_settings = None;
     state.room_leave_confirm = false;
+    state.room_remove_confirm = false;
     state.room_search_draft.clear();
     state.actions_overlay = None;
 }
@@ -1167,6 +1217,7 @@ fn show_detail(state: &mut ConversationsState, thread_id: ThreadId) {
     state.rename_draft = None;
     state.room_settings = None;
     state.room_leave_confirm = false;
+    state.room_remove_confirm = false;
     state.room_search_draft.clear();
     state.reply_recipient_draft.clear();
     state.actions_overlay = None;
@@ -1560,7 +1611,36 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // belongs to a room this account is walking out of.
             app.conversations.room_settings = None;
             app.conversations.room_leave_confirm = false;
+            app.conversations.room_remove_confirm = false;
             Some(Op::LeaveRoom { manager, thread_id })
+        }
+        Action::StartRoomRemove => {
+            // The walk-out's shape: only from inside the open editor, and
+            // gated on the capability as well as on the paint, so a driver
+            // cannot open a confirm the greyed control would not.
+            let Mode::Detail(thread_id) = &app.conversations.mode else {
+                return None;
+            };
+            let may_remove = manager
+                .thread_detail(thread_id.clone())
+                .is_some_and(|d| d.capabilities.supports_local_remove);
+            if app.conversations.room_settings.is_some() && may_remove {
+                app.conversations.room_remove_confirm = true;
+            }
+            None
+        }
+        Action::ConfirmRoomRemove => {
+            let Mode::Detail(thread_id) = &app.conversations.mode else {
+                return None;
+            };
+            if !app.conversations.room_remove_confirm {
+                return None;
+            }
+            let thread_id = thread_id.clone();
+            app.conversations.room_settings = None;
+            app.conversations.room_leave_confirm = false;
+            app.conversations.room_remove_confirm = false;
+            Some(Op::RemoveThread { manager, thread_id })
         }
         Action::WithdrawRoomInvite { invitee_actor_hex } => {
             // Only from inside the editor, where the row is painted; the
@@ -1612,6 +1692,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 // Nothing staged: Save is a close, not a commit.
                 app.conversations.room_settings = None;
                 app.conversations.room_leave_confirm = false;
+                app.conversations.room_remove_confirm = false;
                 return None;
             }
             Some(Op::SaveRoomSettings {
@@ -1791,6 +1872,45 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 msg_id: overlay.msg_id,
             })
         }
+        Action::RetryQueuedSend => {
+            let overlay = app.conversations.actions_overlay.take()?;
+            Some(Op::SettleQueuedSend {
+                manager,
+                msg_id: overlay.msg_id,
+                retry: true,
+            })
+        }
+        Action::StartDiscardQueuedSend => {
+            if let Some(overlay) = app.conversations.actions_overlay.as_mut() {
+                overlay.step = ActionsStep::ConfirmDiscard;
+            }
+            None
+        }
+        Action::ConfirmDiscardQueuedSend => {
+            let overlay = app.conversations.actions_overlay.take()?;
+            Some(Op::SettleQueuedSend {
+                manager,
+                msg_id: overlay.msg_id,
+                retry: false,
+            })
+        }
+        Action::StartRemoveMessage => {
+            if let Some(overlay) = app.conversations.actions_overlay.as_mut() {
+                overlay.step = ActionsStep::ConfirmRemove;
+            }
+            None
+        }
+        Action::ConfirmRemoveMessage => {
+            let overlay = app.conversations.actions_overlay.take()?;
+            let Mode::Detail(thread_id) = &app.conversations.mode else {
+                return None;
+            };
+            Some(Op::RemoveMessage {
+                manager,
+                thread_id: thread_id.clone(),
+                msg_id: overlay.msg_id,
+            })
+        }
         Action::MarkMessageSpam { msg_id } => {
             // Close the menu regardless (fire-and-forget, no confirm step —
             // android/linux parity). Then, if every precondition holds, hand back
@@ -1909,6 +2029,13 @@ pub enum Op {
         manager: Arc<ConversationsManager>,
         thread_id: ThreadId,
     },
+    /// `room-remove-confirm` — remove the nest's copy of the whole
+    /// conversation (`remove_thread`). The thread leaves the manager when the
+    /// nest answers; a refusal is on `error-message`.
+    RemoveThread {
+        manager: Arc<ConversationsManager>,
+        thread_id: ThreadId,
+    },
     /// `room-pending-invite-withdraw-button[i]` — withdraw the invitation
     /// pending for `invitee_actor_hex` on the open room
     /// (`withdraw_room_invite`). Acts at once; the manager re-lists on
@@ -1958,6 +2085,21 @@ pub enum Op {
         thread_id: ThreadId,
         msg_id: MessageId,
     },
+    /// `dm-message-retry-button` (`retry`) or the discard confirm — the shared
+    /// manager's queued-send doors, which re-read the outbox themselves (the
+    /// copy repaints queued, or leaves the thread, via the observer tick).
+    SettleQueuedSend {
+        manager: Arc<ConversationsManager>,
+        msg_id: MessageId,
+        retry: bool,
+    },
+    /// `dm-message-remove-confirm-button` — remove the nest's copy of one
+    /// message (`remove_message`).
+    RemoveMessage {
+        manager: Arc<ConversationsManager>,
+        thread_id: ThreadId,
+        msg_id: MessageId,
+    },
     /// `dm-message-mark-as-spam-button` — train the sealed tier-1 spam model over
     /// a received message's body via the shared façade
     /// [`MailSettingsMachine::train_spam_model_client_mail`] (the live `Insert`
@@ -2001,6 +2143,10 @@ pub enum Outcome {
     /// landed (the editor closes), `false` when one was refused (it stays
     /// open, the refusal already on the page's `error-message`).
     RoomSettingsSaved(bool),
+    /// A whole-conversation remove returned: the page leaves the thread when
+    /// the manager no longer holds it (removed), and stays on it — the
+    /// refusal on `error-message` — when it still does.
+    ThreadRemoved(ThreadId),
     /// An invitation was accepted: the room's thread, which the manager has
     /// selected, or `None` when it was refused (on `error-message` already).
     RoomJoined(Option<ThreadId>),
@@ -2152,6 +2298,13 @@ impl Op {
                 manager.leave_room(thread_id).await;
                 Outcome::Done
             }
+            // The remove. One manager call; the thread leaves the manager
+            // only once the nest answered (`bridged-adapter.md` § Removing
+            // bridged rows, rule 5), and the page follows it back to the list.
+            Op::RemoveThread { manager, thread_id } => {
+                manager.remove_thread(thread_id.clone()).await;
+                Outcome::ThreadRemoved(thread_id)
+            }
             // The withdrawal. One manager call; the list is read again inside
             // it on success (the row leaves the editor on the observer tick),
             // and a refusal is already on `error-message` when this returns.
@@ -2211,6 +2364,28 @@ impl Op {
                 msg_id,
             } => {
                 manager.delete_message(thread_id, msg_id).await;
+                Outcome::Done
+            }
+            Op::SettleQueuedSend {
+                manager,
+                msg_id,
+                retry,
+            } => {
+                if retry {
+                    manager.retry_queued_send(msg_id).await;
+                } else {
+                    manager.discard_queued_send(msg_id).await;
+                }
+                Outcome::Done
+            }
+            // The bubble leaves the snapshot inside `remove_message` once the
+            // nest answered; a refusal is on `error-message`.
+            Op::RemoveMessage {
+                manager,
+                thread_id,
+                msg_id,
+            } => {
+                manager.remove_message(thread_id, msg_id).await;
                 Outcome::Done
             }
             // Fire-and-forget + silent (see the variant doc): the façade seals +
@@ -2400,10 +2575,22 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             }
             sync_page_error(app);
         }
+        Outcome::ThreadRemoved(thread_id) => {
+            let gone = app
+                .conversations
+                .manager
+                .as_ref()
+                .is_some_and(|m| m.thread_detail(thread_id.clone()).is_none());
+            if gone && app.conversations.mode == Mode::Detail(thread_id) {
+                show_list(&mut app.conversations);
+            }
+            sync_page_error(app);
+        }
         Outcome::RoomSettingsSaved(all_landed) => {
             if all_landed {
                 app.conversations.room_settings = None;
                 app.conversations.room_leave_confirm = false;
+                app.conversations.room_remove_confirm = false;
             }
             sync_page_error(app);
         }
@@ -3072,8 +3259,22 @@ fn room_settings_elements(
     detail: &fauna_conversations::ThreadDetail,
     draft: &RoomSettingsDraft,
     leave_confirm: bool,
+    remove_confirm: bool,
     catalog: &crate::settings::labeler_catalog::LabelerCatalogState,
 ) -> Vec<Element> {
+    // A policy-less room (a bridged room) opens this editor only for its
+    // local remove (`RoomSettingsDraft::seed`): it has no policy, roles,
+    // read or labelers to show, greyed or otherwise, so only the walk-out
+    // and the remove are painted.
+    if detail.room.as_ref().is_none_or(|r| r.policy.is_none()) {
+        let mut out = Vec::new();
+        out.extend(room_departure_elements(
+            detail,
+            leave_confirm,
+            remove_confirm,
+        ));
+        return out;
+    }
     use fauna_conversations::{HistoryPolicy, JoinRule};
     let mut out = vec![
         Element::chrome(conversations::unified::ROOM_JOIN_RULE_LABEL),
@@ -3203,21 +3404,51 @@ fn room_settings_elements(
         detail.capabilities.can_set_policy,
         Gesture::Conversations(Action::SaveRoomSettings),
     ));
-    // The walk-out, below Save and outside the staged set: leaving is an
-    // immediate act, not a policy edit. Greyed — never hidden — for the owner,
-    // who hands the room over first (§ Architectural rules 5).
-    out.push(Element::gesture_button(
+    out.extend(room_departure_elements(
+        detail,
+        leave_confirm,
+        remove_confirm,
+    ));
+    out
+}
+
+/// The editor's two immediate acts, below Save and outside the staged set:
+/// the walk-out and the local remove. Leaving is greyed — never hidden — for
+/// the owner, who hands the room over first; the remove is greyed unless
+/// `capabilities.supports_local_remove` (§ Architectural rules 5;
+/// `bridged-adapter.md` § Removing bridged rows, rule 6).
+fn room_departure_elements(
+    detail: &fauna_conversations::ThreadDetail,
+    leave_confirm: bool,
+    remove_confirm: bool,
+) -> Vec<Element> {
+    let mut out = vec![Element::gesture_button(
         ids::ROOM_LEAVE_BUTTON,
         conversations::unified::ROOM_LEAVE,
         detail.capabilities.can_leave_room,
         Gesture::Conversations(Action::StartRoomLeave),
-    ));
+    )];
     if leave_confirm {
         out.push(Element::gesture_button(
             ids::ROOM_LEAVE_CONFIRM,
             common::LEAVE,
             detail.capabilities.can_leave_room,
             Gesture::Conversations(Action::ConfirmRoomLeave),
+        ));
+    }
+    let may_remove = detail.capabilities.supports_local_remove;
+    out.push(Element::gesture_button(
+        ids::ROOM_REMOVE_BUTTON,
+        conversations::unified::ROOM_REMOVE,
+        may_remove,
+        Gesture::Conversations(Action::StartRoomRemove),
+    ));
+    if remove_confirm {
+        out.push(Element::gesture_button(
+            ids::ROOM_REMOVE_CONFIRM,
+            conversations::unified::ROOM_REMOVE_CONFIRM,
+            may_remove,
+            Gesture::Conversations(Action::ConfirmRoomRemove),
         ));
     }
     out
@@ -3453,6 +3684,7 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
             &detail,
             draft,
             app.conversations.room_leave_confirm,
+            app.conversations.room_remove_confirm,
             &app.settings.labeler_catalog,
         ));
         return out;
@@ -3491,7 +3723,7 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
             );
         }
         // The room's standing notice, only while one holds — which one speaks
-        // (awaiting-key over unverified moderation) is the shared
+        // (awaiting-key over a pending re-key over unverified moderation) is the shared
         // `RoomSnapshot::notice`, never decided here (`ui/conversations.md`
         // § Element IDs → `thread-room-notice`). A room-level sentence: never
         // a mark on the message a parked record targets.
@@ -3999,6 +4231,28 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
                 conversations::unified::DM_MESSAGE_UNDELIVERED,
             ));
         }
+        // An own copy of a message sent with no nest (`MessageSnapshot::
+        // queued_send`, the shared projection; account-offline-mutation.md
+        // § The unsent-changes surface, point 2): waiting, or not sent and
+        // why — the dm-message-undelivered shape, the body still in view. The
+        // copy is the draft: retry and discard live in its ⋯ menu.
+        match &msg.queued_send {
+            Some(fauna_conversations::message::QueuedSendState::Queued) => {
+                out.push(Element::label(
+                    ids::DM_MESSAGE_QUEUED,
+                    conversations::unified::DM_MESSAGE_QUEUED,
+                ));
+            }
+            Some(fauna_conversations::message::QueuedSendState::Unsent { reason, .. }) => {
+                out.push(Element::label(
+                    ids::DM_MESSAGE_UNSENT,
+                    conversations::unified::dm_message_unsent(
+                        &reason.resolve(fauna_i18n::strings::lookup),
+                    ),
+                ));
+            }
+            None => {}
+        }
         // An own sent mail the fresh-IP warm-up is holding back
         // (`MessageSnapshot::warmup_hold`; `mail-deliverability.md`
         // § Enforcement at submission time): when it goes out and how many
@@ -4070,7 +4324,16 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         // carries the ⋯ even on a rail with no reactions/delete (android/windows
         // parity — `canFlagSpam = !is_own`). The train itself degrades to a silent
         // no-op when mail isn't enabled; the affordance is unconditional.
-        if detail.capabilities.supports_reactions || msg.can_delete || !msg.is_own {
+        let unsent = matches!(
+            msg.queued_send,
+            Some(fauna_conversations::message::QueuedSendState::Unsent { .. })
+        );
+        if detail.capabilities.supports_reactions
+            || msg.can_delete
+            || msg.can_remove
+            || !msg.is_own
+            || unsent
+        {
             out.push(Element::gesture_button(
                 ids::DM_MESSAGE_ACTIONS_BUTTON,
                 "\u{2026}",
@@ -4204,6 +4467,8 @@ fn actions_menu_elements(
     // destructive step must say what it is about to do.
     let heading = match overlay.step {
         ActionsStep::ConfirmDelete => conversations::detail::DELETE_MESSAGE_CONFIRM_TITLE,
+        ActionsStep::ConfirmDiscard => conversations::detail::DISCARD_MESSAGE_CONFIRM_TITLE,
+        ActionsStep::ConfirmRemove => conversations::detail::REMOVE_MESSAGE_CONFIRM_TITLE,
         _ => conversations::detail::ADD_REACTION,
     };
     let mut out = vec![Element::label(ids::DM_MESSAGE_ACTIONS_MENU, heading)];
@@ -4213,8 +4478,32 @@ fn actions_menu_elements(
         .find(|m| m.message_id == overlay.msg_id);
     let is_own = target.is_some_and(|m| m.is_own);
     let can_delete = target.is_some_and(|m| m.can_delete);
+    // An unsent own copy (`queued_send` = Unsent): retry and discard, on that
+    // copy only (account-offline-mutation.md § The unsent-changes surface).
+    let unsent = target.is_some_and(|m| {
+        m.is_own
+            && matches!(
+                m.queued_send,
+                Some(fauna_conversations::message::QueuedSendState::Unsent { .. })
+            )
+    });
+    let can_remove = target.is_some_and(|m| m.can_remove);
     match overlay.step {
         ActionsStep::Menu => {
+            if unsent {
+                out.push(Element::gesture_button(
+                    ids::DM_MESSAGE_RETRY_BUTTON,
+                    conversations::detail::RETRY_SEND,
+                    true,
+                    Gesture::Conversations(Action::RetryQueuedSend),
+                ));
+                out.push(Element::gesture_button(
+                    ids::DM_MESSAGE_DISCARD_BUTTON,
+                    conversations::detail::DISCARD_MESSAGE,
+                    true,
+                    Gesture::Conversations(Action::StartDiscardQueuedSend),
+                ));
+            }
             if detail.capabilities.supports_reactions {
                 for emoji in fauna_conversations::QUICKSET_EMOJIS {
                     out.push(Element::gesture_button(
@@ -4240,6 +4529,18 @@ fn actions_menu_elements(
                     conversations::detail::DELETE_MESSAGE,
                     true,
                     Gesture::Conversations(Action::StartDeleteMessage),
+                ));
+            }
+            // The local remove — the nest's copy only, never the far side's
+            // (`bridged-adapter.md` § Removing bridged rows, rule 1): its own
+            // verb beside the cooperative delete, off the snapshot's
+            // `can_remove`, own rows too.
+            if can_remove {
+                out.push(Element::gesture_button(
+                    ids::DM_MESSAGE_REMOVE_BUTTON,
+                    conversations::detail::REMOVE_MESSAGE,
+                    true,
+                    Gesture::Conversations(Action::StartRemoveMessage),
                 ));
             }
             // Mark-as-spam — the third ⋯ action, rail-independent, offered on any
@@ -4277,6 +4578,22 @@ fn actions_menu_elements(
                 conversations::detail::DELETE_MESSAGE_CONFIRM,
                 true,
                 Gesture::Conversations(Action::ConfirmDeleteMessage),
+            ));
+        }
+        ActionsStep::ConfirmDiscard => {
+            out.push(Element::gesture_button(
+                ids::DM_MESSAGE_DISCARD_CONFIRM_BUTTON,
+                conversations::detail::DISCARD_MESSAGE_CONFIRM,
+                true,
+                Gesture::Conversations(Action::ConfirmDiscardQueuedSend),
+            ));
+        }
+        ActionsStep::ConfirmRemove => {
+            out.push(Element::gesture_button(
+                ids::DM_MESSAGE_REMOVE_CONFIRM_BUTTON,
+                conversations::detail::REMOVE_MESSAGE_CONFIRM,
+                true,
+                Gesture::Conversations(Action::ConfirmRemoveMessage),
             ));
         }
         ActionsStep::EmojiEntry => {
@@ -8444,6 +8761,200 @@ mod tests {
         );
     }
 
+    /// An authed app on the conversations page with one bridged room, served by
+    /// the real shared `BridgedBackend` over a sink with no wire, its thread
+    /// open — the shape a bridged room has in production (a policy-less
+    /// transport room whose capabilities derive from `Rail::Bridged`).
+    fn bridged_detail_app() -> App {
+        use fauna_conversations::backend::{
+            BridgedOutbound, BridgedResolved, BridgedSent, BridgedSink,
+        };
+        use fauna_conversations::backends::bridged::{BridgedBackend, BridgedRoomRecord};
+
+        struct NoWire;
+        #[async_trait::async_trait]
+        impl BridgedSink for NoWire {
+            async fn resolve(&self, _raw: String) -> Result<Option<BridgedResolved>, String> {
+                Ok(None)
+            }
+            async fn send(&self, _outbound: BridgedOutbound) -> Result<BridgedSent, String> {
+                Err("no wire in this test".into())
+            }
+            async fn remove_room(
+                &self,
+                _room: fauna_conversations::backend::BridgedRoomRef,
+            ) -> Result<u32, String> {
+                Ok(1)
+            }
+        }
+
+        let mut app = authed_app();
+        let manager = ConversationsManager::new();
+        manager.install_mock_backends_for_test();
+        let bridged = BridgedBackend::new(Arc::new(NoWire));
+        bridged.set_rooms(vec![BridgedRoomRecord {
+            bridge_id: "example".into(),
+            identity: None,
+            participants: vec!["@alice:instance.test".into()],
+            self_address: Some(fauna_conversations::manager::TEST_SEAM_SELF_ADDRESS.into()),
+            guardian_state: None,
+            disconnected: false,
+            undelivered_rows: Vec::new(),
+            last_removed_at: 0,
+            removed_rows: Vec::new(),
+        }]);
+        manager.register_backend(Arc::new(bridged));
+        let state = ConversationsState {
+            manager: Some(manager),
+            ..Default::default()
+        };
+        assert!(inject_inbound(
+            &state,
+            &json!({
+                "rail": "Bridged",
+                "bridge_id": "example",
+                "sender": "@alice:instance.test",
+                "body": "hi",
+                "message_id": "m-1"
+            })
+        ));
+        app.conversations = state;
+        app.page = Page::Conversations;
+        let thread_id = app.conversations.snapshot().unwrap().threads[0]
+            .thread_id
+            .clone();
+        apply_local(&mut app, Action::SelectThread(thread_id.0.clone()));
+        app
+    }
+
+    fn open_actions_on_first_message(app: &mut App) {
+        let Mode::Detail(thread_id) = app.conversations.mode.clone() else {
+            panic!("a thread is open");
+        };
+        let msg_id = app
+            .conversations
+            .manager
+            .as_ref()
+            .unwrap()
+            .thread_detail(thread_id)
+            .unwrap()
+            .messages[0]
+            .message_id
+            .clone();
+        apply_local(app, Action::OpenMessageActions { msg_id });
+    }
+
+    /// `bridged-adapter.md` § Removing bridged rows, rules 1 and 6: a bridged
+    /// bubble's ⋯ menu carries the local remove off the snapshot's
+    /// `can_remove`, its two-step reveals the confirm, and the confirm hands
+    /// the one `remove_message` op over — the cooperative delete is not
+    /// offered there (the overlay masks `supports_message_delete`).
+    #[test]
+    fn a_bridged_bubbles_menu_removes_from_my_nest_in_two_steps() {
+        let mut app = bridged_detail_app();
+        open_actions_on_first_message(&mut app);
+        assert_eq!(count_id(&app, "dm-message-remove-button"), 1);
+        assert_eq!(count_id(&app, "dm-message-delete-button"), 0);
+        assert_eq!(count_id(&app, "dm-message-remove-confirm-button"), 0);
+        assert!(apply_local(&mut app, Action::StartRemoveMessage).is_none());
+        assert_eq!(count_id(&app, "dm-message-remove-confirm-button"), 1);
+        let op = apply_local(&mut app, Action::ConfirmRemoveMessage).expect("an op");
+        assert!(
+            matches!(&op, Op::RemoveMessage { msg_id, .. } if msg_id.0.contains("m-1")),
+            "the confirm removes the menu's message"
+        );
+        assert!(
+            app.conversations.actions_overlay.is_none(),
+            "the menu closes"
+        );
+    }
+
+    /// A message on a rail with no local remove paints no remove verb.
+    #[test]
+    fn an_end_to_end_bubble_offers_no_local_remove() {
+        let mut app = detail_app(&[json!({
+            "rail": "FaunaMls",
+            "sender": "bob-remove@self-nest.test",
+            "body": "hi",
+            "message_id": "m-1",
+        })]);
+        open_actions_on_first_message(&mut app);
+        assert_eq!(count_id(&app, "dm-message-remove-button"), 0);
+    }
+
+    /// The room editor opens on a bridged (policy-less) room for its local
+    /// remove: no policy control, no Save, the walk-out greyed and the remove
+    /// live; its confirm is immediate — one `remove_thread` op, the editor
+    /// closed — and never staged through Save.
+    #[test]
+    fn a_bridged_rooms_editor_carries_only_the_departures_and_the_remove_is_live() {
+        let mut app = bridged_detail_app();
+        assert!(apply_local(&mut app, Action::OpenRoomSettings).is_none());
+        assert!(
+            app.conversations.room_settings.is_some(),
+            "the editor opens"
+        );
+        let painted = elements(&app);
+        let enabled = |id: &str| {
+            painted
+                .iter()
+                .filter(|e| e.id == id)
+                .map(|e| e.enabled)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(enabled("room-remove-button"), vec![true]);
+        assert_eq!(enabled("room-leave-button").len(), 1);
+        for absent in [
+            "room-settings-save-button",
+            "room-join-rule-select",
+            "room-history-policy-select",
+            "room-remove-confirm",
+        ] {
+            assert!(enabled(absent).is_empty(), "{absent} is not painted here");
+        }
+        assert!(
+            apply_local(&mut app, Action::ConfirmRoomRemove).is_none(),
+            "no confirm acts before the button opened it"
+        );
+        assert!(apply_local(&mut app, Action::StartRoomRemove).is_none());
+        assert_eq!(count_id(&app, "room-remove-confirm"), 1);
+        let Mode::Detail(open) = app.conversations.mode.clone() else {
+            panic!("a thread is open");
+        };
+        let op = apply_local(&mut app, Action::ConfirmRoomRemove).expect("an op");
+        assert!(matches!(&op, Op::RemoveThread { thread_id, .. } if *thread_id == open));
+        assert!(
+            app.conversations.room_settings.is_none(),
+            "the editor closes"
+        );
+        assert!(!app.conversations.room_remove_confirm);
+    }
+
+    /// The page follows a removed thread back to the list, and stays on one
+    /// the manager still holds (a refusal, on `error-message`).
+    #[tokio::test]
+    async fn a_removed_thread_returns_the_page_to_the_list() {
+        let mut app = bridged_detail_app();
+        let Mode::Detail(open) = app.conversations.mode.clone() else {
+            panic!("a thread is open");
+        };
+        apply_outcome(&mut app, Outcome::ThreadRemoved(open.clone()));
+        assert_eq!(
+            app.conversations.mode,
+            Mode::Detail(open.clone()),
+            "the manager still holds it: the remove was refused"
+        );
+        let manager = app.conversations.manager.clone().unwrap();
+        manager.remove_thread(open.clone()).await;
+        assert!(
+            manager.thread_detail(open.clone()).is_none(),
+            "the nest answered, so the manager forgot the thread: {:?}",
+            manager.page_error_diagnostic()
+        );
+        apply_outcome(&mut app, Outcome::ThreadRemoved(open));
+        assert_eq!(app.conversations.mode, Mode::List);
+    }
+
     /// A bridged room on the unified list paints what its snapshot carries and
     /// nothing tui decided: the bridge's declared glyph with its declared label
     /// beside it, the transport-only class on the header, and — on a
@@ -9873,6 +10384,8 @@ mod tests {
             Action::CloseRoomLabelerInspect,
             Action::StartRoomLeave,
             Action::ConfirmRoomLeave,
+            Action::StartRoomRemove,
+            Action::ConfirmRoomRemove,
             Action::WithdrawRoomInvite {
                 invitee_actor_hex: "11".repeat(32),
             },
@@ -9901,6 +10414,8 @@ mod tests {
             Action::CommitReactionEntry,
             Action::StartDeleteMessage,
             Action::ConfirmDeleteMessage,
+            Action::StartRemoveMessage,
+            Action::ConfirmRemoveMessage,
             Action::MarkMessageSpam { msg_id: msg() },
             Action::RevealMuted { msg_id: msg() },
             Action::RevealContent { msg_id: msg() },
@@ -9912,7 +10427,7 @@ mod tests {
     /// each, plus 6 extra discriminant arms (2 more `SendNewThread` rails and
     /// its founding arm, 1 more `ConfirmAddParticipant`, 2 more `SendThread`
     /// rails).
-    const ACTION_COUNT: usize = 48;
+    const ACTION_COUNT: usize = 52;
 
     #[test]
     fn every_conversations_action_is_in_the_corpus() {
@@ -10045,6 +10560,16 @@ mod tests {
                 "fauna.bridges.put_spam_model",
                 OfflineClass::OnlineOnly,
             ),
+            (
+                Action::ConfirmRemoveMessage,
+                "fauna.bridges.conversation.messages.remove",
+                OfflineClass::OnlineOnly,
+            ),
+            (
+                Action::ConfirmRoomRemove,
+                "fauna.bridges.conversation.rooms.remove",
+                OfflineClass::OnlineOnly,
+            ),
         ] {
             assert_eq!(
                 action.wire_kind(),
@@ -10103,7 +10628,7 @@ mod tests {
             .map(|a| format!("{a:?}"))
             .collect();
         // (what the Debug form must contain, why it needs a nest)
-        let expected: [(&[&str], &str); 7] = [
+        let expected: [(&[&str], &str); 9] = [
             (
                 &["SendNewThread", "founds_room: true"],
                 "a founding is the room ceremony: the room must exist on its home nest first",
@@ -10131,6 +10656,14 @@ mod tests {
             (
                 &["MarkMessageSpam"],
                 "the spam train writes through the mail bridge",
+            ),
+            (
+                &["ConfirmRemoveMessage"],
+                "the nest is the store a bridged row is removed from",
+            ),
+            (
+                &["ConfirmRoomRemove"],
+                "the nest is the store a bridged room is removed from",
             ),
         ];
         for (needles, why) in expected {
@@ -10218,6 +10751,7 @@ mod tests {
                 nest_read: None,
                 labelers: None,
                 awaiting_key,
+                severance_owed: false,
                 moderation_unverified,
                 bridge_disconnected: false,
                 pending_invites: None,
@@ -10441,6 +10975,55 @@ mod tests {
         );
     }
 
+    /// A room whose re-key after a removal is still owed says so on the
+    /// header in the `rekey-pending` state, over unverified moderation and
+    /// under `awaiting-key`; the notice goes when the fact does.
+    #[tokio::test]
+    async fn the_room_notice_says_a_pending_rekey_and_clears_with_the_fact() {
+        use fauna_conversations::RoomNotice;
+        let state_of = |app: &App| {
+            elements(app)
+                .into_iter()
+                .find(|e| e.id == ids::THREAD_ROOM_NOTICE)
+                .map(|e| {
+                    let state = e
+                        .attrs
+                        .iter()
+                        .find(|(k, _)| k == "state")
+                        .map(|(_, v)| v.clone())
+                        .expect("the notice carries its state");
+                    (state, e.text.clone())
+                })
+        };
+        let (app, thread_id, mock) = governed_group_app_with(&["bob"], false, true);
+        let mut room = projected_room(&app, &thread_id);
+        room.severance_owed = true;
+        mock.set_room(thread_id.clone(), room.clone());
+        assert_eq!(
+            state_of(&app),
+            Some((
+                "rekey-pending".to_string(),
+                RoomNotice::RekeyPending.label().to_string()
+            )),
+            "a pending re-key speaks over unverified moderation"
+        );
+        room.awaiting_key = true;
+        mock.set_room(thread_id.clone(), room.clone());
+        assert_eq!(
+            state_of(&app).map(|(state, _)| state),
+            Some("awaiting-key".to_string()),
+            "awaiting-key wins"
+        );
+        room.awaiting_key = false;
+        room.severance_owed = false;
+        mock.set_room(thread_id, room);
+        assert_eq!(
+            state_of(&app).map(|(state, _)| state),
+            Some("moderation-unverified".to_string()),
+            "the paid debt clears the state"
+        );
+    }
+
     /// The header states the class with its driver attribute and offers the
     /// editor's door live for the owner; opening it paints the two token
     /// pickers, one admin switch per participant (live: the owner may appoint)
@@ -10616,6 +11199,7 @@ mod tests {
             nest_read: None,
             labelers: None,
             awaiting_key: false,
+            severance_owed: false,
             moderation_unverified: false,
             bridge_disconnected: false,
             pending_invites: pending,
@@ -10792,6 +11376,7 @@ mod tests {
                 nest_read: None,
                 labelers: None,
                 awaiting_key: false,
+                severance_owed: false,
                 moderation_unverified: false,
                 bridge_disconnected: false,
                 pending_invites: None,
@@ -11015,6 +11600,7 @@ mod tests {
                 nest_read: Some(true),
                 labelers: Some(vec![wasm.clone()]),
                 awaiting_key: false,
+                severance_owed: false,
                 moderation_unverified: false,
                 bridge_disconnected: false,
                 pending_invites: None,
@@ -11157,6 +11743,7 @@ mod tests {
                 nest_read: Some(true),
                 labelers: Some(vec![]),
                 awaiting_key: false,
+                severance_owed: false,
                 moderation_unverified: false,
                 bridge_disconnected: false,
                 pending_invites: None,

@@ -1990,6 +1990,18 @@ class _LogReport:
     def __init__(self, nodeid, when, outcome, duration):
         self.nodeid, self.when, self.outcome, self.duration = nodeid, when, outcome, duration
         self.longrepr = ("t.py", 1, "declared") if outcome == "skipped" else None
+        if outcome == "failed":
+            self.longrepr = _Longrepr(f"AssertionError: {when} of {nodeid} said no\nassert False")
+
+
+class _Longrepr:
+    """A failed report's `longrepr`: its crash line is what the directory keeps."""
+
+    def __init__(self, message):
+        self.reprcrash = type("Crash", (), {"message": message})()
+
+    def __str__(self):
+        return self.reprcrash.message
 
 
 def _phases(nodeid, outcome):
@@ -2075,6 +2087,30 @@ def test_a_red_then_a_green_at_the_same_commit_is_flaky(tmp_path, _origin):
     assert rec["red_since"] is None and rec["last_green"]["commit"] == COMMIT_B
 
 
+def test_a_flake_keeps_the_red_runs_own_failure_beside_its_time(tmp_path, _origin):
+    """A flaky red's run log is overwritten by the next run, so the record is the only
+    place its failure survives: without it nobody can tell twenty flaky tests' causes
+    apart afterwards (convention 14's hunt)."""
+    _lg_session(_origin, tmp_path, {LG_A: "failed"}, commit=COMMIT_B)
+    red = lg.load(tmp_path / "linux.json")[LG_KEY_A]["last"]
+    assert red["why"] == f"AssertionError: call of {LG_A} said no\nassert False", red
+    tests = _lg_session(_origin, tmp_path, {LG_A: "passed"}, commit=COMMIT_B)
+    rec = tests[LG_KEY_A]
+    assert rec["flaky"]["whys"] == [red["why"]], rec
+    assert "why" not in rec["last"], "a green carries no failure"
+
+
+def test_an_error_keeps_its_setup_failure_and_a_long_one_is_cut():
+    run = {"commit": COMMIT_B, "base": RUN_BASE, "dirty": False, "origin": "session",
+           "today": "2026-11-08"}
+    rec = lg.observe(None, outcome="error", time="2026-11-08T00:00:00+00:00",
+                     duration=1.0, run=run, why="x" * 5000)
+    assert len(rec["last"]["why"]) == lg.FLAKY_WHY_CHARS, rec["last"]
+    rec = lg.observe(rec, outcome="green", time="2026-11-08T00:01:00+00:00",
+                     duration=1.0, run=run)
+    assert rec["flaky"]["whys"] == [rec["flaky"]["whys"][0]] and rec["flaky"]["count"] == 1
+
+
 def test_the_flake_times_are_kept_newest_last_and_bounded():
     """The janitor counts flakes inside a window, so the record keeps their times."""
     run = {"commit": COMMIT_B, "base": RUN_BASE, "dirty": False, "origin": "session",
@@ -2086,6 +2122,7 @@ def test_the_flake_times_are_kept_newest_last_and_bounded():
         rec = lg.observe(rec, outcome="green", time=f"2026-11-08T00:{i:02d}:30+00:00",
                          duration=1.0, run=run)
     times = rec["flaky"]["times"]
+    assert len(rec["flaky"]["whys"]) == len(times), "a why for every kept time, aligned"
     assert rec["flaky"]["count"] == lg.FLAKY_TIMES_KEPT + 2
     assert len(times) == lg.FLAKY_TIMES_KEPT and times[-1] == rec["flaky"]["last"], times
     assert times == sorted(times)

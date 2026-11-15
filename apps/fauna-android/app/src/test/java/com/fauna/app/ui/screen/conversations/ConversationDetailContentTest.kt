@@ -26,6 +26,7 @@ import uniffi.fauna_conversations.ComposeState
 import uniffi.fauna_conversations.DeliveryMode
 import uniffi.fauna_conversations.MessageBadges
 import uniffi.fauna_conversations.MessageSnapshot
+import uniffi.fauna_conversations.QueuedSendState
 import uniffi.fauna_conversations.Rail
 import uniffi.fauna_conversations.ReactionGroup
 import uniffi.fauna_conversations.RecipientPickerState
@@ -117,7 +118,11 @@ class ConversationDetailContentTest {
         // refresh (mail-aliases.md § Label); `null` = not a mail alias delivery.
         deliveredTo: String? = null,
         legalTakedownRef: String? = null,
+        // An own copy sent with no nest (`MessageSnapshot.queuedSend`); `null` on
+        // every message that is not one.
+        queuedSend: QueuedSendState? = null,
     ) = MessageSnapshot(
+        queuedSend = queuedSend,
         deliveredTo = deliveredTo,
         messageId = id,
         sender = TypedAddress.Email("$sender@example.com"),
@@ -278,6 +283,8 @@ class ConversationDetailContentTest {
         onReplyCancel: () -> Unit = {},
         onToggleReaction: (String, String) -> Unit = { _, _ -> },
         onDeleteMessage: (String) -> Unit = {},
+        onRetryQueuedSend: (String) -> Unit = {},
+        onDiscardQueuedSend: (String) -> Unit = {},
         onMoreReaction: (String) -> Unit = {},
         onMarkSpam: (MessageSnapshot) -> Unit = {},
         contentPolicyInputs: ContentPolicyInputs = ContentPolicyInputs(),
@@ -331,6 +338,8 @@ class ConversationDetailContentTest {
                 onReplyCancel = onReplyCancel,
                 onToggleReaction = onToggleReaction,
                 onDeleteMessage = onDeleteMessage,
+                onRetryQueuedSend = onRetryQueuedSend,
+                onDiscardQueuedSend = onDiscardQueuedSend,
                 onMoreReaction = onMoreReaction,
                 onMarkSpam = onMarkSpam,
                 replyPreview = replyPreview,
@@ -978,6 +987,52 @@ class ConversationDetailContentTest {
         composeTestRule.waitForIdle()
         assertEquals("placeholder", attachmentState())
         composeTestRule.onNodeWithTag("dm-attachment-image").assertTextEquals("pic.png (10B)")
+    }
+
+    /** conversation-attachments 12: a tap on a held picture opens `image-lightbox` over the
+     *  thread; Escape closes it and the thread (the picture) is still there. */
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun tappingAHeldPictureOpensTheLightboxAndEscapeClosesIt() {
+        val png = pngBytes()
+        render(
+            detail(messages = listOf(msg("m1", attachments = listOf(picture)))),
+            loadAttachmentBytes = { png },
+            attachmentResident = { true },
+        )
+        composeTestRule.onNodeWithTag("image-lightbox").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("dm-attachment-image").performClick()
+        composeTestRule.onNodeWithTag("image-lightbox").assertExists()
+        // Escape is the dismiss the lightbox itself adds (back is the platform Dialog's own
+        // onDismissRequest); drive it as a key event on the lightbox node.
+        composeTestRule.onNodeWithTag("image-lightbox")
+            .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.RequestFocus)
+        composeTestRule.onNodeWithTag("image-lightbox").performKeyInput {
+            pressKey(androidx.compose.ui.input.key.Key.Escape)
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("image-lightbox").assertDoesNotExist()
+        assertEquals("painted", attachmentState())
+    }
+
+    /** conversation-attachments 13: a picture whose bytes the device does not hold still
+     *  opens `image-lightbox` — as its placeholder, never a dropped click — and the close
+     *  button returns to the thread. */
+    @Test
+    fun tappingAPlaceholderPictureOpensTheLightboxAsItsPlaceholder() {
+        render(detail(messages = listOf(msg("m1", attachments = listOf(picture)))))
+        composeTestRule.onNodeWithTag("dm-attachment-image").performClick()
+        composeTestRule.onNodeWithTag("image-lightbox").assertExists()
+        // The declared filename-and-size shows twice: in the thread and as the lightbox's body.
+        composeTestRule.onAllNodesWithText("pic.png (10B)", useUnmergedTree = true)
+            .assertCountEquals(2)
+        composeTestRule.onNodeWithContentDescription(
+            androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+                .getString(com.fauna.app.R.string.common_close),
+        ).performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("image-lightbox").assertDoesNotExist()
+        assertEquals("placeholder", attachmentState())
     }
 
     /** The compose bar renders the shared `reply_preview` record — sender and excerpt —
@@ -1794,5 +1849,83 @@ class ConversationDetailContentTest {
         )
         composeTestRule.onNodeWithTag("add-participant-confirm").assertIsEnabled()
         composeTestRule.onNodeWithText(needsNest()).assertDoesNotExist()
+    }
+
+    // ── Queued own copies (account-offline-mutation.md § The unsent-changes
+    // surface, point 2) — tui's detail_elements / actions_menu_elements twin.
+
+    private fun unsent() = QueuedSendState.Unsent(
+        reasonCode = "mls_not_a_member",
+        reason = LocalizedText("settings.unsent_changes.reason_mls_not_a_member", emptyMap()),
+    )
+
+    @Test
+    fun queuedOwnCopyShowsTheWaitingLine() {
+        render(detail(messages = listOf(msg("q1", isOwn = true, queuedSend = QueuedSendState.Queued))))
+        composeTestRule.onNodeWithTag("dm-message-queued", useUnmergedTree = true)
+            .assertTextEquals("Waiting to send")
+        composeTestRule.onAllNodesWithTag("dm-message-unsent", useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun unsentOwnCopyShowsTheNotSentLineWithItsReason() {
+        render(detail(messages = listOf(msg("u1", isOwn = true, queuedSend = unsent()))))
+        composeTestRule.onNodeWithTag("dm-message-unsent", useUnmergedTree = true)
+            .assertTextEquals("Not sent — You are no longer a member of this conversation")
+        composeTestRule.onAllNodesWithTag("dm-message-queued", useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun unsentOwnCopyOffersTheMenuEvenOnAPlainRail() {
+        // No reactions, no delete, an own message: nothing else would show the menu.
+        render(
+            detail(
+                capabilities = caps(reactions = false, messageDelete = false),
+                messages = listOf(msg("u1", isOwn = true, canDelete = false, queuedSend = unsent())),
+            ),
+        )
+        composeTestRule.onNodeWithTag("dm-message-actions-button").performClick()
+        composeTestRule.onNodeWithTag("dm-message-retry-button").assertExists()
+        composeTestRule.onNodeWithTag("dm-message-discard-button").assertExists()
+        composeTestRule.onAllNodesWithTag("dm-message-discard-confirm-button").assertCountEquals(0)
+    }
+
+    @Test
+    fun queuedOwnCopyOffersNoRetryOrDiscard() {
+        render(
+            detail(
+                capabilities = caps(reactions = true, messageDelete = true),
+                messages = listOf(msg("q1", isOwn = true, queuedSend = QueuedSendState.Queued)),
+            ),
+        )
+        composeTestRule.onNodeWithTag("dm-message-actions-button").performClick()
+        composeTestRule.onAllNodesWithTag("dm-message-retry-button").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("dm-message-discard-button").assertCountEquals(0)
+    }
+
+    @Test
+    fun retryFiresTheQueuedSendRetryForThatCopy() {
+        var retried: String? = null
+        render(
+            detail(messages = listOf(msg("u1", isOwn = true, canDelete = false, queuedSend = unsent()))),
+            onRetryQueuedSend = { retried = it },
+        )
+        composeTestRule.onNodeWithTag("dm-message-actions-button").performClick()
+        composeTestRule.onNodeWithTag("dm-message-retry-button").performClick()
+        assertEquals("u1", retried)
+    }
+
+    @Test
+    fun discardRevealsTheConfirmAndConfirmDiscardsThatCopy() {
+        var discarded: String? = null
+        render(
+            detail(messages = listOf(msg("u1", isOwn = true, canDelete = false, queuedSend = unsent()))),
+            onDiscardQueuedSend = { discarded = it },
+        )
+        composeTestRule.onNodeWithTag("dm-message-actions-button").performClick()
+        composeTestRule.onNodeWithTag("dm-message-discard-button").performClick()
+        composeTestRule.onAllNodesWithTag("dm-message-discard-button").assertCountEquals(0)
+        composeTestRule.onNodeWithTag("dm-message-discard-confirm-button").performClick()
+        assertEquals("u1", discarded)
     }
 }

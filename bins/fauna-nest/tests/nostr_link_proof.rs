@@ -85,6 +85,16 @@ async fn linking_nest() -> AppState {
 
 /// A custodial user on nest 1 (deposited nsec) — the bunker signs as this key.
 async fn link_custodial(state: &AppState, actor_hex: &str) -> Keypair {
+    // The `users` row the signer's door reads the account's authority from
+    // (`bunker::account_stands`): a real account has one, and with none the
+    // bunker answers every request, `connect` included, `unauthorized`.
+    // Only a 32-byte hex actor is an account id; the relay-only tests' text
+    // ids never reach the bunker.
+    if let Ok(bytes) = hex::decode(actor_hex)
+        && let Ok(actor) = <[u8; 32]>::try_from(bytes.as_slice())
+    {
+        state.db.create_user(&actor, "free", "test").await.unwrap();
+    }
     let nest_key = state.nest_identity.signing_key.to_bytes();
     let kp = Keypair::generate();
     let encrypted = encrypt_nostr_privkey(&nest_key, &kp.secret_bytes()).unwrap();

@@ -95,14 +95,43 @@ where
 /// This device's adoption markers (`writer-signed-change-records.md` ruling
 /// (11)(d)), or none when the source cannot read them — a marker unread is a
 /// licence not granted this resolve, never a wrong key, so the batch goes on.
+///
+/// **One consumer per marker** (`succession-cut.md` ruling (11)(l)): a marker
+/// the identity app's projection walk has claimed
+/// ([`FolderKeyReader::adoption_walks`]) is the walk's, and no engine is
+/// handed it; when the claims cannot be read, no marker is carried at all,
+/// since an unread claim may be the walk's.
 pub async fn adoption_markers_or_none(custody: &dyn FolderKeyReader) -> Vec<[u8; 32]> {
-    custody.adoption_markers().await.unwrap_or_else(|e| {
+    let unread = |e: anyhow::Error| {
         tracing::warn!(
             error = %format!("{e:#}"),
             "engine keys: this device's adoption markers are unreadable; none carried this resolve"
         );
-        Vec::new()
-    })
+    };
+    let markers = match custody.adoption_markers().await {
+        Ok(markers) => markers,
+        Err(e) => {
+            unread(e);
+            return Vec::new();
+        }
+    };
+    if markers.is_empty() {
+        return markers;
+    }
+    let walked: Vec<[u8; 32]> = match custody.adoption_walks().await {
+        Ok(walks) => walks
+            .iter()
+            .filter_map(crate::key_reader::AdoptionWalk::marker)
+            .collect(),
+        Err(e) => {
+            unread(e);
+            return Vec::new();
+        }
+    };
+    markers
+        .into_iter()
+        .filter(|m| !walked.contains(m))
+        .collect()
 }
 
 /// The pure half of [`resolve_engine_keys`]: the same-nest sets `summaries`
@@ -196,6 +225,28 @@ mod tests {
     use fauna_core::folder_keys::FolderEngineKeys;
     use fauna_protocol::folders::{FolderSummary, FoldersListReply, FoldersListRequest};
     use std::sync::Mutex;
+
+    /// One consumer per marker (`succession-cut.md` ruling (11)(l)): a marker
+    /// the projection walk has claimed is never carried to an engine; an
+    /// unclaimed one still is. Mutation: drop the `walked` filter in
+    /// [`adoption_markers_or_none`] and this reds.
+    #[test]
+    fn a_marker_the_projection_walk_claimed_is_carried_to_no_engine() {
+        use crate::key_reader::{AdoptionWalk, FolderKeyStore, MemoryFolderKeyStore};
+        let store = MemoryFolderKeyStore::default();
+        block_on(store.record_adoption_marker([1; 32])).unwrap();
+        block_on(store.record_adoption_marker([2; 32])).unwrap();
+        assert_eq!(
+            block_on(adoption_markers_or_none(&store)),
+            vec![[1; 32], [2; 32]]
+        );
+        block_on(store.record_adoption_walk(AdoptionWalk {
+            nonce: fauna_protocol::ByteBuf::from(vec![1; 32]),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert_eq!(block_on(adoption_markers_or_none(&store)), vec![[2; 32]]);
+    }
 
     /// The raw MLS group id the shared set below is bound to; the resolver
     /// derives its custody `ChannelId` from these bytes.

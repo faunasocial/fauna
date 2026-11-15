@@ -112,6 +112,7 @@ pub fn transport_room(participant_count: usize) -> RoomSnapshot {
         nest_read: None,
         labelers: None,
         awaiting_key: false,
+        severance_owed: false,
         moderation_unverified: false,
         bridge_disconnected: false,
         pending_invites: None,
@@ -271,7 +272,7 @@ impl RoomClass {
 
 /// The room's standing notice — what `thread-room-notice` states on the
 /// thread header while one holds (`ui/conversations.md` § Element IDs).
-/// Derived from three shared room facts, so no app re-decides which one speaks.
+/// Derived from four shared room facts, so no app re-decides which one speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum RoomNotice {
@@ -279,6 +280,10 @@ pub enum RoomNotice {
     /// `community-rooms.md` § Implementation status today → *A newcomer's
     /// walk waits for its key-in*).
     AwaitingKey,
+    /// Someone was removed and the room's re-key has not landed yet
+    /// ([`RoomSnapshot::severance_owed`]; `community-rooms.md` § The three
+    /// classes → *Community* → *A removal's re-key is owed until it lands*).
+    RekeyPending,
     /// Some of the room's moderation could not be verified on this device
     /// ([`RoomSnapshot::moderation_unverified`]; `conversation-rooms.md` §
     /// Roles and authorization → *Members verify what they paint*).
@@ -291,13 +296,17 @@ pub enum RoomNotice {
 
 impl RoomNotice {
     /// The notice that holds for these room facts, or `None` when none does
-    /// (the element is then absent). `AwaitingKey` wins over unverified
-    /// moderation: nothing sealed opens, so there is no moderation in view to
-    /// speak of. A disconnected bridge is a transport-only room's fact and the
-    /// other two hold only on end-to-end and community rooms, so it never
+    /// (the element is then absent). `AwaitingKey` wins over the other two
+    /// community facts: nothing sealed opens, so a newcomer with no key reads
+    /// nothing either way and there is no moderation in view to speak of. A
+    /// pending re-key wins over unverified moderation: it is the room's own
+    /// passing state, and the moderation notice returns when it clears. A
+    /// disconnected bridge is a transport-only room's fact and the other
+    /// three hold only on end-to-end and community rooms, so it never
     /// competes; it is checked first all the same.
     pub fn for_facts(
         awaiting_key: bool,
+        severance_owed: bool,
         moderation_unverified: bool,
         bridge_disconnected: bool,
     ) -> Option<Self> {
@@ -305,6 +314,8 @@ impl RoomNotice {
             Some(RoomNotice::BridgeDisconnected)
         } else if awaiting_key {
             Some(RoomNotice::AwaitingKey)
+        } else if severance_owed {
+            Some(RoomNotice::RekeyPending)
         } else if moderation_unverified {
             Some(RoomNotice::ModerationUnverified)
         } else {
@@ -317,6 +328,7 @@ impl RoomNotice {
     pub fn attr_token(self) -> &'static str {
         match self {
             RoomNotice::AwaitingKey => "awaiting-key",
+            RoomNotice::RekeyPending => "rekey-pending",
             RoomNotice::ModerationUnverified => "moderation-unverified",
             RoomNotice::BridgeDisconnected => "bridge-disconnected",
         }
@@ -327,6 +339,7 @@ impl RoomNotice {
         use fauna_i18n::strings::conversations::unified;
         match self {
             RoomNotice::AwaitingKey => unified::ROOM_NOTICE_AWAITING_KEY,
+            RoomNotice::RekeyPending => unified::ROOM_NOTICE_REKEY_PENDING,
             RoomNotice::ModerationUnverified => unified::ROOM_NOTICE_MODERATION_UNVERIFIED,
             RoomNotice::BridgeDisconnected => unified::ROOM_NOTICE_BRIDGE_DISCONNECTED,
         }
@@ -386,14 +399,20 @@ pub fn room_search_result_kind_attr_token(kind: RoomSearchResultKind) -> String 
 
 /// FFI-exported twin of [`RoomNotice::for_facts`] — which notice, if any,
 /// `thread-room-notice` states for a room's `awaiting_key`,
-/// `moderation_unverified` and `bridge_disconnected`.
+/// `severance_owed`, `moderation_unverified` and `bridge_disconnected`.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn room_notice_for(
     awaiting_key: bool,
+    severance_owed: bool,
     moderation_unverified: bool,
     bridge_disconnected: bool,
 ) -> Option<RoomNotice> {
-    RoomNotice::for_facts(awaiting_key, moderation_unverified, bridge_disconnected)
+    RoomNotice::for_facts(
+        awaiting_key,
+        severance_owed,
+        moderation_unverified,
+        bridge_disconnected,
+    )
 }
 
 /// FFI-exported twin of [`RoomNotice::label`].
@@ -740,6 +759,22 @@ pub struct RoomSnapshot {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub awaiting_key: bool,
+    /// Whether this community room **owes a re-key**: someone was removed and
+    /// the mint that seals them out of new traffic has not landed — the home
+    /// nest's floor answer `severance_owed`, as this device last read it
+    /// (`community-rooms.md` § The three classes → *Community* → *A removal's
+    /// re-key is owed until it lands*). Every seated device reads the same
+    /// floor, so every one says so; an owner's or admin's next tend pass pays
+    /// the debt without a gesture, and the floor read that shows it paid
+    /// clears this.
+    ///
+    /// `false` for every other class, for a room whose floor this device has
+    /// not read, and for a floor that carries no answer. Painted as
+    /// `thread-room-notice`'s `rekey-pending` state ([`RoomSnapshot::notice`]),
+    /// which yields to `awaiting_key`.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub severance_owed: bool,
     /// Whether this room carries **moderation this device could not verify**:
     /// an owner's or admin's floor delete record is parked because the chain
     /// under the policy version it names rests on a name this device holds no
@@ -987,6 +1022,7 @@ impl RoomSnapshot {
     pub fn notice(&self) -> Option<RoomNotice> {
         RoomNotice::for_facts(
             self.awaiting_key,
+            self.severance_owed,
             self.moderation_unverified,
             self.bridge_disconnected,
         )
@@ -1069,21 +1105,21 @@ mod tests {
     /// FFI twins say the same.
     #[test]
     fn the_room_notice_is_absent_without_a_fact_and_awaiting_key_wins_over_unverified_moderation() {
-        assert_eq!(RoomNotice::for_facts(false, false, false), None);
+        assert_eq!(RoomNotice::for_facts(false, false, false, false), None);
         assert_eq!(
-            RoomNotice::for_facts(false, true, false),
+            RoomNotice::for_facts(false, false, true, false),
             Some(RoomNotice::ModerationUnverified)
         );
         assert_eq!(
-            RoomNotice::for_facts(true, false, false),
+            RoomNotice::for_facts(true, false, false, false),
             Some(RoomNotice::AwaitingKey)
         );
         assert_eq!(
-            RoomNotice::for_facts(true, true, false),
+            RoomNotice::for_facts(true, false, true, false),
             Some(RoomNotice::AwaitingKey)
         );
         assert_eq!(
-            RoomNotice::for_facts(false, false, true),
+            RoomNotice::for_facts(false, false, false, true),
             Some(RoomNotice::BridgeDisconnected)
         );
         assert_eq!(
@@ -1095,7 +1131,7 @@ mod tests {
             fauna_i18n::strings::conversations::unified::ROOM_NOTICE_BRIDGE_DISCONNECTED
         );
         assert_eq!(
-            room_notice_for(false, false, true),
+            room_notice_for(false, false, false, true),
             Some(RoomNotice::BridgeDisconnected)
         );
         // The snapshot asks the same derivation: a transport room is
@@ -1108,6 +1144,28 @@ mod tests {
         assert_eq!(room.notice(), Some(RoomNotice::BridgeDisconnected));
         // ...and the bar the notice explains is withheld.
         assert!(!room.gate(open).can_send);
+        // A pending re-key says so, yields to awaiting-key, and speaks over
+        // unverified moderation.
+        assert_eq!(
+            RoomNotice::for_facts(false, true, false, false),
+            Some(RoomNotice::RekeyPending)
+        );
+        assert_eq!(
+            RoomNotice::for_facts(true, true, true, false),
+            Some(RoomNotice::AwaitingKey)
+        );
+        assert_eq!(
+            room_notice_for(false, true, true, false),
+            Some(RoomNotice::RekeyPending)
+        );
+        assert_eq!(RoomNotice::RekeyPending.attr_token(), "rekey-pending");
+        assert_eq!(
+            RoomNotice::RekeyPending.label(),
+            fauna_i18n::strings::conversations::unified::ROOM_NOTICE_REKEY_PENDING
+        );
+        let mut owing = transport_room(1);
+        owing.severance_owed = true;
+        assert_eq!(owing.notice(), Some(RoomNotice::RekeyPending));
         assert_eq!(RoomNotice::AwaitingKey.attr_token(), "awaiting-key");
         assert_eq!(
             RoomNotice::ModerationUnverified.attr_token(),
@@ -1118,7 +1176,7 @@ mod tests {
             RoomNotice::ModerationUnverified.label()
         );
         assert_eq!(
-            room_notice_for(true, true, false),
+            room_notice_for(true, false, true, false),
             Some(RoomNotice::AwaitingKey)
         );
         assert_eq!(
@@ -1380,6 +1438,7 @@ mod tests {
             nest_read: None,
             labelers: None,
             awaiting_key: false,
+            severance_owed: false,
             moderation_unverified: false,
             bridge_disconnected: false,
             pending_invites: None,
@@ -1429,6 +1488,7 @@ mod tests {
             nest_read: None,
             labelers: None,
             awaiting_key: false,
+            severance_owed: false,
             moderation_unverified: false,
             bridge_disconnected: false,
             pending_invites: None,

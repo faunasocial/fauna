@@ -129,7 +129,7 @@ Pick where and how big:
     smallest **1 GB** size. **Note:** a social-only box can't add email later — the server would have to be set up again with email, on a plan with 2 GB or more — so leave email **on** if you might ever want it.
 - **Updates.** Your server keeps itself up to date automatically; this choice
   decides which versions it follows:
-  - **Stable** (the default once the first Stable release is out; until then, see below) — released versions. Recommended.
+  - **Stable** (the default) — released versions. Recommended.
   - **Test** — numbered releases being accepted by users before they become
     Stable. A release reaches Test first and moves to Stable once it has been
     verified and approved; if you want to try releases early, this is the
@@ -248,10 +248,10 @@ For a screen-by-screen map of everything you just unlocked, take
 | Piece | Status |
 |---|---|
 | The whole in-app flow — handle, DNS, server pick, live build progress, automatic claim, automatic TLS | **Available** — built into every Fauna app, and tested end to end against test servers. From the web app the build may not finish yet (below). |
-| The nest software itself | **No Stable release yet** — until the first one is out there is nothing on the **Stable** channel: where the app can check, the setup will not build a server on it (Step 3), and a server built on it where the app could not check waits until the first release is out. A numbered release is published on the **Test** channel, and the **Dev** channel's development builds are published. |
+| The nest software itself | **Available** — released versions are published on the **Stable** channel, the first of them 0.1.6; a numbered release is published on the **Test** channel, and the **Dev** channel's development builds are published. |
 | Buying a **server** inside the app | **Available** — Hetzner, DigitalOcean, Vultr, Linode and OVH. Hetzner is the most road-tested and the recommended default. |
 | Buying a **domain** inside the app | **Available** — Porkbun, Gandi, Namecheap and Cloudflare. |
 | Managed DNS (hand the app a token, it maintains every record) | **Available** — Cloudflare, Hetzner, Porkbun, Gandi, Namecheap. |
 | A free **Fauna-hosted address** (no domain of your own at all) | **Not offered** — you bring or buy a domain. |
 | Setting up from the **web app** | A browser cannot trust a brand-new server the way the other apps can, so from the web app the build may not finish yet; build it from a desktop, phone or terminal app. Cloudflare, Namecheap and Gandi (DNS and domain purchase) and Vultr (server) also don't work from the web app yet. |
-| Packaged app releases | **No public release yet** — outside Google Play's invitation-only testing of the Android app and the pre-release downloads of the Windows, Linux and terminal apps, and apart from the web app a nest serves itself by default, trying an app means building it from source. |
+| Packaged app releases | **Available** — the project's [releases page](https://github.com/faunasocial/fauna/releases) carries downloads of the macOS, Windows, Linux and terminal apps; the Android app is in Google Play's invitation-only testing, the web app a nest serves itself by default needs no install, and the iOS app is built from source. |

@@ -341,7 +341,40 @@ def admit_web_seat_origins(nests: list[dict], seats: list[Seat], request) -> Non
         )
 
 
+SEAT_LOG_DIR_ENV = "FAUNA_E2E_SEAT_LOG_DIR"
+"""When set, ``teardown_seats`` writes each seat's whole app log into this
+directory before the seat goes: a seat's log dies with it (``seat_log``), and
+a failure message keeps only the lines a journey's filter chose — a hunt for
+a setup race needs the rest. Unset, nothing is written."""
+
+
+def _save_seat_logs(seats: list[Seat]) -> None:
+    import os
+    import time
+    from pathlib import Path
+
+    target = os.environ.get(SEAT_LOG_DIR_ENV)
+    if not target:
+        return
+    out = Path(target)
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    test = os.environ.get("PYTEST_CURRENT_TEST", "unknown").split(" ")[0]
+    slug = "".join(c if c.isalnum() or c in "-_." else "_" for c in test)[-120:]
+    for i, seat in enumerate(seats):
+        try:
+            text = seat.app.driver.app_stderr_text() or ""
+        except Exception as e:  # pragma: no cover — diagnosis only
+            text = f"<app log unavailable: {e}>"
+        name = f"{stamp}-{slug}-seat{i}-{seat.actor_hex[:12]}.log"
+        (out / name).write_text(text)
+
+
 def teardown_seats(seats: list[Seat]) -> None:
+    try:
+        _save_seat_logs(seats)
+    except Exception:  # pragma: no cover — diagnosis must never fail a teardown
+        pass
     for seat in seats:
         try:
             seat.app.driver.teardown()
@@ -689,6 +722,28 @@ def thread_by_channel(app, channel_hex: str):
     return None
 
 
+def bubble_texts(seat: Seat) -> list[str]:
+    """The texts of the live bubbles (``dm-message-text``) on ``seat``'s open
+    room, in order — a snapshot that holds still while it is read. The count
+    and the per-index reads are separate bridge calls, and a bubble that a
+    delete tombstones (or a re-render drops) between them answers its index
+    ``not found``; such a read takes the snapshot again rather than failing
+    the poll it serves. A seat that never holds still across the attempts
+    gives the bubbles read so far — still index-true, since the list is cut
+    at the first vanished index."""
+    d = seat.app.driver
+    texts: list[str] = []
+    for _ in range(5):
+        texts = []
+        try:
+            for i in range(d.count("dm-message-text")):
+                texts.append(d.get_text("dm-message-text", index=i) or "")
+            return texts
+        except LookupError:
+            continue
+    return texts
+
+
 def wait_for(what: str, read, predicate, budget_s: float, *, diagnose=None):
     """Deadline-poll ``read()`` until ``predicate(value)`` holds; return the
     value. On the budget elapsing, fail naming ``what`` and the last value
@@ -809,8 +864,14 @@ def seat_story(seat: Seat) -> str:
             )
     except Exception as e:  # pragma: no cover — diagnosis only
         rows.append(f"  <list_threads unavailable: {e}>")
+    # `[launch]`, `account-runtime`/`account runtime` and `teardown` name which
+    # client built the session and which started or stopped the process-global
+    # account runtime — the INFO lines that tell a seat whose community-room
+    # seams hold a torn-down store ("account runtime is shut down") apart from
+    # one whose runtime never assembled.
     rail = seat_log(
-        seat, "welcome", "conv", "poll", "manager", "mls", "roster", "error", "warn"
+        seat, "welcome", "conv", "poll", "manager", "mls", "roster", "error", "warn",
+        "[launch]", "account-runtime", "account runtime", "teardown",
     )
     return (
         f"seat {seat.handle} ({seat.actor_hex[:12]}…): error={err!r}\n"

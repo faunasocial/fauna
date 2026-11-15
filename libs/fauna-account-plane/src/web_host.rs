@@ -296,6 +296,8 @@ where
             // No web app default is ratified (`devices.md` § Device names):
             // web's row is born under the placeholder.
             enrollment_device_label: None,
+            // A browser tab has no foreground lifecycle the runtime reads.
+            foreground: true,
         },
         params.reconnects.clone(),
         params.pushes.as_ref().map(broadcast::Receiver::resubscribe),

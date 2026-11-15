@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from helpers.app_surface import app_name, declared_absence, require_surface
+from helpers.app_surface import app_name, declared_absence
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -71,20 +71,6 @@ def _require_participation_toggle(driver) -> None:
                        "request-off arm)",
             doc="p2p.md § Per-device participation → Web",
         )
-
-
-def _require_share_plane(driver) -> None:
-    """The plane-reading half needs the app to host the share plane and paint
-    its ``share-serve-status``. iOS renders the toggle, and its own row
-    flips the device-local row through the door (the toggle-only journey below
-    runs there), but it does not wire ``start_share_plane``, so there is no
-    reading to wait for. windows wires it (2026-10-10) and runs the whole
-    journey. android likewise renders the toggle but
-    starts no share plane, so it paints no ``share-serve-status``; linux runs
-    the plane (``share_glue.rs``) and runs the whole journey."""
-    app = app_name(driver)
-    require_surface(driver, "share-serve-status")
-    require_surface(driver, "share-serve-status")
 
 
 def _own_card(driver) -> str:
@@ -230,7 +216,6 @@ def test_turning_this_devices_peer_transfers_off_and_on_again(
     device-cap lift on the shared tier."""
     driver = app.driver
     _require_participation_toggle(driver)
-    _require_share_plane(driver)
     scope = _open_own_card(app, request, nest_instance)
 
     # --- off

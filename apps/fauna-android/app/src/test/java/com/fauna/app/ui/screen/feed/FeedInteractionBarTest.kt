@@ -5,7 +5,11 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.semantics.SemanticsProperties
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import uniffi.fauna_feed.LikeState
+import uniffi.fauna_feed.likeStateWord
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -84,5 +88,37 @@ class FeedInteractionBarTest {
     fun inactiveExposesNotSelectedSemantics() {
         render(count = 1L, active = false)
         composeTestRule.onNodeWithTag("feed-like-button").assertIsNotSelected()
+    }
+
+    // The heart's `state` attribute (its `stateDescription`) is the shared
+    // `PostSummary.likeState` word — on | off | queued | unsent
+    // (account-offline-mutation.md § The unsent-changes surface, point 2),
+    // spelled by shared Rust (`likeStateWord`), never by this app.
+    @Test
+    fun likeStateWordsAreTheSharedSpelling() {
+        assertEquals("on", likeStateWord(LikeState.ON))
+        assertEquals("off", likeStateWord(LikeState.OFF))
+        assertEquals("queued", likeStateWord(LikeState.QUEUED))
+        assertEquals("unsent", likeStateWord(LikeState.UNSENT))
+    }
+
+    @Test
+    fun stateWordRidesTheButtonsStateDescription() {
+        var clicked = false
+        composeTestRule.setContent {
+            InteractionButton(
+                testTag = "feed-like-button",
+                icon = Icons.Default.FavoriteBorder,
+                contentDescription = "Like",
+                count = 0L,
+                stateWord = likeStateWord(LikeState.UNSENT),
+                onClick = { clicked = true },
+            )
+        }
+        composeTestRule.onNodeWithTag("feed-like-button")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "unsent"))
+            .performClick()
+        // An unsent heart's gesture is still the like door (the shared manager retries).
+        assertTrue(clicked)
     }
 }

@@ -30,13 +30,15 @@
     ensureWasm,
     classifyLinkInput,
     shortNestId,
-    isBoundedMailGrant,
+    grantBoundNote,
     offlineAffordance,
     grantScopeLabels,
     type TrustFolder,
     statusLabel as wasmStatusLabel,
     backupStatusLabel as wasmBackupStatusLabel,
     mintOptionLabel as wasmMintOptionLabel,
+    mintOptionNote as wasmMintOptionNote,
+    mintOptionDefaultDuration,
     mintDurationOptions,
     durationLabel as wasmDurationLabel,
     type TrustGrantDuration,
@@ -270,13 +272,11 @@
   }
 
   // REQUIRED honest-bound copy (nests.md § Honest bound) — never over-promise.
-  // A bounded (content-sealing-epochs) mail grant gets the stronger,
-  // crypto-bounded wording WITH the honest INFO-A caveat; every other
-  // kind/regime keeps the standing trust-until-revoke wording (flip-checklist
-  // line 6). Never re-derive the (class, kind, tier) check here — the shared
-  // `isBoundedMailGrant` predicate is the single source of truth (priority #2).
+  // The regime (materialization, bounded mail, standing) is picked by the
+  // shared `fauna_client_pair::grant_bound_note` — never re-derived here
+  // (priority #2).
   function boundNote(scope: TrustScope[]): string {
-    return isBoundedMailGrant(scope) ? t.nests.bound_note_bounded_mail : t.nests.bound_note_standing;
+    return resolveLocalized(grantBoundNote(scope));
   }
 
   // Map a shared mint-picker option to its localized use-case label, via the
@@ -292,6 +292,22 @@
     const label = mintScopeLabel[row.nest_id];
     if (!label) return null;
     return row.mint_options.find((o) => mintOptionLabel(o) === label) ?? null;
+  }
+  // The picked option's mint-time note (`nest-trust-mint-materialize-note`):
+  // the shared `mint_option_note` — the materialization options' honesty copy,
+  // read BEFORE the confirm (`capability-grants.md` § Capability tiering →
+  // *The materialization grant* (f)). `null` ⇒ the element is absent.
+  function mintNote(o: TrustMintOption | null): string | null {
+    if (!o) return null;
+    const note = wasmMintOptionNote(o);
+    return note ? resolveLocalized(note) : null;
+  }
+  // A new pick pre-selects that option's default window (the shared
+  // `mint_option_default_duration` — a view is standing by nature).
+  function onMintScopeChange(row: NestRow): void {
+    const o = chosenMintOption(row);
+    const d = o ? mintOptionDefaultDuration(o, row.mint_default_duration) : row.mint_default_duration;
+    mintDuration[row.nest_id] = durationText(d);
   }
 
   // Trust timestamps (`lasts_until`, history `at`) are epoch **seconds** (the
@@ -995,11 +1011,13 @@
                   >{t.nests.mint_button}</button>
                   {#if mintOpen[p.nest_id]}
                     {@const opt = chosenMintOption(p)}
+                    {@const note = mintNote(opt)}
                     <div class="mint-form">
                       <select
                         class="mint-select"
                         data-testid={IDS.NEST_TRUST_MINT_SCOPE_SELECT}
                         bind:value={mintScopeLabel[p.nest_id]}
+                        onchange={() => onMintScopeChange(p)}
                       >
                         <option value="">{t.nests.mint_scope_placeholder}</option>
                         {#each p.mint_options as o (mintOptionLabel(o))}
@@ -1025,6 +1043,9 @@
                             <option value={h}>{h}</option>
                           {/each}
                         </select>
+                      {/if}
+                      {#if note}
+                        <p class="bound-note" data-testid={IDS.NEST_TRUST_MINT_MATERIALIZE_NOTE}>{note}</p>
                       {/if}
                       <button
                         class="btn primary"
