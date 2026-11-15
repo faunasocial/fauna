@@ -519,6 +519,7 @@ impl Seat {
             peer_transport,
             enrollment_target_device_id: device_id,
             enrollment_device_label: None,
+            foreground: true,
         })
         .await
         .map_err(|e| err(format!("start the seat's account runtime: {e:#}")))?;
@@ -683,7 +684,13 @@ async fn create_set_on(
     identity: &ActorKeypair,
     req: FolderCreateRequest,
 ) -> Result<Outcome, FfiError> {
-    let files = FoldersClient::new(Arc::clone(nest));
+    // The owner's identity attests a `public` create, as every app's create
+    // site wires it (`FoldersClient::with_audience_attestor`): without it the
+    // shared create refuses a born-public set before any wire call
+    // (`SetLifecycleError::Unattestable`), and a harness that cannot create one
+    // cannot stand up the published sites the web-serving witnesses read.
+    let files = FoldersClient::new(Arc::clone(nest))
+        .with_audience_attestor(Arc::new(identity.clone_keypair()));
     let name = req.name.clone();
     // Sealed from birth, as every production create is: the owner's root
     // passed explicitly, since this client carries no label custody.
@@ -2650,7 +2657,14 @@ pub unsafe extern "C" fn fauna_harness_answer_consent(
 /// deposit adoption on a capability host*, consequence (1)), with no app seat
 /// left running beside it.
 ///
-/// `request` is the empty dag-cbor array. `out` receives `{"ok": "<password>"}`
+/// `request` is the empty dag-cbor array, or `[epoch_schedule]`: `true` also
+/// runs the connect-time refresh pass every signed-in app runs at its
+/// post-auth edge (`MailSettingsMachine::refresh_epoch_schedule`, spawned by
+/// `rpc_glue::refresh_epoch_schedule_on_every_connect`), so the nest holds
+/// the account's content-sealing epoch schedule and the MTA seals inbound mail
+/// under per-epoch keys — the state every app leaves, which a holder's opener
+/// must read (`encryption-at-rest.md` § Capability tiering → Content-sealing
+/// epochs). `out` receives `{"ok": "<password>"}`
 /// — the machine's snapshot reads enabled, and the string is the generated
 /// plain credential, which a test's IMAP/DAV client authenticates with — or a
 /// local failure carrying the snapshot's error line.
@@ -2672,6 +2686,12 @@ pub unsafe extern "C" fn fauna_harness_enable_mail(
     let body = || {
         // SAFETY: per the `# Safety` section above.
         let call = unsafe { decode_call(nest_url, secret, secret_len, request, request_len)? };
+        let flags: Vec<bool> = decode_request!(call.req)?;
+        let epoch_schedule = match flags.as_slice() {
+            [] => false,
+            [on] => *on,
+            _ => return Err(err("request is [] or [epoch_schedule]".to_string())),
+        };
         let node_url = call.nest_url.clone();
         with_seat(
             call.nest_url,
@@ -2705,6 +2725,12 @@ pub unsafe extern "C" fn fauna_harness_enable_mail(
                 let pass_errors = seat.publish().await?;
                 if !pass_errors.is_empty() {
                     return Err(err(format!("the seat's publishing pass: {pass_errors:?}")));
+                }
+                if epoch_schedule {
+                    machine
+                        .refresh_epoch_schedule()
+                        .await
+                        .map_err(|e| err(format!("the epoch schedule refresh: {e}")))?;
                 }
                 let reply: Result<String, NestClientError> = Ok(password);
                 outcome!(reply)
@@ -4588,3 +4614,6 @@ mod follow;
 // The client-kept scheduling outcomes (an organizer's event, the sealed rail,
 // the recipient's apply) — likewise.
 mod scheduling;
+// App-less provisioning through the onboarding machine every app runs —
+// likewise.
+mod provisioning;

@@ -52,6 +52,7 @@ class ProfileOffersContentTest {
         pendingTiers: Set<String> = emptySet(),
         working: Boolean = false,
         onSubscribe: (String) -> Unit = {},
+        onPaymentLink: (String, String) -> Unit = { _, _ -> },
     ) {
         composeTestRule.setContent {
             Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -75,6 +76,7 @@ class ProfileOffersContentTest {
                     },
                     working = working,
                     onSubscribe = onSubscribe,
+                    onPaymentLink = onPaymentLink,
                 )
             }
         }
@@ -116,5 +118,23 @@ class ProfileOffersContentTest {
     fun paymentLink_rendersWhenUrlPresent() {
         render(offers = listOf(tier(name = "gold", paymentUrl = "https://pay.example/gold")))
         composeTestRule.onNodeWithTag("subscription-offer-payment-link").assertExists()
+    }
+
+    /** The payment link hands its row's tier and the author's raw link to the
+     * section — which subscribes first and opens the composed checkout
+     * ([com.fauna.app.ui.viewmodel.ProfileOffersVM.payTo]) — never opens the raw
+     * link itself, and is not the plain Subscribe. */
+    @Test
+    fun paymentLink_click_handsTierAndUrlToTheGesture_neverTheSubscribeButton() {
+        var paid: Pair<String, String>? = null
+        var subscribed: String? = null
+        render(
+            offers = listOf(tier(name = "gold", paymentUrl = "https://pay.example/gold")),
+            onSubscribe = { subscribed = it },
+            onPaymentLink = { tier, url -> paid = tier to url },
+        )
+        composeTestRule.onNodeWithTag("subscription-offer-payment-link").performScrollTo().performClick()
+        assertEquals("gold" to "https://pay.example/gold", paid)
+        assertEquals(null, subscribed)
     }
 }

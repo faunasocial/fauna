@@ -207,6 +207,17 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "the seed rests owner-only");
         }
+        // The self-approve adds the audit-only `users` row every approved
+        // bridge gets — the one bare principal a nest upgraded from a build
+        // before the materializer gains at its first boot (additive).
+        let principal = db
+            .get_user(&holder.ed25519_pubkey())
+            .await
+            .unwrap()
+            .expect("the self-approve adds the holder's users row");
+        assert_eq!(principal.tier, "free");
+        assert_eq!(principal.label, "");
+        let users_before = db.list_users().await.unwrap().len();
         let again = MaterializerHolder::init(dir.path(), db.clone())
             .await
             .unwrap()
@@ -214,6 +225,11 @@ mod tests {
         assert_eq!(
             again.x25519_pubkey, holder.x25519_pubkey,
             "same seed, same key"
+        );
+        assert_eq!(
+            db.list_users().await.unwrap().len(),
+            users_before,
+            "a restart reuses the persisted identity and adds no principal"
         );
     }
 

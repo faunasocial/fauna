@@ -20,6 +20,12 @@ Each half fails silently on its own:
   * committing the locked-mode switch off, or a forced re-evaluation, in a recipe,
     script or workflow turns every restore it runs back into a resolution.
 
+One file may spell the re-evaluation: the bump round's step module, whose `resolve`
+verb is the only way a candidate is made (dependency-bump-report.md § No new software
+without a review, owner-ruled 2026-11-10) — it runs the one restore on a need's exact
+version inside a round, logged, never as a recipe's standing restore. The exception is
+pinned to that one constant's line.
+
 tier_1: reads tracked files, runs no dotnet.
 """
 
@@ -155,17 +161,27 @@ def _scanned_files() -> list[Path]:
     return [p for p in out if p.is_file() and not skip & set(p.parts)]
 
 
+#: The one sanctioned spelling: the round tool's re-evaluation constant (see the docstring),
+#: excepted by its line alone and held to ONE line in the whole scanned tree (the round tool
+#: is not named by path: the public tree does not ship it).
+_ROUND_TOOL_LINE = "NUGET_REEVALUATE = ("
+
+
 def test_no_tracked_file_switches_the_lock_off():
-    hits = []
+    hits, excepted = [], []
     for path in _scanned_files():
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         for number, line in enumerate(text.splitlines(), start=1):
+            if line.startswith(_ROUND_TOOL_LINE):
+                excepted.append(f"{_ids(path)}:{number}")
+                continue
             if any(o in line for o in _OVERRIDES):
                 hits.append(f"{_ids(path)}:{number}: {line.strip()[:160]}")
     assert not hits, (
         "a tracked file switches the NuGet lock off for whatever it runs — a round regenerates "
-        "a lock by hand on a scratch copy, never from a committed recipe:\n" + "\n".join(hits)
+        "a lock through the round tool's resolve verb, never from a committed recipe:\n" + "\n".join(hits)
     )
+    assert len(excepted) <= 1, f"the round tool's constant is the ONE excepted line: {excepted}"

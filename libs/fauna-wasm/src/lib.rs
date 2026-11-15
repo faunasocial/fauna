@@ -5717,10 +5717,31 @@ pub fn appeal_verdict(error: Option<String>) -> Result<JsValue, JsValue> {
 /// deserializes the full projection, so a partial object is a runtime error. Pure —
 /// no nest hop — so a free fn, not a `WsRpcClient` method. See
 /// `docs/goal/behavior/admin.md` § 2 Users → *Cutting a user off*.
+///
+/// `viewer` is the viewing admin's raw actor id, which the take-over offer
+/// keys on (`family-safety.md` § App surface → *Admin take-over*); absent, no
+/// take-over is offered — the FFI face's same reading.
 #[wasm_bindgen(js_name = adminUserRowControls)]
-pub fn admin_user_row_controls(user: JsValue) -> Result<JsValue, JsValue> {
+pub fn admin_user_row_controls(user: JsValue, viewer: Option<Vec<u8>>) -> Result<JsValue, JsValue> {
+    let mut user: fauna_protocol::admin::AdminUser = crate::rpc::from_js(user)?;
+    let viewer = match viewer {
+        Some(v) => v,
+        None => {
+            user.guardian = None;
+            Vec::new()
+        }
+    };
+    crate::rpc::to_js(&fauna_client_admin::admin_user_row_controls(&user, &viewer))
+}
+
+/// `fauna_client_admin::admin_user_guardian_label` → the text a supervised
+/// row's `admin-users-supervised-by` names its guardian by (handle, full-hex
+/// fallback), or `undefined` on an unsupervised row — the wasm twin of the
+/// UniFFI face. `user` is the WHOLE `fauna.admin.users.list` row.
+#[wasm_bindgen(js_name = adminUserGuardianLabel)]
+pub fn admin_user_guardian_label(user: JsValue) -> Result<Option<String>, JsValue> {
     let user: fauna_protocol::admin::AdminUser = crate::rpc::from_js(user)?;
-    crate::rpc::to_js(&fauna_client_admin::admin_user_row_controls(&user))
+    Ok(fauna_client_admin::admin_user_guardian_label(&user))
 }
 
 /// `fauna_client_admin::admin_picker_option` → the option text an admin

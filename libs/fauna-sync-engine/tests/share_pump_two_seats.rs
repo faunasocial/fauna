@@ -1753,7 +1753,7 @@ async fn an_on_demand_seat_lands_the_unsequenced_body_and_serves_it_to_a_third_p
         db_path: bob_db_path.clone(),
         body: Arc::new(OnDemandBodySource::new(
             kept.clone(),
-            cache.clone(),
+            Some(cache.clone()),
             SyncDb::open(&bob_db_path).unwrap(),
         )),
         landing: Landing::OnDemand {

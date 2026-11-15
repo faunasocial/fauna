@@ -372,6 +372,19 @@ pub struct FeedPostItem {
     /// `docs/goal/behavior/web-content-hosting.md` § Published-post management).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_slug: Option<String>,
+    /// When the author advertised this sold post on Nostr — the
+    /// `content_meta.nostr_advertised_at` flag (epoch seconds), projected
+    /// from the post's own row exactly like `web_slug` (the advertisement is
+    /// itself a public note, so its presence is no secret of the feed read).
+    /// `None` = not advertised. The advertise-state twin of
+    /// [`web_slug`](Self::web_slug): it picks which arm of the own-post verb
+    /// pair *Advertise on Nostr* / *Stop advertising on Nostr* the ⋯ overflow
+    /// offers after a reload (`docs/goal/behavior/monetization.md` § The Nostr
+    /// advertisement of a sold post → *What the author sees and agrees to*).
+    /// Additive + `None`-default: an older nest never sends it and the verb
+    /// pair reads "not advertised" (`version-compatibility.md` I4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nostr_advertised_at: Option<u64>,
     /// Per-row content-label verdicts (`moderation.md` § Per-row badge data
     /// path, ratified 2026-07-16), projected from `content_labels` — one entry
     /// per category, the highest-confidence row. Additive + empty-default, so
@@ -1092,6 +1105,11 @@ mod tests {
             } else {
                 None
             },
+            nostr_advertised_at: if with_score {
+                Some(1_762_500_000)
+            } else {
+                None
+            },
             author_display: if with_score {
                 Some(AuthorDisplay {
                     handle: Some("@bob@remote.example".into()),
@@ -1249,6 +1267,28 @@ mod tests {
             "the additive key is on the wire under its own name, got {:?}",
             published_map.get("web_slug")
         );
+    }
+
+    #[test]
+    fn feed_post_item_nostr_advertised_at_is_additive() {
+        // Present: the author's advertise flag survives the canonical
+        // round-trip under its own key.
+        let advertised = sample_post_item(true);
+        let bytes = encode_canonical(&advertised).unwrap();
+        let decoded: FeedPostItem = decode(&bytes).unwrap();
+        assert_eq!(decoded.nostr_advertised_at, Some(1_762_500_000));
+        let as_map: BTreeMap<String, Value> = decode(&bytes).unwrap();
+        assert!(as_map.contains_key("nostr_advertised_at"));
+
+        // Absent (an older nest, or a reader who is not the author): the key
+        // is not emitted, and its absence decodes to `None` — "not advertised".
+        let plain = sample_post_item(false);
+        let bytes = encode_canonical(&plain).unwrap();
+        let as_map: BTreeMap<String, Value> = decode(&bytes).unwrap();
+        assert!(!as_map.contains_key("nostr_advertised_at"));
+        let decoded: FeedPostItem = decode(&bytes).unwrap();
+        assert_eq!(decoded.nostr_advertised_at, None);
+        assert!(decoded.extra.is_empty());
     }
 
     #[test]

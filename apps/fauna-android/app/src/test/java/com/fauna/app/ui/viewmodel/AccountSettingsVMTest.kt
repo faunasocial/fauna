@@ -144,7 +144,7 @@ class AccountSettingsVMTest {
         whenever(
             accountStores.finishSignOut(
                 anyHost(),
-                org.mockito.ArgumentMatchers.eq(false),
+                eqCaller(com.fauna.ffi.FfiFinishCaller.GESTURE),
                 org.mockito.ArgumentMatchers.eq(listOf(ACTOR)),
             )
         ).thenReturn(CLEAN_FINISH)
@@ -162,7 +162,7 @@ class AccountSettingsVMTest {
             verify(actorScope).dropActorScopedState()
             verify(accountStores).finishSignOut(
                 anyHost(),
-                org.mockito.ArgumentMatchers.eq(false),
+                eqCaller(com.fauna.ffi.FfiFinishCaller.GESTURE),
                 org.mockito.ArgumentMatchers.eq(listOf(ACTOR)),
             )
         }
@@ -182,7 +182,7 @@ class AccountSettingsVMTest {
         whenever(
             accountStores.finishSignOut(
                 anyHost(),
-                org.mockito.ArgumentMatchers.eq(false),
+                eqCaller(com.fauna.ffi.FfiFinishCaller.GESTURE),
                 org.mockito.ArgumentMatchers.eq(emptyList()),
             )
         ).thenReturn(CLEAN_FINISH.copy(residue = left))
@@ -194,6 +194,12 @@ class AccountSettingsVMTest {
     }
 
     /** `ArgumentMatchers.any` for a non-null Kotlin parameter. */
+    /** Mockito's `eq` answers `null` for an enum, which a Kotlin non-null parameter refuses. */
+    private fun eqCaller(caller: com.fauna.ffi.FfiFinishCaller): com.fauna.ffi.FfiFinishCaller {
+        org.mockito.ArgumentMatchers.eq(caller)
+        return caller
+    }
+
     private fun anyHost(): com.fauna.ffi.FfiSignOutHost {
         org.mockito.ArgumentMatchers.any(com.fauna.ffi.FfiSignOutHost::class.java)
         return NO_HOST

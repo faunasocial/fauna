@@ -700,6 +700,12 @@ export const reconnectTick = writable(0);
  *  (`notifications.md` § Deep-link destinations). */
 export const familyTabGated = writable(false);
 
+/** Bumped by a page whose act changed the viewer's family relationships —
+ *  the Users hub's admin take-over (family-safety.md § App surface → Admin
+ *  take-over) — so the layout's one `fauna.family.status` read runs again and
+ *  `family-tab` reveals the ward. */
+export const familyStatusTick = writable(0);
+
 // --- Connection status ---
 //
 // Live nest WS-RPC connection state for the global `connection-status`

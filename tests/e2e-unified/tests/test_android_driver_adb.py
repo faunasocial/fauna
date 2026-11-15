@@ -1,7 +1,7 @@
 """tier_1: every `adb` command line `drivers/android.py` issues, against a fake adb.
 
 Authority: `docs/goal/architecture/testing.md` § Default app and nest mode →
-*Android's run venue* (constraint 3: the device reaches the test nest as its own
+*Android's emulator placement* (constraint 3: the device reaches the test nest as its own
 loopback via `adb reverse`, and the run can name its device) and
 `e2e-conventions.md` convention 14 (assert latency-independent state, never wall
 clock).
@@ -262,13 +262,13 @@ def test_the_reverse_precedes_the_app_launch(fake_adb, bridge_posts):
 
 def test_every_adb_call_carries_the_serial(fake_adb):
     driver = _driver()
-    driver.launch(_config(device_serial="emulator-5554", nest_ports=[13002]))
+    driver.launch(_config(device_serial="emulator-5580", nest_ports=[13002]))
     driver.teardown()
 
     issued = fake_adb()
     assert issued, "the fake adb was never invoked"
     for line in issued:
-        assert line.startswith("-s emulator-5554 "), (
+        assert line.startswith("-s emulator-5580 "), (
             f"an adb call went to whichever device was attached: {line!r}"
         )
 
@@ -279,39 +279,47 @@ def test_without_a_serial_no_dash_s_is_passed(fake_adb):
     assert not any(ln.startswith("-s ") for ln in fake_adb())
 
 
-# ── the venue: a remote adb server, and only ports the tunnel carries ───────
+# ── the venue: its own adb server on this machine, the device by connect ────
 #
-# `testing.md` § Default app and nest mode → *Android's run venue*: with
-# `adb_server` in the launch config the driver is a pure client of a server at
-# the far end of a tunnel, so every command names that server and every port
-# either end listens on comes from the venue's fixed ranges.
+# `testing.md` § Default app and nest mode → *A2 amended — the design*, point 2:
+# with `adb_server` in the launch config every command names the venue's adb
+# server, which runs on THIS machine and reaches the emulator by `adb connect`
+# -- so the device is re-attached before the first call, and every forward and
+# reverse lands here: ports come from `find_free_port()`, as on a local device.
 
-_SERVER = "tcp:127.0.0.1:18509"
+_SERVER = "tcp:127.0.0.1:18508"
+_VENUE_SERIAL = "127.0.0.1:18509"
 
 
 @pytest.fixture
-def venue(tmp_path, monkeypatch):
-    """A venue launch config, with leases taken in a private directory so this
-    file never contends with a real android run on the machine."""
-    from helpers import android_venue
-
-    monkeypatch.setattr(android_venue, "lease_dir", lambda: str(tmp_path / "leases"))
-    nest = android_venue.NEST_PORTS[0]
-    return android_venue, _config(url=f"http://127.0.0.1:{nest}", adb_server=_SERVER)
+def venue():
+    return _config(url="http://127.0.0.1:13001", adb_server=_SERVER,
+                   device_serial=_VENUE_SERIAL)
 
 
-def test_every_adb_call_names_the_remote_server(fake_adb, venue):
-    _venue, config = venue
+def test_every_adb_call_names_the_venue_server(fake_adb, venue):
     driver = _driver()
-    driver.launch({**config, "device_serial": "emulator-5554"})
+    driver.launch(venue)
     driver.teardown()
 
     issued = fake_adb()
     assert issued, "the fake adb was never invoked"
     for line in issued:
-        assert line.startswith(f"-L {_SERVER} -s emulator-5554 "), (
-            f"an adb call went to a local adb server: {line!r}"
+        assert line.startswith(f"-L {_SERVER} "), (
+            f"an adb call went to another adb server: {line!r}"
         )
+
+
+def test_the_venue_device_is_connected_before_anything_else(fake_adb, venue):
+    _driver().launch(venue)
+    issued = fake_adb()
+    assert issued[0] == f"-L {_SERVER} connect {_VENUE_SERIAL}", issued[:3]
+    assert all(ln.startswith(f"-L {_SERVER} -s {_VENUE_SERIAL} ") for ln in issued[1:])
+
+
+def test_a_local_serial_is_never_connected(fake_adb):
+    _driver().launch(_config(device_serial="emulator-5580"))
+    assert not _matching(fake_adb(), "connect")
 
 
 def test_without_an_adb_server_no_dash_l_is_passed(fake_adb):
@@ -320,45 +328,16 @@ def test_without_an_adb_server_no_dash_l_is_passed(fake_adb):
     assert not any("-L" in ln.split() for ln in fake_adb())
 
 
-def test_the_venue_forward_port_comes_from_the_fixed_range(fake_adb, venue):
-    android_venue, config = venue
+def test_the_venue_forward_and_reverses_take_any_free_port(fake_adb, venue):
+    # No fixed range and no lease any more: the forward listens where the adb
+    # server runs, which is this machine.
     driver = _driver()
-    driver.launch(config)
-    assert driver._local_port == android_venue.BRIDGE_FORWARD_PORTS[0]
-    assert f"-L {_SERVER} forward tcp:{driver._local_port} tcp:18500" in fake_adb()
-
-
-def test_two_venue_seats_get_different_forward_ports_and_give_them_back(fake_adb, venue):
-    android_venue, config = venue
-    first, second = _driver(), _driver()
-    first.launch(config)
-    second.launch(config)
-    assert (first._local_port, second._local_port) == tuple(android_venue.BRIDGE_FORWARD_PORTS[:2])
-
-    first.teardown()
-    third = _driver()
-    third.launch(config)
-    assert third._local_port == android_venue.BRIDGE_FORWARD_PORTS[0]
-
-
-def test_a_venue_reverse_for_an_untunnelled_nest_port_is_refused(fake_adb, venue):
-    # The reverse would succeed and the app would then fail its first nest call
-    # with a connection error naming nothing; the driver knows the cause.
-    android_venue, config = venue
-    driver = _driver()
-    driver.launch(config)
-    with pytest.raises(android_venue.AndroidVenueError, match="tunnelled range"):
-        driver.ensure_reverse(13099)
-    assert not _matching(fake_adb(), "reverse", "tcp:13099")
-
-
-def test_a_venue_launch_pointed_at_an_untunnelled_nest_fails_before_the_app_starts(
-    fake_adb, venue, bridge_posts
-):
-    android_venue, config = venue
-    with pytest.raises(android_venue.AndroidVenueError):
-        _driver().launch({**config, "url": "http://127.0.0.1:13001"})
-    assert not [path for path, _body, _issued in bridge_posts if path == "/session"]
+    driver.launch({**venue, "nest_ports": [13099]})
+    issued = fake_adb()
+    assert f"-L {_SERVER} -s {_VENUE_SERIAL} forward tcp:{driver._local_port} tcp:18500" in issued
+    assert _matching(issued, "reverse", "tcp:13099")
+    driver.ensure_reverse(13123)
+    assert _matching(fake_adb(), "reverse", "tcp:13123")
 
 
 # ── teardown: removal keyed on the driver's OWN reverse record ──────────────
@@ -545,3 +524,34 @@ def test_launch_takes_the_log_floor_before_the_session_post(monkeypatch, bridge_
     monkeypatch.setattr(AndroidBridgeDriver, "_get", listing)
     _driver().launch(_config())
     assert ("/app-log", 0) in gets, "the floor must be read while no /session POST has landed"
+
+
+# ── provider redirection: the fake the app is pointed at gets a reverse too ──
+
+
+def test_a_provider_redirected_to_loopback_gets_its_reverse(fake_adb, monkeypatch):
+    # `set_provider_base_urls` points the app's provider HTTP at a host-side
+    # fake (`fakes/fake_cloud.py`). On the device 127.0.0.1 is the DEVICE's own
+    # loopback, so without a reverse the VPS verify dies on a connection error
+    # naming nothing — the failure the nest reverse exists to prevent.
+    calls = []
+    monkeypatch.setattr(
+        AndroidBridgeDriver, "call_machine_method",
+        lambda self, name, json_arg="", timeout=10.0: calls.append(name),
+    )
+    driver = _driver()
+    driver.launch(_config())
+    driver.set_provider_base_urls({
+        "vps": "http://127.0.0.1:14555/hetzner-cloud",
+        "dns": "http://localhost:14556/cloudflare",
+        "doh": "https://dns.example.net/dns-query",
+    })
+    issued = fake_adb()
+    assert _matching(issued, "reverse", "tcp:14555")
+    assert _matching(issued, "reverse", "tcp:14556")
+    # A non-loopback host is reached over the device's own network: no reverse.
+    assert not _matching(issued, "reverse", "tcp:443")
+    assert calls == ["set_provider_base_urls"]
+    driver.teardown()
+    removals = {ln for ln in fake_adb() if ln.startswith("reverse --remove ")}
+    assert {"reverse --remove tcp:14555", "reverse --remove tcp:14556"} <= removals

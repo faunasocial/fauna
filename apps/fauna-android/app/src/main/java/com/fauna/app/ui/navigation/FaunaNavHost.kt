@@ -456,13 +456,19 @@ private fun OnboardingWizardNavHost(
         composable("onboarding/almost-ready") {
             AwaitingManualDnsScreen(navController, onWizardExit)
         }
-        composable("onboarding/claim-code") {
-            ClaimCodeScreen(navController, onWizardExit)
-        }
-        // The terminal admin-path setup step, reached directly on a
-        // successful claim (onboarding.md § 3b-bis).
-        composable("onboarding/nat-mode-choice") {
-            NatModeChoiceScreen(navController, onWizardExit)
+        // Claiming a nest makes its admin; the kids build never registers the
+        // claim page or the admin-path setup step after it (a child joins
+        // their guardian's nest by invite — account-age-band.md, the kids-app
+        // bullet, item 4).
+        if (!BuildConfig.KIDS) {
+            composable("onboarding/claim-code") {
+                ClaimCodeScreen(navController, onWizardExit)
+            }
+            // The terminal admin-path setup step, reached directly on a
+            // successful claim (onboarding.md § 3b-bis).
+            composable("onboarding/nat-mode-choice") {
+                NatModeChoiceScreen(navController, onWizardExit)
+            }
         }
         // The one-tap "trust this box" offer (onboarding.md § 3b-ter),
         // reached from nat-mode-choice's two exits once OnboardingHost

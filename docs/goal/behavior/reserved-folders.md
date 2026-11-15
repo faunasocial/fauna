@@ -160,6 +160,23 @@ transport is torn down, and the next sign-in — on this device or another — r
 the user left it, never the one from before their last edit. A teardown that disposes the client
 first does not merely lose that edit: the restore brings back the previous draft whole, audience
 included, so a composer the user had set back to Public can return still holding an earlier sale.
+**A door taken before the launch load has lifted the save gate still saves** (2026-11-11): the
+launch load retries on a backoff of minutes (`conversation-drafts.md` § Persistence), so a door in
+the first seconds of a session — a loaded box, the first boot after a web reload — would otherwise
+find the gate shut and save nothing. The door makes one read of its own
+(`fauna_client_drafts::DraftsSync::load_for_leave`, one attempt inside the door's budget, never the
+retry schedule), fills the rail from it as the launch restore would, then snapshots and saves — so
+the gate's rule (save only over drafts this session has read) holds unchanged; a failed read leaves
+the gate shut and the door goes on without the save. The read, the fill and the save are one shared
+body (`DraftsSync::save_on_leave`, each rail handing it its own FILL rule). tui's rails take it (its
+`LeaveFlush`, at the quit and every session teardown), and so do web's three (their `saveDraftsOnLeave`),
+linux's (each rail's `flush_now_blocking`, under `blocking_flush::flush_leave_door`) and android's (its
+background `onStop` and the sign-out `captureLeaveFlush` of every rail), and macOS' and iOS' (each FaunaKit
+view model's `flushDraftsNow`, at the quit, the background transition and every session teardown). The door-crossing apps reach it
+through one native leave face per rail, the whole body in Rust — `FfiDraftsSync.saveConversationsOnLeave`,
+`FfiFeedManager.saveDraftsOnLeave` and `FfiEventDraftsSync.saveDraftsOnLeave`, each fed the snapshot and
+(for conversations) the identity epoch read at the door; windows' doors do not call them yet and still
+save only through a gate the launch load opened.
 **Windows is the worked example, e2e-proven**: one body, `App.FlushDraftRailsAsync()`, flushes all
 three rails at every door — `TrayIconService.QuitApplication()`, the `RestartManagerService`
 end-session twin, and every session teardown (`SignOutHandler`, and `DisposeNestClients` for the

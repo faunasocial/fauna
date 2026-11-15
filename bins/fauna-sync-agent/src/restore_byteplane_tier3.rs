@@ -410,6 +410,7 @@ async fn restore_byteplane_cfapi_fetch_data_serves_historical_bytes() {
             fauna_sync_engine::access_gate::AccessGate::new(),
             None, // change_signer
             std::sync::Arc::new(fauna_client_folders::MemoryFolderKeyStore::default()),
+            fauna_sync_engine::engine_lifecycle::ReaderHosting::Refuse,
         ),
         fauna_sync_engine::engine_lifecycle::ResolvedBinding {
             folder: FOLDER.to_string(),

@@ -1,28 +1,45 @@
-name: Release (Microsoft Store packages)
-
 # The two Microsoft Store packages (Fauna-Store-x64.msix, Fauna-Store-arm64.msix)
 # are built HERE -- on GitHub-hosted runners, from the public commit a version
-# records -- and graded in the job. The owner downloads the run's artifacts,
-# checks each SHA-256 and identity, and uploads them in Partner Center. Design:
+# records -- and graded in the job. Design:
 # docs/goal/architecture/release-integrity.md § Release signing -> *A store
-# upload is built from a recorded public commit*, and
-# docs/goal/architecture/installers/windows.md § Store distribution (MSIX).
+# upload is built from a recorded public commit*,
+# docs/goal/architecture/installers/windows.md § Store distribution (MSIX), and
+# docs/goal/architecture/installers/store-review.md § The store legs.
 #
-# Why a workflow of its own, dispatched by hand, and not a job in release.yml:
+# Two ways in, one job:
 #
-#   * The Store signs the package itself, so a Store payload is UNSIGNED and is
-#     never a download. release.yml's `release` job downloads every artifact of
-#     its run, hashes, cosign-signs and publishes all of them; a Store job in
-#     that run would put its packages on the GitHub Release. A separate workflow
-#     cannot leak into it by construction.
-#   * The input is the PUBLIC COMMIT the version records, so "built from the
-#     recorded commit" holds because the runner checks out exactly that commit
-#     and the job asserts it did.
+#   * `workflow_call` -- release.yml calls this file at a version's tag (and on
+#     its stores-only dispatch), so the packages are built and graded by jobs of
+#     the TAG's run that hold no credential; release.yml's approved `release`
+#     job then submits them to Partner Center (scripts/msstore-submit.py).
+#   * `workflow_dispatch` -- a dry run by hand: build and grade, nothing else.
+#
+# Why its artifacts never become downloads: the Store signs the package itself,
+# so a Store payload is UNSIGNED and is never a download. release.yml's
+# `release` job publishes only the artifacts it downloads by name (`rust-*`,
+# `windows-*`); this file's are `store-windows-<arch>`, `certification-<arch>`
+# and `store-publish-binlog-<arch>`, which no publish pattern matches -- pinned
+# by the workflow shape tests.
+#
+# The input is the PUBLIC COMMIT the version records, so "built from the
+# recorded commit" holds because the runner checks out exactly that commit and
+# the job asserts it did.
 #
 # Trust: no secret, no Environment, a read-only token. Nothing here publishes;
 # the artifacts expire with the run.
 
 on:
+  workflow_call:
+    inputs:
+      commit:
+        description: "The public commit the version records (full 40-hex SHA)"
+        required: true
+        type: string
+      flavour:
+        description: "The store flavour to build (store-no-payments or store-safe)"
+        required: false
+        type: string
+        default: store-no-payments
   workflow_dispatch:
     inputs:
       commit:
@@ -182,7 +199,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: publish-binlog-${{ matrix.arch }}
+          name: store-publish-binlog-${{ matrix.arch }}
           path: build/installer/app-publish-${{ matrix.arch }}.binlog
           if-no-files-found: warn
 

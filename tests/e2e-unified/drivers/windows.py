@@ -175,6 +175,25 @@ def _default_stall_capture_bin(env: dict) -> None:
         pass
 
 
+def _merge_inherited_rust_log(env: dict) -> None:
+    """Carry a `RUST_LOG` the human exported into the app's launch env, BESIDE
+    any the launch config set — appended, so both sets of directives apply.
+
+    The same rule as linux's and tui's `build_launch_env`. This launch used to
+    take the exported value only when the config set none, and conftest sets one
+    on most launches (its share-plane and place-accepts targets), so a diagnosis
+    run asking for `fauna_archive_import_machine=debug` got only the harness's
+    targets, silently."""
+    inherited = os.environ.get("RUST_LOG")
+    if not inherited:
+        return
+    configured = env.get("RUST_LOG")
+    if not configured:
+        env["RUST_LOG"] = inherited
+    elif configured != inherited:
+        env["RUST_LOG"] = f"{configured},{inherited}"
+
+
 def _ensure_bridge_built() -> None:
     """Build the FlaUI bridge via its build-if-stale-gated just recipe.
 
@@ -425,6 +444,15 @@ class WindowsBridgeDriver(HttpBridgeDriver):
     def get_text(self, element_id: str, index: int = 0, *, scope: str | None = None) -> str:
         text = super().get_text(element_id, index, scope=scope)
         return self._INFOBAR_SEVERITY_ICON.sub("", text) if isinstance(text, str) else text
+
+    def get_texts(self, element_id: str, *, scope: str | None = None) -> list[str]:
+        # The bulk route reads the same aggregated text `get_text` does, and a bulk
+        # read must answer what the per-element loop answers (`PlatformDriver.
+        # get_texts`), so it takes the same strip.
+        return [
+            self._INFOBAR_SEVERITY_ICON.sub("", t) if isinstance(t, str) else t
+            for t in super().get_texts(element_id, scope=scope)
+        ]
 
     def in_viewport(self, element_id: str, *, index: int = 0,
                     scope: str | None = None) -> bool:
@@ -1123,12 +1151,10 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         # names a log LEVEL, feeds no app behaviour, and is off unless a human
         # exported it. `RUST_LOG` is already the sanctioned spelling for exactly
         # this ("the nest's own diagnostic level, not a deployment input" --
-        # `conftest.py`'s `_DOCKER_EXTRA_ENV` note). A caller-supplied value in
-        # `config["environment"]` still wins.
-        if "RUST_LOG" not in env:
-            inherited_log = os.environ.get("RUST_LOG")
-            if inherited_log:
-                env["RUST_LOG"] = inherited_log
+        # `conftest.py`'s `_DOCKER_EXTRA_ENV` note). A value in
+        # `config["environment"]` keeps its directives; the exported ones are
+        # appended to it, as on linux and tui.
+        _merge_inherited_rust_log(env)
 
         # Credential store: point the app at a per-test FILE backend instead of
         # the machine's real Credential Manager (App.xaml.cs → CredentialStore).

@@ -54,6 +54,7 @@ import {
   signedInIdentity,
 } from './store';
 import { guardSingletonBuild } from './singleton-build';
+import { StageOneSlot, type StageOneEntry } from './stage-one';
 import { registerActorScopedReset, sameActorSince } from './actorScope';
 import { accountsList, accountsTabSessionMaterial } from './accounts';
 import { ReceivePump, RECEIVE_PASS_CEILING_MS } from './receive-pump';
@@ -77,6 +78,7 @@ import { raiseNewMessageBanners, resetMessageBanners } from './message-banner';
 import {
   applySpamDisposition,
   conversationsManager,
+  awaitNestConnection,
   emailInboxFetch,
   emailSentFetch,
   fetchSpamModel,
@@ -170,6 +172,27 @@ export const unopenableMailCount: Writable<number> = writable(0);
 let manager: WasmConversationsManager | null = null;
 let managerPromise: Promise<WasmConversationsManager> | null = null;
 
+/** The conversations build's STAGE ONE, one account at a time
+ *  (`account-client-lifecycle.md` § The client-side lifecycle → *The trigger
+ *  fired*, decision (k); `#lib/stage-one`): the manager constructed and the
+ *  account runtime asked for over it, with no connection wait. Memoized apart
+ *  from `managerPromise`, because it outlives a build that fails at the
+ *  connection wait — the next attempt waits again over the SAME manager and
+ *  runtime, so no second engine is built in the tab. Dropped by the
+ *  actor-scoped reset, by its own failure (the role's refusal included), and
+ *  by any build failing AFTER the wait (`getConversationsManager`'s memo
+ *  clear). */
+type StageOne = StageOneEntry<WasmConversationsManager>;
+const stageOne = new StageOneSlot<WasmConversationsManager>();
+
+/** The manager this tab's local half holds — stage one's once built, which
+ *  the nest may not have let the build vend yet. What the connection word and
+ *  the self-address reach, so the outbox's lending stays current while the
+ *  nest is away. */
+function localManager(): WasmConversationsManager | null {
+  return stageOne.built() ?? manager;
+}
+
 /** Whether another tab of this browser profile serves any account a sign-out
  *  would erase — every account in the registry plus the signed-in one, since
  *  `accountsClearAll` erases them all (`account-scoping.md` § Concurrent
@@ -196,7 +219,9 @@ export async function signOutBlockedByAnotherTab(): Promise<boolean> {
 
 /** Whether a remove-account of `actorId` must refuse, and with which line —
  *  `'this_tab'` when it is the account this tab serves, `'other_tab'` when
- *  another tab holds its engine role (`fauna-wasm`'s `removeAccountBlock`).
+ *  another tab holds its engine role, `'carry_owed'` when a retired identity's
+ *  outbox is not carried to its successor yet (`fauna-wasm`'s
+ *  `removeAccountBlock`).
  *  Asked before `accountsRemove`, which drops the account's secret slots. */
 export async function removeAccountBlocked(actorId: string): Promise<RemoveAccountBlock> {
   return removeAccountBlock(actorId, get(identity)?.actorId);
@@ -320,7 +345,8 @@ function noteContactsRevision(): void {
 }
 
 /** Make sure this tab's account runtime is starting. It starts once the
- *  conversations manager exists (`#lib/account-runtime`), and
+ *  conversations build's local stage one has constructed the manager — with
+ *  or without the nest (`#lib/account-runtime`, decision (k)) — and
  *  `startReceivePoll` calls this on every signed-in actor change, so a page
  *  that reads an account-plane kind (`fauna.state.backup` on the Backups page)
  *  but builds no manager itself never calls it. Fire-and-forget: the plane
@@ -331,16 +357,119 @@ function ensureAccountRuntime(): void {
 }
 
 // A page mounts before `startReceivePoll` first runs, so a port call can be
-// ahead of the build that asks for the runtime. Until a manager exists the
-// signed-in account's runtime is still to come; a built manager has asked
-// already (`#lib/account-runtime` tracks that start), and a tab refused the
-// role hosts none.
+// ahead of the build that asks for the runtime. Until stage one has built its
+// manager the signed-in account's runtime is still to come (decision (k)); a
+// built stage one has asked already (`#lib/account-runtime` tracks that
+// start), whether or not stage two ever reaches the nest, and a tab refused
+// the role hosts none.
 setAccountRuntimeStartExpected(
   (actorIdHex) =>
-    manager === null &&
+    stageOne.built() === null &&
     !get(engineRoleDenied) &&
     get(identity)?.actorId?.toLowerCase() === actorIdHex,
 );
+
+/** What a conversations build reads off the identity. */
+type ConversationsIdentity = { secretHex: string; actorId: string; handle?: string; domain?: string };
+
+/** Stage one's body: the wasm load, the leg-3 sink, the MLS-writing role, the
+ *  manager's construction, the runtime's start and the connection word — every
+ *  call local, so it runs with the nest unreachable (decision (k)). */
+async function buildStageOne(
+  id: ConversationsIdentity,
+  entry: StageOne,
+  stillThisActor: () => boolean,
+  wanted: () => boolean,
+): Promise<WasmConversationsManager> {
+  await ensureWasm();
+  // ⚠ BEFORE the manager is built, not after. Leg 3 of the succession
+  // aftermath — the `__mls` re-seal — is a barrier inside the replica's own
+  // `load()`, which this constructor kicks off, so a sink registered
+  // afterwards would miss the pass entirely and the Recovery kit section
+  // would render no leg-3 line. The other
+  // five legs report through `runSuccessionAftermath`'s own callback; this is
+  // the same callback, reaching the one leg that cannot be handed it.
+  setMlsResealSink(recordAftermathLeg);
+  // ⚠ THE MLS-WRITING ROLE, BEFORE ANY ENGINE EXISTS — taken INSIDE
+  // `conversationsManager`, the wasm engine-construction path, for the same
+  // reason the native role lock sits inside `SqliteStorage::open`: the role
+  // must be held before anything can advance the leaf, and the shared
+  // engine-construction path is the one place every writer passes through
+  // (`fauna_mls::engine_role` owns the model and the fail-closed posture).
+  //
+  // It cannot be a gate on "sends" instead. The build ALONE writes MLS
+  // state four times, most of them before returning a manager to anyone —
+  // `restoreMlsState` rehydrates and re-seals the replica,
+  // `foldersResumePendingRemovals` publishes crash-staged rotations (in the
+  // build, or at the account runtime's edge when that comes later), and the
+  // leg-3 re-seal barrier runs inside the replica's own
+  // `load()`. A second tab reaching any of them has already forked the
+  // ratchet, so the refusal has to land before the first of them.
+  let built: WasmConversationsManager;
+  try {
+    built = await conversationsManager(id.secretHex, selfAddressFor(id));
+  } catch (e) {
+    if (!isConversationsEngineRoleRefusal(e)) throw e;
+    if (!stillThisActor() || !wanted()) {
+      throw new Error('conversations manager: superseded while taking the MLS-writing role');
+    }
+    // Log the TRANSITION, not the state: `startReceivePoll` re-attempts the
+    // build on every tick (which is what lets this tab take over when the
+    // holder closes), so logging unconditionally would emit one warning per
+    // tick for as long as both tabs stay open.
+    if (!get(engineRoleDenied)) {
+      logMessage(
+        'warn',
+        'fauna_web::conversations',
+        'MLS-writing role refused for this account (another tab holds it, or this ' +
+          'embedding exposes no Web Locks manager) — running no engine in this tab',
+      );
+    }
+    engineRoleDenied.set(true);
+    // The memo clears with the rejection (the guard's `clearMemo`; this
+    // entry drops itself in `StageOneSlot.enter`), so a later attempt — the
+    // receive poll's next tick, or a reload after the holding tab closes —
+    // can win the role instead of being served this same rejection forever.
+    throw new Error('conversations manager: this account is served by another tab');
+  }
+  if (!stillThisActor()) {
+    // The role is keyed per ACCOUNT, and the teardown released every one this
+    // tab held — but a grant landing after it registered the DEPARTING
+    // account's role again, locking other tabs out of an account this one has
+    // left. Hand it back, unless the switch came round to this account again
+    // (its build then serves under the same hold). An abandoned build (below)
+    // keeps the role: it is the tab's, and its replacement writes under it.
+    if (get(identity)?.actorId?.toLowerCase() !== id.actorId.toLowerCase()) {
+      void releaseConversationsEngineRole(id.actorId);
+    }
+    // Deliberately does NOT null `managerPromise`: by now it may already hold
+    // the INCOMING actor's build, and clearing it here would throw that away.
+    throw new Error('conversations manager: actor changed while the manager was building');
+  }
+  engineRoleDenied.set(false);
+  // The settle deadline's seam beside the identity one: an abandoned build
+  // resolving after its replacement must not install itself over it
+  // (`singleton-build.ts`).
+  if (!wanted() || !stageOne.holds(entry)) {
+    throw new Error('conversations manager: build abandoned by its settle deadline');
+  }
+  entry.built = built;
+  // This tab's account runtime, over the manager just built — it registers
+  // the account-plane seams on it at the store's ready edge
+  // (`#lib/account-runtime`). Not awaited: the store opening must never
+  // hold the conversations page back, and a failed start degrades to the
+  // blob rail on its own. Asked here, in stage one, so a tab loaded with the
+  // nest unreachable still hosts the runtime and its store-backed pages
+  // answer from it (decision (k)).
+  startAccountRuntimeFor(id.secretHex, id.actorId, built);
+  // The offline outbox (`devices.md` § Offline compose): the first
+  // connection word lends this tab's outbox to the manager, so a message
+  // sent on a bound MLS group with no nest is queued as a plaintext intent
+  // and drained — now, at the account store's ready edge and on every
+  // reconnect. `connectionStatus`'s subscription below keeps it current.
+  built.setConnectionState(get(connectionStatus));
+  return built;
+}
 
 export function getConversationsManager(): Promise<WasmConversationsManager> {
   if (managerPromise) return managerPromise;
@@ -351,99 +480,43 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
   // The identity seam ahead of the module-state write below (`actorScope.ts`):
   // this builder awaits the role lock, the wasm build and several MLS passes,
   // so a switch has plenty of room to land inside it — and
-  // `resetConversationsManager`, which only nulls `manager`/`managerPromise`,
+  // `resetConversationsManager`, which only nulls `manager`/`managerPromise`/`stageOne`,
   // cannot stop a build already in flight from assigning the departing actor's
   // manager over the incoming actor's.
   const stillThisActor = sameActorSince();
+  // Set by the build once it has passed the connection wait: the memo clear
+  // then retires stage one with it (decision (k): a failure AT the wait keeps
+  // stage one, a failure after it retires the whole build).
+  let pastTheWait = false;
+  let ownStageOne: StageOne | null = null;
   const build = async (stillWanted: () => boolean): Promise<WasmConversationsManager> => {
-    await ensureWasm();
-    // ⚠ BEFORE the manager is built, not after. Leg 3 of the succession
-    // aftermath — the `__mls` re-seal — is a barrier inside the replica's own
-    // `load()`, which this constructor kicks off, so a sink registered
-    // afterwards would miss the pass entirely and the Recovery kit section
-    // would render no leg-3 line. The other
-    // five legs report through `runSuccessionAftermath`'s own callback; this is
-    // the same callback, reaching the one leg that cannot be handed it.
-    setMlsResealSink(recordAftermathLeg);
-    // ⚠ THE MLS-WRITING ROLE, BEFORE ANY ENGINE EXISTS — taken INSIDE
-    // `conversationsManager`, the wasm engine-construction path, for the same
-    // reason the native role lock sits inside `SqliteStorage::open`: the role
-    // must be held before anything can advance the leaf, and the shared
-    // engine-construction path is the one place every writer passes through
-    // (`fauna_mls::engine_role` owns the model and the fail-closed posture).
-    //
-    // It cannot be a gate on "sends" instead. This builder ALONE writes MLS
-    // state four times, most of them before returning a manager to anyone —
-    // `restoreMlsState` rehydrates and re-seals the replica,
-    // `foldersResumePendingRemovals` publishes crash-staged rotations (in the
-    // build, or at the account runtime's edge when that comes later), and the
-    // leg-3 re-seal barrier runs inside the replica's own
-    // `load()`. A second tab reaching any of them has already forked the
-    // ratchet, so the refusal has to land before the first of them.
-    let built: WasmConversationsManager;
-    try {
-      built = await conversationsManager(id.secretHex, selfAddressFor(id));
-    } catch (e) {
-      if (!isConversationsEngineRoleRefusal(e)) throw e;
-      if (!stillThisActor() || !stillWanted()) {
-        throw new Error('conversations manager: superseded while taking the MLS-writing role');
-      }
-      // Log the TRANSITION, not the state: `startReceivePoll` re-attempts the
-      // build on every tick (which is what lets this tab take over when the
-      // holder closes), so logging unconditionally would emit one warning per
-      // tick for as long as both tabs stay open.
-      if (!get(engineRoleDenied)) {
-        logMessage(
-          'warn',
-          'fauna_web::conversations',
-          'MLS-writing role refused for this account (another tab holds it, or this ' +
-            'embedding exposes no Web Locks manager) — running no engine in this tab',
-        );
-      }
-      engineRoleDenied.set(true);
-      // Clear the memo so a later attempt (the receive poll's next tick, or a
-      // reload after the holding tab closes) can win the role instead of
-      // being served this same rejection forever.
-      managerPromise = null;
-      throw new Error('conversations manager: this account is served by another tab');
-    }
+    // STAGE ONE — local, never waits for the socket (`buildStageOne`): reused
+    // when an earlier attempt for this account built it and failed only at
+    // the connection wait.
+    const local = stageOne.enter(id.actorId.toLowerCase(), (entry) =>
+      buildStageOne(id, entry, stillThisActor, stillWanted),
+    );
+    ownStageOne = local;
+    const built = await local.promise;
+    // STAGE TWO opens with the connection wait. Its throw leaves stage one in
+    // place for the receive poll's next tick.
+    await awaitNestConnection(id.secretHex);
     if (!stillThisActor()) {
-      // The role is keyed per ACCOUNT, and the teardown released every one this
-      // tab held — but a grant landing after it registered the DEPARTING
-      // account's role again, locking other tabs out of an account this one has
-      // left. Hand it back, unless the switch came round to this account again
-      // (its build then serves under the same hold). An abandoned build (below)
-      // keeps the role: it is the tab's, and its replacement writes under it.
-      if (get(identity)?.actorId?.toLowerCase() !== id.actorId.toLowerCase()) {
-        void releaseConversationsEngineRole(id.actorId);
-      }
-      // Deliberately does NOT null `managerPromise`: by now it may already hold
-      // the INCOMING actor's build, and clearing it here would throw that away.
-      throw new Error('conversations manager: actor changed while the manager was building');
+      throw new Error('conversations manager: actor changed while waiting for the nest');
     }
-    engineRoleDenied.set(false);
-    // The settle deadline's seam beside the identity one: an abandoned build
-    // resolving after its replacement must not install itself over it
-    // (`singleton-build.ts`).
     if (!stillWanted()) {
       throw new Error('conversations manager: build abandoned by its settle deadline');
     }
+    pastTheWait = true;
+    // Installed where the one-stage build installed it — ahead of the network
+    // tail, which works on `built` alone — so a page reads the manager at the
+    // same edge as before; the promise this build returns still resolves only
+    // once the tail's restore has run, so the receive poll and every sender
+    // awaiting it see a restored engine.
     manager = built;
     // The private overlay's face is this manager's from now: open pages
     // re-read their names and build their editor over it.
     noteContactsRevision();
-    // This tab's account runtime, over the manager just built — it registers
-    // the account-plane seams on it at the store's ready edge
-    // (`#lib/account-runtime`). Not awaited: the store opening must never
-    // hold the conversations page back, and a failed start degrades to the
-    // blob rail on its own.
-    startAccountRuntimeFor(id.secretHex, id.actorId, built);
-    // The offline outbox (`devices.md` § Offline compose): the first
-    // connection word lends this tab's outbox to the manager, so a message
-    // sent on a bound MLS group with no nest is queued as a plaintext intent
-    // and drained — now, at the account store's ready edge and on every
-    // reconnect. `connectionStatus`'s subscription below keeps it current.
-    built.setConnectionState(get(connectionStatus));
     // ⚠ FROM HERE ON THE BUILD WORKS ON `built`, NEVER ON `manager`, AND
     // RE-CHECKS BOTH SEAMS BEFORE EACH PASS. Every pass below writes MLS state —
     // the restore re-seals the replica, the folder passes publish, the mint
@@ -623,6 +696,10 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
   // routes into this same clear — and hands the build the `stillWanted` its
   // tail checks, because a deadline can abandon a build it cannot stop.
   const guarded = guardSingletonBuild('conversations manager', build, () => {
+    // A build that failed AFTER the connection wait retires its stage one too
+    // (decision (k)); one that failed at the wait or before keeps it, so the
+    // next attempt reuses the same manager and runtime.
+    if (pastTheWait) stageOne.retire(ownStageOne);
     if (managerPromise !== guarded) return;
     managerPromise = null;
     // Retract the slot with the memo (`feed.ts` says why) — and here it has
@@ -651,6 +728,7 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
 export function resetConversationsManager(): void {
   manager = null;
   managerPromise = null;
+  stageOne.clear();
   mocksInstalled = false;
   conversationsSnapshot.set(null);
   conversationThreads.set([]);
@@ -686,8 +764,9 @@ registerActorScopedReset(resetConversationsManager);
 // The offline composer reads the same connection word as the offline gate, so
 // the send it keeps live is exactly the send that queues with no nest — and a
 // word turning back to online drains the queue. A no-op until a manager is
-// built.
-connectionStatus.subscribe((word) => manager?.setConnectionState(word));
+// built — stage one's, so the word reaches a manager the nest has not let the
+// build vend yet (decision (k)).
+connectionStatus.subscribe((word) => localManager()?.setConnectionState(word));
 
 // Self-address self-heal — the web leg of `conversations.md` § State & data
 // shape → *Self-address: live, never baked*. The manager is built as soon as
@@ -703,8 +782,9 @@ connectionStatus.subscribe((word) => manager?.setConnectionState(word));
 // (above) owns that; nothing to push. Registered once, module-lifetime, same
 // idiom as the reset registration.
 identity.subscribe((id) => {
-  if (manager && id?.secretHex) {
-    manager.setSelfAddress(selfAddressFor(id));
+  const m = localManager();
+  if (m && id?.secretHex) {
+    m.setSelfAddress(selfAddressFor(id));
   }
 });
 
@@ -814,8 +894,12 @@ export function flushDraftsNow(): Promise<void> {
     draftSaveTimer = null;
   }
   if (!manager) return Promise.resolve();
-  return manager.saveDrafts().catch((e) => {
-    logMessage('debug', 'fauna_web::conversations', `leave-flush drafts failed: ${e}`);
+  // The leave save: it opens a save gate the launch restore has not lifted yet
+  // with one read of its own (`DraftsSync::load_for_leave`), so a door taken
+  // before that restore lands still saves (`reserved-folders.md` § The
+  // leave-flush promise).
+  return manager.saveDraftsOnLeave().catch((e) => {
+    logMessage('warn', 'fauna_web::conversations', `leave-flush drafts failed: ${e}`);
   });
 }
 

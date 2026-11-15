@@ -139,6 +139,14 @@ abstract class KidsExcisedApi {
     ): com.fauna.ffi.FfiSubscribeReply = throw excised("subscriptions")
 
     @Suppress("UNUSED_PARAMETER")
+    suspend fun subscriptionSubscribeAndCheckout(
+        authorIdHex: String,
+        tier: String,
+        paymentUrl: String,
+        homeNestUrl: String?,
+    ): SubscribeCheckout? = throw excised("subscriptions")
+
+    @Suppress("UNUSED_PARAMETER")
     suspend fun subscriptionUnsubscribe(
         authorId: ByteArray,
         tier: String,

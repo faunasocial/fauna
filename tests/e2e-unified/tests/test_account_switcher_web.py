@@ -1568,7 +1568,12 @@ def test_web_switching_identity_saves_the_draft_inside_its_autosave_window(
                 "switch. The autosave window was re-timed to "
                 f"{SWITCH_FLUSH_AUTOSAVE_WINDOW_MS} ms for this launch, so only the "
                 "switch's own flush could have saved it — the outgoing session was "
-                "torn down unsaved"
+                "torn down unsaved. The page's drafts/feed log lines:\n"
+                + "\n".join(
+                    line for line in driver.console_log()
+                    if "fauna_web::feed" in line or "fauna_web::drafts" in line
+                    or "leave-flush" in line or "EVICTED" in line or "[feed]" in line
+                )
             ),
         )
 

@@ -19,6 +19,11 @@ public struct InteractionBar: View {
     public var quoteCount: Int
     public var likeCount: Int
     public var isLiked: Bool
+    /// The heart's `state` word source — the shared `PostSummary.likeState`
+    /// (`on | off | queued | unsent`, `account-offline-mutation.md` § The
+    /// unsent-changes surface, point 2). `nil` (a caller with no snapshot row)
+    /// falls back to `isLiked`'s `on | off`.
+    public var likeState: LikeState?
     public var isReposted: Bool
     public var onReply: () -> Void
     public var onRepost: () -> Void
@@ -31,6 +36,7 @@ public struct InteractionBar: View {
         quoteCount: Int = 0,
         likeCount: Int = 0,
         isLiked: Bool = false,
+        likeState: LikeState? = nil,
         isReposted: Bool = false,
         onReply: @escaping () -> Void = {},
         onRepost: @escaping () -> Void = {},
@@ -42,6 +48,7 @@ public struct InteractionBar: View {
         self.quoteCount = quoteCount
         self.likeCount = likeCount
         self.isLiked = isLiked
+        self.likeState = likeState
         self.isReposted = isReposted
         self.onReply = onReply
         self.onRepost = onRepost
@@ -63,7 +70,7 @@ public struct InteractionBar: View {
             // Toggle-shaped (isLiked), so activate+read share one Entry
             // (AutomationRegistry.swift cycle/toggle-button pattern).
             .automationActivate(Ids.feedLikeButton, text: { Self.painted("like", likeCount) },
-                                value: { isLiked ? "on" : "off" }, perform: onLike)
+                                value: { likeWord }, perform: onLike)
 
             Button(action: onReply) {
                 interactionLabel(count: replyCount, systemImage: "bubble.right")
@@ -90,6 +97,14 @@ public struct InteractionBar: View {
         }
         .font(.caption)
         .foregroundStyle(.secondary)
+    }
+
+    /// The heart's `state` word — the shared `likeStateWord` over the snapshot's
+    /// `likeState`, so no app spells or derives it; an `unsent` heart's tap
+    /// retries (the manager's `like` door).
+    private var likeWord: String {
+        if let likeState { return likeStateWord(state: likeState) }
+        return isLiked ? "on" : "off"
     }
 
     /// What one button paints, as the in-process driver reads it back (the

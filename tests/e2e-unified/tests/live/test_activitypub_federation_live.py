@@ -104,6 +104,7 @@ import pytest
 
 from nacl.signing import SigningKey  # noqa: F401 — kept for parity with sibling live tests
 
+from common.accounts import single_account_seed
 from helpers.live_gotosocial import PEER_USERNAME, provision_gotosocial_peer
 from helpers.live_provision import (
     await_provisioning,
@@ -359,9 +360,8 @@ def test_activitypub_federation_live_three_party(app, box, ghcr_latest_image,
         # a nest-side bug — the AP domain is read once at boot from node.domain and
         # never follows the claim-registered identity domain — not a session-URL
         # issue; see the module docstring / activitypub.md § Implementation status.)
-        _relaunch(app, extra={"seed_credentials": {
-            "secret_key": secret_hex, "node_url": public_fqdn_url,
-            "device_id": "apfed-public"}})
+        _relaunch(app, extra={"seed_credentials": single_account_seed(
+            secret_hex, nest_url=public_fqdn_url, device_id="apfed-public")})
         _await_authenticated(app)
         _wait_connected(app)
         app.bridges.navigate()

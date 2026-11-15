@@ -34,6 +34,9 @@ import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.RecoveryKitUiState
 import com.fauna.app.ui.viewmodel.RecoveryKitVM
+import com.fauna.app.ui.viewmodel.sameKey
+import com.fauna.ffi.FfiOwedNestEntry
+import com.fauna.ffi.FfiOwedNestsView
 import com.fauna.ffi.FfiRecoveryKitStatus
 import com.fauna.ffi.FfiSweepCopy
 import com.fauna.ffi.FfiSweepView
@@ -123,6 +126,8 @@ fun RecoveryKitSection(
         onSweepRetry = vm::retrySweep,
         onLetGoConfirmChange = vm::onLetGoConfirmChange,
         onLetGo = vm::letGo,
+        onOwedDismissArm = vm::armOwedDismiss,
+        onOwedDismissConfirm = vm::confirmOwedDismiss,
         inheritedFiltersOpen = inheritedFilterMarks.size,
         aftermath = aftermath,
     )
@@ -191,6 +196,9 @@ fun RecoveryKitSectionContent(
     onSweepRetry: () -> Unit = {},
     onLetGoConfirmChange: (String) -> Unit = {},
     onLetGo: () -> Unit = {},
+    // Arm (an entry) or disarm (`null`) the owed nest's two-step dismiss.
+    onOwedDismissArm: (FfiOwedNestEntry?) -> Unit = {},
+    onOwedDismissConfirm: (FfiOwedNestEntry) -> Unit = {},
     // How many inherited filter rules still await the owner's verdict — the
     // count of the shared marks cache, never stored apart from them.
     inheritedFiltersOpen: Int = 0,
@@ -284,6 +292,8 @@ fun RecoveryKitSectionContent(
             if (state.stolenVisible) StolenAction(state, onStolenConfirmChange, onStolen)
 
             state.letGoStatus?.let { line -> LetGoAction(line, state, onLetGoConfirmChange, onLetGo) }
+
+            state.owedNests?.let { view -> OwedNests(view, state, onOwedDismissArm, onOwedDismissConfirm) }
         }
     }
 }
@@ -327,6 +337,65 @@ private fun LetGoAction(
         enabled = state.letGoArmed,
         modifier = Modifier.testTag(Ids.RECOVERY_KIT_LET_GO_BUTTON),
     ) { Text(stringResource(R.string.settings_recovery_kit_let_go), color = MaterialTheme.colorScheme.error) }
+}
+
+/**
+ * The successor's owed nests (`settings.md` § Recovery kit → *The successor's
+ * owed nests*): the status line, then per entry its address, its outcome and
+ * the member card's two-step dismiss — tui's `owed_nests_elements`. Rendered
+ * by the caller only while the shared projection answers a view; every line is
+ * the projection's own `LocalizedText`.
+ */
+@Composable
+private fun OwedNests(
+    view: FfiOwedNestsView,
+    state: RecoveryKitUiState,
+    onArm: (FfiOwedNestEntry?) -> Unit,
+    onConfirm: (FfiOwedNestEntry) -> Unit,
+) {
+    Spacer(Modifier.height(12.dp))
+    Text(
+        localized(view.status).orEmpty(),
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.testTag(Ids.RECOVERY_KIT_OWED_NESTS_STATUS),
+    )
+    view.entries.forEach { entry ->
+        Column(modifier = Modifier.padding(top = 8.dp).testTag(Ids.RECOVERY_KIT_OWED_NEST_ITEM)) {
+            Text(
+                localized(entry.addressCopy).orEmpty(),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag(Ids.RECOVERY_KIT_OWED_NEST_ADDRESS),
+            )
+            Text(
+                localized(entry.outcomeCopy).orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.RECOVERY_KIT_OWED_NEST_OUTCOME),
+            )
+            if (state.owedDismissPending?.sameKey(entry) == true) {
+                OutlinedButton(
+                    onClick = { onConfirm(entry) },
+                    enabled = !state.busy,
+                    modifier = Modifier.testTag(Ids.RECOVERY_KIT_OWED_NEST_DISMISS_CONFIRM_BUTTON),
+                ) {
+                    Text(
+                        stringResource(R.string.settings_recovery_kit_owed_nest_dismiss_confirm),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                OutlinedButton(
+                    onClick = { onArm(null) },
+                    modifier = Modifier.testTag(Ids.RECOVERY_KIT_OWED_NEST_DISMISS_CANCEL_BUTTON),
+                ) { Text(stringResource(R.string.common_cancel)) }
+            } else {
+                OutlinedButton(
+                    onClick = { onArm(entry) },
+                    enabled = !state.busy,
+                    modifier = Modifier.testTag(Ids.RECOVERY_KIT_OWED_NEST_DISMISS_BUTTON),
+                ) { Text(stringResource(R.string.settings_recovery_kit_owed_nest_dismiss)) }
+            }
+        }
+    }
 }
 
 /**

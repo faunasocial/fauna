@@ -39,7 +39,6 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
-    "WTFPL",
     "Zlib",
     "zlib-acknowledgement",
 ]
@@ -63,7 +62,7 @@ wildcards = "allow"
 [sources]
 # crates.io-only: the resolved tree must come from crates.io. A non-crates.io registry or
 # an ad-hoc git dependency must be added here deliberately — and an ECS-style git fork is
-# additionally routed to the injection-resistant review venue by the dep-prescan gate
+# additionally routed to the dependency review sandbox by the dep-prescan gate
 # (dep-changed classifies git/path deps separately from registry crates).
 unknown-registry = "deny"
 unknown-git = "deny"

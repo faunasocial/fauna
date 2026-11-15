@@ -1234,9 +1234,222 @@ pub async fn recovery_reseal_escrow_with_held_kit(
         .map_err(general_err)
 }
 
+/// One entry of the successor's owed-nests list (`settings.md` § Recovery kit
+/// → *The successor's owed nests*) — the shared
+/// [`fauna_client_recovery::owed_nests::OwedNestEntry`] with its two lines
+/// already selected. The app resolves the two `LocalizedText`s and lays out
+/// `recovery-kit-owed-nest-item`'s card; a dismiss hands the record back whole
+/// to [`recovery_dismiss_owed_nest`], which names the entry by its keeper and
+/// settle key — never a painted index.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiOwedNestEntry {
+    /// The nest that keeps the entry, where its dismiss settles: `None` the
+    /// bound nest, `Some` the 32-byte id of the linked keeper.
+    pub keeper: Option<Vec<u8>>,
+    /// The retired identity whose pairing named the owed nest.
+    pub old_actor_id: Vec<u8>,
+    /// The owed nest's id.
+    pub nest_id: Vec<u8>,
+    /// `recovery-kit-owed-nest-item-address`'s line.
+    pub address_copy: fauna_core::localized::LocalizedText,
+    /// `recovery-kit-owed-nest-item-outcome`'s line.
+    pub outcome_copy: fauna_core::localized::LocalizedText,
+    /// The outcome's arm as a stable token (`OwedOutcome::kind`) — for a state
+    /// protocol or a test, never to select copy by.
+    pub outcome_kind: String,
+}
+
+/// The successor's owed-nests list: `recovery-kit-owed-nests-status`'s line and
+/// the entries in the shared projection's order (the bound nest's first, then
+/// each linked keeper's).
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiOwedNestsView {
+    pub status: fauna_core::localized::LocalizedText,
+    pub entries: Vec<FfiOwedNestEntry>,
+}
+
+impl From<&fauna_client_recovery::owed_nests::OwedNestEntry> for FfiOwedNestEntry {
+    fn from(e: &fauna_client_recovery::owed_nests::OwedNestEntry) -> Self {
+        Self {
+            keeper: e.keeper.map(|k| k.to_vec()),
+            old_actor_id: e.old_actor_id.clone(),
+            nest_id: e.nest_id.clone(),
+            address_copy: e.address_copy(),
+            outcome_copy: e.outcome_copy(),
+            outcome_kind: e.outcome.kind().to_string(),
+        }
+    }
+}
+
+impl From<&fauna_client_recovery::owed_nests::OwedNestsView> for FfiOwedNestsView {
+    fn from(v: &fauna_client_recovery::owed_nests::OwedNestsView) -> Self {
+        Self {
+            status: v.status(),
+            entries: v.entries.iter().map(FfiOwedNestEntry::from).collect(),
+        }
+    }
+}
+
+/// Read the successor's owed-nests list for the Settings Account hydrate: the
+/// bound nest's served list (over `nest`'s session) joined with this process's
+/// last owed-nest passes off the account runtime's handle — the bound keeper's
+/// and each linked keeper's — through the shared `OwedNestsView::project`, the
+/// same join tui and linux make. `None` when nothing is owed: the section then
+/// paints none of the seven ids.
+///
+/// A failed read of the bound nest's list leaves its entries out this time
+/// (logged); the linked keepers' entries, read by the runtime's own pass, still
+/// list.
+#[fauna_uniffi_async::export]
+pub async fn recovery_owed_nests_view(nest: Arc<FfiNestClient>) -> Option<FfiOwedNestsView> {
+    use fauna_client_recovery::owed_nests::read_owed_nests;
+    let served = match read_owed_nests(&nest.nest_arc()).await {
+        Ok(served) => served,
+        Err(e) => {
+            tracing::warn!("[settings] owed-nests read failed: {e}");
+            Vec::new()
+        }
+    };
+    project_owed(&served).map(|v| FfiOwedNestsView::from(&v))
+}
+
+/// Join the served list with this process's last passes off the live account
+/// handle — none before the assembly lands.
+#[cfg(feature = "account-runtime")]
+fn project_owed(
+    served: &[fauna_protocol::recovery::OwedNest],
+) -> Option<fauna_client_recovery::owed_nests::OwedNestsView> {
+    let passes = crate::account_runtime::handle()
+        .and_then(|h| h.last_owed_nests())
+        .unwrap_or_default();
+    let bound = passes
+        .iter()
+        .find(|pass| pass.keeper.is_none())
+        .map(|pass| pass.deliveries());
+    let linked: Vec<_> = passes
+        .iter()
+        .filter_map(|pass| pass.keeper.map(|k| (k, pass.deliveries())))
+        .collect();
+    fauna_client_recovery::owed_nests::OwedNestsView::project(served, bound, &linked)
+}
+
+/// A build without the account runtime delivers nothing: every served entry
+/// reads as not yet tried.
+#[cfg(not(feature = "account-runtime"))]
+fn project_owed(
+    served: &[fauna_protocol::recovery::OwedNest],
+) -> Option<fauna_client_recovery::owed_nests::OwedNestsView> {
+    fauna_client_recovery::owed_nests::OwedNestsView::project(served, None, &[])
+}
+
+/// `recovery-kit-owed-nest-item-dismiss-confirm-button` — settle one entry at
+/// its keeper on the user's word (the shared `dismiss_owed_nest`): a bound
+/// entry over `nest`'s session, a linked one over an owner connection to its
+/// keeper through the shared native linked-nest dial. Answers `None` when the
+/// keeper settled — drop the entry from the list — or the line to paint on
+/// `error-message` (`dismiss_failed_copy`).
+///
+/// # Errors
+///
+/// `secret` is not a 32-byte identity secret, or the entry's keeper is not a
+/// 32-byte nest id.
+#[fauna_uniffi_async::export]
+pub async fn recovery_dismiss_owed_nest(
+    nest: Arc<FfiNestClient>,
+    secret: Vec<u8>,
+    entry: FfiOwedNestEntry,
+) -> Result<Option<fauna_core::localized::LocalizedText>, FfiError> {
+    use fauna_client_recovery::owed_nests::{
+        OwedNestEntry, OwedOutcome, dismiss_failed_copy, dismiss_owed_nest,
+    };
+    let identity = ActorKeypair::from_secret(secret32(&secret)?);
+    let keeper = match entry.keeper {
+        None => None,
+        Some(k) => Some(crate::crypto::bytes32(&k, "keeper")?),
+    };
+    let shared = OwedNestEntry {
+        keeper,
+        old_actor_id: entry.old_actor_id,
+        nest_id: entry.nest_id,
+        address: None,
+        // The dismiss reads only the keeper and the settle key.
+        outcome: OwedOutcome::NotTried,
+    };
+    let result = dismiss_owed_nest(
+        &RecoveryClient::new(nest.nest_arc()),
+        &NativeLinkedNestDial::new(&identity),
+        &shared,
+    )
+    .await;
+    Ok(result.err().map(|reason| dismiss_failed_copy(&reason)))
+}
+
+/// Fold a settled dismiss into the list on screen: drop `entry` (matched by
+/// its keeper and settle key, never by its painted lines) and recount the
+/// status line through the shared projection's copy. `None` once nothing is
+/// left — the section then paints none of the seven ids. Local on purpose: a
+/// re-read would list a linked keeper's entry again from the runtime's last
+/// pass until its next one, which is why tui and linux drop locally too
+/// (`OwedNestsView::remove`).
+#[uniffi::export]
+pub fn recovery_owed_nests_after_dismiss(
+    view: FfiOwedNestsView,
+    entry: FfiOwedNestEntry,
+) -> Option<FfiOwedNestsView> {
+    let entries: Vec<FfiOwedNestEntry> = view
+        .entries
+        .into_iter()
+        .filter(|e| {
+            !(e.keeper == entry.keeper
+                && e.old_actor_id == entry.old_actor_id
+                && e.nest_id == entry.nest_id)
+        })
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    Some(FfiOwedNestsView {
+        status: fauna_client_recovery::owed_nests::OwedNestsView::status_of(entries.len()),
+        entries,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owed_entry(keeper: Option<u8>, nest: u8, outcome_kind: &str) -> FfiOwedNestEntry {
+        use fauna_core::localized::LocalizedText;
+        FfiOwedNestEntry {
+            keeper: keeper.map(|k| vec![k; 32]),
+            old_actor_id: vec![1; 32],
+            nest_id: vec![nest; 32],
+            address_copy: LocalizedText::key("a"),
+            outcome_copy: LocalizedText::key(outcome_kind),
+            outcome_kind: outcome_kind.to_string(),
+        }
+    }
+
+    /// The dismiss fold drops the settled entry by its key alone (a refreshed
+    /// outcome line does not stop the match, and the same nest kept by another
+    /// keeper stays), recounts the status line with the shared copy, and
+    /// clears the list once the last entry goes.
+    #[test]
+    fn owed_dismiss_fold_drops_by_key_and_recounts() {
+        use fauna_client_recovery::owed_nests::OwedNestsView;
+        let bound = owed_entry(None, 7, "not-tried");
+        let linked = owed_entry(Some(9), 7, "unreachable");
+        let view = FfiOwedNestsView {
+            status: OwedNestsView::status_of(2),
+            entries: vec![bound.clone(), linked.clone()],
+        };
+        let mut settled = bound.clone();
+        settled.outcome_copy = fauna_core::localized::LocalizedText::key("other");
+        let after = recovery_owed_nests_after_dismiss(view, settled).expect("one left");
+        assert_eq!(after.entries, vec![linked.clone()]);
+        assert_eq!(after.status, OwedNestsView::status_of(1));
+        assert_eq!(recovery_owed_nests_after_dismiss(after, linked), None);
+    }
 
     /// The render view is the SHARED projection, not a mapping written here —
     /// pin the three arms so a second answer cannot creep back in.
@@ -1604,5 +1817,31 @@ mod tests {
     #[test]
     fn a_successor_seed_that_reads_back_is_reported_saved() {
         assert!(persist_over(false));
+    }
+
+    /// The owed-nests record carries the shared projection's lines and key
+    /// verbatim — no app-side selection: a served entry this runtime never
+    /// delivered reads not-tried, its keeper the bound nest, and the status
+    /// counts it.
+    #[test]
+    fn owed_nests_record_carries_the_shared_projection() {
+        use fauna_client_recovery::owed_nests::OwedNestsView;
+        let served = vec![fauna_protocol::recovery::OwedNest {
+            old_actor_id: serde_bytes::ByteBuf::from(vec![1u8; 32]),
+            nest_id: serde_bytes::ByteBuf::from(vec![2u8; 32]),
+            nest_url: Some("https://owed.example".to_string()),
+            extra: Default::default(),
+        }];
+        let view = OwedNestsView::project(&served, None, &[]).expect("one entry owed");
+        let ffi = FfiOwedNestsView::from(&view);
+        assert_eq!(ffi.status, view.status());
+        assert_eq!(ffi.entries.len(), 1);
+        let entry = &ffi.entries[0];
+        assert_eq!(entry.keeper, None);
+        assert_eq!(entry.old_actor_id, vec![1u8; 32]);
+        assert_eq!(entry.nest_id, vec![2u8; 32]);
+        assert_eq!(entry.outcome_kind, "not-tried");
+        assert_eq!(entry.address_copy, view.entries[0].address_copy());
+        assert_eq!(entry.outcome_copy, view.entries[0].outcome_copy());
     }
 }

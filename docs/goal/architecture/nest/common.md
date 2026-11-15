@@ -503,6 +503,8 @@ Both were invisible while the journeys skipped, which is the point: a skip is no
 
 Factory reset is the canonical instance of the **Client-state recoverability** invariant above — the universal recovery floor (return to fresh/unclaimed), and itself crash-atomic via the boot-time marker.
 
+The reset wipes the nest, never the reclaiming account's own store: what a mailbox the account already held does on the reclaimed box is owned by [`../../behavior/mail-credentials.md`](../../behavior/mail-credentials.md) § A nest that lost the mailbox.
+
 The WS-RPC kind **`fauna.admin.factory_reset`** (Admin-gated;
 `bridge_method_allowlist`) returns the nest to **fresh / unclaimed** so it can be
 re-onboarded from a client as if newly deployed — the enabler for the

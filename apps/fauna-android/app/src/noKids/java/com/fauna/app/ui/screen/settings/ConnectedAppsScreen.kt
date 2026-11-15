@@ -32,6 +32,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.CopyButton
+import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.AutomationAttributePack
@@ -42,6 +43,7 @@ import com.fauna.app.ui.util.resolveComposed
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.ffi.connectedAppsFactsSeparator
 import com.fauna.ffi.connectedAppsLineSeparator
+import com.fauna.ffi.connectedAppsOracleOpText
 import com.fauna.ffi.connectedAppsRequestCardLines
 import com.fauna.ffi.connectedAppsRequestInstallText
 import com.fauna.ffi.connectedAppsRosterRowText
@@ -52,6 +54,16 @@ import uniffi.fauna_atproto_settings_machine.ConsentCardRow
 import uniffi.fauna_client_connected_apps.BlockedAppRow
 import uniffi.fauna_client_connected_apps.ConnectedAppRow
 import uniffi.fauna_client_connected_apps.ConnectedAppsSnapshot
+import uniffi.fauna_client_connected_apps.OracleRecord
+import uniffi.fauna_client_connected_apps.PrincipalTrust
+import uniffi.fauna_client_pair.TrustFolder
+import uniffi.fauna_client_pair.TrustLens
+import uniffi.fauna_client_pair.TrustScope
+import uniffi.fauna_client_pair.principalGrantBoundNote
+import uniffi.fauna_client_pair.historyLineText
+import uniffi.fauna_client_pair.principalScopeLabels
+import uniffi.fauna_client_pair.trustStatusLabel
+import com.fauna.app.ui.util.resolveLocalized
 
 /**
  * The "Connected apps" Settings sub-page (`ui.yaml` page `connected-apps`;
@@ -118,8 +130,11 @@ fun ConnectedAppsScreen(
         onSubmitCode = vm::submitCode,
         onResolveRequest = vm::resolveRequest,
         onBlockRequest = vm::blockRequest,
+        onSetFolder = vm::setFolder,
         onUnblock = vm::unblock,
         onSetExternalAppsEnabled = vm::setExternalAppsEnabled,
+        onSetLens = vm::setLens,
+        onToggleRecord = vm::toggleRecord,
         onArmRevoke = vm::armRevoke,
         onConfirmRevoke = vm::confirmRevoke,
         onCancelRevoke = vm::cancelRevoke,
@@ -143,6 +158,11 @@ fun ConnectedAppsContent(
     onBlockRequest: (consentIdHex: String) -> Unit,
     onUnblock: (clientId: String) -> Unit,
     onSetExternalAppsEnabled: (Boolean) -> Unit,
+    // The trust facet's lens pair on a principal row (page-local, no nest call).
+    onSetLens: (key: String, lens: TrustLens) -> Unit = { _, _ -> },
+    // A served principal's record: its open control opens and closes it
+    // (`connected-apps.md` § Layout & flow, region 3).
+    onToggleRecord: (key: String) -> Unit = {},
     onArmRevoke: (key: String) -> Unit,
     onConfirmRevoke: (key: String) -> Unit,
     onCancelRevoke: () -> Unit,
@@ -160,6 +180,8 @@ fun ConnectedAppsContent(
     // A hosted plugin's row links to its settings card on the Bridges page
     // (`connected-apps-item-settings-link`).
     onOpenSettingsCard: () -> Unit = {},
+    // A pick on a bare folder card's picker (page-local, no nest call).
+    onSetFolder: (consentIdHex: String, id: Long) -> Unit = { _, _ -> },
 ) {
     // security.md § On-screen secret exposure, rule 2: a minted, revocable
     // secret suppresses capture for exactly the reveal window. The guard
@@ -208,7 +230,7 @@ fun ConnectedAppsContent(
             if (requests.isNotEmpty()) {
                 SectionHeading(R.string.connected_apps_requests_heading)
                 requests.forEach { request ->
-                    RequestCard(request, onResolveRequest, onBlockRequest)
+                    RequestCard(request, onResolveRequest, onBlockRequest, onSetFolder)
                 }
             }
 
@@ -286,6 +308,10 @@ fun ConnectedAppsContent(
                     RosterRow(
                         row = row,
                         armed = revokeArmed == row.key,
+                        onSetLens = onSetLens,
+                        record = snapshot.record?.takeIf { it.key == row.key },
+                        onToggleRecord = onToggleRecord,
+                        formatTime = formatTime,
                         revealedSecret = revealed[row.key],
                         onArmRevoke = onArmRevoke,
                         onConfirmRevoke = onConfirmRevoke,
@@ -348,6 +374,7 @@ private fun RequestCard(
     request: ConsentCardRow,
     onResolve: (consentIdHex: String, approved: Boolean) -> Unit,
     onBlock: (consentIdHex: String) -> Unit,
+    onSetFolder: (consentIdHex: String, id: Long) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.CONNECTED_APPS_REQUEST_CARD)) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -421,6 +448,38 @@ private fun RequestCard(
                     modifier = Modifier.testTag(Ids.CONNECTED_APPS_REQUEST_INSTALL_SETTINGS),
                 )
             }
+            // The card's folder picker (`connected-apps-request-folder`): present
+            // exactly on a card carrying a bare folder-plane scope. The tokens are
+            // the folders' row ids in decimal, the labels their names; nothing is
+            // selected until the user chooses. A card with no eligible folder
+            // paints the picker with no option and says why in its own text.
+            val picker = request.folderPicker
+            if (picker != null) {
+                picker.noneEligible?.let {
+                    Text(resolveLocalized(context, it).orEmpty(), style = MaterialTheme.typography.bodySmall)
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(stringResource(R.string.atproto_settings_consent_folder_label))
+                    TokenSelect(
+                        testTagValue = Ids.CONNECTED_APPS_REQUEST_FOLDER,
+                        selected = picker.chosen?.toString().orEmpty(),
+                        options = picker.options.map { it.id.toString() to it.name },
+                        onSelect = { token -> token.toLongOrNull()?.let { onSetFolder(request.consentIdHex, it) } },
+                    )
+                    if (picker.chosen == null) {
+                        Text(
+                            stringResource(R.string.atproto_settings_consent_folder_prompt),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            // A bare folder card is approvable only once a folder is chosen.
+            val approvable = picker == null || picker.chosen != null
             Text(
                 stringResourceFmt(R.string.atproto_settings_consent_code, request.code),
                 modifier = Modifier
@@ -442,7 +501,7 @@ private fun RequestCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { onResolve(request.consentIdHex, true) },
-                    enabled = resolveGate.enabled,
+                    enabled = resolveGate.enabled && approvable,
                     modifier = Modifier.testTag(Ids.CONNECTED_APPS_REQUEST_APPROVE),
                 ) {
                     Text(stringResource(R.string.atproto_settings_consent_approve_button))
@@ -485,6 +544,10 @@ private fun RequestCard(
 private fun RosterRow(
     row: ConnectedAppRow,
     armed: Boolean,
+    onSetLens: (String, TrustLens) -> Unit,
+    record: OracleRecord?,
+    onToggleRecord: (String) -> Unit,
+    formatTime: (Long) -> String,
     revealedSecret: String?,
     onArmRevoke: (String) -> Unit,
     onConfirmRevoke: (String) -> Unit,
@@ -564,6 +627,16 @@ private fun RosterRow(
 
             row.mail?.let { mail -> MailLeaves(row.key, mail, revealedSecret, onToggleReveal, readSecret, resolveUsername) }
 
+            // The record's open control, on a row the oracle served — never an
+            // app-password session's (the shared composition's `opens_record`).
+            if (composed.opensRecord) {
+                OracleRecordLeaves(row.key, record, onToggleRecord)
+            }
+
+            // The trust facet, after the row's own leaves and before its Revoke;
+            // absent (never an empty state) on a row that holds none.
+            row.trust?.let { trust -> TrustFacet(row.key, trust, onSetLens, formatTime) }
+
             if (armed) {
                 Text(
                     stringResourceFmt(R.string.connected_apps_revoke_prompt, name),
@@ -601,6 +674,160 @@ private fun RosterRow(
                     Text(stringResource(R.string.connected_apps_revoke))
                 }
             }
+        }
+    }
+}
+
+/**
+ * A served principal's record (`connected-apps.md` § Layout & flow, region 3):
+ * the open control, then — while this row's record is open and its read has
+ * returned — the list, newest first, or its empty state. Each operation's words
+ * are shared Rust's (`connectedAppsOracleOpText`, `compose::oracle_op_text`);
+ * its class rides verbatim as the item's `class` value. The record is the
+ * machine's read, never kept here. Reference painter: tui's
+ * `oracle_record_elements`.
+ */
+@Composable
+private fun OracleRecordLeaves(
+    key: String,
+    record: OracleRecord?,
+    onToggleRecord: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    TextButton(
+        onClick = { onToggleRecord(key) },
+        modifier = Modifier.testTag(Ids.CONNECTED_APPS_ORACLE_OPEN),
+    ) {
+        Text(
+            stringResource(
+                if (record != null) R.string.connected_apps_oracle_close else R.string.connected_apps_oracle_open,
+            ),
+        )
+    }
+    if (record == null || !record.loaded) return
+    Column(
+        modifier = Modifier.testTag(Ids.CONNECTED_APPS_ORACLE_LIST),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        record.ops.forEach { op ->
+            Text(
+                resolveComposed(context, connectedAppsOracleOpText(op)),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .testTag(Ids.CONNECTED_APPS_ORACLE_OP)
+                    .semantics { stateDescription = op.`class` },
+            )
+        }
+    }
+    if (record.ops.isEmpty()) {
+        Text(
+            stringResource(R.string.connected_apps_oracle_empty),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testTag(Ids.CONNECTED_APPS_ORACLE_EMPTY),
+        )
+    }
+}
+
+/**
+ * A principal's trust facet (`connected-apps.md` § The trust facet and history
+ * lens): the per-row Now / History lens over its keys, reusing the Nests page's
+ * `nest-trust-*` ids inside the row. No renew and no per-grant revoke — the
+ * row's one Revoke is the participant's. Every word is shared Rust
+ * (`principalScopeLabels`, `trustStatusLabel(_, false)`, `principalGrantBoundNote`,
+ * `historyLineText`); instants are epoch seconds. Reference painter: tui's
+ * `push_trust_facet`.
+ */
+@Composable
+private fun TrustFacet(
+    key: String,
+    trust: PrincipalTrust,
+    onSetLens: (String, TrustLens) -> Unit,
+    formatTime: (Long) -> String,
+) {
+    val context = LocalContext.current
+    fun scopeLine(scope: List<TrustScope>, folder: TrustFolder?): String =
+        principalScopeLabels(scope, folder).joinToString("; ") { resolveLocalized(context, it).orEmpty() }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val nowSelected = trust.lens == TrustLens.NOW
+            Button(
+                onClick = { onSetLens(key, TrustLens.NOW) },
+                colors = if (nowSelected) ButtonDefaults.buttonColors() else ButtonDefaults.outlinedButtonColors(),
+                modifier = Modifier.testTag(Ids.NEST_TRUST_VIEW_NOW),
+            ) { Text(stringResource(R.string.nests_view_now)) }
+            Button(
+                onClick = { onSetLens(key, TrustLens.HISTORY) },
+                colors = if (!nowSelected) ButtonDefaults.buttonColors() else ButtonDefaults.outlinedButtonColors(),
+                modifier = Modifier.testTag(Ids.NEST_TRUST_VIEW_HISTORY),
+            ) { Text(stringResource(R.string.nests_view_history)) }
+        }
+        when (trust.lens) {
+            TrustLens.NOW ->
+                if (trust.grants.isEmpty()) {
+                    Text(
+                        stringResource(R.string.connected_apps_trust_empty),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(Ids.NEST_TRUST_EMPTY),
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier.testTag(Ids.NEST_TRUST_GRANT_LIST),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        trust.grants.forEach { grant ->
+                            Card(modifier = Modifier.fillMaxWidth().testTag(Ids.NEST_TRUST_GRANT_ITEM)) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Text(
+                                        scopeLine(grant.scope, grant.folder),
+                                        style = MaterialTheme.typography.titleSmall,
+                                        modifier = Modifier.testTag(Ids.NEST_TRUST_GRANT_SCOPE),
+                                    )
+                                    Text(
+                                        stringResourceFmt(R.string.nests_lasts_until, formatTime(grant.lastsUntil * 1000)),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.testTag(Ids.NEST_TRUST_GRANT_LASTS_UNTIL),
+                                    )
+                                    Text(
+                                        resolveLocalized(context, trustStatusLabel(grant.liveness, false)).orEmpty(),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.testTag(Ids.NEST_TRUST_GRANT_STATUS),
+                                    )
+                                    Text(
+                                        resolveLocalized(context, principalGrantBoundNote()).orEmpty(),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.testTag(Ids.NEST_TRUST_GRANT_BOUND_NOTE),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            TrustLens.HISTORY ->
+                Column(
+                    modifier = Modifier.testTag(Ids.NEST_TRUST_HISTORY_LIST),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    trust.history.forEach { h ->
+                        Text(
+                            resolveLocalized(
+                                context,
+                                historyLineText(h.kind, scopeLine(h.scope, h.folder), formatTime(h.at * 1000)),
+                            ).orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag(Ids.NEST_TRUST_HISTORY_ITEM),
+                        )
+                    }
+                }
         }
     }
 }

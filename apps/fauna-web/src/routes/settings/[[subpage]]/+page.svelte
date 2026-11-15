@@ -62,6 +62,8 @@
     requestRecoveryKitLost,
     vetoRecoveryReplacement,
     resealRecoveryEscrow,
+    readOwedNests,
+    dismissOwedNest,
     succeedIdentityWithHeldKit,
     getInboxMode,
     setInboxMode,
@@ -107,6 +109,7 @@
   import { buildVersion, keypackagesLow, statusTextRaw, termsUrl } from '#lib/wasm';
   import { mutedKeywordLevel } from '#lib/wasm';
   import { letGoAnswer, letGoArmed, letGoRenders, type DeadGenerations } from '#lib/recovery-let-go';
+  import { owedKey, withoutOwed, type OwedNestEntry, type OwedNests } from '#lib/recovery-owed-nests';
   import { ownSupersessionHold } from '#lib/own-supersession-hold';
   import { performHeldBackSupersession } from '#lib/post-auth-escalation';
   import type { SweepCopy } from '#lib/rpc';
@@ -182,6 +185,7 @@
   import SessionsSection from '#lib/components/SessionsSection.svelte';
   import FoldersSection from '#lib/components/FoldersSection.svelte';
   import PersonalizationSection from '#lib/components/PersonalizationSection.svelte';
+  import UnsentChangesSection from '#lib/components/UnsentChangesSection.svelte';
   import LabelerCatalogSection from '#lib/components/LabelerCatalogSection.svelte';
   import LogsView from '#lib/components/LogsView.svelte';
   import CredentialStoreSection from '#lib/components/CredentialStoreSection.svelte';
@@ -424,6 +428,10 @@
       accountsError = t.settings.remove_account_blocked_other_window;
       return;
     }
+    if (blocked === 'carry_owed') {
+      accountsError = t.settings.remove_account_blocked_carry_owed;
+      return;
+    }
     try {
       await accountsRemove(actorId);
       await loadAccounts();
@@ -513,6 +521,12 @@
   let deadGenerations = $state<DeadGenerations | null>(null);
   let letGoConfirm = $state('');
   let letGoWord = $state<string | null>(null);
+  /** The successor's owed nests (settings.md § Recovery kit → *The successor's
+   *  owed nests*): the shared projection over the bound read and this tab's
+   *  runtime passes at every keeper — `null` paints none of the seven ids —
+   *  and the key of the entry whose two-step dismiss is armed. */
+  let owedNests = $state<OwedNests | null>(null);
+  let owedDismissPending = $state<string | null>(null);
   // The shown-once minted kit. `null` = nothing to show; dropped on the next
   // ceremony's result or on leaving the page — there is no "show it again"
   // path and there can never be one (identity-succession.md § The
@@ -606,6 +620,43 @@
     letGoWord = recoveryLetGoConfirmWord();
   }
 
+  /** The owed-nests read, on the same nav edge as the status (tui's Account
+   *  hydrate). Never an error: the door leaves out what it could not read. */
+  async function loadOwedNests() {
+    const id = $identity;
+    if (!id) return;
+    try {
+      owedNests = await readOwedNests(id.secretHex);
+    } catch {
+      // No connection to read over: keep the last read.
+    }
+    owedDismissPending = null;
+  }
+
+  /** `recovery-kit-owed-nest-dismiss-confirm-button` — one `owed_settle` at the
+   *  entry's keeper (shared `dismiss_owed_nest`): settled drops the entry, a
+   *  refusal paints the shared line on `error-message` and keeps it listed. */
+  async function doDismissOwedNest(entry: OwedNestEntry) {
+    const id = $identity;
+    if (!id) return;
+    const key = owedKey(entry);
+    recoveryError = recoveryErrorGuard.write(recoveryError, '');
+    recoveryBusy = true;
+    try {
+      const refusal = await dismissOwedNest(id.secretHex, entry);
+      if (refusal) {
+        recoveryError = recoveryErrorGuard.write(recoveryError, resolveLocalized(refusal));
+      } else {
+        owedNests = withoutOwed(owedNests, key);
+      }
+    } catch (e) {
+      recoveryError = recoveryErrorGuard.write(recoveryError, e instanceof Error ? e.message : String(e));
+    } finally {
+      owedDismissPending = null;
+      recoveryBusy = false;
+    }
+  }
+
   /** `recovery-kit-let-go-button` — the user's confirmed act, and the only
    *  caller there is. The word is re-checked HERE and not only in the render
    *  (the stolen gate's reason: a test agent driving the id reaches this, and a
@@ -670,9 +721,11 @@
     recoveryQr = null;
     void loadRecoveryStatus();
     void loadDeadGenerations();
-    // The section's inherited-filters line counts these, and a Keep answered
-    // on the filter list since the last read must already be gone from it.
-    void refreshFilterMarks();
+    void loadOwedNests();
+    // The section's inherited-filters line counts the marks, and a Keep
+    // answered on the filter list since the last read must already be gone
+    // from it; the rules are re-read beside them so the two never disagree.
+    void refreshFilters();
   });
   // The discharge for a still-pending persist-failure message: the user has
   // navigated OFF the Account sub-page, having had the whole visit to read or
@@ -1165,9 +1218,16 @@
   // `inherited_filters_elements`). Counted off the same cached marks the
   // filter list paints, so the line and the per-rule marks never disagree.
   let recoveryInheritedFiltersOpen = $derived(filterMarks.length);
-  async function refreshFilterMarks() {
+  // The rules and their marks, read together: the line counts the marks and the
+  // list paints the rules, so a re-read of one without the other lets the line
+  // name a rule the list does not show yet (the successor's first visit, where
+  // the mount's read can land before the rules the ceremony carried across).
+  async function refreshFilters() {
     const id = $identity;
     if (!id) return;
+    try {
+      emailFilters = await listEmailFilters(id.secretHex);
+    } catch { /* filters not available: the list keeps what it showed */ }
     try {
       filterMarks = await filterMarksList(id.secretHex);
     } catch { /* a failed re-read leaves the cache alone (see filterMarks' own doc) */ }
@@ -1176,7 +1236,7 @@
   // succession ledger, so re-read now rather than at the next visit (linux's
   // and apple's sinks, same hook).
   $effect(() => {
-    if ($configStageSettled > 0) void refreshFilterMarks();
+    if ($configStageSettled > 0) void refreshFilters();
   });
   let showFilterForm = $state(false);
   let newFilterName = $state('');
@@ -1773,17 +1833,15 @@
       // up at sign-in and by this page's own Refresh.
       keyPackageCount = await wsKeypackageCount(id.secretHex, id.actorId);
     } catch { /* MLS key packages not available */ }
+    // Ahead of the manager wait: the rules are a nest read of their own, and
+    // the manager's build (its connection wait, the MLS restore) must not hold
+    // the list back behind the line that counts its marks.
+    await refreshFilters();
     try {
       // The channel count reads the live manager (built at sign-in anyway).
       await getConversationsManager();
       statusManagerReady = true;
     } catch { /* no manager: the Encryption section stays absent */ }
-    try {
-      emailFilters = await listEmailFilters(id.secretHex);
-    } catch { /* filters not available */ }
-    try {
-      filterMarks = await filterMarksList(id.secretHex);
-    } catch { /* a failed re-read leaves the cache alone (see filterMarks' own doc) */ }
     try {
       const prefs = await getSpamPreferences(id.secretHex);
       spamThreshold = prefs.spam_threshold;
@@ -2737,6 +2795,47 @@
           {t.settings.recovery_kit.let_go}
         </button>
       {/if}
+      <!-- The successor's owed nests (settings.md § Recovery kit → *The
+           successor's owed nests*): the status line, then per entry its
+           address, its outcome and the member card's two-step dismiss — tui's
+           `owed_nests_elements`. Only while something is owed. -->
+      {#if owedNests}
+        <p class="muted" data-testid={IDS.RECOVERY_KIT_OWED_NESTS_STATUS}>
+          {resolveLocalized(owedNests.status)}
+        </p>
+        {#each owedNests.entries as entry (owedKey(entry))}
+          <div class="owed-nest" data-testid={IDS.RECOVERY_KIT_OWED_NEST_ITEM}>
+            <p data-testid={IDS.RECOVERY_KIT_OWED_NEST_ADDRESS}>{resolveLocalized(entry.address_copy)}</p>
+            <p class="muted" data-testid={IDS.RECOVERY_KIT_OWED_NEST_OUTCOME}>{resolveLocalized(entry.outcome_copy)}</p>
+            {#if owedDismissPending === owedKey(entry)}
+              <button
+                data-testid={IDS.RECOVERY_KIT_OWED_NEST_DISMISS_CONFIRM_BUTTON}
+                class="btn danger"
+                onclick={() => doDismissOwedNest(entry)}
+                disabled={recoveryBusy}
+              >
+                {t.settings.recovery_kit.owed_nest_dismiss_confirm}
+              </button>
+              <button
+                data-testid={IDS.RECOVERY_KIT_OWED_NEST_DISMISS_CANCEL_BUTTON}
+                class="btn"
+                onclick={() => { owedDismissPending = null; }}
+              >
+                {t.common.cancel}
+              </button>
+            {:else}
+              <button
+                data-testid={IDS.RECOVERY_KIT_OWED_NEST_DISMISS_BUTTON}
+                class="btn"
+                onclick={() => { owedDismissPending = owedKey(entry); }}
+                disabled={recoveryBusy}
+              >
+                {t.settings.recovery_kit.owed_nest_dismiss}
+              </button>
+            {/if}
+          </div>
+        {/each}
+      {/if}
       {#if recoveryStatus?.allows_escrow_reseal}
         <button
           data-testid={IDS.RECOVERY_KIT_ESCROW_RESEAL_BUTTON}
@@ -2892,6 +2991,14 @@
       {/each}
       {#if pendingActionsError}<p class="error" data-testid={IDS.ERROR_MESSAGE}>{pendingActionsError}</p>{/if}
     </section>
+  {/if}
+
+  <!-- Unsent changes (account-offline-mutation.md § The unsent-changes
+       surface, point 1) — STANDING, the pending-actions section's sibling and
+       shape, right after it. Reads this device's outbox only, so it answers
+       with the nest down; twin of tui's `unsent_changes_elements`. -->
+  {#if $identity}
+    <UnsentChangesSection />
   {/if}
 
 {:else if current === 'member-review'}
@@ -3227,7 +3334,7 @@
         {t.muted_words.add}
       </button>
     </div>
-    {#if mutedWordsError}<p class="error">{mutedWordsError}</p>{/if}
+    {#if mutedWordsError}<p class="error" data-testid={IDS.ERROR_MESSAGE}>{mutedWordsError}</p>{/if}
     <div data-testid={IDS.MUTED_WORD_LIST} class="muted-word-list">
       {#if mutedWords.loaded && mutedWords.keywords.length === 0}
         <!-- Two conditions, not one (README.md § List pages: loading is not

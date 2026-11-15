@@ -69,6 +69,7 @@ class FoldersOfflineShareContentTest {
         pendingShares: List<FfiPendingShare> = emptyList(),
         groupInvitations: List<GroupInvitation> = emptyList(),
         groupScopes: List<GroupScope> = emptyList(),
+        groupOnDemand: Map<String, com.fauna.app.ui.viewmodel.OnDemandRow> = emptyMap(),
     ) {
         composeTestRule.setContent {
             FoldersContent(
@@ -79,6 +80,7 @@ class FoldersOfflineShareContentTest {
                 offlineShare = offlineShare,
                 groupInvitations = groupInvitations,
                 groupScopes = groupScopes,
+                groupOnDemand = groupOnDemand,
             )
         }
     }
@@ -239,8 +241,8 @@ class FoldersOfflineShareContentTest {
     fun aLandedScopeListsAsAnOrdinaryReadOnlySetRow() {
         render(
             groupScopes = listOf(
-                GroupScope(shortId = "07070707", memberCount = 2u, sharedBy = "a1b2c3d4"),
-                GroupScope(shortId = "08080808", memberCount = 2u, sharedBy = null),
+                GroupScope(shortId = "07070707", memberCount = 2u, sharedBy = "a1b2c3d4", folderId = groupRef('7')),
+                GroupScope(shortId = "08080808", memberCount = 2u, sharedBy = null, folderId = groupRef('8')),
             ),
         )
         composeTestRule.onAllNodesWithTag("folder-row").assertCountEquals(2)
@@ -251,5 +253,34 @@ class FoldersOfflineShareContentTest {
         // Severance is the authority's mint, never a self-scoped drop.
         node("folder-leave-button").assertDoesNotExist()
         node("folder-delete-button").assertDoesNotExist()
+        // No reading yet (no session) — no toggle.
+        node("folder-on-demand-toggle").assertDoesNotExist()
+    }
+
+    private fun groupRef(c: Char) = "group:" + c.toString().repeat(64)
+
+    // ── The group row's seat (`group-set.md` decision 11): the hide-only
+    // `folder-on-demand-toggle`, default ON, keyed by the scope's `group:` ref ──
+
+    @Test
+    fun aGroupScopeRowCarriesTheOnDemandToggleKeyedByItsGroupRef() {
+        val ref = groupRef('7')
+        var flipped: Pair<String, Boolean>? = null
+        render(
+            groupScopes = listOf(GroupScope(shortId = "07070707", memberCount = 2u, sharedBy = "a1b2c3d4", folderId = ref)),
+            groupOnDemand = mapOf(ref to com.fauna.app.ui.viewmodel.OnDemandRow("scoped", shown = true, stronger = false)),
+            actions = FoldersActions(onSetGroupOnDemand = { r, shown -> flipped = r to shown }),
+        )
+        node("folder-on-demand-toggle")
+            .assertIsOn()
+            .assert(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, "on"))
+            .performClick()
+        assertEquals(ref to false, flipped)
+        // A phone binds no location: no `folder-location-*` section on the row.
+        composeTestRule.onAllNodes(hasTestTagStartingWith("folder-location-")).assertCountEquals(0)
+    }
+
+    private fun hasTestTagStartingWith(prefix: String) = SemanticsMatcher("testTag starts with $prefix") { n ->
+        n.config.getOrElseNullable(androidx.compose.ui.semantics.SemanticsProperties.TestTag) { null }?.startsWith(prefix) == true
     }
 }

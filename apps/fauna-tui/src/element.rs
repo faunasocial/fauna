@@ -346,6 +346,14 @@ pub enum SelectTarget {
     TaskDelegationAssignment {
         row: usize,
     },
+    /// `connected-apps-request-folder[card]` — the consent card's folder
+    /// picker. The option key (the folder's row id in decimal) is what
+    /// `get_text` returns and `select` takes; the folder names ride
+    /// `option_labels` / `display_value`. The card's index is baked in at
+    /// paint time, the settings layer resolving it to the card's consent id.
+    ConnectedAppsFolder {
+        card: usize,
+    },
     /// `tui-settings-external-media` — the mode **token** (`ask`/`always`/`never`)
     /// is what `get_text` returns and `select` takes (like [`Self::ReminderOffset`],
     /// a raw-value picker); the human reads the localized label off `Element::label`.
@@ -854,6 +862,12 @@ impl SelectTarget {
             SelectTarget::ReportReason => Gesture::Report(crate::report::Action::SetReason(value)),
             SelectTarget::TaskDelegationAssignment { row } => {
                 Gesture::Settings(crate::settings::Action::SetTaskAssignment { row, label: value })
+            }
+            SelectTarget::ConnectedAppsFolder { card } => {
+                Gesture::Settings(crate::settings::Action::ConnectedAppsSetFolder {
+                    card,
+                    id: value,
+                })
             }
             SelectTarget::TrainedFactorPublishKind => {
                 Gesture::Settings(crate::settings::Action::SetTrainedFactorPublishKind(

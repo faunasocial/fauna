@@ -11,6 +11,7 @@
   import TipSurface from './payments/TipSurface.svelte';
   import SoldPostTeaser from './payments/SoldPostTeaser.svelte';
   import PurchasePendingLine from './payments/PurchasePendingLine.svelte';
+  import SalePriceDialog from './payments/SalePriceDialog.svelte';
   import RegionPlaceholder from './RegionPlaceholder.svelte';
   import { goto } from '$app/navigation';
   import { profileHref } from '#lib/profile-nav';
@@ -69,9 +70,10 @@
     //    pay-to-unlock → the buyer's price read is post-addressed). The card
     //    can't reach the manager, so the parent dispatches on `post.post_id`. ──
     onbuyunlockoffer?: (post_id: string) => void;
-    /** Open the resolved offer's payment_url — the parent owns the
-     *  https-only safety check + window.open (profile page's precedent). */
-    onopenpaymentlink?: (url: string) => void;
+    /** The resolved offer's payment link — the parent owns the https-only
+     *  safety check, the subscribe-first `payUnlockOffer` and the open
+     *  (the profile page's precedent); it dispatches on `post.post_id`. */
+    onopenpaymentlink?: (post_id: string, url: string) => void;
 
     // ── Muted-keyword collapse (topic-factors.md § Scoring: a mute collapses
     // EVERYWHERE — chronological feeds included, where it cannot sink a post but
@@ -163,6 +165,27 @@
      *  `copied` attr + line survive a re-render — parent-owned like every
      *  other cross-card-rebuild state here. */
     webLinkCopied?: { kind: 'web' | 'paywall'; url: string } | null;
+
+    // ── The own-post Nostr advertisement pair (monetization.md § The Nostr
+    // advertisement of a sold post → *What the author sees and agrees to*).
+    // `nostrAdvertiseVerb` is the shared rule's arm, resolved by the parent
+    // (`postNostrAdvertiseVerb`); `advertiseConfirmBody` is the catalog's
+    // public consequence sentence the confirm step states.
+    nostrAdvertiseVerb?: 'advertise' | 'stop_advertising' | null;
+    advertiseConfirmBody?: string | null;
+    onadvertisenostr?: (post_id: string) => void;
+    onstopadvertisingnostr?: (post_id: string) => void;
+
+    // ── The sold post's *Change price…* verb and dialog (monetization.md §
+    // The asking price → *Re-pricing a sold post*). `salePriceVerb` is the
+    // parent's presence decision (own, sold, payments build, advertised-note
+    // rule); the dialog reports on the page's `error-message` through
+    // `onsalepriceerror`.
+    salePriceVerb?: boolean;
+    onsalepriceerror?: (message: string) => void;
+    /** A price was saved: the parent re-reads the feed (the advertisement may
+     *  have been replaced or withdrawn on the nest). */
+    onsalepricesaved?: () => void;
   }
 
   let {
@@ -193,6 +216,13 @@
     webLinkOrigin = null,
     oncopypaywalllink,
     webLinkCopied = null,
+    nostrAdvertiseVerb = null,
+    advertiseConfirmBody = null,
+    onadvertisenostr,
+    onstopadvertisingnostr,
+    salePriceVerb = false,
+    onsalepriceerror,
+    onsalepricesaved,
     contentCollapsed = false,
     onrevealcontent,
     regionPlaceholder = null,
@@ -279,6 +309,43 @@
     e.stopPropagation();
     actionsOpen = false;
     onunpublishweb?.(post.post_id);
+  }
+
+  // The Nostr advertisement pair: *Stop advertising* is one tap; *Advertise*
+  // arms the confirm step in place (the delete verb's shape), which states the
+  // consequence and is the only door to the act. Disarmed whenever the menu
+  // closes, as delete is.
+  const showAdvertiseStop = $derived(isOwn && nostrAdvertiseVerb === 'stop_advertising' && !!onstopadvertisingnostr);
+  const showAdvertise = $derived(
+    isOwn && nostrAdvertiseVerb === 'advertise' && !!advertiseConfirmBody && !!onadvertisenostr,
+  );
+  let advertiseConfirming = $state(false);
+
+  // *Change price…*: the component paints the verb and, once opened, the dialog
+  // in place; its state dies with the menu (items leave the DOM while closed).
+  const showSalePrice = $derived(__FAUNA_PAYMENTS__ && isOwn && salePriceVerb && !!post.gated_tier);
+
+  function requestAdvertise(e: MouseEvent): void {
+    e.stopPropagation();
+    advertiseConfirming = true;
+  }
+
+  function cancelAdvertise(e: MouseEvent): void {
+    e.stopPropagation();
+    advertiseConfirming = false;
+  }
+
+  function confirmAdvertise(e: MouseEvent): void {
+    e.stopPropagation();
+    actionsOpen = false;
+    advertiseConfirming = false;
+    onadvertisenostr?.(post.post_id);
+  }
+
+  function stopAdvertising(e: MouseEvent): void {
+    e.stopPropagation();
+    actionsOpen = false;
+    onstopadvertisingnostr?.(post.post_id);
   }
 
   function copyWebLink(e: MouseEvent): void {
@@ -519,7 +586,7 @@
     {#if __FAUNA_PAYMENTS__ && post.unlock_offer}
       <SoldPostTeaser
         offer={post.unlock_offer}
-        {onopenpaymentlink}
+        onopenpaymentlink={(url) => onopenpaymentlink?.(post.post_id, url)}
         onbuy={() => onbuyunlockoffer?.(post.post_id)}
       />
     {/if}
@@ -530,7 +597,7 @@
     {#if __FAUNA_PAYMENTS__ && !post.unlock_offer && post.unlock_purchase_pending && !post.gated_unlocked}
       <PurchasePendingLine />
     {/if}
-    {#if ontrain || showDelete || showWebPublish || showReport || showMarkSpam}
+    {#if ontrain || showDelete || showWebPublish || showAdvertise || showAdvertiseStop || showSalePrice || showReport || showMarkSpam}
       <!-- Per-card ⋯ overflow (the dm-message-actions-button precedent applied to
            posts). Hosts the trained-topic training verbs, own-post delete, and
            the own-post web-publishing verbs. -->
@@ -542,7 +609,10 @@
         onclick={(e) => {
           e.stopPropagation();
           actionsOpen = !actionsOpen;
-          if (!actionsOpen) deleteConfirming = false;
+          if (!actionsOpen) {
+            deleteConfirming = false;
+            advertiseConfirming = false;
+          }
         }}
       >⋯</button>
     {/if}
@@ -620,6 +690,47 @@
             </p>
           {/if}
         {/if}
+      {/if}
+      {#if showAdvertiseStop}
+        <button
+          class="menu-item"
+          data-testid={IDS.FEED_POST_STOP_ADVERTISING_NOSTR_BUTTON}
+          onclick={stopAdvertising}
+        >{t.nostr_advertise.stop}</button>
+      {:else if showAdvertise}
+        {#if !advertiseConfirming}
+          <button
+            class="menu-item"
+            data-testid={IDS.FEED_POST_ADVERTISE_NOSTR_BUTTON}
+            onclick={requestAdvertise}
+          >{t.nostr_advertise.advertise}</button>
+        {:else}
+          <div class="menu-confirm" data-testid={IDS.ADVERTISE_NOSTR_CONFIRM_DIALOG} role="group">
+            <p class="menu-note"><strong>{t.nostr_advertise.confirm_title}</strong></p>
+            <p class="menu-note">{advertiseConfirmBody}</p>
+            <button
+              class="menu-item"
+              data-testid={IDS.ADVERTISE_NOSTR_CONFIRM_BUTTON}
+              onclick={confirmAdvertise}
+            >{t.nostr_advertise.confirm}</button>
+            <button
+              class="menu-item"
+              data-testid={IDS.ADVERTISE_NOSTR_CANCEL_BUTTON}
+              onclick={cancelAdvertise}
+            >{t.common.cancel}</button>
+          </div>
+        {/if}
+      {/if}
+      {#if __FAUNA_PAYMENTS__ && showSalePrice}
+        <!-- The sold post's *Change price…* (the payments plane's own ids —
+             `payments/SalePriceDialog.svelte`, imported behind this gate). -->
+        <SalePriceDialog
+          tierName={post.gated_tier!}
+          advertised={post.nostr_advertised_at != null}
+          onerror={(m) => onsalepriceerror?.(m)}
+          onsaved={() => onsalepricesaved?.()}
+          onclose={() => { actionsOpen = false; }}
+        />
       {/if}
       {#if showMarkSpam}
         <button
@@ -811,6 +922,7 @@
       repost_count={post.repost_count}
       quote_count={post.quote_count}
       viewer_liked={post.viewer_liked}
+      like_state={post.like_state}
       viewer_reposted={!!post.viewer_repost_id}
       {oninteract}
     />

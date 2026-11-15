@@ -951,10 +951,6 @@ def reject_peer_mta(dmarc_venue, mail_bridge_e2e_binary, seal_helper_binary, tmp
 
 
 @pytest.mark.feature("dmarc-reporting")
-# The e2e cdylib flavor exists on Linux and macOS; on Windows the shipped and the
-# e2e bridge stage beside one `fauna_ffi.dll`, so there is no seam-carrying
-# library for this bridge to load yet.
-@pytest.mark.host_platform("linux", "macos")
 def test_peer_mail_the_perimeter_refuses_is_counted_with_disposition_reject(
     dmarc_venue, reject_peer_mta,
 ):

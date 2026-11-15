@@ -315,7 +315,9 @@ pub struct PlaceholderFold {
     pub stale_hydrated: Vec<StaleHydratedRow>,
     /// The remote deletes the fold left in place, sorted by path: every path whose
     /// batch-latest change is a delete and that still holds a live row here — a
-    /// placeholder the platform may have put on the disk, or a hydrated copy. The
+    /// placeholder the platform may have put on the disk, or a hydrated copy. A row a
+    /// resolved backup seat stamped with that delete's `seq`, or a later one, is not
+    /// reported: the decline stands (`file-sync.md` § 4). The
     /// fold removes none of these rows, because the row may go only once what the
     /// disk holds has gone: the fold advances the anchor whatever happens next, so a
     /// row dropped ahead of a failed removal would strand the file
@@ -340,6 +342,12 @@ pub struct FoldedDelete {
     /// The device that recorded the delete (hex) — named in the conflict report
     /// when the delete is declined.
     pub deleting_device: Option<String>,
+    /// The delete's `seq` in the set's change log — what a resolved backup seat
+    /// stamps on the row it keeps ([`SyncEngine::apply_folded_delete`]), so the
+    /// whole-log fold never offers this delete again (`file-sync.md` § 4, *A delete
+    /// a backup seat declined stays declined*). `None` where the delete is not a
+    /// `changes.list` record (a group set's converged delete): nothing is stamped.
+    pub seq: Option<i64>,
 }
 
 /// A host's drop of every body it keeps for a path — what
@@ -356,8 +364,10 @@ pub enum FoldedDeleteOutcome {
     /// reported and the survivor uploaded (`conflicts.md`). The row stays.
     KeptConflict,
     /// The bytes were kept with no conflict — a lineage the delete cannot refer to,
-    /// or a disk that could not answer. The row stays, and the next fold, which
-    /// reads the whole log, reports it again.
+    /// a disk that could not answer, or a backup seat's keep. The row stays, and the
+    /// next fold, which reads the whole log, reports it again — except a seat
+    /// RESOLVED to backup's keep, which stamps the row with the delete's `seq` so it
+    /// is never offered again (`file-sync.md` § 4).
     Kept,
     /// Nothing left to do: the row went, or settled as a delete, since the fold.
     Moot,
@@ -430,7 +440,7 @@ pub struct SupersededBody {
 /// device's free space where they land — a closure so the floor is measured
 /// at each landing, and a test can script it.
 pub struct OnDemandLanding<'a> {
-    pub tree: &'a crate::provider_face::owned_tree::OwnedTree,
+    pub tree: &'a dyn crate::provider_face::owned_tree::PeerLanding,
     pub free_space: &'a dyn Fn() -> Option<u64>,
 }
 
@@ -2710,8 +2720,20 @@ impl SyncEngine {
     /// set's row compares it against that basis and calls the edge's
     /// `on_rebuild` when the keys no longer answer it. The desktop sync agent's
     /// resident engines take this; the control-inverted host drives its own.
+    ///
+    /// An engine built on its set's binding record — no read reached the nest —
+    /// keeps its floor marked unread (decision 2″ (5)): installing the edge
+    /// never stands in for the read that would lift it.
     pub fn with_binding_edge(self, edge: crate::binding_edge::BindingEdge) -> Self {
-        let floor = crate::binding_edge::SealFloor::Floor(edge.basis.content_key_floor());
+        let read = crate::binding_edge::SealFloor::Floor(edge.basis.content_key_floor());
+        let floor = if matches!(
+            *self.seal_floor.read().unwrap(),
+            crate::binding_edge::SealFloor::Unread(_)
+        ) {
+            read.after_failed_read()
+        } else {
+            read
+        };
         let mut this = self.with_seal_floor(floor).with_folder_ref(edge.folder_ref);
         *this.seen_basis.write().unwrap() = Some(edge.basis.clone());
         this.binding_edge = Some(edge);
@@ -2836,16 +2858,22 @@ impl SyncEngine {
         })
         .await
         .unwrap_or(false);
+        // The one classification the builder's list read takes
+        // (`on-demand-files-shared-sets.md` decision 2″ (4)): a nest that could
+        // not be reached is 2′'s failed read; a nest that ANSWERED with a
+        // refusal is a read, so the engine does not go on as if offline — it
+        // holds publication as on a failed read and asks the host to
+        // re-resolve, and the rebuild meets the same answer and refuses.
         let read = if connected {
             fauna_client_folders::FoldersClient::new(control)
                 .list_owned_and_shared_wire()
                 .await
-                .ok()
+                .map_err(|e| e.read_failure(None))
         } else {
-            None
+            Err(fauna_client::ReadFailure::Unreachable)
         };
         match read {
-            Some(reply) => {
+            Ok(reply) => {
                 let bases: Vec<(i64, crate::binding_edge::BindingBasis)> = reply
                     .folders
                     .iter()
@@ -2853,9 +2881,18 @@ impl SyncEngine {
                     .collect();
                 self.apply_binding_read(&bases);
             }
-            None => {
-                let mut floor = self.seal_floor.write().unwrap();
-                *floor = floor.after_failed_read();
+            Err(failure) => {
+                {
+                    let mut floor = self.seal_floor.write().unwrap();
+                    *floor = floor.after_failed_read();
+                }
+                if failure == fauna_client::ReadFailure::Answered {
+                    tracing::warn!(
+                        "the nest answered the pre-seal row read with a refusal; asking the host \
+                         to re-resolve the binding"
+                    );
+                    (edge.on_rebuild)();
+                }
             }
         }
     }
@@ -4697,6 +4734,11 @@ impl SyncEngine {
             .is_some_and(|b| ContentHash::of_raw(&b) == file_hash);
         if let Some(entry) = self.db.get_entry(relative_path)? {
             if Self::is_stale_cache(&entry, &file_hash) {
+                if !force_record
+                    && let Some(ack) = Self::placeholder_recorded_ack(&entry, &file_hash)
+                {
+                    return Ok(Some(ack));
+                }
                 tracing::debug!(
                     path = %fauna_core::log_redact::log_path(relative_path),
                     "a recorded version's stale cache under its placeholder row, not an edit — \
@@ -5160,6 +5202,11 @@ impl SyncEngine {
             .is_some_and(|b| ContentHash::of_raw(&b) == file_hash);
         if let Some(entry) = self.db.get_entry(relative_path)? {
             if Self::is_stale_cache(&entry, &file_hash) {
+                if !force_record
+                    && let Some(ack) = Self::placeholder_recorded_ack(&entry, &file_hash)
+                {
+                    return Ok(Some(ack));
+                }
                 tracing::debug!(
                     path = %fauna_core::log_redact::log_path(relative_path),
                     "a recorded version's stale cache under its placeholder row (streaming), \
@@ -9480,6 +9527,8 @@ impl SyncEngine {
         let delete = FoldedDelete {
             relative_path: path.to_string(),
             deleting_device: change.device_id.clone(),
+            // The group plane's seq is not the fold's: never a stamp.
+            seq: None,
         };
         match self
             .apply_folded_delete(&delete, |p| match std::fs::remove_file(p) {
@@ -9723,9 +9772,9 @@ impl SyncEngine {
                         return Ok(false);
                     }
                 }
-                let staged = tree.temp_path(BodyRoot::Kept)?;
+                let staged = tree.kept_temp_path()?;
                 tokio::fs::write(&staged, &bytes).await?;
-                let landed = tree.land_body(self, path, &staged, BodyRoot::Kept)?;
+                let landed = tree.land_kept(path, &staged)?;
                 // The merge base and the row, exactly as the resident landing
                 // commits them (see `ingest_peer_share_rows_landing`).
                 self.save_base(path, &bytes);
@@ -9777,7 +9826,7 @@ impl SyncEngine {
     /// any cache-root body under it.
     fn record_peer_placeholder(
         &self,
-        tree: &crate::provider_face::owned_tree::OwnedTree,
+        tree: &dyn crate::provider_face::owned_tree::PeerLanding,
         path: &str,
         change: &fauna_protocol::sync::SyncChange,
         manifest: ContentHash,
@@ -9801,7 +9850,7 @@ impl SyncEngine {
             1,
             change_stamp(change)?,
         )?;
-        tree.record_placeholder(self, path)
+        tree.placeholder_recorded(self, path)
     }
 
     /// Is the body at `relative_path` one the share plane landed from a peer
@@ -13013,13 +13062,96 @@ impl SyncEngine {
         let mut max_seq = 0i64;
         let our_device = self.client.device_id_hex().to_string();
         let our_actor = self.client.actor_id_hex();
+        // A change this root can never apply is reported where the fold first
+        // knows it (`conflicts.md` § Skipped catch-up changes reach the review
+        // list → *The sites on an on-demand root*): recorded here, once per
+        // path; the pass that ran the fold sends the report and every cure's
+        // resolve (`Self::fold_and_report` → `Self::flush_skip_reports`).
+        //
+        // The newest seq of each path hash in the log: a refused row is
+        // reported only while it is its hash's newest, since a later row of the
+        // same path that opens is the cure.
+        let mut newest_of_hash: HashMap<&str, i64> = HashMap::new();
+        for change in changes {
+            let newest = newest_of_hash
+                .entry(change.path_hash.as_str())
+                .or_insert(change.seq);
+            *newest = (*newest).max(change.seq);
+        }
+        // What is on record unresolved, read once: the fold re-reads the whole
+        // log every pass, so it asks the db to record or cure only where the
+        // answer can change.
+        let on_record = self
+            .db
+            .unresolved_catchup_failure_paths()
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = ?e, "reading the skips on record failed");
+                std::collections::HashSet::new()
+            });
+        let owes_cure = |path: &str| {
+            on_record.contains(path)
+                || on_record.contains(&hex::encode(fauna_core::sync::path_hash(path)))
+        };
+        // The KEY-PENDING bound, on the resident pull's clock: the one seq
+        // whose hold has run, and the lowest seq this fold still holds.
+        let key_pending_due = self.key_pending_due_seq();
+        let mut key_pending_held: Option<i64> = None;
+        // Paths the root may not hold, by their newest row (seq, live).
+        let mut refused_paths: HashMap<String, (i64, bool)> = HashMap::new();
         for change in changes {
             max_seq = max_seq.max(change.seq);
             // A change whose path this reader could not open carries no plaintext
-            // path; without it there is nothing to place in the file browser, so skip them.
-            let Some(path) = change.path.clone() else {
-                continue;
+            // path: there is nothing to place in the file browser, and the
+            // opener the resident pull uses says whether it ever will be.
+            let path = match change.path.as_deref() {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => {
+                    if newest_of_hash.get(change.path_hash.as_str()) != Some(&change.seq)
+                        || on_record.contains(&change.path_hash)
+                    {
+                        continue;
+                    }
+                    let sealed = change.path_sealed.as_ref().map(|b| &b[..]);
+                    match self.sealed_path_verdict(change) {
+                        fauna_core::label_custody::ChangePathOpen::Refused(reason) => self
+                            .record_fold_skip(
+                                &change.path_hash,
+                                true,
+                                sealed,
+                                &format!("sealed path unusable: {}", reason.as_str()),
+                            ),
+                        fauna_core::label_custody::ChangePathOpen::NoRoot
+                            if key_pending_due == Some(change.seq) =>
+                        {
+                            self.record_fold_skip(
+                                &change.path_hash,
+                                true,
+                                sealed,
+                                fauna_core::apply_failure::PermanentApplyFailure::KEY_PENDING
+                                    .reason,
+                            )
+                        }
+                        // Transient for a bounded time: a generation can lag its rows.
+                        fauna_core::label_custody::ChangePathOpen::NoRoot => {
+                            key_pending_held =
+                                Some(key_pending_held.map_or(change.seq, |h| h.min(change.seq)));
+                        }
+                        // `fetch_changes` fills `path` for every seal that opened.
+                        fauna_core::label_custody::ChangePathOpen::Opened(_) => {}
+                    }
+                    continue;
+                }
             };
+            // The apply stage's own lexical guard: no row, no placeholder.
+            if !fauna_core::path_guard::is_safe_relative_path(&path) {
+                let newest = refused_paths
+                    .entry(path)
+                    .or_insert((change.seq, change.manifest_hash.is_some()));
+                if change.seq > newest.0 {
+                    *newest = (change.seq, change.manifest_hash.is_some());
+                }
+                continue;
+            }
             if Self::placeholder_row_is_stale(
                 change,
                 self.causal().edit_frontier(&path),
@@ -13051,7 +13183,37 @@ impl SyncEngine {
         let mut repointed: Vec<crate::enumerate::PlaceholderRow> = Vec::new();
         let mut stale_hydrated: Vec<StaleHydratedRow> = Vec::new();
         let mut deleted: Vec<FoldedDelete> = Vec::new();
+        if let Some(seq) = key_pending_held {
+            self.note_key_pending_hold(seq);
+        }
+        // A refused path's newest row: live → recorded through the ordinary
+        // funnel; a delete → nothing to be behind on, so a skip on record is
+        // cured.
+        for (path, (_, live)) in &refused_paths {
+            if *live {
+                if !on_record.contains(path) {
+                    self.record_fold_skip(
+                        path,
+                        false,
+                        None,
+                        fauna_core::apply_failure::PermanentApplyFailure::PATH_REFUSED.reason,
+                    );
+                }
+            } else if owes_cure(path) {
+                self.cure_in_fold(path);
+            }
+        }
         for (path, folded) in &latest {
+            // A live head that is the newest row of its path hash opened here:
+            // a sealed-path skip recorded under that hash is cured.
+            if folded.manifest.is_some() {
+                let hash_hex = hex::encode(fauna_core::sync::path_hash(path));
+                if on_record.contains(&hash_hex)
+                    && newest_of_hash.get(hash_hex.as_str()) == Some(&folded.seq)
+                {
+                    self.cure_in_fold(path);
+                }
+            }
             // Latest state is a delete (`manifest_hash = None`).
             let Some(manifest_hex) = folded.manifest.as_deref() else {
                 // A remote delete. (A delete *within* one pull simply never records
@@ -13069,16 +13231,38 @@ impl SyncEngine {
                 // it is on this disk (decision (f) of `delete-propagation.md` § *An
                 // offline placeholder delete propagates* — nothing is left dangling).
                 // A `Deleted` row already applied a delete.
+                //
+                // Where the path's delete has applied here — the row is gone, or
+                // never was — a skip on record under it is cured: nothing is left
+                // to be behind on. A live row's cure is its applied delete's
+                // (`Self::apply_folded_delete`).
                 match self.db.get_entry(path)? {
                     Some(entry) if entry.state == SyncState::LocallyDeleted => {
                         self.db.remove_entry(path)?;
+                        if owes_cure(path) {
+                            self.cure_in_fold(path);
+                        }
                     }
                     Some(entry) if entry.state == SyncState::Deleted => {}
+                    // A delete a resolved backup seat already declined — this one,
+                    // or a later one it stamped — stays declined: the place set back
+                    // to apply deletes never reaches into the past (`file-sync.md`
+                    // § 4, *A delete a backup seat declined stays declined*). By
+                    // `seq` alone, so a newer delete of a re-created path is new.
+                    Some(entry)
+                        if entry
+                            .declined_delete_seq
+                            .is_some_and(|stamp| stamp >= folded.seq) => {}
                     Some(_) => deleted.push(FoldedDelete {
                         relative_path: path.clone(),
                         deleting_device: folded.device.clone(),
+                        seq: Some(folded.seq),
                     }),
-                    None => {}
+                    None => {
+                        if owes_cure(path) {
+                            self.cure_in_fold(path);
+                        }
+                    }
                 }
                 continue;
             };
@@ -13213,6 +13397,11 @@ impl SyncEngine {
                 // The dehydration proof is the content the OLD head reassembles to. Left
                 // behind, it would vouch for a stale cache as the new head.
                 self.db.clear_recorded_content_hash(path)?;
+                // The skip said "this device cannot open this path's head"; the
+                // head it named is gone.
+                if owes_cure(path) {
+                    self.cure_in_fold(path);
+                }
             }
             recorded += 1;
             let row = || crate::enumerate::PlaceholderRow {
@@ -13290,6 +13479,10 @@ impl SyncEngine {
     /// The row is read afresh — a local delete or an upload may have moved it since
     /// the fold — and then:
     ///
+    /// - **a backup (or unresolved) seat**: the row and whatever the disk holds are
+    ///   kept, before the disk is read — a backup seat never applies a peer's delete,
+    ///   whatever rail delivered it (`file-sync.md` § 4); a resolved backup seat stamps
+    ///   the row with the delete's `seq`, so the fold never offers it again;
     /// - **nothing on the disk** (a placeholder never listed, an off-disk root's
     ///   row, a file already gone): the row is all there is, and it goes;
     /// - **a disk that cannot answer** (anything but a definite `NotFound`,
@@ -13357,6 +13550,43 @@ impl SyncEngine {
                 return Ok(FoldedDeleteOutcome::Moot);
             }
             _ => {}
+        }
+        // A backup seat never applies a peer's delete, whatever rail delivered it
+        // (`file-sync.md` § 4) — the resident arm's first check, on its on-demand
+        // twin, and before the disk is read: every live row is kept, a hydrated
+        // copy and a row with nothing on this disk alike (a cloud-only placeholder
+        // in a directory never listed, an off-disk root's row), which is the whole
+        // of the archive's file there. No cure: the copy is still behind
+        // (`conflicts.md` § Skipped catch-up changes reach the review list). An
+        // unresolved seat declines the same way, and because the fold reads the
+        // set's whole log, its next pass after the seat resolves to `Sync` reports
+        // the delete again.
+        //
+        // A seat RESOLVED to backup remembers the decline on the row it keeps, by
+        // the delete's `seq`, so the fold never offers this delete again — not
+        // after the place is set back to apply deletes either (`file-sync.md` § 4,
+        // *A delete a backup seat declined stays declined*). An unresolved seat's
+        // decline is provisional and stamps nothing.
+        if !self.applies_remote_deletes() {
+            let resolution = self.sync_mode_resolution();
+            if let Some(seq) = delete.seq
+                && !resolution.holds_anchor_on_declined_delete()
+            {
+                self.db.set_declined_delete_seq(path, seq)?;
+            }
+            if resolution.holds_anchor_on_declined_delete() {
+                // Reported again on every pass until the seat resolves.
+                tracing::debug!(
+                    path = %fauna_core::log_redact::log_path(path),
+                    "unresolved mode: keeping the local copy of a path the source deleted"
+                );
+            } else {
+                tracing::info!(
+                    path = %fauna_core::log_redact::log_path(path),
+                    "backup mode: keeping the local copy of a path the source deleted"
+                );
+            }
+            return Ok(FoldedDeleteOutcome::Kept);
         }
         let full_path = self.watch_dir.join(path);
         let held = if remove.is_some() {
@@ -13626,7 +13856,76 @@ impl SyncEngine {
             .fetch_changes(folder, 0)
             .await
             .context("listing folder changes for placeholder population")?;
-        self.record_placeholders_from_changes(&changes)
+        self.fold_and_report(&changes).await
+    }
+
+    /// One on-demand pass over a fetched log: the placeholder fold, then the
+    /// skip reports and cure resolves it owes the nest.
+    pub(crate) async fn fold_and_report(
+        &self,
+        changes: &[fauna_protocol::sync::SyncChange],
+    ) -> Result<PlaceholderFold> {
+        let fold = self.record_placeholders_from_changes(changes)?;
+        // The fold is synchronous, so it records and cures locally; what that
+        // owes the nest is sent here, as every resident catch-up pass does
+        // (`conflicts.md` § Skipped catch-up changes reach the review list →
+        // *The sites on an on-demand root*).
+        self.flush_skip_reports().await;
+        Ok(fold)
+    }
+
+    /// The fold's record of a change this root can never apply: the local
+    /// `catchup_failed` row, once per path ([`SyncDb::record_skipped_change`]);
+    /// its report goes out with the pass's [`Self::flush_skip_reports`].
+    fn record_fold_skip(
+        &self,
+        path: &str,
+        path_is_hash: bool,
+        path_sealed: Option<&[u8]>,
+        details: &str,
+    ) {
+        tracing::warn!(
+            reason = details,
+            "a change this on-demand root can never apply; recording it and placing the rest"
+        );
+        if let Err(e) =
+            self.db
+                .record_skipped_change(path, path_is_hash, path_sealed, Some(details))
+        {
+            tracing::warn!(error = ?e, "recording a skipped change failed");
+        }
+    }
+
+    /// The fold's local cure of every skip on record under `path` (by path, or
+    /// by its hash); the nest resolve goes out with the pass's
+    /// [`Self::flush_skip_reports`].
+    fn cure_in_fold(&self, path: &str) {
+        let hash_hex = hex::encode(fauna_core::sync::path_hash(path));
+        match self.db.cure_catchup_failures_for_path(path, &hash_hex) {
+            Ok(cured) if !cured.is_empty() => tracing::info!(
+                path = %fauna_core::log_redact::log_path(path),
+                "a later head of a skipped path reached this on-demand root; the skip is cured"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "curing a skipped path failed"),
+        }
+    }
+
+    /// What a hydration's outcome means for the path's skip record
+    /// (`conflicts.md` § Skipped catch-up changes reach the review list →
+    /// *The sites on an on-demand root*, (b)): a permanent refusal is recorded
+    /// and reported through the ordinary funnel — the row and the placeholder
+    /// stay; a success cures; a transient failure records nothing.
+    async fn note_hydration<T>(&self, relative_path: &str, outcome: &Result<T>) {
+        match outcome {
+            Ok(_) => self.cure_skipped_path(relative_path).await,
+            Err(err) => {
+                if let Some(reason) = fauna_core::apply_failure::permanent_reason(err) {
+                    self.record_and_report_skip(relative_path, false, None, reason)
+                        .await;
+                }
+            }
+        }
     }
 
     /// Re-pull the set from the nest **in session** and converge the local rows —
@@ -14100,6 +14399,11 @@ impl SyncEngine {
     /// [`Self::upload_file`]); the recorded manifest tracks the last *remote*
     /// version, which is exactly what a cloud-only placeholder carries — so this
     /// targets placeholder / remote entries, the cfapi case.
+    ///
+    /// The one shared hydration entry every binding fetches through, so it is
+    /// where an on-demand root first knows a permanent content refusal: the
+    /// fetch's outcome is noted on the path's skip record
+    /// ([`Self::note_hydration`]) before the error returns as before.
     pub async fn download_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>> {
         let entry = self.db.get_entry(relative_path)?.ok_or_else(|| {
             anyhow::anyhow!(
@@ -14113,14 +14417,16 @@ impl SyncEngine {
                 fauna_core::log_redact::log_path(relative_path)
             )
         })?;
-        let (bytes, manifest) = fauna_core::file_download::download_file_bytes_and_manifest(
+        let fetched = fauna_core::file_download::download_file_bytes_and_manifest(
             &self.blob_fetcher(),
             &self.download_keys_for_record(&manifest_hash),
             manifest_hash,
             entry.content_stamp,
             relative_path,
         )
-        .await?;
+        .await;
+        self.note_hydration(relative_path, &fetched).await;
+        let (bytes, manifest) = fetched?;
         // A hydrated body is one this seat holds: index it for the serve
         // (`file-sync.md` § Relay serving — an on-demand root serves what it
         // hydrated). Until the host marks the row hydrated the serve skips it.
@@ -14152,7 +14458,7 @@ impl SyncEngine {
                 fauna_core::log_redact::log_path(relative_path)
             )
         })?;
-        let (hash, manifest) = fauna_core::file_download::download_file_to_path_and_manifest(
+        let fetched = fauna_core::file_download::download_file_to_path_and_manifest(
             &self.blob_fetcher(),
             &self.download_keys_for_record(&manifest_hash),
             manifest_hash,
@@ -14160,7 +14466,9 @@ impl SyncEngine {
             relative_path,
             dest,
         )
-        .await?;
+        .await;
+        self.note_hydration(relative_path, &fetched).await;
+        let (hash, manifest) = fetched?;
         // As in [`Self::download_file_bytes`]: the hydrated body is indexed.
         self.index_held_body(relative_path, &manifest, entry.content_stamp);
         Ok(hash)
@@ -14763,6 +15071,25 @@ impl SyncEngine {
         entry.state == SyncState::Placeholder && entry.local_hash == Some(*disk)
     }
 
+    /// A stale cache that IS the recorded head — the proof names exactly these
+    /// bytes, and a head that moves clears the proof — is a recorded write
+    /// whose row the staging root's settle demoted to `Placeholder`, re-driven
+    /// by the OS after a lost ack (`p2p-shared-set-build.md` § *Built — iOS's
+    /// leg*). The upload path acks it as the `Synced` skip does, uploading
+    /// nothing: a decline would answer `recorded: false` and the OS would
+    /// re-drive the write forever. A restore's stale cache names a version the
+    /// head moved past, carries no matching proof, and stays declined.
+    fn placeholder_recorded_ack(
+        entry: &crate::db::SyncEntry,
+        disk: &ContentHash,
+    ) -> Option<ResealUpload> {
+        let manifest_hash = entry.manifest_hash?;
+        (entry.recorded_content_hash == Some(*disk)).then_some(ResealUpload {
+            manifest_hash,
+            recorded: true,
+        })
+    }
+
     /// The proof half of the gate: the row is `Synced`, the file is not a
     /// cloud-only placeholder, and its bytes hash to both the row's local
     /// identity and the content its recorded head reassembles to.
@@ -14839,6 +15166,36 @@ impl SyncEngine {
             return false;
         }
         Self::is_dehydration_safe_in(&self.db, relative_path, &self.watch_dir.join(relative_path))
+    }
+
+    /// Is the body at `relative_path` a second copy of bytes the nest already
+    /// serves, under a row that is ALREADY a placeholder — the local identity
+    /// and the recorded head both hash to exactly the disk bytes? The
+    /// [`Self::is_dehydration_safe`] proof for a row past its demotion: what a
+    /// staging root holds when the OS re-drives a recorded write the settle
+    /// already demoted, after a lost ack, and ingest acks it
+    /// ([`Self::placeholder_recorded_ack`]; `p2p-shared-set-build.md` §
+    /// *Built — iOS's leg*). The same holder-kept and group-set clauses
+    /// apply; a `Synced` row answers `false` here (that is the full gate's
+    /// case). Fail-closed on every error path.
+    pub fn is_recorded_placeholder_copy(&self, relative_path: &str) -> bool {
+        if self.nest_leg_absent {
+            return false;
+        }
+        let Ok(Some(entry)) = self.db.get_entry(relative_path) else {
+            return false;
+        };
+        if entry.state != SyncState::Placeholder || Self::holder_keeps(&self.db, &entry) {
+            return false;
+        }
+        let full_path = self.watch_dir.join(relative_path);
+        if crate::placeholder::path_is_cloud_placeholder(&full_path) {
+            return false;
+        }
+        match fauna_core::chunker_stream::content_hash_streaming(&full_path) {
+            Ok(disk) => entry.local_hash == Some(disk) && entry.recorded_content_hash == Some(disk),
+            Err(_) => false,
+        }
     }
 
     /// [`Self::is_dehydration_safe`] over a bare `db` and the file's `full_path` — for
@@ -17524,6 +17881,10 @@ impl crate::provider_face::ProviderEngine for SyncEngine {
 
     fn is_dehydration_safe(&self, rel: &str) -> bool {
         SyncEngine::is_dehydration_safe(self, rel)
+    }
+
+    fn is_recorded_placeholder_copy(&self, rel: &str) -> bool {
+        SyncEngine::is_recorded_placeholder_copy(self, rel)
     }
 
     fn holds_provisional_peer_body(&self, rel: &str) -> Result<bool> {

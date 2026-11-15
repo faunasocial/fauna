@@ -72,8 +72,13 @@ use crate::client::FaunaClient;
 /// shared lifecycle carries a payload rather than only a handle.
 static HOST: AccountRuntimeHost<tokio::runtime::Handle> = AccountRuntimeHost::new();
 
-/// Post-auth hook: assemble and start the account-store runtime for the
-/// signed-in account. GTK main thread; all I/O is spawned.
+/// Session-establishment hook (`app.rs`'s `SessionEstablished` arm, tui's
+/// `session::establish`): assemble and start the account-store runtime for the
+/// signed-in account, whether or not the nest answers — a launch with the nest
+/// down still hosts one, so a never-listed scope answers its first-listing
+/// refusal (`account-client-lifecycle.md` § The client-side lifecycle → *The
+/// first listing*). Once per session: a second call supersedes the first. GTK
+/// main thread; all I/O is spawned.
 ///
 /// Best-effort by construction — a failed assembly leaves every store-backed
 /// surface answering "the account runtime is not running" and the account's
@@ -147,6 +152,10 @@ pub fn install(
     // same two the deployment-seed custody leg takes at this edge.
     let ledger_nest = Arc::clone(fauna_client.nest_rpc());
     let ledger_tx = fauna_client.tx();
+    // Whether the session's post-auth edge has landed by the store-ready edge
+    // below: the runtime is hosted at session establishment, so either edge may
+    // land first, and the custody leg runs at the second.
+    let post_auth_landed = fauna_client.post_auth_landed();
     // The channel the store-change watch posts its notice into
     // (`crate::store_surfaces::watch`).
     let store_change_tx = fauna_client.tx();
@@ -230,12 +239,17 @@ pub fn install(
                     }
                     // The deployment-seed custody leg's store-ready edge
                     // (`box-recovery.md` § The plane-era recovery floor → *(c)
-                    // The writes*): the post-auth edge already landed (this
-                    // install runs from it, on its authenticated client), so
-                    // this edge is the second and runs the leg. Every later
-                    // post-auth edge re-runs it through
+                    // The writes*): it runs here only when the post-auth edge
+                    // has already landed — this install runs at session
+                    // establishment, before any bearer, so on a launch whose
+                    // nest is down the post-auth edge (`AuthSuccess`) is the
+                    // second and runs it there. Every later post-auth edge
+                    // re-runs it through
                     // `FaunaClient::run_deployment_seed_custody_leg`.
-                    if let Some(handle) = HOST.handle() {
+                    if let Some(handle) = HOST
+                        .handle()
+                        .filter(|_| post_auth_landed.load(std::sync::atomic::Ordering::SeqCst))
+                    {
                         tokio::spawn(crate::client::run_deployment_seed_custody_leg(
                             ledger_nest,
                             handle,

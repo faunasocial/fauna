@@ -81,6 +81,16 @@ where
         fauna_client_folders::decode_adoption_markers(raw.as_deref())
     }
 
+    /// One replica-local meta row beside the markers' — the projection walk's
+    /// claims (`succession-cut.md` ruling (11)(l)).
+    async fn adoption_walks(&self) -> anyhow::Result<Vec<fauna_client_folders::AdoptionWalk>> {
+        let handle = (self.source)().ok_or_else(|| anyhow::anyhow!(RUNTIME_ABSENT))?;
+        let raw = handle
+            .meta_get(fauna_client_folders::ADOPTION_WALKS_META_KEY)
+            .await?;
+        fauna_client_folders::decode_adoption_walks(raw.as_deref())
+    }
+
     /// One replica-local meta row per set, as the adoption markers' is.
     async fn refetch_requested_at(&self, channel_id: &[u8; 32]) -> anyhow::Result<Option<u64>> {
         let handle = (self.source)().ok_or_else(|| anyhow::anyhow!(RUNTIME_ABSENT))?;
@@ -185,6 +195,22 @@ where
                 key,
                 fauna_client_folders::encode_adoption_markers(&markers)?,
             )
+            .await
+    }
+
+    /// One replica-local meta row holds the list; the identity app's launch
+    /// pass is its only writer, so the read-modify-write races nothing.
+    async fn record_adoption_walk(
+        &self,
+        walk: fauna_client_folders::AdoptionWalk,
+    ) -> anyhow::Result<()> {
+        let handle = self.handle_for_write().await?;
+        let key = fauna_client_folders::ADOPTION_WALKS_META_KEY;
+        let mut walks =
+            fauna_client_folders::decode_adoption_walks(handle.meta_get(key).await?.as_deref())?;
+        fauna_client_folders::upsert_adoption_walk(&mut walks, walk);
+        handle
+            .meta_put(key, fauna_client_folders::encode_adoption_walks(&walks)?)
             .await
     }
 

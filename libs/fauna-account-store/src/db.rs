@@ -120,7 +120,14 @@ const CREATE_TABLES_SQL: &str = "
         -- root (fail closed). Cleared by every write that moves
         -- `manifest_hash` without naming a signer, so it never describes a
         -- head it was not recorded for.
-        head_signed_as  BLOB
+        head_signed_as  BLOB,
+        -- The `seq` of the peer delete a seat RESOLVED to backup declined on
+        -- this row (`file-sync.md` § 4, *A delete a backup seat declined stays
+        -- declined*): the on-demand fold reads the set's whole log, and does
+        -- not report a live row whose stamp is at or above its path's
+        -- batch-latest delete. NULL = no decline. Device-local; a stale stamp
+        -- under a newer head is inert (a later delete has a higher seq).
+        declined_delete_seq INTEGER
     );
 
     -- The SIGNER_BOUND hold (`writer-signed-change-records.md` ruling (11)(e)):
@@ -1009,6 +1016,24 @@ pub fn set_park(state_dir: &Path, folder_ref: FolderRef) -> Result<SetParkRead> 
     })
 }
 
+/// One group set's review list read from its state DB at rest — the
+/// cross-process WAL read [`set_park`] makes, answered by
+/// [`SyncDb::retained_conflicts`] (`group-set.md` § Build design — the group
+/// set, decision 9: the phone's read beside the agent's `ListSetConflicts`).
+/// No engine needs to run: on iOS the engine lives in the File Provider
+/// extension, and the app reads the rows it recorded here. A missing DB is a
+/// set never served: no rows.
+pub fn set_retained_conflicts(
+    state_dir: &Path,
+    folder_ref: FolderRef,
+) -> Result<Vec<fauna_core::sync::RetainedConflict>> {
+    let path = folder_ref.state_db_path(state_dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    SyncDb::open(&path)?.retained_conflicts()
+}
+
 fn entry_is_unrecorded(e: &SyncEntry) -> bool {
     match e.state {
         SyncState::LocallyModified | SyncState::Uploading | SyncState::Conflicted => true,
@@ -1342,6 +1367,10 @@ pub struct SyncEntry {
     /// [`SyncDb::set_head_signed_as`] and [`SyncDb::update_recorded_head`],
     /// cleared by [`SyncDb::upsert_entry`] whenever the manifest moves.
     pub head_signed_as: Option<[u8; 32]>,
+    /// The `seq` of the peer delete a resolved backup seat declined on this row
+    /// (`file-sync.md` § 4, *A delete a backup seat declined stays declined*);
+    /// `None` = no decline. Written by [`SyncDb::set_declined_delete_seq`] alone.
+    pub declined_delete_seq: Option<i64>,
 }
 
 /// The one `sync_entries` SELECT head every [`SyncEntry`] read shares, paired
@@ -1351,7 +1380,7 @@ const SYNC_ENTRY_SELECT: &str = "SELECT path, local_hash, remote_hash, manifest_
         local_mtime, remote_mtime, size_bytes, version_num,
         last_synced_at, pinned, content_key_version, owner_sealed,
         current_root_sealed, recorded_content_hash, thumbnail_hash, seen_on_disk,
-        head_signed_as, recorded_proof_origin, content_generation
+        head_signed_as, recorded_proof_origin, content_generation, declined_delete_seq
  FROM sync_entries";
 
 /// A stamp's `content_key_version` column — the folder family's arm.
@@ -1417,6 +1446,7 @@ fn map_sync_entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncEntry> {
         head_signed_as: row
             .get::<_, Option<Vec<u8>>>(17)?
             .and_then(|b| b.try_into().ok()),
+        declined_delete_seq: row.get(20)?,
     })
 }
 
@@ -2164,6 +2194,22 @@ impl SyncDb {
                 params![thumbnail_hash, path],
             )
             .context("set thumbnail_hash")?;
+        Ok(())
+    }
+
+    /// Stamp `path`'s row with the `seq` of the peer delete a resolved backup
+    /// seat declined on it (`file-sync.md` § 4, *A delete a backup seat declined
+    /// stays declined*). Never lowers a stamp already there. A missing row is a
+    /// no-op.
+    pub fn set_declined_delete_seq(&self, path: &str, seq: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE sync_entries
+                 SET declined_delete_seq = MAX(COALESCE(declined_delete_seq, ?1), ?1)
+                 WHERE path = ?2",
+                params![seq, path],
+            )
+            .context("set declined_delete_seq")?;
         Ok(())
     }
 
@@ -2947,6 +2993,25 @@ impl SyncDb {
         Ok(cured)
     }
 
+    /// The handles every unresolved skip row is filed under — the plaintext
+    /// `path`, or the change row's `path_hash` when its sealed path never
+    /// opened. One read per placeholder fold, so the fold asks the db to cure
+    /// only a path that has something to cure.
+    pub fn unresolved_catchup_failure_paths(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT path FROM sync_conflicts
+                 WHERE conflict_type = ?1 AND resolved_at IS NULL",
+            )
+            .context("prepare unresolved skip paths")?;
+        let rows = stmt
+            .query_map(params![CATCHUP_FAILED], |row| row.get::<_, String>(0))
+            .context("query unresolved skip paths")?;
+        rows.collect::<rusqlite::Result<_>>()
+            .context("read unresolved skip paths")
+    }
+
     /// Cured skip rows whose nest row is still open: the candidate-free
     /// `conflicts.resolve` for their `nest_id` has not landed yet.
     pub fn list_catchup_failures_owing_nest_resolve(&self) -> Result<Vec<SkippedChange>> {
@@ -3239,6 +3304,28 @@ impl SyncDb {
     /// that burns, and a burn that does not persist is a replay window.
     pub fn set_audience_attestation_memory(&self, row: &str) -> Result<()> {
         self.meta_put("audience_attestation_memory", row)
+    }
+
+    /// The set's **binding record**, sealed and hex-encoded as it rests
+    /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host,
+    /// decision 2″ (2)): one `meta` row, written by the engine builder and
+    /// opened only by it (`fauna_sync_engine::binding_record`). `None` = no
+    /// record — this host never built the set with a nest in reach, or the
+    /// last read retired it.
+    pub fn binding_record(&self) -> Result<Option<String>> {
+        self.meta_get("binding_record")
+    }
+
+    /// Replace the set's binding record (the write half of
+    /// [`Self::binding_record`]) — one row, atomic with the DB's own write.
+    pub fn set_binding_record(&self, sealed_hex: &str) -> Result<()> {
+        self.meta_put("binding_record", sealed_hex)
+    }
+
+    /// Remove the set's binding record — a read found the row gone, or the
+    /// row itself refused the build (decision 2″ (3)).
+    pub fn clear_binding_record(&self) -> Result<()> {
+        self.meta_del("binding_record")
     }
 
     /// The website-serving shape this device last CONVERGED this folder's
@@ -5575,6 +5662,40 @@ mod tests {
 
         db.clear_access_revoked().unwrap();
         assert_eq!(set_park(state_dir, set).unwrap().access_revoked_at, None);
+    }
+
+    /// The phone's review-list read (`group-set.md` decision 9): a set with no
+    /// DB has no rows; a concurrent loss the host recorded is read at rest,
+    /// while a superseded retention (decision 10) never is.
+    #[test]
+    fn set_retained_conflicts_reads_the_hosts_unresolved_losses_at_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let set = FolderRef::Group([7; 32]);
+        assert!(set_retained_conflicts(state_dir, set).unwrap().is_empty());
+
+        let db = SyncDb::open(set.state_db_path(state_dir)).unwrap();
+        let loser = |path: &str, superseded| RetainedLoser {
+            path: path.into(),
+            winner_author: Some("aa".into()),
+            winner_device: Some("bb".into()),
+            winner_created_at: 1,
+            winner_manifest: Some("cc".into()),
+            retained_manifest: "dd".into(),
+            superseded,
+        };
+        let id = db
+            .record_retained_loser(&loser("lost.txt", false))
+            .unwrap()
+            .unwrap();
+        db.record_retained_loser(&loser("seen.txt", true)).unwrap();
+
+        let rows = set_retained_conflicts(state_dir, set).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].id, rows[0].path.as_str()), (id, "lost.txt"));
+
+        db.resolve_conflict(id).unwrap();
+        assert!(set_retained_conflicts(state_dir, set).unwrap().is_empty());
     }
 
     /// The capability host's built access outlives the connection that wrote

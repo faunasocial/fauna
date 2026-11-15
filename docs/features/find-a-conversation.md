@@ -38,7 +38,7 @@ Stamped 2026-09-19 at e9152e3330.
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+1703723b standalone |
+| tui | ✅ full | 0.1.6-dev+ca5c8cfc standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 

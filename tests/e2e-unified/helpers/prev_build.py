@@ -364,7 +364,10 @@ PIPELINE_CELLS = (CELL_IMAGE_UPGRADE_SMOKE,)
 #: Outside `GRID_CELLS` because it is no skew-grid cell: no app, no fixture shared with
 #: the grid. **A future at-rest break inside the 0.1.x window** (`version-compatibility.md`
 #: § Dimension 2, the fifth exception) turns it red until the pin passes the break — the
-#: honest signal; the break's entry here names this cell.
+#: honest signal; the break's entry here names this cell. Its image twin
+#: (`tests/platform/docker/test_nest_image_upgrade.py`: the pinned release's IMAGE seeded
+#: by the same harness, a later image on the same volume) is the same hop and carries the
+#: same cell.
 CELL_NEST_DATA_UPGRADE = "nest_data_upgrade"
 UPGRADE_CELLS = (CELL_NEST_DATA_UPGRADE,)
 _UPGRADE = frozenset(UPGRADE_CELLS)

@@ -13,6 +13,8 @@ import com.fauna.app.core.feed.FeedManagerHost
 import com.fauna.app.core.feed.InlineVideoPlayback
 import com.fauna.app.core.feed.PostMediaOpen
 import com.fauna.app.payments.resolvePostTipsIfBuilt
+import com.fauna.app.payments.salePriceSave
+import com.fauna.app.payments.salePriceTierLoad
 import com.fauna.ffi.FfiCueTracker
 import com.fauna.ffi.FfiFeedManager
 import com.fauna.ffi.FfiPostBlobHome
@@ -25,6 +27,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_core.ContentLabelEntry
 import uniffi.fauna_core.RenderBlock
+import com.fauna.app.payments.nostrAdvertisePost
+import com.fauna.app.payments.salePriceSave
+import com.fauna.app.payments.salePriceTierLoad
 import uniffi.fauna_feed.AttachedFile
 import uniffi.fauna_feed.CueObservation
 import uniffi.fauna_feed.FactorWeightInput
@@ -323,6 +328,109 @@ class FeedVM @Inject constructor(
         }
     }
 
+    // ── The own-post Nostr advertisement pair (`monetization.md` § The Nostr
+    // advertisement of a sold post → *What the author sees and agrees to*;
+    // reference painter tui's `nostr_advertise_verbs`). ──
+
+    /**
+     * The nest's `nostr-advertise` capability, read once per session when an
+     * own post's menu first renders ([ensureNostrAdvertise]). `null` = unread:
+     * no *Advertise* verb rather than one that may only ever refuse. A failed
+     * read stays `null`, so the next render asks again.
+     */
+    private val _nostrAdvertiseSupported = MutableStateFlow<Boolean?>(null)
+    val nostrAdvertiseSupported: StateFlow<Boolean?> = _nostrAdvertiseSupported.asStateFlow()
+    private var nostrAdvertiseReading = false
+
+    fun ensureNostrAdvertise() {
+        if (_nostrAdvertiseSupported.value != null || nostrAdvertiseReading) return
+        nostrAdvertiseReading = true
+        viewModelScope.launch {
+            _nostrAdvertiseSupported.value =
+                runCatching { api.nestRpc().nostrAdvertise().advertiseSupported() }.getOrNull()
+            nostrAdvertiseReading = false
+        }
+    }
+
+    /**
+     * Which arm of the pair [post]'s ⋯ overflow offers — the shared
+     * `post_nostr_advertise_verb`, never re-derived here. `canAdvertise` is
+     * this build's `zaps` member AND the nest's capability AND [confirmBody]
+     * (the confirm step's public consequence sentence, read from the catalog
+     * at run time — until its public-texts round lands no app offers the act).
+     */
+    fun nostrAdvertiseVerbFor(
+        post: uniffi.fauna_feed.PostSummary,
+        supported: Boolean?,
+        confirmBody: String?,
+    ): uniffi.fauna_feed.NostrAdvertiseVerb? {
+        val viewer = ownActorIdHex() ?: return null
+        val canAdvertise = com.fauna.app.payments.NOSTR_ADVERTISE_BUILT && supported == true && confirmBody != null
+        return uniffi.fauna_feed.postNostrAdvertiseVerb(post, viewer, canAdvertise)
+    }
+
+    /**
+     * Nostr-advertisement failures — a separate channel like [deleteError]: a
+     * refusal (not sold, no price, no linked key, no custodial key) mutates no
+     * page state, and it MUST reach `error-message`. Carries the localized line.
+     */
+    private val _advertiseError = MutableStateFlow<String?>(null)
+    val advertiseError: StateFlow<String?> = _advertiseError.asStateFlow()
+
+    /** `fauna.nostr.advertise.set`, then a feed re-read so the card's
+     *  `nostrAdvertisedAt` — and with it the pair — repaints from the nest. */
+    fun advertisePostOnNostr(postId: String, errorText: (String) -> String) {
+        viewModelScope.launch {
+            _advertiseError.value = null
+            runCatching { api.nostrAdvertisePost(postId) }
+                .onFailure { _advertiseError.value = errorText(it.message ?: it.toString()) }
+            reload()
+        }
+    }
+
+    /** `fauna.nostr.advertise.clear` — one tap, then the same re-read. */
+    fun stopAdvertisingPostOnNostr(postId: String, errorText: (String) -> String) {
+        viewModelScope.launch {
+            _advertiseError.value = null
+            runCatching { api.nestRpc().nostrAdvertise().clearAdvertisement(postId) }
+                .onFailure { _advertiseError.value = errorText(it.message ?: it.toString()) }
+            reload()
+        }
+    }
+
+    // ── The sold post's *Change price...* dialog (`monetization.md` § The asking
+    // price -> *Re-pricing a sold post*; reference painter tui's
+    // `sale_price_verbs`). The money plane's: every FFI symbol sits behind the
+    // `src/payments` / `src/noPayments` glue. ──
+
+    /** Whether this post offers *Change price...*: an own post that is sold.
+     *  An advertised one is offered too; the dialog paints
+     *  `sale_price.advertised_note` for it. */
+    fun postOffersSalePriceVerb(post: uniffi.fauna_feed.PostSummary): Boolean {
+        if (!com.fauna.app.payments.SALE_PRICE_BUILT) return false
+        val viewer = ownActorIdHex() ?: return false
+        return post.author == viewer &&
+            com.fauna.app.payments.postOffersSalePrice(post)
+    }
+
+    /** The author's own selling tier, for the dialog's pre-fill. Throws on a
+     *  failed read; the caller shows `sale_price.error_load`. */
+    suspend fun loadSalePriceTier(tierName: String): com.fauna.app.payments.SalePriceTier =
+        api.salePriceTierLoad(tierName)
+
+    /** Save through the shared plan; a closed answer re-reads the feed so the
+     *  card repaints from the nest. Throws on a nest refusal; the caller shows
+     *  `sale_price.error_save`. */
+    suspend fun saveSalePrice(
+        tier: com.fauna.app.payments.SalePriceTier,
+        hint: String,
+        asking: String,
+    ): com.fauna.app.payments.SalePriceSaveResult {
+        val result = api.salePriceSave(tier, hint, asking)
+        if (result is com.fauna.app.payments.SalePriceSaveResult.Closed) reload()
+        return result
+    }
+
     fun copyPostWebLink(postId: String, slug: String) = webPublishStore.copyWebLink(postId, slug)
 
     fun copyPostPaywallLink(postId: String, slug: String) = webPublishStore.copyPaywallLink(postId, slug)
@@ -572,6 +680,25 @@ class FeedVM @Inject constructor(
         }
     }
 
+    /** The sold post's payment link (`gated-post-payment-link`) — the shared
+     *  `pay_unlock_offer`: the subscribe to the offer's tier goes FIRST (across
+     *  nests at the post's home), then [open] receives the checkout URL the
+     *  shared rule composes, so the external checkout is bound to the buyer's
+     *  actor (`monetization.md` § Pillar 3 → *Buyer↔actor binding (Q4)*, the
+     *  Q13 rules (1) and (2); tui's `Op::PayUnlockOffer`). `null` opens nothing
+     *  (no resolved offer or link, an own post, an unsafe link); a refused
+     *  subscribe surfaces on [buyUnlockError] — the buy button's banner — and
+     *  opens nothing. The caller has already refused an unsafe URL and passes
+     *  the app's one opener ([com.fauna.app.core.UrlOpener]) as [open]. */
+    fun payUnlockOffer(postId: String, open: (String) -> Unit) {
+        val m = manager() ?: return
+        viewModelScope.launch {
+            runCatching { m.payUnlockOffer(postId) }
+                .onSuccess { url -> url?.let(open) }
+                .onFailure { _buyUnlockError.value = it.message ?: "buy failed" }
+        }
+    }
+
     /** Resolve link-preview metadata for [url] (render-model.md § D4) — calls
      *  `fauna.linkpreview.resolve` once per url (cached), folds the `Resolved`/`Failed`
      *  state onto the post document's `LinkPreview` block, and re-emits so the feed
@@ -675,6 +802,12 @@ class FeedVM @Inject constructor(
     /** The capture tracker of the current auth ([FeedManagerHost.cueTracker]),
      *  or null before the manager exists. */
     fun cueTracker(): FfiCueTracker? = host.manager()?.let { host.cueTracker(it) }
+
+    /** The feed selection the timeline shows now
+     *  ([FfiFeedManager.cueSelectionKey], the shared spelling), or null before
+     *  the manager exists — the key the cue capture hands
+     *  [FfiCueTracker.noteSelection] so a feed switch ends every exposure. */
+    fun cueSelectionKey(): String? = host.manager()?.cueSelectionKey()
 
     /** Force a put of any unsaved cues — the background / app-close flush. The
      *  cue put is debounced (`CUE_PUT_DEBOUNCE_S`), so without this the tail of
@@ -945,6 +1078,19 @@ class FeedVM @Inject constructor(
         val staged = compose.attachedFile
         val sell = compose.sell
         val attachmentBytes = host.pendingAttachmentBytes()
+        // The one text -> sats rule, read once for both sell phases
+        // (`compose_sell_asking_price_sats`, shared with the *Change price...*
+        // dialog): a mistyped price is refused here — already stamped on
+        // `compose-error`, nothing minted — never read as "no price".
+        val askingPriceSats: ULong? = if (sell != null) {
+            try {
+                m.composeSellAskingPriceSats()
+            } catch (e: Exception) {
+                return false
+            }
+        } else {
+            null
+        }
         val sealed = try {
             // ── 1. The audience is already final ──
             // It decides the seal, and it was staged on the manager pick by pick,
@@ -956,7 +1102,7 @@ class FeedVM @Inject constructor(
             // live is a no-op, so a retry is safe). Only when there IS an
             // attachment: with none, `prepare_sell_post` runs it inline.
             if (sell != null && attachmentBytes != null) {
-                m.stageSellTier(sell.subscribersGetItFree, sell.askingPriceSats())
+                m.stageSellTier(sell.subscribersGetItFree, askingPriceSats)
             }
 
             // ── 2. Seal the attachment for that audience, THEN upload it ──
@@ -974,7 +1120,7 @@ class FeedVM @Inject constructor(
                     sell.subscribersGetItFree,
                     // The same asking price `stage_sell_tier` got above: phase one
                     // decides the tier's rank, so the two must agree.
-                    sell.askingPriceSats(),
+                    askingPriceSats,
                 )
             } else {
                 m.prepareGatedBlob()
@@ -1001,22 +1147,6 @@ class FeedVM @Inject constructor(
                 .also { if (it) host.stageAttachmentBytes(null) }
         }
     }
-
-    /**
-     * `compose-sell-asking-price` as whole sats, or `null` for "no machine
-     * price" (the minted tier stays a tip target forever, never a purchase —
-     * `monetization.md` § The asking price). Empty or unparseable both mean
-     * none, exactly as tui's `asking_price.trim().parse::<u64>().ok()` and
-     * windows' `s.AskingPrice` do; `prepare_sell_post` owns the sats→msat
-     * conversion and the overflow refusal, so this is a plain text→u64 parse.
-     *
-     * One helper because [submitPost] must hand the SAME value to
-     * `stage_sell_tier` and `prepare_sell_post` — phase one decides the tier's
-     * rank, so a disagreement between the two would let the sale change arms
-     * after the photo had already sealed.
-     */
-    private fun SellComposeState.askingPriceSats(): ULong? =
-        askingPrice.trim().toULongOrNull()
 
     // ── Gated-post authoring / unlock (feed.md § Encryption at rest) ──────────
 
@@ -1081,6 +1211,28 @@ class FeedVM @Inject constructor(
     // pick the new number up. A comment naming a sibling app's behaviour is a
     // claim with no test behind it — `test_like_moves_its_own_count` is the test
     // this one lacked.
+
+    /** The feed's unsent re-read edge (account-offline-mutation.md § The
+     *  unsent-changes surface): the outbox's drains tell the app nothing, so
+     *  while the feed is composed (the caller's `LaunchedEffect` scope,
+     *  cancelled when it leaves) the like intents are re-read every ~2 s,
+     *  the first at once — `refreshUnsentLikes` notifies when a heart's
+     *  `likeState` moved, and the snapshot repaints. A local store read; no
+     *  nest is needed. tui's `session::spawn_unsent_refresh` is the twin. */
+    suspend fun refreshUnsentLikesWhileShown() {
+        while (true) {
+            manager()?.let { m ->
+                try {
+                    m.refreshUnsentLikes()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.d("FeedVM", "unsent likes not re-read: ${e.message}")
+                }
+            }
+            kotlinx.coroutines.delay(2_000L)
+        }
+    }
 
     // Like/unlike is a TOGGLE, not a one-way interact (feed.md § Interaction
     // bar → Repost's viewer_liked carrier; "the like button became a toggle

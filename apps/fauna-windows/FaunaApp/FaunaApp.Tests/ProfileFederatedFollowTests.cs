@@ -20,7 +20,7 @@ public class ProfileFederatedFollowTests
         var rpc = new MockNestRpcClient();
         var vm = new ProfileViewModel(rpc, BobHex, isSelf: false, home: Home);
 
-        await vm.FollowAsync();
+        await vm.ToggleFollowAsync();
 
         Assert.Equal("followers", rpc.LastSubscribe?.Tier);
         Assert.Equal(Home, rpc.LastSubscribeHome);

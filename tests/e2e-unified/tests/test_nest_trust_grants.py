@@ -706,3 +706,447 @@ def test_a_subscribed_labelers_trust_renews_with_its_epoch_keys(
     assert texts and texts[0].startswith(renewed_prefix) and short in texts[0], (
         f"the newest History row must be this labeler's renew, got {texts!r}"
     )
+
+
+
+def _deliver_inbound(mx_port: int, server_name: str, recipient_addr: str,
+                     raw: bytes, deadline: float) -> None:
+    """One real inbound SMTP transaction through the MTA's STARTTLS listener;
+    returns after the `250` on `.`, sent once the nest committed the seal +
+    store (the `test_search_local_index.py` shape)."""
+    from helpers.mail_wire import _connect_smtp_starttls
+
+    with _connect_smtp_starttls(mx_port, server_name, deadline) as conn:
+        conn.cmd("MAIL FROM:<sender@external.test>", "250", deadline)
+        conn.cmd(f"RCPT TO:<{recipient_addr}>", "250", deadline)
+        conn.cmd("DATA", "354", deadline)
+        conn.send_raw(raw)
+        conn.cmd(".", "250", deadline)
+        conn.cmd("QUIT", "221", deadline)
+
+
+@pytest.mark.feature("nests-and-trust")
+def test_keeping_your_mail_searchable_on_your_nest_states_its_bound_and_revoking_deletes_the_copy(
+    logged_in_app, mail_bridge_mta, nest_instance, test_user
+):
+    """Outcome 31: the owner lets their nest keep their mail searchable, told
+    plainly — before the confirm — what it will read and keep; the nest's
+    search finds their mail by a body phrase; revoking deletes the copy.
+
+    `nests.md` § Trust facet — grants → *Mint* → *The materialization option*
+    and § Honest bound (the third regime); the grant's shape and the area are
+    `capability-grants.md` § Capability tiering → *The materialization
+    grant*, parts (c), (d) and (f). Every gesture is the app UI's
+    (convention 8). The nest arm is asserted by the nest's own
+    `fauna.search.query` reply as the owner — the app's local index would find
+    the same mail, so the Search page cannot tell the two arms apart — and the
+    area `__materialized/<actor>/` is read from outside, the way the trust
+    tests read `capability_grants`.
+    """
+    from pathlib import Path
+
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.mail_aliases import add_exact_alias
+    from helpers.materialized_views import INDEXED_S, grant_ids, hits, wait_hits
+
+    app = logged_in_app
+    app.nest_trust.require_materialize_note_supported()
+    owner_hex = test_user["actor_id_hex"]
+    owner_id = bytes.fromhex(owner_hex)
+    owner_seed = bytes(test_user["signing_key"])
+    db_path = nest_instance["db_path"]
+    area = Path(db_path).parent / "__materialized" / owner_hex
+
+    # ── Arrange: mail on (the MSEK the option's payload derives from) and an
+    # address the MTA routes to the owner.
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+    local_part = f"keep{uuid.uuid4().hex[:10]}"
+    address = f"{local_part}@{mail_bridge_mta.domain}"
+    add_exact_alias(nest_instance["url"], test_user["signing_key"],
+                    mail_bridge_mta.domain, local_part)
+
+    app.linked_nests.navigate()
+    assert app.linked_nests.is_page_visible(), (
+        f"Nests page not reachable. error: {app.error_text()!r}"
+    )
+    assert app.nest_trust.mint_button_present(), (
+        "mail enabled + the nest's own materializer on the roster ⇒ the "
+        f"materialization option derives. error: {app.error_text()!r}"
+    )
+    before = app.nest_trust.grant_count()
+    grants_before = grant_ids(db_path, owner_id)
+
+    try:
+        # ── The note is the option's alone: with nothing picked there is none
+        # (an ordinary option's absence is pinned by the tui unit test
+        # `the_materialization_option_states_its_bound_before_the_confirm`;
+        # the shared nest enrolls no `mda` holder, so the mail option does not
+        # derive here).
+        app.nest_trust.open_mint()
+        assert app.nest_trust.mint_note_absent(), (
+            "no option picked ⇒ no mint-time note — absent, not empty"
+        )
+
+        # ── Act: pick "Keep my mail searchable on this nest" — its honesty
+        # copy renders before the confirm, the standard window pre-selected.
+        app.nest_trust.select_scope(app.nest_trust.MATERIALIZE_MAIL_LABEL)
+        note = app.nest_trust.mint_note_text()
+        assert note == S.nests.mint_materialize_note, (
+            "the materialization option states its bound before the confirm "
+            f"(capability-grants.md part (f)); got {note!r}"
+        )
+        assert app.nest_trust.duration_selected() == app.nest_trust.STANDARD_LABEL, (
+            "a view is standing by nature: the option pre-selects the standard window"
+        )
+        app.nest_trust.confirm_mint()
+        assert app.nest_trust.wait_for_grant_count(before + 1), (
+            f"the materialization grant never rendered. error: {app.error_text()!r}"
+        )
+
+        # ── The row: its scope label and the third honest-bound regime.
+        texts = [
+            (app.nest_trust.grant_scope_text(j), app.nest_trust.grant_bound_note_text(j))
+            for j in range(app.nest_trust.grant_count())
+        ]
+        rows = [j for j, (scope, _) in enumerate(texts)
+                if S.nests.scope_materialize_mail in scope]
+        assert len(rows) == 1, f"one row names the searchable copy; rows {texts!r}"
+        row = rows[0]
+        assert texts[row][1] == S.nests.bound_note_materialize_mail, (
+            "the row carries the materialization bound (nests.md § Honest bound); "
+            f"got {texts[row]!r}"
+        )
+
+        with WsRpcAdminClient(nest_instance["url"], actor_id=owner_id,
+                              signing_key=owner_seed) as owner_ws:
+            # ── A mail arrives; the nest's own search finds it by a body phrase.
+            nonce = f"reedwarbler{time.time_ns()}"
+            raw = (
+                "From: External Sender <sender@external.test>\r\n"
+                f"To: {address}\r\n"
+                "Subject: Field notes\r\n"
+                f"Message-ID: <{nonce}@external.test>\r\n"
+                "Date: Fri, 13 Nov 2026 12:00:00 +0000\r\n"
+                "\r\n"
+                f"The {nonce} sang from the reeds at dawn.\r\n"
+            ).encode()
+            _deliver_inbound(mail_bridge_mta.mx_port, mail_bridge_mta.domain,
+                             address, raw, time.monotonic() + 60.0)
+            found = wait_hits(owner_ws, nonce, "mail")
+            assert len(found) == 1, (
+                "the nest's search must find the delivered mail by a body phrase "
+                f"within {INDEXED_S}s; mail hits {found!r}; "
+                + _materialized_diagnosis(owner_ws, area, nonce)
+            )
+            assert found[0]["content_id"] == f"<{nonce}@external.test>", found[0]
+            assert area.is_dir(), f"the materialized area must exist at {area}"
+
+            # ── Revoke from the row: Now drops it, History keeps it, the
+            # nest's copy is gone.
+            app.nest_trust.revoke(row)
+            deadline = time.monotonic() + _UI_S
+            while time.monotonic() < deadline and app.nest_trust.grant_count() != before:
+                time.sleep(0.5)
+            assert app.nest_trust.grant_count() == before, (
+                "the revoked grant leaves the Now lens; "
+                f"{app.nest_trust.grant_count()} row(s). error: {app.error_text()!r}"
+            )
+            deadline = time.monotonic() + _UI_S
+            while time.monotonic() < deadline and area.exists():
+                time.sleep(0.25)
+            assert not area.exists(), f"revoke must delete the nest's copy at {area}"
+            assert hits(owner_ws, nonce, "mail") == [], (
+                "after revoke the nest's search no longer finds the mail"
+            )
+
+        app.nest_trust.show_history()
+        history = app.nest_trust.history_texts()
+        assert sum(S.nests.scope_materialize_mail in t for t in history) >= 2, (
+            f"History keeps the mint and the revoke; got {history!r}"
+        )
+    finally:
+        # Cleanup only — the session user is shared, so a failed run must not
+        # leave its nest reading their mail. Revokes just this test's grants.
+        leftover = grant_ids(db_path, owner_id) - grants_before
+        if leftover:
+            with WsRpcAdminClient(nest_instance["url"], actor_id=owner_id,
+                                  signing_key=owner_seed) as ws:
+                for grant_id in leftover:
+                    ws.call("fauna.capabilities.revoke", {"grant_id": grant_id})
+
+
+
+# The calendar and card twins of outcome 31 (`nests.md` § Trust facet —
+# grants → *Mint* → *The materialization option*: one option per kind, never
+# an umbrella option). Per kind: the option label, the mint-time note, the
+# row's scope label and bound note, the search `content_type`, and the other
+# kind whose view must stand through this kind's revoke.
+_KINDS = {
+    "calendar": dict(
+        label=S.nests.mint_option_materialize_calendar,
+        note=S.nests.mint_materialize_calendar_note,
+        scope=S.nests.scope_materialize_calendar,
+        bound=S.nests.bound_note_materialize_calendar,
+        content_type="calendar",
+        other="card",
+    ),
+    "card": dict(
+        label=S.nests.mint_option_materialize_card,
+        note=S.nests.mint_materialize_card_note,
+        scope=S.nests.scope_materialize_card,
+        bound=S.nests.bound_note_materialize_card,
+        content_type="contact",
+        other="calendar",
+    ),
+}
+
+
+def _mint_kind_from_the_home_row(app, kind: str) -> int:
+    """Mint one kind's "keep searchable" option through the trust facet,
+    asserting its own note before the confirm and the standard window; return
+    the index of the row that names this kind's copy, its bound asserted."""
+    spec = _KINDS[kind]
+    before = app.nest_trust.grant_count()
+    app.nest_trust.open_mint()
+    app.nest_trust.select_scope(spec["label"])
+    note = app.nest_trust.mint_note_text()
+    assert note == spec["note"], (
+        f"the {kind} option states its own bound before the confirm "
+        f"(capability-grants.md part (f)); got {note!r}"
+    )
+    assert app.nest_trust.duration_selected() == app.nest_trust.STANDARD_LABEL, (
+        f"a {kind} view is standing by nature: the option pre-selects the standard window"
+    )
+    app.nest_trust.confirm_mint()
+    assert app.nest_trust.wait_for_grant_count(before + 1), (
+        f"the {kind} materialization grant never rendered. error: {app.error_text()!r}"
+    )
+    return _row_naming(app, kind)
+
+
+def _row_naming(app, kind: str) -> int:
+    """The one grant row that names this kind's copy, its bound asserted."""
+    spec = _KINDS[kind]
+    texts = [
+        (app.nest_trust.grant_scope_text(j), app.nest_trust.grant_bound_note_text(j))
+        for j in range(app.nest_trust.grant_count())
+    ]
+    rows = [j for j, (scope, _) in enumerate(texts) if spec["scope"] in scope]
+    assert len(rows) == 1, f"one row names the {kind} copy; rows {texts!r}"
+    assert texts[rows[0]][1] == spec["bound"], (
+        f"the {kind} row carries its own kind's bound beside Revoke "
+        f"(nests.md § Honest bound); got {texts[rows[0]]!r}"
+    )
+    return rows[0]
+
+
+def _save_one_record(kind: str, port: int, login: str, password: str,
+                     phrase: str) -> str:
+    """Save one event (or card) the way a person's calendar (contacts) app
+    does — a DAV PUT over HTTPS to the MDA, which seals it to the owner's key
+    of that kind — and return the hex `uid_hash` the nest keys the hit by."""
+    import secrets
+
+    from helpers.materialized_views import uid_hash_hex
+
+    base = f"https://127.0.0.1:{port}"
+    if kind == "calendar":
+        from helpers.caldav_client import CalDAVClient
+
+        cal = CalDAVClient(base, login, password, verify=False)
+        cal.wait_until_serving()
+        cal_href = cal.personal_calendar()
+        uid = f"supper-{secrets.token_hex(6)}@e2e.test"
+        cal.put_event(cal_href, uid, (
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Fauna//e2e-trust//EN\r\n"
+            "BEGIN:VEVENT\r\n"
+            f"UID:{uid}\r\nDTSTAMP:20361108T120000Z\r\n"
+            "DTSTART:20361120T180000Z\r\nDTEND:20361120T200000Z\r\n"
+            "SUMMARY:Harvest supper\r\n"
+            f"DESCRIPTION:Bring the {phrase} for the long table.\r\n"
+            "END:VEVENT\r\nEND:VCALENDAR\r\n"
+        ))
+        href = cal.href_for_uid(cal_href, uid)
+        assert href, f"the saved event must be listed: {cal.event_hrefs(cal_href)!r}"
+        return uid_hash_hex(href, ".ics")
+    from helpers.carddav_client import CardDAVClient, build_vcard
+
+    book = CardDAVClient(base, login, password, verify=False)
+    book.wait_until_serving()
+    book_href = book.contacts_addressbook()
+    uid = f"urn:uuid:{secrets.token_hex(16)}"
+    book.put_card(book_href, uid, build_vcard(
+        uid, "Ada Millwright", note=f"Mends the {phrase} at the mill."))
+    saved = [c for c in book.list_cards(book_href) if c.uid == uid]
+    assert len(saved) == 1, f"the saved card must be listed: {book.uids(book_href)!r}"
+    return uid_hash_hex(saved[0].href, ".vcf")
+
+
+def _keep_kind_searchable_journey(kind, app, mail_bridge_mda, nest_instance,
+                                  test_user) -> None:
+    """The calendar / card journey: both kinds minted from the home row, each
+    with its own note before the confirm and its own bound on its row; a record
+    of this kind saved by a DAV app is found by the nest's own search; revoking
+    this kind from its row deletes `__materialized/<owner>/<kind>/` and leaves
+    the other kind's view standing.
+
+    Every gesture on the owner's side is the app UI's (convention 8): mail on,
+    the app password the DAV app signs in with, both mints and the revoke. The
+    nest arm is asserted by the nest's own `fauna.search.query` reply and the
+    area read from outside, as the mail journey (outcome 31) does — the Search
+    page could not tell the nest's copy from the app's local index.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.mail_aliases import add_exact_alias
+    from helpers.materialized_views import grant_ids, hits, kind_dir, wait_hits
+
+    spec = _KINDS[kind]
+    app.nest_trust.require_materialize_note_supported()
+    owner_hex = test_user["actor_id_hex"]
+    owner_id = bytes.fromhex(owner_hex)
+    owner_seed = bytes(test_user["signing_key"])
+    db_path = nest_instance["db_path"]
+    view = kind_dir(db_path, owner_hex, kind)
+    other_view = kind_dir(db_path, owner_hex, spec["other"])
+
+    # ── Arrange: mail on, and an app password the DAV app signs in with
+    # (`<address>+<credential id>`, mail-credentials.md § MUA-username).
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+    credential = f"dav{uuid.uuid4().hex[:8]}"
+    password = f"KeepSearchable{uuid.uuid4().hex[:8]}Aa1"
+    app.mail_settings.add_credential_plain(credential, password)
+    local_part = f"keep{kind}{uuid.uuid4().hex[:8]}"
+    add_exact_alias(nest_instance["url"], test_user["signing_key"],
+                    mail_bridge_mda.domain, local_part)
+    login = f"{local_part}+{credential}@{mail_bridge_mda.domain}"
+
+    app.linked_nests.navigate()
+    assert app.linked_nests.is_page_visible(), (
+        f"Nests page not reachable. error: {app.error_text()!r}"
+    )
+    assert app.nest_trust.mint_button_present(), (
+        "mail enabled + the nest's own materializer on the roster ⇒ the "
+        f"materialization options derive. error: {app.error_text()!r}"
+    )
+    before = app.nest_trust.grant_count()
+    grants_before = grant_ids(db_path, owner_id)
+
+    try:
+        # ── Act: the other kind first, then this kind — one option per kind,
+        # each its own note and its own row.
+        _mint_kind_from_the_home_row(app, spec["other"])
+        _mint_kind_from_the_home_row(app, kind)
+
+        with WsRpcAdminClient(nest_instance["url"], actor_id=owner_id,
+                              signing_key=owner_seed) as owner_ws:
+            # ── A DAV app saves a record; the nest's own search finds it.
+            phrase = f"quincelantern{kind}{time.time_ns()}"
+            want_id = _save_one_record(kind, mail_bridge_mda.caldav_port, login,
+                                       password, phrase)
+            found = wait_hits(owner_ws, phrase, spec["content_type"])
+            assert len(found) == 1, (
+                f"the nest's search must find the saved {kind} record by a phrase; "
+                f"hits {found!r}; unfiltered "
+                f"{owner_ws.call('fauna.search.query', {'query': phrase, 'limit': 20})!r}"
+            )
+            assert found[0]["content_id"] == want_id, found[0]
+            assert view.is_dir() and other_view.is_dir(), (
+                f"each granted kind keeps its own view: {view}, {other_view}"
+            )
+
+            # ── Revoke this kind from its row: Now drops it, its copy is
+            # gone, the other kind's view stands.
+            app.nest_trust.revoke(_row_naming(app, kind))
+            deadline = time.monotonic() + _UI_S
+            while time.monotonic() < deadline and app.nest_trust.grant_count() != before + 1:
+                time.sleep(0.5)
+            assert app.nest_trust.grant_count() == before + 1, (
+                f"the revoked {kind} grant leaves the Now lens; "
+                f"{app.nest_trust.grant_count()} row(s). error: {app.error_text()!r}"
+            )
+            deadline = time.monotonic() + _UI_S
+            while time.monotonic() < deadline and view.exists():
+                time.sleep(0.25)
+            assert not view.exists(), f"revoke must delete the nest's {kind} copy at {view}"
+            assert other_view.is_dir(), (
+                f"the {spec['other']} view rides its own grant and must stand: {other_view}"
+            )
+            assert hits(owner_ws, phrase, spec["content_type"]) == [], (
+                f"after revoke the nest's search no longer finds the {kind} record"
+            )
+            # ── Then the other kind, from its own row — through the app, so
+            # its grant log records the revoke too (a revoke behind the app's
+            # back would leave its row listed for the next journey).
+            app.nest_trust.revoke(_row_naming(app, spec["other"]))
+            deadline = time.monotonic() + _UI_S
+            while time.monotonic() < deadline and app.nest_trust.grant_count() != before:
+                time.sleep(0.5)
+            assert app.nest_trust.grant_count() == before, (
+                f"both materialization grants leave the Now lens; "
+                f"{app.nest_trust.grant_count()} row(s). error: {app.error_text()!r}"
+            )
+            deadline = time.monotonic() + _UI_S
+            while time.monotonic() < deadline and other_view.exists():
+                time.sleep(0.25)
+            assert not other_view.exists(), (
+                f"revoking the {spec['other']} grant deletes its copy at {other_view}"
+            )
+
+        app.nest_trust.show_history()
+        history = app.nest_trust.history_texts()
+        assert sum(spec["scope"] in t for t in history) >= 2, (
+            f"History keeps the {kind} mint and its revoke; got {history!r}"
+        )
+    finally:
+        # Cleanup only — the session user is shared, so no run may leave its
+        # nest reading their calendar or contacts. Revokes this test's grants.
+        leftover = grant_ids(db_path, owner_id) - grants_before
+        if leftover:
+            with WsRpcAdminClient(nest_instance["url"], actor_id=owner_id,
+                                  signing_key=owner_seed) as ws:
+                for grant_id in leftover:
+                    ws.call("fauna.capabilities.revoke", {"grant_id": grant_id})
+
+
+@pytest.mark.feature("nests-and-trust")
+def test_keeping_your_calendar_searchable_on_your_nest_states_its_bound_and_revoking_deletes_that_copy_alone(
+    logged_in_app, mail_bridge_mda, nest_instance, test_user
+):
+    """Outcome 32: the calendar twin of outcome 31 — see
+    `_keep_kind_searchable_journey`. `nests.md` § Trust facet — grants →
+    *Mint* → *The materialization option* and § Honest bound;
+    `capability-grants.md` § Capability tiering → *The materialization
+    grant*, parts (a), (c), (d) and (f)."""
+    _keep_kind_searchable_journey("calendar", logged_in_app, mail_bridge_mda,
+                                  nest_instance, test_user)
+
+
+@pytest.mark.feature("nests-and-trust")
+def test_keeping_your_contacts_searchable_on_your_nest_states_its_bound_and_revoking_deletes_that_copy_alone(
+    logged_in_app, mail_bridge_mda, nest_instance, test_user
+):
+    """Outcome 33: the card twin of outcome 31 — see
+    `_keep_kind_searchable_journey`. Same owner sections as outcome 32."""
+    _keep_kind_searchable_journey("card", logged_in_app, mail_bridge_mda,
+                                  nest_instance, test_user)
+
+
+def _materialized_diagnosis(ws, area, phrase: str) -> str:
+    """Convention 6: what the nest's view held when the search missed — the
+    area's walk cursor and skip count (a record the held key could not open),
+    and the unfiltered query's reply."""
+    state = area / "mail" / "state.db"
+    if not state.exists():
+        view = f"no view at {state} (area exists: {area.exists()})"
+    else:
+        conn = sqlite3.connect(f"file:{state}?mode=ro", uri=True, timeout=5.0)
+        try:
+            view = repr(conn.execute(
+                "SELECT hex(grant_id), format_version, cursor, skipped FROM area"
+            ).fetchall())
+        finally:
+            conn.close()
+    unfiltered = ws.call("fauna.search.query", {"query": phrase, "limit": 20})
+    return f"view state {view}; unfiltered reply {unfiltered!r}"

@@ -624,6 +624,21 @@ export async function vetoRecoveryReplacement(
   return rpc.recoveryVeto(secretHex, phrase);
 }
 
+/** The successor's owed-nests list (Settings Account hydrate); `null` = nothing owed. */
+export async function readOwedNests(
+  secretHex: string,
+): Promise<import('#lib/recovery-owed-nests').OwedNests | null> {
+  return rpc.recoveryOwedNests(secretHex);
+}
+
+/** Settle one owed entry at its keeper (`recovery-kit-owed-nest-dismiss-confirm-button`). */
+export async function dismissOwedNest(
+  secretHex: string,
+  entry: import('#lib/recovery-owed-nests').OwedNestEntry,
+): Promise<import('#lib/i18n/localized').LocalizedText | null> {
+  return rpc.recoveryDismissOwedNest(secretHex, entry);
+}
+
 /** The no-escrow repair (`recovery-kit-escrow-reseal-button`). */
 export async function resealRecoveryEscrow(
   secretHex: string,

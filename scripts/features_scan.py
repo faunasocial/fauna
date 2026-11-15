@@ -150,6 +150,10 @@ DRIVER_FACTORY_IMPORTS = frozenset({
     # a driver obtained through a SIBLING TEST MODULE's helper is a door this
     # closure cannot see, and the re-key journey read as launching no app.
     ("helpers.tui_headless_store", "headless_launch"),
+    # The device that outlives its box (the dead-saved-nest recovery journeys
+    # and "retiring keeps the recovery key"): the seat launches the app's
+    # driver itself, a process per launch or one reloaded tab.
+    ("helpers.box_recovery_launch", "SurvivingSeat"),
     # The seat rounds' whole setup (nest, account, set, `start_seats`), adopted
     # by import from its home module by journeys that need two seats of one
     # account (the linux on-demand hydrate journey) — the same door as above.
@@ -423,7 +427,10 @@ def _app_set(expr: ast.AST, scope: tuple, local: dict | None = None,
     intersection with `get_available_apps()` is the machine's, not the test's, so a
     bound on the set is exactly the columns the test can ever speak for.
     """
-    if depth > 8:
+    # A recursion guard, never a limit on the idioms: a helper calling a seat helper
+    # over a starred filtered constant that itself stars another constant is nine
+    # levels deep (the offline-share module's `_group_bind_apps()`).
+    if depth > 16:
         return None
     local = local or {}
     constants, functions = scope
@@ -444,8 +451,7 @@ def _app_set(expr: ast.AST, scope: tuple, local: dict | None = None,
         if len(expr.generators) != 1:
             return None
         gen = expr.generators[0]
-        if not (isinstance(gen.target, ast.Name) and isinstance(expr.elt, ast.Name)
-                and expr.elt.id == gen.target.id):
+        if not (isinstance(gen.target, ast.Name) and _yields_target(expr.elt, gen.target.id)):
             return None
         return _app_set(gen.iter, scope, local, depth + 1)
     if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) \
@@ -470,6 +476,22 @@ def _app_set(expr: ast.AST, scope: tuple, local: dict | None = None,
             return None
         return _app_set(returns[0].value, scope, bound, depth + 1)
     return None
+
+
+def _yields_target(elt: ast.AST, target: str) -> bool:
+    """Whether a comprehension element evaluates to its loop variable's app: the bare
+    name, `pytest.param(<name>, …)` (pytest's param carries its first argument as the
+    value — marks and an id ride beside it), or a conditional choosing between those
+    (`pytest.param(app, marks=…) if app == "ios" else app`)."""
+    if isinstance(elt, ast.Name):
+        return elt.id == target
+    if isinstance(elt, ast.IfExp):
+        return _yields_target(elt.body, target) and _yields_target(elt.orelse, target)
+    if isinstance(elt, ast.Call) and isinstance(elt.func, ast.Attribute) \
+            and elt.func.attr == "param" and isinstance(elt.func.value, ast.Name) \
+            and elt.func.value.id == "pytest" and len(elt.args) == 1:
+        return _yields_target(elt.args[0], target)
+    return False
 
 
 def _indirect(call: ast.Call, name: str) -> bool:

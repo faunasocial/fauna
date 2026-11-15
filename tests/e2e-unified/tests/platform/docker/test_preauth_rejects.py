@@ -657,7 +657,6 @@ def test_activitypub_unsigned_inbox_post_is_401(ap_nest):
     assert _unsigned_inbox_post(nest, json.dumps(activity).encode()) == 401
 
 
-@pytest.mark.xfail(strict=False, reason="waits on verify-before-fetch: the inbox fetches the actor its body names before verifying the signature")
 def test_activitypub_unsigned_inbox_post_makes_no_outbound_fetch(ap_nest):
     nest = ap_nest
     """M1: an unsigned POST naming an actor URL must not make the nest dial that

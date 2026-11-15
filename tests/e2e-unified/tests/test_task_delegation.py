@@ -328,7 +328,7 @@ def test_web_names_the_other_device_building_the_index(logged_in_app, nest_insta
     additionally cannot host tantivy), so the builder is always ANOTHER of the
     user's devices, and what a viewer owes is naming it on the row (§ UI
     surfaces — the page shows each kind's current runner). The android witness
-    has not been run yet — it needs the android venue.
+    has not been run yet — it needs the android emulator.
 
     The builder here is a stand-in device holding the ``index`` lease through
     the same ``fauna.delegation.heartbeat`` a builder seat sends for the

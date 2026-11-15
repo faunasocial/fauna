@@ -190,7 +190,10 @@ impl<R: RpcRequester> PaymentsClient<R> {
     /// code's home must see, never their nest's word for it — naming the nest
     /// this client is connected to as their home, and the nest relays it
     /// verbatim. An author hosted here is a local redeem whatever home is
-    /// named (the nest's first arm). Typed errors: those of
+    /// named (the nest's first arm). `author_id` is read only when a home is
+    /// named: a door with no creator in hand (`subscription-settings`) passes
+    /// `None` for the home and, by convention, the redeemer's own id. Typed
+    /// errors: those of
     /// [`Self::claims_redeem`], plus `fauna.payments.claim_admits_elsewhere`
     /// (a membership code redeemed from another nest).
     pub async fn claims_redeem_across_nests(

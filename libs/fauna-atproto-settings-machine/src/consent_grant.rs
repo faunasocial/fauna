@@ -95,6 +95,145 @@ pub trait ConsentFolderSeam: fauna_client_capabilities::OwnedSetNames {
     /// it is not one of the owner's folders or cannot be read now (the
     /// approve then refuses: fail closed).
     async fn folder_for_consent(&self, id: i64) -> Option<ConsentFolder>;
+
+    /// Every folder the owner owns, with what the card's folder picker
+    /// filters on ([`consent_folder_options_from`]) — `None` when custody or
+    /// the folder list cannot be read now (the picker then says so and
+    /// offers nothing: fail closed).
+    async fn folders_for_consent(&self) -> Option<Vec<ConsentFolderOption>>;
+}
+
+/// One owned folder as the card's folder picker sees it
+/// (`authorization-server.md` § Consent → *The card chooses the folder*):
+/// its row id, the owner's name for it, and the two facts eligibility reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentFolderOption {
+    /// The folder's row id — the qualifier the choice becomes.
+    pub id: i64,
+    /// The owner's name for it, from custody where the nest rests none.
+    pub name: String,
+    /// The folder's content residency is metadata-only — no deposit can land
+    /// in it (`FolderSummary::is_metadata_only`, fail-closed).
+    pub metadata_only: bool,
+    /// The owner's custody marks the set served — what a folder read takes
+    /// (`webdav-server.md` § Key model → *A principal's read*).
+    pub served_by_custody: bool,
+}
+
+/// The custody fold behind [`ConsentFolderSeam::folders_for_consent`]: every
+/// owned row of `rows`, named from `custody`, with its residency and its
+/// served state from custody. A member row is never offered.
+#[must_use]
+pub fn consent_folder_options_from(
+    rows: Vec<fauna_protocol::folders::FolderSummary>,
+    custody: &fauna_core::data::FoldersConfig,
+) -> Vec<ConsentFolderOption> {
+    fauna_client_folders::custody::named_from_custody(rows, custody)
+        .into_iter()
+        .filter(|r| r.role.as_deref() != Some("member"))
+        .map(|r| ConsentFolderOption {
+            id: r.id,
+            metadata_only: r.is_metadata_only(),
+            served_by_custody: fauna_client_folders::custody_served(&r, custody),
+            name: r.name,
+        })
+        .collect()
+}
+
+/// "Choose a folder" — the picker's prompt while nothing is chosen.
+pub const FOLDER_PICKER_PROMPT_KEY: &str = "atproto_settings.consent_folder_prompt";
+/// No folder can take a deposit: every one is metadata-only.
+pub const FOLDER_NONE_DEPOSIT_KEY: &str = "atproto_settings.consent_folder_none_deposit";
+/// No folder is served for an app to read.
+pub const FOLDER_NONE_READ_KEY: &str = "atproto_settings.consent_folder_none_read";
+/// No folder both takes a deposit and is served.
+pub const FOLDER_NONE_BOTH_KEY: &str = "atproto_settings.consent_folder_none_both";
+/// The owner's folders could not be read now.
+pub const FOLDER_UNREADABLE_KEY: &str = "atproto_settings.consent_folder_unreadable";
+
+/// Whether `row` takes the card's folder choice — it carries a BARE
+/// folder-plane scope and is not an admin's install card.
+#[must_use]
+pub fn takes_folder_choice(row: &NestConsentRow) -> bool {
+    !is_install_card(row)
+        && row
+            .scopes
+            .iter()
+            .any(|s| fauna_bridge_atproto::fauna_scope::user_qualified_bare_arm(s).is_some())
+}
+
+/// The card's folder picker for `row` (`authorization-server.md` § Consent →
+/// *The card chooses the folder*): `None` unless the row carries a BARE
+/// folder-plane scope (an admin's install card never does — its scopes are a
+/// ceiling). The options are the folders of `folders` every bare folder verb
+/// on the card can take — deposit: not metadata-only; read: served by the
+/// owner's custody — in name order; `chosen` is kept only when it is one of
+/// them. No eligible folder, or `folders` unreadable (`None`), → no option
+/// and the reason.
+#[must_use]
+pub fn folder_picker(
+    row: &NestConsentRow,
+    folders: Option<&[ConsentFolderOption]>,
+    chosen: Option<i64>,
+) -> Option<crate::FolderPicker> {
+    use fauna_bridge_atproto::fauna_scope::{FaunaScopeArm, user_qualified_bare_arm};
+    use fauna_core::localized::LocalizedText;
+    if is_install_card(row) {
+        return None;
+    }
+    let arms: Vec<FaunaScopeArm> = row
+        .scopes
+        .iter()
+        .filter_map(|s| user_qualified_bare_arm(s))
+        .collect();
+    if arms.is_empty() {
+        return None;
+    }
+    let deposit = arms.contains(&FaunaScopeArm::FolderDeposit);
+    let read = arms.contains(&FaunaScopeArm::FolderRead);
+    let Some(folders) = folders else {
+        return Some(crate::FolderPicker {
+            options: Vec::new(),
+            chosen: None,
+            none_eligible: Some(LocalizedText::key(FOLDER_UNREADABLE_KEY)),
+        });
+    };
+    let mut options: Vec<crate::FolderOption> = folders
+        .iter()
+        .filter(|f| (!deposit || !f.metadata_only) && (!read || f.served_by_custody))
+        .map(|f| crate::FolderOption {
+            id: f.id,
+            name: strip_control(&f.name),
+        })
+        .collect();
+    options.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    let chosen = chosen.filter(|id| options.iter().any(|o| o.id == *id));
+    let none_eligible = options.is_empty().then(|| {
+        LocalizedText::key(match (deposit, read) {
+            (true, true) => FOLDER_NONE_BOTH_KEY,
+            (true, false) => FOLDER_NONE_DEPOSIT_KEY,
+            _ => FOLDER_NONE_READ_KEY,
+        })
+    });
+    Some(crate::FolderPicker {
+        options,
+        chosen,
+        none_eligible,
+    })
+}
+
+/// A folder name is the owner's own, but it is painted inside the card's
+/// structured body like every other row string, so it is fenced the same way.
+fn strip_control(name: &str) -> String {
+    name.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// The owner's folders as the card's picker filters them, through the folder
+/// seam — `None` without the seam or when it cannot read them now.
+pub async fn consent_folder_options(
+    seams: Option<&ConsentGrantSeams>,
+) -> Option<Vec<ConsentFolderOption>> {
+    seams?.folders.as_ref()?.folders_for_consent().await
 }
 
 /// The custody fold behind [`ConsentFolderSeam`]: the owned row `id` among
@@ -153,11 +292,36 @@ async fn folder_for_consent_over<R: fauna_protocol::RpcRequester>(
     consent_folder_from(rows, custody, id)
 }
 
+/// [`ConsentFolderSeam::folders_for_consent`] over any host transport `R`:
+/// custody, then the owner-scoped folder list, folded by
+/// [`consent_folder_options_from`].
+#[cfg(feature = "rpc-glue")]
+async fn folders_for_consent_over<R: fauna_protocol::RpcRequester>(
+    keys: &dyn fauna_client_folders::FolderKeyStore,
+    nest: R,
+) -> Option<Vec<ConsentFolderOption>> {
+    let custody = keys
+        .load()
+        .await
+        .inspect_err(|e| tracing::warn!(target: "fauna_atproto_settings", error = %e, "consent folders: custody unreadable"))
+        .ok()?;
+    let rows = fauna_client_folders::FoldersClient::new(nest)
+        .list_wire()
+        .await
+        .inspect_err(|e| tracing::warn!(target: "fauna_atproto_settings", error = %e, "consent folders: folder list unreadable"))
+        .ok()?
+        .folders;
+    Some(consent_folder_options_from(rows, &custody))
+}
+
 #[cfg(all(feature = "rpc-glue", not(target_arch = "wasm32")))]
 #[async_trait::async_trait]
 impl ConsentFolderSeam for CustodyConsentFolders<Arc<fauna_client::NestClient>> {
     async fn folder_for_consent(&self, id: i64) -> Option<ConsentFolder> {
         folder_for_consent_over(&*self.keys, self.nest.clone(), id).await
+    }
+    async fn folders_for_consent(&self) -> Option<Vec<ConsentFolderOption>> {
+        folders_for_consent_over(&*self.keys, self.nest.clone()).await
     }
 }
 
@@ -168,6 +332,9 @@ impl ConsentFolderSeam for CustodyConsentFolders<Arc<fauna_client::NestClient>> 
 impl ConsentFolderSeam for CustodyConsentFolders<fauna_rpc_wasm::WsRpcClient> {
     async fn folder_for_consent(&self, id: i64) -> Option<ConsentFolder> {
         folder_for_consent_over(&*self.keys, self.nest.clone(), id).await
+    }
+    async fn folders_for_consent(&self) -> Option<Vec<ConsentFolderOption>> {
+        folders_for_consent_over(&*self.keys, self.nest.clone()).await
     }
 }
 
@@ -745,6 +912,112 @@ mod tests {
         assert!(consent_folder_from(vec![row(42, "photos")], custody("photos", true), 7).is_none());
     }
 
+    /// Owned folders for the picker: "photos" (42, served), "docs" (7,
+    /// metadata-only, served), "notes" (9, neither) and a member row (5).
+    fn picker_folders() -> Vec<ConsentFolderOption> {
+        let mut docs = row(7, "docs");
+        docs.residency = fauna_protocol::folders::RESIDENCY_METADATA_ONLY.into();
+        let mut member = row(5, "theirs");
+        member.role = Some("member".into());
+        let mut cfg = custody("photos", true);
+        cfg.sets.extend(custody("docs", true).sets);
+        cfg.sets.extend(custody("notes", false).sets);
+        consent_folder_options_from(vec![row(42, "photos"), docs, row(9, "notes"), member], &cfg)
+    }
+
+    fn picked(p: &crate::FolderPicker) -> Vec<(i64, &str)> {
+        p.options.iter().map(|o| (o.id, o.name.as_str())).collect()
+    }
+
+    /// The fold offers owned rows only, with residency and served from
+    /// custody.
+    #[test]
+    fn the_picker_fold_offers_owned_rows_with_their_residency_and_served_state() {
+        let folders = picker_folders();
+        let ids: Vec<_> = folders
+            .iter()
+            .map(|f| (f.id, f.metadata_only, f.served_by_custody))
+            .collect();
+        assert_eq!(ids, [(42, false, true), (7, true, true), (9, false, false)]);
+    }
+
+    /// A bare deposit card lists every owned folder that is not
+    /// metadata-only, by name; a bare read card lists the served ones; a card
+    /// carrying both lists the folders that take both.
+    #[test]
+    fn a_bare_folder_card_offers_the_folders_its_verbs_can_take() {
+        let folders = picker_folders();
+        let deposit = folder_picker(&consent(&["fauna:folder:deposit"]), Some(&folders), None)
+            .expect("a bare deposit card has a picker");
+        assert_eq!(picked(&deposit), [(9, "notes"), (42, "photos")]);
+        assert_eq!(deposit.none_eligible, None);
+        let read = folder_picker(&consent(&["fauna:folder:read"]), Some(&folders), None).unwrap();
+        assert_eq!(picked(&read), [(7, "docs"), (42, "photos")]);
+        let both = folder_picker(
+            &consent(&["fauna:folder:deposit", "fauna:folder:read"]),
+            Some(&folders),
+            None,
+        )
+        .unwrap();
+        assert_eq!(picked(&both), [(42, "photos")]);
+    }
+
+    /// No eligible folder → no option, the reason for the card's verbs; an
+    /// unreadable custody → the unreadable reason.
+    #[test]
+    fn a_card_with_no_eligible_folder_says_why() {
+        let mut only_docs = picker_folders();
+        only_docs.retain(|f| f.id == 7);
+        let deposit =
+            folder_picker(&consent(&["fauna:folder:deposit"]), Some(&only_docs), None).unwrap();
+        assert!(deposit.options.is_empty());
+        assert_eq!(
+            deposit.none_eligible.map(|t| t.key),
+            Some(FOLDER_NONE_DEPOSIT_KEY.to_string())
+        );
+        let read = folder_picker(&consent(&["fauna:folder:read"]), Some(&[]), None).unwrap();
+        assert_eq!(
+            read.none_eligible.map(|t| t.key),
+            Some(FOLDER_NONE_READ_KEY.to_string())
+        );
+        let unread = folder_picker(&consent(&["fauna:folder:deposit"]), None, Some(42)).unwrap();
+        assert_eq!(unread.chosen, None);
+        assert_eq!(
+            unread.none_eligible.map(|t| t.key),
+            Some(FOLDER_UNREADABLE_KEY.to_string())
+        );
+    }
+
+    /// The choice survives only while it is one of the eligible folders; a
+    /// qualified folder card and a card with no folder scope show no picker.
+    #[test]
+    fn the_choice_is_kept_only_among_the_options_and_a_qualified_card_has_no_picker() {
+        let folders = picker_folders();
+        let bare = consent(&["fauna:folder:deposit"]);
+        assert_eq!(
+            folder_picker(&bare, Some(&folders), Some(42))
+                .unwrap()
+                .chosen,
+            Some(42)
+        );
+        assert_eq!(
+            folder_picker(&bare, Some(&folders), Some(7))
+                .unwrap()
+                .chosen,
+            None
+        );
+        assert_eq!(
+            folder_picker(&bare, Some(&folders), Some(5))
+                .unwrap()
+                .chosen,
+            None
+        );
+        assert!(
+            folder_picker(&consent(&["fauna:folder:deposit:42"]), Some(&folders), None).is_none()
+        );
+        assert!(folder_picker(&consent(&["atproto"]), Some(&folders), None).is_none());
+    }
+
     /// A seam answering "photos" (id 42) and "docs" (id 7) from fixed rows
     /// and custody.
     struct FixedFolders(FoldersConfig);
@@ -753,6 +1026,12 @@ mod tests {
     impl ConsentFolderSeam for FixedFolders {
         async fn folder_for_consent(&self, id: i64) -> Option<ConsentFolder> {
             consent_folder_from(vec![row(42, "photos"), row(7, "docs")], self.0.clone(), id)
+        }
+        async fn folders_for_consent(&self) -> Option<Vec<ConsentFolderOption>> {
+            Some(consent_folder_options_from(
+                vec![row(42, "photos"), row(7, "docs")],
+                &self.0,
+            ))
         }
     }
 

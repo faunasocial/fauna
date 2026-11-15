@@ -102,6 +102,19 @@ public static class ImageHashBind
     public static void SetPlaceholder(DependencyObject d, FrameworkElement? value) => d.SetValue(PlaceholderProperty, value);
     public static FrameworkElement? GetPlaceholder(DependencyObject d) => (FrameworkElement?)d.GetValue(PlaceholderProperty);
 
+    // A post media element's settled label (FaunaApp.Core.Helpers.PostMediaElement.Alt —
+    // the author's alt, else the shared fallback text). Published beside the paint state
+    // on the same HelpText (ImagePaintState.HelpText), so get_attr(post-image, "alt") and
+    // get_attr(post-image, "state") each read on their own (render-model.md § D6c →
+    // Proxied video, the alt paragraph). Null (default) publishes the bare state.
+    public static readonly DependencyProperty AltProperty =
+        DependencyProperty.RegisterAttached(
+            "Alt", typeof(string), typeof(ImageHashBind),
+            new PropertyMetadata(null, OnPresentationTargetChanged));
+
+    public static void SetAlt(DependencyObject d, string? value) => d.SetValue(AltProperty, value);
+    public static string? GetAlt(DependencyObject d) => (string?)d.GetValue(AltProperty);
+
     // Monotonic counter stored per-Image so stale async completions (after the
     // container recycled onto a new item) can be ignored.
     private static readonly DependencyProperty RequestVersionProperty =
@@ -195,7 +208,8 @@ public static class ImageHashBind
     /// <item>visibility (the Image when <see cref="ManageVisibilityProperty"/>, and the
     /// <see cref="VisibilityTargetProperty"/>): shown once a picture is on screen, and
     /// for a proxied picture from the first frame, behind its placeholder;</item>
-    /// <item><c>get_attr(post-image, "state")</c> (<see cref="ImagePaintState"/>), as
+    /// <item><c>get_attr(post-image, "state")</c> (<see cref="ImagePaintState"/>) — packed
+    /// with the element's <see cref="AltProperty"/> when it has one — as
     /// <c>AutomationProperties.HelpText</c> on the <see cref="VisibilityTargetProperty"/>
     /// when one is present (post-image's AutomationId sits on the wrapping Button, not
     /// the Image itself), else on the Image directly (link-preview-image,
@@ -219,7 +233,7 @@ public static class ImageHashBind
         if (GetManageVisibility(img)) img.Visibility = visibility;
         if (GetVisibilityTarget(img) is { } visibilityTarget) visibilityTarget.Visibility = visibility;
 
-        AutomationProperties.SetHelpText(target, ImagePaintState.From(painted));
+        AutomationProperties.SetHelpText(target, ImagePaintState.HelpText(painted, GetAlt(img)));
 
         var placeholderText = ImagePaintState.PlaceholderText(proxiedPath, painted);
         if (GetPlaceholder(img) is { } placeholder)

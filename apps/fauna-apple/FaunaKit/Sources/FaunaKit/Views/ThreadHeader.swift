@@ -158,13 +158,14 @@ public struct ThreadHeader: View {
                         .accessibilityIdentifier(Ids.conversationGuardianState)
                         .automationValue(Ids.conversationGuardianState, text: { stateLabel }, value: { stateToken })
                 }
-                // The room's standing notice — present iff one of the three room
+                // The room's standing notice — present iff one of the four room
                 // facts holds (`ui/conversations.md` § Element IDs →
                 // `thread-room-notice`). Which notice speaks, its words and its
                 // `state` token are all shared Rust; absent otherwise.
                 if let room = detail.room,
                    let notice = roomNoticeFor(
-                       awaitingKey: room.awaitingKey, moderationUnverified: room.moderationUnverified,
+                       awaitingKey: room.awaitingKey, severanceOwed: room.severanceOwed,
+                       moderationUnverified: room.moderationUnverified,
                        bridgeDisconnected: room.bridgeDisconnected)
                 {
                     let noticeLabel = roomNoticeLabel(notice: notice)

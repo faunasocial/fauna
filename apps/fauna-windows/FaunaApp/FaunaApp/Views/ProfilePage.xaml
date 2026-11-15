@@ -656,6 +656,17 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
+
+                    <!-- The redeem pair (profile.md § Layout & flow → Another's profile):
+                         the subscription-settings pair, here carrying this creator's home,
+                         so a code minted on another nest redeems from the creator's
+                         profile. Paints with or without offer rows. The markup is
+                         Views/Payments/ClaimRedeemPanel.xaml, hosted rather than named —
+                         the PaymentsSectionsHost reasoning above; filled under
+                         `#if PAYMENTS`, empty and zero-height in an excised build. -->
+                    <ContentControl x:Name="ClaimRedeemHost"
+                                    HorizontalAlignment="Stretch"
+                                    HorizontalContentAlignment="Stretch" />
                 </StackPanel>
 
             </StackPanel>

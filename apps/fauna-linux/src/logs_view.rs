@@ -66,6 +66,13 @@ pub fn build_entry_row(entry: &LogEntry, tz_offset_secs: i32) -> adw::ActionRow 
     let row = adw::ActionRow::builder()
         .title(&entry.message)
         .subtitle(fauna_log::format::subtitle(entry, tz_offset_secs))
+        // One line each, ellipsized: a ring of up to `RING_CAPACITY` rows of
+        // wrapping kilobyte messages cost the UI thread a height-for-width
+        // measure of every wrapped label at each render, a stall long enough to
+        // miss the page's own deadlines. The full line rides the `log-entry`
+        // marker below and the Copy button.
+        .title_lines(1)
+        .subtitle_lines(1)
         .build();
     row.set_use_markup(false);
     row.add_prefix(&crate::settings::value_marker(

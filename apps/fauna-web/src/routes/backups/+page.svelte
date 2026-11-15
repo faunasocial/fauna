@@ -1733,7 +1733,18 @@
       <!-- Plain confirm, no re-type: the ceremony deletes nothing on either
            side and refuses a lived-in nest by itself. It names the nest whose
            copy it pulls back. -->
-      <div data-testid={IDS.BACKUP_DESTINATION_RESEED_CONFIRM_MODAL} class="dest-remove-confirm">
+      <!-- The modal's declared text is title, consequence, then each preflight
+           line, one per line (tui's registration; ui/backups.md § Restore after
+           losing the nest — the lines are the body, no id of their own). -->
+      <div
+        data-testid={IDS.BACKUP_DESTINATION_RESEED_CONFIRM_MODAL}
+        data-test-text={[
+          t.backups.backup_reseed_pull_back_confirm_title({ name: reseedView.name }),
+          t.backups.backup_reseed_pull_back_confirm_body({ name: reseedView.name }),
+          ...reseedView.lines,
+        ].join('\n')}
+        class="dest-remove-confirm"
+      >
         <p><strong>{t.backups.backup_reseed_pull_back_confirm_title({ name: reseedView.name })}</strong></p>
         <p>{t.backups.backup_reseed_pull_back_confirm_body({ name: reseedView.name })}</p>
         {#each reseedView.lines as line}

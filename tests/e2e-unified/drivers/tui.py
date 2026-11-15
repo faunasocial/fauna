@@ -220,6 +220,17 @@ def build_launch_env(
     # when it is deleted. Read back through the driver's `custody_hold_file`.
     env.setdefault("FAUNA_E2E_CUSTODY_HOLD_FILE", os.path.join(tmp, "custody-hold"))
 
+    # The e2e outbox drain hold (`fauna_account_plane::outbox`'s
+    # `outbox_drain_held`, the compile-gated `FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`
+    # seam): a path in this launch's scratch dir that does not exist, so the
+    # generic outbox drain runs as usual until a test creates the file
+    # (`helpers/outbox_drain.py::hold_outbox_drain`), in whichever process pumps,
+    # this app or the sync agent it spawns. Read back through the driver's
+    # `outbox_drain_hold_file`.
+    env.setdefault(
+        "FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE", os.path.join(tmp, "outbox-drain-hold")
+    )
+
     # Opt-in (`config["sync_agent_own_group"]`, POSIX only): the direct-spawned
     # agent leads a process group of its own and records its pgid here
     # (`agent_spawner::AGENT_OWN_GROUP_ENV`), so it survives the pty hangup a tui
@@ -473,6 +484,12 @@ class TuiDriver(HttpBridgeDriver):
         None before `launch()`. Driven through
         `helpers/folder_content.py::hold_custody_reread`."""
         return getattr(self, "_custody_hold_file", None)
+
+    def outbox_drain_hold_file(self) -> str | None:
+        """The file whose existence holds this launch's generic outbox drain
+        (`FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`, set by `build_launch_env`); None
+        before `launch()`. Driven through `helpers/outbox_drain.py`."""
+        return getattr(self, "_outbox_drain_hold_file", None)
 
     def download_dir(self) -> str | None:
         """Where fauna-tui saves e2e-mode downloads (no save dialog on a
@@ -852,6 +869,7 @@ class TuiDriver(HttpBridgeDriver):
         # as drivers/linux.py's download_dir().
         self._download_dir = env.get("FAUNA_E2E_DOWNLOAD_DIR")
         self._custody_hold_file = env.get("FAUNA_E2E_CUSTODY_HOLD_FILE")
+        self._outbox_drain_hold_file = env.get("FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE")
         # The opted-in own-group agent's pgid file (None otherwise) — see
         # `agent_pgid`. Watched from the launch on, so the group is this run's
         # (reaper-registered) the moment the agent records it, not only once a

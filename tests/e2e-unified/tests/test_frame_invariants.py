@@ -248,6 +248,7 @@ def test_a_toolkit_app_is_fully_covered_by_the_two_shape_invariants():
         "focus-fanout",
         "region-block-never-silent",
         "nest-block-never-silent",
+        "painted-text-has-area",
     ]
 
 
@@ -262,6 +263,7 @@ def test_an_unobservable_frame_is_not_a_violation():
             "receive-loop-alive",
             "region-block-never-silent",
             "nest-block-never-silent",
+            "painted-text-has-area",
         ],
     )
 
@@ -316,6 +318,101 @@ def test_a_malformed_nest_block_render_is_a_violation():
     assert _names({"nest_block_render": {"blocked": True, "placeholders": 1}}) == [
         "nest-block-never-silent"
     ]
+
+
+# ── painted-text-has-area ───────────────────────────────────────────────────
+#
+# The windows header defect found three times, one header at a time: a `*` title
+# column left 0 px by the `Auto` columns beside it, so the title's box is empty,
+# UIA reports it offscreen, the driver reads NOT VISIBLE — and a human sees no
+# title at all. The verdict is decided on the LAYOUT SIZE the app publishes,
+# never on UIA's `IsOffscreen`, which reads an empty box and a merely clipped or
+# scrolled-out one the same.
+
+
+def _starved(**entry):
+    """One `painted_text_area.starved` entry; the starved bridged-room title by default."""
+    base = {
+        "id": "thread-header",
+        "text": "Example Notes room",
+        "width": 0.0,
+        "height": 28.0,
+        "pane": {"width": 186.0, "height": 60.0},
+        "depth": 0,
+    }
+    base.update(entry)
+    return base
+
+
+def _text_area(*entries):
+    return {"painted_text_area": {"starved": list(entries)}}
+
+
+def test_a_starved_title_is_caught():
+    """The 2026-11-10 shape: the title column starved to 0 px inside a laid-out row."""
+    violations = _violations(_text_area(_starved()))
+    assert [v.split(":")[0] for v in violations] == ["painted-text-has-area"]
+    # It names the element, so the corpus line is the diagnosis.
+    assert "thread-header" in violations[0]
+
+
+def test_a_box_with_no_height_is_caught_too():
+    assert _names(_text_area(_starved(width=120.0, height=0.0))) == ["painted-text-has-area"]
+
+
+def test_a_box_under_one_dip_is_no_area_a_human_reads():
+    assert _names(_text_area(_starved(width=0.4))) == ["painted-text-has-area"]
+
+
+def test_text_starved_inside_a_starved_wrapper_is_caught():
+    """A StackPanel in the starved column takes the 0 px and its text inherits it:
+    the pane is the nearest laid-out ancestor, however many levels up."""
+    assert _names(_text_area(_starved(depth=2))) == ["painted-text-has-area"]
+
+
+def test_an_element_scrolled_out_of_view_is_not_a_violation():
+    """A clipped or scrolled-out element keeps its layout box — UIA calls it
+    offscreen exactly as it does a starved one, which is why the verdict reads
+    the box, not `IsOffscreen`."""
+    assert _names(_text_area(_starved(width=240.0, height=20.0))) == []
+
+
+def test_a_collapsed_element_is_not_a_violation():
+    """The app's walk descends through `Visible` elements only, so a collapsed
+    element — absent to the driver too — never reaches the field."""
+    assert _names(_text_area()) == []
+
+
+def test_an_element_whose_pane_is_not_laid_out_is_not_a_violation():
+    """Nothing above it has area — a minimised window, a pane not laid out yet:
+    the frame shows nothing at all, so nothing in it is starved."""
+    assert _names(_text_area(_starved(pane=None))) == []
+    assert _names(_text_area(_starved(pane={"width": 0.0, "height": 300.0}))) == []
+
+
+def test_an_element_with_no_text_is_not_a_violation():
+    """An empty or whitespace-only label shows nothing whatever its box."""
+    assert _names(_text_area(_starved(text=""), _starved(text="   "))) == []
+
+
+def test_the_detail_names_every_starved_element():
+    violations = _violations(
+        _text_area(_starved(), _starved(id="thread-room-class", text="Community room"))
+    )
+    assert len(violations) == 1
+    assert "thread-header" in violations[0] and "thread-room-class" in violations[0]
+
+
+def test_a_malformed_painted_text_area_is_a_violation():
+    assert _names({"painted_text_area": None}) == ["painted-text-has-area"]
+    assert _names({"painted_text_area": {"starved": None}}) == ["painted-text-has-area"]
+    assert _names({"painted_text_area": {}}) == ["painted-text-has-area"]
+    assert _names(_text_area("thread-header")) == ["painted-text-has-area"]
+    assert _names(_text_area(_starved(width="0"))) == ["painted-text-has-area"]
+    assert _names(_text_area(_starved(height=True))) == ["painted-text-has-area"]
+    assert _names(_text_area(_starved(id=""))) == ["painted-text-has-area"]
+    assert _names(_text_area(_starved(text=None))) == ["painted-text-has-area"]
+    assert _names(_text_area(_starved(pane={"width": 186.0}))) == ["painted-text-has-area"]
 
 
 # ── absent vs. published-as-null ────────────────────────────────────────────

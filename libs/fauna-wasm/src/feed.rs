@@ -109,6 +109,50 @@ pub fn post_card_gate(
     crate::rpc::to_js(&fauna_feed::post_card_gate(post))
 }
 
+/// Which arm of the own-post Nostr advertisement verb pair the ⋯ overflow
+/// offers — `"advertise"`, `"stop_advertising"`, or `undefined` for neither.
+/// The browser twin of the UniFFI `post_nostr_advertise_verb`, over the one
+/// shared `fauna_feed::PostSummary::nostr_advertise_verb`
+/// (`monetization.md` § The Nostr advertisement of a sold post → *What the
+/// author sees and agrees to*). Takes the snapshot-post fields the rule reads
+/// (the `postCardGate` posture); `nostr_advertised_at` is a number (epoch
+/// seconds) so no `bigint` crosses; `can_advertise` is the build's `zaps`
+/// member AND `nostrAdvertiseSupported()`.
+#[wasm_bindgen(js_name = postNostrAdvertiseVerb)]
+pub fn post_nostr_advertise_verb(
+    author: String,
+    gated_tier: Option<String>,
+    nostr_advertised_at: Option<f64>,
+    viewer: String,
+    can_advertise: bool,
+) -> Option<String> {
+    let post = fauna_feed::PostSummary {
+        author,
+        gated_tier,
+        nostr_advertised_at: nostr_advertised_at.map(|t| t.max(0.0) as u64),
+        ..Default::default()
+    };
+    post.nostr_advertise_verb(&viewer, can_advertise)
+        .map(|v| match v {
+            fauna_feed::NostrAdvertiseVerb::Advertise => "advertise",
+            fauna_feed::NostrAdvertiseVerb::StopAdvertising => "stop_advertising",
+        })
+        .map(str::to_string)
+}
+
+/// Whether a post is **sold** as the apps can tell from the feed read — the
+/// shared `fauna_feed::PostSummary::is_sold_post` over the post's `gated_tier`
+/// (the *Change price…* verb's presence rule, with ownership and the
+/// advertisement note decided by the page).
+#[wasm_bindgen(js_name = postIsSoldPost)]
+pub fn post_is_sold_post(gated_tier: Option<String>) -> bool {
+    fauna_feed::PostSummary {
+        gated_tier,
+        ..Default::default()
+    }
+    .is_sold_post()
+}
+
 /// How the thread page names a `feed-thread-post`'s author — the shared
 /// `fauna_feed::ThreadPostView::author_label` (display name, else `@handle`).
 /// `post` is one entry of the snapshot's `thread.posts`, as read off
@@ -506,6 +550,15 @@ mod manager {
             Ok(obj)
         }
 
+        /// The feed selection the list shows now
+        /// (`fauna_feed::FeedManager::cue_selection_key`) — the key the cue
+        /// capture hands `WasmCueTracker.noteSelection` before every sample,
+        /// read without serializing the snapshot.
+        #[wasm_bindgen(js_name = "cueSelectionKey")]
+        pub fn cue_selection_key(&self) -> String {
+            self.manager.cue_selection_key()
+        }
+
         /// Update the composer (`compose-text-field` / `compose-tags-field` /
         /// staged file) and clear any stale compose error. `attached_file` is a JS
         /// `{ name, size, blob_hash?, media_type? }` object or `null`/`undefined`.
@@ -681,6 +734,26 @@ mod manager {
                     .await
                     .map(|_| JsValue::UNDEFINED)
                     .map_err(|e| JsValue::from_str(&format!("save feed drafts: {e}")))
+            })
+        }
+
+        /// The leave door's save (`reserved-folders.md` § The leave-flush
+        /// promise): [`saveDrafts`](Self::save_drafts) through the shared
+        /// `DraftsSync::save_on_leave`, which first opens a save gate the
+        /// launch restore has not lifted yet with one read, whose bytes FILL
+        /// the composer (`PostDrafts::fill`, never over what the user typed)
+        /// before the snapshot is saved. Rejects with the read or save error; the SPA
+        /// logs it and the door goes on.
+        #[wasm_bindgen(js_name = saveDraftsOnLeave)]
+        pub fn save_drafts_on_leave(&self) -> js_sys::Promise {
+            let sync = self.drafts_sync.clone();
+            let mgr = self.manager.clone();
+            let captured = mgr.drafts_snapshot_bytes();
+            future_to_promise(async move {
+                sync.save_on_leave(captured, |resting| mgr.fill_drafts_for_leave(&resting))
+                    .await
+                    .map(|_| JsValue::UNDEFINED)
+                    .map_err(|e| JsValue::from_str(&format!("save feed drafts on leave: {e}")))
             })
         }
 
@@ -1074,6 +1147,20 @@ mod manager {
                     .map(|()| JsValue::UNDEFINED)
                     .map_err(|e| JsValue::from_str(&e))
             })
+        }
+
+        /// The sell composer's asking-price field as sats, read by the one
+        /// shared rule (`FeedManager::compose_sell_asking_price_sats`):
+        /// resolves to a number, or `undefined` for an empty field or no sale.
+        /// Text that is not a whole number of sats THROWS the rule's message
+        /// after stamping its catalog key on `compose-error`. Call it before
+        /// either sell phase and pass its answer to both.
+        #[wasm_bindgen(js_name = composeSellAskingPriceSats)]
+        pub fn compose_sell_asking_price_sats(&self) -> Result<Option<f64>, JsValue> {
+            self.manager
+                .compose_sell_asking_price_sats()
+                .map(|s| s.map(|s| s as f64))
+                .map_err(|e| JsValue::from_str(&e))
         }
 
         #[wasm_bindgen(js_name = prepareSellPost)]
@@ -2201,6 +2288,18 @@ mod manager {
         #[wasm_bindgen(js_name = drainAll)]
         pub fn drain_all(&self, wall_now_ms: f64) -> Result<JsValue, JsValue> {
             let left = self.inner.borrow_mut().drain_all(ms(wall_now_ms));
+            crate::rpc::to_js(&left)
+        }
+
+        /// The feed selection the list shows now
+        /// (`WasmFeedManager.cueSelectionKey()`); its change since the last
+        /// call drains every exposure — a feed switch ends every exposure, and
+        /// is no scroll (`fauna_feed::CueTracker::note_selection`). Call it
+        /// before `sample` on every sample and record what it returns like a
+        /// sample's. `wallNowMs` is `Date.now()`.
+        #[wasm_bindgen(js_name = noteSelection)]
+        pub fn note_selection(&self, key: &str, wall_now_ms: f64) -> Result<JsValue, JsValue> {
+            let left = self.inner.borrow_mut().note_selection(key, ms(wall_now_ms));
             crate::rpc::to_js(&left)
         }
 

@@ -1834,6 +1834,7 @@ fn folded(rel: &str) -> crate::engine::FoldedDelete {
     crate::engine::FoldedDelete {
         relative_path: rel.to_string(),
         deleting_device: Some("bb".repeat(32)),
+        seq: Some(1),
     }
 }
 
@@ -1954,6 +1955,239 @@ async fn a_folded_delete_of_a_row_settled_since_the_fold_is_moot() {
         assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Moot, "{rel}");
         assert!(engine.db().get_entry(rel).unwrap().is_none(), "{rel}");
     }
+}
+
+/// **A backup seat on an on-demand root keeps what a peer deleted — the fold's rail
+/// too** (`file-sync.md` § 4: "a backup seat never applies a peer's delete to its own
+/// disk, whatever rail delivered it"). An on-demand root receives through the fold, not
+/// `apply_remote_changes`, and every windows binding is a cfapi root, so an archive
+/// device there lost each file another device deleted while the resident arm's guard
+/// sat on a rail it never runs. Every live row is kept — a hydrated copy, and a row with
+/// nothing on this disk (a cloud-only placeholder in a directory never listed, or an
+/// off-disk root's row), which is the whole of the archive's file there — and the
+/// binding is never asked to remove anything. An unresolved seat declines the same way;
+/// the fold reads the whole log, so once it resolves to `Sync` the next pass reports
+/// the delete again.
+#[tokio::test]
+async fn a_folded_delete_on_a_backup_seat_keeps_the_copy_and_its_row() {
+    let never = |p: &std::path::Path| -> anyhow::Result<()> {
+        panic!("a backup seat removes nothing: {p:?}")
+    };
+    for mode in [
+        crate::config::ModeResolution::from(crate::config::SyncMode::Backup),
+        crate::config::ModeResolution::Unresolved,
+    ] {
+        let watch = tempfile::tempdir().unwrap();
+        let engine = test_engine(watch.path().to_path_buf());
+        engine.set_sync_mode(mode);
+        seed_tracked_file(&engine, watch.path(), "important.txt", b"do not lose this");
+        seed_tracked_row(&engine, "cloud-only.txt", b"never hydrated here");
+
+        for rel in ["important.txt", "cloud-only.txt"] {
+            let outcome = engine
+                .apply_folded_delete(&folded(rel), never)
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                crate::engine::FoldedDeleteOutcome::Kept,
+                "{mode:?} {rel}"
+            );
+            assert_eq!(
+                engine.db().get_entry(rel).unwrap().map(|e| e.state),
+                Some(SyncState::Synced),
+                "{mode:?}: {rel}'s row stays — the archive still holds the file"
+            );
+            assert!(
+                !engine.was_recent_removal(rel),
+                "{mode:?}: nothing was removed"
+            );
+        }
+        assert_eq!(
+            std::fs::read(watch.path().join("important.txt")).unwrap(),
+            b"do not lose this",
+            "{mode:?}: the kept copy is untouched"
+        );
+        assert!(
+            engine.db().list_unresolved_conflicts().unwrap().is_empty(),
+            "{mode:?}: a declined delete on a backup seat is no conflict"
+        );
+    }
+}
+
+// ---- a delete a backup seat declined stays declined (`file-sync.md` § 4) ----
+//
+// The fold reads the set's whole log, so without a memory of the decline the next
+// pass after the place is set back to apply deletes would apply every delete the
+// archive kept. The kept row carries the declined delete's `seq`.
+
+/// The peer that deletes in these tests.
+fn peer_hex() -> String {
+    "bb".repeat(32)
+}
+
+/// Fold `changes` and return the paths the fold reported as remote deletes.
+fn folded_deletes(engine: &SyncEngine, changes: &[SyncChange]) -> Vec<crate::engine::FoldedDelete> {
+    engine
+        .record_placeholders_from_changes(changes)
+        .unwrap()
+        .deleted
+}
+
+/// (a) A resolved backup seat declines a folded delete; the place is set back to
+/// apply deletes; the same log folds again — the delete is not reported, and the
+/// file and its row are still there.
+#[tokio::test]
+async fn a_backup_seat_s_declined_delete_stays_declined_after_the_mode_flips() {
+    let never = |p: &std::path::Path| -> anyhow::Result<()> {
+        panic!("a declined delete removes nothing: {p:?}")
+    };
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    engine.set_sync_mode(crate::config::SyncMode::Backup);
+    seed_tracked_file(&engine, watch.path(), "important.txt", b"do not lose this");
+    let log = [delete_change(5, "important.txt", &peer_hex())];
+
+    let deleted = folded_deletes(&engine, &log);
+    assert_eq!(
+        deleted.len(),
+        1,
+        "precondition: the fold reports the delete"
+    );
+    assert_eq!(deleted[0].seq, Some(5), "the fold carries the delete's seq");
+    let outcome = engine
+        .apply_folded_delete(&deleted[0], never)
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Kept);
+    assert_eq!(
+        engine
+            .db()
+            .get_entry("important.txt")
+            .unwrap()
+            .unwrap()
+            .declined_delete_seq,
+        Some(5),
+        "a resolved backup seat stamps the declined delete on the row"
+    );
+
+    engine.set_sync_mode(crate::config::SyncMode::Sync);
+    assert!(
+        folded_deletes(&engine, &log).is_empty(),
+        "the declined delete is never offered again"
+    );
+    assert_eq!(
+        std::fs::read(watch.path().join("important.txt")).unwrap(),
+        b"do not lose this"
+    );
+    assert!(engine.db().get_entry("important.txt").unwrap().is_some());
+}
+
+/// (b) After (a), the path is re-created and deleted again at a higher `seq`: that
+/// is a new delete, judged by the mode the seat holds now — reported and applied.
+#[tokio::test]
+async fn a_newer_delete_of_a_declined_path_is_reported_and_applied() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    engine.set_sync_mode(crate::config::SyncMode::Backup);
+    seed_tracked_file(&engine, watch.path(), "important.txt", b"do not lose this");
+    let first = folded_deletes(&engine, &[delete_change(5, "important.txt", &peer_hex())]);
+    engine
+        .apply_folded_delete(&first[0], |p| panic!("declined: {p:?}"))
+        .await
+        .unwrap();
+    engine.set_sync_mode(crate::config::SyncMode::Sync);
+
+    let log = [
+        delete_change(5, "important.txt", &peer_hex()),
+        create_change(6, "important.txt", &peer_hex(), 0x42),
+        delete_change(7, "important.txt", &peer_hex()),
+    ];
+    let deleted = folded_deletes(&engine, &log);
+    assert_eq!(deleted.len(), 1, "the newer delete is reported");
+    assert_eq!(deleted[0].seq, Some(7));
+    let outcome = engine
+        .apply_folded_delete(&deleted[0], |p| std::fs::remove_file(p).map_err(Into::into))
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Applied);
+    assert!(!watch.path().join("important.txt").exists());
+    assert!(engine.db().get_entry("important.txt").unwrap().is_none());
+}
+
+/// (c) An UNRESOLVED seat's decline is provisional: it stamps nothing, so once the
+/// seat resolves to sync the delete is reported again and applied.
+#[tokio::test]
+async fn an_unresolved_seat_s_decline_is_reported_again_once_it_resolves_to_sync() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    engine.set_sync_mode(crate::config::ModeResolution::Unresolved);
+    seed_tracked_file(&engine, watch.path(), "notes.txt", b"synced v1");
+    let log = [delete_change(5, "notes.txt", &peer_hex())];
+
+    let deleted = folded_deletes(&engine, &log);
+    let outcome = engine
+        .apply_folded_delete(&deleted[0], |p| panic!("declined: {p:?}"))
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Kept);
+    assert_eq!(
+        engine
+            .db()
+            .get_entry("notes.txt")
+            .unwrap()
+            .unwrap()
+            .declined_delete_seq,
+        None,
+        "an unresolved seat stamps nothing"
+    );
+
+    engine.set_sync_mode(crate::config::SyncMode::Sync);
+    let deleted = folded_deletes(&engine, &log);
+    assert_eq!(
+        deleted.len(),
+        1,
+        "the provisional decline is reported again"
+    );
+    let outcome = engine
+        .apply_folded_delete(&deleted[0], |p| std::fs::remove_file(p).map_err(Into::into))
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Applied);
+    assert!(!watch.path().join("notes.txt").exists());
+}
+
+/// (d) A delete the verdict applies and whose removal failed keeps its row
+/// unstamped, and the next fold reports it again (the whole-log retry).
+#[tokio::test]
+async fn a_failed_removal_is_reported_again_on_the_next_fold() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    seed_tracked_file(&engine, watch.path(), "notes.txt", b"synced v1");
+    let log = [delete_change(5, "notes.txt", &peer_hex())];
+
+    let deleted = folded_deletes(&engine, &log);
+    let result = engine
+        .apply_folded_delete(&deleted[0], |_| {
+            Err(anyhow::anyhow!("the file is open in another process"))
+        })
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        engine
+            .db()
+            .get_entry("notes.txt")
+            .unwrap()
+            .unwrap()
+            .declined_delete_seq,
+        None,
+        "a failed removal stamps nothing"
+    );
+    assert_eq!(
+        folded_deletes(&engine, &log).len(),
+        1,
+        "the next fold reports the delete again"
+    );
 }
 
 // ---- the fold evidence bound (3) reads (`crate::succession_drain`) ----

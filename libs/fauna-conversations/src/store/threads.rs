@@ -812,6 +812,31 @@ impl ThreadStore {
         }
     }
 
+    /// Put `addr` back into the thread's roster AT `index` (clamped to the
+    /// roster's length) — the undo of an optimistic [`Self::remove_participant_from`]
+    /// whose wire op failed. Unlike [`Self::add_participant_to`], which appends,
+    /// the member returns to the slot they held, so a failed removal leaves the
+    /// roster's ORDER as it found it: every app's `thread-member-chip[i]` is
+    /// index-parallel with `participants`, and a rollback that moved the member
+    /// to the end would re-seat every later chip under a different person.
+    /// A no-op when `addr` is already listed.
+    pub fn insert_participant_at(&self, id: &ThreadId, index: usize, addr: TypedAddress) {
+        let mut inner = self.inner.write().unwrap();
+        if let Some(detail) = inner.threads.get_mut(id)
+            && !detail
+                .participants
+                .iter()
+                .any(|p| p.same_participant(&addr))
+        {
+            let at = index.min(detail.participants.len());
+            let display_at = at.min(detail.participant_displays.len());
+            detail
+                .participant_displays
+                .insert(display_at, addr.display());
+            detail.participants.insert(at, addr);
+        }
+    }
+
     /// Drop `addr` from the thread's roster.
     ///
     /// **Keyed on participant identity, never on the rendered handle**
@@ -1864,6 +1889,41 @@ mod tests {
             store.anchor_grade_handle_for(&alice).as_deref(),
             Some("alice@home.example")
         );
+    }
+
+    /// A failed removal's rollback puts the member back where they were, so
+    /// the roster — and with it every index-parallel chip — keeps its order.
+    #[test]
+    fn a_rolled_back_removal_restores_the_member_at_their_position() {
+        let store = ThreadStore::new();
+        let (a, b, c) = (
+            fauna("a@home.example", 1),
+            fauna("b@home.example", 2),
+            fauna("c@home.example", 3),
+        );
+        let id = channel_thread(&store, "beef", vec![a.clone(), b.clone(), c.clone()]);
+        let order = |s: &ThreadStore| -> Vec<String> {
+            s.get(&id)
+                .unwrap()
+                .participants
+                .iter()
+                .map(|p| p.display())
+                .collect()
+        };
+        let before = order(&store);
+
+        store.remove_participant_from(&id, &a);
+        store.insert_participant_at(&id, 0, a.clone());
+        assert_eq!(order(&store), before);
+        let displays = store.get(&id).unwrap().participant_displays;
+        assert_eq!(displays, before, "displays stay index-parallel");
+
+        // Already listed → nothing doubles; an index past the end appends.
+        store.insert_participant_at(&id, 1, a.clone());
+        assert_eq!(order(&store), before);
+        store.remove_participant_from(&id, &c);
+        store.insert_participant_at(&id, 9, c);
+        assert_eq!(order(&store), before);
     }
 
     /// The list snippet strips Markdown to plaintext (`**bold**` → `bold`) so a

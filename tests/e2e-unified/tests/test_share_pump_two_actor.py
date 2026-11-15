@@ -85,6 +85,21 @@ pytestmark = [
     # probe doors); its real external `fauna-sync-agent` is what the plane's
     # provisioner drives.
     pytest.mark.windows,
+    # iOS joined 2026-11-13 as the MEMBER seat of a tui owner (`p2p-shared-set-build.md`
+    # § Phone peers — design, decision 5: a phone dials out more easily than it is
+    # dialled, so it is first proven as the member). Its seat is the Debug
+    # `Fauna-iOS` app with the File Provider appex (`ios_file_provider_app`, on the
+    # param only — `_share_plane_seat_params`), whose extension is the replica the
+    # app's foreground plane lands into (decision 3).
+    pytest.mark.ios,
+    # android joined 2026-11-14 as the MEMBER seat of a tui owner, the same
+    # decision 5 step as iOS. Its replica is the app's own DocumentsProvider
+    # (the provider runs in the app's process, so the plane's door is a direct
+    # call into the set's one host); the seat reads it through the androidTest
+    # bridge's documents verbs (`_AndroidReplica`), never a bound folder. It is
+    # the OWNER of a tui member too (`_MIXED_PAIRS`), authoring through the
+    # same provider (`_author`).
+    pytest.mark.android,
     # macOS' production spawner is launchd, which an e2e launch must not
     # bootstrap; this marker is what makes its launch construct the private
     # child-agent spawner instead, and the plane's provisioner (its two agent
@@ -101,7 +116,7 @@ pytestmark = [
 
 #: Apps with a landed share-plane leg. Grow this — and the app's own marker
 #: above — together.
-_SUPPORTED_APPS = ("tui", "linux", "macos", "windows")
+_SUPPORTED_APPS = ("tui", "linux", "macos", "windows", "ios", "android")
 
 #: The apps that can be the OWNER seat of this journey: the choreography has
 #: the owner promote the member to **writer** (readers never bind engines),
@@ -119,7 +134,15 @@ _LEAD_OWNER_APP = "tui"
 #: and its serving half is witnessed against the lead app's member too — the
 #: cross-app pairing a defect in shared glue would otherwise hide behind a
 #: same-app arm whose two sides break alike.
-_MIXED_PAIRS = (("tui", "macos"), ("macos", "tui"))
+#:
+#: android is the OWNER of a tui member here (2026-11-14): it carries
+#: `folder-member-role-select` and its foreground share plane serves while the
+#: app is in front, but the emulator venue hosts ONE android seat, so an
+#: android × android pair cannot run and android stays out of `_OWNER_APPS`.
+#: Its serving half (the serve hold and serve tally arm) is witnessed through
+#: this pair; its member half through the tui owner `_share_plane_seat_pairs`
+#: gives it.
+_MIXED_PAIRS = (("tui", "macos"), ("macos", "tui"), ("android", "tui"))
 
 
 def _share_plane_seat_pairs():
@@ -146,6 +169,19 @@ def _share_plane_seat_pairs():
         if owner in available and member in available
     )
     return pairs
+
+
+def _share_plane_seat_params():
+    """`_share_plane_seat_pairs` as pytest params: an iOS member seat also carries
+    `ios_file_provider_app`, so the harness installs the appex-embedding app and
+    lifts the File Provider reconcile gate for that seat alone (`conftest.py`'s
+    `_ios_seat_app_path`)."""
+    return [
+        pytest.param(owner, member, marks=[pytest.mark.ios_file_provider_app])
+        if member == "ios"
+        else (owner, member)
+        for owner, member in _share_plane_seat_pairs()
+    ]
 
 # The scan cadence is no per-folder choice since phase 5 (2026-08-20): every
 # e2e launch ticks at the harness's 30 s `FAUNA_E2E_RESCAN_MS` default
@@ -178,6 +214,252 @@ def _read_or_none(path):
         return path.read_text()
     except (FileNotFoundError, OSError):
         return None
+
+
+def _is_android(app) -> bool:
+    from helpers.app_surface import app_name
+
+    return app_name(app.driver) == "android"
+
+
+class _AndroidReplica:
+    """The android member's replica: the set's root in the app's own
+    DocumentsProvider, read as another app's picker reads it (the androidTest
+    bridge's ``documents_children`` / ``documents_read``, in the app's process).
+
+    A read is what the provider SERVES — the kept root first (a peer-landed
+    body rests there until the nest confirms it), then the cache root, then a
+    hydration through the nest. A not-found or a refused read is ``None``, the
+    bound-folder twin's "not here".
+    """
+
+    def __init__(self, driver, set_name: str):
+        self.driver = driver
+        self.set_name = set_name
+
+    def _set_root(self):
+        # A shared set's display name carries its owner, so match by inclusion.
+        for child in self.driver.documents_children():
+            if self.set_name in (child.get("name") or ""):
+                return child["id"]
+        return None
+
+    def read(self, name: str):
+        try:
+            root = self._set_root()
+            if root is None:
+                return None
+            for child in self.driver.documents_children(root):
+                if child.get("name") == name:
+                    return self.driver.documents_read(child["id"]).decode()
+        except (LookupError, RuntimeError, OSError):
+            return None
+        return None
+
+    def write(self, name: str, text: str) -> None:
+        """Author ``name`` in the set through the provider, as an editor app
+        saving into the picker's folder does: create it if the set has no such
+        document, then one open → write → close (the written close the
+        provider ingests). The android OWNER seat's twin of a bound folder's
+        atomic write; a refusal raises (an author must not fail quietly)."""
+        root = self._set_root()
+        if root is None:
+            raise LookupError(
+                f"the provider presents no set named {self.set_name!r}; root lists "
+                f"{self.driver.documents_children()!r}"
+            )
+        doc = next(
+            (
+                child["id"]
+                for child in self.driver.documents_children(root)
+                if child.get("name") == name
+            ),
+            None,
+        )
+        if doc is None:
+            doc = self.driver.documents_create(root, name)
+        self.driver.documents_write(doc, text.encode())
+
+    def listing(self) -> str:
+        try:
+            root = self._set_root()
+            return repr(self.driver.documents_children(root) if root else self.driver.documents_children())
+        except Exception as exc:  # a readout must never mask the failure it explains
+            return f"<unreadable: {type(exc).__name__}>"
+
+
+def _replica_read(member_folder, name: str):
+    """``name``'s text on the member's replica — a bound folder, an iOS staging
+    root (both paths), or an android provider (`_AndroidReplica`)."""
+    if isinstance(member_folder, _AndroidReplica):
+        return member_folder.read(name)
+    return _read_or_none(member_folder / name)
+
+
+def _author(owner_folder, name: str, text: str) -> None:
+    """The owner authors ``name`` — an atomic write into its bound folder, or,
+    for an android owner, a save through its provider (`_AndroidReplica.write`)."""
+    if isinstance(owner_folder, _AndroidReplica):
+        owner_folder.write(name, text)
+    else:
+        _atomic_write(owner_folder / name, text)
+
+
+def _is_ios(app) -> bool:
+    from helpers.app_surface import app_name
+
+    return app_name(app.driver) == "ios"
+
+
+def _ios_staging_root(udid: str, member_hex: str, folder_id: int):
+    """The set's staging root on the member's simulator — the extension's kept
+    root, where a peer-landed body rests (`p2p-shared-set-build.md` § Built —
+    iOS's leg; `FileProviderDomainIdentity.stagingRootRelativePath`:
+    `FileProvider/roots/<actor-id-hex>/<ref-component>`), read from the host the
+    way the eviction witness reads the replica, so no launch ends the seat."""
+    from pathlib import Path
+
+    from tests.platform.ios.test_file_provider_eviction import _BUNDLE_ID, _sim
+
+    listed = _sim("get_app_container", udid, _BUNDLE_ID, "groups").stdout
+    groups = [Path(e.split(None, 1)[-1].strip()) for e in listed.splitlines() if e.strip()]
+    base = next((g for g in groups if (g / "FileProvider").is_dir()), None)
+    assert base is not None, (
+        f"[member] no app group on {udid} holds a FileProvider directory after the "
+        f"domain registered: {listed!r}"
+    )
+    return base / "FileProvider" / "roots" / member_hex.lower() / f"local%3A{folder_id}"
+
+
+def _ios_tree_listing(udid: str) -> str:
+    """Every file under the app groups' `FileProvider` and `share-spool` trees on
+    the member's simulator, with its size — what the door landed and where."""
+    import os
+    from pathlib import Path
+
+    from tests.platform.ios.test_file_provider_eviction import _BUNDLE_ID, _sim
+
+    lines = []
+    listed = _sim("get_app_container", udid, _BUNDLE_ID, "groups").stdout
+    for entry in listed.splitlines():
+        group = Path(entry.split(None, 1)[-1].strip())
+        for top in ("FileProvider/roots", "share-spool"):
+            for dirpath, _dirs, files in os.walk(group / top):
+                for name in files:
+                    path = Path(dirpath) / name
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        size = -1
+                    lines.append(f"{path.relative_to(group)} ({size} B)")
+    return "\n".join(lines) or f"<no files under FileProvider/roots or share-spool: {listed!r}>"
+
+
+def _ios_member_domain(request, nest, owner, member, member_app, set_name, tmp_path):
+    """The iOS member's replica: the set's File Provider domain on the seat's own
+    simulator, the one the app's foreground plane reaches across to.
+
+    Fixture setup (the writer-revocation iOS arm's precedent): the extension's
+    capability is provisioned with the machine principal the seat enrolled before
+    its first sign-in (`conftest._folder_share_recipient_seat`) and the domain
+    registered under the identity the reconcile would use, through the DEBUG
+    `FileProviderTestCLI`. Each verb is a launch of the same bundle and ends the
+    seat's process, so the seat's state is pinned and the app relaunched after —
+    its `start()` starts the phone plane over the registered domain.
+
+    Returns the staging root (where a peer-landed body rests) and records the
+    domain on the driver for the later domain reads.
+    """
+    import blake3
+    import cbor2
+
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.set_names import find_set
+    from tests.platform.ios.test_file_provider_eviction import (
+        _BACKUP_KEY_CONTEXT,
+        _fauna,
+        _keep_logs,
+        _register,
+    )
+
+    drv = member_app.driver
+    udid = drv._launch_config["udid"]
+    url = nest["url"]
+    member_seed = member["signing_key"].encode()
+    member_hex = member["actor_id_hex"]
+    writer_secret, device_authorization = member["fp_principal"]
+
+    # A same-nest member keys the set as the nest's own row, `local:<id>`; the
+    # owner's `fauna.folders.list` holds the id, found by the set's name hash.
+    with WsRpcAdminClient(
+        url, actor_id=bytes.fromhex(owner["actor_id_hex"]),
+        signing_key=owner["signing_key"].encode(),
+    ) as ws:
+        rows = ws.call("fauna.folders.list", {})["folders"]
+    row = find_set(rows, set_name)
+    assert row is not None, f"[owner] the shared set is not listed: {rows!r}"
+    folder_id = int(row["id"])
+    folder_ref = f"local:{folder_id}"
+
+    device_id = secrets.token_bytes(32)
+    with WsRpcAdminClient(url, actor_id=bytes.fromhex(member_hex), signing_key=member_seed) as ws:
+        ws.call(
+            "fauna.sync.register",
+            {"device_id": device_id.hex(), "label": "fp-ext", "capabilities": "read,write"},
+        )
+        ws.call(
+            "fauna.sync.device_grant.register",
+            {"device_id": device_id.hex(), "authorization": cbor2.loads(device_authorization)},
+        )
+    backup_key = blake3.blake3(member_seed, derive_key_context=_BACKUP_KEY_CONTEXT).digest()
+
+    assert drv.preserve_state_across_relaunch(), "the iOS seat must pin its state"
+    assert "provision OK" in _fauna(
+        udid, "provision", url, member_hex, device_id.hex(), "fp-ext",
+        backup_key.hex(), member["token"], writer_secret.hex(), device_authorization.hex(),
+    )
+    _register(udid, folder_ref, set_name)
+
+    def _teardown():
+        # Kept past the session's device (convention 6): the app's whole log —
+        # the pump's DEBUG lines the filtered tail drops — and what the
+        # extension's staging tree holds.
+        _keep_logs(udid, tmp_path)
+        (tmp_path / "member-app.log").write_text(drv.app_stderr_text())
+        (tmp_path / "staging-tree.txt").write_text(_ios_tree_listing(udid))
+        _fauna(udid, "remove", folder_ref, set_name)
+        _fauna(udid, "revoke")
+
+    request.addfinalizer(_teardown)
+    drv._share_domain = {"udid": udid, "folder_ref": folder_ref, "set_name": set_name}
+    drv.hard_reload()
+    return _ios_staging_root(udid, member_hex, folder_id)
+
+
+def _ios_domain_read(member_app, name: str, expected: str) -> str:
+    """Read ``name`` through the member's File Provider domain (`fetchContents`,
+    the kept root before the network) and assert it is ``expected``. The verb is
+    a launch of the seat's bundle, so it ENDS the seat's process: call it only
+    once nothing else is read off the running app, and `_member_back_in_front`
+    after."""
+    import hashlib
+
+    from tests.platform.ios.test_file_provider_eviction import _extension_diagnostics, _fauna
+
+    dom = member_app.driver._share_domain
+    out = _fauna(dom["udid"], "read", dom["folder_ref"], dom["set_name"], name)
+    digest = hashlib.sha256(expected.encode()).hexdigest()
+    assert f"read OK: {name}" in out and digest in out, (
+        f"[member] the domain did not serve {name} byte for byte: {out}\n"
+        f"{_extension_diagnostics(dom['udid'])}"
+    )
+    return out
+
+
+def _member_back_in_front(member_app) -> None:
+    """An iOS seat a domain read ended comes back to the foreground; a no-op elsewhere."""
+    if _is_ios(member_app):
+        member_app.driver.hard_reload()
 
 
 def _transfer_surface_readout(driver) -> str:
@@ -247,15 +529,15 @@ def _await_member_file(member_folder, filename, expected, member_app):
     """Deadline-poll until the member's bound folder holds ``filename`` ==
     ``expected`` (convention 14 — the shared ``wait_until``)."""
     wait_until(
-        lambda: _read_or_none(member_folder / filename) == expected,
+        lambda: _replica_read(member_folder, filename) == expected,
         _PEER_TRANSFER_S,
         interval=1.0,
         diagnose=lambda: (
             f"[member] {filename}: "
             + (
                 "NEVER ARRIVED"
-                if _read_or_none(member_folder / filename) is None
-                else f"content mismatch: got {_read_or_none(member_folder / filename)!r}"
+                if _replica_read(member_folder, filename) is None
+                else f"content mismatch: got {_replica_read(member_folder, filename)!r}"
             )
             + " with the nest DOWN — the peer pull did not deliver it. The "
             "owner's engine minted it offline (pending row + local plaintext), "
@@ -264,8 +546,48 @@ def _await_member_file(member_folder, filename, expected, member_app):
             f"app error: {member_app.error_text()!r}\n"
             + seat_firewall_note(member_app.driver, "member")
             + _agent_diagnosis(member_app, "member")
+            + (
+                "\n[member] the iOS staging tree:\n"
+                + _ios_tree_listing(member_app.driver._share_domain["udid"])
+                # The door's far side: a page the app spooled but the extension
+                # never landed is the extension's to explain (its build with
+                # the nest unreachable, its ingest answer), and its logs live
+                # on the simulator, not in the app's stderr above.
+                + "\n[member] the File Provider extension's own logs:\n"
+                + _ios_extension_logs(member_app.driver._share_domain["udid"])
+                if _is_ios(member_app)
+                else ""
+            )
         ),
     )
+
+
+def _ios_extension_logs(udid: str) -> str:
+    """The extension's os log and tracing tail, plus the whole of both kept on
+    disk (the simulator goes with the session), or why they could not be read —
+    a failure message never loses its verdict to a diagnostic (convention 6)."""
+    import tempfile
+    from pathlib import Path
+
+    from tests.platform.ios.test_file_provider_eviction import (
+        _extension_diagnostics,
+        _keep_logs,
+    )
+
+    try:
+        tail = _extension_diagnostics(udid)
+    except Exception as exc:
+        tail = f"<unreadable: {type(exc).__name__}: {exc}>"
+    try:
+        into = Path(tempfile.mkdtemp(prefix="fauna-e2e-ios-extension-"))
+        _keep_logs(udid, into)
+        kept = (
+            f"\n[member] the extension's COMPLETE tracing and fileproviderd's log "
+            f"preserved at: {into}"
+        )
+    except Exception as exc:
+        kept = f"\n[member] the extension's logs could not be kept: {type(exc).__name__}: {exc}"
+    return tail + kept
 
 
 def _member_access_or_none(ob, index, row):
@@ -372,31 +694,62 @@ def _share_and_reach_peer_barrier(
     )
 
     # ── 2. nest-mediated hydration (the anchor both later steps stand on) ──
-    owner_folder = tmp_path / "owner-bound"
-    owner_folder.mkdir()
-    _bind_location_under_set(owner_app, set_name, owner_folder, seat="owner")
-
     file_1 = f"online-{secrets.token_hex(3)}.txt"
     payload_1 = f"nest-mediated — {secrets.token_hex(8)}\n"
-    _atomic_write(owner_folder / file_1, payload_1)
-    _await_agent_upload(owner_app, file_1, seat="owner")
+    if _is_android(owner_app):
+        # A phone binds no folder: an own set is presented in its provider by
+        # default, and the owner authors through it. No agent log to grep —
+        # the provider ingests in the app's process — so the member's
+        # nest-mediated hydration below is this upload's witness.
+        owner_folder = _AndroidReplica(owner_app.driver, set_name)
+        wait_until(
+            lambda: owner_folder._set_root() is not None,
+            _FOLDERS_REFRESH_S,
+            interval=1.0,
+            diagnose=lambda: (
+                f"[owner] the provider never presented the own set {set_name!r}: "
+                f"{owner_folder.listing()}; error={owner_app.error_text()!r}"
+            ),
+        )
+        _author(owner_folder, file_1, payload_1)
+    else:
+        owner_folder = tmp_path / "owner-bound"
+        owner_folder.mkdir()
+        _bind_location_under_set(owner_app, set_name, owner_folder, seat="owner")
+        _author(owner_folder, file_1, payload_1)
+        _await_agent_upload(owner_app, file_1, seat="owner")
 
-    member_folder = tmp_path / "member-bound"
-    member_folder.mkdir()
-    _bind_location_under_set(member_app, set_name, member_folder, seat="member")
+    if _is_ios(member_app):
+        # A phone binds no folder: its replica is the set's File Provider
+        # domain. `file_1`, sequenced by the nest, lands there as a placeholder
+        # row only (a peer body lands only for a row the nest cannot serve —
+        # `share_landing::body_is_wanted`), which the barrier below counts.
+        member_folder = _ios_member_domain(
+            request, nest, _owner, member, member_app, set_name, tmp_path
+        )
+    else:
+        if _is_android(member_app):
+            # A phone binds no folder: the set joins the provider's presence
+            # plan once the share lands (a shared-with-me set is presented by
+            # default), and `file_1` hydrates through the nest on read.
+            member_folder = _AndroidReplica(member_app.driver, set_name)
+        else:
+            member_folder = tmp_path / "member-bound"
+            member_folder.mkdir()
+            _bind_location_under_set(member_app, set_name, member_folder, seat="member")
 
-    wait_until(
-        lambda: _read_or_none(member_folder / file_1) == payload_1,
-        _NEST_HYDRATION_S,
-        interval=1.0,
-        diagnose=lambda: (
-            f"[member] {file_1} never hydrated NEST-MEDIATED within "
-            f"{_NEST_HYDRATION_S:.0f}s — the ordinary path is broken, so the "
-            f"peer-pull half below cannot be read as a peer result. "
-            f"error={member_app.error_text()!r}\n"
-            + _agent_diagnosis(member_app, "member")
-        ),
-    )
+        wait_until(
+            lambda: _replica_read(member_folder, file_1) == payload_1,
+            _NEST_HYDRATION_S,
+            interval=1.0,
+            diagnose=lambda: (
+                f"[member] {file_1} never hydrated NEST-MEDIATED within "
+                f"{_NEST_HYDRATION_S:.0f}s — the ordinary path is broken, so the "
+                f"peer-pull half below cannot be read as a peer result. "
+                f"error={member_app.error_text()!r}\n"
+                + _agent_diagnosis(member_app, "member")
+            ),
+        )
 
     # ── 3. the peer barrier: the member has pulled from the owner PEER-SIDE ──
     # Also the moment the surface's six ids are first proven live in a real
@@ -517,7 +870,7 @@ def _share_and_reach_peer_barrier(
 
 @pytest.mark.parametrize(
     "folder_share_owner_app,folder_share_recipient_app",
-    _share_plane_seat_pairs(),
+    _share_plane_seat_params(),
     indirect=True,
 )
 @pytest.mark.real_conversations
@@ -531,6 +884,9 @@ def test_member_pulls_offline_authored_file_from_owner_peer(
 ):
     """A file authored with the nest down arrives peer-to-peer, and the
     transfer surface reports it (rule-5/Dim-3 honesty)."""
+    from helpers.app_surface import require_surface
+
+    require_surface(folder_share_recipient_app[0].driver, "share-offline-landing")
     owner_app, member_app, nest, owner_folder, member_folder, _set_name = (
         _share_and_reach_peer_barrier(
             request, folder_share_owner_app, folder_share_recipient_app, tmp_path
@@ -545,7 +901,7 @@ def test_member_pulls_offline_authored_file_from_owner_peer(
 
         file_2 = f"offline-{secrets.token_hex(3)}.txt"
         payload_2 = f"authored in the cabin — {secrets.token_hex(8)}\n"
-        _atomic_write(owner_folder / file_2, payload_2)
+        _author(owner_folder, file_2, payload_2)
 
         _await_member_file(member_folder, file_2, payload_2, member_app)
 
@@ -568,17 +924,24 @@ def test_member_pulls_offline_authored_file_from_owner_peer(
         assert "limited" not in state.lower(), (
             f"[member] the transfer gate refused a pull this test needed: {state!r}"
         )
+        if _is_ios(member_app):
+            # The phone's file is what Files serves: read through the domain
+            # with the nest still down, so the bytes can only be the kept
+            # root's (`fetchContents` asks `lookupBody` first). Last, because
+            # the read ends the seat's process.
+            _ios_domain_read(member_app, file_2, payload_2)
     finally:
         # The session-scoped nest must outlive this test healthy — same port,
         # same data dir, no factory reset.
         start_nest_in_place(nest)
 
+    _member_back_in_front(member_app)
     _await_member_page_clean_after_restart(member_app)
 
 
 @pytest.mark.parametrize(
     "folder_share_owner_app,folder_share_recipient_app",
-    _share_plane_seat_pairs(),
+    _share_plane_seat_params(),
     indirect=True,
 )
 @pytest.mark.real_conversations
@@ -615,6 +978,7 @@ def test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived(
     from helpers.app_surface import app_name, require_surface
 
     require_surface(folder_share_owner_app[0].driver, "share-serve-tally")
+    require_surface(folder_share_recipient_app[0].driver, "share-offline-landing")
 
     owner_app, member_app, nest, owner_folder, member_folder, _set_name = (
         _share_and_reach_peer_barrier(
@@ -639,14 +1003,14 @@ def test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived(
             name: f"{name} — authored with the nest down — {secrets.token_hex(8)}\n"
             for name in (file_a, file_b, file_c)
         }
-        _atomic_write(owner_folder / file_a, payloads[file_a])
+        _author(owner_folder, file_a, payloads[file_a])
         _await_member_file(member_folder, file_a, payloads[file_a], member_app)
 
         # ── 2. hold on; the next manifest request parks mid-transfer ──
         ob.hold_share_serves(True)
         try:
-            _atomic_write(owner_folder / file_b, payloads[file_b])
-            _atomic_write(owner_folder / file_c, payloads[file_c])
+            _author(owner_folder, file_b, payloads[file_b])
+            _author(owner_folder, file_c, payloads[file_c])
             wait_until(
                 lambda: ob.share_serve_tally().get("parked", 0) >= 1,
                 _PEER_TRANSFER_S,
@@ -662,7 +1026,7 @@ def test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived(
             # Nothing authored after the hold can have crossed: every body
             # starts with a manifest answer, and those are parked.
             arrived_early = [
-                n for n in (file_b, file_c) if _read_or_none(member_folder / n) is not None
+                n for n in (file_b, file_c) if _replica_read(member_folder, n) is not None
             ]
             assert not arrived_early, (
                 f"[member] {arrived_early} arrived while every manifest answer was "
@@ -760,7 +1124,7 @@ def _p2p_share_limits_row(settings) -> int:
 
 @pytest.mark.parametrize(
     "folder_share_owner_app,folder_share_recipient_app",
-    _share_plane_seat_pairs(),
+    _share_plane_seat_params(),
     indirect=True,
 )
 @pytest.mark.real_conversations
@@ -841,7 +1205,7 @@ def test_a_pull_from_a_device_that_went_away_keeps_its_row_and_says_why(
 
 @pytest.mark.parametrize(
     "folder_share_owner_app,folder_share_recipient_app",
-    _share_plane_seat_pairs(),
+    _share_plane_seat_params(),
     indirect=True,
 )
 @pytest.mark.real_conversations
@@ -875,8 +1239,10 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
     then moves past its row), so step 4 polls fast enough to read one whole
     pump pass; a loaded box makes a pass longer, never shorter.
     """
+    from helpers.app_surface import require_surface
     from helpers.rpc_hold import arm_rpc_hold, release_rpc_hold, rpc_hold_status
 
+    require_surface(folder_share_recipient_app[0].driver, "share-cap-nest-hold")
     owner_app, member_app, nest, owner_folder, member_folder, set_name = (
         _share_and_reach_peer_barrier(
             request, folder_share_owner_app, folder_share_recipient_app, tmp_path
@@ -916,7 +1282,7 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
     try:
         # ── 2–3. hold the nest path, then the owner adds the big file ──
         arm_rpc_hold(nest["port"], kind)
-        _atomic_write(owner_folder / big, payload)
+        _author(owner_folder, big, payload)
 
         # ── 4. the member's row says limited; the file is not here yet ──
         def _limited_row():
@@ -933,7 +1299,7 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
                 f"[member] no transfer row for {set_name!r} read {expected_state!r} "
                 f"after the owner added a {len(payload)}-byte file over the 1 KB "
                 f"cap; rows={_transfer_rows(md)!r}; member has the file: "
-                f"{_read_or_none(member_folder / big) is not None}. A file that "
+                f"{_replica_read(member_folder, big) is not None}. A file that "
                 "ARRIVED with no limited reading crossed the peer leg uncapped "
                 "(the pass read a policy without the cap, or the cap is not put "
                 "to each file); no arrival and no reading means no pass planned "
@@ -943,7 +1309,7 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
                 + _agent_diagnosis(member_app, "member")
             ),
         )
-        assert _read_or_none(member_folder / big) is None, (
+        assert _replica_read(member_folder, big) is None, (
             "[member] the over-cap file is already here while the nest path is "
             "held — it crossed the peer leg the cap should have kept it off"
         )
@@ -951,8 +1317,13 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
         release_rpc_hold(nest["port"], kind)
 
     # ── 5. the file arrives through the nest ──
+    if _is_ios(member_app):
+        # A phone's copy of a file the nest serves is the OS's, fetched on
+        # open: the domain answers the read through the nest.
+        _ios_domain_read(member_app, big, payload)
+        return
     wait_until(
-        lambda: _read_or_none(member_folder / big) == payload,
+        lambda: _replica_read(member_folder, big) == payload,
         _NEST_HYDRATION_S,
         interval=1.0,
         diagnose=lambda: (
@@ -968,7 +1339,7 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
 
 @pytest.mark.parametrize(
     "folder_share_owner_app,folder_share_recipient_app",
-    _share_plane_seat_pairs(),
+    _share_plane_seat_params(),
     indirect=True,
 )
 @pytest.mark.real_conversations
@@ -1018,7 +1389,13 @@ def test_a_removed_member_drops_off_the_owners_transfer_list(
         ),
     )
 
-    owner_row = ob.find_and_expand_folder(set_name)
+    # The expand TOGGLES, and linux keeps the row the share opened open across
+    # navigate_folders(), so one toggle can shut it; the member roster also
+    # fills asynchronously after the expand. Re-expand until the member's
+    # Remove control shows (find_and_expand_folder_until's contract).
+    owner_row = ob.find_and_expand_folder_until(
+        set_name, "folder-member-remove-button", timeout=60
+    )
     ob.remove_shared_member(0, row=owner_row)
     wait_until(
         lambda: ob.shared_member_count() == 0,
@@ -1134,7 +1511,7 @@ def test_a_person_the_folder_was_never_shared_with_gets_nothing_readable(
     secret = secrets.token_hex(16)
     file_s = f"never-for-strangers-{secrets.token_hex(3)}.txt"
     payload = f"for members only — {secret}\n"
-    _atomic_write(owner_folder / file_s, payload)
+    _author(owner_folder, file_s, payload)
     _await_member_file(member_folder, file_s, payload, member_app)
 
     group_id_hex = conv_api.folder_group_id_hex(nest["port"], owner, set_name)

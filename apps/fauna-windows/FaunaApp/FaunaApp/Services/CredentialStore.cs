@@ -51,9 +51,10 @@ internal static class CredentialStore
     /// <c>FfiAccountRegistry.DeviceIdForActor</c> passes
     /// (<c>sync-agent-credentials.md</c> § Credential model, the RULED
     /// 2026-09-20 block) — safe because windows has exactly ONE credential
-    /// store: sign-out (<c>App.xaml.cs</c>'s <c>ClearCredentialNamespace</c> →
-    /// <c>Registry().ClearAll()</c>, the only bulk eraser) never names
-    /// <c>install/device_secret</c>. An app needing a SECOND store for this (android's wholesale
+    /// store: neither sign-out's wipe (the shared routine's <c>wipe_own</c>, behind
+    /// <c>App.xaml.cs</c>'s <c>FinishSignOut</c>) nor the e2e reset's
+    /// <c>Registry().ClearAll()</c> ever names <c>install/device_secret</c>, and windows'
+    /// <c>SignOutHost.WipeOwnStore</c> adds no wholesale reset. An app needing a SECOND store for this (android's wholesale
     /// <c>SecureStorage.clear()</c>) would pass a store its own reset does not
     /// reach; windows needs no such split.</para>
     /// </summary>

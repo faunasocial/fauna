@@ -20,6 +20,12 @@ pub enum ConnectedAppsGesture {
         consent_id_hex: String,
         approved: bool,
     },
+    /// Choose the folder on a bare folder-plane request card
+    /// (`connected-apps-request-folder`), by the folder's row id.
+    SetFolder {
+        consent_id_hex: String,
+        id: i64,
+    },
     Block(String),
     /// Lift a per-client block, by the blocked client's id.
     Unblock(String),
@@ -27,6 +33,11 @@ pub enum ConnectedAppsGesture {
     /// Set the account's external-apps switch to the carried value
     /// (`atproto-external-apps-enable`).
     SetExternalApps(bool),
+    /// Open a served principal's per-operation record, by row key
+    /// (`connected-apps-oracle-open`).
+    OpenRecord(String),
+    /// Close the open record (`connected-apps-oracle-open` while open).
+    CloseRecord,
 }
 
 impl ConnectedAppsGesture {
@@ -40,10 +51,13 @@ impl ConnectedAppsGesture {
                 consent_id_hex,
                 approved,
             } => machine.resolve_request(consent_id_hex, approved).await,
+            Self::SetFolder { consent_id_hex, id } => machine.set_folder(consent_id_hex, id),
             Self::Block(consent_id_hex) => machine.block_request(consent_id_hex).await,
             Self::Unblock(client_id) => machine.unblock(client_id).await,
             Self::Revoke(key) => machine.revoke(key).await,
             Self::SetExternalApps(enabled) => machine.set_external_apps_enabled(enabled).await,
+            Self::OpenRecord(key) => machine.open_record(key).await,
+            Self::CloseRecord => machine.close_record(),
         }
     }
 }

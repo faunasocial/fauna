@@ -9,10 +9,7 @@ guide: docs/guides/install.md § The no-install option: the web app
 ## What a user gets
 
 Every nest serves the web app itself by default, so on any device with a browser
-you open your nest's address and you are in — nothing to install. The six native
-apps (Linux, Windows, macOS, iOS, Android and the terminal app) are built from
-source today, outside Google Play's invitation-only testing of the Android app
-and the pre-release downloads of the Windows, Linux and terminal apps; public releases arrive once a version passes acceptance, and from then on the nest and every app's release channel that exists ship together at one version. The Windows installer can also set up your nest on the computer it installs on — its "Nest Service" choice, off by default — as a service that starts with the computer, runs with nobody signed in, and that your other devices reach over the network; the macOS package, once published, does the same.
+you open your nest's address and you are in — nothing to install. Released versions, the first of them 0.1.6, are published on the project's releases page, with downloads of the macOS, Windows, Linux and terminal apps; the Android app is in Google Play's invitation-only testing, and the iOS app is built from source. A version's public release arrives once it passes acceptance, and the nest and every app's release channel that exists ship together at one version. The Windows installer can also set up your nest on the computer it installs on — its "Nest Service" choice, off by default — as a service that starts with the computer, runs with nobody signed in, and that your other devices reach over the network; the macOS package, once published, does the same.
 
 ## Coverage contract
 

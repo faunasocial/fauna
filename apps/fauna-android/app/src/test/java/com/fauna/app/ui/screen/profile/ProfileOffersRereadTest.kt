@@ -2,6 +2,7 @@ package com.fauna.app.ui.screen.profile
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -49,10 +50,12 @@ class ProfileOffersRereadTest {
     val composeTestRule = createComposeRule()
 
     private val author = "aa".repeat(32)
+    private val remote = "https://home.example"
 
     private fun api(): ApiClient = mock(ApiClient::class.java).also { api ->
         runBlocking {
-            whenever(api.subscriptionOffersList(author)).thenReturn(emptyList())
+            whenever(api.subscriptionOffersList(author, null)).thenReturn(emptyList())
+            whenever(api.subscriptionOffersList(author, remote)).thenReturn(emptyList())
         }
     }
 
@@ -71,17 +74,17 @@ class ProfileOffersRereadTest {
             }
         }
         composeTestRule.waitForIdle()
-        runBlocking { verify(api, times(1)).subscriptionOffersList(author) }
+        runBlocking { verify(api, times(1)).subscriptionOffersList(author, null) }
 
         // The tab is re-activated while already showing — `tab` does not change,
         // so the branch does not re-compose and the token is the only signal.
         token++
         composeTestRule.waitForIdle()
-        runBlocking { verify(api, times(2)).subscriptionOffersList(author) }
+        runBlocking { verify(api, times(2)).subscriptionOffersList(author, null) }
 
         token++
         composeTestRule.waitForIdle()
-        runBlocking { verify(api, times(3)).subscriptionOffersList(author) }
+        runBlocking { verify(api, times(3)).subscriptionOffersList(author, null) }
     }
 
     @Test
@@ -108,6 +111,33 @@ class ProfileOffersRereadTest {
         // The door is tab activation, not recomposition: keying the effect on
         // something that changes on every frame would turn a render into a
         // network round trip.
-        runBlocking { verify(api, times(1)).subscriptionOffersList(author) }
+        runBlocking { verify(api, times(1)).subscriptionOffersList(author, null) }
+    }
+
+    @Test
+    fun `the header read moving the home slot re-reads the offers from the new home`() {
+        // `subscriptions.md` § Pillar 1 → *The offers browse across nests*: the
+        // open seeds the slot, the header read may replace it after the first
+        // load, and the tab then reads again from the home the slot now names.
+        val api = api()
+        var home by mutableStateOf<String?>(null)
+
+        composeTestRule.setContent {
+            CompositionLocalProvider(LocalAppMessages provides AppMessages()) {
+                ProfileOffersSection(
+                    targetActorIdHex = author,
+                    home = home,
+                    reloadToken = 0,
+                    vm = ProfileOffersVM(api),
+                )
+            }
+        }
+        composeTestRule.waitForIdle()
+        runBlocking { verify(api, times(1)).subscriptionOffersList(author, null) }
+
+        home = remote
+        composeTestRule.waitForIdle()
+        runBlocking { verify(api, times(1)).subscriptionOffersList(author, remote) }
+        runBlocking { verify(api, times(1)).subscriptionOffersList(author, null) }
     }
 }

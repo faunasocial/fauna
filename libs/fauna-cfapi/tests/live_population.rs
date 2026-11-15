@@ -33,6 +33,7 @@ use fauna_cfapi::PlaceholderInfo;
 use windows::Win32::Storage::CloudFilters::{CF_CALLBACK_INFO, CF_CALLBACK_PARAMETERS};
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
 const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
 
 /// What each connected root should answer FETCH_PLACEHOLDERS with, plus where to report the
@@ -82,8 +83,6 @@ struct Outcome {
     callback: String,
     /// What a *different process* sees in the directory — the user's ground truth.
     listing: Vec<String>,
-    /// The root's file attributes right after `CfRegisterSyncRoot`, before `connect`.
-    attrs_after_register: u32,
 }
 
 /// Register + connect a fresh sync root that will answer FETCH_PLACEHOLDERS with `entries`,
@@ -95,9 +94,6 @@ fn run_case(entries: Vec<PlaceholderInfo>) -> Outcome {
     let root_str = root.to_string_lossy().to_string();
 
     fauna_cfapi::register_sync_root(&root_str, "FaunaTest").expect("register_sync_root");
-    let attrs_after_register = std::fs::symlink_metadata(&root)
-        .expect("stat root")
-        .file_attributes();
 
     let (tx, rx) = channel::<String>();
     let key = fauna_cfapi::connect(
@@ -129,11 +125,7 @@ fn run_case(entries: Vec<PlaceholderInfo>) -> Outcome {
     let _ = fauna_cfapi::unregister_sync_root(&root_str);
     cases().lock().unwrap().remove(&key.0);
 
-    Outcome {
-        callback,
-        listing,
-        attrs_after_register,
-    }
+    Outcome { callback, listing }
 }
 
 fn one_file() -> Vec<PlaceholderInfo> {
@@ -142,6 +134,7 @@ fn one_file() -> Vec<PlaceholderInfo> {
         size: 5,
         mtime: 1_700_000_000, // Unix SECONDS
         is_dir: false,
+        read_only: false,
     }]
 }
 
@@ -203,24 +196,120 @@ fn an_empty_placeholder_set_still_completes_the_operation() {
 /// If this ever fails, FETCH_PLACEHOLDERS will go silent and on-demand sync will die — do NOT
 /// "fix" that by converting the root; converting an already-placeholder root fails 0x8007017C,
 /// which is the false trail that cost a whole session.
+///
+/// **When the reparse point appears depends on the registering process.** It appears at
+/// `connect` — unless the process registering the root already holds a live connection to
+/// another root of the provider, in which case the new root is `REPARSE_POINT | OFFLINE`
+/// from registration on. A root merely registered, or connected and since disconnected,
+/// does not count, and no other process's roots matter (measured 2026-11-11, ten fresh
+/// roots per case). Every other test in this binary connects a root, in parallel, so the
+/// body runs in a child process of its own (this binary re-run on this one test), where no
+/// connection exists until the body makes one — the in-binary form read `0x401430` at
+/// registration whenever a sibling's connection overlapped it.
 #[test]
 fn registering_a_sync_root_makes_it_an_on_demand_placeholder() {
-    let outcome = run_case(one_file());
+    const CHILD: &str = "FAUNA_CFAPI_REGISTER_ATTRS_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().expect("test exe"))
+            .args([
+                "--exact",
+                "registering_a_sync_root_makes_it_an_on_demand_placeholder",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("re-run this test binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "the child run failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
 
+    /// Disconnects and unregisters on drop, so a failed assertion leaves no sync root behind.
+    struct Root {
+        _tmp: tempfile::TempDir,
+        path: std::path::PathBuf,
+        key: Option<windows::Win32::Storage::CloudFilters::CF_CONNECTION_KEY>,
+    }
+    impl Root {
+        fn register() -> Self {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("root");
+            std::fs::create_dir_all(&path).unwrap();
+            fauna_cfapi::register_sync_root(&path.to_string_lossy(), "FaunaTest")
+                .expect("register_sync_root");
+            Root {
+                _tmp: tmp,
+                path,
+                key: None,
+            }
+        }
+        fn attrs(&self) -> u32 {
+            std::fs::symlink_metadata(&self.path)
+                .expect("stat root")
+                .file_attributes()
+        }
+        fn connect(&mut self) {
+            self.key = Some(
+                fauna_cfapi::connect(
+                    &self.path.to_string_lossy(),
+                    Some(noop_cb),
+                    Some(noop_cb),
+                    Some(noop_cb),
+                    Some(noop_cb),
+                )
+                .expect("connect"),
+            );
+        }
+    }
+    impl Drop for Root {
+        fn drop(&mut self) {
+            if let Some(key) = self.key.take() {
+                fauna_cfapi::disconnect(key);
+            }
+            let _ = fauna_cfapi::unregister_sync_root(&self.path.to_string_lossy());
+        }
+    }
+    const PLACEHOLDER_ROOT: u32 = FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_OFFLINE;
+
+    // (1) No connection in this process: registration alone sets RECALL_ON_DATA_ACCESS.
+    let mut first = Root::register();
+    let registered = first.attrs();
     assert_ne!(
-        outcome.attrs_after_register & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+        registered & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
         0,
-        "CfRegisterSyncRoot must leave the root RECALL_ON_DATA_ACCESS (attrs {:#x}) — that is \
-         what makes Windows ask us to populate it",
-        outcome.attrs_after_register
+        "CfRegisterSyncRoot must leave the root RECALL_ON_DATA_ACCESS (attrs {registered:#x}) \
+         — that is what makes Windows ask us to populate it"
     );
-    // A plain directory is not a reparse point; a cloud placeholder root becomes one.
     assert_eq!(
-        outcome.attrs_after_register & FILE_ATTRIBUTE_REPARSE_POINT,
+        registered & PLACEHOLDER_ROOT,
         0,
-        "the reparse point appears at connect, not at register — if this changes, the \
-         comment on register_sync_root is out of date (attrs {:#x})",
-        outcome.attrs_after_register
+        "with no connection in the registering process the reparse point appears at connect, \
+         not at register — if this changes, the comment on register_sync_root is out of date \
+         (attrs {registered:#x})"
+    );
+
+    // (2) Connecting makes the root a reparse-point placeholder.
+    first.connect();
+    let connected = first.attrs();
+    assert_eq!(
+        connected & PLACEHOLDER_ROOT,
+        PLACEHOLDER_ROOT,
+        "connect must make the root REPARSE_POINT | OFFLINE (attrs {connected:#x})"
+    );
+
+    // (3) With that connection live, the next root registered here is one from registration on.
+    let second = Root::register();
+    let second_registered = second.attrs();
+    assert_eq!(
+        second_registered & (PLACEHOLDER_ROOT | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS),
+        PLACEHOLDER_ROOT | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+        "a root registered while the same process holds a live connection to another root is \
+         REPARSE_POINT | OFFLINE | RECALL_ON_DATA_ACCESS at registration — if this changes, \
+         the comment on register_sync_root is out of date (attrs {second_registered:#x})"
     );
 }
 

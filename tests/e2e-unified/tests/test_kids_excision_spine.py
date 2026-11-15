@@ -541,12 +541,22 @@ def test_the_android_kids_build_routes_into_no_nest_setup_or_nest_retirement():
     paragraph). Each carries `!BuildConfig.KIDS`, which the release shrinker folds out of the kids APK."""
     ui = _ANDROID_MAIN / "com/fauna/app/ui"
     nav = _kotlin_code_only((ui / "navigation/FaunaNavHost.kt").read_text(encoding="utf-8"))
-    setup = re.search(
-        r"if \(!BuildConfig\.KIDS\) \{(.*?)\n        \}\n", nav, flags=re.DOTALL
+    guarded = "".join(
+        m.group(1)
+        for m in re.finditer(r"if \(!BuildConfig\.KIDS\) \{(.*?)\n        \}\n", nav, flags=re.DOTALL)
     )
-    assert setup, "the nest setup route block lost its `if (!BuildConfig.KIDS)` guard"
-    for route in ("onboarding/dns-config", "onboarding/vps-config", "onboarding/nest-provisioning"):
-        assert f'composable("{route}")' in setup.group(1), f"`{route}` is registered outside the kids guard"
+    assert guarded, "the nest setup route block lost its `if (!BuildConfig.KIDS)` guard"
+    # Claiming a nest makes its admin: the claim page and the admin-path NAT
+    # step after it are setup too (`account-age-band.md`, the kids-app bullet,
+    # item 4 — onboarding is joining a nest by invite).
+    for route in (
+        "onboarding/dns-config",
+        "onboarding/vps-config",
+        "onboarding/nest-provisioning",
+        "onboarding/claim-code",
+        "onboarding/nat-mode-choice",
+    ):
+        assert f'composable("{route}")' in guarded, f"`{route}` is registered outside the kids guard"
         assert nav.count(f'composable("{route}")') == 1
     assert 'if (!BuildConfig.KIDS) composable("settings/admin-nest-retire")' in nav, (
         "the admin nest-retire route is registered on the kids build"
@@ -560,11 +570,25 @@ def test_the_android_kids_build_routes_into_no_nest_setup_or_nest_retirement():
         ("DNS_CONFIG", "onboarding/dns-config"),
         ("VPS_CONFIG", "onboarding/vps-config"),
         ("NEST_PROVISIONING", "onboarding/nest-provisioning"),
+        ("CLAIM_CODE", "onboarding/claim-code"),
+        ("NAT_MODE_CHOICE", "onboarding/nat-mode-choice"),
     ):
         assert re.search(
             rf'OnboardingStep\.{step} ->\s*if \(BuildConfig\.KIDS\) "onboarding/handle-entry" else "{route}"',
             handle,
         ), f"routeForStep sends {step} to its provider screen on the kids build"
+    # The launch router's two claim re-entries (an unclaimed saved nest, a
+    # factory-reset resume) land on handle-entry on the kids build.
+    launch = _kotlin_code_only((ui / "viewmodel/AppLaunchVM.kt").read_text(encoding="utf-8"))
+    assert "if (rec == null || BuildConfig.KIDS)" in launch, (
+        "the factory-reset resume reaches the claim page on the kids build"
+    )
+    assert re.search(
+        r'if \(BuildConfig\.KIDS\) \{\s*NavTarget\.Wizard\("onboarding/handle-entry"\)\s*\} else \{'
+        r'[^}]*?navigateToClaimCodeForKnownNestWithCode',
+        launch,
+        re.S,
+    ), "the unclaimed-nest launch row reaches the claim page on the kids build"
     retry = _kotlin_code_only((ui / "screen/LaunchRetryScreen.kt").read_text(encoding="utf-8"))
     assert re.search(r"if \(!BuildConfig\.KIDS\) \{\s*Spacer[^}]*?Ids\.LAUNCH_RETIRE_BUTTON", retry, re.S), (
         "`launch-retire-button` is rendered on the kids build"
@@ -763,15 +787,34 @@ def test_the_ios_kids_build_routes_into_no_nest_setup_and_gates_the_retire_ids()
     onboarding = _APPLE / "Fauna-iOS/Views/Onboarding"
     welcome = (onboarding / "WelcomeView.swift").read_text(encoding="utf-8")
     kids_arm, rest = welcome.split("#if FAUNA_KIDS", 1)[1].split("#else", 1)
-    assert "case .dnsConfig, .vpsConfig, .nestProvisioning:" in kids_arm and "HandleEntryView(vm: vm)" in kids_arm
+    # Claiming a nest makes its admin, so the claim page and the admin-path NAT
+    # step after it are setup too (`account-age-band.md`, the kids-app bullet,
+    # item 4 — onboarding is joining a nest by invite), as on the android leg.
+    assert (
+        "case .dnsConfig, .vpsConfig, .nestProvisioning, .claimCode, .natModeChoice:" in kids_arm
+        and "HandleEntryView(vm: vm)" in kids_arm
+    ), "the kids router arm no longer keeps every setup and claim step on handle entry"
     full_arm = rest.split("#endif", 1)[0]
-    for view in ("DnsConfigView", "VpsConfigView", "NestProvisioningView"):
+    for view in ("DnsConfigView", "VpsConfigView", "NestProvisioningView", "ClaimCodeView", "NatModeChoiceView"):
         assert f"{view}(vm: vm)" in full_arm and f"{view}(vm: vm)" not in kids_arm, (
             f"{view} is reachable from the kids router arm"
         )
+        assert welcome.count(f"{view}(vm: vm)") == 1, f"{view} is routed twice in WelcomeView"
         text = (onboarding / f"{view}.swift").read_text(encoding="utf-8")
         assert text.startswith("#if !FAUNA_KIDS\n") and text.rstrip().endswith("#endif // !FAUNA_KIDS"), (
             f"{view}.swift is no longer compiled out of the kids build whole"
+        )
+    # The launch router's two claim re-entries (an unclaimed saved nest, a
+    # factory-reset resume) and the admin page's factory-reset re-onboard land on
+    # handle entry under `FAUNA_KIDS`: every call into the machine's claim page
+    # sits behind `#if !FAUNA_KIDS`.
+    app = (_APPLE / "Fauna-iOS/App/FaunaApp.swift").read_text(encoding="utf-8")
+    calls = [m.start() for m in re.finditer(r"\.navigateToClaimCodeForKnownNest(?:WithCode)?\(", app)]
+    assert len(calls) == 3, f"expected the three claim re-entries in FaunaApp.swift, found {len(calls)}"
+    for at in calls:
+        before = app[:at]
+        assert before.rfind("#if !FAUNA_KIDS") > before.rfind("#endif"), (
+            f"a claim re-entry at FaunaApp.swift:{app.count(chr(10), 0, at) + 1} is reachable on the kids build"
         )
     generator = _UI_IDS_GENERATOR.read_text(encoding="utf-8")
     m = re.search(r"SWIFT_KIDS_ONLY_ID_PREFIXES = \(([^)]*)\)", generator)
@@ -924,6 +967,48 @@ def test_the_kids_build_opens_no_outbound_link():
         r"#if FAUNA_KIDS\n\s*\.environment\(\\\.openURL, OpenURLAction \{ _ in \.discarded \}\)\n\s*#endif",
         app,
     ), "the kids app root no longer refuses SwiftUI's own link taps"
+
+
+def test_the_kids_build_renders_a_message_link_as_inert_text():
+    """account-age-band.md, the kids-app bullet, item (4): links render as inert text.
+    The kids arm of `appendInlines` appends the label with no link attribute and no
+    accent; the main build keeps the linked, accent-coloured run."""
+    src = (_APPLE / "FaunaKit/Sources/FaunaKit/Views/DocumentBodyView.swift").read_text(encoding="utf-8")
+    m = re.search(
+        r"#if FAUNA_KIDS\n\s*case let \.link\(_, inner\):\n(.*?)#else\n\s*case let \.link\(href, inner\):\n(.*?)#endif",
+        src,
+        re.S,
+    )
+    assert m, "DocumentBodyView's `.link` case is no longer split under FAUNA_KIDS"
+    kids, main = m.group(1), m.group(2)
+    assert ".link =" not in kids and "accentColor" not in kids, "the kids link label is styled as a link again"
+    assert "label.link = url" in main and "label.foregroundColor = .accentColor" in main
+    assert src.count("case let .link(") == 2, "a second, ungated `.link` case is in DocumentBodyView"
+
+
+def test_the_kids_build_asks_the_nest_for_no_link_preview():
+    """The kids build issues no link-preview resolve: the DM bubble's fire-once task and
+    the thread view's wiring to `resolveLinkPreview` are both behind `#if !FAUNA_KIDS`
+    (the feed's resolves sit in files the kids build compiles out whole)."""
+    bubble = (_APPLE / "FaunaKit/Sources/FaunaKit/Views/DmMessageBubble.swift").read_text(encoding="utf-8")
+    assert re.search(
+        r"\.task\(id: resolvingLinkPreviewUrls\(message\.document\)\) \{\n\s*#if !FAUNA_KIDS\n"
+        r"\s*for url in resolvingLinkPreviewUrls\(message\.document\) \{\n\s*onResolveLinkPreview\(url\)",
+        bubble,
+    ), "the bubble's link-preview resolve lost its `#if !FAUNA_KIDS` guard"
+    assert bubble.count("onResolveLinkPreview(url)") == 1
+    thread = (_APPLE / "FaunaKit/Sources/FaunaKit/Views/ThreadDetailView.swift").read_text(encoding="utf-8")
+    assert re.search(
+        r"onResolveLinkPreview: \{ url in\s*#if !FAUNA_KIDS\s*Task \{ await vm\.resolveLinkPreview\(url\) \}\s*#endif",
+        thread,
+    ), "the thread view's `resolveLinkPreview` wiring lost its `#if !FAUNA_KIDS` guard"
+    assert thread.count("vm.resolveLinkPreview(") == 1
+    for excised in (
+        "FaunaKit/Sources/FaunaKit/Views/PostCardBody.swift",
+        "Fauna-iOS/Views/Feed/PostDetailView.swift",
+    ):
+        text = (_APPLE / excised).read_text(encoding="utf-8")
+        assert "\n#if !FAUNA_KIDS\n" in text[:400], f"{excised} is no longer excised whole from the kids build"
 
 
 def test_the_kids_more_page_lists_no_bridges_row():

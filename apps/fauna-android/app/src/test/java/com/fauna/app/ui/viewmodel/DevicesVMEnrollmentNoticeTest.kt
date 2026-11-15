@@ -65,7 +65,7 @@ class DevicesVMEnrollmentNoticeTest {
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         whenever(api.devicesStaleTick).thenReturn(MutableSharedFlow())
         whenever(api.storeChangedTick).thenReturn(MutableSharedFlow())
-        val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext), FakeOnDemandToggle())
+        val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext), FakeOnDemandToggle(), NoSharePlaneReadings)
         return Fixture(vm, api)
     }
 

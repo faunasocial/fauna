@@ -252,6 +252,77 @@ private func oneDeadGeneration() -> FfiDeadGenerations {
     #expect(vm.letGoStatus == nil, "a different identity starts with nothing listed")
 }
 
+// MARK: - The successor's owed nests
+
+/// One entry as `recovery_owed_nests_view` hands it over.
+private func owedEntry(keeper: UInt8?, nest: UInt8, outcome: String = "not-tried")
+    -> FfiOwedNestEntry
+{
+    FfiOwedNestEntry(
+        keeper: keeper.map { Data(repeating: $0, count: 32) },
+        oldActorId: Data(repeating: 1, count: 32),
+        nestId: Data(repeating: nest, count: 32),
+        addressCopy: LocalizedText(
+            key: "settings.recovery_kit.owed_nest_address_none", args: [:]),
+        outcomeCopy: LocalizedText(key: "settings.recovery_kit.owed_nest_\(outcome)", args: [:]),
+        outcomeKind: outcome)
+}
+
+private func owedStatus(_ count: Int) -> LocalizedText {
+    LocalizedText(key: "settings.recovery_kit.owed_nests_status", args: ["count": "\(count)"])
+}
+
+/// `docs/goal/ui/settings.md` § Recovery kit → *The successor's owed nests*:
+/// a settled dismiss drops its entry and recounts the line, the last drop
+/// clears the list (none of the seven ids paint), and a refusal keeps the
+/// entry and says why on `error-message`. The apple twin of linux's
+/// `OwedNests::confirm` fold.
+///
+/// Mutation check: folding with `==` on the painted entry (a refreshed
+/// outcome line), or dropping on a refusal, reds this.
+@MainActor
+@Test func theOwedDismissDropsSettledEntriesAndKeepsRefusedOnes() {
+    let vm = RecoveryKitVM()
+    let bound = owedEntry(keeper: nil, nest: 7)
+    let linked = owedEntry(keeper: 9, nest: 7, outcome: "unreachable")
+    vm.owedNests = FfiOwedNestsView(status: owedStatus(2), entries: [bound, linked])
+
+    vm.applyOwedDismiss(linked, refusal: LocalizedText(
+        key: "settings.recovery_kit.owed_nest_dismiss_failed", args: ["reason": "x"]))
+    #expect(vm.owedNests?.entries.count == 2, "a refusal keeps the entry")
+    #expect(vm.errorText != nil, "a refusal says why")
+
+    // The same entry with a refreshed outcome line still matches by its key.
+    vm.applyOwedDismiss(owedEntry(keeper: nil, nest: 7, outcome: "landed"), refusal: nil)
+    #expect(vm.owedNests?.entries == [linked], "the settled entry drops, the other keeper's stays")
+    #expect(vm.owedNests?.status == owedStatus(1), "the line recounts")
+
+    vm.applyOwedDismiss(linked, refusal: nil)
+    #expect(vm.owedNests == nil, "the last drop clears the list")
+}
+
+/// The two-step dismiss arms one entry at a time, matched by key; cancel
+/// hides the pair, and another identity starts with nothing listed.
+@MainActor
+@Test func theOwedDismissArmsOneEntryAndDoesNotOutliveTheIdentity() {
+    let vm = RecoveryKitVM()
+    let a = owedEntry(keeper: nil, nest: 7)
+    let b = owedEntry(keeper: nil, nest: 8)
+    vm.owedNests = FfiOwedNestsView(status: owedStatus(2), entries: [a, b])
+
+    vm.armOwedDismiss(a)
+    #expect(vm.isOwedDismissPending(owedEntry(keeper: nil, nest: 7, outcome: "waiting")))
+    #expect(!vm.isOwedDismissPending(b))
+    vm.armOwedDismiss(b)
+    #expect(!vm.isOwedDismissPending(a), "arming another entry hides the first pair")
+    vm.cancelOwedDismiss()
+    #expect(!vm.isOwedDismissPending(b))
+
+    vm.armOwedDismiss(a)
+    vm.resetForIdentityChange()
+    #expect(vm.owedNests == nil && vm.owedDismissPending == nil)
+}
+
 // MARK: - The stolen ceremony's typed outcome
 
 /// `docs/goal/ui/settings.md` § Recovery kit → *The ceremony's outcome is

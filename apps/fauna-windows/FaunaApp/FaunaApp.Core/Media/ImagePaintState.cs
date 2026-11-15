@@ -28,6 +28,18 @@ public static class ImagePaintState
     /// <see cref="Placeholder"/> otherwise.</summary>
     public static string From(bool hasPicture) => hasPicture ? Painted : Placeholder;
 
+    /// <summary>The HelpText a picture element publishes: its paint <see cref="From">state</see>,
+    /// and — for a post's media element — its settled <c>alt</c> beside it, packed
+    /// (<see cref="Helpers.AutomationAttributePack"/>) so the FlaUI bridge answers
+    /// <c>get_attr(post-image, "state")</c> and <c>get_attr(post-image, "alt")</c> each on its
+    /// own (render-model.md § D6c → <i>Proxied video</i>, the <c>alt</c> paragraph). With no
+    /// alt it is the bare state, which is all an image outside a post's media
+    /// (<c>link-preview-image</c>, <c>media-thumbnail</c>) has ever published.</summary>
+    public static string HelpText(bool hasPicture, string? alt)
+        => string.IsNullOrEmpty(alt)
+            ? From(hasPicture)
+            : Helpers.AutomationAttributePack.Pack(("state", From(hasPicture)), ("alt", alt));
+
     /// <summary>What <c>get_text(post-image)</c> answers while a placeholder stands in
     /// for a bridged post's picture: its nest-relative path (render-model.md § D6c — the
     /// label tui paints until the bytes arrive, and what apple's

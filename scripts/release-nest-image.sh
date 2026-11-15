@@ -1,6 +1,6 @@
 #!/bin/sh
-# release-nest-image.sh stage <sha-tag> <stage-tag> <version>
-# release-nest-image.sh promote <sha-tag>
+# release-nest-image.sh stage <sha-tag> <stage-tag>
+# release-nest-image.sh promote <sha-tag> <version>
 #
 # The public repository's two release acts on the nest image and its mirrored
 # sidecars (image-pipeline.md § Image tags & channels → *The UAT channel*, and
@@ -8,16 +8,19 @@
 # call sites, both on the public repository only:
 #
 #   stage   — UAT entry, run by the `stage` job of build-nest-image.yml and
-#             restage-nest.yml once :<sha-tag> is pushed. Refuses a :<version>
-#             that already names another digest (staging a numbered build
-#             spends the version string; a re-stage of the same build is
-#             idempotent), signs every digest keyless, verifies the signatures
-#             against this repository's workflow identity, and only then moves
-#             :<stage-tag> + :<version> on the nest image and the mirrors.
+#             restage-nest.yml once :<sha-tag> is pushed. Signs every digest
+#             keyless, verifies the signatures against this repository's
+#             workflow identity, and only then moves :<stage-tag> ALONE on the
+#             nest image and the mirrors. It writes no :<version>: a stage
+#             spends nothing, so a fix before the public tag is staged again at
+#             the same version (decision (3), re-ruled 2026-11-12).
 #   promote — the release, run by the `promote` job inside the `promote-nest`
 #             Environment after a green verify. Signs nothing: it refuses any
-#             digest the stage did not sign, then copies :latest — the only
-#             writer of that tag.
+#             digest the stage did not sign, refuses unless the public tag
+#             v<version> names the commit :<sha-tag> was built from, refuses a
+#             :<version> that already names another digest (the same one is a
+#             re-run), then copies :<version> + :latest — the only writer of
+#             either tag, so :<version> is written exactly once.
 #
 # Every digest is resolved from :<sha-tag> first; any absence is a break, never
 # a skip, so no channel tag ever names an unsigned manifest.
@@ -29,17 +32,18 @@ set -eu
 
 MODE="${1:-}"
 SHA_TAG="${2:-}"
-STAGE_TAG="${3:-}"
-VERSION="${4:-}"
+STAGE_TAG=""
+VERSION=""
 usage() {
     sed -n '2,3p' "$0" >&2
     exit 2
 }
 case "$MODE" in
-    stage) [ -n "$SHA_TAG" ] && [ -n "$STAGE_TAG" ] && [ -n "$VERSION" ] || usage ;;
-    promote) [ -n "$SHA_TAG" ] && [ -z "$STAGE_TAG" ] || usage ;;
+    stage) STAGE_TAG="${3:-}" ;;
+    promote) VERSION="${3:-}" ;;
     *) usage ;;
 esac
+[ -n "$SHA_TAG" ] && [ -n "${3:-}" ] && [ -z "${4:-}" ] || usage
 
 IMAGE="${IMAGE:-ghcr.io/faunasocial/nest}"
 REPOSITORY="${GITHUB_REPOSITORY:-faunasocial/fauna}"
@@ -47,6 +51,9 @@ ISSUER="https://token.actions.githubusercontent.com"
 # The two workflows that run this script, on `main` of this repository only.
 REPO_RE=$(printf '%s' "$REPOSITORY" | sed 's/[.]/\\./g')
 IDENTITY_RE="^https://github\\.com/$REPO_RE/\\.github/workflows/(build-nest-image|restage-nest)\\.yml@refs/heads/main\$"
+
+# Where the promote reads the public tag: this repository on GitHub.
+TAG_REMOTE="${TAG_REMOTE:-https://github.com/$REPOSITORY.git}"
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PLAN=$(mktemp)
@@ -116,25 +123,6 @@ EOF
 
 do_stage() {
     resolve
-    # Staging a numbered build spends the version string: a :<version> that
-    # names another digest is refused, an absent one or the same one is fine.
-    # Only an explicit not-found counts as absent — a registry error is a red.
-    while IFS="$TAB" read -r repo digest; do
-        if existing=$(digest_of "$repo:$VERSION" 2>"$INSPECT_ERR"); then
-            if [ "$existing" != "$digest" ]; then
-                echo "release: $repo:$VERSION already names $existing, not this build's $digest —" \
-                    "a staged version is spent; bump the version and stage a new build" >&2
-                exit 1
-            fi
-            echo "[release] $repo:$VERSION already names this build (a re-stage)"
-        elif grep -qiE 'not found|manifest unknown' "$INSPECT_ERR"; then
-            echo "[release] $repo:$VERSION does not exist yet"
-        else
-            echo "release: could not tell whether $repo:$VERSION exists: $(tr '\n' ' ' <"$INSPECT_ERR")" >&2
-            exit 1
-        fi
-    done <"$PLAN"
-
     # Sign each digest keyless (the workflow's Sigstore identity), then prove
     # the signatures verify — the recipe printed at the end — before anything
     # moves.
@@ -144,25 +132,76 @@ do_stage() {
     done <"$PLAN"
     verify_all
 
-    # Move the UAT tags: the nest image from its resolved digest, the mirrors
-    # from their :<sha-tag>, strict — every one was just resolved and signed.
+    # Move the stage tag alone: the nest image from its resolved digest, the
+    # mirrors from their :<sha-tag>, strict — every one was just resolved and
+    # signed. No :<version>: the promote writes it, once.
     docker buildx imagetools create \
         -t "$IMAGE:$STAGE_TAG" \
-        -t "$IMAGE:$VERSION" \
         "$IMAGE@$NEST_DIGEST"
-    "$REPO_ROOT/scripts/mirror-third-party-images.sh" "$STAGE_TAG,$VERSION" "$SHA_TAG"
-    print_recipe "$VERSION" "Staged \`$IMAGE:$STAGE_TAG\` + \`:$VERSION\` = \`$NEST_DIGEST\` (and the mirrors), signed."
+    "$REPO_ROOT/scripts/mirror-third-party-images.sh" "$STAGE_TAG" "$SHA_TAG"
+    print_recipe "$STAGE_TAG" "Staged \`$IMAGE:$STAGE_TAG\` = \`$NEST_DIGEST\` (and the mirrors), signed."
+}
+
+# The commit the public tag v<version> names (an annotated tag peeled), or
+# nothing when the tag does not exist. A remote that cannot be read is a red.
+tag_commit() {
+    refs=$(git ls-remote --tags "$TAG_REMOTE" "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" </dev/null) || {
+        echo "release: could not read v$VERSION off $TAG_REMOTE" >&2
+        exit 1
+    }
+    peeled=$(printf '%s\n' "$refs" | awk -v r="refs/tags/v$VERSION^{}" '$2 == r { print $1 }')
+    if [ -n "$peeled" ]; then
+        printf '%s\n' "$peeled"
+    else
+        printf '%s\n' "$refs" | awk -v r="refs/tags/v$VERSION" '$2 == r { print $1 }'
+    fi
 }
 
 do_promote() {
     resolve
     # The stage signed every digest; one it did not is a break, never signed here.
     verify_all
+
+    # The public tag spends the version string, so :<version> follows it: the
+    # tag must name the very commit this digest was built from.
+    built="${SHA_TAG#sha-}"
+    tagged=$(tag_commit)
+    if [ -z "$tagged" ]; then
+        echo "release: the public tag v$VERSION does not exist — the promote follows the tag" >&2
+        exit 1
+    fi
+    if [ "$tagged" != "$built" ]; then
+        echo "release: the public tag v$VERSION names $tagged, not $built, the commit" \
+            "$IMAGE:$SHA_TAG was built from — not v$VERSION's build" >&2
+        exit 1
+    fi
+    echo "[release] the public tag v$VERSION names $built, the commit of $IMAGE:$SHA_TAG"
+
+    # :<version> is written exactly once: one naming another digest is refused,
+    # the same digest is a re-run. Only an explicit not-found counts as absent —
+    # a registry error is a red.
+    while IFS="$TAB" read -r repo digest; do
+        if existing=$(digest_of "$repo:$VERSION" 2>"$INSPECT_ERR"); then
+            if [ "$existing" != "$digest" ]; then
+                echo "release: $repo:$VERSION already names $existing, not this build's $digest —" \
+                    "a version's tag is written once" >&2
+                exit 1
+            fi
+            echo "[release] $repo:$VERSION already names this build (a re-run)"
+        elif grep -qiE 'not found|manifest unknown' "$INSPECT_ERR"; then
+            echo "[release] $repo:$VERSION does not exist yet"
+        else
+            echo "release: could not tell whether $repo:$VERSION exists: $(tr '\n' ' ' <"$INSPECT_ERR")" >&2
+            exit 1
+        fi
+    done <"$PLAN"
+
     docker buildx imagetools create \
+        -t "$IMAGE:$VERSION" \
         -t "$IMAGE:latest" \
         "$IMAGE@$NEST_DIGEST"
-    "$REPO_ROOT/scripts/mirror-third-party-images.sh" "latest" "$SHA_TAG"
-    print_recipe "latest" "Promoted \`$IMAGE:latest\` = \`$NEST_DIGEST\` (and the mirrors), signed at stage."
+    "$REPO_ROOT/scripts/mirror-third-party-images.sh" "$VERSION,latest" "$SHA_TAG"
+    print_recipe "$VERSION" "Promoted \`$IMAGE:$VERSION\` + \`:latest\` = \`$NEST_DIGEST\` (and the mirrors), signed at stage."
 }
 
 case "$MODE" in

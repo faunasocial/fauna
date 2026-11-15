@@ -410,6 +410,32 @@ def test_a_test_failing_on_one_platform_is_mixed_even_if_another_platform_passed
     assert fc.compute_cell(pages[0], "tui", ledger).state == "partial"
 
 
+@pytest.mark.parametrize("refresh", ["mixed", "failed"])
+def test_a_cross_platform_mix_with_no_other_pass_is_mixed_never_failing(tmp_path, refresh):
+    """§ Cell semantics, the ⚠ row: one test passing on linux and failing on windows
+    is "mixed" — so a cell whose only pass is one platform of a test is ⚠, never ❌
+    (the features page's Failing meaning: "none of them passed")."""
+    mixed = {**rec(platform="linux"), **rec(outcome="failed", platform="windows")}
+    pages, ledger = _catalog(tmp_path, {"tui": ledger_file("tui", {"feed-read": {
+        "cell": cell_entry(),
+        "tests": {
+            OWN: mixed,
+            REFRESH: mixed if refresh == "mixed" else rec("failed"),
+        }}})})
+    assert fc.compute_cell(pages[0], "tui", ledger).state == "partial"
+
+
+def test_a_test_failing_on_every_platform_still_folds_to_failing(tmp_path):
+    pages, ledger = _catalog(tmp_path, {"tui": ledger_file("tui", {"feed-read": {
+        "cell": cell_entry(),
+        "tests": {
+            OWN: {**rec(outcome="failed", platform="linux"),
+                  **rec(outcome="error", platform="windows")},
+            REFRESH: rec("failed"),
+        }}})})
+    assert fc.compute_cell(pages[0], "tui", ledger).state == "failing"
+
+
 def test_a_test_passing_on_every_platform_that_recorded_it_still_folds_to_full(tmp_path):
     text = PAGE.replace("   - (none)",
                         "   - `tests/e2e-unified/tests/api/test_delete.py::test_delete`")
@@ -1105,6 +1131,40 @@ def test_a_client_set_parametrization_narrows_the_columns_like_a_mark(tmp_path):
     assert facts["test_fixture_params_through_a_fixture"] == ("linux", "macos", "tui")
     # A test's own parametrization of the fixture replaces the fixture's `params=`.
     assert facts["test_the_test_overrides_the_fixtures_params"] == ("macos",)
+
+
+def test_a_set_of_pytest_params_narrows_like_its_plain_values(tmp_path):
+    """A seat helper that wraps one app in `pytest.param(app, marks=…)` — the
+    offline-share module's `_seat_params`, which gives an iOS seat its File
+    Provider mark — still names its set: a param's value is its first argument.
+    Read as unrestricted, a journey over a NARROWER set than its module marks
+    credited every marked app (android on offline-sharing 3 and 7, whose run
+    deselects it)."""
+    facts = _scan_apps(tmp_path, (
+        "import pytest\n"
+        "from drivers import get_available_apps\n\n"
+        "pytestmark = [pytest.mark.tui, pytest.mark.ios, pytest.mark.android]\n"
+        "_ALL = (\"tui\", \"ios\", \"android\")\n"
+        "_DESKTOP = (\"tui\",)\n"
+        "_NARROW = (*_DESKTOP, \"ios\")\n\n\n"
+        "def _seat_params(*apps):\n"
+        "    return [\n"
+        "        pytest.param(app, marks=[pytest.mark.slow], id=app) if app == \"ios\" else app\n"
+        "        for app in apps\n"
+        "    ]\n\n\n"
+        "def _all():\n"
+        "    available = get_available_apps()\n"
+        "    return [c for c in _ALL if c in available]\n\n\n"
+        "def _narrow():\n"
+        "    available = get_available_apps()\n"
+        "    return _seat_params(*[c for c in _NARROW if c in available])\n\n\n"
+        "@pytest.fixture(params=_seat_params(*_all()))\n"
+        "def seat_app(request):\n    return request.param\n\n\n"
+        "def test_every_seat(seat_app):\n    pass\n\n\n"
+        "@pytest.mark.parametrize(\"seat_app\", _narrow(), indirect=True)\n"
+        "def test_narrow_seat(seat_app):\n    pass\n"))
+    assert facts["test_every_seat"] == ("android", "ios", "tui")
+    assert facts["test_narrow_seat"] == ("ios", "tui")
 
 
 def test_a_parametrization_the_run_does_not_deselect_on_does_not_narrow(tmp_path):

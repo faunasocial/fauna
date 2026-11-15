@@ -15,7 +15,9 @@ root is two-way). A fresh windows binding starts on-demand, so the journey is:
         directory holds both files' bytes.
 
 **Every assertion is another process's view**: the filter's sync-root
-registration (`helpers.folder_content.on_demand_root_stands`), plain file I/O
+registration and its provider's connection (`helpers.folder_content.on_demand_root_served`
+before the first write, since the agent registers the root before it connects it, and
+`on_demand_root_stands` for the root coming down), plain file I/O
 through the root, and — for "uploaded" — the engine's own `file uploaded` line,
 which it cannot emit without the byte plane having accepted the file. Bodies
 are written as bytes: a text write turns each newline into CRLF on windows.
@@ -36,11 +38,13 @@ from helpers.folder_content import (
     await_agent_upload,
     bind_location_under_set,
     mountable_location,
+    on_demand_root_served,
     on_demand_root_stands,
     open_bound_row,
     upload_count,
 )
 from helpers.waiting import wait_until
+from helpers.windows_cfapi import sync_root_provider
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.windows]
 
@@ -50,15 +54,31 @@ _ROOT_WINDOW_SECS = 90.0
 
 
 def _await_root(app, location, *, standing: bool) -> None:
+    # Standing means SERVED: the registration comes before the agent's provider
+    # connection, and a file another process puts into a root no provider serves
+    # yet is refused (`on_demand_root_served`). Coming down is the registration
+    # gone, which a mere disconnect is not.
     wait_until(
-        lambda: on_demand_root_stands(location) == standing,
+        (lambda: on_demand_root_served(location))
+        if standing
+        else (lambda: not on_demand_root_stands(location)),
         _ROOT_WINDOW_SECS,
         interval=0.3,
         diagnose=lambda: (
-            f"the on-demand root {'never stood over' if standing else 'never came down from'} "
-            f"{location}; error={app.error_text()!r}\n" + agent_diagnosis(app, "owner")
+            f"the on-demand root {'was never served over' if standing else 'never came down from'} "
+            f"{location} (provider {_provider(location)}); error={app.error_text()!r}\n"
+            + agent_diagnosis(app, "owner")
         ),
     )
+
+
+def _provider(location) -> str:
+    """The filter's provider reading for ``location``, for a failure message."""
+    try:
+        provider = sync_root_provider(location)
+    except OSError as e:
+        return f"unread: {e}"
+    return "none" if provider is None else f"{provider.name} status 0x{provider.status:X}"
 
 
 @pytest.mark.feature("files-on-demand")

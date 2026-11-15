@@ -63,9 +63,13 @@ class PaymentsSiteOrigin @Inject constructor() {
     fun ensure() = Unit
 }
 
-/** Excised — the claim-redemption row is not rendered in this flavor. */
+/** Excised — neither claim-redemption door is rendered in this flavor. */
 @Suppress("UNUSED_PARAMETER")
-suspend fun ApiClient.paymentsClaimsRedeem(code: String) = Unit
+suspend fun ApiClient.paymentsClaimsRedeemAcrossNests(
+    code: String,
+    authorIdHex: String?,
+    authorHomeUrl: String?,
+): ClaimRedeemResult = ClaimRedeemResult(tier = "", queued = false)
 
 /** Excised — the §5 mint control is not rendered in this flavor. */
 @Suppress("UNUSED_PARAMETER")

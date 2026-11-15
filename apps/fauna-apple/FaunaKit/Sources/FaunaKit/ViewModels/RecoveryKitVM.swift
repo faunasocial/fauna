@@ -130,6 +130,15 @@ public class RecoveryKitVM {
     /// The type-to-confirm buffer behind `recovery-kit-let-go-confirm-field`.
     public var letGoConfirmInput = ""
 
+    /// The successor's owed nests (`settings.md` § Recovery kit → *The
+    /// successor's owed nests*) — the shared projection's list and its status
+    /// line, `nil` while nothing is owed (the section then paints none of the
+    /// seven ids).
+    public var owedNests: FfiOwedNestsView?
+    /// The entry whose dismiss is armed, awaiting its confirm or cancel — the
+    /// two-step inline destructive confirm, one entry at a time.
+    public var owedDismissPending: FfiOwedNestEntry?
+
     private var api: APIClient?
     /// Where the stolen ceremony reports that it owns the Account page, so a
     /// supersession it causes is held back rather than tearing the page down
@@ -177,6 +186,9 @@ public class RecoveryKitVM {
         // The previous account's dead read lists ITS generations: the let-go
         // must not be offered to this one until its own read lands.
         deadGenerations = FfiDeadGenerations(generationIds: [], unreadableStatus: nil)
+        // The same for the owed nests: they are the previous identity's.
+        owedNests = nil
+        owedDismissPending = nil
         setErrorText(nil)
     }
 
@@ -348,6 +360,77 @@ public class RecoveryKitVM {
             letGoConfirmInput = ""
             setErrorText(L.settings.recoveryKit.letGoFailed(message: String(describing: error)))
         }
+    }
+
+    // MARK: - The successor's owed nests
+
+    /// Read the owed-nests list at hydrate, after the dead read. A read that
+    /// cannot reach the nest leaves the list as it was and says nothing: the
+    /// block is optional, and the section's other reads report the
+    /// connection.
+    public func loadOwedNests() async {
+        guard let api else { return }
+        do {
+            owedNests = try await api.recoveryOwedNestsView()
+            owedDismissPending = nil
+        } catch {
+            logMessage(level: .warn, target: "fauna.app",
+                       message: "[settings] owed-nests read skipped: \(error)")
+        }
+    }
+
+    /// Whether `entry` is the one whose confirm/cancel pair is showing —
+    /// compared by keeper and settle key, never by the painted lines (a
+    /// refreshed outcome must not disarm the confirm).
+    public func isOwedDismissPending(_ entry: FfiOwedNestEntry) -> Bool {
+        guard let pending = owedDismissPending else { return false }
+        return Self.sameOwedEntry(pending, entry)
+    }
+
+    static func sameOwedEntry(_ a: FfiOwedNestEntry, _ b: FfiOwedNestEntry) -> Bool {
+        a.keeper == b.keeper && a.oldActorId == b.oldActorId && a.nestId == b.nestId
+    }
+
+    /// `recovery-kit-owed-nest-dismiss-button` — step one: show this entry's
+    /// confirm/cancel pair (and hide any other entry's).
+    public func armOwedDismiss(_ entry: FfiOwedNestEntry) {
+        owedDismissPending = entry
+    }
+
+    /// `recovery-kit-owed-nest-dismiss-cancel-button` — hide the pair; nothing
+    /// is sent.
+    public func cancelOwedDismiss() {
+        owedDismissPending = nil
+    }
+
+    /// `recovery-kit-owed-nest-dismiss-confirm-button` — step two: settle the
+    /// entry at its keeper (`dismiss_owed_nest`; the owed nest itself is never
+    /// dialed), then fold the answer.
+    public func confirmOwedDismiss(_ entry: FfiOwedNestEntry) async {
+        guard let api, !busy else { return }
+        owedDismissPending = nil
+        busy = true
+        defer { busy = false }
+        setErrorText(nil)
+        do {
+            let refusal = try await api.recoveryDismissOwedNest(entry)
+            applyOwedDismiss(entry, refusal: refusal)
+        } catch {
+            setErrorText(String(describing: error))
+        }
+    }
+
+    /// Fold one dismiss answer onto the list: settled (`nil`) drops the entry
+    /// and recounts the status line through the shared fold — the last drop
+    /// clears the list — while a refusal keeps the entry and paints the
+    /// shared reason on `error-message`. Internal for the unit test.
+    func applyOwedDismiss(_ entry: FfiOwedNestEntry, refusal: LocalizedText?) {
+        if let refusal {
+            setErrorText(renderLocalizedText(refusal))
+            return
+        }
+        guard let view = owedNests else { return }
+        owedNests = recoveryOwedNestsAfterDismiss(view: view, entry: entry)
     }
 
     /// `identity-stolen-button` — the irreversible succession ceremony.
@@ -593,6 +676,19 @@ public class RecoveryKitVM {
                                 + "\(sessionActorIdHex) — flag kept for the next pass")
             return
         }
+        // The right seat on a dead client is the same deferral: the torn-down
+        // session's `APIClient` can name the successor too (a re-point reaches
+        // it), and every call through it is refused. Measured on iOS
+        // 2026-11-10: the claim passed the seat check above on the retired
+        // client and all five mints failed "this session was torn down". The
+        // live client re-hydrates the section (`RecoveryKitSection.hydrateKey`
+        // keys on the client instance), which answers this deferral.
+        guard api?.isRetired == false else {
+            logMessage(level: .info, target: "fauna.app",
+                       message: "[succession-kit] discharge deferred: the seat's client "
+                                + "was torn down — flag kept for the live client's pass")
+            return
+        }
         guard SuccessionHandoff.claimOwedKit(asSuccessor: sessionActorIdHex) else {
             logMessage(level: .info, target: "fauna.app",
                        message: "[succession-kit] discharge refused: "
@@ -662,6 +758,10 @@ public class RecoveryKitVM {
             logMessage(level: .warn, target: "fauna.app",
                        message: "[succession-kit] mint attempt \(attempt) of "
                                 + "\(Self.successionMintAttempts) showed nothing")
+            // A cancelled task's `Task.sleep` returns at once, so without this
+            // the remaining attempts fire back to back with no backoff (measured:
+            // four in one millisecond). Stop and re-arm; the next pass retries.
+            if Task.isCancelled { break }
             if attempt < Self.successionMintAttempts {
                 try? await Task.sleep(nanoseconds: Self.successionMintBackoffNs)
             }

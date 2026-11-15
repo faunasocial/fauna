@@ -465,7 +465,7 @@ impl ConversationDetail {
                     return;
                 };
                 // No pre-send SMTP re-register: the rail reads the session's
-                // live self-address cell at send time (seeded at AuthSuccess,
+                // live self-address cell at send time (seeded at SessionEstablished,
                 // pushed by the `IdentityRefreshed` handler —
                 // `conversations.md` § State & data shape → *Self-address:
                 // live, never baked*).
@@ -646,6 +646,9 @@ impl ConversationDetail {
                 let m_for_leave = m.clone();
                 let rt_for_leave = rt.clone();
                 let tid_for_leave = tid.clone();
+                let m_for_remove = m.clone();
+                let rt_for_remove = rt.clone();
+                let tid_for_remove = tid.clone();
                 let client_for_labelers = Rc::clone(&client_for_room_editor);
                 let rt_for_labelers = rt.clone();
                 // Captured for the overlay's own index resolution; Save
@@ -722,6 +725,19 @@ impl ConversationDetail {
                         let tid = tid_for_leave.clone();
                         rt_for_leave.spawn(async move {
                             m.leave_room(tid).await;
+                        });
+                    },
+                    // `room-remove-confirm` → `manager.remove_thread`: the
+                    // nest's copy of the whole conversation, never the far
+                    // side's (`bridged-adapter.md` § Removing bridged rows).
+                    // The thread leaves the manager — and the selection with
+                    // it, so the page goes back to the list — once the nest
+                    // answered; a refusal rides the page's `error-message`.
+                    move || {
+                        let m = m_for_remove.clone();
+                        let tid = tid_for_remove.clone();
+                        rt_for_remove.spawn(async move {
+                            m.remove_thread(tid).await;
                         });
                     },
                     // The catalog the labeler section reads and inspects — a

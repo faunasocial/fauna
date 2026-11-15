@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from drivers.http_bridge import SelectOptionNotOffered
 from helpers.indexed_rows import row_texts
 from helpers.settings_tab_click import click_settings_tab
-from helpers import budgets
+from helpers import box_actions, budgets
 
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
@@ -75,6 +75,10 @@ class AdminActions:
         lifted admin-nest still render Factory Reset on admin-settings, so try
         admin-nest first and fall back. (Drop the fallback once all seven apps
         render admin-nest.)
+
+        On a run against an organisation box (``--nest live:URL``) the reset is
+        written to that box's record (`helpers.box_actions`); a local nest's
+        writes nothing.
         """
         self.navigate_nest()
         if self.driver.count("admin-factory-reset-button") == 0:
@@ -87,6 +91,7 @@ class AdminActions:
         self.driver.click("admin-factory-reset-confirm-button")
         # The session is torn down and onboarding re-seeded at claim-code.
         self.driver.wait_for("claim-code-input", timeout=60.0)
+        box_actions.record(None, "factory reset through the app (admin Danger zone)")
         code = self.driver.get_text("claim-code-input")
         assert code, (
             "claim-code-input was not pre-filled after the UI factory reset — the "
@@ -2530,6 +2535,35 @@ class AdminActions:
         `admin-users-make-admin-button` (schedules `fauna.admin.admins.add`)."""
         self.driver.click("admin-users-make-admin-button", scope=f"user-row[{index}]")
         time.sleep(1.5)  # sleep-ok: settles the async schedule+re-read round trip; the grant itself has no rendered state to poll on (it's a 24h-delayed pending action, mirroring evict/suspend's identical settle above)
+
+    # --- Admin take-over of a supervised account (family-safety.md § App
+    #     surface → Admin take-over) ---
+
+    def supervised_by_text(self, index: int) -> str:
+        """The row's `admin-users-supervised-by` text, or "" on an unsupervised
+        row (the element is present only on a supervised one)."""
+        scope = f"user-row[{index}]"
+        if self.driver.is_absent("admin-users-supervised-by", scope=scope):
+            return ""
+        return self.driver.get_text("admin-users-supervised-by", scope=scope) or ""
+
+    def take_over_offered(self, index: int) -> bool:
+        """Whether the row offers `admin-users-take-over-button` — read as
+        not-absent, so `assert not take_over_offered(...)` is exact on every
+        app (an offscreen button still counts as offered)."""
+        return not self.driver.is_absent("admin-users-take-over-button", scope=f"user-row[{index}]")
+
+    def arm_take_over(self, index: int) -> str:
+        """Arm the inline confirm on row `index`; returns the confirm summary,
+        waited for as the armed state's observable."""
+        scope = f"user-row[{index}]"
+        self.driver.click("admin-users-take-over-button", scope=scope)
+        self.driver.wait_for("admin-users-take-over-confirm-summary", timeout=10, scope=scope)
+        return self.driver.get_text("admin-users-take-over-confirm-summary", scope=scope) or ""
+
+    def confirm_take_over(self, index: int) -> None:
+        """Dispatch the armed take-over (`fauna.family.transfer` to self)."""
+        self.driver.click("admin-users-take-over-confirm-button", scope=f"user-row[{index}]")
 
     def remove_admin(self, index: int = 0) -> None:
         """Revoke the admin role from the user at row `index` via

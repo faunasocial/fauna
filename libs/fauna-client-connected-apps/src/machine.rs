@@ -9,15 +9,17 @@ use std::sync::{Arc, Mutex};
 
 use fauna_atproto_settings_machine::consent_grant::{self, AnswerError};
 use fauna_atproto_settings_machine::{
-    ConsentCardRow, ConsentGrantSeams, ConsentSetRow, NestConsentRow, consent_card_row,
-    consent_folder_names, grant_set, oracle_class_words, scope_words,
+    ConsentCardRow, ConsentFolderOption, ConsentGrantSeams, ConsentSetRow, NestConsentRow,
+    consent_card_row, consent_folder_names, consent_folder_options, folder_picker, grant_set,
+    oracle_class_words, scope_words, takes_folder_choice,
 };
 use fauna_client_capabilities::grant_log;
 use fauna_client_capabilities::view_model::{
-    PrincipalKeys, ReplacedKey, grants_ended_by_key_replacement, principal_trust_facet,
-    replaced_key,
+    PrincipalKeys, ReplacedKey, grants_ended_by_key_replacement, principal_history,
+    principal_trust_facet, replaced_key,
 };
 use fauna_client_mail_settings::{MailCredentialSummary, credential_kind_badge};
+use fauna_client_pair::{FolderSetNames, project_history, project_principal_grant};
 use fauna_core::control_chars::strip_control_chars;
 use fauna_core::localized::LocalizedText;
 use fauna_core::secret::SecretString;
@@ -30,8 +32,22 @@ use crate::nest_api::{ConnectedAppsApiError, ConnectedAppsNestApi};
 use crate::observer::ConnectedAppsObserver;
 use crate::snapshots::{
     BlockedAppRow, ConnectedAppRow, ConnectedAppsSnapshot, MailAppPassword, OracleOpRow,
-    OracleRecord, OracleSummaryRow, VERBATIM_KEY, class,
+    OracleRecord, OracleSummaryRow, PrincipalTrust, TrustLens, VERBATIM_KEY, class,
 };
+
+/// Each principal's folder grant id → set-name map, by holder key — `None`
+/// when no folder grant can be named now (no folder seam, or the owner's set
+/// names unreadable), so no folder read is ever guessed `Deleted` from a map
+/// that was never read.
+type PrincipalFolders = Option<BTreeMap<[u8; 32], FolderSetNames>>;
+
+/// What a principal row's trust reads come from: the owner's grant log (when
+/// the seams are wired and it read) and its folder names by holder key.
+#[derive(Clone, Copy, Default)]
+struct TrustReads<'a> {
+    grant_log: Option<&'a SuccessionLedger>,
+    folders: Option<&'a BTreeMap<[u8; 32], FolderSetNames>>,
+}
 
 /// "Failed to load connected apps: {message}".
 const REFRESH_ERROR_KEY: &str = "connected_apps.error_refresh";
@@ -103,6 +119,14 @@ struct State {
     /// scope names, from the consent seams' folder custody
     /// (`consent_folder_names`) — what the card words the read row with.
     folder_names: BTreeMap<i64, String>,
+    /// The owner's folders as the card's folder picker filters them, read
+    /// with the tray when a listed request carries a bare folder-plane scope
+    /// (`consent_folder_options`) — `None` when unread or unreadable.
+    folder_options: Option<Vec<ConsentFolderOption>>,
+    /// Each bare folder card's chosen folder, by consent id
+    /// ([`ConnectedAppsMachine::set_folder`]) — what its approve qualifies
+    /// the row with. Dropped with the row.
+    folder_choices: BTreeMap<Vec<u8>, i64>,
     principals: Vec<ConnectedAppRow>,
     /// Each principal row's attested keys, as the last roster read named
     /// them — what a revoke records its `Revoke`s against, and what an
@@ -119,6 +143,9 @@ struct State {
     /// The depositor keys a roster read has been asked for
     /// ([`ConnectedAppsMachine::depositor_read_wanted`]) — each key once.
     depositor_reads: BTreeSet<[u8; 32]>,
+    /// Each row's trust-facet lens, by row key, as the user last chose it
+    /// ([`ConnectedAppsMachine::set_lens`]); a row absent here shows Now.
+    lenses: BTreeMap<String, TrustLens>,
 }
 
 /// One roster row's keys, by its row key and its `client_id`.
@@ -148,6 +175,11 @@ impl State {
     /// The card for `row`, saying what its approve ends.
     fn card(&self, row: NestConsentRow) -> ConsentCardRow {
         let folders = &self.folder_names;
+        let picker = folder_picker(
+            &row,
+            self.folder_options.as_deref(),
+            self.folder_choices.get(&row.consent_id).copied(),
+        );
         let ends = self.replaced_by(&row).map(|r| {
             LocalizedText::key(match r {
                 ReplacedKey::Holder(_) => ENDS_HOLDER_KEY,
@@ -156,6 +188,7 @@ impl State {
         });
         ConsentCardRow {
             ends,
+            folder_picker: picker,
             ..consent_card_row(row, folders)
         }
     }
@@ -198,10 +231,21 @@ impl ConnectedAppsMachine {
 impl ConnectedAppsMachine {
     pub fn snapshot(&self) -> ConnectedAppsSnapshot {
         let s = self.state.lock().unwrap();
+        let principals = s
+            .principals
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                if let Some(trust) = row.trust.as_mut() {
+                    trust.lens = s.lenses.get(&row.key).copied().unwrap_or_default();
+                }
+                row
+            })
+            .collect();
         ConnectedAppsSnapshot {
             loaded: s.loaded,
             requests: s.requests.clone(),
-            principals: s.principals.clone(),
+            principals,
             blocked: s.blocked.clone(),
             external_apps_off: s.external_apps_off,
             record: s.record.clone(),
@@ -276,6 +320,22 @@ impl ConnectedAppsMachine {
         wanted
     }
 
+    /// Show the Now (`TrustLens::Now`) or History lens of the trust facet on
+    /// the row `key` — page-local state, no nest call; it survives a re-read
+    /// and resets on a fresh visit ([`Self::reset_lenses`]).
+    pub fn set_lens(&self, key: String, lens: TrustLens) {
+        self.state.lock().unwrap().lenses.insert(key, lens);
+        self.observer.on_changed();
+    }
+
+    /// Put every row back on its Now lens — the page's fresh-visit reset,
+    /// beside the app's own drafts (`connected-apps.md` § The trust facet and
+    /// history lens → *Lens state*).
+    pub fn reset_lenses(&self) {
+        self.state.lock().unwrap().lenses.clear();
+        self.observer.on_changed();
+    }
+
     /// Re-read the whole page. Non-optimistic: every gesture below ends here,
     /// so what paints is what the nest now says. Notifies once.
     pub async fn refresh(&self) {
@@ -348,6 +408,46 @@ impl ConnectedAppsMachine {
         self.observer.on_changed();
     }
 
+    /// Choose the folder on a request card carrying a bare folder-plane scope
+    /// (`connected-apps-request-folder`; `authorization-server.md` § Consent
+    /// → *The card chooses the folder*) — local to this visit, no nest call:
+    /// the card's Approve then mints over it and sends it with
+    /// `resolve_consent`. An id that is not one of the card's eligible
+    /// folders, or a card without a picker, changes nothing.
+    pub fn set_folder(&self, consent_id_hex: String, id: i64) {
+        let Ok(consent_id) = hex::decode(&consent_id_hex) else {
+            return;
+        };
+        {
+            let mut s = self.state.lock().unwrap();
+            let Some(pos) = s
+                .requests
+                .iter()
+                .position(|r| r.consent_id_hex == consent_id_hex)
+            else {
+                return;
+            };
+            let offered = s.requests[pos]
+                .folder_picker
+                .as_ref()
+                .is_some_and(|p| p.options.iter().any(|o| o.id == id));
+            if !offered {
+                return;
+            }
+            s.folder_choices.insert(consent_id.clone(), id);
+            let Some(row) = s
+                .request_rows
+                .iter()
+                .find(|r| r.consent_id == consent_id)
+                .cloned()
+            else {
+                return;
+            };
+            s.requests[pos] = s.card(row);
+        }
+        self.observer.on_changed();
+    }
+
     /// Approve or Decline one request in the tray (`resolve_consent`). A
     /// decline is recorded nest-side, never dismissed locally. An approve
     /// naming a `fauna:records:` scope mints and deposits the app's
@@ -383,18 +483,20 @@ impl ConnectedAppsMachine {
                 return;
             }
         };
-        let replaced = approved
-            .then(|| self.state.lock().unwrap().replaced_by(&row))
-            .flatten();
+        let (replaced, folder) = {
+            let s = self.state.lock().unwrap();
+            let replaced = approved.then(|| s.replaced_by(&row)).flatten();
+            (replaced, s.folder_choices.get(&row.consent_id).copied())
+        };
         let seams = self.consent_grants.lock().unwrap().clone();
         let nest = &self.nest_api;
         let answer = consent_grant::answer_consent(
             seams.as_deref(),
             &row,
             approved,
-            // The card's folder picker is unbuilt: a
-            // bare folder-plane row is refused until it chooses.
-            None,
+            // The card's folder choice: a bare folder-plane row is qualified
+            // by it, and refused before any mint while there is none.
+            folder,
             |blob| nest.mint_grant(blob),
             |id, approved, folder| nest.resolve_consent(id, approved, folder),
             |grant_id| nest.revoke_grant(grant_id),
@@ -725,6 +827,16 @@ impl ConnectedAppsMachine {
         }
     }
 
+    /// The owner's folders for the cards' folder pickers — read only when one
+    /// of `rows` takes a folder choice; `None` otherwise, or when they cannot
+    /// be read now (the picker then says so).
+    async fn picker_folders(&self, rows: &[NestConsentRow]) -> Option<Vec<ConsentFolderOption>> {
+        if !rows.iter().any(takes_folder_choice) {
+            return None;
+        }
+        consent_folder_options(self.consent_grant_seams().as_deref()).await
+    }
+
     /// The owner's grant log, when the seams are wired and it reads — the
     /// source of a principal's trust facet. `None` degrades every principal
     /// row to its roster-only *lasts-until*, never the page error.
@@ -743,6 +855,35 @@ impl ConnectedAppsMachine {
         }
     }
 
+    /// Which folder each principal's folder read grants cover
+    /// ([`PrincipalFolders`]), read once per roster read over the log already
+    /// loaded — the owner secret derives each generation's grant id
+    /// (`webdav-server.md` § Key model → *A principal's read* rule (1)).
+    async fn principal_folders(
+        &self,
+        principals: &[PrincipalInfo],
+        grant_log: Option<&SuccessionLedger>,
+    ) -> PrincipalFolders {
+        let seams = self.consent_grant_seams()?;
+        let log = grant_log?;
+        let set_names = seams.folders.as_ref()?.owned_set_names().await?;
+        Some(
+            principals
+                .iter()
+                .filter_map(holder_key)
+                .map(|holder| {
+                    let names = fauna_client_capabilities::folder_principal_set_names(
+                        &log.grant_events,
+                        seams.owner_keypair.secret_bytes(),
+                        &holder,
+                        &set_names,
+                    );
+                    (holder, names)
+                })
+                .collect(),
+        )
+    }
+
     /// The claimed or opened row is an ordinary pending row, so the re-list
     /// carries it; should that read have failed, the row the nest answered
     /// still paints — it is the card the user just asked for.
@@ -752,8 +893,12 @@ impl ConnectedAppsMachine {
             std::slice::from_ref(&row),
         )
         .await;
+        let options = self.picker_folders(std::slice::from_ref(&row)).await;
         let mut s = self.state.lock().unwrap();
         s.folder_names.extend(folders);
+        if options.is_some() {
+            s.folder_options = options;
+        }
         let card = s.card(row.clone());
         if !s
             .requests
@@ -837,6 +982,9 @@ impl ConnectedAppsMachine {
         };
         let roster = match (principals, grants, sessions, bunker) {
             (Ok(principals), Ok(grants), Ok(sessions), Ok(bunker)) => {
+                let folders = self
+                    .principal_folders(&principals, grant_log.as_ref())
+                    .await;
                 let fresh_mail = mail.is_some();
                 let holders = principals
                     .iter()
@@ -855,7 +1003,10 @@ impl ConnectedAppsMachine {
                     sessions,
                     bunker,
                     mail.unwrap_or_default(),
-                    grant_log.as_ref(),
+                    TrustReads {
+                        grant_log: grant_log.as_ref(),
+                        folders: folders.as_ref(),
+                    },
                     external_apps_off,
                 );
                 Some((rows, holders, fresh_mail))
@@ -892,6 +1043,10 @@ impl ConnectedAppsMachine {
             Some(rows) => {
                 Some(consent_folder_names(self.consent_grant_seams().as_deref(), rows).await)
             }
+            None => None,
+        };
+        let folder_options = match &consents {
+            Some(rows) => Some(self.picker_folders(rows).await),
             None => None,
         };
 
@@ -937,12 +1092,18 @@ impl ConnectedAppsMachine {
         if let Some(folder_names) = folder_names {
             s.folder_names = folder_names;
         }
+        if let Some(folder_options) = folder_options {
+            s.folder_options = folder_options;
+        }
         if let Some(consents) = consents {
             let blocked = &s.blocked;
             let rows: Vec<NestConsentRow> = consents
                 .into_iter()
                 .filter(|c| !blocked.iter().any(|b| b.client_id == c.client_id))
                 .collect();
+            // A choice lives exactly as long as its row is listed.
+            s.folder_choices
+                .retain(|id, _| rows.iter().any(|r| &r.consent_id == id));
             let cards = rows.iter().cloned().map(|r| s.card(r)).collect();
             s.requests = cards;
             s.request_rows = rows;
@@ -1135,7 +1296,7 @@ fn oauth_suspended(client_id: &str, grants: &[AtprotoGrantInfo]) -> bool {
 fn principal_row(
     p: &PrincipalInfo,
     grants: &[AtprotoGrantInfo],
-    grant_log: Option<&SuccessionLedger>,
+    trust: TrustReads<'_>,
     switch_off: bool,
 ) -> ConnectedAppRow {
     let suspended = !is_hosted(&p.execution_form) && oauth_suspended(&p.client_id, grants);
@@ -1156,7 +1317,7 @@ fn principal_row(
         lasts_until_millis: if suspended {
             None
         } else {
-            principal_lasts_until(p, grants, grant_log)
+            principal_lasts_until(p, grants, trust.grant_log)
         },
         connected: (p.live_grants > 0 || is_hosted(&p.execution_form)) && !paused,
         paused,
@@ -1164,7 +1325,31 @@ fn principal_row(
         mail: None,
         signer_burned: false,
         oracle: p.oracle.as_ref().map(oracle_summary_row),
+        trust: principal_trust(p, trust),
     }
+}
+
+/// A principal's trust facet (`connected-apps.md` § The trust facet and
+/// history lens → *Which rows*): its live third-party grants and their events
+/// from the owner's log, keyed by its attested holder key. `None` — no facet,
+/// never an empty one — for a principal that attested no key and on a machine
+/// whose grant log is not wired or did not read: "holds no keys" is a claim
+/// only a read of the log may make. The lens is the snapshot's to set.
+fn principal_trust(p: &PrincipalInfo, reads: TrustReads<'_>) -> Option<PrincipalTrust> {
+    let (log, holder) = reads.grant_log.zip(holder_key(p))?;
+    let names = reads.folders.and_then(|f| f.get(&holder));
+    Some(PrincipalTrust {
+        lens: TrustLens::Now,
+        grants: principal_trust_facet(log, &holder, now_epoch_secs())
+            .grants
+            .into_iter()
+            .map(|g| project_principal_grant(g, names))
+            .collect(),
+        history: principal_history(log, &holder)
+            .into_iter()
+            .map(|h| project_history(h, names))
+            .collect(),
+    })
 }
 
 /// Whether `row` links to its settings card (`connected-apps.md` § Layout &
@@ -1173,6 +1358,16 @@ fn principal_row(
 #[must_use]
 pub fn opens_settings_card(row: &ConnectedAppRow) -> bool {
     is_hosted(&row.class)
+}
+
+/// Whether `row` opens a per-operation record (`connected-apps-oracle-open`,
+/// `connected-apps.md` § Layout & flow, region 3): a principal row the oracle
+/// served. An ATProto app-password session's row carries the summary too but
+/// no record — its operations are read as a summary only — so it gets no open
+/// control; [`ConnectedAppsMachine::open_record`] opens nothing for it.
+#[must_use]
+pub fn opens_record(row: &ConnectedAppRow) -> bool {
+    row.oracle.is_some() && key_principal_id(&row.key).is_some()
 }
 
 /// A hosted plugin's binding (`wasm` / `container`) holds no token and so no
@@ -1206,6 +1401,7 @@ fn app_password_row(s: &AtprotoSessionInfo, paused: bool) -> ConnectedAppRow {
         mail: None,
         signer_burned: false,
         oracle: s.oracle.as_ref().map(oracle_summary_row),
+        trust: None,
     }
 }
 
@@ -1234,6 +1430,7 @@ fn mail_row(c: &MailCredentialSummary) -> ConnectedAppRow {
         }),
         signer_burned: false,
         oracle: None,
+        trust: None,
     }
 }
 
@@ -1273,6 +1470,7 @@ fn signer_row(b: &BunkerAppEntry) -> ConnectedAppRow {
         mail: None,
         signer_burned: burned,
         oracle: None,
+        trust: None,
     }
 }
 
@@ -1289,12 +1487,12 @@ fn compose_roster(
     sessions: Vec<AtprotoSessionInfo>,
     bunker: Vec<BunkerAppEntry>,
     mail: Vec<MailCredentialSummary>,
-    grant_log: Option<&SuccessionLedger>,
+    trust: TrustReads<'_>,
     external_apps_off: bool,
 ) -> Vec<ConnectedAppRow> {
     let mut rows: Vec<ConnectedAppRow> = principals
         .iter()
-        .map(|p| principal_row(p, &grants, grant_log, external_apps_off))
+        .map(|p| principal_row(p, &grants, trust, external_apps_off))
         .collect();
     rows.extend(
         sessions

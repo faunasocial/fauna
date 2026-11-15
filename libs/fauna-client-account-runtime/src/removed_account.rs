@@ -25,6 +25,7 @@ pub use fauna_account_plane::account_driver::{
     EnrollmentRetirement, REMOVED_ACCOUNT_RETIRE_BUDGET,
 };
 
+use crate::closing::{ClosingStores, within_or_hand_over};
 use crate::{
     ACCOUNT_RUNTIME_STOP_BUDGET, AppRuntimeInputs, ResolveContext, SandboxedStoreContainer,
     assemble, build_params, sign_in_with_seed,
@@ -79,41 +80,88 @@ async fn retire(
     removed: Arc<RemovedAccountCredentials>,
     inputs: RemovedAccountInputs,
 ) -> EnrollmentRetirement {
+    retire_into(crate::closing_stores(), removed, inputs).await
+}
+
+/// [`retire`], handing a lapse to `closing`.
+///
+/// ⚠ **A lapse of either budget hands the rest over; it never drops it.** The
+/// runtime this assembles is a store opened over the removed account's scope,
+/// and the removal's erase follows at once: dropping a stop that has not
+/// finished — or an assembly that may yet open the store — left that store
+/// open under the erase, which windows refuses (`os error 32`). So both go on
+/// in the closing set the erase waits behind (`crate::closing`'s module
+/// docs), and a runtime the assembly starts late is stopped the sign-out way
+/// there — a retirement late, but not lost.
+async fn retire_into(
+    closing: &ClosingStores,
+    removed: Arc<RemovedAccountCredentials>,
+    inputs: RemovedAccountInputs,
+) -> EnrollmentRetirement {
     if !removed.holds_device_authorization() {
         return EnrollmentRetirement::NotEnrolled;
     }
     // The stop is a sign-out's and takes a sign-out's budget; the sign-in and
     // the assembly share what is left of the whole.
     let assembly_budget = REMOVED_ACCOUNT_RETIRE_BUDGET - ACCOUNT_RUNTIME_STOP_BUDGET;
-    let (client, handle) = match tokio::time::timeout(
+    let assembled = within_or_hand_over(
+        closing,
         assembly_budget,
         sign_in_and_assemble(Arc::clone(&removed), inputs),
+        |late| async move {
+            if let Ok((client, handle)) = late {
+                let retirement = handle.shutdown_for_sign_out().await;
+                tracing::info!(
+                    ?retirement,
+                    "[account-runtime] remove-account: the late assembly's runtime stopped; its \
+                     store is closed"
+                );
+                drop(handle);
+                client.disconnect().await;
+            }
+        },
     )
-    .await
-    {
-        Ok(Ok(assembled)) => assembled,
-        Ok(Err(e)) => return EnrollmentRetirement::Deferred(format!("{e:#}")),
-        Err(_) => {
+    .await;
+    let (client, handle) = match assembled {
+        Some(Ok(assembled)) => assembled,
+        Some(Err(e)) => return EnrollmentRetirement::Deferred(format!("{e:#}")),
+        None => {
             return EnrollmentRetirement::Deferred(format!(
                 "the nest did not answer within {}s",
                 assembly_budget.as_secs()
             ));
         }
     };
-    let retirement =
-        match tokio::time::timeout(ACCOUNT_RUNTIME_STOP_BUDGET, handle.shutdown_for_sign_out())
-            .await
-        {
-            Ok(retirement) => retirement,
-            // Dropping the handle below ends the runtime's host all the same.
-            Err(_) => EnrollmentRetirement::Deferred(format!(
-                "the stop did not finish within {}s",
-                ACCOUNT_RUNTIME_STOP_BUDGET.as_secs()
-            )),
-        };
-    drop(handle);
-    client.disconnect().await;
-    retirement
+    // The session outlives a lapsed stop: its retirement still rides it.
+    let late_client = Arc::clone(&client);
+    let stop = async move {
+        let retirement = handle.shutdown_for_sign_out().await;
+        drop(handle);
+        retirement
+    };
+    let retirement = within_or_hand_over(
+        closing,
+        ACCOUNT_RUNTIME_STOP_BUDGET,
+        stop,
+        move |late| async move {
+            tracing::info!(
+                retirement = ?late,
+                "[account-runtime] remove-account: the lapsed stop finished; its store is closed"
+            );
+            late_client.disconnect().await;
+        },
+    )
+    .await;
+    match retirement {
+        Some(retirement) => {
+            client.disconnect().await;
+            retirement
+        }
+        None => EnrollmentRetirement::Deferred(format!(
+            "the stop did not finish within {}s",
+            ACCOUNT_RUNTIME_STOP_BUDGET.as_secs()
+        )),
+    }
 }
 
 /// The sign-in as the removed account and the runtime over its snapshot.
@@ -260,11 +308,26 @@ mod tests {
         let (registry, aux, snapshot) = removed_account(&url, true);
         let actor = snapshot.actor_id().to_owned();
         let dir = tempfile::tempdir().unwrap();
+        let closing = ClosingStores::new();
 
         let started = Instant::now();
-        let retirement = retire_removed_account(snapshot, inputs(dir.path())).await;
+        let retirement = retire_into(&closing, snapshot, inputs(dir.path())).await;
         let took = started.elapsed();
+        // The lapsed sign-in is still dialing the held nest — not dropped:
+        // whatever it would assemble is a store over the scope the erase is
+        // about to delete, so the erase must be able to wait for it.
+        assert_eq!(
+            closing.len(),
+            1,
+            "the lapsed assembly is handed over to the closing set"
+        );
         held.abort();
+        assert!(
+            closing
+                .closed(std::time::Duration::from_secs(60), "test")
+                .await,
+            "the handed-over assembly ends once its nest is gone"
+        );
 
         assert!(
             matches!(retirement, EnrollmentRetirement::Deferred(_)),

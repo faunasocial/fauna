@@ -1,5 +1,6 @@
 """Android driver using on-device Kotlin bridge via ADB port-forward."""
 
+import contextlib
 import io
 import json
 import os
@@ -349,7 +350,6 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         # The launch config's `adb_server`: a socket spec naming a remote adb
         # server this driver is a pure client of, or None for a local one.
         self._adb_server = None
-        self._forward_lease = None
         # Every port this driver has an `adb reverse` open for. Its OWN list,
         # deliberately not derived from `_local_port` at teardown: that port is
         # the FORWARD's (host -> device, for the bridge), and the reverses run
@@ -377,6 +377,14 @@ class AndroidBridgeDriver(HttpBridgeDriver):
 
     def is_android(self) -> bool:
         return True
+
+    def set_outbox_drain_hold(self, held: bool) -> None:
+        """Set or clear the app process's in-process e2e outbox drain hold
+        (`fauna_e2e_agent::OUTBOX_DRAIN_HOLD`). The app hosts its account
+        runtime in-process and inherits nothing from the harness, so the hold
+        file the desktop drivers set cannot reach it. Driven through
+        `helpers/outbox_drain.py`."""
+        self.call_command("outbox_drain_hold", {"held": bool(held)})
 
     #: Document bodies the ``painted`` read answers for (``DocumentBlocks`` under
     #: these test tags) — the ids the ``document-painted-read`` witnesses read.
@@ -486,9 +494,9 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         Every other bridge-backed app runs on the pytest host, so the shared
         ``set_input_files`` hands its agent the host path. android's agent
         (``TestAgent.kt``'s ``compose.file`` arms) opens ``java.io.File(path)`` on
-        the device, where no host path exists on any venue -- under venue A2 the
+        the device, where no host path exists on any venue -- under emulator placement A2 the
         device is not even on this machine (`testing.md` § Default app and nest
-        mode → *Android's run venue*). So the file's bytes ride the bridge's own
+        mode → *Android's emulator placement*). So the file's bytes ride the bridge's own
         HTTP connection first, the same boundary crossing ``seed_credentials``
         makes: the bridge (same uid as the app) writes them under the app's cache
         dir, keeping the basename -- the agent derives the attachment's name and
@@ -525,8 +533,6 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         return device_path
 
     def launch(self, config: dict) -> None:
-        from helpers import android_venue
-
         from .port_util import find_free_port
 
         app_apk = config.get("app_path")
@@ -535,6 +541,11 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         self._adb_server = config.get("adb_server")
         self._device_port = config.get("bridge_port", 18500)
 
+        # A venue device is a connect address: re-attach it before the first
+        # adb call, in case its tunnel flapped since the probe (idempotent).
+        from helpers import android_device
+
+        android_device.connect_device(self._device_serial, self._adb_server)
         adb = self._adb_cmd()
 
         # Install APKs
@@ -559,16 +570,11 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         self.set_app_locale(config.get("locale"))
 
         # ADB port-forward: local port -> device port. `adb forward` listens on
-        # the machine running the adb SERVER. With a local server that is this
-        # machine and any free port will do; with a remote one (`adb_server`,
-        # the tunnelled venue) it is the other end of the tunnel, so the port
-        # must be one the tunnel already carries -- a leased port of the venue's
-        # fixed range (`helpers/android_venue.py`), never `find_free_port()`.
-        if self._adb_server:
-            self._forward_lease = android_venue.lease_bridge_forward_port()
-            self._local_port = self._forward_lease.port
-        else:
-            self._local_port = find_free_port()
+        # the machine running the adb SERVER, which is always this one: a local
+        # server, or the android emulator's own server on this machine reaching the
+        # emulator by `adb connect` (`helpers/android_emu.py`). So any free
+        # port will do, in a venue run too.
+        self._local_port = find_free_port()
         subprocess.run(
             [*adb, "forward", f"tcp:{self._local_port}", f"tcp:{self._device_port}"],
             check=True, capture_output=True,
@@ -577,15 +583,14 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         # ADB REVERSE, the other direction: the DEVICE's own 127.0.0.1:<p> is
         # carried back to <p> on the machine running the adb server, where the
         # test nest listens. This is constraint 3 of testing.md § Default app and
-        # nest mode → *Android's run venue*, and it is what lets the app be
+        # nest mode → *Android's emulator placement*, and it is what lets the app be
         # handed the harness's ordinary `http://127.0.0.1:<port>` URL with no
         # rewriting anywhere -- the device's loopback IS the nest.
         #
-        # ⚠ The reverse lands on the adb SERVER's loopback, not on the machine
-        # that happens to be driving pytest. They are the same box for a local
-        # emulator or a USB device; under the remote-adb venue they are NOT, and
-        # the tunnel carries the venue's fixed nest-port range the rest of the
-        # way -- which is why `ensure_reverse` refuses any other port there.
+        # The reverse lands on the adb SERVER's loopback, which is this machine
+        # in every venue: a local emulator, a USB device, and the android emulator,
+        # whose adb server runs here and reaches the emulator's adbd through the
+        # tunnel (testing.md § *A2 amended — the design*, point 2).
         #
         # Before the app is launched, deliberately: the /session POST below
         # starts it, and an app that reaches its first nest call before the
@@ -593,13 +598,31 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         for port in nest_ports_from_config(config):
             self.ensure_reverse(port)
 
-        # Start bridge instrumentation on device (runs in background)
-        # Armed against point 9 (2026-08-14): `am instrument -w` streams for the
-        # WHOLE run, so this adb client is long-lived by construction, and an
-        # unreaped one keeps its device port-forward claimed against the next run.
+        posted_at = self._start_bridge_instrumentation()
+        self._url = f"http://127.0.0.1:{self._local_port}"
+        self._wait_for_health(posted_at, timeout=self._RELAUNCH_READY_BUDGET_S)
+
+        # Kept for `preserve_state_across_relaunch()`, which pins into it, and
+        # for the relaunch `recover()` runs from it.
+        self._launch_config = config
+        self._note_store_owner(config)
+        self._mark_log_baseline()
+        self._post("/session", self._session_body(config))
+        self._mark_app_launch()
+
+    def _start_bridge_instrumentation(self) -> float:
+        """Start the instrumentation bridge on the device (it runs in the
+        background) and return when it was posted, the launch gate's
+        `posted_at`. One home for `launch()` and for the relaunch after an
+        unclean kill, which took the bridge with the app: on android the bridge
+        runs inside the app's own process.
+
+        Armed against point 9 (2026-08-14): `am instrument -w` streams for the
+        WHOLE run, so this adb client is long-lived by construction, and an
+        unreaped one keeps its device port-forward claimed against the next run."""
         posted_at = time.time()
         self._bridge_proc = subprocess.Popen(
-            [*adb, "shell", "am", "instrument", "-w",
+            [*self._adb_cmd(), "shell", "am", "instrument", "-w",
              "-e", "port", str(self._device_port),
              # Test-APK package = applicationId + ".test"; the runner CLASS
              # keeps the source-package name (namespace stays com.fauna.app).
@@ -613,17 +636,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         # it, so this pipe was guaranteed to fill and then block the adb client
         # (port_util.drain_pipes — same class as the windows bridge stall).
         self._bridge_log = drain_pipes(self._bridge_proc)
-
-        self._url = f"http://127.0.0.1:{self._local_port}"
-        self._wait_for_health(posted_at, timeout=self._RELAUNCH_READY_BUDGET_S)
-
-        # Kept for `preserve_state_across_relaunch()`, which pins into it, and
-        # for the relaunch `recover()` runs from it.
-        self._launch_config = config
-        self._note_store_owner(config)
-        self._mark_log_baseline()
-        self._post("/session", self._session_body(config))
-        self._mark_app_launch()
+        return posted_at
 
     #: The `_launch_config` key `preserve_state_across_relaunch()` pins. android
     #: has no per-launch store dir to pin (the base vocabulary,
@@ -833,6 +846,8 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         below is what then gives up.
         """
         self._read_exit_before_close("the relaunch in recover()")
+        if self.__dict__.pop("_killed_uncleanly", False):
+            return self._relaunch_after_unclean_kill()
         if not self._await_health():
             return False
         config = getattr(self, "_launch_config", None)
@@ -849,6 +864,12 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         # The app is stopped (`stopApp` force-stops it): the one window in which
         # a replica can be removed without a live process holding it open.
         self._wipe_device_replicas()
+        return self._post_relaunch_session(config)
+
+    def _post_relaunch_session(self, config: dict) -> bool:
+        """The relaunch's last half, shared by `recover()` and the relaunch
+        after an unclean kill: the session body (the seed withheld under the
+        pin), the log baseline, the `POST /session`, the crash-witness mark."""
         body = self._session_body(config)
         if not config.get(self._PRESERVE_STORE_KEY) and not config.get(self._PRODUCTION_STORE_KEY):
             # The empty seed below erases the store with every enrollment in it
@@ -867,6 +888,89 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             return False
         self._mark_app_launch()
         return True
+
+    # --- The unclean kill (convention 7 mode 5's `unclean-kill` surface) ---
+
+    #: How long `kill_uncleanly()` waits for the device to stop listing the
+    #: killed pid — a deadline poll (convention 14), which a SIGKILL beats at
+    #: once on a green run.
+    _UNCLEAN_KILL_GONE_BUDGET_S = 10.0
+
+    def supports_unclean_kill(self) -> bool:
+        """True once a launch has read its app's pid on the device
+        (`_mark_app_launch` sets `_app_pid`): the kill signals that pid and no
+        other — the ios shape, a pid the driver's own launch reported."""
+        return getattr(self, "_app_pid", None) is not None
+
+    def kill_uncleanly(self) -> None:
+        """SIGKILL the CURRENT launch's app process on the device (see
+        `PlatformDriver.kill_uncleanly` for the crash-simulation contract).
+
+        The verb is `adb shell run-as social.fauna.fauna kill -9 <pid>`: the
+        e2e build is debuggable, so `run-as` runs `kill` under the APP's own uid
+        — the one uid that may signal it without root, and one that can reach no
+        other app's process. SIGKILL is uncatchable, so nothing of the app runs:
+        no `onPause`/`onStop`/`onDestroy`, no shutdown hook, no SharedPreferences
+        write-back — power loss. Never `am force-stop` (the system's orderly
+        stop of the package, which also cancels its alarms and jobs) and never
+        `am kill` (which spares a foreground process): neither is a crash.
+
+        Only `_app_pid` is signalled — the pid THIS driver's most recent launch
+        read (`_mark_app_launch`), never a name-based kill (process safety). The
+        instrumentation bridge runs inside that process, so it dies too: the
+        driver is marked dead, and the next `recover()` (via `hard_reload()`)
+        starts a new bridge over the same install, the same filesDir, the same
+        forward and reverses (`_relaunch_after_unclean_kill`)."""
+        pid = getattr(self, "_app_pid", None)
+        if pid is None:
+            super().kill_uncleanly()  # the NotImplementedError with the contract
+        self._read_exit_before_close("kill_uncleanly()")
+        done = subprocess.run(
+            [*self._adb_cmd(), "shell", "run-as", self.APPLICATION_ID, "kill", "-9", str(pid)],
+            capture_output=True, text=True, timeout=self._WITNESS_ADB_TIMEOUT_S,
+        )
+        deadline = time.monotonic() + self._UNCLEAN_KILL_GONE_BUDGET_S
+        while str(pid) in self._device_shell(f"pidof {self.APPLICATION_ID}").split():
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"the unclean kill of the app's pid {pid} did not take: the device "
+                    f"still lists it after {self._UNCLEAN_KILL_GONE_BUDGET_S:.0f} s "
+                    f"(run-as kill rc={done.returncode} stdout={done.stdout!r} "
+                    f"stderr={done.stderr!r})"
+                )
+            time.sleep(0.1)  # sleep-ok: pacing between poll iterations, not a settle-wait
+        self._app_pid = None
+        self._killed_uncleanly = True
+        self._bridge_dead = True
+
+    def _relaunch_after_unclean_kill(self) -> bool:
+        """The relaunch after `kill_uncleanly()`: the bridge died with the app,
+        so a new `am instrument` is started on the same device port. The adb
+        forward and every recorded reverse live on the adb server and outlive
+        the process, and nothing clears app data, so the new process opens the
+        store the killed one left. Then the ordinary relaunch half."""
+        old = getattr(self, "_bridge_proc", None)
+        if old is not None and old.poll() is None:
+            old.terminate()
+            try:
+                old.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                old.kill()
+                old.wait()
+        # The app is dead: the one window a replica can be removed in.
+        self._wipe_device_replicas()
+        posted_at = self._start_bridge_instrumentation()
+        try:
+            self._wait_for_health(posted_at, timeout=self._RELAUNCH_READY_BUDGET_S)
+        except (RuntimeError, TimeoutError) as exc:
+            print(f"[e2e] android: the bridge did not come back after the unclean kill: {exc}",
+                  flush=True)
+            return False
+        self._bridge_dead = False
+        config = getattr(self, "_launch_config", None)
+        if config is None:
+            return True
+        return self._post_relaunch_session(config)
 
     # --- A discarded driver retires its machine (convention 10) ---
 
@@ -961,9 +1065,6 @@ class AndroidBridgeDriver(HttpBridgeDriver):
                 check=False, capture_output=True,
             )
             self._local_port = None
-        if self._forward_lease:
-            self._forward_lease.release()
-            self._forward_lease = None
         # Each reverse is removed by the port it was opened for, from this
         # driver's own record -- see `_reverse_ports`. `check=False` for the same
         # reason the forward's removal uses it: teardown must not raise over a
@@ -1031,6 +1132,8 @@ class AndroidBridgeDriver(HttpBridgeDriver):
                   f"{type(exc).__name__}: {exc}", flush=True)
             at, pid = None, ""
         self._app_launch_mark = None if at is None else (at, pid, time.time())
+        # The pid `kill_uncleanly()` signals: this launch's own, read here.
+        self._app_pid = pid or None
 
     def _read_exit_before_close(self, close: str) -> None:
         """Convention 6's close rider, the android leg: read whether the app
@@ -1233,9 +1336,11 @@ class AndroidBridgeDriver(HttpBridgeDriver):
 
     #: A path under the app's private data directory that `app_data_exists`
     #: will ask about: relative, `/`-separated segments of letters, digits,
-    #: `.`, `_` and `-`, never `..`. The path is spelled into a device shell
-    #: command line, so nothing else may reach it.
-    _APP_DATA_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
+    #: `.`, `_`, `-` and `%`, never `..`. The path is spelled into a device
+    #: shell command line inside double quotes, so nothing else may reach it;
+    #: `%` is literal there and is how an on-demand kept root spells its ref
+    #: component (`files/on-demand/<actor>/group%3A<hex>/`, `OwnedTree::for_set`).
+    _APP_DATA_SEGMENT = re.compile(r"[A-Za-z0-9._%-]+")
 
     def app_data_exists(self, rel_path: str) -> bool:
         """Whether ``rel_path`` exists under the app's private data directory
@@ -1277,6 +1382,97 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             line for line in result.stdout.decode(errors="replace").splitlines()
             if line.startswith(rel_dir)
         )
+
+    # --- On-device filesystem faults and readings (the residue journeys) ---
+    #
+    # The desktop residue witnesses (`test_sign_out_tui.py`) inject a sign-out
+    # fault with host permission bits and read the store tree host-side. On
+    # android the store is inside the app sandbox, so the same four acts run as
+    # the app's own uid through `run-as` (the e2e build is debuggable), from
+    # outside the app. Every path is checked by `_require_plain_app_path`
+    # before it reaches the device shell, and `exec-out` carries no exit
+    # status, so success is a marker the device shell prints only then.
+
+    def _run_as_script(self, script: str, *, timeout: float = 30) -> bytes:
+        result = subprocess.run(
+            [*self._adb_cmd(), "exec-out", f'run-as social.fauna.fauna sh -c "{script}"'],
+            capture_output=True, timeout=timeout,
+        )
+        return result.stdout
+
+    def app_data_tree(self, rel_dir: str) -> dict[str, tuple[bool, int, str]]:
+        """Every entry under ``rel_dir`` of the app's data directory: path
+        relative to ``rel_dir`` → ``(is_dir, size, mtime)`` (mtime as the
+        device's own ``stat %y`` text, nanoseconds included — compared, never
+        parsed). Empty when the directory is absent or unreadable."""
+        self._require_plain_app_path(rel_dir)
+        out = self._run_as_script(
+            f"find {rel_dir} -mindepth 1 -exec stat -c '%F|%s|%y|%n' {{}} +", timeout=60,
+        )
+        tree: dict[str, tuple[bool, int, str]] = {}
+        prefix = rel_dir.rstrip("/") + "/"
+        for line in out.decode(errors="replace").splitlines():
+            parts = line.split("|", 3)
+            if len(parts) != 4 or not parts[3].startswith(prefix):
+                continue
+            kind, size, mtime, name = parts
+            with contextlib.suppress(ValueError):
+                tree[name[len(prefix):]] = (kind == "directory", int(size), mtime)
+        return tree
+
+    def app_data_dir_modes(self, rel_dir: str) -> dict[str, int]:
+        """``rel_dir`` and every directory under it → its permission bits."""
+        self._require_plain_app_path(rel_dir)
+        out = self._run_as_script(f"find {rel_dir} -type d -exec stat -c '%a|%n' {{}} +")
+        modes: dict[str, int] = {}
+        for line in out.decode(errors="replace").splitlines():
+            mode, _, name = line.partition("|")
+            if name == rel_dir or name.startswith(rel_dir.rstrip("/") + "/"):
+                with contextlib.suppress(ValueError):
+                    modes[name] = int(mode, 8)
+        return modes
+
+    def app_data_chmod(self, modes: dict[str, int]) -> None:
+        """Set each app-data path's permission bits; raises when the device
+        refused any of them (a fault that silently never landed would pass the
+        journey for the wrong reason). Applied in the given order."""
+        for rel in modes:
+            self._require_plain_app_path(rel)
+        for rel, mode in modes.items():
+            out = self._run_as_script(f"chmod {mode:o} {rel} && echo FAUNA_CHMOD")
+            if b"FAUNA_CHMOD" not in out:
+                raise RuntimeError(f"run-as chmod {mode:o} {rel} was refused: {out[:300]!r}")
+
+    def app_data_denies(self, rel_dir: str, *, listing: bool) -> bool:
+        """Whether the app's own uid is really refused at ``rel_dir`` — its
+        listing (``listing=True``) or a write into it — the probe that the
+        injected fault is a fault and not a no-op."""
+        self._require_plain_app_path(rel_dir)
+        if listing:
+            script = f"ls {rel_dir} >/dev/null 2>&1 && echo FAUNA_ALLOWED"
+        else:
+            probe = f"{rel_dir}/.fault-injection-probe"
+            script = f"touch {probe} 2>/dev/null && rm -f {probe} && echo FAUNA_ALLOWED"
+        return b"FAUNA_ALLOWED" not in self._run_as_script(script)
+
+    def app_data_read(self, rel_path: str) -> bytes | None:
+        """The bytes of one app-data file, or None when it is absent."""
+        self._require_plain_app_path(rel_path)
+        out = self._run_as_script(f"test -f {rel_path} && echo FAUNA_FILE && cat {rel_path}")
+        marker = b"FAUNA_FILE\n"
+        if not out.startswith(marker):
+            return None
+        return out[len(marker):]
+
+    def app_data_remove(self, rel_paths) -> None:
+        """Best-effort ``rm -rf`` of app-data paths — a journey's cleanup of
+        what it left on a device every later test shares. Call it with the
+        app stopped (a live process holds its stores open)."""
+        rels = list(rel_paths)
+        for rel in rels:
+            self._require_plain_app_path(rel)
+        if rels:
+            self._run_as_script("rm -rf " + " ".join(rels))
 
     def pull_app_data(self, dest) -> Path:
         """The app's whole private data directory, as host files under ``dest``,
@@ -1507,15 +1703,28 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         port = int(port)
         if port in self._reverse_ports:
             return
-        if self._adb_server:
-            from helpers import android_venue
-
-            android_venue.require_tunnelled_nest_port(port)
         subprocess.run(
             [*self._adb_cmd(), "reverse", f"tcp:{port}", f"tcp:{port}"],
             check=True, capture_output=True,
         )
         self._reverse_ports.append(port)
+
+    def set_provider_base_urls(self, urls: dict[str, str]) -> None:
+        """The shared redirect (`HttpBridgeDriver.set_provider_base_urls`), after
+        a reverse for every loopback port it names.
+
+        The urls point at a host-side fake (`fakes/fake_cloud.py`); on the device
+        127.0.0.1 is the device's own loopback, so each such port needs the same
+        `adb reverse` a nest port gets, or the provider verify dies on a bare
+        connection error. A non-loopback host is reached over the device's own
+        network and is left alone."""
+        from urllib.parse import urlsplit
+
+        for url in urls.values():
+            parts = urlsplit(url)
+            if parts.hostname in ("127.0.0.1", "localhost") and parts.port:
+                self.ensure_reverse(parts.port)
+        super().set_provider_base_urls(urls)
 
     #: The installed app's application id (`applicationId` in `app/build.gradle.kts`;
     #: the source namespace stays `com.fauna.app`).

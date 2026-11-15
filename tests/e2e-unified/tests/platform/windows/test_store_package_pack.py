@@ -49,6 +49,11 @@ STUB_PAYLOAD = [
     os.path.join("App", "fauna_ffi.dll"),
     "fauna-sync-agent.exe",
     "fauna_shell.dll",
+    # The three licence files at the package root (shipped-notices.md § Per
+    # channel, the Microsoft Store row): the packer refuses a payload without them.
+    "LICENSE-MIT.txt",
+    "LICENSE-APACHE.txt",
+    "THIRD-PARTY-NOTICES.txt",
 ]
 
 # Debug symbols the MSBuild publish drops beside the managed binaries. They are

@@ -11,7 +11,7 @@
 # Written ONLY by `just store-review` (scripts/store-review.py); never edit
 # by hand — the digest below covers every table, and the pin fails on a
 # hand edit.
-# written-by: just store-review sha256:bd621d68f81d048cb7dc397b6f46e01b16da7e4c8583abe4cf049ae63278e149
+# written-by: just store-review sha256:84a797f421b9b994cd0997409de29e36146dfa7d1e59ff94c44b24c26a1878b8
 
 [[submission]]
 store = "play"
@@ -45,3 +45,36 @@ state = "withdrawn"
 since = 2026-10-14
 read = 2026-10-21
 note = "The arm64 and x64 packages were built and graded 2026-10-10 from the 0.1.3 public commit and never uploaded; the first Store upload is the version the acceptance nest serves, in the store-safe flavour (owner ruling 2026-10-14). Owner's Partner Center reading 2026-10-21: no submission, nothing in review."
+
+[[submission]]
+store = "app-store"
+version = "0.1.6"
+build = "1"
+track = "testflight-internal"
+flavour = "store-safe"
+state = "uploaded"
+since = 2026-11-11
+read = 2026-11-11
+note = "Read by just ios-store-builds (the App Store Connect API, the Developer-role key): processingState VALID, internalBuildState READY_FOR_BETA_TESTING, externalBuildState READY_FOR_BETA_SUBMISSION; no beta group exists yet."
+
+[[submission]]
+store = "microsoft-store"
+version = "0.1.6"
+build = "0.1.6.0"
+track = "private-audience"
+flavour = "store-no-payments"
+state = "built"
+since = 2026-11-11
+read = 2026-11-11
+note = "The x64 and arm64 packages were built, graded and certification-kit checked by the public Store workflow from the 0.1.6 public commit; not yet uploaded. The upload waits on the owner's one Partner Center visit."
+
+[[submission]]
+store = "play"
+version = "0.1.6"
+build = "106"
+track = "internal-testing"
+flavour = "store-no-payments"
+state = "built"
+since = 2026-11-12
+read = 2026-11-12
+note = "Built from the public v0.1.6 tag with the storeNoPayments recipe, signed with the upload key and checked: 0.1.6/106, strip check and no-payments scan passed; AAB 168977199 bytes (its SHA-256 in installers/android.md). Not uploaded yet: the owner uploads it in the Play Console (hand upload chosen for 0.1.6)."

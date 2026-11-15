@@ -109,15 +109,23 @@ def connect_state() -> tuple[int, str]:
     return state, _STATE_NAMES.get(state, f"Unknown({state})")
 
 
-def skip_unless_attached_desktop() -> None:
+_SENDINPUT_NEED = "SendInput needs an attached interactive desktop"
+
+
+def skip_unless_attached_desktop(need: str = _SENDINPUT_NEED) -> None:
     """``skip_environment`` iff this session is WTS-disconnected.
+
+    ``need`` names what the caller cannot do without a desktop: hardware
+    input by default, or — for the store-listing shots — a window render,
+    since a disconnected session composes no app content and
+    ``PrintWindow`` hands back a title bar over a flat client area.
 
     Runs the caller normally (returns) on every other connect state,
     including the query itself failing — an inability to probe is not
     evidence of disconnection, and a genuine disconnection that slips past
-    this probe still turns into a self-diagnosing error at the actual
-    `SendInput` call (`Actions.cs`'s `PhysicalOnly`), so a false negative
-    here is not a silent one.
+    this probe still turns into a self-diagnosing error downstream (the
+    `SendInput` call's `PhysicalOnly`, or `CaptureWindow`'s flat-client-area
+    refusal), so a false negative here is not a silent one.
     """
     from helpers.app_surface import skip_environment
 
@@ -128,9 +136,8 @@ def skip_unless_attached_desktop() -> None:
     if state == WTS_DISCONNECTED:
         skip_environment(
             "this box's automation session is WTS-disconnected (`query "
-            "session` would show `Disc`) — SendInput needs an attached "
-            "interactive desktop. Reattach with `tscon %SESSIONNAME% "
-            "/dest:console` from an elevated prompt (the project's internal "
-            "Windows dev-setup notes — the SendInput/attached-desktop "
-            "paragraph) and re-run."
+            f"session` would show `Disc`) — {need}. Reattach with `tscon "
+            "%SESSIONNAME% /dest:console` from an elevated prompt (the "
+            "project's internal Windows dev-setup notes — the "
+            "SendInput/attached-desktop paragraph) and re-run."
         )

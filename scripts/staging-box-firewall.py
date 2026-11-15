@@ -72,6 +72,21 @@ _spec = importlib.util.spec_from_file_location("deploy_verify_cloud_firewall", _
 gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gate)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    # The organisation boxes' record (org-nests.md § The box record) lives in
+    # the private fleet tree alone; a tree without it records nothing.
+    import _box_record as box_record  # noqa: E402
+except ImportError:
+    class box_record:  # noqa: N801 — the module's stand-in
+        @staticmethod
+        def is_box(_host):
+            return False
+
+        @staticmethod
+        def record(*_a, **_k):
+            return None
+
 # The one box whose :22 may answer is named by the cloud-firewall gate (which
 # ships, as this file does); the door rule below is fenced to that host and no other.
 ADMITTED_22_HOST = gate.ADMITTED_22_HOST
@@ -308,6 +323,9 @@ def main() -> int:
         print(f"ERROR: the create did not go through: {e}", file=sys.stderr)
         return 2
     fw_id = (created.get("firewall") or {}).get("id")
+    if box_record.is_box(host):
+        box_record.record(host, f"firewall {name!r} created (apply pending)",
+                          detail={"firewall": fw_id, "server": target["id"]}, land_now=False)
     print(f"  created firewall {fw_id}; waiting for the provider to apply it …")
 
     deadline = time.monotonic() + args.apply_timeout
@@ -325,6 +343,12 @@ def main() -> int:
             status = None
         if status == "applied":
             print(f"DONE: firewall {fw_id} ({name!r}) is applied to {host}.")
+            if box_record.is_box(host):
+                door = " with the SSH door's 22/tcp rule" if args.ssh_door_from else ""
+                box_record.record(host, f"firewall {name!r} applied as a copy of "
+                                  f"{ref_host}'s{door}",
+                                  detail={"firewall": fw_id, "server": target["id"],
+                                          "rules": describe(rules)})
             return 0
         time.sleep(5)
     print(f"ERROR: firewall {fw_id} was created but the provider did not report it applied "

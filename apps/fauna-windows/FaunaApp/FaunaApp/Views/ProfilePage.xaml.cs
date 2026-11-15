@@ -56,6 +56,12 @@ public sealed partial class ProfilePage : Page, IPostCardPage
     /// <see cref="_payments"/> (dynamic-features.md § Platform-family surface excision
     /// → The price-and-route class). Null until the first <c>Page_Loaded</c>.</summary>
     private Views.Payments.TierMoneyFields? _tierMoneyFields;
+
+    /// <summary>The OTHER Tiers tab's claim-redeem pair, dropped into
+    /// <c>ClaimRedeemHost</c> inside the offers section (so it never paints on the
+    /// viewer's own profile) — same removable-item reasoning as
+    /// <see cref="_payments"/>. Null until the first <c>Page_Loaded</c>.</summary>
+    private Views.Payments.ClaimRedeemPanel? _claimRedeem;
 #endif
 
     // The nav-parameter clients (held so the OTHER-profile start-DM resolves the
@@ -72,7 +78,16 @@ public sealed partial class ProfilePage : Page, IPostCardPage
     {
         this.InitializeComponent();
         _cards = new PostCardHost(this, ProfilePostsList, "profile", TipListDialogHost);
+        // The Posts tab's cards paint the viewer's own hides like the feed's: when the
+        // hide list moves — an account reported from this very profile, a show-again on
+        // one of its cards, or the store-change re-read finding a show-again made on
+        // another device (moderation.md § Corollary) — re-read the rows. May be raised
+        // off the UI thread.
+        Loaded += (_, _) => FaunaApp.Core.Services.ContentPolicyCache.HiddenContentChanged += OnHiddenContentChanged;
+        Unloaded += (_, _) => FaunaApp.Core.Services.ContentPolicyCache.HiddenContentChanged -= OnHiddenContentChanged;
     }
+
+    private void OnHiddenContentChanged() => DispatcherQueue.TryEnqueue(RefreshPosts);
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
@@ -121,8 +136,10 @@ public sealed partial class ProfilePage : Page, IPostCardPage
             PageHeading.Text = S.Get("profile/posts");
 
             // Header primary action (edit vs follow) + Tiers-tab branch (author
-            // management vs offers browse) follow the is_self split.
+            // management vs offers browse) follow the is_self split. The follow
+            // toggle reads Follow until the open's status read answers.
             ApplyProfileMode(isSelf);
+            ApplyFollowLabel();
 
             // The private section's editor: one per open of one OTHER person's profile,
             // over the manager as it stands now (profile.md § The private section).
@@ -308,6 +325,26 @@ public sealed partial class ProfilePage : Page, IPostCardPage
 
         _tierMoneyFields = new Views.Payments.TierMoneyFields();
         TierMoneyFieldsHost.Content = _tierMoneyFields;
+
+        // The redeem pair: a fresh control per load (so a fresh open starts with an
+        // empty input, as the per-open view model's buffer does). The typed text goes
+        // into the VM's buffer, which redeems at the page's actor home; a refusal
+        // surfaces through the ErrorMessage change handler.
+        if (!_vm.IsSelf)
+        {
+            var vm = _vm;
+            _claimRedeem = new Views.Payments.ClaimRedeemPanel();
+            ClaimRedeemHost.Content = _claimRedeem;
+            _claimRedeem.Attach(code =>
+            {
+                vm.RedeemCode = code;
+                return vm.RedeemClaimAsync();
+            }, UpdateDerivedUi);
+        }
+        else
+        {
+            ClaimRedeemHost.Content = null;
+        }
 #endif
 
 #if DEBUG || FAUNA_E2E_AGENT
@@ -351,7 +388,9 @@ public sealed partial class ProfilePage : Page, IPostCardPage
         // already blocked, else Block) — mirrors linux refresh_block_state.
         if (!_vm.IsSelf)
         {
-            ApplyFollowLabel(false);
+            // The hydrate's status read set the toggle; paint it (the change
+            // notifications also repaint it).
+            ApplyFollowLabel();
             await _vm.RefreshBlockStateAsync();
             ApplyBlockLabel();
             ApplyBlockEnabled();
@@ -476,14 +515,21 @@ public sealed partial class ProfilePage : Page, IPostCardPage
         BlockButton.IsEnabled = _vm.IsBlockKnown;
     }
 
-    /// <summary>Render the <c>profile-follow-button</c> toggle label — "Following"
-    /// when followed, "Follow" otherwise — off the shared
+    /// <summary>Render the <c>profile-follow-button</c> toggle label — the cost line
+    /// (<c>profile/unfollow_confirm</c>) while a paid holder's leave is armed, else
+    /// "Following" when followed and "Follow" otherwise off the shared
     /// <c>fauna_core::format::follow_toggle_label</c> (FFI <c>FollowToggleLabel</c>;
     /// profile.md § Where logic lives → Follow / unfollow), the single source every
-    /// app sharing the button resolves. Mirrors <see cref="ApplyBlockLabel"/>.</summary>
-    private void ApplyFollowLabel(bool isFollowing)
+    /// app sharing the button resolves — and hold the button disabled while a press
+    /// is in flight. Repainted on every change of the view model's toggle state.
+    /// Mirrors <see cref="ApplyBlockLabel"/>.</summary>
+    private void ApplyFollowLabel()
     {
-        FollowButton.Content = S.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.FollowToggleLabel(isFollowing));
+        if (_vm is null) return;
+        FollowButton.Content = _vm.UnfollowArmed
+            ? S.Get("profile/unfollow_confirm")
+            : S.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.FollowToggleLabel(_vm.IsFollowing));
+        FollowButton.IsEnabled = !_vm.IsFollowBusy;
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -519,6 +565,11 @@ public sealed partial class ProfilePage : Page, IPostCardPage
                 break;
             case nameof(ProfileViewModel.IsBlockKnown):
                 ApplyBlockEnabled();
+                break;
+            case nameof(ProfileViewModel.IsFollowing):
+            case nameof(ProfileViewModel.UnfollowArmed):
+            case nameof(ProfileViewModel.IsFollowBusy):
+                ApplyFollowLabel();
                 break;
             case nameof(ProfileViewModel.IsApproving):
                 RequestBusyText.Visibility = _vm.IsApproving ? Visibility.Visible : Visibility.Collapsed;
@@ -578,14 +629,14 @@ public sealed partial class ProfilePage : Page, IPostCardPage
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(CopyActorIdButton, copied);
     }
 
-    /// <summary>Follow (OTHER profile) = subscribe to the free "followers" tier; on
-    /// success the button flips to "Following".</summary>
+    /// <summary>The Follow ⇄ Following toggle (OTHER profile): <i>Follow</i>
+    /// subscribes to the free "followers" tier, <i>Following</i> leaves it — behind a
+    /// second press when a paid tier is held. The label follows the view model's
+    /// change notifications (<see cref="ApplyFollowLabel"/>).</summary>
     private async void Follow_Click(object sender, RoutedEventArgs e)
     {
         if (_vm is null) return;
-        await _vm.FollowAsync();
-        if (_vm.IsFollowing)
-            ApplyFollowLabel(true);
+        await _vm.ToggleFollowAsync();
     }
 
     // ── OTHER-profile secondary relationship actions (start-DM + block) ──
@@ -715,20 +766,27 @@ public sealed partial class ProfilePage : Page, IPostCardPage
     }
 
 #if PAYMENTS
-    /// <summary>Open the tier's external checkout URL in the default browser (the per-row
-    /// checkout link; linux <c>offers.rs</c> UriLauncher) — refused for a non-https scheme
-    /// via the shared <c>uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl</c> guard
-    /// (F-CL2 anti-phishing-redirect class — the same check
-    /// <c>FeedPage.OpenUnlockOfferPaymentLink</c> applies).</summary>
-    private void OpenOfferPaymentLink(SubscriptionOfferRow row)
+    /// <summary>The per-row checkout link (<c>subscription-offer-payment-link</c>):
+    /// refused for a non-https scheme via the shared
+    /// <c>uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl</c> guard (F-CL2
+    /// anti-phishing-redirect class — the same check
+    /// <c>PostCardHost.OpenUnlockOfferPaymentLink</c> applies; error shown, nothing
+    /// sent), else SUBSCRIBE FIRST and open the checkout URL the shared rule composed,
+    /// bound to the buyer's actor (<see cref="ProfileViewModel.PayToOfferAsync"/>;
+    /// <c>monetization.md</c> § Pillar 3 → Buyer↔actor binding (Q4)). A refused
+    /// subscribe surfaces on <c>error-message</c> and opens nothing. Opened only
+    /// through the one <see cref="FaunaApp.Services.UrlOpener"/>.</summary>
+    private async void OpenOfferPaymentLink(SubscriptionOfferRow row)
     {
-        if (string.IsNullOrEmpty(row.PaymentUrl)) return;
+        if (_vm is null || string.IsNullOrEmpty(row.PaymentUrl)) return;
         if (!uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl(row.PaymentUrl))
         {
             RenderError(S.Get("subscriptions/unsafe_payment_url"));
             return;
         }
-        FaunaApp.Services.UrlOpener.Open(row.PaymentUrl, "Profile");
+        var url = await _vm.PayToOfferAsync(row.Name, row.PaymentUrl);
+        UpdateDerivedUi();
+        if (url is not null) FaunaApp.Services.UrlOpener.Open(url, "Profile");
     }
 #endif
 

@@ -1562,6 +1562,31 @@ Mint event on the owner's grant log, the owner's second device converging on the
 custodian-endpoints row via the fleet walk under a real generation (the
 W8.3-deferred proof), the held witness verifying for the accepted
 device, budget carried, both drives settling to zero.
+*Built — the owed-drive retry edge (2026-11-14):* a drive
+pass runs at an edge (a ceremony-moved ingest, session start, the account
+store landing, a custody page's load), and an act that fails there stays
+owed — which stalled for good when the counterpart was waiting on that
+very act, because then no ingest ever comes (a host whose accept post
+failed once, the owner sending nothing more). The retry edge is **the
+conversations receive cycle**: every pass reports whether it left work
+owed (or could not read its records) to the rail's
+`fauna_conversations::backends::fauna_mls::CustodyRedrive`, and each full
+conversation sweep — native `conv_sweep!` / `poll_conversations`, wasm
+`pollConversations`, one step after the walk — asks it once and, when a
+retry is due, fires the sink's `drive_owed`, which the observer answers
+with one drive pass on the app's own executor, exactly as for a ceremony
+move. No timer of its own, as with expiry: the receive loop's ticker, a
+reconnect, a push and a poke already pace the cycle, on all seven apps.
+The spacing is computed from state, in cycles — a first owed pass is
+retried at the next cycle, each further owed pass doubles the wait (1, 3,
+7, then 15 cycles) — so an act that stays refused costs one pass every
+sixteenth cycle, a settled pass clears it, and a settled ceremony costs a
+cycle one lock. Pinned tier_1: the real sweep fires the edge with nothing
+arriving (`fauna-conversations`,
+`a_receive_cycle_retries_an_owed_custody_drive`), and a host's
+once-failed accept post goes out through the production sink and drive
+pass with no new ingest (`fauna-client-conversations`,
+`a_once_failed_accept_post_is_retried_by_the_receive_cycle_alone`).
 *Built — W8.5 (2026-08-16):* the custodian
 runtime leg — hold, serve, re-serve. `PeerSyncServer` carries the
 served-accounts registry (admission peeks the witness's CLAIMED account

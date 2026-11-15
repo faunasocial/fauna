@@ -51,11 +51,13 @@ function appComponentSupported() {
             start_selected="false"
             description="Private API server for the Fauna protocol. Stores messages, manages identity, and serves the web UI.">
         <pkg-ref id="social.fauna.nest"/>
+        <pkg-ref id="social.fauna.doc"/>
     </choice>
     <choice id="social.fauna.sync"
             title="Sync Service"
             description="Background file sync agent. Keeps your synced folders uploading and downloading even when the Fauna app is closed.">
         <pkg-ref id="social.fauna.sync"/>
+        <pkg-ref id="social.fauna.doc"/>
     </choice>
     <!-- The terminal app: default SELECTED, mirroring the Windows "Fauna Terminal
          App" feature (default ON). The same fauna-tui binary the per-OS release
@@ -73,12 +75,22 @@ function appComponentSupported() {
             description="The terminal (text-mode) Fauna app, usable over SSH, and fauna-cli, the program an AI assistant runs to work in Fauna. Installs fauna-tui and fauna-cli to /usr/local/bin.">
     <!-- public-text-end: macos-installer-descriptions -->
         <pkg-ref id="social.fauna.tui"/>
+        <pkg-ref id="social.fauna.doc"/>
     </choice>
+    <!-- Bridge requires Nest (Windows parity, installers/windows.md § Feature Tree:
+         deselecting Nest Service deselects Bridge Service). `enabled` greys the
+         choice out while Nest is unticked; `selected` is re-evaluated on every
+         change to another choice, so unticking Nest unticks Bridge. Proven headless
+         by `installer -showChoicesAfterApplyingChangesXML` in
+         tests/e2e-unified/tests/platform/macos/test_distribution_choice_gate.py. -->
     <choice id="social.fauna.bridge"
             title="Bridge Service"
             start_selected="false"
+            enabled="choices['social.fauna.nest'].selected"
+            selected="my.choice.selected &amp;&amp; choices['social.fauna.nest'].selected"
             description="Mail-access service (MDA role). Lets standard calendar and email clients (Calendar.app, Mail.app, Thunderbird) read your Fauna calendar over CalDAV and your mailbox over IMAP. Does not send outbound mail (no SMTP relay — that stays on a public nest).">
         <pkg-ref id="social.fauna.bridge"/>
+        <pkg-ref id="social.fauna.doc"/>
     </choice>
     <pkg-ref id="social.fauna.app" version="__VERSION__"
              installKBytes="__SIZE_APP__">fauna-app.pkg</pkg-ref>
@@ -90,4 +102,11 @@ function appComponentSupported() {
              installKBytes="__SIZE_BRIDGE__">fauna-bridge.pkg</pkg-ref>
     <pkg-ref id="social.fauna.tui" version="__VERSION__"
              installKBytes="__SIZE_TUI__">fauna-tui.pkg</pkg-ref>
+    <!-- The licence texts and the notices file for the binaries outside the app,
+         at /usr/local/share/doc/fauna (shipped-notices.md § Per channel, the macOS
+         `.pkg` row). No choice of its own: every tool choice above names it, so it
+         installs with whichever of them is ticked, and not for an app-only install
+         (the app carries its own set in Contents/Resources). -->
+    <pkg-ref id="social.fauna.doc" version="__VERSION__"
+             installKBytes="__SIZE_DOC__">fauna-doc.pkg</pkg-ref>
 </installer-gui-script>

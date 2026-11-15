@@ -601,9 +601,14 @@ class Actions
         try { return item.Name ?? ""; } catch { return ""; }
     }
 
+    /// <summary>An option's key: its AutomationId, or "" when it has none — WinUI's
+    /// x:Name fallback for a data-bound option is not a key the app set
+    /// (<see cref="ElementFinder.IsTemplatePartFallback"/>).</summary>
     private static string SafeItemAutomationId(AutomationElement item)
     {
-        try { return item.AutomationId ?? ""; } catch { return ""; }
+        string id;
+        try { id = item.AutomationId ?? ""; } catch { return ""; }
+        return ElementFinder.IsTemplatePartFallback(id) ? "" : id;
     }
 
     public void Clear(string id, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
@@ -2525,6 +2530,7 @@ class Actions
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
             byte[]? previous = null;
             System.Drawing.Bitmap? frame = null;
+            var frameOrigin = System.Drawing.Point.Empty;
             var settled = false;
             var sized = false;
             Win32.RECT windowRect = default;
@@ -2535,7 +2541,7 @@ class Actions
                 if (sized)
                 {
                     frame?.Dispose();
-                    frame = RenderVisibleWindow(hwnd, windowRect);
+                    frame = RenderVisibleWindow(hwnd, windowRect, out frameOrigin);
                     var pixels = PixelBytes(frame);
                     if (previous is not null && pixels.AsSpan().SequenceEqual(previous))
                     {
@@ -2554,10 +2560,14 @@ class Actions
                     "(a size larger than the monitor is clamped by the window manager)");
             using (frame)
             {
-                if (IsUniform(previous!))
+                // Ask it of the CLIENT area: a session with no attached desktop still gets its
+                // title bar drawn, so the whole frame is never one colour (CaptureContent).
+                var client = ClientRegionInFrame(hwnd, frameOrigin, frame!.Width, frame.Height);
+                if (CaptureContent.RegionIsUniform(previous!, frame.Width, frame.Height, client))
                     throw new InvalidOperationException(
-                        "CaptureWindow: the window rendered as one flat colour — PrintWindow drew nothing " +
-                        "(a disconnected or locked desktop session renders no composition)");
+                        $"CaptureWindow: the window's client area ({client.Width}x{client.Height} px) rendered as " +
+                        "one flat colour — the app painted nothing (a disconnected or locked desktop session " +
+                        "renders no composition: `query session` shows it `Disc`)");
                 frame!.Save(path, System.Drawing.Imaging.ImageFormat.Png);
                 return new WindowCapture(path, frame.Width, frame.Height, dpi / 96.0, settled);
             }
@@ -2568,9 +2578,28 @@ class Actions
         }
     }
 
+    /// <summary>The window's client area in the captured frame's own pixel coordinates —
+    /// <paramref name="frameOrigin"/> is the frame's top-left on screen. Falls back to the whole
+    /// frame when the client rect cannot be read, so the guard never gets weaker than a
+    /// whole-frame check.</summary>
+    private static System.Drawing.Rectangle ClientRegionInFrame(IntPtr hwnd, System.Drawing.Point frameOrigin,
+        int frameWidth, int frameHeight)
+    {
+        var whole = new System.Drawing.Rectangle(0, 0, frameWidth, frameHeight);
+        var topLeft = new Win32.POINT { X = 0, Y = 0 };
+        if (!Win32.GetClientRect(hwnd, out var clientRect) || !Win32.ClientToScreen(hwnd, ref topLeft))
+            return whole;
+        var client = new System.Drawing.Rectangle(topLeft.X - frameOrigin.X, topLeft.Y - frameOrigin.Y,
+            clientRect.Right - clientRect.Left, clientRect.Bottom - clientRect.Top);
+        client.Intersect(whole);
+        return client.Width > 0 && client.Height > 0 ? client : whole;
+    }
+
     /// <summary>One PrintWindow render of <paramref name="hwnd"/>, cropped to its DWM extended
-    /// frame bounds (falls back to the whole window rect where DWM reports none).</summary>
-    private static System.Drawing.Bitmap RenderVisibleWindow(IntPtr hwnd, Win32.RECT windowRect)
+    /// frame bounds (falls back to the whole window rect where DWM reports none);
+    /// <paramref name="origin"/> is the kept frame's top-left on screen.</summary>
+    private static System.Drawing.Bitmap RenderVisibleWindow(IntPtr hwnd, Win32.RECT windowRect,
+        out System.Drawing.Point origin)
     {
         var fullWidth = windowRect.Right - windowRect.Left;
         var fullHeight = windowRect.Bottom - windowRect.Top;
@@ -2598,11 +2627,12 @@ class Actions
             visible.Intersect(crop);
             if (visible.Width > 0 && visible.Height > 0) crop = visible;
         }
+        origin = new System.Drawing.Point(windowRect.Left + crop.X, windowRect.Top + crop.Y);
         return full.Clone(crop, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
     }
 
     /// <summary>The bitmap's pixels as tightly packed 24-bit rows (the stride's row padding
-    /// dropped, so <see cref="IsUniform"/> reads pixels only).</summary>
+    /// dropped, so <see cref="CaptureContent.RegionIsUniform"/> reads pixels only).</summary>
     private static byte[] PixelBytes(System.Drawing.Bitmap bitmap)
     {
         var data = bitmap.LockBits(new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height),
@@ -2619,15 +2649,6 @@ class Actions
         {
             bitmap.UnlockBits(data);
         }
-    }
-
-    private static bool IsUniform(byte[] pixels)
-    {
-        if (pixels.Length < 3) return true;
-        for (var i = 3; i + 2 < pixels.Length; i += 3)
-            if (pixels[i] != pixels[0] || pixels[i + 1] != pixels[1] || pixels[i + 2] != pixels[2])
-                return false;
-        return true;
     }
 
     /// <summary>
@@ -3444,6 +3465,20 @@ internal static class Win32
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public struct POINT
+    {
+        public int X, Y;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
 
     /// <summary>Render through DWM's own composition — WinUI 3 content is DirectComposition,
     /// which a plain PrintWindow draws as black.</summary>

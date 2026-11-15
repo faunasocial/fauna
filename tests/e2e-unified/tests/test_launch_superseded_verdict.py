@@ -28,14 +28,15 @@ tui, the lead app, built the counters first; linux and android joined
 ``apps/fauna-android/app/src/main/java/com/fauna/app/core/LaunchCurrency.kt``),
 then web (``apps/fauna-web/src/lib/launch-currency.ts``) in its own web-marked
 test below, then macos and ios (``LaunchMachineBox.deliver`` counting into the
-shared FaunaKit ``LaunchVerdicts``). iOS enters optimistically from the stored
-identity before the launch's verdict, so there the witness proves the stronger
+shared FaunaKit ``LaunchVerdicts``), then windows
+(``apps/fauna-windows/FaunaApp/FaunaApp.Core/Services/LaunchCurrency.cs``, every
+launch drive passing ``App.DriveLaunchAsync``). iOS enters optimistically from
+the stored identity before the launch's verdict, so there the witness proves the stronger
 property: the shell the session patch built over that optimistic entry survives
 the stale verdict.
 
 android reaches the held listener and the newer session's nest over ``adb
-reverse``: the held port is leased like any nest port (``android_venue.nest_port``,
-the only ports a remote-adb venue's tunnel carries) and rides in the launch
+reverse``: the held port is a free port like any nest's and rides in the launch
 config's ``url``; the real nest, named only by the session patch, gets its
 reverse from ``ensure_reverse``.
 
@@ -60,14 +61,14 @@ from helpers import budgets
 from helpers.app_launch import app_launch_config
 from helpers.waiting import await_session_actor, session_generation, wait_until
 
-# App markers sit PER-TEST (the native test carries tui, linux, android, macos
-# and ios, the web test carries web), as in ``test_version_mismatch_launch.py``: a module-wide
+# App markers sit PER-TEST (the native test carries tui, linux, android, macos,
+# ios and windows, the web test carries web), as in ``test_version_mismatch_launch.py``: a module-wide
 # union would hand ``--app linux`` the web test, which needs a browser.
 pytestmark = pytest.mark.tier_3
 
 #: The apps that publish ``launch_verdicts`` and are driven through the native
 #: launch harness (a seeded credential store, then a cold launch).
-NATIVE_APPS = ("tui", "linux", "android", "macos", "ios")
+NATIVE_APPS = ("tui", "linux", "android", "macos", "ios", "windows")
 
 #: The cross-app state key (``fauna_e2e_agent::LAUNCH_VERDICTS_KEY``).
 LAUNCH_VERDICTS_KEY = "launch_verdicts"
@@ -236,18 +237,17 @@ def _supersede_the_held_launch(app, driver, held, nest_instance, *, node_url, be
 @pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("multiple-accounts")
 @pytest.mark.parametrize("launch_harness", _apps(*NATIVE_APPS), indirect=True)
 def test_a_superseded_launch_verdict_never_tears_down_the_newer_session(
     request, nest_instance, launch_harness
 ):
     app = request.node.callspec.params["launch_harness"]
-    release_port = lambda: None  # noqa: E731
     if app == "android":
         from drivers.port_util import find_free_port
-        from helpers import android_venue
 
-        held_port, release_port = android_venue.nest_port(find_free_port)
+        held_port = find_free_port()
         held = _HeldNest(held_port)
     else:
         held = _HeldNest()
@@ -271,7 +271,6 @@ def test_a_superseded_launch_verdict_never_tears_down_the_newer_session(
         )
     finally:
         held.release()
-        release_port()
 
 
 @pytest.mark.web

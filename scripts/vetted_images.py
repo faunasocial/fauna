@@ -89,8 +89,8 @@ _RUST_BASE = (
     "@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922"
 )
 _GOLANG_BASE = (
-    "golang:1.26.10-bookworm"
-    "@sha256:5b1f78db1f54cc8cb46e652c51d3f854441c4310a449161b6fe9fb553edab505"
+    "golang:1.26.11-bookworm"
+    "@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0"
 )
 _DENO_BASE = (
     "denoland/deno:latest"
@@ -103,7 +103,7 @@ _DEBIAN_BASE = (
 
 # ref (name:tag@digest) -> its vetting evidence. Measured against the live
 # registry 2026-08-27 (2026-08-29 for the four Dockerfile build inputs below;
-# the golang entry re-vetted 2026-10-21 with the go1.26.10 toolchain pin bump).
+# the golang entry re-vetted 2026-11-13 with the go1.26.11 toolchain pin bump).
 _VETTED_THIRD_PARTY_IMAGES: dict[str, VettedImage] = {
     # Floor: 1.5.3 fixes the July 2026 parser out-of-bounds writes
     # (CVE-2026-20213…20217, -20243/-20244) and carries the CVE-2025-20260 PDF
@@ -154,7 +154,7 @@ _VETTED_THIRD_PARTY_IMAGES: dict[str, VettedImage] = {
         frozenset({"amd64", "arm/v7", "arm64", "386", "ppc64le"}),
         "project-official",
         True,
-        "2026-10-21",
+        "2026-11-13",
     ),
     # The Deno project's own account (not the Docker Official Images program) —
     # no attestation manifests accompany this index.

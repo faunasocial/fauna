@@ -125,6 +125,31 @@ class FaunaDocumentsProviderTest {
         assertTrue("the root query re-reads the set list", source.refreshedSets > 0)
     }
 
+    /**
+     * A group set the presence plan lists (`group-set.md` § Build design — the
+     * group set, decision 11 (a)) is a set like any other here: its actor-scoped
+     * `group%3A…` id lists under the root beside an own set and its documents
+     * resolve through its own host — nothing provider-side keys on the family.
+     */
+    @Test
+    fun aGroupSetIsHostedLikeAnyOtherSet() {
+        val groupId = "group%3A${"07".repeat(32)}@$actor"
+        val groupHost = FakeHost(bodies)
+        groupHost.items[""] = listOf(OnDemandItem("note.txt", "note.txt", 5, 1_700_000_000, isDir = false))
+        source = FakeSource(
+            actor,
+            listOf(OnDemandSet(setId, "Documents"), OnDemandSet(groupId, "Trip")),
+            mapOf(setId to host, groupId to groupHost),
+        )
+        FaunaDocumentsProvider.sourceOverride = source
+
+        val sets = children(FaunaDocumentsProvider.ROOT_DOCUMENT_ID)
+        assertEquals(listOf(setId, groupId), sets.map { it[DocumentsContract.Document.COLUMN_DOCUMENT_ID] })
+        assertEquals("Trip", sets[1][DocumentsContract.Document.COLUMN_DISPLAY_NAME])
+        val kids = children(groupId)
+        assertEquals(listOf("$groupId/note.txt"), kids.map { it[DocumentsContract.Document.COLUMN_DOCUMENT_ID] })
+    }
+
     @Test
     fun aSetsChildrenCarryTheHostsRowsUnderActorScopedIds() {
         host.items[""] = listOf(

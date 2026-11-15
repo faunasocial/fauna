@@ -176,6 +176,10 @@ is a second nest round trip against a `BackupKey`-sealed blob. Sized alongside
 since a green run returns the instant the count moves and only a genuine "this
 device never incorporated the other's commit" spends the budget."""
 
+APP_FIRST_STATE_S = 60.0
+"""A running app's test agent pushes its first serialized state (``session`` and
+``nav`` present) to the bridge after a launch or a between-module reset."""
+
 APP_RELAUNCH_S = 120.0
 """An app is torn down and relaunched against a preserved client-local store,
 and its launch flow reaches a decided state (into the app, or onto the launch

@@ -315,7 +315,7 @@ func TestSealMlsSnapshotOpensHybridInbound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveRecipientHpkeKeypair: %v", err)
 	}
-	if _, err := fauna_ffi.OpenMailRecordWithKey(envelope, classical.Secret); err == nil {
+	if _, err := fauna_ffi.OpenMailRecordWithKey(envelope, classical.Secret, 0); err == nil {
 		t.Fatalf("classical key opened the record — it was not sealed X-Wing, so this test proves nothing")
 	}
 
@@ -449,7 +449,7 @@ func TestSealMailRecordRoundTrip(t *testing.T) {
 	if bytes.Contains(sealed, plaintext) {
 		t.Fatalf("the envelope carries the plaintext in the clear")
 	}
-	got, err := fauna_ffi.OpenMailRecordWithKey(sealed, kp.Secret)
+	got, err := fauna_ffi.OpenMailRecordWithKey(sealed, kp.Secret, 0)
 	if err != nil {
 		t.Fatalf("OpenMailRecordWithKey: %v", err)
 	}
@@ -687,7 +687,7 @@ func TestMintGrantXwingDrainsHybridMail(t *testing.T) {
 
 	// NEGATIVE CONTROL: a 32-byte classical key cannot open an X-Wing record (no
 	// ML-KEM decaps half), so a pass here proves the record is genuinely hybrid.
-	if _, err := fauna_ffi.OpenMailRecordWithKey(sealed, recipient.Secret); err == nil {
+	if _, err := fauna_ffi.OpenMailRecordWithKey(sealed, recipient.Secret, 0); err == nil {
 		t.Fatalf("classical 32-byte key unexpectedly opened an X-Wing-sealed record — record is not genuinely hybrid")
 	}
 
@@ -722,7 +722,7 @@ func TestMintGrantXwingDrainsHybridMail(t *testing.T) {
 	}
 
 	// The drain's exact open: the recovered 32+2400 key opens the X-Wing record.
-	got, err := fauna_ffi.OpenMailRecordWithKey(sealed, grant.Keys[0].Key)
+	got, err := fauna_ffi.OpenMailRecordWithKey(sealed, grant.Keys[0].Key, 0)
 	if err != nil {
 		t.Fatalf("OpenMailRecordWithKey under the grant key: %v", err)
 	}
@@ -913,7 +913,7 @@ func TestDeriveRecipientDavPubkeysSealsAsTheKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveRecipientMailXwingMaterial: %v", err)
 	}
-	if _, err := fauna_ffi.OpenMailRecordWithKey(sealed, mail.CapabilitySecret); err == nil {
+	if _, err := fauna_ffi.OpenMailRecordWithKey(sealed, mail.CapabilitySecret, 0); err == nil {
 		t.Fatalf("the mail grant payload opened a calendar record")
 	}
 	got, err := fauna_ffi.OpenRecordWithKey(fauna_ffi.FfiRecordKindCalendar, sealed, material.CalendarCapabilitySecret)

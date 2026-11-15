@@ -166,23 +166,6 @@ public enum OpenURL {
     }
 }
 
-/// Open a payment/subscription URL if it passes the anti-phishing
-/// `isSafePaymentUrl` gate (F-CL2 redirect class — the URL is nest/author-
-/// supplied, so untrusted the same way linux's `views/profile/offers.rs` and
-/// web's `isSafeNavUrl` treat it); otherwise reports `L.subscriptions
-/// .unsafePaymentUrl` via `setError`. `PostUnlockOfferTeaser` and
-/// `ProfileView`'s `SubscriptionOfferRow` each hand-rolled this identical
-/// guard against their own VM's differently-named error property — a closure
-/// rather than a `Binding` so callers whose `vm` is a plain `let` reference
-/// (not `@Bindable`) don't need one.
-public func openPaymentURL(_ url: String, setError: (String) -> Void) {
-    guard isSafePaymentUrl(url: url) else {
-        setError(L.subscriptions.unsafePaymentUrl)
-        return
-    }
-    if let u = URL(string: url) { OpenURL.open(u) }
-}
-
 /// Present the system share sheet (`UIActivityViewController`) over the app's
 /// current key window — iOS only. Every call site's own macOS presentation
 /// (`AccountSettingsView`'s `NSSavePanel`; the other two call sites have no

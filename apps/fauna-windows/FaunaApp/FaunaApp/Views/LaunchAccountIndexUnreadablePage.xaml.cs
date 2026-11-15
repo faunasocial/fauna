@@ -84,9 +84,10 @@ public sealed partial class LaunchAccountIndexUnreadablePage : Page
     {
         // Ask BEFORE the erase, same as sign-out's gate (account-scoping.md §
         // Concurrent instances → *An erase refuses while a sibling serves the
-        // account*): OnConfirmStartOver's own first call,
-        // App.ClearCredentialNamespace, releases actor-scoped state before it
-        // erases, so the gate has to sit here, at the confirm click. The refusal
+        // account*): OnConfirmStartOver records the start-over and runs the one
+        // sign-out routine (App.FinishSignOut), which releases actor-scoped state
+        // before it erases, so the gate has to sit here, at the confirm click. The
+        // routine asks the same question again and refuses whole. The refusal
         // paints on the page's `error-message` (convention 2), as tui, linux and
         // macOS do, and the verdict text and the confirm stay exactly as they
         // were — closing the other window and confirming again is the remedy.
@@ -109,10 +110,9 @@ public sealed partial class LaunchAccountIndexUnreadablePage : Page
 /// <summary>
 /// Navigation parameter for <see cref="LaunchAccountIndexUnreadablePage"/>.
 /// <see cref="OnConfirmStartOver"/> is the documented client-side floor
-/// (<c>long-term-store.md</c> § Cleanup contract) — the app's existing
-/// factory-reset seam (<c>App.ClearCredentialNamespace</c>, the same one
-/// sign-out and the test agent's <c>reset</c>/<c>logout</c> arms use), never a
-/// second clearing path — landing on fresh onboarding at
+/// (<c>long-term-store.md</c> § Cleanup contract) — the sign-out record with no
+/// accounts and the one sign-out routine a sign-out runs (<c>App.FinishSignOut</c>),
+/// never a second clearing path — landing on fresh onboarding at
 /// <c>identity_choice</c>.
 ///
 /// <c>internal</c>, not <c>public</c> — forced, not chosen:

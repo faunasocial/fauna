@@ -171,11 +171,13 @@ class FeedManagerHost @Inject constructor(
     }
 
     /**
-     * The leave-flush: an immediate `saveIfChanged` of the feed manager's drafts
+     * The leave-flush: an immediate save of the feed manager's drafts
      * snapshot, bypassing the debounce, on the app's background transition —
      * the posts-rail leg of `drafts-survive` outcome 5, twin of
      * `ConversationsManagerHost.onStop`. Best-effort like any such handler.
-     * The launch gate and unchanged-snapshot dedup stay in `saveIfChanged`.
+     * Saved through the shared `saveDraftsOnLeave` (`reserved-folders.md`
+     * § The leave-flush promise): the unchanged-snapshot dedup holds, and
+     * before the launch restore completes it reads once rather than skipping.
      */
     override fun onStop(owner: LifecycleOwner) {
         val sync = synchronized(this) {
@@ -184,9 +186,10 @@ class FeedManagerHost @Inject constructor(
             api.postsDraftsSync() ?: return
         }
         val m = seen ?: return
+        val snapshot = m.draftsSnapshotBytes()
         draftsScope.launch {
             try {
-                sync.saveIfChanged(m.draftsSnapshotBytes())
+                m.saveDraftsOnLeave(sync, snapshot)
             } catch (e: Exception) {
                 ShellLog.d("FeedDrafts", "leave-flush drafts failed: ${e.message}")
             }

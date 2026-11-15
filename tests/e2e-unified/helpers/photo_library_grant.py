@@ -63,11 +63,16 @@ def main() -> int:
     print("  (A notifications prompt for the same app may also appear; either answer.)\n",
           flush=True)
 
+    import pytest
+
     driver = macos.MacosInProcessDriver()
     try:
         driver.launch({"app_path": str(BINARY), "launch_mode": "photo-library",
                        "environment": {}})
         answer = driver.request_photos_access(timeout=ANSWER_WAIT_S)
+    except pytest.skip.Exception as exc:  # the driver's unanswered-keychain skip
+        return _refuse(f"{exc.msg} — the keychain dialog was not answered in time; "
+                       "run this again and answer it")
     finally:
         driver.teardown()
 

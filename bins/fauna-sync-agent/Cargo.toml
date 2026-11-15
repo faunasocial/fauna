@@ -60,6 +60,16 @@ required-features = ["tier3-nest"]
 name = "agent_custody_rekey"
 required-features = ["tier3-nest"]
 
+# The linux presence root against a real nest (on-demand-files-shared-sets.md
+# decision 3d): a member's agent with no bound location serves the set the
+# owner shared as a reader at `$HOME/Fauna/<name>` — `ro`, hydrating into its
+# private backing — remounts it two-way on a `writer` grant, and unmounts and
+# removes it once the set is toggled off and drained. Mounts, so it also needs
+# `fuse-live`'s `/dev/fuse` + `fusermount3`; run by `just fuse-live-test-check`.
+[[test]]
+name = "presence_root_tier3"
+required-features = ["tier3-nest", "fuse-live"]
+
 [features]
 # The cross-user share plane's INGEST half (slice E — p2p.md § Cross-user
 # shared-set transfer): the engine's provisional ingest door + the
@@ -78,8 +88,10 @@ p2p-share = ["fauna-sync-engine/p2p-share"]
 # `e2e-agent` does for its automation surface. A plain `--release` artifact
 # enables neither and compiles the whole surface out (testing.md convention 15).
 # Forwards the wire half rather than declaring a sibling gate, so the variant and
-# its handler can never be present on only one side of the seam.
-test-helpers = ["fauna-ipc/test-helpers", "fauna-ws-substrate/test-helpers"]
+# its handler can never be present on only one side of the seam. `fauna-cfapi`'s
+# rides along so the cfapi live harness's mutex names (`fauna_cfapi::test_roots`)
+# are present wherever `fauna_ipc::test_support`'s guard is.
+test-helpers = ["fauna-ipc/test-helpers", "fauna-ws-substrate/test-helpers", "fauna-cfapi/test-helpers"]
 
 # Opt-in, heavy tier_3 harness (like tier_4): pulls the whole `fauna-nest` crate
 # so `src/versions_tier3.rs` can drive the Version-history + Restore path against
@@ -182,8 +194,16 @@ fauna-i18n = { path = "../../libs/fauna-i18n" }
 # resolver (priority #2/#3 — the same nest-authoritative `rescan_interval_secs`
 # every device honors; linux's engine loop reads it through the same helper). No
 # `mls` feature: this host is bearer-only and builds its engines `mls: None`, so
-# the base (fauna-mls-free) crate is exactly what it needs.
-fauna-client-folders = { path = "../../libs/fauna-client-folders" }
+# the base (fauna-mls-free) crate is what it needs, plus `nest-resolver`: the
+# presence plan's folders read renders sealed set names through the shared
+# content-key resolver (`presence_roots::read_plan_inputs`), which links no MLS.
+fauna-client-folders = { path = "../../libs/fauna-client-folders", features = ["nest-resolver"] }
+# The presence plan's one body and its rules — `presence_sets_over`, the
+# per-set toggle store (`OnDemandPrefs`) and `desired_presences` — that the
+# desktop agent plans presence roots from (`on-demand-files-shared-sets.md`
+# § Shared sets on a capability host, decision 3d). `rpc-glue` is the feature
+# that carries the read (it rides `fauna-client-folders`, held above).
+fauna-folders-machine = { path = "../../libs/fauna-folders-machine", features = ["rpc-glue"] }
 # The shared account-store crate — the store seams and helpers this host still uses
 # (e.g. `enroll_client_custodian`).
 fauna-client-config = { path = "../../libs/fauna-client-config" }
@@ -342,6 +362,7 @@ windows = { workspace = true, features = ["Foundation_Collections"] }
 # windows sink is the WinRT toast through its existing `windows` crate and
 # macOS has no sink (a declared absence: macOS refuses the crate's post).
 [target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5.14.0"
 # The on-demand root's FUSE binding (`src/fuse_host.rs`; `on-demand-files.md`
 # § Linux FUSE binding): the pure-Rust `/dev/fuse` protocol. Approved by the user
 # 2026-09-26 — crates.io, under `cargo vet`. `default-features = false` is

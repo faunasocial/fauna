@@ -2,6 +2,7 @@ package com.fauna.app.provider
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import uniffi.fauna_devices_machine.ConflictSummary
 import uniffi.fauna_devices_machine.FolderSummary
 
 /**
@@ -23,6 +24,15 @@ interface OnDemandToggle {
      * such a row has no presence to steer, so it renders no toggle.
      */
     suspend fun identify(folder: FolderSummary): OnDemandIdentity?
+
+    /**
+     * A set's identity from its `FolderRef` wire form alone — the group-scope
+     * row's (`group:<64-hex>`, `group-set.md` § Build design — the group set,
+     * decision 11 (a)), which has no `FolderSummary` to resolve. The same
+     * actor-scoped id [identify] gives, so the preference store and the
+     * provider never key on the family. `null` when signed out.
+     */
+    suspend fun identifyRef(folderRef: String): OnDemandIdentity?
 
     /**
      * Read every given set's state in one pass — the preference (default ON),
@@ -48,6 +58,25 @@ interface OnDemandToggle {
      * the app shows, and how the park reaches it").
      */
     val reconciled: Flow<Unit> get() = emptyFlow()
+
+    /**
+     * A group set's review rows (`group-set.md` § Build design — the group
+     * set, decision 9; `folders.md` § Conflicts): read in-process off the
+     * set's state DB, beside its park, through the shared mapping
+     * (`syncSetReviewRows` → `ConflictSummary::of_retained`) under
+     * [setLabel], the set's label on the page. A phone runs no sync agent, so
+     * this is the read a desktop asks its agent for. A missing DB reads none;
+     * an unreadable one throws, and the caller keeps the rows it last read.
+     */
+    suspend fun groupReviewRows(folderRef: String, setLabel: String): List<ConflictSummary> = emptyList()
+
+    /**
+     * *Use the other version* on review row [conflictId] of the group set
+     * [folderRef], on the set's own host (its one writer, decision 11).
+     * Throws when the set has no host here or the host refuses; the row stays.
+     */
+    suspend fun restoreRetainedVersion(folderRef: String, conflictId: Long): Unit =
+        throw UnsupportedOperationException("no review rows on this device")
 }
 
 /**

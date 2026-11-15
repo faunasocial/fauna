@@ -37,14 +37,20 @@ class SettingsFamilyGateVM @Inject constructor(
         // caller's own supervision), so a guardian's gate still waits for the
         // read, as before.
         if (accountStores.supervisionSnapshot() != null) hasFamilyRelationship.value = true
+        // One read at creation, and again whenever an act elsewhere changed the
+        // viewer's family relationships (the admin take-over —
+        // `FamilyStatusEpoch`); the StateFlow replays its current value, so the
+        // first collection IS the creation read.
         viewModelScope.launch {
-            try {
-                val status = api.familyStatus()
-                hasFamilyRelationship.value =
-                    status.wards.isNotEmpty() || status.supervisedBy != null || status.incomingTransfers.isNotEmpty()
-            } catch (_: Exception) {
-                // No information: keep the restored/last-known gate rather than
-                // hiding a supervised ward's Family entry on a reconnect blip.
+            com.fauna.app.core.FamilyStatusEpoch.tick.collect {
+                try {
+                    val status = api.familyStatus()
+                    hasFamilyRelationship.value =
+                        status.wards.isNotEmpty() || status.supervisedBy != null || status.incomingTransfers.isNotEmpty()
+                } catch (_: Exception) {
+                    // No information: keep the restored/last-known gate rather than
+                    // hiding a supervised ward's Family entry on a reconnect blip.
+                }
             }
         }
     }

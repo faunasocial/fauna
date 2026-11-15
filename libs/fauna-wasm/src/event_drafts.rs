@@ -163,6 +163,40 @@ mod face {
                 .map_err(|e| JsValue::from_str(&format!("save event drafts: {e}")))
             })
         }
+
+        /// The leave door's save (`reserved-folders.md` § The leave-flush
+        /// promise): [`saveDrafts`](Self::save_drafts) through
+        /// `fauna_client_caldav::drafts::leave_save_event_draft`, which first
+        /// opens a save gate the launch restore has not lifted yet with one
+        /// read, and never overwrites a resting draft with an untouched form.
+        /// Rejects with the read or save error; the SPA logs it and the door
+        /// goes on.
+        #[wasm_bindgen(js_name = saveDraftsOnLeave)]
+        pub fn save_drafts_on_leave(
+            &self,
+            summary: String,
+            dtstart: String,
+            dtend: String,
+            description: String,
+            location: String,
+        ) -> js_sys::Promise {
+            let sync = self.sync.clone();
+            future_to_promise(async move {
+                fauna_client_caldav::drafts::leave_save_event_draft(
+                    &sync,
+                    EventDrafts {
+                        summary,
+                        dtstart,
+                        dtend,
+                        description,
+                        location,
+                    },
+                )
+                .await
+                .map(|_| JsValue::UNDEFINED)
+                .map_err(|e| JsValue::from_str(&format!("save event drafts on leave: {e}")))
+            })
+        }
     }
 }
 

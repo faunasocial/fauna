@@ -28,6 +28,7 @@ public sealed partial class PostCardTemplates : ResourceDictionary
     private void NestRevealButton_Click(object sender, RoutedEventArgs e) => PostCardHost.RevealContent(sender);
     private void ContentRevealButton_Click(object sender, RoutedEventArgs e) => PostCardHost.RevealContent(sender);
     private void MutedRevealButton_Click(object sender, RoutedEventArgs e) => PostCardHost.RevealMuted(sender);
+    private void ShowAgainButton_Click(object sender, RoutedEventArgs e) => PostCardHost.Of(sender)?.ShowAgain_Click(sender, e);
     private void PostAuthor_Click(object sender, RoutedEventArgs e) => PostCardHost.Of(sender)?.PostAuthor_Click(sender, e);
     private void SoldPostTeaserHost_Loaded(object sender, RoutedEventArgs e) => PostCardHost.Of(sender)?.SoldPostTeaserHost_Loaded(sender, e);
     private void TipDisplayHost_Loaded(object sender, RoutedEventArgs e) => PostCardHost.Of(sender)?.TipDisplayHost_Loaded(sender, e);

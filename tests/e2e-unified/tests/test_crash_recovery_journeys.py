@@ -46,8 +46,10 @@ so it SIGKILLs that specific PID, never a name/bundle-id-based kill. web's
 kill is the page closed with its BrowserContext kept (`drivers/web.py`
 `kill_uncleanly` — no unload handler runs, the storage survives). windows' kill
 is the FlaUI bridge's own hard process-tree kill of the app it owns
-(`drivers/windows.py` `kill_uncleanly`); android's bridge owns no app child, a
-declared `unclean-kill` skip there (`surfaces.toml`).
+(`drivers/windows.py` `kill_uncleanly`); android's is `run-as <package> kill -9`
+of the pid its launch read on the device, after which `recover()` starts a new
+instrumentation bridge over the same install (`drivers/android.py`
+`kill_uncleanly`).
 """
 
 from __future__ import annotations

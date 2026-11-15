@@ -40,8 +40,8 @@ android {
         // Owner: docs/goal/architecture/installers/android.md § Versioning.
         // versionName must equal [workspace.package] version in the root
         // Cargo.toml (product-version.md; version-lockstep merge gate).
-        versionCode = 106
-        versionName = "0.1.6"
+        versionCode = 107
+        versionName = "0.1.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -246,6 +246,11 @@ android {
     // face (the post-tip resolver on `FfiFeedManager`): taken by the two build
     // types with a feed and no payments, `storeSafe` and `storeNoPayments`, and
     // never by `kids`, whose bindings carry no feed.
+    // Each shipping build type packages LICENSE-MIT, LICENSE-APACHE and its own
+    // generated THIRD-PARTY-NOTICES in `assets/` (shipped-notices.md § Per
+    // channel, the Android row): `just _android-notices <buildtype>` stages them
+    // under `build/shipped-notices/<buildtype>/assets` before every shipping
+    // recipe's Gradle step, and the recipe checks the built package's entry list.
     sourceSets {
         // The find/actuate half of the UiAutomator bridge, shared with the
         // out-of-process store driver (`:store-driver`), which reaches a
@@ -262,6 +267,7 @@ android {
             java.srcDir("src/storeAge/java")
         }
         getByName("release") {
+            assets.srcDir("build/shipped-notices/release/assets")
             java.srcDir("src/noKids/java")
             java.srcDir("src/payments/java")
             java.srcDir("src/p2pShare/java")
@@ -269,6 +275,7 @@ android {
             java.srcDir("src/storeAge/java")
         }
         getByName("storeSafe") {
+            assets.srcDir("build/shipped-notices/storeSafe/assets")
             java.srcDir("src/noKids/java")
             java.srcDir("src/noPayments/java")
             java.srcDir("src/noKidsNoPayments/java")
@@ -277,6 +284,7 @@ android {
             java.srcDir("src/storeAge/java")
         }
         getByName("storeNoPayments") {
+            assets.srcDir("build/shipped-notices/storeNoPayments/assets")
             java.srcDir("src/noKids/java")
             java.srcDir("src/noPayments/java")
             java.srcDir("src/noKidsNoPayments/java")
@@ -285,6 +293,7 @@ android {
             java.srcDir("src/storeAge/java")
         }
         getByName("foss") {
+            assets.srcDir("build/shipped-notices/foss/assets")
             java.srcDir("src/noKids/java")
             java.srcDir("src/payments/java")
             java.srcDir("src/p2pShare/java")
@@ -294,6 +303,7 @@ android {
         // `kids` is Play-distributed (Families policy), so it keeps the real
         // store-age twin; everything else is `storeSafe`'s set.
         getByName("kids") {
+            assets.srcDir("build/shipped-notices/kids/assets")
             java.srcDir("src/noPayments/java")
             java.srcDir("src/noP2pShare/java")
             java.srcDir("src/noAgent/java")

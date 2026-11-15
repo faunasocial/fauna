@@ -108,3 +108,40 @@ data class ClaimItem(
 
 private fun ByteArray?.contentEqualsOrBothNull(other: ByteArray?): Boolean =
     if (this == null || other == null) this == null && other == null else contentEquals(other)
+
+/**
+ * What a claim redeem answered (`fauna.payments.claims.redeem`), the seam over
+ * `FfiClaimRedeemReply`. Unlike the rows above it is a reply, not a rendered
+ * record, so it carries only what a redeem door folds: the tier the code
+ * entitles and whether the grant queued for the creator's client (the
+ * profile Tiers tab marks that tier pending, as a queued subscribe does).
+ */
+data class ClaimRedeemResult(
+    val tier: String,
+    val queued: Boolean,
+)
+
+/**
+ * The selling tier of a sold post as the *Change price…* dialog holds it
+ * (`feed-post-sale-price-dialog`; `monetization.md` § The asking price →
+ * *Re-pricing a sold post*): the two field strings it pre-fills, and the
+ * payments variant's own tier record carried opaquely so the save compares
+ * against exactly what the fields were pre-filled with. The shared UI never
+ * looks inside [raw] (it is an `FfiTierItem` in the payments variant, which a
+ * store-safe build's bindings do not have).
+ */
+class SalePriceTier(
+    val hint: String,
+    val asking: String,
+    internal val raw: Any?,
+)
+
+/** What a *Change price…* save answered (the shared `FfiSalePriceSave`). */
+sealed interface SalePriceSaveResult {
+    /** Unchanged or saved: the dialog closes. */
+    data object Closed : SalePriceSaveResult
+
+    /** The asking-price field is not a price; [i18nKey] is the catalog key to
+     *  show. Nothing was sent; the dialog stays open with the typed text. */
+    data class Refused(val i18nKey: String) : SalePriceSaveResult
+}

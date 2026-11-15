@@ -102,4 +102,61 @@ public class AccountRuntimeStopsTests
 
         Assert.True(await stops.BarrierAsync("test", TimeSpan.FromMilliseconds(1)));
     }
+
+    /// <summary>
+    /// A teardown returns at its OWN budget's lapse (the shared stop's 5 s) while the
+    /// store it was stopping is still closing in the background — so every tracked stop
+    /// having finished does not mean the store is closed. The barrier then waits on the
+    /// stores still closing (the shared <c>account_runtime_stores_closed</c>) too.
+    ///
+    /// <para>The red this pins (2026-11-04, a full-file <c>--app windows</c> run): the
+    /// shared stop lapsed at 34.116, the barrier counted the teardown finished 3 ms later
+    /// and the remove-account erase met the still-open store (<c>os error 32</c>).</para>
+    /// </summary>
+    [Fact]
+    public async Task Barrier_HoldsUntilTheStoresClose_AfterEveryStopReturned()
+    {
+        var closed = new TaskCompletionSource<bool>();
+        var stops = new AccountRuntimeStops(() => closed.Task);
+        var lapsed = new TaskCompletionSource();
+        stops.Track(lapsed.Task);
+
+        var barrier = stops.BarrierAsync("test", Generous);
+        lapsed.SetResult(); // the teardown returned at its budget's lapse
+        await Task.Yield();
+        Assert.False(barrier.IsCompleted,
+            "the barrier passed while the lapsed stop still held the store open");
+
+        closed.SetResult(true);
+        Assert.True(await barrier);
+    }
+
+    /// <summary>The stores' close is held to the barrier's own budget: one that never
+    /// closes costs the budget, then the erase goes ahead (loudly).</summary>
+    [Fact]
+    public async Task Barrier_AStoreThatNeverCloses_LapsesAtTheBudget()
+    {
+        var stops = new AccountRuntimeStops(() => new TaskCompletionSource<bool>().Task);
+
+        Assert.False(await stops.BarrierAsync("test", TimeSpan.FromMilliseconds(50)));
+    }
+
+    /// <summary>The shared wait has a budget of its own and reports its own lapse; the
+    /// barrier passes that on rather than calling the scope erasable.</summary>
+    [Fact]
+    public async Task Barrier_TheSharedWaitsLapse_IsTheBarriersLapse()
+    {
+        var stops = new AccountRuntimeStops(() => Task.FromResult(false));
+
+        Assert.False(await stops.BarrierAsync("test", Generous));
+    }
+
+    /// <summary>Nothing closing — the common erase — passes at once.</summary>
+    [Fact]
+    public async Task Barrier_NothingClosing_PassesAtOnce()
+    {
+        var stops = new AccountRuntimeStops(() => Task.FromResult(true));
+
+        Assert.True(await stops.BarrierAsync("test", Generous));
+    }
 }

@@ -54,13 +54,13 @@ Stamped 2026-11-07 at 6a0ded1015.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+e4b19f90 standalone |
-| linux | ✅ full | 0.1.5-dev+e4b19f90 standalone |
+| web | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
+| linux | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
 | windows | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
-| macos | ✅ full | 0.1.5-dev+e4b19f90 standalone |
-| ios | ✅ full | 0.1.5-dev+662ece79 standalone |
+| macos | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
+| ios | ⚠ partial | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -83,5 +83,5 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 7 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_shows_the_storage_the_nest_holds` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_shows_the_one_card_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_admin.py::test_a_failed_dashboard_read_drops_only_its_own_cards` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/api/test_anonymous_discovery_counts.py::test_no_anonymous_surface_answers_how_many_members_and_posts` | nest (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_anonymous_discovery_counts.py::test_no_anonymous_surface_answers_how_many_members_and_posts` | nest (linux): passed, nest (macos): failed |
 <!-- features-render:end -->

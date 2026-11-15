@@ -2020,8 +2020,14 @@ import os, sys, time
 from pathlib import Path
 
 args = sys.argv[1:]
+Path(os.environ["STUB_CARGO_LOG"]).parent.mkdir(parents=True, exist_ok=True)
 with open(os.environ["STUB_CARGO_LOG"], "a") as log:
     log.write("stub-cargo " + " ".join(args) + "\\n")
+if "metadata" in args:  # the cargo boundary reads the target dir it may write
+    import json
+    print(json.dumps({{"target_directory": os.environ["STUB_TARGET_DIR"],
+                      "workspace_root": os.getcwd()}}))
+    sys.exit(0)
 out = Path(os.environ["STUB_TARGET_DIR"]) / "debug"
 name = None
 for flag, value in zip(args, args[1:]):
@@ -2073,9 +2079,11 @@ def test_helper_build_is_charged_to_collection_not_the_test(tmp_path):
     test_file = tmp_path / "test_helper_probe.py"
     test_file.write_text(_INNER_HELPER_TEST)
     env = _inner_env(tmp_path, bin_dir)
-    env["STUB_CARGO_LOG"] = str(tmp_path / "stub-cargo.log")
-    # A target dir of its own: no stamp, so the gate must build.
+    # A target dir of its own: no stamp, so the gate must build. The stub's
+    # log lives inside it: the cargo boundary lets a compile write only its
+    # target directory (on macOS a sandbox refuses every other path).
     env["CARGO_TARGET_DIR"] = str(tmp_path / "cargo-target")
+    env["STUB_CARGO_LOG"] = str(tmp_path / "cargo-target" / "stub-cargo.log")
     env["STUB_TARGET_DIR"] = env["CARGO_TARGET_DIR"]
 
     result = subprocess.run(
@@ -2093,7 +2101,7 @@ def test_helper_build_is_charged_to_collection_not_the_test(tmp_path):
     assert "[prebuild] mls-keypackage-gen" in result.stdout, result.stdout[-4000:]
 
     # Built once, at collection — the accessor replayed the memo.
-    log = (tmp_path / "stub-cargo.log").read_text()
+    log = (tmp_path / "cargo-target" / "stub-cargo.log").read_text()
     keypkg = [l for l in log.splitlines() if "mls-keypackage-gen" in l]
     assert len(keypkg) == 1, log
 

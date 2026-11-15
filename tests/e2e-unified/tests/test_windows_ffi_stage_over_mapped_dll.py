@@ -107,6 +107,44 @@ def test_a_rebuilt_dll_stages_over_one_another_process_has_mapped(tmp_path):
         holder.communicate(input="", timeout=30)
 
 
+def test_identical_bytes_over_a_mapped_dll_are_left_alone(tmp_path):
+    """The Go/cgo recipes stage their runtime dlls on every call, built or not
+    (`_windows-go-cgo-build`); a slot already holding the same bytes is a no-op,
+    so a run beside a bridge that keeps the dll mapped neither fails nor churns
+    an aside on every prebuild (measured 2026-11-10: a plain `cp` there died
+    `Device or resource busy` with nothing changed)."""
+    staged = tmp_path / "fauna_ffi.dll"
+    shutil.copyfile(_a_real_dll(), staged)
+    same = tmp_path / "built.dll"
+    shutil.copyfile(staged, same)
+
+    from drivers.port_util import popen_group_kwargs, reap_descendants_of
+
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER, str(staged)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        **popen_group_kwargs(),
+    )
+    reap_descendants_of(holder.pid)
+    try:
+        assert holder.stdout.readline().strip() == "mapped"
+        _assert_overwrite_refused(staged)
+        before = os.stat(staged)
+
+        proc = _stage(same, staged)
+        assert proc.returncode == 0, f"{proc.stdout}{proc.stderr}"
+        after = os.stat(staged)
+        # The file id, not the aside count: MSYS `rm` deletes a mapped aside with
+        # POSIX semantics, so a rename-and-copy over identical bytes leaves no
+        # aside behind either — but it does leave a NEW file in the slot.
+        assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns), (
+            "identical bytes must leave the staged file itself in place: nothing changed"
+        )
+        assert holder.poll() is None
+    finally:
+        holder.communicate(input="", timeout=30)
+
+
 def test_the_next_stage_sweeps_asides_no_longer_mapped(tmp_path):
     staged = tmp_path / "fauna_ffi.dll"
     staged.write_bytes(b"old")

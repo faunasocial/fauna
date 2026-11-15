@@ -365,6 +365,12 @@ def test_settings_warns_when_the_rules_could_not_be_checked_lately(logged_in_app
         )
 
         _region_hook(nest_instance["url"], "content-policy/log-silent", {"region": REGION})
+        # Leave Settings before the relaunch: web's relaunch is a reload that
+        # keeps the URL, and its Settings shell replaces the app nav, so a
+        # relaunch from there comes back signed in but showing none of the
+        # shell markers `wait_for_authenticated_shell` waits on (the native
+        # apps relaunch to their home page either way).
+        app.feed.navigate()
         # The relaunch's login refresh folds the relay's stale answer.
         assert app.driver.recover(), "relaunch after silencing the log failed"
         wait_for_authenticated_shell(app)

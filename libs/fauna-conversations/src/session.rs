@@ -1532,6 +1532,8 @@ impl ConversationsSession {
         // (`conversations.md` § Attachments → *Retention*).
         crate::backends::fauna_mls::refill_evicted_attachments(&self.fauna_mls, &self.manager)
             .await;
+        // A custody ceremony act a drive pass left owed is retried from here.
+        self.fauna_mls.redrive_owed_custody();
         match first_err {
             Some(e) if total == 0 => Err(e),
             _ => Ok(total),
@@ -2455,6 +2457,11 @@ impl ConversationsSession {
                     // repeated (`conversations.md` § Attachments → *Retention*).
                     crate::backends::fauna_mls::refill_evicted_attachments(&backend, &manager)
                         .await;
+                    // A custody ceremony act a drive pass left owed is retried
+                    // from here — the cycle is its only edge when the
+                    // counterpart is waiting on that very act
+                    // (`CustodyRedrive`).
+                    backend.redrive_owed_custody();
                     // A room whose key-in just landed: everything behind its
                     // wait is backlog, and the boundary has usually closed
                     // without it (an unkeyed room folds for now). So reopen the
@@ -3482,6 +3489,17 @@ where
             why: "no longer a member of this conversation".to_string(),
         };
     }
+    // A staged attachment the intent names that this device no longer holds
+    // (a retired identity's intent carried across a succession, bytes
+    // evicted) is permanent: the remedy is discard and recompose, never a
+    // send without it (`succession-aftermath.md` § Re-key scope, the
+    // device-local outbox row).
+    if !manager.staged_attachments_resolve(&intent.attachments) {
+        return MlsIntentOutcome::Park {
+            code: park_code::MLS_ATTACHMENT_MISSING,
+            why: "a staged attachment is no longer on this device".to_string(),
+        };
+    }
     // The binding is RAM state the session restores; not yet there is a
     // retry, never a park.
     let Some(thread_id) = fauna_mls.thread_for_channel(&channel) else {
@@ -3532,6 +3550,22 @@ impl fauna_core::offline_intent::MlsIntentSender for ConversationsSession {
         )
         .await
     }
+
+    fn holds_group_of(&self, payload: &[u8]) -> bool {
+        intent_group_held(&self.fauna_mls, payload)
+    }
+}
+
+/// Whether `fauna_mls`'s engine holds the group of the channel a queued MLS
+/// intent's `payload` names — the outbox carry's MLS hold, shared by every
+/// host of the engine. An intent that does not decode, or names no channel,
+/// is not held: carried, it would park at once, so it waits with its
+/// predecessor's outbox where the user can discard it.
+pub fn intent_group_held(fauna_mls: &FaunaMlsBackend, payload: &[u8]) -> bool {
+    crate::offline_compose::MlsSendIntent::decode(payload)
+        .ok()
+        .and_then(|intent| ChannelId::from_hex(&intent.channel_id).ok())
+        .is_some_and(|channel| fauna_mls.engine().has_group(&channel))
 }
 
 #[cfg(test)]

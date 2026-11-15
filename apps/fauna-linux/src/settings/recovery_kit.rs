@@ -55,6 +55,7 @@ use crate::i18n::strings::common;
 use crate::i18n::strings::settings::recovery_kit as rk;
 use fauna_client_recovery::RecoveryKitStatus;
 use fauna_client_recovery::ceremony::{STOLEN_CONFIRM_WORD, SweepStatus};
+use fauna_client_recovery::owed_nests::{OwedNestKey, OwedNestsView, dismiss_failed_copy};
 use fauna_core::qr_matrix::QrMatrix;
 use fauna_sync_engine::generation_let_go::{
     DeadGeneration, LET_GO_CONFIRM_WORD, unreadable_status,
@@ -481,6 +482,221 @@ impl LetGoWidgets {
     }
 }
 
+/// The successor's **owed nests** (`settings.md` § Recovery kit → *The
+/// successor's owed nests*; `succession-linked-nests.md` § The road → *What
+/// the dial does with an entry it cannot land*): the status line, then per
+/// entry its address, its outcome and the two-step dismiss — tui's
+/// `owed_nests_elements`, as GTK widgets. The selection and copy are the
+/// shared [`OwedNestsView`]'s; this only resolves keys and lays them out. The
+/// whole block is absent while nothing is owed (the honest empty state).
+struct OwedNests {
+    container: gtk::Box,
+    /// The page's one `error-message` (E2E Rule 2), where a refused dismiss
+    /// says why.
+    error_label: gtk::Label,
+    view: RefCell<Option<OwedNestsView>>,
+    /// The entry whose dismiss is armed, awaiting its confirm.
+    pending: RefCell<Option<OwedNestKey>>,
+}
+
+impl OwedNests {
+    fn new(error_label: &gtk::Label) -> Rc<Self> {
+        let container = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .margin_top(8)
+            .visible(false)
+            .build();
+        Rc::new(Self {
+            container,
+            error_label: error_label.clone(),
+            view: RefCell::new(None),
+            pending: RefCell::new(None),
+        })
+    }
+
+    /// Read the list on the section's nav edge — tui's Account hydrate. A
+    /// failed read of the bound nest's list is logged by the client and leaves
+    /// only its entries out.
+    fn read(self: &Rc<Self>) {
+        let Some(client) = crate::settings::get_client() else {
+            return;
+        };
+        let this = Rc::downgrade(self);
+        crate::async_helper::spawn_with_snapshot(
+            &client.runtime_handle(),
+            {
+                let read = client.owed_nests_view();
+                move || read
+            },
+            move |view| {
+                if let Some(this) = this.upgrade() {
+                    this.view.replace(view);
+                    this.pending.replace(None);
+                    this.repaint();
+                }
+            },
+        );
+    }
+
+    fn repaint(self: &Rc<Self>) {
+        while let Some(child) = self.container.first_child() {
+            self.container.remove(&child);
+        }
+        let view = self.view.borrow();
+        let Some(view) = view.as_ref() else {
+            self.container.set_visible(false);
+            return;
+        };
+        let lookup = crate::i18n::strings::lookup;
+        let status = gtk::Label::builder()
+            .label(view.status().resolve(lookup))
+            .wrap(true)
+            .halign(gtk::Align::Start)
+            .build();
+        crate::testid::set_test_id(&status, ids::RECOVERY_KIT_OWED_NESTS_STATUS);
+        self.container.append(&status);
+        let pending = self.pending.borrow().clone();
+        for entry in &view.entries {
+            let item = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(2)
+                .margin_top(4)
+                .build();
+            crate::testid::set_test_id(&item, ids::RECOVERY_KIT_OWED_NEST_ITEM);
+            let line = |id: &str, text: String| {
+                let label = gtk::Label::builder()
+                    .label(text)
+                    .wrap(true)
+                    .halign(gtk::Align::Start)
+                    .build();
+                crate::testid::set_test_id(&label, id);
+                label
+            };
+            item.append(&line(
+                ids::RECOVERY_KIT_OWED_NEST_ADDRESS,
+                entry.address_copy().resolve(lookup),
+            ));
+            let outcome = line(
+                ids::RECOVERY_KIT_OWED_NEST_OUTCOME,
+                entry.outcome_copy().resolve(lookup),
+            );
+            outcome.add_css_class("dim-label");
+            item.append(&outcome);
+            let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let key = entry.key();
+            if pending.as_ref() == Some(&key) {
+                let confirm = gtk::Button::builder()
+                    .label(rk::OWED_NEST_DISMISS_CONFIRM)
+                    .css_classes(["destructive-action"])
+                    .build();
+                crate::testid::set_test_id(
+                    &confirm,
+                    ids::RECOVERY_KIT_OWED_NEST_DISMISS_CONFIRM_BUTTON,
+                );
+                crate::offline_gate::declare_wire_kind(
+                    &confirm,
+                    fauna_protocol::recovery::SUCCESSION_OWED_SETTLE_KIND,
+                );
+                let this = Rc::downgrade(self);
+                confirm.connect_clicked(move |_| {
+                    if let Some(this) = this.upgrade() {
+                        this.confirm(&key);
+                    }
+                });
+                buttons.append(&confirm);
+                let cancel = gtk::Button::builder().label(common::CANCEL).build();
+                crate::testid::set_test_id(
+                    &cancel,
+                    ids::RECOVERY_KIT_OWED_NEST_DISMISS_CANCEL_BUTTON,
+                );
+                let this = Rc::downgrade(self);
+                cancel.connect_clicked(move |_| {
+                    if let Some(this) = this.upgrade() {
+                        this.pending.replace(None);
+                        this.repaint_later();
+                    }
+                });
+                buttons.append(&cancel);
+            } else {
+                let dismiss = gtk::Button::builder().label(rk::OWED_NEST_DISMISS).build();
+                crate::testid::set_test_id(&dismiss, ids::RECOVERY_KIT_OWED_NEST_DISMISS_BUTTON);
+                let this = Rc::downgrade(self);
+                dismiss.connect_clicked(move |_| {
+                    if let Some(this) = this.upgrade() {
+                        this.pending.replace(Some(key.clone()));
+                        this.repaint_later();
+                    }
+                });
+                buttons.append(&dismiss);
+            }
+            item.append(&buttons);
+            self.container.append(&item);
+        }
+        self.container.set_visible(true);
+    }
+
+    /// Repaint off the clicked button's own signal emission: the repaint
+    /// removes that button from the tree.
+    fn repaint_later(self: &Rc<Self>) {
+        let this = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(this) = this.upgrade() {
+                this.repaint();
+            }
+        });
+    }
+
+    /// The confirm: settle the entry at its keeper; drop it on success (the
+    /// list then reads as the keeper's next serve will), say why on
+    /// `error-message` on a refusal.
+    fn confirm(self: &Rc<Self>, key: &OwedNestKey) {
+        self.pending.replace(None);
+        let entry = self
+            .view
+            .borrow()
+            .as_ref()
+            .and_then(|v| v.entries.iter().find(|e| e.key() == *key).cloned());
+        let (Some(entry), Some(client)) = (entry, crate::settings::get_client()) else {
+            self.repaint_later();
+            return;
+        };
+        super::render_account_error_label(&self.error_label, None);
+        self.repaint_later();
+        let this = Rc::downgrade(self);
+        let key = key.clone();
+        crate::async_helper::spawn_with_snapshot(
+            &client.runtime_handle(),
+            {
+                let settle = client.dismiss_owed_nest(entry);
+                move || settle
+            },
+            move |result| {
+                let Some(this) = this.upgrade() else {
+                    return;
+                };
+                match result {
+                    Ok(()) => {
+                        let mut view = this.view.borrow_mut();
+                        if let Some(v) = view.as_mut() {
+                            v.remove(&key);
+                            if v.entries.is_empty() {
+                                *view = None;
+                            }
+                        }
+                    }
+                    Err(reason) => {
+                        let line =
+                            dismiss_failed_copy(&reason).resolve(crate::i18n::strings::lookup);
+                        super::render_account_error_label(&this.error_label, Some(&line));
+                    }
+                }
+                this.repaint();
+            },
+        );
+    }
+}
+
 /// The section's view state — mirrors tui's `RecoveryState`, narrowed to the
 /// fields the section's ceremonies need, plus the aftermath-progress
 /// bundle and the inherited-filters open count.
@@ -627,6 +843,10 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
     group.add(&let_go.button);
     let let_go_confirm_row = let_go.confirm_row.clone();
     let let_go_btn = let_go.button.clone();
+
+    // The successor's owed nests — its own block, read on the nav edge.
+    let owed = OwedNests::new(error_label);
+    group.add(&owed.container);
 
     // The no-escrow repair (ID user-approved 2026-08-16): renders in
     // `RegisteredNoEscrow` only — an affordance for a state, never a standing
@@ -1091,8 +1311,10 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
         client.fetch_recovery_status();
     }
     read_dead_generations(&state, &widgets);
+    owed.read();
 
     let refresh: Rc<dyn Fn()> = Rc::new({
+        let owed = owed.clone();
         let state = state.clone();
         let widgets = widgets.clone();
         let minted = minted.clone();
@@ -1126,6 +1348,8 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
             // The let-go's render gate, read on the same nav edge as the
             // status — tui's Account hydrate.
             read_dead_generations(&state, &widgets);
+            // The owed-nests list, on the same nav edge.
+            owed.read();
             // A stolen-identity persist-failure message may have landed while
             // this page was off-screen — paint it now rather than leaving it
             // parked (`settings::show_stolen_failed_message`'s doc comment).

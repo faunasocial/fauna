@@ -311,7 +311,6 @@ def test_other_profile_offers_render_and_subscribe(
     ratified behavior and where the approve arm is tracked).
     """
     app = logged_in_app
-    app.profile.require_other_profile_offers_browse_supported()
 
     # Headless author: register + seed an auto_approve paid tier.
     author = create_actor_and_register(
@@ -432,7 +431,6 @@ def test_activating_the_tiers_tab_rereads_the_offers_section(
     helper deadline-polls a state, and a green run pays only the real re-read.
     """
     app = logged_in_app
-    app.profile.require_other_profile_offers_browse_supported()
 
     author = create_actor_and_register(
         nest_instance["port"],
@@ -622,10 +620,8 @@ def test_profile_follow_toggle_unfollows_and_confirms_a_paid_leave(
     paid tier with the follow.
     """
     app = logged_in_app
-    from helpers.app_surface import require_surface
     from helpers.other_profile import open_other_profile
 
-    require_surface(app.driver, "profile-follow-unfollow")
     import fauna_ffi
 
     nest = nest_instance

@@ -33,14 +33,22 @@ tier_3: the real nest, taken down and brought back on the same data dir; real
 seats; every mutation a UI gesture (convention 8); every wait a deadline poll on
 painted state (convention 14). tui first (``testing.md`` § Default app and nest
 mode); the other apps add their marker as their trickle-down batch reaches them.
-The first-sync refusal also runs on linux, whose relaunch carries the principal
+The restart half also runs on linux, which hosts its account runtime at session
+establishment as tui does, so a launch with the nest down still reads and writes
+its listed replica. The first-sync refusal also runs on linux, whose relaunch carries the principal
 and its replica as tui's does, so ``wipe_replica_at_next_relaunch`` withholds a
 real replica there. It runs on android too, whose replica never leaves the
 device: the app's filesDir outlives the relaunch, so the driver's arm deletes
 ``files/account-store/<actor>/account-store`` inside the app sandbox while the
-app is stopped, and the replayed sign-in finds no replica to adopt. web (a
-replica in the origin's IndexedDB, untouched by a reload) needs a replica-wipe
-arm of its own driver before it joins.
+app is stopped, and the replayed sign-in finds no replica to adopt. web has its
+driver arm (it deletes the actor's account store, its IndexedDB database and
+OPFS directory, which a reload keeps, from a same-origin page that runs no app,
+after closing the SPA's own, while the registry's writer key stays) but does not
+join yet: a tab loaded with the nest unreachable hosts no account runtime,
+because the runtime starts only once the conversations manager is built and that
+build waits for the socket, so the page reads "the account runtime is not
+running" instead of the first-listing refusal. The other apps need a
+replica-wipe arm of their own drivers before they join.
 """
 from __future__ import annotations
 
@@ -48,8 +56,9 @@ import time
 
 import pytest
 
-from common.nest import start_nest_in_place, stop_nest
+from common.nest import start_nest_in_place
 from helpers.fleet import SiblingSeats, poked_pass
+from helpers.nest_outage import hold_nest_down
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -57,9 +66,6 @@ pytestmark = [pytest.mark.tier_3]
 
 #: A seat's own add round trip, nest up or down (a local store write).
 ADD_S = 120.0
-
-#: The connection indicator leaving ``Connected`` once the nest is held down.
-DISCONNECT_S = 90.0
 
 #: The first-listing gate's own bound is ``FIRST_PASS_WAIT`` (30 s,
 #: ``handle_source.rs``); the refusal is painted after it, so this sits well
@@ -103,28 +109,11 @@ def _signed_in_with_a_listed_word(app, request, nest_instance, word: str) -> dic
     return user
 
 
-def _hold_nest_down(app, nest_instance) -> None:
-    stop_nest(nest_instance, graceful=True)
-    status = {}
-
-    def disconnected() -> bool:
-        if not app.is_visible("connection-status"):
-            return False
-        status["text"] = app.driver.get_text("connection-status")
-        return status["text"] != S.common.connected
-
-    wait_until(
-        disconnected, DISCONNECT_S,
-        diagnose=lambda: (
-            f"connection-status still read {status.get('text')!r} with the nest "
-            "down — the seat never noticed the outage, so an 'offline' edit below "
-            "would not be offline at all"
-        ),
-    )
 
 
 @pytest.mark.feature("offline-aware-controls")
 @pytest.mark.tui
+@pytest.mark.linux
 def test_an_offline_change_is_kept_across_restart_and_reaches_the_nest(
     app, request, nest_instance, sibling_seats
 ):
@@ -136,11 +125,11 @@ def test_an_offline_change_is_kept_across_restart_and_reaches_the_nest(
     # pin a relaunch gets an empty replica and "the word did not survive" would
     # be indistinguishable from "a new device that never had it".
     assert app.driver.preserve_state_across_relaunch(), (
-        "tui could not pin its client store across the relaunch, so the restart "
+        "the app could not pin its client store across the relaunch, so the restart "
         "half of this outcome would be vacuous"
     )
 
-    _hold_nest_down(app, nest_instance)
+    hold_nest_down(app, nest_instance, act="an offline edit below")
     try:
         app.muted_words.navigate()
         app.muted_words.add(offline_word)
@@ -194,6 +183,7 @@ def test_an_offline_change_is_kept_across_restart_and_reaches_the_nest(
 @pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.web
 def test_a_device_before_its_first_sync_says_it_needs_the_nest_and_refuses_edits(
     app, request, nest_instance
 ):
@@ -206,7 +196,7 @@ def test_a_device_before_its_first_sync_says_it_needs_the_nest_and_refuses_edits
         "would not be a never-listed replica for the reason this test names"
     )
 
-    _hold_nest_down(app, nest_instance)
+    hold_nest_down(app, nest_instance, act="an offline edit below")
     try:
         # The relaunched seat keeps its writer key but not its replica: a store
         # that has never listed the account, and no nest to list it from.

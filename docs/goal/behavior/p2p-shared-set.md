@@ -375,9 +375,11 @@ instead the D4 convergence direction (file-sync onto scope families, charter
     ceremony-born set is a set — badged with who shared it, and read from the
     **store's** group rows rather than the ceremony record: a recorded-but-never-
     adopted scope is silently absent, never painted as a set the device cannot
-    read. A group row carries no local-seat config, no name (v1 sets are
-    nameless — the row shows the short scope id) and no leave button (severance
-    is the authority's mint —
+    read. A group row carries the same location form as a folder row
+    ([`group-set.md`](group-set.md) § Build design — the group set, decision 7),
+    no name until one is recorded (a recorded `fauna.group.name` labels the row,
+    and no app writes one yet — the row shows the short scope id meanwhile) and
+    no leave button (severance is the authority's mint —
     [`../architecture/recipient-set-scheme.md`](../architecture/recipient-set-scheme.md)
     § The recipient-set scheme).
   - **The driver seam is shared, not per-app**: `AccountStoreHandle`'s four

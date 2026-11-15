@@ -91,7 +91,7 @@ import ssl
 
 import pytest
 
-from helpers import live_box_door
+from helpers import box_actions, live_box_door
 from helpers.waiting import wait_until
 from helpers.live_provision import hetzner_token, hetzner_token_hint, skip_unless_live_drive_app
 
@@ -377,7 +377,8 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
         # auto-publishing dispatch rather than the manual paste flow
         # (`build_cert_issuance`'s `single_issue`).
         idx = _domain_index(app, TARGET_DOMAIN)
-        if app.admin.dns_domain_modes()[idx].strip().lower() != "fauna-managed":
+        switched = app.admin.dns_domain_modes()[idx].strip().lower() != "fauna-managed"
+        if switched:
             app.admin.toggle_domain_mode(idx)
         wait_until(
             lambda: app.admin.dns_domain_modes()[_domain_index(app, TARGET_DOMAIN)]
@@ -391,6 +392,9 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
                 f"modes={app.admin.dns_domain_modes()!r} error={app.error_text()!r}"
             ),
         )
+        if switched:
+            box_actions.record(nest_url, f"DNS for {TARGET_DOMAIN} switched to Fauna-managed "
+                               "through the app (the record matrix published)")
         idx = _domain_index(app, TARGET_DOMAIN)
 
         # ── 3. Click get/renew certificate ────────────────────────────────────
@@ -439,6 +443,8 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
             ),
         )
         print(f"[dns01] after: {seen['badge']!r} — expiry {before_expiry} → {seen['expiry']}")
+        box_actions.record(nest_url, f"TLS certificate for {TARGET_DOMAIN} re-issued by DNS-01 "
+                           "through the app", detail={"expiry": str(seen["expiry"])})
 
     finally:
         # ── 5. Leave no durable trace but the new certificate ─────────────────
@@ -472,6 +478,8 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
             i = _domain_index(app, TARGET_DOMAIN)
             if app.admin.dns_domain_modes()[i].strip().lower() != mode_before.strip().lower():
                 app.admin.toggle_domain_mode(i)
+                box_actions.record(nest_url, f"DNS for {TARGET_DOMAIN} put back to "
+                                   f"{mode_before.strip().lower()} through the app (teardown)")
             wait_until(
                 lambda: app.admin.dns_domain_modes()[_domain_index(app, TARGET_DOMAIN)]
                 .strip()

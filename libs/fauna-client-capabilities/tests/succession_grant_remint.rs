@@ -22,7 +22,7 @@ use fauna_client_capabilities::grant_log::{
     self, bounded_mail_event_scope, current_grants, is_bounded_mail_grant,
 };
 use fauna_client_capabilities::{
-    GrantRemintOutcome, GrantRemintProgress, remint_capability_grants,
+    GrantRemintOutcome, GrantRemintProgress, remint_capability_grants, succession::remint_grant_id,
 };
 use fauna_client_config::test_helpers::FakeSuccessionLedgerStore;
 use fauna_client_config::{SuccessionLedgerStore, keep_grant_mark};
@@ -378,14 +378,26 @@ fn a_predecessor_minted_grant_is_reminted_marked_and_idempotent() {
     // never deletes the mark (an answered mark that vanished would be
     // indistinguishable from one never raised — `UnattestedVerdict`).
     let mark_id = blob.index.1.to_vec();
-    assert!(block_on(keep_grant_mark(&ledger, &mark_id)).expect("keep"));
+    assert!(
+        block_on(keep_grant_mark(
+            &ledger,
+            &mark_id,
+            &remint_grant_id(&SUCCESSOR_SEED, &mark_id)
+        ))
+        .expect("keep")
+    );
     let log = ledger.current();
     assert!(
         !GrantUnattestedMark::any_open(&log.unattested_grant_marks, &mark_id),
         "the row must stop asking"
     );
     assert!(
-        !block_on(keep_grant_mark(&ledger, &mark_id)).expect("second keep"),
+        !block_on(keep_grant_mark(
+            &ledger,
+            &mark_id,
+            &remint_grant_id(&SUCCESSOR_SEED, &mark_id)
+        ))
+        .expect("second keep"),
         "a second Keep is a no-op"
     );
 
@@ -452,6 +464,104 @@ fn a_keep_landing_during_the_deposit_is_carried_onto_the_replacement() {
         "the Keep the owner pressed during the re-mint must settle the row the \
          page now renders, not be overwritten by the Open read before the deposit; \
          marks: {:?}",
+        log.unattested_grant_marks
+    );
+}
+
+/// The window the retirement's own carry cannot close: a Keep landing AFTER
+/// the retirement. The Nests page still paints the old row it folded before
+/// the retirement, so the press names the retired id, whose mark rows stay at
+/// rest still `Open` (only the replacement got the carried copies). The Keep
+/// must follow the row onto its replacement — the id a re-mint by this owner
+/// derives — or the refreshed page asks the answered question again, with no
+/// error (`succession-aftermath.md` § Adjudicating what the aftermath carries
+/// across, the grant-mark Keep).
+#[test]
+fn a_keep_landing_after_the_retirement_settles_the_replacement() {
+    let nest = Arc::new(FakeNest::default());
+    let ledger = successor_ledger(vec![master_mail_scope()], far_future());
+    *nest.roster.lock().unwrap() = vec![("mda-1".into(), "mda".into())];
+    let old_id = [0xABu8; 16];
+
+    block_on(remint_capability_grants(
+        nest.clone(),
+        SUCCESSOR_SEED,
+        &ledger,
+        None,
+        &mail(),
+    ))
+    .expect("run");
+    let live = current_grants(&ledger.current());
+    assert_eq!(live.len(), 1, "old id dark, replacement live");
+    let new_id = live[0].grant_id.clone();
+    assert!(
+        GrantUnattestedMark::any_open(&ledger.current().unattested_grant_marks, &new_id),
+        "precondition: the replacement carries the question"
+    );
+
+    assert!(
+        block_on(keep_grant_mark(
+            &ledger,
+            &old_id,
+            &remint_grant_id(&SUCCESSOR_SEED, &old_id)
+        ))
+        .expect("keep"),
+        "the press is a real adjudication"
+    );
+    let log = ledger.current();
+    assert!(
+        !GrantUnattestedMark::any_open(&log.unattested_grant_marks, &new_id),
+        "a Keep pressed on the retired row must settle the row that replaced it; \
+         marks: {:?}",
+        log.unattested_grant_marks
+    );
+}
+
+/// The same Keep reaching this device only by the plane's merge — another of
+/// the owner's devices pressed it on the old row before it had this device's
+/// retirement, so its write decided the retired id alone. The next
+/// store-ready pass carries the answer onto the replacement: the pass runs on
+/// every device and derives the same replacement id.
+#[test]
+fn a_keep_merged_in_on_the_retired_id_is_carried_by_the_next_pass() {
+    let nest = Arc::new(FakeNest::default());
+    let ledger = successor_ledger(vec![master_mail_scope()], far_future());
+    *nest.roster.lock().unwrap() = vec![("mda-1".into(), "mda".into())];
+    let old_id = [0xABu8; 16];
+
+    block_on(remint_capability_grants(
+        nest.clone(),
+        SUCCESSOR_SEED,
+        &ledger,
+        None,
+        &mail(),
+    ))
+    .expect("run");
+    let new_id = current_grants(&ledger.current())[0].grant_id.clone();
+
+    // The sibling device's write, as the merge lands it: the old id alone.
+    ledger.mutate(|log| {
+        assert!(log.decide_grant_marks_for(&old_id, UnattestedVerdict::Kept));
+    });
+    assert!(GrantUnattestedMark::any_open(
+        &ledger.current().unattested_grant_marks,
+        &new_id
+    ));
+
+    let second = block_on(remint_capability_grants(
+        nest.clone(),
+        SUCCESSOR_SEED,
+        &ledger,
+        None,
+        &mail(),
+    ))
+    .expect("second run");
+    assert_eq!(second, GrantRemintOutcome::NothingToRemint);
+    assert_eq!(nest.minted.lock().unwrap().len(), 1, "no second mint");
+    let log = ledger.current();
+    assert!(
+        !GrantUnattestedMark::any_open(&log.unattested_grant_marks, &new_id),
+        "the answer given on the retired id follows the row; marks: {:?}",
         log.unattested_grant_marks
     );
 }

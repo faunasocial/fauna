@@ -131,6 +131,7 @@ fn params(base: &Path, device: &str, net: &Listeners) -> AccountRuntimeParams<Ne
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     }
 }
 
@@ -245,6 +246,93 @@ async fn a_switched_off_device_never_binds_after_a_restart() {
         "a switched-off device registers no listener at all after a restart"
     );
     assert!(!a.p2p_participation().await.unwrap().effective());
+    a.shutdown().await;
+}
+
+// ── The app host's foreground: a phone's leg stops in the background ───────
+
+/// `account-sync-plane.md` § Wormability walk, rule 5, and
+/// `p2p-shared-set-build.md` § Phone peers — design, decision 2: a phone's
+/// leg STOPS when its app leaves the foreground. The host's
+/// `set_foreground(false)` takes the accept side down when it returns — no
+/// pass needed, so a shell that awaits it before suspension leaves nothing
+/// bound — every later pass binds nothing, and `set_foreground(true)` binds
+/// again at the next pass. Participation is untouched throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leaving_the_foreground_takes_the_listener_down_and_returning_binds_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base: PathBuf = tmp.path().to_path_buf();
+    let net = listeners();
+    let node = premint(&base, "a");
+
+    let a = AccountStoreRuntime::start(params(&base, "a", &net))
+        .await
+        .expect("start");
+    await_listening(&net, &node).await;
+    assert!(a.is_foreground(), "a runtime starts foreground");
+    assert!(
+        accepting(&net, &node),
+        "foreground: the accept side is live"
+    );
+
+    // Background: down by the time the call returns, with no pass run.
+    a.set_foreground(false).await.expect("the signal lands");
+    await_not_listening(&net, &node).await;
+    assert!(
+        !accepting(&net, &node),
+        "background ⇒ no listener, before any pass"
+    );
+    // Every pass while backgrounded binds nothing.
+    assert_eq!(peer_leg_of(&a).await, Some(PeerLegPass::Backgrounded));
+    assert_eq!(peer_leg_of(&a).await, Some(PeerLegPass::Backgrounded));
+    assert!(!accepting(&net, &node));
+    assert!(
+        a.p2p_participation().await.unwrap().effective(),
+        "the foreground signal is not the participation switch"
+    );
+
+    // Foreground again: the next pass binds afresh.
+    a.set_foreground(true).await.expect("the signal lands");
+    assert_eq!(peer_leg_of(&a).await, Some(PeerLegPass::Bound));
+    await_listening(&net, &node).await;
+    assert!(accepting(&net, &node), "foreground ⇒ the listener is back");
+
+    a.shutdown().await;
+}
+
+/// A runtime a phone starts out of front (`AccountRuntimeParams::foreground`
+/// false — the ffi seeds the shell's last signal) runs its prologue
+/// backgrounded: no accept side is EVER registered, rather than one bound by
+/// the prologue and stood down after the start returns. Returning to the
+/// foreground binds at the next pass, as for any backgrounded runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_runtime_started_backgrounded_never_binds_until_it_returns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base: PathBuf = tmp.path().to_path_buf();
+    let net = listeners();
+    let node = premint(&base, "a");
+
+    let a = AccountStoreRuntime::start(AccountRuntimeParams {
+        foreground: false,
+        ..params(&base, "a", &net)
+    })
+    .await
+    .expect("start");
+    // The prologue behind us: it read background and registered nothing.
+    a.settled().await;
+    assert!(
+        net.lock().unwrap().get(&node).is_none(),
+        "a runtime started backgrounded registers no listener at all"
+    );
+    assert!(!a.is_foreground(), "the seat starts where the host said");
+    assert_eq!(peer_leg_of(&a).await, Some(PeerLegPass::Backgrounded));
+    assert!(net.lock().unwrap().get(&node).is_none());
+
+    a.set_foreground(true).await.expect("the signal lands");
+    assert_eq!(peer_leg_of(&a).await, Some(PeerLegPass::Bound));
+    await_listening(&net, &node).await;
+    assert!(accepting(&net, &node), "foreground ⇒ the listener binds");
+
     a.shutdown().await;
 }
 

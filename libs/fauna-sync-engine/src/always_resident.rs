@@ -1155,6 +1155,26 @@ pub async fn ingest_share_page(
     ingest_share_page_landing(engine, proven_actor_hex, rows, spool_dir, None).await
 }
 
+/// The share plane's ingest door on an on-demand replica, over whichever
+/// tree hosts it ([`crate::provider_face::owned_tree::PeerLanding`]: android's
+/// owned tree, iOS's staging root): bodies land in the tree's kept root, above
+/// the storage floor measured where they land.
+#[cfg(feature = "p2p-share")]
+pub async fn share_ingest_on_demand(
+    engine: &SyncEngine,
+    tree: &dyn crate::provider_face::owned_tree::PeerLanding,
+    proven_actor_hex: &str,
+    rows: &[Vec<u8>],
+    spool_dir: PathBuf,
+) -> anyhow::Result<(crate::peer_share_store::PeerIngestReport, i64)> {
+    let kept = tree.kept_root().to_path_buf();
+    let landing = crate::engine::OnDemandLanding {
+        tree,
+        free_space: &move || crate::share_landing::free_space(&kept),
+    };
+    ingest_share_page_landing(engine, proven_actor_hex, rows, spool_dir, Some(&landing)).await
+}
+
 /// [`ingest_share_page`] with its landing named: `None` is the resident tree
 /// (every accepted body lands), `Some` an on-demand replica's
 /// (`provider_face::owned_tree::OwnedTree::share_ingest` — rows always,

@@ -283,6 +283,10 @@ public struct FaunaMacApp: App {
                 // hosts hand it to `BridgeManagerVM` (family-safety.md §§
                 // Child-initiated contact requests / Feed-source approvals).
                 .environment(appState.familyStatus)
+                // The shared FaunaKit `FamilyView` re-binds the ward's
+                // `ScreenTimeStore` from its own status read on every visit
+                // (family-client-enforcement.md § Implementation status today).
+                .environment(appState.screenTime)
                 // The shared FaunaKit `SubscriptionTiersTab` reads
                 // `@Environment(WebPublishStore.self)` for the creator's web-site
                 // origin (the §4 provider form's return-URL display).
@@ -2526,6 +2530,11 @@ public struct FaunaMacApp: App {
                 // Devices outcome 15's owner send-again poke — shared FaunaKit
                 // handler, fire-and-forget (`fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW`).
                 CustodyOwnerResendTestCommand.apply(client: appState.liveClient)
+            case AppOutboxDrainTestCommand.action:
+                // The app-only outbox drain, rung now after a test released the
+                // e2e drain hold — shared FaunaKit handler, fire-and-forget
+                // (`fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW`).
+                AppOutboxDrainTestCommand.apply()
             case BarrierTestCommand.barrierAction, BarrierTestCommand.probeAction:
                 // Convention 14's causal anchor + its self-test probe. Shared
                 // FaunaKit handler (macOS + iOS, one implementation) — the
@@ -3725,7 +3734,7 @@ public struct FaunaMacApp: App {
         // it, and the sweeps log their paths either way. The window's own lock
         // is put down around it, since it still holds it here.
         _ = SignOutResidueSurface.finish(
-            ownLock: appState.instanceLock, dismissAgent: false,
+            ownLock: appState.instanceLock, caller: .gesture,
             written: SignOutResidueSurface.recordSignOut(servedActor: appState.session.actorId))
         keychain.deleteAll()
         // Erasure follows SCOPE, not just the credential namespace
@@ -3931,8 +3940,13 @@ public struct FaunaMacApp: App {
         // (`claim_code_prefill()` feeds the input; the human never types it).
         onboardingVM.machine.reset()
         onboardingVM.machine.seedIdentity(secret: secretHex)
+        // The slot's qualified handle, never the session's bare localpart: the
+        // re-claim must carry the account's mail domain, or it derives email off
+        // and the mailbox never comes back (`AdminNestVM.reclaimHandle`).
         onboardingVM.machine.navigateToClaimCodeForKnownNestWithCode(
-            nestUrl: nestUrl, handle: handle, code: claimCode)
+            nestUrl: nestUrl,
+            handle: AdminNestVM.reclaimHandle(sessionHandle: handle, nestUrl: nestUrl),
+            code: claimCode)
 
         appState.isOnboarded = false
     }

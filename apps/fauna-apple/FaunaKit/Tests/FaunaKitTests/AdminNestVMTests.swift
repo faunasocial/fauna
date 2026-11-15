@@ -1,6 +1,28 @@
 import Testing
 @testable import FaunaKit
 
+// The in-process post-reset re-claim seeds the wizard with the slot's qualified
+// handle, never the session's bare localpart (factory-reset outcome 17).
+@Suite struct ReclaimHandleTests {
+    @Test func theSlotsQualifiedHandleWinsOverTheBareSessionHandle() {
+        #expect(AdminNestVM.reclaimHandle(
+            slotNestUrl: "http://127.0.0.1:4000", slotHandle: "alice@fauna.test",
+            sessionHandle: "alice", domain: "fauna.test",
+            nestUrl: "http://127.0.0.1:4000") == "alice@fauna.test")
+    }
+
+    @Test func withNoSlotForThisNestTheSessionHandleIsQualifiedWithTheDomain() {
+        #expect(AdminNestVM.reclaimHandle(
+            slotNestUrl: "http://other:4000", slotHandle: "bob@other",
+            sessionHandle: "alice", domain: "fauna.test",
+            nestUrl: "http://127.0.0.1:4000") == "alice@fauna.test")
+        #expect(AdminNestVM.reclaimHandle(
+            slotNestUrl: nil, slotHandle: nil,
+            sessionHandle: "alice", domain: "fauna.test",
+            nestUrl: "http://127.0.0.1:4000") == "alice@fauna.test")
+    }
+}
+
 // Non-e2e unit tests for the admin-nest VM gating logic that needs no live
 // nest / FFI round-trip. Pins the serving-port editability rule
 // (nest/common.md § Serving ports): the field is editable only on a

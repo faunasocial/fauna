@@ -761,7 +761,8 @@ pub enum IdempotencyHit {
 
 impl RpcConnection {
     /// Look up an idempotency_key: the per-connection [`IdempotencyCache`]
-    /// first (the in-connection fast path, frame bytes replayed verbatim),
+    /// first (the in-connection fast path, frame bytes re-stamped with the
+    /// current correlation_id on replay),
     /// then — authenticated connections only — the **durable tier**
     /// (`db/rpc_idempotency.rs`), which is what catches a replay arriving on a
     /// *fresh* connection after a reconnect (`account-data-plane.md` § The
@@ -846,9 +847,9 @@ impl RpcConnection {
 /// The per-actor side of the shared dispatch core (Spec Y2 slice 4 §4.C / §5).
 /// Reply carriage: encode a `Frame::Reply` to bytes and send it through the
 /// outbound slot reserved when the request was admitted
-/// ([`RpcConnection::emit_reply`]); the idempotency cache stores the **frame bytes** verbatim, so
-/// a replay re-sends them as-is (the established behavior — the cached frame's
-/// correlation_id is preserved, not rebuilt). See [`crate::dispatch_core`].
+/// ([`RpcConnection::emit_reply`]); the idempotency cache stores the **frame bytes**, and
+/// a replay re-stamps them with the current request's correlation_id
+/// ([`DispatchSink::replay`]). See [`crate::dispatch_core`].
 impl DispatchSink for RpcConnection {
     fn pending_handlers(&self) -> &Mutex<HashMap<u64, AbortHandle>> {
         &self.pending_handlers
@@ -880,11 +881,34 @@ impl DispatchSink for RpcConnection {
     }
 
     fn replay(self: Arc<Self>, correlation_id: u64, cached: Bytes) -> BoxFuture<'static, ()> {
-        // Per-actor replays the cached Reply *frame* verbatim (the cached frame
-        // already carries the original correlation_id; this matches the existing
-        // behavior pre-extraction). The slot is the *current* request's: it is
-        // the one this frame answers.
-        Box::pin(async move { self.emit_reply(correlation_id, cached) })
+        // The cached frame carries the FIRST attempt's correlation_id, and a
+        // re-send on this connection is a new Request with a new one (reusing
+        // an id is a 4400): the frame is re-stamped with the current request's
+        // correlation_id, or the caller's pending map never matches it and the
+        // caller waits out its deadline. The slot is the current request's
+        // too: it is the one this frame answers.
+        Box::pin(async move {
+            let mut reply = match fauna_protocol::decode_frame(&cached) {
+                Ok(Frame::Reply(reply)) => reply,
+                other => {
+                    // A frame we cached that no longer decodes as a Reply is
+                    // corruption; answer internal so the caller retries
+                    // rather than hangs.
+                    tracing::error!(decoded = ?other.map(|_| "not a Reply"), "cached Reply frame unusable for replay");
+                    return self
+                        .send_error(
+                            correlation_id,
+                            RpcError::new("fauna.protocol.internal", "error.protocol.internal"),
+                        )
+                        .await;
+                }
+            };
+            reply.correlation_id = correlation_id;
+            match encode_frame(&Frame::Reply(reply)) {
+                Ok(bytes) => self.emit_reply(correlation_id, bytes),
+                Err(_) => self.release_reply_slot(correlation_id),
+            }
+        })
     }
 
     fn replay_rebuilt(
@@ -3180,6 +3204,53 @@ mod tests {
         let actor = [11u8; 32];
         let (conn, _rx) = ws.subscribe(actor);
         assert!(!WsState::flush_resync_if_needed(&conn));
+    }
+
+    /// An in-connection replay answers the CURRENT request's correlation_id.
+    /// A re-send of one idempotency key on the same connection is a new
+    /// Request with a new correlation_id (the old one is no longer in flight
+    /// — reusing it is a 4400); the offline outbox's retry of a refused
+    /// intent is exactly that. Replaying the cached frame verbatim carried
+    /// the first attempt's correlation_id, which the caller's pending map no
+    /// longer holds, so the caller waited out its deadline and the retried
+    /// intent never parked again (the tui unsent-changes journey, 2026-11-14).
+    #[tokio::test]
+    async fn an_in_connection_replay_answers_the_current_correlation_id() {
+        let ws = WsState::new();
+        let (conn, mut rx) = ws.subscribe([15u8; 32]);
+        let key = [3u8; 16];
+        conn.clone()
+            .finish(
+                1,
+                key,
+                "fauna.posts.interact".to_string(),
+                Err(RpcError::new(
+                    "fauna.posts.not_found",
+                    "error.posts.not_found",
+                )),
+            )
+            .await;
+        let first = fauna_protocol::decode_frame(&rx.recv().await.unwrap()).unwrap();
+        let Frame::Reply(first) = first else {
+            panic!("expected the first Reply")
+        };
+        assert_eq!(first.correlation_id, 1);
+
+        let outcome = crate::dispatch_core::check_idempotent(&conn, 2, key).await;
+        assert!(matches!(
+            outcome,
+            crate::dispatch_core::IdempotencyOutcome::Replayed
+        ));
+        let replay = fauna_protocol::decode_frame(&rx.recv().await.unwrap()).unwrap();
+        let Frame::Reply(replay) = replay else {
+            panic!("expected the replayed Reply")
+        };
+        assert_eq!(
+            replay.correlation_id, 2,
+            "the replay must answer the request that asked, not the first attempt"
+        );
+        assert_eq!(replay.ok, first.ok);
+        assert_eq!(replay.payload, first.payload);
     }
 
     #[tokio::test]

@@ -138,6 +138,32 @@ def launched_drivers(funcargs):
     return found
 
 
+def paired_seat_drivers(funcargs):
+    """`(label, driver)` for every seat a fixture yields inside a tuple or list.
+
+    The two-seat fixtures (`succeedable_app`, `succession_member_app`, …) yield
+    `(ActionLayer, actor)` pairs, and the value-based resolution reads a tuple as
+    holding no driver — so a red iOS member-seat run attached only the owner's
+    log while its whole question was the member seat's on the second simulator.
+    Each element is resolved like a fixture value; the caller drops drivers it
+    already reported, so a seat reached two ways gets one section.
+    """
+    from helpers import frame_invariants
+
+    found = []
+    for name, value in sorted(funcargs.items()):
+        if not isinstance(value, (tuple, list)):
+            continue
+        for element in value:
+            try:
+                driver = frame_invariants._as_driver(element)
+            except Exception:  # diagnostics must never mask the failure they explain
+                continue
+            if driver is not None:
+                found.append((name, driver))
+    return found
+
+
 def build(driver, tail_lines: int = DEFAULT_TAIL_LINES, label: str | None = None):
     """`(title, body)` for a failing test's report section, or `None`.
 

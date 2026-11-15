@@ -133,6 +133,12 @@ internal static class FeedManagerHost
             CueHydrate.Reset();
             _current = built;
             _builtOver = transport;
+#if DEBUG || FAUNA_E2E_AGENT
+            // Armed before this manager existed (a seat signed in off the feed):
+            // held from birth, so its first hydrate parks. After `_current` is set,
+            // so an arm racing this build reaches the manager one way or the other.
+            if (_cueHydrationHoldForTest) built.SetCueHydrationHoldForTest(true);
+#endif
             if (transport is Services.INestRpcClient rpc)
             {
                 void OnReconnected()
@@ -212,6 +218,31 @@ internal static class FeedManagerHost
             return _cueTracker;
         }
     }
+
+#if DEBUG || FAUNA_E2E_AGENT
+    /// <summary>The e2e cue-hydration hold as last armed (<see cref="SetCueHydrationHoldForTest"/>),
+    /// kept for a manager not built yet.</summary>
+    private static volatile bool _cueHydrationHoldForTest;
+
+    /// <summary>
+    /// Set or clear the e2e cue-hydration hold (<c>feed_cue_hydration_hold</c>; the
+    /// shared <c>fauna_feed::FeedManager::set_cue_hydration_hold_for_test</c>): set, the
+    /// manager's rollup fetch parks inside <c>HydrateCues</c> until it is cleared, so a
+    /// test can drive a second device before it has fetched (engagement-cues.md § At
+    /// rest). The in-memory lever web and apple use too — the windows driver builds the
+    /// app's launch environment from scratch, so the hold file tui and linux take never
+    /// reaches this process. windows builds its manager only when the Feed page first
+    /// loads, so a seat that signs in off the feed arms the hold here and the build
+    /// applies it (<see cref="GetOrBuildAsync"/>); a live manager takes it at once, and
+    /// a parked hydrate goes on at its next poll once it is cleared. Compiled out of
+    /// release artifacts with the agent that calls it (convention 15).
+    /// </summary>
+    public static void SetCueHydrationHoldForTest(bool held)
+    {
+        _cueHydrationHoldForTest = held;
+        _current?.SetCueHydrationHoldForTest(held);
+    }
+#endif
 
     /// <summary>The page-less twin of <c>FeedViewModel.ReloadAsync</c>: the same
     /// shared seams, in the same order. A fault is logged, never thrown into the

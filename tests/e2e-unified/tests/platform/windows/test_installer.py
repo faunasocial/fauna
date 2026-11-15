@@ -1,7 +1,5 @@
 """E2E tests: Windows MSI installer — independent feature installation."""
 
-import glob
-import json
 import os
 import shutil
 import subprocess
@@ -10,22 +8,15 @@ import time
 
 import pytest
 
-from helpers.build_step import run_build_step
-from helpers.helper_bins import helper_bin
-from helpers.windows_installer import (
-    is_admin,
-    max_mtime,
-    msi_is_cached,
-    msi_paths,
-    release_ffi_dll,
-    require_release_test_flavor,
-    source_mtime,
-)
+from helpers.windows_installer import is_admin
 
-# The publish and the WiX link below are this suite's subject and stay in
-# `msi_path`, charged to the first test that asks (e2e-conventions.md point 9: a
-# subject build stays in its test, on a 3600 s clock). Everything they consume is
-# a collection-time prebuild (`conftest.py::_prebuild_jobs`).
+# The MSI is this suite's subject. Its publish and its WiX link run behind the
+# one door every MSI reader requests, `conftest.py::msi_path` (the structure
+# suite's unelevated run builds it as well), charged to the first test that asks
+# (e2e-conventions.md point 9: a subject build stays in its test, on a 3600 s
+# clock). Everything they consume is a collection-time prebuild
+# (`conftest.py::_prebuild_jobs`); this suite adds only the install, which
+# needs elevation.
 pytestmark = [pytest.mark.skipif(sys.platform != "win32", reason="Windows-only"), pytest.mark.skipif(
         sys.platform == "win32" and not is_admin(),
         reason="Requires admin privileges",
@@ -34,255 +25,6 @@ pytestmark = [pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 INSTALL_DIR = os.path.join(
     os.environ.get("ProgramFiles", r"C:\Program Files"), "Fauna",
 )
-
-# WinUI XAML must be published with MSBuild, NOT `dotnet build/publish`: on win-arm64
-# `dotnet` invokes the XAML compiler out-of-process under x86 emulation and it crashes
-# (conftest._build_windows_app uses the same path for the Debug build). Absent (e.g.
-# an x64 box, where there is no emulation), the publish falls back to `dotnet publish`.
-_MSBUILD = r"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
-
-
-def _get_repo_root():
-    here = os.path.dirname(os.path.abspath(__file__))
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, check=True, cwd=here,
-    )
-    path = result.stdout.strip()
-    if sys.platform == "win32" and path.startswith("/"):
-        path = path[1].upper() + ":" + path[2:]
-    return os.path.normpath(path)
-
-
-def _build_msi(repo):
-    """Build the MSI installer from source. Returns the MSI path."""
-    build_dir = os.path.join(repo, "build", "installer")
-    stage_dir = os.path.join(build_dir, "stage", "arm64")
-    msi_path = os.path.join(build_dir, "Fauna-Setup-arm64.msi")
-
-    os.makedirs(stage_dir, exist_ok=True)
-    os.makedirs(os.path.join(stage_dir, "icons"), exist_ok=True)
-    os.makedirs(os.path.join(stage_dir, "app"), exist_ok=True)
-
-    ws_dir = os.path.join(repo, "apps", "fauna-windows")
-
-    # 0. Ensure WiX extensions are installed (version must match WiX v6)
-    wix_ver = subprocess.run(
-        ["wix", "--version"], capture_output=True, text=True,
-    )
-    ext_ver = wix_ver.stdout.strip().split("+")[0]
-    ext_errors = []
-    # Firewall.wixext is NOT optional: ServiceNest.wxs opens inbound TCP 443 for the
-    # nest through <firewall:FirewallException>, so a build without this extension dies
-    # with WIX0200 "unhandled extension element 'FirewallException'". It was added to
-    # wix.json, Package.wxs's build comment and installer/README.md when the rule landed,
-    # but not here, so this builder had been unable to link an MSI at all.
-    for ext in ["WixToolset.Util.wixext", "WixToolset.UI.wixext",
-                "WixToolset.Firewall.wixext"]:
-        r = subprocess.run(
-            ["wix", "extension", "add", "-g", f"{ext}/{ext_ver}"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode != 0:
-            ext_errors.append(f"{ext}/{ext_ver}: rc={r.returncode} "
-                              f"stdout={r.stdout.strip()} stderr={r.stderr.strip()}")
-    if ext_errors:
-        pytest.fail(f"WiX extension install failed:\n" + "\n".join(ext_errors))
-
-    # The prebuild staged this flavor last; anything else here would package the
-    # wrong core without a word.
-    require_release_test_flavor(repo)
-
-    # 1. Publish the .NET app self-contained (skip if publish output already exists).
-    # Two requirements for the bare-VM install target (installer/README.md steps 3-4):
-    #   - Publish with MSBuild `-t:Publish`, NOT `dotnet publish` — on win-arm64 the
-    #     latter crashes the WinUI XAML compiler under x86 emulation (see _MSBUILD).
-    #   - Self-contained (`SelfContained` + `WindowsAppSDKSelfContained`) so the
-    #     installed app launches on a throwaway VM with no .NET 10 / Windows App SDK
-    #     runtime — exactly the box TestCalDAVImapServingAfterInstall installs onto.
-    # `dotnet publish` fallback (still self-contained) for an x64 box with no VS MSBuild
-    # (no emulation there, so `dotnet` is safe).
-    csproj = os.path.join(ws_dir, "FaunaApp", "FaunaApp", "FaunaApp.csproj")
-    app_publish = os.path.join(
-        ws_dir, "FaunaApp", "FaunaApp",
-        "bin", "Release", "net10.0-windows10.0.26100", "win-arm64", "publish",
-    )
-    app_exe = os.path.join(app_publish, "FaunaApp.exe")
-    # Republish when any input is newer than the published exe — never reuse a
-    # publish merely because it exists, or a cached-MSI rebuild after a C#/XAML
-    # change (or a fauna-ffi rebuild, whose MSVC DLL the publish bundles) ships
-    # the OLD app and the journey tests witness it.
-    # max_mtime skips gitignored output (bin/, obj/, the regenerated bindings);
-    # the MSVC DLL lives in the gitignored target/, so it is read on its own.
-    ffi_dll = release_ffi_dll(repo)
-    publish_inputs_mtime = max(
-        max_mtime([
-            os.path.join(ws_dir, "FaunaApp", "**", "*.cs"),
-            os.path.join(ws_dir, "FaunaApp", "**", "*.xaml"),
-            os.path.join(ws_dir, "FaunaApp", "**", "*.csproj"),
-        ]),
-        os.path.getmtime(ffi_dll) if os.path.exists(ffi_dll) else 0.0,
-    )
-    if (not os.path.exists(app_exe)
-            or os.path.getmtime(app_exe) < publish_inputs_mtime):
-        if os.path.exists(_MSBUILD):
-            publish_cmd = [
-                _MSBUILD, csproj, "-restore", "-t:Publish",
-                "-p:Configuration=Release", "-p:RuntimeIdentifier=win-arm64",
-                "-p:SelfContained=true", "-p:WindowsAppSDKSelfContained=true",
-                # The automation surface is `#if DEBUG || FAUNA_E2E_AGENT` since
-                # 2026-08-01 (testing.md convention 15), so a plain Release publish
-                # ships NO test agent — and TestFullJourneyInstalledApp below drives
-                # the installed product through exactly that agent. This opt-in
-                # property is convention 15's sanctioned "explicit e2e build
-                # flavor"; the shipped MSI (release.yml) never sets it.
-                "-p:FaunaE2eAgent=true",
-                "-verbosity:minimal",
-            ]
-        else:
-            publish_cmd = [
-                "dotnet", "publish", csproj, "-c", "Release", "-r", "win-arm64",
-                "--self-contained", "-p:WindowsAppSDKSelfContained=true",
-                "-p:FaunaE2eAgent=true",  # see the MSBuild branch above
-            ]
-        # Cold self-contained WinUI publish (restore + XAML compile + bundle the
-        # Windows App SDK self-contained runtime).
-        tool = "MSBuild -t:Publish" if os.path.exists(_MSBUILD) else "dotnet publish"
-        run_build_step(publish_cmd, f"WinUI self-contained publish ({tool})")
-
-    # 2. Stage binaries — each one the collection-time prebuild built
-    # (`helpers/helper_bins.py`), replayed here and never built.
-    for name in ["fauna-sync-agent", "fauna-nest-svc", "fauna-bridge-svc", "fauna_shell",
-                 "fauna-tui", "fauna-cli"]:
-        src = helper_bin(name)
-        shutil.copy2(src, os.path.join(stage_dir, src.name))
-
-    # Stage the Go MDA + its gnullvm runtime DLLs (built into the ROOT target/, NOT
-    # the apps/fauna-windows workspace target). They ship beside fauna-bridge-svc.exe
-    # in INSTALLFOLDER. The MDA's gnullvm fauna_ffi.dll deliberately shares the name
-    # of the .NET app's MSVC fauna_ffi.dll (staged under app/) — same name, DIFFERENT
-    # stage subdir → different MSI install dir, never collide (ServiceBridge.wxs).
-    root_target = os.path.join(repo, "target")
-    for fname in ["fauna-mail-bridge.exe", "fauna_ffi.dll", "libunwind.dll"]:
-        src = os.path.join(root_target, fname)
-        if not os.path.exists(src):
-            pytest.fail(
-                f"Expected MDA build artifact missing: {src} "
-                "(just windows-mail-bridge-build should have staged it in target/)"
-            )
-        shutil.copy2(src, os.path.join(stage_dir, fname))
-
-    # Stage icons — the reference staging is two copies (installer/README.md § 1):
-    # EVERY shell-ext overlay icon, plus the app's own AppIcon.ico from the FaunaApp
-    # project's Assets. Globbing rather than naming four files keeps this from drifting
-    # again the next time an overlay is added; ARPPRODUCTICON needs AppIcon.ico
-    # specifically (Package.wxs's <Icon Id="FaunaIcon" SourceFile="$(var.IconDir)AppIcon.ico">).
-    # A missing icon is fatal, never skipped: the previous `if os.path.exists(...)`
-    # silently staged nothing and let `wix build` fail much later with WIX0103.
-    icon_dest = os.path.join(stage_dir, "icons")
-    overlay_icons = glob.glob(os.path.join(ws_dir, "shell-ext", "src", "icons", "*.ico"))
-    if not overlay_icons:
-        pytest.fail(
-            "No shell-ext overlay icons found under "
-            f"{os.path.join(ws_dir, 'shell-ext', 'src', 'icons')} — the ShellExt feature "
-            "ships them as components."
-        )
-    for src in overlay_icons:
-        shutil.copy2(src, os.path.join(icon_dest, os.path.basename(src)))
-    app_icon = os.path.join(ws_dir, "FaunaApp", "FaunaApp", "Assets", "AppIcon.ico")
-    if not os.path.exists(app_icon):
-        pytest.fail(
-            f"App icon missing: {app_icon} — Package.wxs stages it as ARPPRODUCTICON "
-            "(the same file FaunaApp.csproj's <ApplicationIcon> uses)."
-        )
-    shutil.copy2(app_icon, os.path.join(icon_dest, "AppIcon.ico"))
-
-    # Stage .NET app
-    if os.path.isdir(app_publish):
-        app_dest = os.path.join(stage_dir, "app")
-        shutil.rmtree(app_dest)
-        shutil.copytree(app_publish, app_dest)
-
-    # 2b. The ShellExt feature ships Fauna-Sparse.msix as a component
-    # (ShellExt.wxs's $(var.SparsePackage)). It is ProcessorArchitecture="neutral" —
-    # built ONCE and shared by every arch — by a dedicated dev-fleet packaging script
-    # that is deliberately not in this tree (installer/README.md § 2. Build the sparse
-    # package), so this builder consumes the prebuilt artifact and never tries to make
-    # one. Without the -d below, `wix build` dies with WIX0150 "Undefined preprocessor
-    # variable '$(var.SparsePackage)'"; fail here instead, naming what is missing and
-    # where it comes from, exactly as the staged-binary checks above do.
-    sparse_pkg = os.path.join(repo, "build", "installer", "Fauna-Sparse.msix")
-    if not os.path.exists(sparse_pkg):
-        pytest.fail(
-            f"Sparse package missing: {sparse_pkg} — the ShellExt feature ships it as a "
-            "component. It is built once (arch-neutral) by the dev-fleet packaging "
-            "script described in apps/fauna-windows/installer/README.md § 2, which is "
-            "not part of this tree; copy the artifact in rather than rebuilding it here."
-        )
-
-    # 3. Build MSI
-    installer_dir = os.path.join(ws_dir, "installer")
-    wxs_files = glob.glob(os.path.join(installer_dir, "*.wxs"))
-    wxl_files = glob.glob(os.path.join(installer_dir, "*.wxl"))
-    loc_args = []
-    for wxl in wxl_files:
-        loc_args.extend(["-loc", wxl])
-    run_build_step(
-        [
-            "wix", "build", "-arch", "arm64",
-            "-ext", "WixToolset.Util.wixext",
-            "-ext", "WixToolset.UI.wixext",
-            "-ext", "WixToolset.Firewall.wixext",
-            "-o", msi_path,
-        ] + wxs_files + loc_args + [
-            "-d", f"SyncBin={os.path.join(stage_dir, 'fauna-sync-agent.exe')}",
-            "-d", f"NestBin={os.path.join(stage_dir, 'fauna-nest-svc.exe')}",
-            "-d", f"BridgeBin={os.path.join(stage_dir, 'fauna-bridge-svc.exe')}",
-            "-d", f"MailBridgeBin={os.path.join(stage_dir, 'fauna-mail-bridge.exe')}",
-            "-d", f"MailBridgeFfiDll={os.path.join(stage_dir, 'fauna_ffi.dll')}",
-            "-d", f"MailBridgeLibunwindDll={os.path.join(stage_dir, 'libunwind.dll')}",
-            "-d", f"ShellDll={os.path.join(stage_dir, 'fauna_shell.dll')}",
-            # Every *.wxs is preprocessed whichever Feature links it, so a build
-            # without TuiBin dies with WIX0150 even for an install that
-            # deselects TerminalApp.
-            "-d", f"TuiBin={os.path.join(stage_dir, 'fauna-tui.exe')}",
-            "-d", f"CliBin={os.path.join(stage_dir, 'fauna-cli.exe')}",
-            "-d", f"IconDir={os.path.join(stage_dir, 'icons')}\\",
-            "-d", f"AppDir={os.path.join(stage_dir, 'app')}\\",
-            "-d", f"SparsePackage={sparse_pkg}",
-        ],
-        # The link compresses a ~310 MB staged payload (the self-contained WinUI
-        # publish) into a ~180 MB MSI: 71 s on an idle Windows host, far longer under the
-        # box's ordinary multi-slot contention, which once blew a 300 s bound and
-        # read as a broken installer. Unbounded like every step (run_build_step).
-        "WiX build (wix build -arch arm64)", cwd=installer_dir,
-    )
-
-    return msi_path
-
-
-@pytest.fixture(scope="session")
-def msi_path(request):
-    """Build or return cached MSI installer. The publish and the link run here;
-    their inputs were built at collection time, for a run that owes this build
-    (`helpers/windows_installer.py::msi_build_owed`, the same two answers read
-    below), so a cache hit needs none of them."""
-    repo = _get_repo_root()
-    msi, stamp = msi_paths(repo)
-    current_mtime = source_mtime(repo)
-    if msi_is_cached(repo, current_mtime):
-        return msi
-
-    # Cache miss — build
-    request.getfixturevalue("mail_bridge_binary")
-    result = _build_msi(repo)
-
-    # Write stamp
-    os.makedirs(os.path.dirname(stamp), exist_ok=True)
-    with open(stamp, "w") as f:
-        f.write(str(current_mtime))
-
-    return result
 
 
 # ── Cleanup fixture: remove leftover installation from interrupted runs ──
@@ -377,6 +119,11 @@ def wait_for_service(service_name, timeout=10):
             return True
         time.sleep(1)
     return False
+
+
+#: The three licence files every install carries beside the binaries (Notices.wxs;
+#: shipped-notices.md § Per channel, the Windows MSI row).
+LICENCE_FILES = ("LICENSE-MIT.txt", "LICENSE-APACHE.txt", "THIRD-PARTY-NOTICES.txt")
 
 
 def file_installed(relative_path):
@@ -495,6 +242,14 @@ class TestNestOnly:
             assert not shell_dll_installed(), \
                 "shell DLL (fauna_shell_<ver>.dll) should not exist"
 
+            # The licence files ride every top-level feature (Notices.wxs), so the
+            # headless subset carries them too — present and not empty, by size
+            # alone (the notices file is dependency-authored text).
+            for name in LICENCE_FILES:
+                path = os.path.join(INSTALL_DIR, name)
+                assert os.path.isfile(path) and os.path.getsize(path) > 0, \
+                    f"{name} missing or empty beside the binaries of a nest-only install"
+
         finally:
             rc, log = msi_uninstall(msi_path, log_suffix="_nest")
             assert rc == 0, f"Uninstall failed (rc={rc}). See {log}"
@@ -504,6 +259,8 @@ class TestNestOnly:
             "FaunaNest still exists after uninstall"
         assert not file_installed("fauna-nest-svc.exe"), \
             "fauna-nest-svc.exe still exists after uninstall"
+        for name in LICENCE_FILES:
+            assert not file_installed(name), f"{name} still exists after uninstall"
 
 
 class TestSyncOnly:
@@ -812,7 +569,9 @@ class TestCalDAVImapServingAfterInstall:
     test does **no** manual register/approve/x25519-poke — the standalone engine's
     Stage C is the SCM service's job here. The MDA fetches the self-signed floor cert
     and binds CalDAV :8443 + IMAP :993 → two Python CalDAVClients bidirectionally
-    round-trip a calendar event and a stock imaplib client opens INBOX.
+    round-trip a calendar event, a third dials the box's own LAN address on :8443
+    (the bare address a home nest is reached at — never loopback) and round-trips
+    with them, and a stock imaplib client opens INBOX.
 
     Only this environment exercises the SCM virtual-account services + the supervisor
     → MDA spawn → loopback auto-enrollment path (test_caldav_imap_serving.py spawns
@@ -847,9 +606,17 @@ class TestCalDAVImapServingAfterInstall:
         from helpers.caldav_client import CalDAVClient, build_vevent
         from helpers.caldav_roundtrip import caldav_has, wait_caldav_serving
 
+        from helpers.installed_nest_reach import lan_ipv4
+
         # Fail-fast SKIP (before the expensive install) if the test-only seal-helper
         # is not built — the headless credential mint needs it (no Fauna app UI).
         eng.seal_helper_exe()
+        # The bare-address leg below dials the box's own LAN address, never a
+        # loopback stand-in; a box with none cannot run it.
+        lan = lan_ipv4()
+        if lan is None:
+            pytest.skip("this box has no LAN IPv4 address to reach the installed "
+                        "CalDAV listener at")
 
         # A prior serving run leaves a CLAIMED nest under %ProgramData%\Fauna, but a
         # fresh claim needs a pristine data dir (the claim-code is consumed on first
@@ -911,6 +678,29 @@ class TestCalDAVImapServingAfterInstall:
                 uid_b, s_b, "20260620T140000Z", "20260620T150000Z"))
             assert caldav_has(mua_a, cal_a, s_b, timeout=60.0), (
                 f"event {s_b!r} created by MUA B never became visible to MUA A"
+            )
+
+            # ── The bare address: a calendar app elsewhere on the network dials the
+            # box's own LAN address on the default CalDAV port — the supervisor
+            # binds the MDA's listener on every interface (`fauna_mda_supervisor::
+            # CALDAV_LISTEN`, caldav-server.md § Network exposure, Desktop / IP).
+            # Same credential, same calendar: what A wrote on loopback reads back
+            # here, and what is written here reads back on loopback.
+            lan_base = f"https://{lan}:{INSTALLED_CALDAV_PORT}"
+            wait_caldav_serving(lan_base, verify=False, timeout=60.0)
+            mua_lan = CalDAVClient(lan_base, prov.auth_username, prov.password, verify=False)
+            cal_lan = mua_lan.personal_calendar()
+            assert caldav_has(mua_lan, cal_lan, s_a, timeout=60.0), (
+                f"event {s_a!r} never became visible at the box's LAN address "
+                f"{lan_base} — the installed CalDAV listener does not serve on a bare "
+                "address"
+            )
+            s_l, uid_l = f"{nonce}-from-lan", f"{nonce}-uid-lan"
+            mua_lan.put_event(cal_lan, uid_l, build_vevent(
+                uid_l, s_l, "20260620T150000Z", "20260620T160000Z"))
+            assert caldav_has(mua_a, cal_a, s_l, timeout=60.0), (
+                f"event {s_l!r} written at the LAN address {lan_base} never became "
+                "visible on loopback"
             )
 
             # ── IMAP: the same credential opens the mailbox (one MDA serves both).
@@ -988,6 +778,146 @@ class TestCalDAVImapServingAfterInstall:
             if prov is not None:
                 prov.cleanup()
             msi_uninstall(msi_path, remove_data=True, log_suffix="_caldav")
+
+
+# ── Install-then-reach: the installed nest SERVES, seen from outside it ──────────
+#
+# TestNestOnly proves the FaunaNest service is installed and RUNNING; running is not
+# serving, and a packaging check colours no catalog cell (packaging-witnesses.md
+# § Implementation status today). This class is the channel's own install-then-
+# reach test (installers/README.md § The channel contract), the Windows twin of
+# tests/platform/macos/test_installer.py::TestInstallThenReach: install the MSI's
+# Nest feature alone, read the claim code the service writes at its first start,
+# then claim and read health at the box's own LAN address on the service's :443 —
+# never loopback, never a spawned stand-in.
+#
+# Scope of a same-box dial: it proves the service binds every interface and serves
+# its floor there, which is the half of "your other devices reach it over the
+# network" a single box can observe. Windows does not filter a connection to the
+# box's own address, so the Firewall inbound allow (ServiceNest.wxs) is not proved
+# here; it stays authoring-guarded (installers/windows.md § Implementation status
+# today, its own row).
+#
+# It carries no feature mark yet, as its macOS twin did: it becomes get-the-app
+# outcome 3's windows witness (the mark + the citation, in one commit) only once an
+# elevated run has seen it green — until then the outcome's witness stays (none).
+
+#: The service's external serving bind (service.rs: `0.0.0.0:443` under the SCM).
+INSTALLED_NEST_EXTERNAL_PORT = 443
+#: How long the freshly installed service may take to write its claim code and
+#: answer at the LAN address (first start runs migrations + mints the floor cert).
+INSTALLED_NEST_READY_TIMEOUT = 120.0
+
+
+def _installed_nest_diagnosis():
+    """What a failure quotes (convention 6): the SCM's view of FaunaNest and the
+    tail of the service's own log under the data dir (the SCM discards stdout)."""
+    from pathlib import Path
+
+    from helpers.windows_caldav_nest import _log_tail, nest_log_path
+
+    q = subprocess.run(["sc", "queryex", "FaunaNest"], capture_output=True, text=True)
+    log = nest_log_path(Path(_installed_nest_data_dir()))
+    return (
+        f"sc queryex FaunaNest (rc={q.returncode}):\n{(q.stdout or q.stderr)[-2000:]}\n"
+        f"service log ({log}):\n{_log_tail(log)}"
+    )
+
+
+class TestInstallThenReach:
+    """The MSI-installed nest is a network-reachable server: claimed and healthy at
+    the box's LAN address on the FaunaNest service's :443 (installers/windows.md
+    § Implementation status today, the Network-reachable nest, Claim-code bootstrap
+    and Headless nest-only rows). The claim code is the one the service writes to
+    `%ProgramData%\\Fauna\\nest\\claim-code` at its first start — the file a service
+    with no console conveys it by."""
+
+    def test_installed_nest_is_claimed_and_healthy_at_its_lan_address(self, msi_path):
+        from pathlib import Path
+
+        from common.auth import claim_admin, pin_nest_spki, unpin_nest_spki
+        from helpers.installed_nest_reach import lan_ipv4, pinned_health
+        from helpers.windows_caldav_nest import floor_cert_spki
+
+        lan = lan_ipv4()
+        if lan is None:
+            pytest.skip("this box has no LAN IPv4 address to reach the nest at")
+
+        data_dir = Path(_installed_nest_data_dir())
+        claim_file = data_dir / "claim-code"
+        # A claimed nest's data dir is a user's: never touched. An unclaimed one
+        # (claim code still on disk — what TestNestOnly's plain uninstall leaves)
+        # holds nothing but the service's own first-start state, so this test may
+        # claim it and remove it again at teardown.
+        if (data_dir / "nest.db").exists() and not claim_file.exists():
+            pytest.fail(
+                f"{data_dir} holds an already-CLAIMED nest; this test claims a fresh "
+                "one and never touches a claimed nest's data. Remove it by hand on a "
+                f"test box (an uninstall with REMOVE_USER_DATA=1, or delete {data_dir}) "
+                "and re-run.")
+
+        rc, log = msi_install(msi_path, features=["Nest"], log_suffix="_reach")
+        assert rc == 0, f"Install (Nest) failed (rc={rc}). See {log}"
+
+        base = f"https://{lan}:{INSTALLED_NEST_EXTERNAL_PORT}"
+        authority = f"{lan}:{INSTALLED_NEST_EXTERNAL_PORT}"
+        claimed = False
+        try:
+            assert wait_for_service("FaunaNest", timeout=30), (
+                f"FaunaNest not running after install\n{_installed_nest_diagnosis()}")
+
+            deadline = time.monotonic() + INSTALLED_NEST_READY_TIMEOUT
+            while not claim_file.exists() and time.monotonic() < deadline:
+                time.sleep(1)  # sleep-ok: poll interval of a deadline loop
+            assert claim_file.exists(), (
+                f"the installed service never wrote {claim_file} within "
+                f"{INSTALLED_NEST_READY_TIMEOUT:.0f}s\n{_installed_nest_diagnosis()}")
+            claim_code = claim_file.read_text().strip()
+
+            # Trust the nest by the floor it says it serves — its own
+            # acme\fullchain.pem — pinned to the LAN authority, so a leaf that
+            # disagrees is refused before a byte is written.
+            last = "(never attempted)"
+            healthy = None
+            while time.monotonic() < deadline:
+                try:
+                    pin_nest_spki(authority, floor_cert_spki(data_dir))
+                    status, body = pinned_health(base)
+                    if status == 200 and (body or {}).get("status") == "ok":
+                        healthy = body
+                        break
+                    last = f"HTTP {status}: {body}"
+                except (OSError, ValueError) as e:
+                    last = f"{type(e).__name__}: {e}"
+                time.sleep(1)  # sleep-ok: poll interval of a deadline loop
+            assert healthy is not None, (
+                f"the installed nest never answered health at {base} (the LAN "
+                f"address on the service's :443) within "
+                f"{INSTALLED_NEST_READY_TIMEOUT:.0f}s — last: {last}\n"
+                f"{_installed_nest_diagnosis()}")
+            # What answered is THIS install's nest: the pin is the leaf key of the
+            # floor in its own data dir, so no other server on :443 passes it.
+
+            admin = claim_admin(
+                INSTALLED_NEST_EXTERNAL_PORT, claim_code, base_url=base, handle="test")
+            claimed = True
+            assert admin["token"], f"claim at {base} returned no bearer: {admin}"
+
+            status, body = pinned_health(base)
+            assert status == 200 and (body or {}).get("status") == "ok", (
+                f"health at {base} after the claim: HTTP {status}: {body}\n"
+                f"{_installed_nest_diagnosis()}")
+            # The service consumes the claim code on claim (reconcile deletes it).
+            deadline = time.monotonic() + 30
+            while claim_file.exists() and time.monotonic() < deadline:
+                time.sleep(1)  # sleep-ok: poll interval of a deadline loop
+            assert not claim_file.exists(), \
+                f"{claim_file} survived the claim — the nest did not record it"
+        finally:
+            unpin_nest_spki(authority)
+            # Only a nest THIS test claimed has its data removed: it holds nothing
+            # but the test's own claim, and a re-run needs a fresh claim code.
+            msi_uninstall(msi_path, remove_data=claimed, log_suffix="_reach")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

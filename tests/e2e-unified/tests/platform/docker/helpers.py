@@ -30,7 +30,12 @@ from helpers.mail_aliases import add_exact_alias_as
 from helpers.recipient_seal_key import provision_recipient_seal_key
 
 
-BUILD_TIMEOUT = 1800
+#: How long the image build itself may run once it holds its slot. A cold build of
+#: the nest image on a loaded Linux measured 60–87 min (2026-11-11/12: the
+#: rust-native and rust-wasm stages share the slot's cores with the rest of the
+#: box), and 1800 s killed a build mid-wasm-stage, cancelling the BuildKit stage
+#: so the next attempt redid it; two hours leaves room for that measured spread.
+BUILD_TIMEOUT = 7200
 #: How long a build waits for its `build` slot before giving up — a saturated box
 #: queues builds for a while, and the wait is not the build's own time.
 SLOT_WAIT_TIMEOUT = 3600
@@ -1991,7 +1996,7 @@ def start_fake_dns_sidecar(
     `publish_port` (optional) also publishes `port` to `127.0.0.1:<publish_port>`
     on the host, TCP and UDP alike (`start_container_with_ports`' shape) — the
     ACME stack's name server, which every app reaches at the dev VM's loopback
-    and an android venue run through its TCP-only reverse
+    and an android emulator run through its TCP-only reverse
     (`e2e-automation-surface-gating.md` § The ACME directory seed → *The name
     server's reach*).
 

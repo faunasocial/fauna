@@ -62,6 +62,7 @@ from tests.platform.macos.test_file_provider_read_path import (  # noqa: F401 â€
     _BACKUP_KEY_CONTEXT,
     _CLOUD,
     _has_codesigning_identity,
+    _provision,
     _run_host,
     _safe_listdir,
     _wait_for,
@@ -114,20 +115,9 @@ def test_a_deposit_is_adopted_as_a_placeholder_by_the_file_provider_refresh(
 
     before = set(os.listdir(_CLOUD)) if _CLOUD.exists() else set()
     try:
-        provisioned = _run_host(
-            fauna, "provision", nest["url"], alice["actor_id_bytes"].hex(), device_id.hex(),
-            "fp-ext", backup_key.hex(), alice["token"], check=False,
-        )
-        if provisioned.returncode != 0 and "-34018" in provisioned.stdout + provisioned.stderr:
-            # Signing identities exist but the app carries no embedded provisioning
-            # profile, so the app-group Keychain refuses the credential write.
-            pytest.skip(
-                "app-group data-protection Keychain refused `provision` (errSecMissingEntitlement "
-                "-34018): the build has no embedded provisioning profile"
-                "; the test runs once the profile lands."
-            )
-        assert provisioned.returncode == 0, (
-            f"`Fauna provision` failed: {provisioned.stdout.strip()} {provisioned.stderr.strip()}"
+        _provision(
+            fauna, nest["url"], alice["actor_id_bytes"].hex(), device_id.hex(),
+            "fp-ext", backup_key.hex(), alice["token"],
         )
         _run_host(fauna, "register", folder_ref, folder_name)
         _CLOUD.mkdir(parents=True, exist_ok=True)

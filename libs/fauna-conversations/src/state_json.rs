@@ -259,6 +259,9 @@ pub fn conversation_threads_json(manager: &ConversationsManager) -> Value {
                 // room (`null` where there is no such read — an end-to-end
                 // room, or an answer not read yet).
                 "awaiting_key": r.awaiting_key,
+                // Whether the room's re-key after a removal is still owed, as
+                // this seat last read the floor (`RoomSnapshot::severance_owed`).
+                "severance_owed": r.severance_owed,
                 "nest_read": r.nest_read,
                 // The room's VERIFIED labeler set (lowercase hex ids) — what a
                 // journey waits on after Save, rather than sleeping past it;

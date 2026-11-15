@@ -41,7 +41,6 @@ import time
 
 import pytest
 
-from helpers.app_surface import require_surface
 from helpers.mail_client_ui import claim_enable_and_ready, deliver_inbound
 from helpers.mail_wire import build_reply_message
 
@@ -60,7 +59,6 @@ EXTERNAL_DOMAIN = "external.test"
 
 @pytest.mark.feature("email-in-conversations")
 def test_client_send_then_stub_autoreply_renders_decrypted(app, unclaimed_mail_nest_ui):
-    require_surface(app.driver, "mail-reply-roundtrip")
 
     nest = unclaimed_mail_nest_ui
 

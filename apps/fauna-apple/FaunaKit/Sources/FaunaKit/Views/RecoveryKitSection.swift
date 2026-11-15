@@ -101,6 +101,7 @@ public struct RecoveryKitSection: View {
             actionButtons
             stolenAction
             letGoAction
+            owedNestsList
 
             // One `error-message`: a partial Remove in the pass says how far it
             // got here, where the row it left standing is.
@@ -179,8 +180,16 @@ public struct RecoveryKitSection: View {
     /// is already correct, so its section mounts once with the right client,
     /// while iOS's persistent TabView has no such gate (the same asymmetry behind
     /// this row's first two defects).
+    ///
+    /// The client INSTANCE is part of the key too: a rebuilt session hands the
+    /// environment a new `APIClient` bound to the same successor, and the old
+    /// one is retired. Keyed on actors alone, the section hydrated once on the
+    /// retired client, deferred its discharge there
+    /// (`RecoveryKitVM.dischargeOwedSuccessionKit`) and never re-fired for the
+    /// live one (measured on iOS 2026-11-10: no fresh kit, ever).
     private var hydrateKey: String {
-        "\(sessionActorIdHex ?? "-")|\(client?.api.boundActorIdHex ?? "no-client")"
+        let instance = client.map { "\(ObjectIdentifier($0.api).hashValue)" } ?? "no-client"
+        return "\(sessionActorIdHex ?? "-")|\(client?.api.boundActorIdHex ?? "no-client")|\(instance)"
     }
 
     /// Read the chain, then discharge an owed successor kit if this session is
@@ -232,6 +241,7 @@ public struct RecoveryKitSection: View {
         vm.memberReviewDeferred = SuccessionHandoff.memberReviewDeferred
         await vm.loadStatus()
         await vm.loadDeadGenerations()
+        await vm.loadOwedNests()
 
         // The claim is ONE-SHOT, so only a section that is actually on screen may
         // take it — see `onScreen`. A section on its way out that claimed here
@@ -653,6 +663,68 @@ public struct RecoveryKitSection: View {
             // No offline gate: the act ends in the retire door, which the
             // shared table declares OfflineSafe, so nothing here desensitizes.
         }
+    }
+
+    /// The successor's owed nests (`settings.md` § Recovery kit → *The
+    /// successor's owed nests*): the status line, then per entry its address,
+    /// its outcome and the two-step dismiss — tui's `owed_nests_elements` and
+    /// linux's `OwedNests`, as SwiftUI. Every line is the shared projection's
+    /// copy; the whole block is absent while nothing is owed.
+    @ViewBuilder private var owedNestsList: some View {
+        if let view = vm.owedNests {
+            automationText(Ids.recoveryKitOwedNestsStatus, renderLocalizedText(view.status))
+                .font(.caption)
+            ForEach(Array(view.entries.enumerated()), id: \.offset) { index, entry in
+                owedNestItem(entry, index: index)
+            }
+        }
+    }
+
+    private func owedNestItem(_ entry: FfiOwedNestEntry, index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            automationText(Ids.recoveryKitOwedNestAddress, renderLocalizedText(entry.addressCopy))
+                .font(.caption)
+            automationText(Ids.recoveryKitOwedNestOutcome, renderLocalizedText(entry.outcomeCopy))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                if vm.isOwedDismissPending(entry) {
+                    Button(L.settings.recoveryKit.owedNestDismissConfirm, role: .destructive) {
+                        Task { await vm.confirmOwedDismiss(entry) }
+                    }
+                    .disabled(vm.busy)
+                    .accessibilityIdentifier(Ids.recoveryKitOwedNestDismissConfirmButton)
+                    .automationActivate(Ids.recoveryKitOwedNestDismissConfirmButton,
+                                        isEnabled: { !vm.busy }) {
+                        Task { await vm.confirmOwedDismiss(entry) }
+                    }
+                    .faunaGate("fauna.recovery.succession.owed_settle")
+
+                    Button(L.common.cancel) { vm.cancelOwedDismiss() }
+                        .accessibilityIdentifier(Ids.recoveryKitOwedNestDismissCancelButton)
+                        .automationActivate(Ids.recoveryKitOwedNestDismissCancelButton) {
+                            vm.cancelOwedDismiss()
+                        }
+                } else {
+                    Button(L.settings.recoveryKit.owedNestDismiss) { vm.armOwedDismiss(entry) }
+                        .disabled(vm.busy)
+                        .accessibilityIdentifier(Ids.recoveryKitOwedNestDismissButton)
+                        .automationActivate(Ids.recoveryKitOwedNestDismissButton,
+                                            isEnabled: { !vm.busy }) {
+                            vm.armOwedDismiss(entry)
+                        }
+                }
+            }
+            .controlSize(.small)
+        }
+        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.recoveryKitOwedNestItem)
+        .automationValue(Ids.recoveryKitOwedNestItem,
+                         text: { renderLocalizedText(entry.addressCopy) })
+        .automationScope(Ids.recoveryKitOwedNestItem, index: index)
     }
 
 }

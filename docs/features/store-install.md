@@ -1,6 +1,6 @@
 ---
 slug: store-install
-title: store-install
+title: Installed from an app store
 section: money
 goal: docs/goal/architecture/dynamic-features.md § The store flavors
 guide: docs/guides/install.md § Checking you have the official app
@@ -13,7 +13,16 @@ absences:
 
 ## What a user gets
 
-This text is being written and will appear here once it has been reviewed.
+No app store offers Fauna publicly yet: during the closed alpha, the Android app
+is in Google Play's invitation-only testing. The app built for each store —
+Google Play, the Microsoft Store and the App Store — is Fauna with its payment
+features left out of the build itself: there is no payment provider to connect,
+no code to hand out or redeem for a paid tier, no tips, no price on a tier, and
+no selling or buying a post. Tiers, follows and subscriptions are all there; a
+tier that carries a price elsewhere is one you ask to join. Sharing a folder in
+person with someone else's device stays in the Google Play and Microsoft Store
+builds and is left out of the App Store build. The apps you download directly
+carry all of it, and the web app all of it but sharing a folder in person.
 
 ## Coverage contract
 

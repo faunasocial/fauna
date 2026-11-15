@@ -77,7 +77,7 @@ Stamped 2026-11-07 at ac836c937b.
 | linux | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
 | windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
 | macos | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android-kids | — absent | |
@@ -108,9 +108,9 @@ Stamped 2026-11-07 at ac836c937b.
 | 15 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_toggle_and_clear_activity_data` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 16 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_what_one_device_collected_informs_the_feeds_on_your_other_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 17 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
-| 17 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_near_the_bottom_edge_still_counts_as_watched` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_near_the_bottom_edge_still_counts_as_watched` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed |
 | 17 | app | absent by design on tui | — |
-| 18 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_only_a_scroll_counts_as_a_skip_a_switch_a_drop_a_placeholder_and_a_quit_teach_nothing` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 18 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_only_a_scroll_counts_as_a_skip_a_switch_a_drop_a_placeholder_and_a_quit_teach_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 19 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_lingering_on_a_picture_post_teaches_the_topic_as_a_text_post_does` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

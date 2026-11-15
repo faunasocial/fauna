@@ -2656,6 +2656,26 @@ pub async fn originate_follow_key_blob_fetch(
     .await
 }
 
+/// Originate `fauna.federation.follow.offers.list` (idempotent read) — an
+/// author's offered tiers from their home, relayed to the reader unstored.
+pub async fn originate_follow_offers_list(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    home_nest_id: &[u8; 32],
+    req: crate::follow_federation::FedOffersListRequest,
+) -> Result<Result<fauna_protocol::subscriptions::TiersListReply, RpcError>, PoolError> {
+    originate_follow(
+        pool,
+        state,
+        peer_url,
+        home_nest_id,
+        crate::follow_federation::OFFERS_LIST_KIND,
+        to_value(&req),
+    )
+    .await
+}
+
 /// Originate `fauna.federation.follow.state` — the outbox's push of a
 /// request's fate to the subscriber's home (idempotent: the receiver sets the
 /// state it is told).

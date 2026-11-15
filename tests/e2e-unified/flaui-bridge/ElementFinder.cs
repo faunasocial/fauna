@@ -265,6 +265,21 @@ static class ElementFinder
     }
 
     /// <summary>
+    /// Whether a selected ComboBox item's AutomationId is WinUI's x:Name fallback
+    /// rather than a key the app set. An item with no AutomationId of its own
+    /// answers the x:Name of its template's content part, "ContentPresenter":
+    /// every data-bound picker (an <c>ItemsSource</c> of strings, or
+    /// <c>DisplayMemberPath</c>) whose items were not built through FaunaApp's
+    /// <c>Helpers/PickerOption.cs</c> does, and a closed picker rebuilt by a page
+    /// refresh read back "ContentPresenter" instead of its painted label (the
+    /// admin-dns catch-all and role pickers, the vps-location picker). Such an
+    /// item reads back by its Name, the label it paints, as it did before keyed
+    /// options existed.
+    /// </summary>
+    internal static bool IsTemplatePartFallback(string automationId) =>
+        automationId == "ContentPresenter";
+
+    /// <summary>
     /// Get text from an element, with InfoBar child TextBlock fallback.
     /// </summary>
     public static string GetText(AutomationElement el, ConditionFactory cf)
@@ -303,7 +318,7 @@ static class ElementFinder
                 if (el.Properties.ControlType.ValueOrDefault == FlaUI.Core.Definitions.ControlType.ComboBox)
                 {
                     var key = SafeAutomationId(selected[0]);
-                    if (!string.IsNullOrEmpty(key))
+                    if (!string.IsNullOrEmpty(key) && !IsTemplatePartFallback(key))
                         return key;
                 }
                 var selName = SafeName(selected[0]);

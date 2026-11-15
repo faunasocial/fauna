@@ -22,13 +22,18 @@ import com.fauna.app.ui.navigation.profileRoute
 import com.fauna.ffi.connectionIsOnline
 import com.fauna.ffi.connectionStateWord
 import com.fauna.ffi.contentTypeForFilename
+import com.fauna.ffi.appOutboxDrainNowForTest
 import com.fauna.ffi.dialBudgetClearForTest
 import com.fauna.ffi.launchClockNowSecsForTest
 import com.fauna.ffi.launchClockOffsetSecsForTest
 import com.fauna.ffi.logEmitBurstForTest
 import com.fauna.ffi.logReloadE2eCapsForTest
+import com.fauna.ffi.offlineShareAdvanceClock
+import com.fauna.ffi.offlineShareDropConnectionsForTest
+import com.fauna.ffi.offlineShareHoldServes
 import com.fauna.ffi.setDelegationClockOffsetSecs
 import com.fauna.ffi.setMailTokenRefreshClockOffsetSecs
+import com.fauna.ffi.setOutboxDrainHoldForTest
 import com.fauna.ffi.setTrustClockOffsetSecs
 import com.fauna.ffi.subscriptionsHoldAuthorDrainForTest
 import com.fauna.ffi.subscriptionsReleaseAuthorDrainForTest
@@ -565,6 +570,18 @@ object TestAgent {
         actorScope = scope
     }
 
+    /** Test seam, same shape as [setConversationsManagerHostForTest]: point
+     *  `call_machine_method` at an [OnboardingHost] and an account registry a pin
+     *  owns, so its arms can be proven to MOVE the shared machine and registry,
+     *  not merely to be recognised. [start] sets the real Hilt singletons. */
+    internal fun setMachineMethodTargetsForTest(
+        host: OnboardingHost?,
+        accountRegistry: com.fauna.ffi.FfiAccountRegistry?,
+    ) {
+        onboardingHost = host
+        registry = accountRegistry
+    }
+
     private suspend fun pollLoop(
         bridgeUrl: String,
         appState: AppState,
@@ -707,6 +724,25 @@ object TestAgent {
                 )
             }
         }
+
+    /**
+     * `share_serve_tally` (`fauna_e2e_agent::SHARE_SERVE_TALLY_KEY`) — the
+     * shared recorder's snapshot as `{manifests: {path: n}, chunks: {path: n},
+     * parked: n, held: b}`, the shape tui's / linux's `share_serve_tally_json`
+     * and apple's `serveTallyState` publish (`actions/backups.py::
+     * share_serve_tally` reads it). Counts go out as JSON numbers, never a
+     * boxed `ULong`.
+     */
+    internal fun serveTallyToJson(t: com.fauna.ffi.FfiServeTally): JSONObject =
+        JSONObject().apply {
+            put("manifests", JSONObject().apply { t.manifests.forEach { (k, v) -> put(k, v.toLong()) } })
+            put("chunks", JSONObject().apply { t.chunks.forEach { (k, v) -> put(k, v.toLong()) } })
+            put("parked", t.parked.toLong())
+            put("held", t.held)
+        }
+
+    /** [serveTallyToJson] over this process's live tally — a lock-and-clone. */
+    private fun shareServeTallyJson(): JSONObject = serveTallyToJson(com.fauna.ffi.shareServeTally())
 
     /**
      * The state protocol's `messages` value: a populated object when the app-wide
@@ -1238,6 +1274,11 @@ object TestAgent {
                 } ?: JSONObject.NULL,
             )
             put("serving_enablement", servingEnablement ?: JSONObject.NULL)
+            // `fauna_e2e_agent::SHARE_SERVE_TALLY_KEY` — what this process's
+            // share plane has served, `{manifests: {path: n}, chunks: {path: n},
+            // parked: n, held: b}`: the shared recorder's snapshot, a plain
+            // lock-and-clone (convention 11's corollary), legal here.
+            put("share_serve_tally", shareServeTallyJson())
             // `fauna_e2e_agent::WIDGET_REFRESH_KEY` — bumped by the widget
             // worker's pass and nothing else, so the poke below has a barrier.
             put("widget_refresh", com.fauna.app.widget.WidgetRefreshPasses.stateJson())
@@ -1647,7 +1688,30 @@ object TestAgent {
                 val methodName = cmd.optString("method")
                 if (methodName.isNullOrEmpty()) return "the command carried no `method` name"
                 val jsonArg = cmd.optString("json_arg") ?: ""
-                // The registry arms first — they need this app's own account
+                // The provisioning drive first — the one arm each app owns,
+                // because it spawns work that outlives the call and which
+                // runtime owns that spawn is platform-divergent
+                // (`OnboardingMachine::call_machine_method_async`'s doc; the
+                // shared dispatchers deliberately leave both names out, so
+                // without this arm a live drive sat `Idle` for its whole
+                // budget — `helpers/live_provision.py`). Both names map to the
+                // async `runProvisioning()`, never the same-named sync exports,
+                // whose bare `tokio::spawn` needs an ambient runtime this thread
+                // lacks — the production buttons' choice (`NestProvisioningVM`),
+                // and iOS's and windows's arm. `run_provisioning_inner` resets the
+                // snapshot and the cancel flag at entry, so it is the retry entry
+                // too. Launched, not awaited: the drive takes minutes and the
+                // bridge acks at once; the driver polls `provisioning_snapshot`.
+                if (methodName == "start_provisioning" || methodName == "retry_provisioning") {
+                    val host = onboardingHost
+                        ?: return "call_machine_method($methodName) arrived before the " +
+                            "OnboardingHost was wired (TestAgent.start has not run yet)"
+                    machineMethodResult = null
+                    pokeScope.launch { host.machine.runProvisioning() }
+                    android.util.Log.i("TestAgent", "call_machine_method($methodName) launched")
+                    return null
+                }
+                // The registry arms next — they need this app's own account
                 // registry, which no machine dispatcher can reach (the shared
                 // `fauna_client_accounts::call_registry_method_for_test`; apple's
                 // `RegistryTestBridge` and tui's automation route the same way).
@@ -2200,6 +2264,25 @@ object TestAgent {
                     }
                 }
             }
+            "app_outbox_drain_now" -> {
+                // The app-only outbox drain, rung now — android's twin of tui's
+                // and linux's arm (`fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW` owns
+                // the contract): the process outbox's own drain loop, for a test
+                // that has just released the e2e drain hold, whose held pass
+                // ended the loop. The FFI body spawns on the store runtime and
+                // returns at once; a no-op pre-auth. The barrier is the effect.
+                appOutboxDrainNowForTest()
+            }
+            "outbox_drain_hold" -> {
+                // The in-process e2e outbox drain hold
+                // (`fauna_e2e_agent::OUTBOX_DRAIN_HOLD`): this process hosts the
+                // account runtime and inherits no harness environment, so the
+                // hold file the desktop apps read cannot reach it. A missing or
+                // non-boolean `held` is a loud refusal (convention 11).
+                val held = cmd.opt("held") as? Boolean
+                    ?: return "outbox_drain_hold needs a boolean `held`"
+                setOutboxDrainHoldForTest(held)
+            }
             "custody_owner_resend_now" -> {
                 // The custody owner sends again, android's twin of tui's and
                 // linux's arm (`fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW` owns
@@ -2432,6 +2515,59 @@ object TestAgent {
                 // here: the shared connect-time loop reads the clock on its next
                 // pass (a reconnect or the daily tick).
                 setMailTokenRefreshClockOffsetSecs(cmd.optLong("now_offset_secs", 0L))
+            }
+            "offline_share_advance_clock" -> {
+                // The co-present ceremony's ADMISSION clock (convention 14) —
+                // android's twin of tui `automation.rs` / linux `main.rs` /
+                // apple `OfflineShareTestCommand.applyAdvanceClock`, all over
+                // the shared seam `fauna_sync_engine::ceremony_clock`: the `now`
+                // a receive-act expectation is minted and judged against. The
+                // 15-minute window is a Rust constant, so "a lapsed receive
+                // window refuses the initiator like a stranger" (`p2p.md`
+                // § Offline share initiation) is reached only by moving this
+                // clock. `0` resets; process-wide, nothing auto-resets it.
+                // Nothing to repaint and nothing to refuse: the seat's own
+                // listener reads the offset at admission time.
+                offlineShareAdvanceClock(cmd.optLong("now_offset_secs", 0L))
+            }
+            "offline_share_drop_connections" -> {
+                // Drop every connection a counterpart has open to THIS
+                // session's ceremony listener, keeping it up, and report how
+                // many (`actions/backups.py::drop_offline_share_connections`
+                // reads the count off `machine_method_result`) — the link
+                // between two devices failing part-way, which "the share picks
+                // up again without the code a second time" needs. Twin of tui's
+                // / linux's arms and apple's `applyDropConnections`; the seat
+                // is the session slot `OfflineShareHost` binds through, so the
+                // shared door reads it, never a UI-held handle. The slot is
+                // cleared FIRST, so a refusal can never leave a stale
+                // neighbour's value to be read as a count (convention 11).
+                machineMethodResult = null
+                val api = apiClient
+                    ?: return "offline_share_drop_connections: no ApiClient wired " +
+                        "(TestAgent.start has not run yet), so no ceremony seat to drop " +
+                        "connections from"
+                try {
+                    val dropped = offlineShareDropConnectionsForTest(api.ownerSecretBytes())
+                    machineMethodResult = dropped.toLong().toString()
+                } catch (e: Exception) {
+                    return "offline_share_drop_connections: ${e.message ?: e::class.simpleName}"
+                }
+            }
+            "offline_share_hold_serves" -> {
+                // Turn THIS process's share-plane SERVE hold on or off
+                // (`fauna_sync_engine::share_serve_tally`): while it is on, the
+                // next manifest a peer asks this seat for parks unanswered and
+                // the `share_serve_tally` state key's `parked` count says so —
+                // "part-way through a transfer" as a state a journey waits for
+                // (convention 14), cut with `offline_share_drop_connections`,
+                // then lifted: the parked request fails and is never counted as
+                // served. Twin of tui's / linux's arms, windows' `TestAgent` and
+                // apple's `applyHoldServes`, over the same shared door; the
+                // serve side is the plane `SharePlaneHost` runs in this
+                // process. Process-wide, nothing auto-resets it; a missing
+                // `hold` reads as `false`, the lift. Cannot refuse.
+                offlineShareHoldServes(cmd.optBoolean("hold", false))
             }
             "archive_import_pause_after", "archive_import_hold_after" -> {
                 // Arm the mounted archive-import page's machine to pause (or

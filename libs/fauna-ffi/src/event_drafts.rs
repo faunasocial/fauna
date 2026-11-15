@@ -172,6 +172,31 @@ impl FfiEventDraftsSync {
         .await
         .map_err(general_err)
     }
+
+    /// The events rail's **leave-door save**
+    /// (`docs/goal/behavior/reserved-folders.md` § The leave-flush promise):
+    /// the form as the door found it, saved through the shared
+    /// `fauna_client_caldav::drafts::leave_save_event_draft` — so a door taken
+    /// before the launch restore has lifted the save gate still saves, by one
+    /// read of its own and this rail's FILL rule (`EventDrafts::fill`): a form
+    /// the user typed into is saved, an untouched one takes the resting draft
+    /// and writes nothing over it. With the gate already open it is
+    /// [`save_drafts`](Self::save_drafts). The caller bounds the call (the
+    /// shared leave budget); a failed read saves nothing.
+    pub async fn save_drafts_on_leave(&self, draft: FfiEventDrafts) -> Result<(), FfiError> {
+        event_leave_save(&self.sync, draft)
+            .await
+            .map_err(general_err)
+    }
+}
+
+/// The body of [`FfiEventDraftsSync::save_drafts_on_leave`], over any
+/// transport — the seam its tests drive over an in-memory nest.
+async fn event_leave_save<R: fauna_protocol::RpcRequester>(
+    sync: &DraftsSync<R>,
+    draft: FfiEventDrafts,
+) -> Result<(), fauna_client_drafts::DraftsClientError<R::Error>> {
+    fauna_client_caldav::drafts::leave_save_event_draft(sync, draft.into()).await
 }
 
 #[cfg(test)]
@@ -204,5 +229,64 @@ mod tests {
         let core: EventDrafts = ffi.clone().into();
         let back: FfiEventDrafts = core.into();
         assert_eq!(ffi, back);
+    }
+
+    use fauna_client_drafts::testing::{MemoryDraftsNest, SharedDraftsNest};
+    use fauna_client_testkit::block_on;
+
+    fn sync(nest: &Arc<MemoryDraftsNest>) -> DraftsSync<SharedDraftsNest> {
+        let keypair = fauna_core::identity::ActorKeypair::from_secret([7u8; 32]);
+        DraftsSync::new(SharedDraftsNest(Arc::clone(nest)), &keypair, EVENTS_RAIL)
+    }
+
+    fn form(summary: &str) -> FfiEventDrafts {
+        FfiEventDrafts {
+            summary: summary.into(),
+            dtstart: String::new(),
+            dtend: String::new(),
+            description: String::new(),
+            location: String::new(),
+        }
+    }
+
+    fn rest(nest: &Arc<MemoryDraftsNest>, summary: &str) {
+        let other = sync(nest);
+        block_on(other.load()).unwrap();
+        let bytes = EventDrafts::from(form(summary)).snapshot_bytes();
+        assert!(block_on(other.save_if_changed(&bytes)).unwrap());
+    }
+
+    fn resting_summary(nest: &Arc<MemoryDraftsNest>) -> String {
+        let bytes = block_on(sync(nest).load()).unwrap().expect("a draft rests");
+        EventDrafts::restore_from_bytes(&bytes).unwrap().summary
+    }
+
+    /// An events door taken before the launch restore lifted the gate still
+    /// saves the typed form (`save_drafts` alone writes nothing behind it).
+    #[test]
+    fn an_events_door_before_the_launch_restore_saves_the_typed_form() {
+        let nest = Arc::new(MemoryDraftsNest::default());
+        rest(&nest, "resting");
+
+        block_on(event_leave_save(
+            &sync(&nest),
+            form("typed before the gate opened"),
+        ))
+        .unwrap();
+
+        assert_eq!(resting_summary(&nest), "typed before the gate opened");
+    }
+
+    /// An untouched form takes the resting draft: nothing is written over it.
+    #[test]
+    fn an_events_door_with_an_empty_form_never_overwrites_the_resting_draft() {
+        let nest = Arc::new(MemoryDraftsNest::default());
+        rest(&nest, "resting");
+        let before = *nest.puts.lock().unwrap();
+
+        block_on(event_leave_save(&sync(&nest), form(""))).unwrap();
+
+        assert_eq!(*nest.puts.lock().unwrap(), before);
+        assert_eq!(resting_summary(&nest), "resting");
     }
 }

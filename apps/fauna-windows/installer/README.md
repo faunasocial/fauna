@@ -7,17 +7,22 @@ WiX v6 MSI installer for Fauna for Windows.
 On the Windows build machine:
 
 ```powershell
-# Install WiX (v6) .NET tool
-dotnet tool install --global wix
+# Install WiX (v6) .NET tool, at the version the release build pins
+dotnet tool install --global wix --version 6.0.2
 
-# Install the WiX extensions used by the .wxs source:
+# Install the WiX extensions used by the .wxs source, at the same version:
 #   Util     — RemoveFolderEx + ServiceConfig (failure recovery)
 #   UI       — WixUI_FeatureTree (feature-selection dialog)
 #   Firewall — FirewallException (inbound :443 allow rule for the nest)
-wix extension add --global WixToolset.Util.wixext
-wix extension add --global WixToolset.UI.wixext
-wix extension add --global WixToolset.Firewall.wixext
+wix extension add --global WixToolset.Util.wixext/6.0.2
+wix extension add --global WixToolset.UI.wixext/6.0.2
+wix extension add --global WixToolset.Firewall.wixext/6.0.2
 ```
+
+The version is one for the tool and its three extensions: the release workflow installs it,
+the MSI's third-party notices name it (WiX puts code of its own into the package), and
+`just windows-msi-notices` copies that code's licence files from this install at that
+version, so a build machine with another WiX fails there. A test holds the pins equal.
 
 ## Building from a clean checkout — required steps
 
@@ -131,6 +136,12 @@ cp target/libunwind.dll         stage/x64/
 cp apps/fauna-windows/shell-ext/src/icons/*.ico stage/x64/icons/
 cp apps/fauna-windows/FaunaApp/FaunaApp/Assets/AppIcon.ico stage/x64/icons/
 cp -r apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/net10.0-windows*/win-x64/publish/* stage/x64/app/
+# The three licence files Notices.wxs installs beside the binaries:
+# LICENSE-MIT.txt, LICENSE-APACHE.txt and the generated THIRD-PARTY-NOTICES.txt
+# (docs/goal/architecture/shipped-notices.md § Per channel). After the publish
+# (its restore writes the project.assets.json the notices read), over the bridge
+# staged above. The notices file is dependency-authored text: never open it.
+just windows-msi-notices stage/x64/notices x64 target/fauna-mail-bridge.exe
 ```
 
 For ARM64, replace `x86_64-pc-windows-msvc` with `aarch64-pc-windows-msvc`
@@ -170,9 +181,9 @@ cert; a self-sign-and-trust option is also available).
 
 ### 3. Build MSI
 
-The `-ext` flags load the globally-installed WiX extensions (`wix extension add --global
-WixToolset.Util.wixext WixToolset.UI.wixext WixToolset.Firewall.wixext` once, beforehand).
-They are required when building from the repo root (where `wix.json` is not auto-discovered).
+The `-ext` flags load the globally-installed WiX extensions (added once, beforehand, at the
+pinned version: § Prerequisites). They are required when building from the repo root (where
+`wix.json` is not auto-discovered).
 
 The `-d` paths MUST be absolute (clean-checkout gotcha 5): WiX harvests
 `App.wxs`'s `<Files Include="$(var.AppDir)**">` relative to the **.wxs file's**
@@ -186,6 +197,7 @@ step 2 built — same path for both arches.
 wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
   -ext WixToolset.Firewall.wixext `
   -o Fauna-Setup-x64.msi apps/fauna-windows/installer/*.wxs `
+  -loc apps/fauna-windows/installer/Strings.wxl `
   -d SyncBin=$PWD/stage/x64/fauna-sync-agent.exe `
   -d TuiBin=$PWD/stage/x64/fauna-tui.exe `
   -d CliBin=$PWD/stage/x64/fauna-cli.exe `
@@ -197,12 +209,14 @@ wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
   -d ShellDll=$PWD/stage/x64/fauna_shell.dll `
   -d IconDir=$PWD/stage/x64/icons/ `
   -d AppDir=$PWD/stage/x64/app/ `
+  -d NoticesDir=$PWD/stage/x64/notices/ `
   -d SparsePackage=$PWD/build/installer/Fauna-Sparse.msix
 
 # ARM64 (from Git Bash on Windows, replace $PWD with $(pwd -W) — clean-checkout step 5)
 wix build -arch arm64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
   -ext WixToolset.Firewall.wixext `
   -o Fauna-Setup-arm64.msi apps/fauna-windows/installer/*.wxs `
+  -loc apps/fauna-windows/installer/Strings.wxl `
   -d SyncBin=$PWD/stage/arm64/fauna-sync-agent.exe `
   -d TuiBin=$PWD/stage/arm64/fauna-tui.exe `
   -d CliBin=$PWD/stage/arm64/fauna-cli.exe `
@@ -214,6 +228,7 @@ wix build -arch arm64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
   -d ShellDll=$PWD/stage/arm64/fauna_shell.dll `
   -d IconDir=$PWD/stage/arm64/icons/ `
   -d AppDir=$PWD/stage/arm64/app/ `
+  -d NoticesDir=$PWD/stage/arm64/notices/ `
   -d SparsePackage=$PWD/build/installer/Fauna-Sparse.msix
 ```
 

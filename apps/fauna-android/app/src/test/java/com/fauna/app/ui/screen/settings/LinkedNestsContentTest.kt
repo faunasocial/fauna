@@ -74,6 +74,15 @@ class LinkedNestsContentTest {
         holderCandidates = listOf(holder),
     )
 
+    /** The "Keep my mail searchable on this nest" option — the keyless
+     *  `materialize{mail}` tuple, held by the nest's own materializer. */
+    private fun materializeMailOption() = TrustMintOption(
+        useCase = TrustMintUseCase.MATERIALIZE_MAIL,
+        tier = null,
+        scope = listOf(TrustScope(`class` = "materialize", kind = "mail", tier = null)),
+        holderCandidates = listOf("materializer"),
+    )
+
     private fun homeRow(
         trustGrants: List<TrustGrantRow> = emptyList(),
         trustHistory: List<TrustHistoryRow> = emptyList(),
@@ -138,10 +147,11 @@ class LinkedNestsContentTest {
         grantId: ByteArray = byteArrayOf(1, 2, 3),
         liveness: TrustLiveness = TrustLiveness.ACTIVE,
         unattested: Boolean = false,
+        scope: List<TrustScope> = listOf(TrustScope(`class` = "content.read", kind = "mail", tier = null)),
     ) = TrustGrantRow(
         grantId = grantId,
         holder = byteArrayOf(9, 9, 9),
-        scope = listOf(TrustScope(`class` = "content.read", kind = "mail", tier = null)),
+        scope = scope,
         lastsUntil = 4_102_444_800L, // 2100-01-01, far future — status assertions don't depend on "now"
         liveness = liveness,
         // The post-succession review mark (succession-aftermath.md § Adjudicating
@@ -915,5 +925,39 @@ class LinkedNestsContentTest {
         composeTestRule.onNodeWithTag("nest-trust-blessed-toggle").performScrollTo().assertIsOff()
             .performClick()
         assertEquals("aa".repeat(32) to true, set)
+    }
+
+    // ── The materialization option (nests.md § Trust facet — grants → Mint →
+    //    The materialization option; tui leads) ──
+
+    /** Picking the materialization option renders its honesty note before the
+     *  confirm and pre-selects the standard window; an ordinary option has no
+     *  note — absent, not empty. */
+    @Test
+    fun theMaterializationOptionStatesItsBoundBeforeTheConfirm() {
+        render(
+            snapshot(home = homeRow(mintOptions = listOf(paywalledOption(tier = "gold"), materializeMailOption()))),
+        )
+        composeTestRule.onNodeWithTag("nest-trust-grant-mint-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("nest-trust-mint-materialize-note").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("nest-trust-mint-scope-select").performScrollTo().performClick()
+        composeTestRule.onNodeWithText(paywalledLabel("gold")).performClick()
+        composeTestRule.onNodeWithTag("nest-trust-mint-materialize-note").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("nest-trust-mint-scope-select").performScrollTo().performClick()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.nests_mint_option_materialize_mail)).performClick()
+        composeTestRule.onNodeWithTag("nest-trust-mint-materialize-note")
+            .assertTextEquals(ctx.getString(R.string.nests_mint_materialize_note))
+        composeTestRule.onNodeWithTag("nest-trust-mint-duration-select")
+            .assertTextContains("DUR:STANDARD")
+    }
+
+    /** A materialization grant's row carries the third honest-bound regime. */
+    @Test
+    fun aMaterializationGrantRowCarriesItsBound() {
+        render(snapshot(home = homeRow(trustGrants = listOf(
+            grant(scope = listOf(TrustScope(`class` = "materialize", kind = "mail", tier = null))),
+        ))))
+        composeTestRule.onNodeWithTag("nest-trust-grant-bound-note")
+            .assertTextEquals(ctx.getString(R.string.nests_bound_note_materialize_mail))
     }
 }

@@ -846,10 +846,20 @@ pub fn build_bounded_mail_grant_blob(
 ///   - **32 bytes**: the recipient-mail X25519 HPKE secret
 ///     (`derive_recipient_hpke_keypair`) — opens **classical** records only; an
 ///     X-Wing record returns a typed error (never a mis-decrypt).
-///   - **32 + 2400 bytes** (`x25519_secret ∥ mlkem_decaps_key`, the
-///     `derive_recipient_xwing_keypair` halves): opens **both** classical and
-///     hybrid (X-Wing) records, exactly as the AUTH'd MDA session does via the
-///     snapshot's `mlkem_dk`.
+///   - **`k × (32 + 2400)` bytes** (`x25519_secret ∥ mlkem_decaps_key`, the
+///     `derive_recipient_xwing_keypair` halves; `k ≥ 2` a bounded grant's
+///     rotation-boundary epoch wrap): opens **both** classical and hybrid
+///     (X-Wing) records under the secret(s) it carries.
+///   - **`k × 2464` bytes, `k ≤ 64`**: a master-key payload — per MSEK
+///     generation its standing secret then its mail-epoch root — which runs
+///     the epoch trial chain keyed off `record_unix_secs`, so it opens
+///     standing- and epoch-sealed mail of every generation it carries
+///     (`capability-grants.md` § Capability tiering → *What a master-key mail
+///     wrap conveys*).
+///
+/// `record_unix_secs` is the record's seal instant (the nest's `stored_at`,
+/// never the message's own `Date:`; `0` = unknown) — the instant the Go drain
+/// already selects candidate keys by.
 ///
 /// Either shape is a minimal derived per-kind key — never MSEK / identity /
 /// index-master (`key-material-hierarchy.md` rule #7). The caller (the Go drain)
@@ -867,21 +877,21 @@ pub fn build_bounded_mail_grant_blob(
 pub fn open_mail_record_with_key(
     envelope_bytes: Vec<u8>,
     key: Vec<u8>,
+    record_unix_secs: u64,
 ) -> Result<Vec<u8>, FfiError> {
     let envelope = MailRecordEnvelope::from_canonical_bytes(&envelope_bytes).map_err(|e| {
         FfiError::General {
             msg: format!("decode mail-record envelope: {e}"),
         }
     })?;
-    // The 32-vs-2432 length dispatch is the shared `content.read{mail}` open
-    // (`fauna_mls::wrapped_blob::unseal_mail_record_with_derived_key`) — the
-    // same primitive the epoch trial chain uses (design § 4), so a grant key
-    // and an epoch-derived key open by identical rules.
-    fauna_mls::wrapped_blob::unseal_mail_record_with_derived_key(&envelope, &key).map_err(|e| {
-        FfiError::General {
+    // The ONE grant-holder open (`fauna_mls::wrapped_blob::
+    // open_mail_record_with_grant_key`): master form first, else the shared
+    // derived-key length dispatch the epoch trial chain also uses (design § 4).
+    let key = zeroize::Zeroizing::new(key);
+    fauna_mls::wrapped_blob::open_mail_record_with_grant_key(&envelope, &key, record_unix_secs)
+        .map_err(|e| FfiError::General {
             msg: format!("open mail-record with grant key: {e}"),
-        }
-    })
+        })
 }
 
 /// Report whether `bytes` are a sealed `MailRecordEnvelope` (strict
@@ -3202,9 +3212,10 @@ pub fn seal_record_to_recipient_xwing(
 }
 
 /// [`open_mail_record_with_key`] for a record of any `kind` — opens a sealed
-/// envelope with a grant's derived per-kind key (a `content.read{calendar}`
-/// payload is the calendar's own secret, in the mail payload's 32-vs-2432 byte
-/// contract; `owner-key-material.md` § Path B-sibling-5 → *Capability
+/// envelope with a grant's derived per-kind key (a mail record through the
+/// grant-holder mail opener, master-key payload included; a
+/// `content.read{calendar}` payload is the calendar's own secret, in the mail
+/// payload's 32-vs-2432 byte contract; `owner-key-material.md` § Path B-sibling-5 → *Capability
 /// payload*). The envelope must declare `kind`; a key of another kind fails the
 /// open, never mis-decrypts.
 ///
@@ -3224,10 +3235,18 @@ pub fn open_record_with_key(
             msg: format!("decode {} envelope: {e}", kind.as_str()),
         }
     })?;
-    fauna_mls::wrapped_blob::unseal_record_with_derived_key(kind, &envelope, &key).map_err(|e| {
-        FfiError::General {
-            msg: format!("open {} with grant key: {e}", kind.as_str()),
+    // A mail record opens through the ONE grant-holder mail opener, so a
+    // `content.read{mail}` master-key payload (`k × 2464`) opens here as it
+    // does at every other holder site; the seal instant is unknown at this
+    // door (`0`), which walks the generations newest first.
+    let opened = match kind {
+        RecordKind::Mail => {
+            fauna_mls::wrapped_blob::open_mail_record_with_grant_key(&envelope, &key, 0)
         }
+        _ => fauna_mls::wrapped_blob::unseal_record_with_derived_key(kind, &envelope, &key),
+    };
+    opened.map_err(|e| FfiError::General {
+        msg: format!("open {} with grant key: {e}", kind.as_str()),
     })
 }
 
@@ -4008,6 +4027,7 @@ mod bounded_mint_prior_generation_tests {
             let opened = open_mail_record_with_key(
                 env.to_canonical_bytes().expect("encode envelope"),
                 payload.clone(),
+                0,
             )
             .unwrap_or_else(|e| panic!("{label}-generation boundary content must open: {e:?}"));
             assert_eq!(opened, b"boundary body");
@@ -4031,13 +4051,13 @@ mod open_with_key_tests {
         let envelope =
             seal_to_recipient(plaintext.clone(), kp.pubkey.clone()).expect("seal classical");
 
-        let opened = open_mail_record_with_key(envelope.clone(), kp.secret.clone())
+        let opened = open_mail_record_with_key(envelope.clone(), kp.secret.clone(), 0)
             .expect("32-byte grant key opens a classical record");
         assert_eq!(opened, plaintext);
 
         let wrong = generate_x25519_keypair();
         assert!(
-            open_mail_record_with_key(envelope, wrong.secret).is_err(),
+            open_mail_record_with_key(envelope, wrong.secret, 0).is_err(),
             "a wrong grant key must fail, never mis-decrypt"
         );
     }
@@ -4055,19 +4075,19 @@ mod open_with_key_tests {
         let hybrid = seal_to_recipient_xwing(plaintext.clone(), kp.public.to_bytes().to_vec())
             .expect("seal x-wing");
         let opened =
-            open_mail_record_with_key(hybrid.clone(), concat.clone()).expect("hybrid key opens");
+            open_mail_record_with_key(hybrid.clone(), concat.clone(), 0).expect("hybrid key opens");
         assert_eq!(opened, plaintext);
 
         // Classical-sealed record to the same x25519 half also opens.
         let classical = seal_to_recipient(plaintext.clone(), kp.public.x25519_public().to_vec())
             .expect("seal classical");
         let opened =
-            open_mail_record_with_key(classical, concat).expect("hybrid key opens classical");
+            open_mail_record_with_key(classical, concat, 0).expect("hybrid key opens classical");
         assert_eq!(opened, plaintext);
 
         // The bare 32-byte half must NOT open the hybrid record (typed error).
         assert!(
-            open_mail_record_with_key(hybrid, kp.secret.x25519_secret().to_vec()).is_err(),
+            open_mail_record_with_key(hybrid, kp.secret.x25519_secret().to_vec(), 0).is_err(),
             "classical-only key rejects a hybrid record"
         );
     }
@@ -4076,7 +4096,7 @@ mod open_with_key_tests {
     fn open_with_key_rejects_odd_key_lengths() {
         let kp = generate_x25519_keypair();
         let envelope = seal_to_recipient(b"x".to_vec(), kp.pubkey).expect("seal");
-        let err = open_mail_record_with_key(envelope, vec![0u8; 64])
+        let err = open_mail_record_with_key(envelope, vec![0u8; 64], 0)
             .expect_err("a 64-byte key is neither shape");
         let msg = format!("{err:?}");
         assert!(msg.contains("2432"), "error names both shapes: {msg}");
@@ -4187,7 +4207,7 @@ mod perf_bench {
                 let sk = ckp.secret.clone();
                 let env = env.clone();
                 bench("open_mail_record_with_key", move || {
-                    let _ = open_mail_record_with_key(env.clone(), sk.clone()).unwrap();
+                    let _ = open_mail_record_with_key(env.clone(), sk.clone(), 0).unwrap();
                 });
             }
         }
@@ -4213,7 +4233,7 @@ mod perf_bench {
                 let key = hconcat.clone();
                 let env = env.clone();
                 bench("open (hybrid concat key)", move || {
-                    let _ = open_mail_record_with_key(env.clone(), key.clone()).unwrap();
+                    let _ = open_mail_record_with_key(env.clone(), key.clone(), 0).unwrap();
                 });
             }
         }

@@ -28,9 +28,12 @@ self-invalidation guard ``test_conv_rail_push_wakes_web`` uses:
 single-rail push wakes, so growth there means some other arm ran and the
 attribution to the push arm would be unearned.
 
-Runs on the direct-Rust clients (linux + tui) and apple, whose real rail opens
-at launch under ``real_conversations`` — web is out of scope here; its own leg of
-this same property is ``test_conv_rail_push_wakes_web``.
+Runs on the direct-Rust clients (linux + tui), apple and windows, whose real
+rail opens at launch under ``real_conversations`` — web is out of scope here;
+its own leg of this same property is ``test_conv_rail_push_wakes_web``. windows
+needs no arm of its own: its ``fauna-ffi`` factory hands the same
+``conv_push_source`` to ``ConversationsSession`` that linux's in-process wiring
+does, and its second seat is ``_launch_second_real_faunamls_app``'s windows arm.
 """
 
 from __future__ import annotations
@@ -53,10 +56,13 @@ pytestmark = pytest.mark.tier_3
 # said `real-conversations gate CLOSED`), so an apple record from then proves
 # nothing. The marker is what makes apple's run a real rail, and
 # `helpers/real_rail_control.py` is what made the defect legible instead of silent.
+# windows' launch gate is the same marker; there a missing marker fails loudly
+# (`real_faunamls_app`'s readiness poll on `data.conv_real_backend_active`).
 @pytest.mark.linux
 @pytest.mark.tui
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.real_conversations
 @pytest.mark.feature("conversations")
 def test_conv_rail_push_wakes_native(

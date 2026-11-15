@@ -48,6 +48,7 @@ import urllib.request
 import pytest
 
 from helpers.room_seats import (  # noqa: F401 — room_app/room_seat_pair are pytest fixtures adopted by import
+    bubble_texts,
     MESSAGE_BUDGET_S,
     WELCOME_BUDGET_S,
     found_community_room,
@@ -108,11 +109,6 @@ def _poison_seat_key(port: int, room_id: str, member_hex: str) -> bool:
     with urllib.request.urlopen(req, timeout=30.0) as resp:
         assert resp.status == 200, f"the seat-key poisoning hook returned {resp.status}"
         return bool(json.loads(resp.read()).get("poisoned"))
-
-
-def _bubble_texts(seat) -> list[str]:
-    d = seat.app.driver
-    return [d.get_text("dm-message-text", index=i) or "" for i in range(d.count("dm-message-text"))]
 
 
 @pytest.mark.feature("group-conversations")
@@ -180,7 +176,7 @@ def test_a_community_room_seat_that_lost_its_key_is_rekeyed_by_its_own_app(room_
     assert not founder.app.has_error(), founder.app.error_text()
     wait_for(
         "the founder's post-heal message painting on the member's seat",
-        lambda: _bubble_texts(member),
+        lambda: bubble_texts(member),
         lambda texts: any(out in t for t in texts),
         MESSAGE_BUDGET_S,
         diagnose=lambda: f"{seat_story(member)}\n{seat_log(member, 'generation', 'room')}",
@@ -190,7 +186,7 @@ def test_a_community_room_seat_that_lost_its_key_is_rekeyed_by_its_own_app(room_
     assert not member.app.has_error(), member.app.error_text()
     wait_for(
         "the member's post-heal message painting on the founder's seat",
-        lambda: _bubble_texts(founder),
+        lambda: bubble_texts(founder),
         lambda texts: any(back in t for t in texts),
         MESSAGE_BUDGET_S,
         diagnose=lambda: f"{seat_story(founder)}\n{seat_log(founder, 'generation', 'room')}",

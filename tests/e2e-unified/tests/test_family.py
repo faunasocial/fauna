@@ -704,6 +704,102 @@ def test_family_transfer_accept_journey(admin_app, request, nest_instance):
 
 
 @pytest.mark.feature("family-safety")
+def test_family_admin_takes_over_guardianship(admin_app, request, nest_instance):
+    """The admin arm of the transfer, outcome 63's admin half
+    (family-safety.md § App surface → Admin take-over): the ward's Users-hub
+    row names its guardian and offers the admin's one family act; arming and
+    confirming it completes at once (a self-proposal needs no consent step),
+    the row re-reads supervised by the admin with no offer, the admin's own
+    Family page lists the ward, and the old guardian no longer does."""
+    app = admin_app
+
+    # Its OWN pair (one anonymous submit), not `family_pair`: the take-over
+    # re-points the link to the admin, so the pairing does not survive the test.
+    guardian_identity, ward_identity, guardian_handle, ward_handle = _admit_own_pair(
+        nest_instance, "take-over"
+    )
+    ward_hex = ward_identity["actor_id_hex"]
+    admin_hex = nest_instance["admin"]["actor_id_hex"]
+
+    app.admin.navigate_users()
+    row = app.admin.user_row_index(ward_hex)
+    supervised_by = app.admin.supervised_by_text(row)
+    assert guardian_handle in supervised_by, (
+        f"the ward's row should name its guardian: {supervised_by!r}. "
+        f"error: {app.error_text()!r}"
+    )
+    assert app.admin.take_over_offered(row), "a ward another account guards must offer take-over"
+
+    summary = app.admin.arm_take_over(row)
+    assert ward_handle in summary and guardian_handle in summary, (
+        f"the armed confirm should name the ward and the current guardian: {summary!r}"
+    )
+    app.admin.confirm_take_over(row)
+
+    # The re-read row: supervised by the admin now, and no offer (the viewer
+    # already guards it). Polled on the row's own text — the observable.
+    deadline = time.monotonic() + 20.0
+    supervised_by = ""
+    while time.monotonic() < deadline:
+        app.admin.navigate_users()
+        row = app.admin.user_row_index(ward_hex)
+        supervised_by = app.admin.supervised_by_text(row)
+        if supervised_by and guardian_handle not in supervised_by:
+            break
+        time.sleep(0.5)
+    assert supervised_by and guardian_handle not in supervised_by, (
+        f"the row should re-read supervised by the admin, not {guardian_handle!r}: "
+        f"{supervised_by!r}. error: {app.error_text()!r}"
+    )
+    assert not app.admin.take_over_offered(row), (
+        "a row the viewing admin guards must not offer take-over"
+    )
+    # The label is the admin's handle, or the full actor hex for a handle-less
+    # admin (the shared fallback) — the handle read off the nest, which the
+    # session fixture's admin record does not carry. The projection's guardian
+    # is read beside it: the ground truth the row renders.
+    with WsRpcAdminClient(
+        nest_instance["url"],
+        bytes.fromhex(admin_hex),
+        bytes(nest_instance["admin"]["signing_key"]),
+    ) as admin_rpc:
+        accounts = admin_rpc.users_list_all()
+    by_id = {bytes(u["actor_id"]).hex(): u for u in accounts}
+    admin_label = by_id[admin_hex].get("handle") or admin_hex
+    ward_guardian = by_id[ward_hex].get("guardian") or {}
+    assert bytes(ward_guardian.get("actor_id", b"")).hex() == admin_hex, (
+        f"the nest projection should name the admin as the ward's guardian: {ward_guardian!r}"
+    )
+    assert admin_label in supervised_by, (
+        f"the row should name the admin ({admin_label!r}) as guardian: {supervised_by!r}"
+    )
+
+    # The admin is now the guardian: their own Family page lists the ward.
+    app.family.navigate()
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and ward_handle not in app.family.ward_handles():
+        time.sleep(0.5)
+        app.family.reload()
+    assert ward_handle in app.family.ward_handles(), (
+        f"the taken-over ward should appear in the admin's Family page. "
+        f"error: {app.error_text()!r}"
+    )
+
+    # …and the old guardian no longer lists it.
+    from conftest import _login_app_as
+    app.driver.reset()
+    _login_app_as(app, request, nest_instance, guardian_identity)
+    app.family.navigate()
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and ward_handle in app.family.ward_handles():
+        time.sleep(0.5)
+        app.family.reload()
+    assert ward_handle not in app.family.ward_handles(), (
+        f"the old guardian still lists the taken-over ward. error: {app.error_text()!r}"
+    )
+
+
+@pytest.mark.feature("family-safety")
 def test_family_transfer_decline_journey(admin_app, request, nest_instance, family_pair):
     """The decline arm: B refuses, the prompt clears, and the link stands —
     A still guards the ward and the pending marker is gone (declining is
@@ -3317,7 +3413,6 @@ def test_family_editor_states_which_content_categories_are_not_detected_yet(
     ads yet, so a limit on them waits until a post or message is labelled that
     way (`family-policy-content-hint`, the shared `family.policy_content_hint`)."""
     app = admin_app
-    app.family.require_content_hint()
     guardian_identity, _ward_identity, _guardian_handle, ward_handle = family_pair
 
     _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)

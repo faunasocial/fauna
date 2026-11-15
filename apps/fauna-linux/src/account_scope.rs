@@ -54,7 +54,7 @@ fn account_state_dir_under(base: &std::path::Path, actor_id_hex: &str) -> PathBu
 
 /// The active account's actor id (hex), if any is signed in yet. Shared
 /// resolution for the free-function call sites that don't already have the
-/// actor in hand (`app.rs`'s `AuthSuccess` handler does, via `state.borrow()`
+/// actor in hand (`app.rs`'s `SessionEstablished` handler does, via `state.borrow()`
 /// — this is for `settings::privacy`/`sync`, whose entry points are called
 /// with no session state threaded through).
 pub(crate) fn active_actor_id_hex() -> Option<String> {
@@ -88,7 +88,7 @@ fn erase_bases(fauna_base: &Path) -> [PathBuf; 3] {
 }
 
 /// Become (or remain) one of this account's serving instances — called from
-/// `app.rs`'s `AuthSuccess` arm BEFORE any of the account's scoped state
+/// `app.rs`'s `SessionEstablished` arm BEFORE any of the account's scoped state
 /// opens (`account-scoping.md` § Concurrent instances).
 ///
 /// **linux is RETIRED (W5.6 (account-data-plane.md § Workstreams) trickle-down, mirroring tui's 2026-08-15 leg): it
@@ -313,11 +313,18 @@ fn remove_account_under(
     fauna_base: Option<&Path>,
     actor_id_hex: &str,
 ) -> Result<RemovalOwed, String> {
+    let store_root = bases.store_root;
     if let Some(blocked) =
         fauna_client_accounts::remove_account_blocked_as(serving_here, bases, actor_id_hex)
     {
         tracing::warn!("[settings/account] remove-account REFUSED ({blocked:?}) — {actor_id_hex}");
         return Err(blocked.copy().resolve(crate::i18n::strings::lookup));
+    }
+    if let Some(owed) =
+        fauna_client_accounts::remove_account_carry_owed(registry, store_root, actor_id_hex)
+    {
+        tracing::warn!("[settings/account] remove-account REFUSED (carry owed) — {actor_id_hex}");
+        return Err(owed.copy().resolve(crate::i18n::strings::lookup));
     }
     // The removal joins the sign-out record before its registry step, so the
     // store that step's crash-safety argument leaves unreached is finished by
@@ -457,8 +464,10 @@ pub(crate) fn record_sign_out() -> fauna_client_accounts::SignOutRecord {
 /// registry, with linux's own credential acts ([`LinuxFinishHost`]). Twin of
 /// tui's `account_scope::finish`.
 ///
-/// `dismiss_agent` is false for the gesture, whose own stop already dismissed
-/// the sync agent (`account_runtime::teardown` awaits the un-provision);
+/// `caller` says which of the three this run is: the sync agent is not
+/// dismissed again for the gesture, whose own stop already dismissed it (`account_runtime::teardown` awaits the un-provision), and
+/// only Remove Again re-sweeps the residue's paths while the registry names
+/// somebody;
 /// `written` is the gesture's own record (`None` elsewhere).
 ///
 /// When the run wiped the credentials, the in-memory state deliberately built
@@ -467,21 +476,14 @@ pub(crate) fn record_sign_out() -> fauna_client_accounts::SignOutRecord {
 /// SUCCESSION_KIT_OWED}`): an erase destroys every identity on the box, so
 /// there is no successor left to owe a kit to.
 pub(crate) fn finish(
-    dismiss_agent: bool,
+    caller: fauna_client_accounts::FinishCaller,
     written: Option<fauna_client_accounts::SignOutRecord>,
 ) -> fauna_client_accounts::SignOutFinish {
     let registry = crate::account_registry();
     let namespace = crate::client::credential_namespace();
     let outcome = match install_state_base() {
         Some(base) => with_serving_bases(|serving| {
-            finish_under(
-                &registry,
-                &namespace,
-                &base,
-                serving,
-                dismiss_agent,
-                written,
-            )
+            finish_under(&registry, &namespace, &base, serving, caller, written)
         }),
         None => finish_without_base(&registry, &namespace, written),
     };
@@ -538,14 +540,15 @@ fn finish_under(
     namespace: &fauna_credential_store::CredentialStore,
     fauna_base: &Path,
     serving: fauna_client_accounts::ServingBases<'_>,
-    dismiss_agent: bool,
+    caller: fauna_client_accounts::FinishCaller,
     written: Option<fauna_client_accounts::SignOutRecord>,
 ) -> fauna_client_accounts::SignOutFinish {
     let swept = erase_bases(fauna_base);
     let mut host = LinuxFinishHost {
         registry,
         namespace,
-        dismiss_agent,
+        // The gesture's own stop already dismissed the sync agent.
+        dismiss_agent: caller != fauna_client_accounts::FinishCaller::Gesture,
     };
     fauna_client_accounts::finish_sign_out_with(
         fauna_client_accounts::FinishSeat {
@@ -553,6 +556,7 @@ fn finish_under(
             swept_bases: &swept,
             serving,
             registry,
+            caller,
         },
         &mut host,
         written,
@@ -698,7 +702,7 @@ pub(crate) fn paint_finish(outcome: &fauna_client_accounts::SignOutFinish) {
 /// lands on the fresh wizard painting the retry's refusal line, whose Remove
 /// Again re-runs the routine (decision 4).
 pub(crate) fn finish_at_launch() -> bool {
-    let outcome = finish(true, None);
+    let outcome = finish(fauna_client_accounts::FinishCaller::Launch, None);
     paint_finish(&outcome);
     outcome.fails_closed()
 }
@@ -709,7 +713,7 @@ pub(crate) fn retry_residue() {
     if sign_out_residue().is_none() {
         return;
     }
-    let outcome = finish(true, None);
+    let outcome = finish(fauna_client_accounts::FinishCaller::RemoveAgain, None);
     paint_finish(&outcome);
 }
 
@@ -1012,7 +1016,7 @@ mod tests {
                 state_base: Some(&fauna_base),
                 store_root: Some(&fauna_base.join("sync")),
             },
-            false,
+            fauna_client_accounts::FinishCaller::Gesture,
             None,
         );
 
@@ -1058,7 +1062,7 @@ mod tests {
             &namespace,
             &seats.fauna_base,
             seats.linux(),
-            false,
+            fauna_client_accounts::FinishCaller::Gesture,
             None,
         )
     }

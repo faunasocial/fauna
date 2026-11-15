@@ -34,7 +34,18 @@
 //! fauna-shellext-fixture seed     --dir <folder> --file <name> --folder <set> [--folder-id <ref>] [--mode <on-demand|always>] [--content <text>]
 //! fauna-shellext-fixture status   --file <abs-path>
 //! fauna-shellext-fixture teardown --dir <folder> --folder <set> [--folder-id <ref>] [--file <name>]
+//! fauna-shellext-fixture register-shell   --dll <abs-path-to-fauna_shell.dll>
+//! fauna-shellext-fixture unregister-shell
 //! ```
+//! `register-shell` writes the shell extension's per-user registration
+//! (`fauna_shell::per_user`: every COM class, the file and folder verbs, under
+//! `HKEY_CURRENT_USER`, no elevation) naming `--dll`, so Explorer loads a build
+//! output for the run; it steps aside, writing nothing, when the machine-wide
+//! (MSI) registration is present. It prints `SHELL_REGISTRATION=per-user` or
+//! `SHELL_REGISTRATION=machine-wide`; `unregister-shell` removes the per-user keys
+//! and prints `SHELL_REGISTRATION=removed`. The caller holds the registration's
+//! named mutex (`fauna_shell::per_user::REGISTRATION_MUTEX`) from before
+//! `register-shell` until after `unregister-shell`.
 //! `--folder-id` is the set's `FolderRef` wire form (default [`FIXTURE_REF`]):
 //! the binding is keyed by it, and so is the state DB the status read opens.
 //! `--mode` is the location's sync mode (default `on-demand`): `always` binds an
@@ -42,12 +53,23 @@
 //! folder is enumerable even with a capability present.
 //! `seed`/`status` print `STATUS=<Synced|CloudOnly|...>` and `FILE=<abs-path>` on
 //! success so the PowerShell orchestrator can parse the result.
+//!
+//! A binding is an account's (since 2026-11-06 the agent refuses `AddLocation`
+//! while no account is provisioned), so `seed` against an agent with none first
+//! provisions a fixture account whose nest is a loopback port nothing serves —
+//! the agent's content-key resolution then names no set, so no engine starts and
+//! no cfapi root is registered — and seeds the row under that account's scope,
+//! printing `ACCOUNT=<actor hex>`. An agent that already has an account keeps
+//! its own capability: the fixture never provisions over one.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fauna_core::folder_keys::FolderRef;
-use fauna_ipc::sync::{FileStatus, RequestMethod, ResponsePayload, ResponseResult};
+use fauna_ipc::sync::{
+    BINDINGS_NEED_AN_ACCOUNT_PREFIX, BearerToken, FileStatus, RequestMethod, ResponsePayload,
+    ResponseResult, SyncCapability,
+};
 use fauna_ipc::sync_pipe_client::SyncPipeClient;
 use fauna_sync_engine::db::{SyncDb, SyncState};
 
@@ -112,9 +134,75 @@ fn sync_mode(args: &[String]) -> Result<String> {
 }
 
 /// The set's identity-keyed state DB — the path the agent's status read opens
-/// (`SyncPaths::sync_db_path_for_ref`).
-fn set_db_path(args: &[String], set: FolderRef) -> Result<PathBuf> {
-    Ok(base_dir(args)?.join(format!("{}.db", set.db_component())))
+/// (`SyncPaths::sync_db_path_for_ref`): under the account's scope
+/// (`<base>/<actor hex>`, the one shared derivation) when `scope` names one,
+/// else the flat base.
+fn set_db_path(args: &[String], set: FolderRef, scope: Option<&str>) -> Result<PathBuf> {
+    let base = base_dir(args)?;
+    let dir = match scope {
+        Some(hex) => fauna_sync_engine::db::actor_state_dir(&base, hex)?,
+        None => base,
+    };
+    Ok(set.state_db_path(&dir))
+}
+
+/// The account the fixture provisions on an agent that has none — a binding
+/// write is refused until one is (`fauna_ipc::sync::BINDINGS_NEED_AN_ACCOUNT_PREFIX`,
+/// the binding store being an account's). Its nest is a loopback port nothing
+/// serves, so the agent's content-key resolution names no set and no engine
+/// starts: no cfapi root is registered, and the seeded folder stays an
+/// ordinary, enumerable one whatever its mode.
+const FIXTURE_ACTOR: [u8; 32] = [0xf1; 32];
+const FIXTURE_NEST_URL: &str = "http://127.0.0.1:9";
+
+/// The fixture account's scope component, in the agent's spelling (lowercase hex).
+fn fixture_actor_hex() -> String {
+    FIXTURE_ACTOR.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn fixture_capability() -> SyncCapability {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    SyncCapability::new(
+        vec![0x5e; 32],
+        FIXTURE_ACTOR.to_vec(),
+        FIXTURE_NEST_URL.to_string(),
+        "shellext-fixture".to_string(),
+        BearerToken::new("shellext-fixture".to_string(), now.as_secs() + 86_400),
+    )
+    .with_provisioned_at_ms(u64::try_from(now.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// `AddLocation`, provisioning [`fixture_capability`] first when the agent
+/// refuses it for want of an account. Returns the account scope the binding
+/// landed in when the fixture provisioned it; `None` when the agent already
+/// had an account (its capability is never replaced), whose scope the fixture
+/// cannot know — the seed then writes the flat path, and the status check
+/// below reports `NotTracked` if that is not where the agent reads.
+fn add_location(client: &SyncPipeClient, dir: &str) -> Result<Option<String>> {
+    let first = client
+        .request(RequestMethod::AddLocation {
+            path: dir.to_string(),
+        })
+        .context("pipe request AddLocation failed")?;
+    let refused = match first.result {
+        ResponseResult::Ok(_) => return Ok(None),
+        ResponseResult::Err(msg) if msg.starts_with(BINDINGS_NEED_AN_ACCOUNT_PREFIX) => msg,
+        ResponseResult::Err(msg) => bail!("service rejected AddLocation: {msg}"),
+    };
+    eprintln!("agent has no account ({refused}); provisioning the fixture account");
+    call(
+        client,
+        RequestMethod::ProvisionCapability(fixture_capability()),
+    )?;
+    call(
+        client,
+        RequestMethod::AddLocation {
+            path: dir.to_string(),
+        },
+    )?;
+    Ok(Some(fixture_actor_hex()))
 }
 
 /// Send one request and unwrap the service's `Ok`/`Err` reply.
@@ -172,11 +260,15 @@ fn seed(args: &[String]) -> Result<()> {
 
     // 2. Drive the target service's config via its own pipe so the folder is a
     //    served, bound root in `mode`. `SetLocationSyncMode`/`SetLocationFolder`
-    //    reconcile, which no-ops without a provisioned capability — so against a
-    //    NO-capability service NO cfapi root is registered and an on-demand folder
-    //    stays a normal, enumerable folder (the whole point of the harness).
+    //    reconcile, which builds an engine only for a set the agent's content-key
+    //    resolution names — and with the fixture account's nest unserved it names
+    //    none — so NO cfapi root is registered and an on-demand folder stays a
+    //    normal, enumerable folder (the whole point of the harness).
     let client = connect(args)?;
-    call(&client, RequestMethod::AddLocation { path: dir.clone() })?;
+    let scope = add_location(&client, &dir)?;
+    if let Some(hex) = &scope {
+        println!("ACCOUNT={hex}");
+    }
     call(
         &client,
         RequestMethod::SetLocationSyncMode {
@@ -196,7 +288,7 @@ fn seed(args: &[String]) -> Result<()> {
     // 3. Seed the per-set DB row (folder-relative path, forward slashes) as
     //    Synced. `%LOCALAPPDATA%\Fauna\sync\fsid-<ref>.db`; opened on demand by the
     //    service per query (WAL, 5 s busy_timeout) so an external writer is safe.
-    let db_path = set_db_path(args, set)?;
+    let db_path = set_db_path(args, set, scope.as_deref())?;
     let rel = file.replace('\\', "/");
     {
         let db = SyncDb::open(&db_path)
@@ -248,16 +340,55 @@ fn teardown(args: &[String]) -> Result<()> {
         let _ = call(&client, RequestMethod::RemoveLocation { path: dir.clone() });
     }
 
-    // Delete the seeded DB (+ WAL/SHM sidecars) and the on-disk folder.
-    let db_path = set_db_path(args, set)?;
-    for suffix in ["", "-wal", "-shm"] {
-        let p = PathBuf::from(format!("{}{suffix}", db_path.display()));
-        let _ = std::fs::remove_file(&p);
+    // Delete the seeded DB (+ WAL/SHM sidecars) — at either path a seed writes:
+    // under the fixture account's scope, or flat — and the on-disk folder.
+    let hex = fixture_actor_hex();
+    for scope in [Some(hex.as_str()), None] {
+        let db_path = set_db_path(args, set, scope)?;
+        for suffix in ["", "-wal", "-shm"] {
+            let p = PathBuf::from(format!("{}{suffix}", db_path.display()));
+            let _ = std::fs::remove_file(&p);
+        }
     }
     if Path::new(&dir).exists() {
         std::fs::remove_dir_all(&dir).with_context(|| format!("remove_dir_all {dir}"))?;
     }
     println!("TEARDOWN=ok");
+    Ok(())
+}
+
+/// Register the shell extension per user for the run, naming `--dll` (an absolute
+/// path, so the `InprocServer32` value resolves whatever the loader's cwd).
+#[cfg(windows)]
+fn register_shell(args: &[String]) -> Result<()> {
+    let dll = PathBuf::from(require(args, "--dll")?);
+    if !dll.is_file() {
+        bail!("--dll {} is not a file", dll.display());
+    }
+    if fauna_shell::per_user::machine_registered() {
+        println!("SHELL_REGISTRATION=machine-wide");
+        return Ok(());
+    }
+    // `absolute`, not `canonicalize`: no `\\?\` prefix in a value COM loads from.
+    let dll =
+        std::path::absolute(&dll).with_context(|| format!("absolute path of {}", dll.display()))?;
+    fauna_shell::per_user::register(&dll.to_string_lossy())
+        .context("write the per-user shell registration")?;
+    if !fauna_shell::per_user::registered() {
+        bail!("wrote the per-user shell registration but its verb key is not readable");
+    }
+    println!("SHELL_REGISTRATION=per-user");
+    Ok(())
+}
+
+/// Remove the per-user registration `register-shell` wrote.
+#[cfg(windows)]
+fn unregister_shell() -> Result<()> {
+    fauna_shell::per_user::unregister().context("remove the per-user shell registration")?;
+    if fauna_shell::per_user::registered() {
+        bail!("removed the per-user shell registration but its verb key is still there");
+    }
+    println!("SHELL_REGISTRATION=removed");
     Ok(())
 }
 
@@ -268,9 +399,13 @@ fn main() -> Result<()> {
         Some("seed") => seed(&args[2..]),
         Some("status") => status(&args[2..]),
         Some("teardown") => teardown(&args[2..]),
+        #[cfg(windows)]
+        Some("register-shell") => register_shell(&args[2..]),
+        #[cfg(windows)]
+        Some("unregister-shell") => unregister_shell(),
         other => {
             eprintln!(
-                "usage: fauna-shellext-fixture <seed|status|teardown> ...\n\
+                "usage: fauna-shellext-fixture <seed|status|teardown|register-shell|unregister-shell> ...\n\
                  got: {other:?}\n\
                  see the module doc for flags."
             );

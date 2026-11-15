@@ -22,13 +22,13 @@ The stack is two containers on a private docker network:
   would serve it. Pebble validates against the sidecar's container address on
   the docker network; every app reaches it at ``127.0.0.1:<port>``, the port
   published for TCP and UDP and taken through the nest-port seam
-  (:func:`lease_name_server_port`), so an android venue run's device reaches
-  it through the tunnel over TCP — the propagation probe's RFC 7766 retry
+  (:func:`free_name_server_port`), so an android device reaches it through
+  its ``adb reverse`` over TCP — the propagation probe's RFC 7766 retry
   (`e2e-automation-surface-gating.md` § The ACME directory seed → *The name
   server's reach*).
 - ``pebble`` — its directory published on a loopback port taken through the
-  nest-port seam (:func:`lease_directory_port`), so an android venue run's
-  device can reach it through the tunnel. Pebble's own
+  same free-port rule as a nest (:func:`free_directory_port`), so an android
+  device can reach it through its ``adb reverse``. Pebble's own
   directory certificate carries the SAN ``127.0.0.1``, and its CA is copied out
   and handed to the app as PEM text, so the app's ACME client trusts that CA
   and nothing else.
@@ -145,30 +145,22 @@ def extract_pebble_ca(name: str) -> bytes:
     raise AssertionError("unreachable")
 
 
-def lease_directory_port():
-    """The host port pebble's directory is published on -> ``(port, release)``.
-
-    Taken through `helpers.android_venue.nest_port`, the seam every nest port
-    comes from: outside an android venue run it is a free port, and inside one
-    a lease on the tunnelled range. An android app reaches the directory as its
-    own loopback through an ``adb reverse``, which the venue carries home only
-    for that range (`testing.md` § Default app and nest mode → *Android's run
-    venue*, constraint 3)."""
-    from helpers import android_venue
+def free_directory_port() -> int:
+    """The host port pebble's directory is published on: a free port. An
+    android app reaches it as its own loopback through an ``adb reverse``, which
+    lands on this machine in every venue (`testing.md` § Default app and nest
+    mode → *A2 amended — the design*, point 2)."""
     from tests.platform.docker.helpers import find_free_ports
 
-    return android_venue.nest_port(lambda: find_free_ports(1)[0])
+    return find_free_ports(1)[0]
 
 
-def lease_name_server_port():
-    """The host port the fake name server is published on, TCP and UDP ->
-    ``(port, release)``. The same seam as :func:`lease_directory_port`, for the
-    same reason: in an android venue run the device reaches it only as its own
-    loopback through an ``adb reverse`` of the tunnelled range."""
-    from helpers import android_venue
+def free_name_server_port() -> int:
+    """The host port the fake name server is published on, TCP and UDP: a
+    free port, reached by an android device as :func:`free_directory_port` is."""
     from tests.platform.docker.helpers import find_free_ports
 
-    return android_venue.nest_port(lambda: find_free_ports(1)[0])
+    return find_free_ports(1)[0]
 
 
 def name_server_port(env: dict) -> int | None:
@@ -232,7 +224,6 @@ class AcmePebble:
         self.ca_pem = ""
         self.nameserver = ""
         self._txt: dict[str, str] = {}
-        self._releases: list = []
 
     def start(self) -> "AcmePebble":
         from tests.platform.docker.helpers import (
@@ -240,10 +231,8 @@ class AcmePebble:
             start_fake_dns_sidecar,
         )
 
-        host_port, release = lease_directory_port()
-        self._releases.append(release)
-        ns_port, release = lease_name_server_port()
-        self._releases.append(release)
+        host_port = free_directory_port()
+        ns_port = free_name_server_port()
         try:
             create_network(self.network)
             fakes_dir = str(Path(__file__).resolve().parent.parent / "fakes")
@@ -310,9 +299,6 @@ class AcmePebble:
         for name in (self.pebble_name, self.dns_name):
             remove_container(name)
         remove_network(self.network)
-        for release in self._releases:
-            release()
-        self._releases = []
 
 
 def skip_android_until_it_reaches_the_acme_stack(request) -> None:
@@ -321,9 +307,9 @@ def skip_android_until_it_reaches_the_acme_stack(request) -> None:
 
     The whole stack reaches the app: `launchApp()` puts the three
     `FAUNA_E2E_ACME_*` keys on the intent and `MainActivity` re-exports them;
-    pebble's directory and the fake name server are each published on a venue
-    lease the launch reverses (:func:`lease_directory_port`,
-    :func:`lease_name_server_port`), and the propagation probe's TCP retry and
+    pebble's directory and the fake name server are each published on a free
+    port the launch reverses (:func:`free_directory_port`,
+    :func:`free_name_server_port`), and the propagation probe's TCP retry and
     the managed mirror's UPDATE both ride that TCP-only reverse. But no android
     e2e run has gone through the venue yet, so it stays skipped until that first
     run shows it green.

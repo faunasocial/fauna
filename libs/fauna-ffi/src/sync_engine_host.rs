@@ -269,6 +269,13 @@ impl HostContext {
         &self.nest_rpc
     }
 
+    /// The sync device this host's connection runs as — what its own relay
+    /// seat announces by.
+    #[cfg(feature = "file-provider-host")]
+    pub(crate) fn device_id(&self) -> [u8; 32] {
+        self.device_id
+    }
+
     /// Where this host's per-set state DBs live — what the serve half (the
     /// relay's and the share plane's) opens its own read connection under.
     #[cfg(feature = "file-provider-host")]

@@ -51,7 +51,7 @@ def recorded(monkeypatch):
 
     monkeypatch.setattr(android_mod.subprocess, "run", fake_run)
     driver = AndroidBridgeDriver()
-    monkeypatch.setattr(driver, "_adb_cmd", lambda: ["adb", "-s", "emulator-5554"])
+    monkeypatch.setattr(driver, "_adb_cmd", lambda: ["adb", "-s", "emulator-5580"])
     return driver, calls
 
 

@@ -811,6 +811,14 @@ async fn pull_into(
                     .context("encode accepted row")
             })
             .collect::<Result<_>>()?;
+        // Paired with the answer below: the gap between the two is the time
+        // the replica's writer took (on iOS a call across to the extension).
+        tracing::debug!(
+            folder = %fauna_core::log_redact::log_folder_name(&spec.folder),
+            peer = %peer_hex,
+            rows = page.accepted.len(),
+            "share pump: handing a page to the ingest door"
+        );
         let summary = door
             .ingest(
                 &spec.folder,
@@ -821,6 +829,20 @@ async fn pull_into(
             )
             .await
             .context("ingest door")?;
+        // The door's answer, per page: without it a pass that pulled rows the
+        // replica then declined (refused, already current, a body the landing
+        // policy did not want) reads exactly like a pass that pulled nothing.
+        tracing::debug!(
+            folder = %fauna_core::log_redact::log_folder_name(&spec.folder),
+            peer = %peer_hex,
+            rows = page.accepted.len(),
+            refused = summary.refused,
+            overlaid = summary.overlaid,
+            materialized = summary.materialized,
+            already_current = summary.already_current,
+            cursor = summary.cursor,
+            "share pump: the ingest door answered a page"
+        );
         outcome.rows_refused += summary.refused;
         outcome.materialized += summary.materialized;
         outcome.storage_limited |= summary.storage_limited;

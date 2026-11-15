@@ -243,6 +243,12 @@ pub struct RoomSettingsEditor {
     /// The live `can_leave_room`, re-read at the confirm's open and not only
     /// at paint (a greyed control must not be openable by a driver).
     can_leave: Rc<Cell<bool>>,
+    /// `room-remove-button` — greyed unless `capabilities.supports_local_remove`
+    /// (`bridged-adapter.md` § Removing bridged rows, rule 6).
+    remove_btn: gtk::Button,
+    /// The live `supports_local_remove`, re-read at the confirm's open like
+    /// [`Self::can_leave`].
+    can_remove: Rc<Cell<bool>>,
     /// Held so the section's weak self-references stay upgradable for as long
     /// as the editor lives.
     _labelers: Rc<LabelerSection>,
@@ -270,6 +276,10 @@ impl RoomSettingsEditor {
         self.can_leave.set(detail.capabilities.can_leave_room);
         self.leave_btn
             .set_sensitive(detail.capabilities.can_leave_room);
+        self.can_remove
+            .set(detail.capabilities.supports_local_remove);
+        self.remove_btn
+            .set_sensitive(detail.capabilities.supports_local_remove);
     }
 
     /// A commit was refused. The editor STAYS OPEN with the refused value
@@ -291,16 +301,26 @@ impl RoomSettingsEditor {
 /// must outlive its own Save until every commit has landed.
 ///
 /// `on_leave` is the walk-out (`room-leave-confirm`): one manager call, outside
-/// Save's staged set. The editor closes itself first.
+/// Save's staged set. The editor closes itself first. `on_remove` is the local
+/// remove (`room-remove-confirm`, `bridged-adapter.md` § Removing bridged rows,
+/// rule 6): the walk-out's twin, one manager call, immediate.
 ///
-/// `None` on a policy-less room or a non-room (no policy to edit) — the button is
-/// greyed there, so this is the belt behind that gate.
-pub fn show<F: Fn(RoomSettingsDraft) + 'static, W: Fn(String) + 'static, L: Fn() + 'static>(
+/// `None` where the shared seed opens no editor (a non-room). A policy-less
+/// room — a bridged room — opens it only for its local remove
+/// (`RoomSettingsDraft::seed`), and then only the walk-out and the remove are
+/// painted: it has no policy, roles, read or labelers to show.
+pub fn show<
+    F: Fn(RoomSettingsDraft) + 'static,
+    W: Fn(String) + 'static,
+    L: Fn() + 'static,
+    R: Fn() + 'static,
+>(
     parent: &impl IsA<gtk::Widget>,
     detail: &ThreadDetail,
     on_save: F,
     on_withdraw: W,
     on_leave: L,
+    on_remove: R,
     labelers: LabelerSeams,
 ) -> Option<Rc<RoomSettingsEditor>> {
     let seed = RoomSettingsDraft::seed(detail)?;
@@ -327,6 +347,14 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static, W: Fn(String) + 'static, L: Fn()
 
     let draft = Rc::new(RefCell::new(seed));
     let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    // Every policy control lives in `policy_area`, which is attached only
+    // where the room has a policy to show; a policy-less room's editor holds
+    // the departures alone.
+    let has_policy = detail.room.as_ref().is_some_and(|r| r.policy.is_some());
+    let policy_area = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    if has_policy {
+        content.append(&policy_area);
+    }
 
     let join_rule_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let join_rule_caption = gtk::Label::new(Some(
@@ -348,7 +376,7 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static, W: Fn(String) + 'static, L: Fn()
     let can_set_policy = detail.capabilities.can_set_policy;
     join_rule_dd.set_sensitive(can_set_policy);
     join_rule_row.append(&join_rule_dd);
-    content.append(&join_rule_row);
+    policy_area.append(&join_rule_row);
 
     let history_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let history_caption = gtk::Label::new(Some(
@@ -369,13 +397,13 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static, W: Fn(String) + 'static, L: Fn()
     select_token(&history_dd, draft.borrow().history_policy.token());
     history_dd.set_sensitive(can_set_policy);
     history_row.append(&history_dd);
-    content.append(&history_row);
+    policy_area.append(&history_row);
 
     // The per-member rows are torn down and rebuilt on every staging gesture,
     // so the `checked` attributes and the hand-over's at-most-one rule are
     // always read straight off the draft rather than tracked per widget.
     let members_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    content.append(&members_box);
+    policy_area.append(&members_box);
 
     // The home nest's read, only where there is one to stage: a community room
     // whose answer this device has read (`RoomSettingsDraft::nest_read`).
@@ -394,18 +422,18 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static, W: Fn(String) + 'static, L: Fn()
                 paint_nest_read(btn, d.nest_read.unwrap_or(false));
             });
         }
-        content.append(&toggle);
+        policy_area.append(&toggle);
     }
 
     let on_withdraw: Rc<dyn Fn(String)> = Rc::new(on_withdraw);
     let pending_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
     paint_pending(&pending_box, detail, &on_withdraw);
-    content.append(&pending_box);
+    policy_area.append(&pending_box);
 
     // The room's labeler set: staged like the rest, committed by Save. Absent
     // where the draft carries no set. Its inspect view opens in place.
     let labeler_section = LabelerSection::new(&draft, labelers, detail.capabilities.can_set_policy);
-    content.append(&labeler_section.root);
+    policy_area.append(&labeler_section.root);
     {
         let weak = Rc::downgrade(&labeler_section);
         window.connect_close_request(move |_| {
@@ -469,7 +497,9 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static, W: Fn(String) + 'static, L: Fn()
     // kind for all five, so the button itself declares it.
     crate::offline_gate::declare_wire_kind(&save_btn, "fauna.conversations.channel.send");
     save_btn.set_sensitive(can_set_policy);
-    content.append(&save_btn);
+    if has_policy {
+        content.append(&save_btn);
+    }
 
     // The walk-out, below Save and outside the staged set: leaving is an
     // immediate act, not a policy edit. Greyed for the owner, who hands the
@@ -511,6 +541,46 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static, W: Fn(String) + 'static, L: Fn()
     }
     content.append(&leave_btn);
 
+    // The local remove, beside the walk-out and outside the staged set:
+    // greyed unless the room's capabilities say `supports_local_remove`, and
+    // re-checked when the confirm opens. Its confirm is immediate.
+    let can_remove = Rc::new(Cell::new(detail.capabilities.supports_local_remove));
+    let remove_btn =
+        gtk::Button::with_label(crate::i18n::strings::conversations::unified::ROOM_REMOVE);
+    remove_btn.set_halign(gtk::Align::End);
+    remove_btn.set_sensitive(detail.capabilities.supports_local_remove);
+    crate::testid::set_test_id(&remove_btn, ids::ROOM_REMOVE_BUTTON);
+    {
+        let can_remove = Rc::clone(&can_remove);
+        let window = window.clone();
+        let label = detail.label.clone();
+        let on_remove = Rc::new(on_remove);
+        remove_btn.connect_clicked(move |btn| {
+            if !can_remove.get() {
+                return;
+            }
+            let window = window.clone();
+            let on_remove = Rc::clone(&on_remove);
+            crate::confirm_dialog::present_confirm(
+                btn,
+                crate::confirm_dialog::ConfirmSpec::new(
+                    crate::i18n::strings::conversations::unified::ROOM_REMOVE,
+                    crate::confirm_dialog::ConfirmBody::Text(&label),
+                    "remove",
+                    crate::i18n::strings::conversations::unified::ROOM_REMOVE_CONFIRM,
+                    crate::confirm_dialog::CANCEL,
+                )
+                .with_confirm_id(ids::ROOM_REMOVE_CONFIRM)
+                .with_wire_kind(fauna_protocol::bridged_conversations::KIND_ROOMS_REMOVE),
+                move || {
+                    window.close();
+                    on_remove();
+                },
+            );
+        });
+    }
+    content.append(&remove_btn);
+
     {
         let draft = Rc::clone(&draft);
         save_btn.connect_clicked(move |_| {
@@ -540,6 +610,8 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static, W: Fn(String) + 'static, L: Fn()
         on_withdraw,
         leave_btn,
         can_leave,
+        remove_btn,
+        can_remove,
         _labelers: labeler_section,
     }))
 }

@@ -91,7 +91,7 @@ impl Sink<Bytes> for PeerStreamAdapter {
     type Error = std::io::Error;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.get_mut().inner).poll_ready(cx)
+        Sink::<Bytes>::poll_ready(Pin::new(&mut self.get_mut().inner), cx)
     }
 
     fn start_send(self: Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
@@ -99,11 +99,11 @@ impl Sink<Bytes> for PeerStreamAdapter {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        Sink::<Bytes>::poll_flush(Pin::new(&mut self.get_mut().inner), cx)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.get_mut().inner).poll_close(cx)
+        Sink::<Bytes>::poll_close(Pin::new(&mut self.get_mut().inner), cx)
     }
 }
 

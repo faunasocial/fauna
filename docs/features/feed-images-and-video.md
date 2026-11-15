@@ -82,11 +82,11 @@ Stamped 2026-11-07 at 6a0ded1015.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+646e0070 standalone |
-| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| linux | ✅ full | 0.1.7-dev+c0e2aa0e standalone |
 | windows | ⚠ partial | |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+79c80402 standalone |
-| android | 🚧 unbuilt | |
+| android |  no run recorded | |
 | tui | ✅ full | 0.1.5 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
@@ -104,7 +104,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 6 | app | `tests/e2e-unified/tests/test_feed_remote_image.py::test_body_remote_image_is_blocked_until_revealed_then_paints` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_feed.py::test_post_image_survives_a_blob_gc_sweep` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_feed.py::test_post_image_strips_exif_gps_before_the_nest_stores_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 9 | app | `tests/e2e-unified/tests/test_gated_post_compose.py::test_a_restricted_post_s_picture_opens_for_an_entitled_reader` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_gated_post_compose.py::test_a_restricted_post_s_picture_opens_for_an_entitled_reader` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_feed.py::test_a_picture_is_uploaded_when_you_post_so_writing_time_never_loses_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_feed.py::test_a_forged_c2pa_assertion_paints_no_provenance_badge` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_tapping_a_video_plays_it_in_place` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
@@ -112,17 +112,17 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 12 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_video_played_to_its_end_reads_its_whole_length` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_sealed_video_plays_after_its_post_unlocks` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_tui_feed_video_external_open.py::test_ask_confirm_hands_the_feed_clip_to_the_os_player` | tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_tapping_a_bridged_video_plays_it_through_the_ticketed_proxy` — requires `proxied-video-playback` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
-| 13 | app | `tests/e2e-unified/tests/test_tui_feed_video_external_open.py::test_a_bridged_video_hands_off_through_the_nest_proxy` — requires `proxied-video-playback` (not built: android, android-kids, ios-kids) | tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_tapping_a_bridged_video_plays_it_through_the_ticketed_proxy` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_tui_feed_video_external_open.py::test_a_bridged_video_hands_off_through_the_nest_proxy` | tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_playing_video_survives_a_feed_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 14 | app | `tests/e2e-unified/tests/test_tui_feed_video_external_open.py::test_a_feed_refresh_leaves_a_running_handoff_alone` | tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_leaving_the_feed_while_a_video_plays_keeps_the_app_running` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 15 | app | `tests/e2e-unified/tests/test_tui_feed_video_external_open.py::test_leaving_the_feed_mid_handoff_and_coming_back_opens_the_video_again` | tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_feed_media_items.py::test_every_media_item_paints_in_order_with_its_alt` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_feed_bridged_image.py::test_a_bridged_posts_picture_paints_at_once_through_the_nest` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_feed_media_items.py::test_every_media_item_paints_in_order_with_its_alt` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_feed_media_items.py::test_every_media_item_paints_in_order_with_its_alt` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_feed_bridged_image.py::test_a_bridged_posts_picture_paints_at_once_through_the_nest` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_feed_media_items.py::test_every_media_item_paints_in_order_with_its_alt` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 19 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_sealed_video_plays_after_its_post_unlocks` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 19 | app | `tests/e2e-unified/tests/test_tui_feed_video_external_open.py::test_a_sealed_video_hands_off_once_its_post_unlocks` | tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | tui (linux): passed, tui (macos): passed |
-| 20 | app | `tests/e2e-unified/tests/test_profile_remote_read_cross_nest.py::test_a_remote_actors_profile_shows_their_name_only_once_they_open_it` | tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_profile_remote_read_cross_nest.py::test_a_remote_actors_profile_shows_their_name_only_once_they_open_it` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

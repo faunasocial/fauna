@@ -203,6 +203,7 @@ public partial class AccountSwitcherViewModel : ViewModelBase
                 {
                     FfiEraseRemoveBlocked.ServedHere here => here.@line,
                     FfiEraseRemoveBlocked.ServedElsewhere elsewhere => elsewhere.@line,
+                    FfiEraseRemoveBlocked.CarryOwed owed => owed.@line,
                     _ => throw new InvalidOperationException($"unknown refusal {blocked}"),
                 }));
                 return;

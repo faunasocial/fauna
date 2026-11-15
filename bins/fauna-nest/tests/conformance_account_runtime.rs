@@ -263,6 +263,7 @@ fn params(
         peer_transport: None,
         enrollment_target_device_id: device_row(device),
         enrollment_device_label: None,
+        foreground: true,
     }
 }
 
@@ -2871,6 +2872,79 @@ async fn own_pump_a_background_write_moves_the_generation_and_a_dismiss_does_not
     a.shutdown().await;
 }
 
+/// One owner-side custody record, keyed by `grant` — enough for the door's
+/// per-record join to put a new row.
+fn custody_record(grant: u8) -> fauna_core::custody_ceremony::CustodyConfig {
+    fauna_core::custody_ceremony::CustodyConfig {
+        granted: vec![fauna_core::custody_ceremony::GrantedCustody {
+            grant_id: vec![grant; fauna_core::custody_grant::CUSTODY_GRANT_ID_LEN],
+            host: [2u8; 32],
+            channel_hex: "aa".repeat(32),
+            offer: vec![0xF0, grant],
+            updated_at: fauna_core::data::Timestamp(1_000),
+            ..Default::default()
+        }],
+        held: vec![],
+    }
+}
+
+/// The custody ceremony door carries a variant per caller (part 2): the
+/// machinery's write — the ceremony sink capturing a friend's accept, the
+/// drive pass marking a grant minted — is a background write and moves the
+/// generation at once, so an OPEN Devices page repaints the custodian binding;
+/// a page's own mint or revoke is a gesture and moves nothing. Red-verified:
+/// with `Cmd::is_background_write` answering `false` for `MergeCustody`, the
+/// waiter hangs (the web Devices page painted a friend's accepted custody as
+/// pending for ever).
+#[tokio::test]
+async fn own_pump_a_background_custody_write_moves_the_generation_and_a_gesture_does_not() {
+    let (rpc, _state, tmp) = nest_with_escrow().await;
+    let a = AccountStoreRuntime::start(params_trusting_deployment(tmp.path(), "a", &rpc))
+        .await
+        .expect("start A");
+    a.reconcile_now().await.expect("A's barrier");
+    // The custody kind is `GenerationTip`-sealed: this gesture runs the
+    // first-need mint, and the passes after it settle what the mint publishes.
+    a.merge_custody(custody_record(0x01))
+        .await
+        .expect("the minting gesture");
+    a.settled().await;
+    a.reconcile_now().await.expect("a pass after the mint");
+    a.reconcile_now().await.expect("and the echo's");
+    let g0 = a.change_generation();
+
+    let waiter = tokio::spawn({
+        let a = a.clone();
+        async move { a.changed_after(g0).await }
+    });
+    a.merge_custody_background(custody_record(0x02))
+        .await
+        .expect("the machinery's capture");
+    let g1 = tokio::time::timeout(std::time::Duration::from_secs(30), waiter)
+        .await
+        .expect("a background custody write must move the generation")
+        .expect("join");
+    assert_eq!(
+        g1,
+        g0 + 1,
+        "a background custody write moves the generation once"
+    );
+    a.settled().await;
+    assert_eq!(a.change_generation(), g1, "its publish step moves nothing");
+
+    a.merge_custody(custody_record(0x03))
+        .await
+        .expect("a page's own mint");
+    a.settled().await;
+    assert_eq!(
+        a.change_generation(),
+        g1,
+        "a page's custody gesture is never a source"
+    );
+
+    a.shutdown().await;
+}
+
 /// Pin (e): a non-holder's generation never moves — it runs no pass, so its
 /// notice is the `data_version` floor (V7) — while the holder's own walk of
 /// the same row moves the holder's. The non-holder's own gesture and the
@@ -3053,6 +3127,7 @@ async fn v10_the_runtime_authenticates_as_the_store_principal() {
         peer_transport: None,
         enrollment_target_device_id: device_row("machine"),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("runtime assembles");
@@ -3254,6 +3329,7 @@ async fn v14_the_first_need_mint_crosses_the_store_principals_own_connection() {
         peer_transport: None,
         enrollment_target_device_id: device_row("machine"),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("runtime assembles");
@@ -3347,6 +3423,7 @@ async fn v13_a_deleted_machine_revives_as_a_successor_through_the_real_doors() {
         peer_transport: None,
         enrollment_target_device_id: device_row("machine"),
         enrollment_device_label: None,
+        foreground: true,
     };
     let converge = |handle: AccountStoreHandle| async move {
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
@@ -3777,6 +3854,7 @@ fn v12_params(
         peer_transport: Some(factory),
         enrollment_target_device_id: device_row(device),
         enrollment_device_label: None,
+        foreground: true,
     }
 }
 

@@ -178,6 +178,52 @@ pub enum PeerLegPass {
     /// `p2p.md` § Per-device participation): no listener, and a node that
     /// was up is dropped this pass — rule 5's "p2p disabled ⇒ no socket".
     ParticipationOff,
+    /// The app host is out of the foreground ([`ForegroundSeat`]): no
+    /// listener, and a node that was up is dropped — a phone's process is
+    /// suspended there, and a listener it cannot answer is bound for nothing
+    /// (`account-sync-plane.md` § Wormability walk, rule 5;
+    /// `p2p-shared-set-build.md` § Phone peers — design, decision 2).
+    Backgrounded,
+}
+
+/// Whether the app hosting this runtime is in the foreground — the host's
+/// signal, shared between every clone of the runtime's handle and the legs
+/// each assembly builds, so it survives a reassembly. Starts foreground: a
+/// desktop host (and every host that never says otherwise) keeps its leg.
+/// A phone's shell flips it from its scene or lifecycle phase through
+/// [`crate::account_driver::AccountStoreHandle::set_foreground`]; the peer
+/// leg's ensure step reads it and binds nothing while it reads background.
+#[derive(Clone, Debug)]
+pub struct ForegroundSeat(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Default for ForegroundSeat {
+    fn default() -> Self {
+        ForegroundSeat::starting(true)
+    }
+}
+
+impl ForegroundSeat {
+    /// A seat that starts where the host says it is — what the driver mints
+    /// from [`crate::account_driver::DriverConfig::foreground`], so a runtime
+    /// started out of front never reads foreground at all.
+    pub fn starting(foreground: bool) -> Self {
+        ForegroundSeat(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            foreground,
+        )))
+    }
+
+    /// Whether the host last said it is in the foreground.
+    pub fn is_foreground(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Record the host's foreground state; only the account driver's
+    /// handle writes it, so the method exists only where that driver does.
+    #[cfg(feature = "account-driver")]
+    pub(crate) fn set(&self, foreground: bool) {
+        self.0
+            .store(foreground, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// What one dial pass did (the pump's `peer_dial` report slot).

@@ -118,6 +118,21 @@ def test_the_archive_carries_the_three_binaries_and_the_installer(installed_prod
         assert path.stat().st_mode & stat.S_IXUSR, f"{path} is not executable"
 
 
+def test_the_archive_carries_the_licences_and_its_notices_at_its_root(installed_product):
+    """The archive root holds Fauna's two licence texts, byte for byte the
+    repository's, and a non-empty notices file (shipped-notices.md § Per
+    channel, the terminal-archive row). The notices file is dependency-authored
+    text: its presence and size are read, never its contents."""
+    root = Path(get_repo_root())
+    staged = staged_archive_dir(root)
+    for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+        assert (staged / name).read_bytes() == (root / name).read_bytes(), (
+            f"{staged / name} is not the repository's {name}"
+        )
+    notices = staged / "THIRD-PARTY-NOTICES"
+    assert notices.is_file() and notices.stat().st_size > 0, f"{notices} is missing or empty"
+
+
 def test_the_installed_app_is_what_the_driver_launched(installed_product, app):
     """The subject check, before any assertion that depends on it."""
     launched = app.driver.app_path()

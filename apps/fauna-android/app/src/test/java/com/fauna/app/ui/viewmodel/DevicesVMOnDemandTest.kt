@@ -8,7 +8,10 @@ import com.fauna.app.p2pshare.OfflineShareHost
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -88,6 +91,8 @@ class DevicesVMOnDemandTest {
         val secureStorage = mock(SecureStorage::class.java)
         whenever(secureStorage.resolveDeviceId()).thenReturn(deviceId)
         val appContext = mock(Context::class.java)
+        whenever(appContext.getString(com.fauna.app.R.string.devices_error_use_other_version))
+            .thenReturn("Failed to use the other version: {message}")
         whenever(api.folderChangedTick).thenReturn(MutableSharedFlow())
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         whenever(api.devicesStaleTick).thenReturn(MutableSharedFlow())
@@ -95,7 +100,7 @@ class DevicesVMOnDemandTest {
         val log = mutableListOf<String>()
         val toggle = FakeOnDemandToggle(stronger, failSetShown, log)
         val vm = DevicesVM(
-            api, mock(ResolveService::class.java), secureStorage, appContext, OfflineShareHost(appContext), toggle,
+            api, mock(ResolveService::class.java), secureStorage, appContext, OfflineShareHost(appContext), toggle, NoSharePlaneReadings,
         )
         return Fixture(vm, api, toggle, log)
     }
@@ -206,5 +211,113 @@ class DevicesVMOnDemandTest {
         assertTrue(f.vm.onDemand.value.getValue(OnDemandRowKey.of(own)).shown)
         assertFalse(f.log.contains("replan"))
         verify(f.api, never()).ensureFolderPlace(anyString(), anyString())
+    }
+
+    // ── The group-scope row (`group-set.md` § Build design — the group set,
+    // decision 11): a phone's seat is its on-demand replica, keyed by the
+    // scope's `group:` ref, hide-only like a member's row. ──
+
+    private val groupRef = "group:" + "07".repeat(32)
+
+    @Test
+    fun aGroupScopeRowReadsDefaultOnUnderItsGroupRef() = runTest {
+        val f = makeVm()
+
+        f.vm.loadGroupOnDemand(listOf(groupRef))
+
+        val row = f.vm.groupOnDemand.value.getValue(groupRef)
+        assertTrue(row.shown)
+        assertFalse(row.stronger)
+        assertEquals(f.toggle.identifyRef(groupRef).scopedId, row.scopedId)
+    }
+
+    @Test
+    fun aGroupScopeHideIsHideOnlyAndRemembered() = runTest {
+        val f = makeVm()
+        f.vm.loadGroupOnDemand(listOf(groupRef))
+        val scoped = f.vm.groupOnDemand.value.getValue(groupRef).scopedId
+
+        f.vm.setGroupOnDemand(groupRef, false)
+        f.vm.loadGroupOnDemand(listOf(groupRef))
+
+        assertFalse(f.vm.groupOnDemand.value.getValue(groupRef).shown)
+        assertEquals(listOf("setShown $scoped false", "replan"), f.log)
+        // The membership is the seat: no place is read or written.
+        verify(f.api, never()).ensureFolderPlace(anyString(), anyString())
+    }
+
+    @Test
+    fun aReconcileReReadsTheGroupScopeRows() = runTest {
+        val f = makeVm()
+        f.vm.loadGroupOnDemand(listOf(groupRef))
+        assertFalse(f.vm.groupOnDemand.value.getValue(groupRef).parked)
+
+        f.toggle.parked += groupRef
+        f.toggle.reconcile()
+
+        assertTrue(f.vm.groupOnDemand.value.getValue(groupRef).parked)
+    }
+
+    // ── A group set's review rows (`group-set.md` § Build design — the group
+    // set, decision 9): read in-process on a poll, restored on the set's host ──
+
+    private fun retained(id: Long, fileInfo: String) = uniffi.fauna_devices_machine.ConflictSummary(
+        id = id,
+        folder = "Shared folder 07",
+        deviceId = "cd".repeat(32),
+        path = "notes.txt",
+        conflictType = "content",
+        details = null,
+        createdAt = 0L,
+        candidates = emptyList(),
+        resolvedAt = 1L,
+        resolution = "auto",
+        winningManifestHash = null,
+        hasOtherVersion = true,
+        fileInfo = fileInfo,
+    )
+
+    @Test
+    fun theReviewPollReadsEachSetUnderItsLabelAndKeepsRowsOverAFailedRead() = runTest {
+        val f = makeVm()
+        f.toggle.reviewRows[groupRef] = listOf(retained(9L, "Shared folder 07: notes.txt"))
+        backgroundScope.launch { f.vm.pollGroupReviewRows(listOf(groupRef to "Shared folder 07")) }
+        runCurrent()
+
+        assertEquals(listOf(GroupReviewRow(groupRef, retained(9L, "Shared folder 07: notes.txt"))), f.vm.groupReviewRows.value)
+        assertTrue("review $groupRef Shared folder 07" in f.log)
+
+        // A busy DB never loses a review row.
+        f.toggle.reviewReadFails += groupRef
+        advanceTimeBy(GROUP_REVIEW_POLL_MS + 1)
+        assertEquals(1, f.vm.groupReviewRows.value.size)
+    }
+
+    @Test
+    fun aRestoreIsKeyedBySetAndRowAndTheUsedRowGoes() = runTest {
+        val f = makeVm()
+        f.toggle.reviewRows[groupRef] = listOf(retained(9L, "Shared folder 07: notes.txt"))
+        backgroundScope.launch { f.vm.pollGroupReviewRows(listOf(groupRef to "Shared folder 07")) }
+        runCurrent()
+
+        f.vm.useRetainedVersion(groupRef, 9L)
+
+        assertTrue("restore $groupRef 9" in f.log)
+        assertTrue(f.vm.groupReviewRows.value.isEmpty())
+        assertEquals(null, f.vm.sharingError.value)
+    }
+
+    @Test
+    fun aRefusedRestoreLandsOnTheErrorSlotAndTheRowStays() = runTest {
+        val f = makeVm()
+        f.toggle.reviewRows[groupRef] = listOf(retained(9L, "Shared folder 07: notes.txt"))
+        f.toggle.restoreRefusal = "the kept version is gone"
+        backgroundScope.launch { f.vm.pollGroupReviewRows(listOf(groupRef to "Shared folder 07")) }
+        runCurrent()
+
+        f.vm.useRetainedVersion(groupRef, 9L)
+
+        assertEquals("Failed to use the other version: the kept version is gone", f.vm.sharingError.value)
+        assertEquals(1, f.vm.groupReviewRows.value.size)
     }
 }

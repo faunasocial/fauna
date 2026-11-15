@@ -8,6 +8,11 @@
 //! same pattern).
 #![allow(dead_code)]
 
+/// Actors, the owner's authoring seat and the member's custody ingest — the
+/// shared-set fixtures over a real in-process nest.
+#[cfg(feature = "tier3-nest")]
+pub mod sets;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Arc;
@@ -132,7 +137,10 @@ impl AgentWorld {
             .env("FAUNA_E2E_CREDENTIAL_DIR", self.root.join("creds"))
             // The engine's own pull/`file uploaded` lines are the diagnostic
             // surface when an assertion fails.
-            .env("RUST_LOG", "info,fauna_sync_engine=debug");
+            .env(
+                "RUST_LOG",
+                "info,fauna_sync_engine=debug,fauna_sync_agent::presence_roots=debug",
+            );
         // `HOME` is set on every unix, not just macOS: since W5.5b the agent
         // resolves the shared ACCOUNT-STORE root from the home/XDG
         // environment (`StoreRoot::platform`), so a child with the
@@ -468,6 +476,7 @@ pub async fn enroll_as_w5_app(
             peer_transport: None,
             enrollment_target_device_id,
             enrollment_device_label: None,
+            foreground: true,
         },
     )
     .await
@@ -566,6 +575,7 @@ impl AppSeat {
                 peer_transport: None,
                 enrollment_target_device_id: hex::encode(device),
                 enrollment_device_label: None,
+                foreground: true,
             },
         )
         .await

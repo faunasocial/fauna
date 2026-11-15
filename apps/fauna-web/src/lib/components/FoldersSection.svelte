@@ -54,7 +54,7 @@
   import { getConversationsManager } from '#lib/conversations';
   import { sessionDevicesMachine } from '#lib/devices-session';
   import { parseRecipient } from '#lib/resolve';
-  import { refusedAsNotReady } from '#lib/wasm';
+  import { logMessage, refusedAsNotReady } from '#lib/wasm';
   import {
     defaultConflictPolicyGet,
     defaultConflictPolicySet,
@@ -496,12 +496,16 @@
       // Paint the last-known rows now; the refresh below brings them current.
       applySnapshot();
       ready = true;
+      // The knock list reads the durable inbox, not the machine, so it starts
+      // now rather than behind the refresh below: a slow refresh would
+      // otherwise hold the "Shared with you" section back for its whole length,
+      // and a page left before it settles would never show a waiting share.
+      void loadPendingShares();
       await machine.refresh();
       applySnapshot();
       void loadWebdavCapability(id.secretHex);
       void loadDefaultConflictPolicy(id.secretHex);
       void loadOwnTiers(id.secretHex);
-      void loadPendingShares();
       // An identity change landing during the awaits above already ran the drop;
       // starting the poll now would resurrect the outgoing actor's loop.
       poll.start(sameActor, () => {
@@ -950,9 +954,13 @@
     try {
       const mgr = await getConversationsManager();
       pendingShares = await mgr.foldersPendingShares();
-    } catch {
+    } catch (e: unknown) {
       // A read failure degrades to an empty knock list WITHOUT the page error —
-      // the same rule the owner-side roster read follows.
+      // the same rule the owner-side roster read follows — but never silently:
+      // an empty list from a failed read is otherwise indistinguishable from
+      // "no knock waits", so the failure goes to the log (log-only, never
+      // user-facing).
+      logMessage('warn', 'fauna_web::folders', `pending shares read failed: ${detail(e)}`);
       pendingShares = [];
     }
   }

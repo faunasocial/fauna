@@ -47,11 +47,12 @@ public partial class ContactsViewModel : ViewModelBase
     /// <see cref="Contacts"/>.</summary>
     public ObservableCollection<ContactRow> Rows { get; } = new();
 
-    /// <summary>The painted roster: <see cref="Rows"/> grouped by relationship status in
-    /// the shared order (<see cref="GroupByStatus"/>; contacts.md § Where logic lives →
-    /// Roster status grouping), rebuilt with <see cref="Rows"/>. The page binds its
-    /// grouped list to this; <see cref="Rows"/> stays the roster's own order, the one
-    /// <see cref="FilterRows"/> narrows.</summary>
+    /// <summary>The painted roster: <see cref="Rows"/> narrowed by
+    /// <see cref="RosterQuery"/> and grouped by relationship status in the shared order
+    /// (<see cref="GroupByStatus"/>; contacts.md § Where logic lives → Roster status
+    /// grouping), rebuilt with <see cref="Rows"/> and whenever the query changes. The page
+    /// binds its grouped list to this, filtered or not; <see cref="Rows"/> stays the
+    /// roster's own order, the one <see cref="FilterRows"/> narrows.</summary>
     public ObservableCollection<ContactRosterSection> Sections { get; } = new();
 
     /// <summary>The painted knock cards (<see cref="Knocks"/> + the sender names).</summary>
@@ -79,9 +80,7 @@ public partial class ContactsViewModel : ViewModelBase
         Rows.Clear();
         foreach (var c in Contacts)
             Rows.Add(RowFor(names, c, views));
-        Sections.Clear();
-        foreach (var section in GroupByStatus(Rows))
-            Sections.Add(section);
+        RebuildSections(names);
         PaintKnockRows(names);
     }
 
@@ -109,6 +108,41 @@ public partial class ContactsViewModel : ViewModelBase
     /// within sections and an emptied section drops out.</summary>
     public IReadOnlyList<ContactRosterSection> FilterSections(string query) =>
         GroupByStatus(FilterRows(query));
+
+    private string _rosterQuery = string.Empty;
+
+    /// <summary>The <c>contacts-search-field</c> query <see cref="Sections"/> is narrowed
+    /// by, trimmed; empty paints the whole roster. Setting it rebuilds the sections, and
+    /// so does every repaint (<see cref="RefreshNames"/>: a load, a name, an archive-link
+    /// view), so the narrowed roster is the live one — never a snapshot of the rows the
+    /// query was typed over, which a later repaint could not reach (the asked row kept
+    /// its question after the answer). The tui and linux lists filter at render, which is
+    /// the same rule.</summary>
+    public string RosterQuery
+    {
+        get => _rosterQuery;
+        set
+        {
+            var query = (value ?? string.Empty).Trim();
+            if (query == _rosterQuery) return;
+            _rosterQuery = query;
+            using var names = ContactOverlayNames.Open();
+            RebuildSections(names);
+        }
+    }
+
+    /// <summary>case (c) search-no-results (contacts.md § Errors &amp; edge cases): a
+    /// NON-EMPTY roster narrowed to zero — never the true-empty-roster state.</summary>
+    public bool RosterNarrowedToNothing =>
+        _rosterQuery.Length > 0 && Rows.Count > 0 && Sections.Count == 0;
+
+    private void RebuildSections(ContactOverlayNames.Reader names)
+    {
+        var rows = _rosterQuery.Length == 0 ? Rows : FilterRowsWith(names, _rosterQuery);
+        Sections.Clear();
+        foreach (var section in GroupByStatus(rows))
+            Sections.Add(section);
+    }
 
     /// <summary>Re-paint the rows when the archive-link views moved (the page calls this
     /// on <see cref="ArchiveLinksHost.Changed"/>: a question arrived, an answer or unlink
@@ -196,10 +230,13 @@ public partial class ContactsViewModel : ViewModelBase
     public IReadOnlyList<ContactRow> FilterRows(string query)
     {
         using var names = ContactOverlayNames.Open();
-        return Rows
+        return FilterRowsWith(names, query);
+    }
+
+    private IReadOnlyList<ContactRow> FilterRowsWith(ContactOverlayNames.Reader names, string query) =>
+        Rows
             .Where(r => names.MatchesFilter(query, r.Contact.Handle, r.Contact.Domain, r.ActorId))
             .ToList();
-    }
 
     /// <summary>Which of the three find-user branches the
     /// <c>contact-actor-id-field</c> input takes, from the shared classifier.</summary>

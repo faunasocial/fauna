@@ -158,11 +158,24 @@ pub struct RoomSettingsDraft {
 
 impl RoomSettingsDraft {
     /// The editor's opening state, read off the projected room. `None` on a
-    /// thread that is no room or a policy-less room (no policy to edit) — the
-    /// button is greyed there, so this is the belt behind that gate.
+    /// thread that is no room, and on a policy-less room with no verb of its
+    /// own to carry.
+    ///
+    /// A policy-less room the user may remove from their nest — a bridged
+    /// room (`capabilities.supports_local_remove`; `bridged-adapter.md`
+    /// § Removing bridged rows, rule 6) — seeds an editor with nothing staged
+    /// and nothing to stage: `room-remove-button` sits in it beside the
+    /// walk-out, and a painter shows the policy controls only where
+    /// `RoomSnapshot::policy` is `Some`. Its seats are empty, so Save could
+    /// emit no edit even if one were painted.
     pub fn seed(detail: &ThreadDetail) -> Option<Self> {
         let room = detail.room.as_ref()?;
-        let policy = room.policy.as_ref()?;
+        let Some(policy) = room.policy.as_ref() else {
+            return detail
+                .capabilities
+                .supports_local_remove
+                .then(Self::policy_less);
+        };
         let admins: Vec<bool> = room
             .members
             .iter()
@@ -202,6 +215,28 @@ impl RoomSettingsDraft {
             labelers: room.labelers.clone().map(sorted),
             seed_labelers: room.labelers.clone().map(sorted),
         })
+    }
+
+    /// The editor over a policy-less room: no seat, no read, no labeler set,
+    /// the policy fields at a new room's (`RoomPolicy::initial`) and equal to
+    /// their seeds, so [`Self::edits`] is empty whatever the live roster.
+    fn policy_less() -> Self {
+        Self {
+            join_rule: JoinRule::Invite,
+            history_policy: HistoryPolicy::None,
+            seats: Vec::new(),
+            admins: Vec::new(),
+            owners: Vec::new(),
+            eligible: Vec::new(),
+            transfer_to: None,
+            seed_join_rule: JoinRule::Invite,
+            seed_history_policy: HistoryPolicy::None,
+            seed_admins: Vec::new(),
+            nest_read: None,
+            seed_nest_read: None,
+            labelers: None,
+            seed_labelers: None,
+        }
     }
 
     /// `room-nest-read-toggle` — flip the staged home-nest read. A no-op where
@@ -657,6 +692,7 @@ mod tests {
                 nest_read: None,
                 labelers: None,
                 awaiting_key: false,
+                severance_owed: false,
                 moderation_unverified: false,
                 bridge_disconnected: false,
                 pending_invites: None,
@@ -912,9 +948,35 @@ mod tests {
             RoomSettingsDraft::seed(&policy_less).is_none(),
             "a policy-less room has no policy to edit"
         );
+        let mut no_room = three_seats();
+        no_room.room = None;
+        no_room.capabilities.supports_local_remove = true;
+        assert!(
+            RoomSettingsDraft::seed(&no_room).is_none(),
+            "no room, no editor, whatever the capability"
+        );
         let mut plain = three_seats();
         plain.room = None;
         assert!(RoomSettingsDraft::seed(&plain).is_none());
+    }
+
+    /// A bridged room is policy-less but carries the user's local remove, so
+    /// its editor opens — empty, and inert on Save (`bridged-adapter.md`
+    /// § Removing bridged rows, rule 6).
+    #[test]
+    fn a_policy_less_room_with_a_local_remove_seeds_an_inert_editor() {
+        let mut bridged = three_seats();
+        bridged.room.as_mut().unwrap().policy = None;
+        bridged.capabilities.supports_local_remove = true;
+        let draft = RoomSettingsDraft::seed(&bridged).expect("the remove's editor opens");
+        assert!(draft.seats.is_empty() && draft.eligible.is_empty());
+        assert_eq!(draft.nest_read, None);
+        assert_eq!(draft.labelers, None);
+        assert_eq!(
+            draft.edits(&bridged.participants),
+            vec![],
+            "nothing is staged and nothing can be"
+        );
     }
 
     #[test]

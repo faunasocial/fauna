@@ -1701,6 +1701,12 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public List<string> HiddenContent { get; } = new();
     /// Make the next <c>hide_reported</c> throw (the failed-hide arm).
     public Exception? HideReportedError { get; set; }
+    /// Make every <c>unhide_reported</c> throw (the failed show-again arm).
+    public Exception? UnhideReportedError { get; set; }
+    /// Make the Nth <c>unhide_reported</c> call (1-based) throw — the arm where an
+    /// earlier un-hide of the same press already landed.
+    public int? UnhideReportedFailOnCall { get; set; }
+    private int _unhideCalls;
 
     public Task<FfiReportSent> AbuseReportSubmitAsync(FfiReportTarget target, FfiReportForm form)
     {
@@ -1770,6 +1776,18 @@ internal sealed class MockNestRpcClient : INestRpcClient
         Throw();
         if (HideReportedError is not null) throw HideReportedError;
         if (!HiddenContent.Contains(id)) HiddenContent.Add(id);
+        return Task.FromResult(HiddenContent.ToArray());
+    }
+
+    public Task<string[]> UnhideReportedAsync(string id)
+    {
+        _calls.Add("UnhideReported");
+        Throw();
+        _unhideCalls++;
+        if (UnhideReportedError is not null) throw UnhideReportedError;
+        if (UnhideReportedFailOnCall == _unhideCalls)
+            throw new InvalidOperationException("unhide failed");
+        HiddenContent.Remove(id);
         return Task.FromResult(HiddenContent.ToArray());
     }
 
@@ -3332,7 +3350,9 @@ internal sealed class MockNestRpcClient : INestRpcClient
 
     public (string Kind, string WebhookSecret, string Tier)? LastProvidersSet { get; private set; }
     public string? LastProvidersRemove { get; private set; }
-    public string? LastClaimsRedeem { get; private set; }
+    /// The last <c>claims_redeem_across_nests</c> call: the code, the author slot
+    /// (<c>null</c> = the caller's own id) and the home it named.
+    public (string Code, byte[]? AuthorId, string? AuthorHomeUrl)? LastClaimsRedeem { get; private set; }
     public (string Tier, ulong? ValidUntil)? LastClaimsMint { get; private set; }
     public string? LastClaimsVoid { get; private set; }
     /// Thrown by <c>claims.void</c> alone (a typed refusal) without failing the §5 re-read.
@@ -3361,10 +3381,11 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextProvidersRemoveResult);
     }
 
-    public Task<FfiClaimRedeemReply> PaymentsClaimsRedeemAsync(string code)
+    public Task<FfiClaimRedeemReply> PaymentsClaimsRedeemAcrossNestsAsync(
+        string code, byte[]? authorId, string? authorHomeUrl)
     {
-        _calls.Add("PaymentsClaimsRedeem");
-        LastClaimsRedeem = code;
+        _calls.Add("PaymentsClaimsRedeemAcrossNests");
+        LastClaimsRedeem = (code, authorId, authorHomeUrl);
         Throw();
         return Task.FromResult(NextClaimRedeemReply);
     }
@@ -3391,6 +3412,26 @@ internal sealed class MockNestRpcClient : INestRpcClient
         if (ClaimsVoidError is not null) throw ClaimsVoidError;
         Throw();
         return Task.FromResult(1UL);
+    }
+
+    /// What the next <see cref="SubscriptionSubscribeAndCheckoutAsync"/> returns
+    /// (default: the subscribe's <see cref="NextSubscribeReply"/> + the URL it was given).
+    public FfiCheckoutOpen? NextCheckoutOpen { get; set; }
+    /// Make <see cref="SubscriptionSubscribeAndCheckoutAsync"/> return <c>null</c> (the
+    /// shared guard refused the link — nothing subscribed).
+    public bool CheckoutRefused { get; set; }
+    /// The (authorId, tier, paymentUrl, home) the last payment-link subscribe captured.
+    public (byte[] AuthorId, string Tier, string PaymentUrl, string? Home)? LastSubscribeAndCheckout { get; private set; }
+
+    public Task<FfiCheckoutOpen?> SubscriptionSubscribeAndCheckoutAsync(
+        byte[] authorId, string tier, string paymentUrl, string? homeNestUrl)
+    {
+        _calls.Add("SubscriptionSubscribeAndCheckout");
+        LastSubscribeAndCheckout = (authorId, tier, paymentUrl, homeNestUrl);
+        Throw();
+        if (CheckoutRefused) return Task.FromResult<FfiCheckoutOpen?>(null);
+        return Task.FromResult<FfiCheckoutOpen?>(
+            NextCheckoutOpen ?? new FfiCheckoutOpen(NextSubscribeReply, paymentUrl));
     }
 
 #endif   // PAYMENTS
@@ -4061,7 +4102,7 @@ internal sealed class MockNestRpcClient : INestRpcClient
         string actorIdHex, string tier, string label = "", string? handle = null, bool suspended = false,
         FfiAdminEviction? eviction = null, bool mailServingEnabled = true, bool isAdmin = false) =>
         new FfiAdminUser(
-            Convert.FromHexString(actorIdHex), tier, label, handle, suspended, 0, 0, 0, eviction, mailServingEnabled, isAdmin);
+            Convert.FromHexString(actorIdHex), tier, label, handle, suspended, 0, 0, 0, eviction, mailServingEnabled, isAdmin, null);
 
     /// A pending eviction to seed a row whose <c>AdminUserRow.EvictionActive</c> is
     /// true (the evict→cancel row flip). <paramref name="status"/> defaults to

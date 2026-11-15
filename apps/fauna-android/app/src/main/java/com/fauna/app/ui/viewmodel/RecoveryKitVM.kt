@@ -18,8 +18,11 @@ import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.FfiConnectionState
 import com.fauna.ffi.FfiDeadGenerations
 import com.fauna.ffi.FfiMintedKit
+import com.fauna.ffi.FfiOwedNestEntry
+import com.fauna.ffi.FfiOwedNestsView
 import com.fauna.ffi.FfiRecoveryKitStatus
 import com.fauna.ffi.FfiStolenOutcome
+import com.fauna.ffi.recoveryOwedNestsAfterDismiss
 import com.fauna.ffi.FfiSweepView
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -68,6 +71,10 @@ import javax.inject.Inject
  *   dead read — `null` until then, which arms nothing.
  * @property letGoConfirmInput the type-to-confirm buffer behind
  *   `recovery-kit-let-go-confirm-field`.
+ * @property owedNests the successor's owed-nests list (`settings.md`
+ *   § Recovery kit → *The successor's owed nests*), the shared projection read
+ *   at hydrate — `null` paints none of the seven ids.
+ * @property owedDismissPending the entry whose two-step dismiss is armed.
  */
 data class RecoveryKitUiState(
     val status: FfiRecoveryKitStatus? = null,
@@ -82,6 +89,8 @@ data class RecoveryKitUiState(
     val deadGenerations: FfiDeadGenerations? = null,
     val letGoConfirmWord: String? = null,
     val letGoConfirmInput: String = "",
+    val owedNests: FfiOwedNestsView? = null,
+    val owedDismissPending: FfiOwedNestEntry? = null,
 ) {
     /**
      * `recovery-kit-unreadable-status`, and the render gate of the whole let-go
@@ -252,6 +261,7 @@ class RecoveryKitVM @Inject constructor(
         viewModelScope.launch {
             loadStatus()
             loadDeadGenerations()
+            loadOwedNests()
             if (onScreen) {
                 dischargeOwedSweep(sessionActorIdHex)
                 dischargeOwedSuccessionKit(sessionActorIdHex)
@@ -299,6 +309,56 @@ class RecoveryKitVM @Inject constructor(
         val dead: FfiDeadGenerations? = api.recoveryDeadGenerations()
         val word: String? = api.recoveryLetGoConfirmWord()
         _state.update { it.copy(deadGenerations = dead, letGoConfirmWord = word) }
+    }
+
+    /**
+     * Read the successor's owed nests at hydrate (tui's Account hydrate). The
+     * read never throws: the door leaves out what it could not read.
+     */
+    suspend fun loadOwedNests() {
+        val owed: FfiOwedNestsView? = try {
+            api.recoveryOwedNestsView()
+        } catch (e: Exception) {
+            ShellLog.w(TAG, "[settings] owed-nests read failed: ${e.message}")
+            _state.value.owedNests
+        }
+        _state.update { it.copy(owedNests = owed, owedDismissPending = null) }
+    }
+
+    /** `recovery-kit-owed-nest-dismiss-button` / `-cancel-button` — arm or
+     *  disarm the two-step dismiss on one entry. */
+    fun armOwedDismiss(entry: FfiOwedNestEntry?) {
+        _state.update { it.copy(owedDismissPending = entry) }
+    }
+
+    /**
+     * `recovery-kit-owed-nest-dismiss-confirm-button` — one `owed_settle` at the
+     * entry's keeper through the shared `dismiss_owed_nest`: settled drops the
+     * entry (the last one takes the section away); a refusal paints the shared
+     * `dismiss_failed_copy` line on `error-message` and keeps it listed. The
+     * entry is named by its keeper and settle key, never a painted index.
+     */
+    fun confirmOwedDismiss(entry: FfiOwedNestEntry) {
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true) }
+        viewModelScope.launch {
+            try {
+                val refusal = api.recoveryDismissOwedNest(entry)
+                if (refusal != null) {
+                    setError(resolveLocalized(context, refusal))
+                } else {
+                    // The shared drop and recount (macos/ios use the same
+                    // door): the last entry takes the section away.
+                    _state.update { s ->
+                        s.copy(owedNests = s.owedNests?.let { recoveryOwedNestsAfterDismiss(it, entry) })
+                    }
+                }
+            } catch (e: Exception) {
+                setError(e.message)
+            } finally {
+                _state.update { it.copy(busy = false, owedDismissPending = null) }
+            }
+        }
     }
 
     /**
@@ -770,4 +830,13 @@ class RecoveryKitVM @Inject constructor(
         internal fun mintCanNeverLand(status: FfiRecoveryKitStatus?): Boolean =
             status?.allowsCreate == false
     }
+}
+
+/** An owed entry's identity — its keeper and settle key, never the painted
+ *  lines (byte arrays compare by content, not by reference). */
+fun FfiOwedNestEntry.sameKey(other: FfiOwedNestEntry): Boolean {
+    val mine = keeper
+    val theirs = other.keeper
+    val sameKeeper = if (mine == null || theirs == null) mine == theirs else mine.contentEquals(theirs)
+    return sameKeeper && oldActorId.contentEquals(other.oldActorId) && nestId.contentEquals(other.nestId)
 }

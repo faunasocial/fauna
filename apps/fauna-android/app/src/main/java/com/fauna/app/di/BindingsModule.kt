@@ -14,4 +14,5 @@ abstract class BindingsModule {
     @Binds abstract fun bindCryptoOps(impl: FfiCryptoOps): CryptoOps
     @Binds abstract fun bindSessionAccount(impl: SecureStorage): SessionAccount
     @Binds abstract fun bindOnDemandToggle(impl: FfiOnDemandSource): OnDemandToggle
+    @Binds abstract fun bindSharePlaneReadings(impl: com.fauna.app.p2pshare.SharePlaneHost): com.fauna.app.p2pshare.SharePlaneReadingsSource
 }

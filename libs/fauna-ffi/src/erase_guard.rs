@@ -60,6 +60,33 @@ pub enum FfiEraseRemoveBlocked {
         /// `settings.remove_account_blocked_other_window`.
         line: LocalizedText,
     },
+    /// The account is a retired identity whose undrained outbox this device
+    /// has not carried to its successor yet (`succession-aftermath.md`
+    /// § Re-key scope, the device-local outbox row) — removing it would erase
+    /// the only copy of those pending writes
+    /// (`fauna_client_accounts::remove_account_carry_owed`).
+    CarryOwed {
+        /// `settings.remove_account_blocked_carry_owed`.
+        line: LocalizedText,
+    },
+}
+
+/// Remove-account's third question, after [`remove_account_blocked`]: does
+/// this device still owe `actor_id_hex`'s successor its outbox? Over the same
+/// store root the question and the erase resolve.
+pub(crate) fn remove_account_carry_owed(
+    registry: &FfiAccountRegistry,
+    store_container_dir: Option<String>,
+    actor_id_hex: &str,
+) -> Option<FfiEraseRemoveBlocked> {
+    let store_root =
+        crate::account_state::store_root_or_logged(store_container_dir.map(PathBuf::from));
+    fauna_client_accounts::remove_account_carry_owed(
+        registry.registry(),
+        store_root.as_deref(),
+        actor_id_hex,
+    )
+    .map(|owed| FfiEraseRemoveBlocked::CarryOwed { line: owed.copy() })
 }
 
 /// **May sign-out erase every account on this device?** `None` = proceed;
@@ -78,6 +105,7 @@ pub fn sign_out_blocked(
     own_lock: Option<Arc<FfiAccountInstanceLock>>,
 ) -> Option<FfiEraseBlocked> {
     all_accounts_erase_blocked(
+        "sign-out",
         &registry,
         Path::new(&base_dir),
         crate::account_state::store_root_or_logged(store_container_dir.map(PathBuf::from))
@@ -102,6 +130,7 @@ pub fn start_over_blocked(
     own_lock: Option<Arc<FfiAccountInstanceLock>>,
 ) -> Option<FfiEraseBlocked> {
     all_accounts_erase_blocked(
+        "start-over",
         &registry,
         Path::new(&base_dir),
         crate::account_state::store_root_or_logged(store_container_dir.map(PathBuf::from))
@@ -171,8 +200,10 @@ pub(crate) fn serving_bases<'a>(
 
 /// The all-accounts question, over exactly what
 /// [`crate::account_state_erase_all_scopes`] sweeps: the registry's accounts
-/// plus every actor scope under `base_dir` and the store root.
+/// plus every actor scope under `base_dir` and the store root. `gesture` names
+/// the gesture asking, for the log.
 fn all_accounts_erase_blocked(
+    gesture: &str,
     registry: &FfiAccountRegistry,
     base_dir: &Path,
     store_root: Option<&Path>,
@@ -189,12 +220,22 @@ fn all_accounts_erase_blocked(
     })?;
     // Which accounts refused, beside the one whose lock this seat put down:
     // the line names none, so this is the only place a refusal says why.
-    tracing::warn!(
-        refused = ?blocked.accounts,
-        own_lock = ?own,
-        "erase refused: another instance serves an account it reaches"
-    );
+    tracing::warn!(own_lock = ?own, "{}", refusal_line(gesture, &blocked.accounts));
     Some(blocked.accounts)
+}
+
+/// The log line of a refused all-accounts erase — the words tui's and linux's
+/// own gestures log (`apps/fauna-linux/src/account_scope.rs`), and the
+/// `remove-account REFUSED` line [`crate::remove_account_gesture`] logs beside
+/// them, so one search finds a refusal on every app. Each erasing gesture's e2e
+/// witness counts these lines: it presses again only after a press the app
+/// logged as refused (`test_erase_refused_other_instance.py`).
+fn refusal_line(gesture: &str, accounts: &[String]) -> String {
+    format!(
+        "[{gesture}] REFUSED — another Fauna instance still serves {} account(s): {}",
+        accounts.len(),
+        accounts.join(", ")
+    )
 }
 
 pub(crate) fn with_own_lock_down<T>(
@@ -439,6 +480,22 @@ mod tests {
         );
     }
 
+    /// A refused all-accounts erase logs the line tui's and linux's own
+    /// gestures log, naming the gesture and every account that refused it —
+    /// the one search for a refusal across apps, and what each erasing
+    /// gesture's e2e witness counts before it presses again.
+    #[test]
+    fn a_refusal_logs_the_line_every_app_logs() {
+        let served = ["aa".repeat(32), "bb".repeat(32)];
+        assert_eq!(
+            refusal_line("sign-out", &served),
+            format!(
+                "[sign-out] REFUSED — another Fauna instance still serves 2 account(s): {}, {}",
+                served[0], served[1]
+            )
+        );
+    }
+
     // The holder route (windows' single-window box) is pinned in
     // `accounts_registry`'s process-session-instance test, which owns the
     // process-global holder and launch binding: a second test here driving the
@@ -534,5 +591,55 @@ mod tests {
             "an account nobody serves may go"
         );
         assert!(own.is_held(), "and this instance still holds its own lock");
+    }
+
+    /// Remove-account's third answer: a retired identity whose outbox this
+    /// device still owes its successor is refused `CarryOwed` while its store
+    /// rests under the root, and may go once the carry is recorded — or when
+    /// the device never held its store.
+    #[test]
+    fn remove_account_answers_carry_owed_for_a_retired_identity() {
+        let device = Device::new('7');
+        let successor = device
+            .registry
+            .add_account("8".repeat(64), Some("https://a.example".into()), None)
+            .expect("add the successor");
+        device
+            .registry
+            .registry()
+            .record_succession(&device.actor, &successor)
+            .expect("record the succession");
+        let owed = || {
+            remove_account_carry_owed(
+                &device.registry,
+                Some(device.container.clone()),
+                &device.actor,
+            )
+        };
+
+        assert_eq!(owed(), None, "no store at rest: nothing to carry");
+
+        let store_dir = fauna_account_store::root::StoreRoot::at(device.store_root())
+            .store_dir(&device.actor)
+            .expect("the retired identity's store dir");
+        std::fs::create_dir_all(&store_dir).expect("its store at rest");
+        assert_eq!(
+            owed(),
+            Some(FfiEraseRemoveBlocked::CarryOwed {
+                line: fauna_client_accounts::remove_account_carry_owed_copy(),
+            })
+        );
+        assert_eq!(
+            remove_account_carry_owed(&device.registry, Some(device.container.clone()), &successor),
+            None,
+            "the successor owes nothing"
+        );
+
+        device
+            .registry
+            .registry()
+            .record_outbox_carried(&device.actor)
+            .expect("record the carry");
+        assert_eq!(owed(), None, "carried: the removal may go");
     }
 }

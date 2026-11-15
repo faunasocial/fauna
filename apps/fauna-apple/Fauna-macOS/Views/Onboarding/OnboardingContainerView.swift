@@ -11,7 +11,7 @@ struct OnboardingContainerView: View {
             switch vm.step {
             case .identityChoice:
                 // Shared FaunaKit view (priority #2, mirrors `TrustPromptView`).
-                IdentityChoiceView(vm: vm)
+                IdentityChoiceView(vm: vm, isAddingAccount: appState.isAddingAccount)
             case .identityCreated:
                 MacIdentityCreatedView(vm: vm)
             case .identityImport:

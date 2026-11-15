@@ -183,7 +183,7 @@ resolver = "2"
 [workspace.package]
 # The product version — the fleet-wide source of truth every other surface
 # copies (docs/goal/architecture/product-version.md; version-lockstep gate).
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/faunasocial/fauna"
@@ -370,7 +370,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 
 # Storage
 redb = "2"

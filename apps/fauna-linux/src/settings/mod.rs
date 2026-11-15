@@ -33,6 +33,7 @@ pub mod sessions;
 mod stolen_hold;
 pub mod subscriptions;
 pub mod task_delegation;
+pub mod unsent_changes;
 pub mod web;
 
 pub(crate) use stolen_hold::{

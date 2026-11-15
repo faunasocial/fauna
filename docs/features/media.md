@@ -4,6 +4,10 @@ title: Browse, upload and manage your files
 section: everyday
 goal: docs/goal/ui/media.md § Goal
 guide: docs/guides/app-tour.md § Media
+absences:
+  ios (outcome 15): "docs/goal/architecture/apps/ios.md § Key Differences from macOS"
+  web (outcome 15): "docs/goal/ui/folders.md § Binding (local-folder, desktop only)"
+  android (outcome 15): "docs/goal/ui/folders.md § Binding (local-folder, desktop only)"
 ---
 
 ## What a user gets
@@ -73,11 +77,11 @@ Stamped 2026-11-07 at ac836c937b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+1e755069 standalone |
+| web | ✅ full | 0.1.5-dev+1e755069 standalone |
 | linux | ✅ full | 0.1.5-dev+1e755069 standalone |
 | windows | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+1e755069 standalone |
+| ios | ✅ full | 0.1.5-dev+1e755069 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 | android-kids |  no run recorded | |
@@ -113,6 +117,7 @@ Stamped 2026-11-07 at ac836c937b.
 | 15 | app | `tests/e2e-unified/tests/test_media.py::test_media_restore_of_an_older_version_reaches_the_resident_disk` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_media.py::test_media_restore_of_a_file_deleted_on_this_device_brings_it_back_to_disk` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_reaches_the_folder_this_device_serves` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 15 | app | absent by design on web, ios, android, android-kids, ios-kids | — |
 | 16 | nest | `tests/e2e-unified/tests/api/test_file_versions_metering_audience.py::test_every_version_counts_shrinking_frees_nothing_pruning_and_deleting_free` | nest (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_version_prune_recovery.py::test_version_prune_soft_prunes_and_the_ui_recovers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_media_version_retention.py::test_a_scheduled_version_prune_waits_seven_days_and_cancelling_keeps_every_version` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

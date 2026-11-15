@@ -1060,6 +1060,7 @@ async fn the_pump_pulls_a_custodied_owner_from_the_owners_nest_with_no_peer_leg(
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -1390,6 +1391,7 @@ async fn the_pump_pulls_the_owners_record_bytes_from_the_owners_nest_with_no_pee
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -1601,6 +1603,7 @@ async fn the_pump_adopts_the_owners_mail_segments_end_to_end() {
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -1810,6 +1813,7 @@ async fn a_cap_below_one_pair_leaves_the_owners_mail_segments_unadopted() {
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -2020,6 +2024,7 @@ async fn the_pump_adopts_the_owners_calendar_and_card_segments_end_to_end() {
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -2354,6 +2359,7 @@ async fn the_pump_adopts_a_channels_conv_segments_under_the_member_mint_rule() {
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("the custodian's runtime assembles");

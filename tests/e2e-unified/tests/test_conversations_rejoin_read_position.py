@@ -22,14 +22,17 @@ the whole stream at once — the Welcome, the messages, the Remove commit, the
 Add commit with a second Welcome from the user's second key package, and a
 message in the re-joined epoch — and the test posts each piece at its own
 moment. Arranging the world is setup (convention 8 carve-out (b)); the user's
-own acts — opening the thread, going back to the list, opening it again — go
+own acts — opening the thread, opening the composer over it, opening it again — go
 through the app.
 
 The sequence, and why each step is there:
 
 1. The sender seats the user and posts message one; the user opens the thread
-   (the read raises the marker through message one) and goes back to the list,
-   which closes the thread on tui (``show_list`` clears the selection).
+   (the read raises the marker through message one) and opens the
+   new-conversation composer over it, which closes the thread on every app:
+   ``docs/goal/ui/conversations.md`` § When a thread is read — "a covered
+   thread is not being read". Going back to the list alone would not do on a
+   two-pane app, whose selected thread stays on screen beside the list.
    **Durability barrier**: ``read_marker_state`` reports the raise.
 2. Message two arrives while the thread is closed: one unread. This is the
    position the re-join must resume at — read through one, two unread-able.
@@ -154,7 +157,10 @@ def test_a_group_left_and_re_joined_opens_at_the_old_read_position(
         diagnose=lambda: f"the read never raised the marker: {_describe(app, channel_hex)}",
     )
     read_through = _read_marker(app, channel_hex)["through"]
-    app.conversations.navigate()
+    # Close the thread the way every shell can: the new-conversation composer
+    # covers it (a two-pane app keeps it selected beside the list, so going
+    # back to the list alone leaves it on screen and read on arrival).
+    app.conversations.open_new_conversation()
 
     # ── 2. Message two arrives with the thread closed. ──
     conv_api.channel_send(port, sender, channel_hex, second)
@@ -190,6 +196,7 @@ def test_a_group_left_and_re_joined_opens_at_the_old_read_position(
         f"{_describe(app, channel_hex)} — 3 means the position was lost, 1 "
         "that message two was called history",
     )
+    app.conversations.step_out_of_new_conversation()
     app.conversations.open_thread_by_channel(channel_hex)
     wait_until(
         lambda: _thread(app, channel_hex).unread_count == 0

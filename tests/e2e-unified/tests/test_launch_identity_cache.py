@@ -10,8 +10,8 @@ so a changed tier reaches the app only on the next check. The launch surface
 reads it through the one shared reader, ``AccountRegistry::launch_identity_line``
 (``FfiAccountRegistry.launchIdentityLine`` native, ``accountIdentityLine`` wasm).
 
-With the nest down the app never enters the shell, so the Settings identity cell
-is not reachable: the cached identity shows on the launch surface, as
+With the nest down a gating app never enters the shell, so the Settings identity
+cell is not reachable: the cached identity shows on the launch surface, as
 ``launch-identity-label`` (``handle@domain · tier``) beside ``launch_retry``
 (``docs/goal/behavior/onboarding.md`` § App-launch routing).
 
@@ -28,10 +28,35 @@ The journey, every wait on state (convention 14):
 
 tui led the witness (``testing.md`` § Default app and nest mode); web, linux and
 android joined in one trickle-down batch, the build having landed on all three
-together. The restart is ``hard_reload(replay_login=False)`` over a pinned store
+together; macos and ios followed in the apple batch, painting the line in the
+shared FaunaKit launch views, and windows with its own trickle-down. The restart
+is ``hard_reload(replay_login=False)`` over a pinned store
 (``preserve_state_across_relaunch``) — no login replay, which with the nest down
 would push the app off the launch surface — the shape ``test_offline_queued_like.py``
 runs on the same apps; the remaining apps add their marker as theirs reaches them.
+
+The label is on ``launch_progress`` too, so it can show while the launch's sign-in
+check is still running: the retry surface is waited for, never assumed the moment
+the label shows (convention 14).
+
+Web's launch is a reload, and a signed-in web reload keeps its route and verifies
+in the background: an unreachable nest is retried silently and reaches the launch
+route only by escalation, which needs a device that custodies a box
+(``onboarding.md`` § App-launch routing, the web gate). So web never sits on
+``launch_retry`` here: steps 2 and 4 read the cached handle and tier where they
+stay in place on web — the Settings identity cell, the cache's other surface
+(``long-term-store.md`` § Cross-app server-data cache) — and step 3's new sign-in
+check is the reload's own background verify, the nest up, in place of the retry
+button the launch surface would offer.
+
+iOS keeps its shell too, for its own reason: it alone enters optimistically from
+the stored session, and an entered session stays in its cached shell on a
+transient verdict, leaving for ``launch_retry`` only when the device custodies a
+box whose nest may be lost — which this test's device does not
+(``onboarding.md`` § App-launch routing, the iOS entry-posture paragraph). So iOS
+takes web's branch: steps 2 and 4 read the Settings identity cell, and step 3's
+new sign-in check is the relaunch with the nest up — the pinned store's own
+auto-restore, its launch verify — in place of the retry button.
 """
 
 from __future__ import annotations
@@ -48,6 +73,9 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.web,
     pytest.mark.android,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.windows,
 ]
 
 #: The tier the account is moved onto in step 3 — a name no default tier has.
@@ -63,11 +91,37 @@ def _shows(driver, *needles: str) -> bool:
     return all(n in text for n in needles)
 
 
+def _keeps_shell(driver) -> bool:
+    """True on the apps that stay in the shell at a launch with the nest down —
+    web (its reload keeps the route) and iOS (optimistic entry) — and so never
+    paint ``launch_retry`` here (module docstring)."""
+    return driver.is_web() or driver.is_ios()
+
+
+def _cached_identity_shown(app, handle: str, tier: str, seen: dict) -> bool:
+    """The cached handle and tier on the surface this app shows at a launch with
+    the nest down: the launch surface's label, or on web and iOS the Settings
+    cell of the shell they keep (module docstring)."""
+    if _keeps_shell(app.driver):
+        return _settings_cell(app, seen) and handle in seen["handle"] and tier in seen["tier"]
+    return _shows(app.driver, handle, tier)
+
+
+def _launch_down_diagnose(app, seen: dict) -> str:
+    if _keeps_shell(app.driver):
+        return f"the Settings identity cell read {seen!r}: " + app.driver.diagnose(
+            "settings-tier-label")
+    return app.driver.diagnose(IDENTITY)
+
+
 def _settings_cell(app, seen: dict) -> bool:
     """Open Settings and read the identity cell; False while the shell (or the
     cell) is not up yet — the retry's sign-in may still be in flight."""
     try:
         app.settings.navigate()
+        # The cell is on the Status sub-page. The desktop shells land there on a
+        # plain navigate; iOS lands on the root page list (`SettingsActions.navigate`).
+        app.settings._navigate_subpage("status")
     except Exception as e:  # still on the launch surface
         seen["navigate"] = repr(e)
         return False
@@ -123,17 +177,26 @@ def test_launch_paints_the_cached_handle_and_tier_and_keeps_them_while_the_nest_
         stop_nest(nest, graceful=True)
         nest_down = True
         driver.hard_reload(replay_login=False)
+        down: dict = {}
         wait_until(
-            lambda: _shows(driver, handle, first_tier),
+            lambda: _cached_identity_shown(app, handle, first_tier, down),
             APP_RELAUNCH_S,
-            diagnose=lambda: f"{IDENTITY} never painted the cached handle {handle!r} and "
-            f"tier {first_tier!r} on a launch with the nest down: "
-            + driver.diagnose(IDENTITY),
+            diagnose=lambda: f"the launch never painted the cached handle {handle!r} and "
+            f"tier {first_tier!r} with the nest down: " + _launch_down_diagnose(app, down),
         )
-        assert driver.is_visible(RETRY), (
-            "the nest is down, so the launch must sit on launch_retry: "
-            + driver.diagnose(RETRY)
-        )
+        if not _keeps_shell(driver):
+            # launch_progress carries the label too (onboarding.md § App-launch
+            # routing), so the label alone does not say the launch has failed
+            # through yet: wait for the retry surface itself.
+            wait_until(
+                lambda: driver.is_visible(RETRY),
+                APP_RELAUNCH_S,
+                diagnose=lambda: "the nest is down, so the launch must reach "
+                "launch_retry: " + driver.diagnose(RETRY),
+            )
+            assert _shows(driver, handle, first_tier), (
+                "launch_retry lost the cached identity: " + driver.diagnose(IDENTITY)
+            )
 
         # (3) The nest returns and the account moves to another tier. The cache's
         # only writer is the sign-in check, so the retry (a new check) must land it.
@@ -143,7 +206,12 @@ def test_launch_paints_the_cached_handle_and_tier_and_keeps_them_while_the_nest_
                     base_url=nest["url"])
         set_user_tier(nest["port"], actor, MOVED_TIER, admin_signing_key=admin_sk,
                       base_url=nest["url"])
-        driver.click(RETRY)
+        if _keeps_shell(driver):
+            # The relaunch's own sign-in check, the nest up: web's background
+            # verify, iOS's launch verify over the pinned store's auto-restore.
+            driver.hard_reload()
+        else:
+            driver.click(RETRY)
         moved: dict = {}
         wait_until(
             lambda: _settings_cell(app, moved) and MOVED_TIER in moved["tier"],
@@ -156,12 +224,13 @@ def test_launch_paints_the_cached_handle_and_tier_and_keeps_them_while_the_nest_
         stop_nest(nest, graceful=True)
         nest_down = True
         driver.hard_reload(replay_login=False)
+        again: dict = {}
         wait_until(
-            lambda: _shows(driver, handle, MOVED_TIER),
+            lambda: _cached_identity_shown(app, handle, MOVED_TIER, again),
             APP_RELAUNCH_S,
-            diagnose=lambda: f"{IDENTITY} lost the last good handle/tier "
+            diagnose=lambda: f"the launch lost the last good handle/tier "
             f"({handle!r}, {MOVED_TIER!r}) with the nest down again: "
-            + driver.diagnose(IDENTITY),
+            + _launch_down_diagnose(app, again),
         )
     finally:
         if nest_down:

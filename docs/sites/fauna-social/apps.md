@@ -13,7 +13,7 @@ Fauna {version}, the current release, has these downloads:
 
 ## Downloads
 
-Every file, with its signature, is also listed at {releases}.
+Every file is also listed at {releases}, and our [code signing policy](/code-signing-policy) says how to check that it is ours.
 
 ### Check a download
 
@@ -23,9 +23,8 @@ The releases page lists each file's SHA-256 hash. Compare it with yours:
 - macOS: `shasum -a 256 <file>`
 - Linux: `sha256sum <file>`
 
-The Windows installer will be code-signed through SignPath.io, with a
-certificate from the SignPath Foundation; until that certificate is issued,
-the installer is unsigned. See our [code signing
-policy](/code-signing-policy).
+The Windows installers in our releases do not carry a Windows code
+signature; our [code signing policy](/code-signing-policy) says how to check
+that an installer is ours.
 
 Found a download claiming to be ours somewhere else? Write to {email}.

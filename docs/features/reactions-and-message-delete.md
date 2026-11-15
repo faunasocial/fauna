@@ -45,7 +45,7 @@ Stamped 2026-09-19 at eb7ece9829.
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+26250b64 standalone |
+| tui | ✅ full | 0.1.6-dev+2f2257c1 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 

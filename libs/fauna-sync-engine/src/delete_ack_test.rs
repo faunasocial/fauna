@@ -164,6 +164,58 @@ async fn a_proven_synced_skip_acks_recorded() {
     );
 }
 
+/// A recorded write whose row was demoted to `Placeholder` (the staging
+/// root's settle on the engine's dehydration proof) and whose OS re-drives it
+/// with the same bytes (the ack was lost): the bytes are the recorded head, so
+/// the skip must ack `recorded: true` without touching the network — never the
+/// stale-cache decline's `recorded: false`, which would have the OS re-drive
+/// the write forever.
+#[tokio::test]
+async fn a_demoted_recorded_write_retried_with_its_bytes_acks_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = test_engine(dir.path().to_path_buf());
+
+    let body = b"recorded, then demoted";
+    std::fs::write(dir.path().join("demoted.txt"), body).unwrap();
+    let hash = fauna_core::data::ContentHash::of_raw(body);
+    let mtime = 1_700_000_000i64;
+    engine
+        .db()
+        .upsert_entry(
+            "demoted.txt",
+            Some(hash),
+            Some(hash),
+            Some(hash),
+            SyncState::Synced,
+            mtime,
+            mtime,
+            body.len() as i64,
+            1,
+            None,
+        )
+        .unwrap();
+    engine
+        .db()
+        .stamp_recorded_content_from_local("demoted.txt", crate::db::ProofOrigin::OwnRecord)
+        .unwrap();
+    engine.mark_placeholder("demoted.txt").unwrap();
+
+    let outcome = engine
+        .upload_file("demoted.txt")
+        .await
+        .expect("upload_file");
+    assert!(
+        outcome.recorded,
+        "a retried write of a demoted row's recorded bytes must ack"
+    );
+    let entry = engine.db().get_entry("demoted.txt").unwrap().unwrap();
+    assert_eq!(
+        entry.state,
+        SyncState::Placeholder,
+        "the ack moves nothing: the row stays the placeholder the settle made it"
+    );
+}
+
 /// A `Synced` row WITHOUT the recorded-head proof is the residue of a failed
 /// record: it must NOT skip — the retry re-drives the upload + record (which
 /// here fails loudly against the unreachable nest, proving the network path

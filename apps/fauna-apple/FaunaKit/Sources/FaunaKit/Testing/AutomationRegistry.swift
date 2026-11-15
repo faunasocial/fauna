@@ -96,6 +96,13 @@ public enum E2eEnv {
     /// Spawn the real external `fauna-sync-agent` as a private child.
     public static var realSyncAgent: Bool { env["FAUNA_E2E_REAL_SYNC_AGENT"] != nil }
 
+    /// iOS: run the File Provider domain reconcile on an e2e launch — set by the
+    /// harness only for a seat that installed the appex-embedding `Fauna-iOS`
+    /// app (the `ios_file_provider_app` marker), on its own ephemeral simulator.
+    public static var fileProviderReconcile: Bool {
+        env["FAUNA_E2E_FILE_PROVIDER_RECONCILE"] != nil
+    }
+
     /// Run `KeychainStore` on a REAL keychain instead of the e2e in-memory store:
     /// the seat simulator's own on iOS, a harness-owned file on macOS
     /// (`KeychainStore.e2eRealKeychain` owns the gate and the reason).
@@ -153,6 +160,7 @@ public enum E2eEnv {
     public static var widgetDir: String? { nil }
     public static var realConversations: Bool { false }
     public static var realSyncAgent: Bool { false }
+    public static var fileProviderReconcile: Bool { false }
     public static var realKeychain: Bool { false }
     public static var keepRealKeychain: Bool { false }
     public static var keychainPath: String? { nil }
@@ -275,6 +283,17 @@ public enum FaunaE2E {
     /// (run 20260724-02). Only meaningful when `isActive`.
     public static var realSyncAgent: Bool { E2eEnv.realSyncAgent }
 
+    /// E2E-only: run the iOS File Provider domain reconcile, which every other e2e
+    /// launch skips because File Provider domains and the shared app-group
+    /// Keychain are machine-global (testing.md § conventions point 10). The
+    /// harness sets `FAUNA_E2E_FILE_PROVIDER_RECONCILE` only for a seat carrying
+    /// the `ios_file_provider_app` marker, which installs the appex-embedding
+    /// `Fauna-iOS` app on a simulator of its own, so the domains it registers
+    /// stay inside that one seat's device — the phone-peer member's witness
+    /// (`p2p-shared-set-build.md` § Phone peers — design, decision 5). Only
+    /// meaningful when `isActive`.
+    public static var fileProviderReconcile: Bool { E2eEnv.fileProviderReconcile }
+
     /// E2E-only: make the automation server **refuse** to actuate a control the
     /// real UI has disabled, instead of driving it anyway.
     ///
@@ -381,6 +400,11 @@ public struct SentinelGeometry {
     /// harness, where the app is never the active one), so a frame-only test
     /// read the closed sheet's controls present indefinitely.
     public var windowVisible: Bool = true
+    /// The room the layout gave the element (`AutomationPaintedTextRoom`),
+    /// measured on demand — a walk of the sentinel's platform ancestors, so it
+    /// is read only by the `painted_text_area` feed, never by every geometry
+    /// read. `nil` where no sentinel is realized.
+    public var laidOutRoom: (() -> AutomationLaidOutRoom?)?
 
     /// The zombie test — deliberately horizontal-origin-only. UIKit
     /// slide-transition/reuse churn leaves a DEAD row's cell attached at the
@@ -654,6 +678,22 @@ public final class AutomationRegistry {
             for slot in visibleSlots(id) {
                 let text = slot.entry.text?() ?? slot.entry.value?() ?? ""
                 if !text.isEmpty { frame.append((id: id, text: text)) }
+            }
+        }
+        return frame
+    }
+
+    /// Every visible slot with text of its own (the `paintedTexts` rule) and a
+    /// realized sentinel, with the room the layout gave it — the frame the
+    /// `painted_text_area` observable is fed. A slot with no sentinel, or a
+    /// zero-size carrier, is not measured.
+    public func laidOutTexts() -> [(id: String, text: String, room: AutomationLaidOutRoom)] {
+        var frame: [(id: String, text: String, room: AutomationLaidOutRoom)] = []
+        for id in entries.keys.sorted() {
+            for slot in visibleSlots(id) {
+                let text = slot.entry.text?() ?? slot.entry.value?() ?? ""
+                guard !text.isEmpty, let room = slot.geometry?()?.laidOutRoom?() else { continue }
+                frame.append((id: id, text: text, room: room))
             }
         }
         return frame
@@ -1787,12 +1827,14 @@ private final class _AutomationLifecycle {
         return SentinelGeometry(
             frame: CGRect(x: r.minX, y: h - r.maxY, width: r.width, height: r.height),
             windowBounds: CGRect(x: 0, y: 0, width: window.frame.width, height: h),
-            windowVisible: window.isVisible)
+            windowVisible: window.isVisible,
+            laidOutRoom: { [weak view] in view?.laidOutRoom })
         #else
         return SentinelGeometry(
             frame: r,
             windowBounds: CGRect(origin: .zero, size: window.bounds.size),
-            windowVisible: !window.isHidden)
+            windowVisible: !window.isHidden,
+            laidOutRoom: { [weak view] in view?.laidOutRoom })
         #endif
         #else
         return nil
@@ -2037,6 +2079,31 @@ final class _AttachmentProbeView: _PlatformView {
     /// `@MainActor` state.
     var superseded = false
 
+    /// The room the layout gave the element this probe backs — the probe rides
+    /// in the element's `.background`, so its box is the element's frame — cut
+    /// by its platform ancestors (`AutomationPaintedTextRoom.room`). Window
+    /// coordinates; AppKit's are bottom-up, which no intersection or size cares
+    /// about. `nil` while detached.
+    var laidOutRoom: AutomationLaidOutRoom? {
+        guard window != nil else { return nil }
+        var ancestors: [AutomationRoomAncestor] = []
+        var next = superview
+        while let ancestor = next {
+            let kind: AutomationRoomAncestor.Kind
+            #if os(iOS)
+            if ancestor is UIScrollView { kind = .scroll }
+            else { kind = ancestor.clipsToBounds ? .clip : .plain }
+            #else
+            if ancestor is NSClipView || ancestor is NSScrollView { kind = .scroll }
+            else { kind = ancestor.clipsToBounds ? .clip : .plain }
+            #endif
+            ancestors.append(AutomationRoomAncestor(
+                box: ancestor.convert(ancestor.bounds, to: nil), kind: kind))
+            next = ancestor.superview
+        }
+        return AutomationPaintedTextRoom.room(own: convert(bounds, to: nil), ancestors: ancestors)
+    }
+
     #if os(iOS)
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -2273,3 +2340,99 @@ public struct _AutomationRegister: ViewModifier {
 }
 
 #endif
+
+// MARK: - Painted-text room (convention 17)
+//
+// Kept in THIS file, unconditional, so the file still typechecks standalone
+// for iOS.
+
+/// The ROOM the layout gave one registered element — the measure behind
+/// convention 17's `painted-text-has-area` (`fauna_e2e_contract::LaidOutText`
+/// owns each field's meaning; `E2eLoudSurfaces` feeds it to `fauna-ffi`'s
+/// `FfiPaintedTextAreaForTest`, the shared builder, which keeps the starved).
+///
+/// `width`/`height` are the element's own box cut by every ancestor that clips
+/// it, a scroll viewport excepted; `pane` is the box of its nearest ancestor
+/// with area, `depth` the area-less ancestors between. Layout units are points.
+public struct AutomationLaidOutRoom: Equatable {
+    public let width: CGFloat
+    public let height: CGFloat
+    public let pane: CGSize?
+    public let depth: Int
+}
+
+/// One platform ancestor of an element's sentinel, innermost first, as the
+/// room rule reads it: its box in window coordinates and how it bounds its
+/// content.
+public struct AutomationRoomAncestor {
+    public enum Kind {
+        /// Draws its subviews unclipped.
+        case plain
+        /// Clips its subviews to its bounds (`clipsToBounds`).
+        case clip
+        /// A scroll viewport (`UIScrollView`, `NSClipView`, `NSScrollView`):
+        /// content scrolled out of view keeps its box, so past it only SIZES
+        /// compare, never positions.
+        case scroll
+    }
+
+    public let box: CGRect
+    public let kind: Kind
+
+    public init(box: CGRect, kind: Kind) {
+        self.box = box
+        self.kind = kind
+    }
+}
+
+public enum AutomationPaintedTextRoom {
+    /// The room rule. `own` is the element's box in window coordinates (its
+    /// sentinel rides in the element's `.background`, so the sentinel's box IS
+    /// the element's SwiftUI frame); `ancestors` run innermost outward.
+    ///
+    /// Returns `nil` for an element with no box of its own at all (0×0): SwiftUI
+    /// gives a starved text a line's height at zero width, so a box empty in
+    /// BOTH dimensions is a deliberate zero-size carrier (macOS's hidden
+    /// `page-heading`, `.frame(width: 0, height: 0)`) or one not laid out yet —
+    /// never a starve. Like every leg, the rule can miss a starved element but
+    /// never invent one: positions inside a scroll are ignored, and a
+    /// SwiftUI-only `.clipped()` makes no platform view, so it is not seen.
+    public static func room(own: CGRect, ancestors: [AutomationRoomAncestor]) -> AutomationLaidOutRoom? {
+        guard own.width > 0 || own.height > 0 else { return nil }
+        var pane: CGSize?
+        var depth = 0
+        for ancestor in ancestors {
+            if hasArea(ancestor.box.size) {
+                pane = ancestor.box.size
+                break
+            }
+            depth += 1
+        }
+        let size = cut(own, ancestors[...])
+        return AutomationLaidOutRoom(width: size.width, height: size.height, pane: pane, depth: pane == nil ? 0 : depth)
+    }
+
+    /// `box` cut by every clipping ancestor up to the first scroll viewport;
+    /// past it, the size is capped by the viewport's own room, size by size.
+    private static func cut(_ box: CGRect, _ ancestors: ArraySlice<AutomationRoomAncestor>) -> CGSize {
+        var rect = box
+        for (offset, ancestor) in zip(ancestors.indices, ancestors) {
+            switch ancestor.kind {
+            case .plain:
+                continue
+            case .clip:
+                rect = rect.intersection(ancestor.box)
+                if rect.isNull { return .zero }
+            case .scroll:
+                let viewport = cut(ancestor.box, ancestors[(offset + 1)...])
+                return CGSize(width: min(rect.width, viewport.width),
+                              height: min(rect.height, viewport.height))
+            }
+        }
+        return rect.size
+    }
+
+    private static func hasArea(_ size: CGSize) -> Bool {
+        size.width > 0 && size.height > 0
+    }
+}

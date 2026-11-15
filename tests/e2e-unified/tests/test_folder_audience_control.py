@@ -69,7 +69,7 @@ pytestmark = [
     pytest.mark.windows,
     # android, 2026-10-31: the seventh app. `folder-audience-select` is a
     # `TokenSelect` (wire value on the anchor), the website toggle a Switch.
-    # Witness NOT run — no android venue yet; the marker is
+    # Witness NOT run — no android emulator yet; the marker is
     # the parity ledger, not a green cell.
     pytest.mark.android,
 ]

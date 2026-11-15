@@ -47,10 +47,16 @@ public struct RoomSettingsSheet: View {
     @State private var saving = false
     /// The walk-out's confirm is open (`room-leave-confirm` is painted).
     @State private var confirmingLeave = false
+    /// The local remove's confirm is open (`room-remove-confirm` is painted).
+    @State private var confirmingRemove = false
+    /// The room carries a policy to edit. `false` on a policy-less (bridged)
+    /// room, whose editor `RoomSettingsDraft::seed` opens only for the remove.
+    private let hasPolicy: Bool
 
     /// `seed` is `roomSettingsSeed(detail:)`'s answer; the host opens the
-    /// editor only when there is one (a policy-less room or a non-room has no
-    /// policy to edit, so that is the belt). The door is live for any member;
+    /// editor only when there is one (a non-room, or a policy-less room with no
+    /// local remove, has nothing to show, so that is the belt; a policy-less
+    /// room that supports the remove seeds an empty draft for it). The door is live for any member;
     /// each policy control greys off `canSetPolicy` inside.
     public init(detail: ThreadDetail, seed: RoomSettingsDraft, onClose: @escaping () -> Void) {
         self.threadId = detail.threadId
@@ -63,6 +69,7 @@ public struct RoomSettingsSheet: View {
         }
         self.canAppointAdmins = detail.capabilities.canAppointAdmins
         self.canTransferOwnership = detail.capabilities.canTransferOwnership
+        self.hasPolicy = detail.room?.policy != nil
         self._draft = State(initialValue: seed)
     }
 
@@ -77,27 +84,36 @@ public struct RoomSettingsSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L.conversations.unified.threadRoomSettings).font(.headline)
 
-            // The staged content scrolls; Save/Cancel stay put below it.
-            ScrollView {
-                content
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(minHeight: 240, idealHeight: 360, maxHeight: 520)
+            // A policy-less room (a bridged room) opens this editor only for
+            // its local remove (`RoomSettingsDraft::seed`): it has no policy,
+            // roles, read or labelers to show, greyed or otherwise, so only the
+            // walk-out and the remove are painted — and no Save.
+            if hasPolicy {
+                // The staged content scrolls; Save/Cancel stay put below it.
+                ScrollView {
+                    content
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(minHeight: 240, idealHeight: 360, maxHeight: 520)
 
-            ErrorBanner(message: refusal)
+                ErrorBanner(message: refusal)
+            }
 
             HStack {
                 Spacer()
                 Button(L.common.cancel) { onClose() }
                     .keyboardShortcut(.cancelAction)
-                Button(L.common.save) { save() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(saving || !canSetPolicy)
-                    .accessibilityIdentifier(Ids.roomSettingsSaveButton)
-                    .automationActivate(Ids.roomSettingsSaveButton, isEnabled: { !saving && canSetPolicy }) { save() }
+                if hasPolicy {
+                    Button(L.common.save) { save() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(saving || !canSetPolicy)
+                        .accessibilityIdentifier(Ids.roomSettingsSaveButton)
+                        .automationActivate(Ids.roomSettingsSaveButton, isEnabled: { !saving && canSetPolicy }) { save() }
+                }
             }
 
             leaveSection
+            removeSection
         }
         .padding(20)
         .frame(minWidth: 360)
@@ -221,6 +237,53 @@ public struct RoomSettingsSheet: View {
         guard canLeaveRoom else { return }
         onClose()
         Task { await vm.leaveRoom(threadId) }
+    }
+
+    /// The live `supports_local_remove` (a bridged room today) — read again
+    /// when the confirm opens and at the confirm, not only at paint.
+    private var canRemoveRoom: Bool { vm.detail(threadId)?.capabilities.supportsLocalRemove ?? false }
+
+    /// `room-remove-button` + `room-remove-confirm` — the nest's local remove
+    /// of the whole conversation (`bridged-adapter.md` § Removing bridged
+    /// rows, rule 6). Beside the walk-out and OUTSIDE Save's staged set: an
+    /// immediate act. Greyed — never hidden — unless `supports_local_remove`.
+    @ViewBuilder
+    private var removeSection: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            Button(L.conversations.unified.roomRemove) { openRemoveConfirm() }
+                .buttonStyle(.bordered)
+                .disabled(!canRemoveRoom)
+                .accessibilityIdentifier(Ids.roomRemoveButton)
+                .automationActivate(Ids.roomRemoveButton, isEnabled: { canRemoveRoom }) { openRemoveConfirm() }
+            if confirmingRemove {
+                HStack(spacing: 8) {
+                    Button(L.common.cancel) { confirmingRemove = false }
+                    Button(L.conversations.unified.roomRemoveConfirm, role: .destructive) { confirmRemove() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canRemoveRoom)
+                        .accessibilityIdentifier(Ids.roomRemoveConfirm)
+                        .automationActivate(Ids.roomRemoveConfirm, isEnabled: { canRemoveRoom }) { confirmRemove() }
+                        .faunaGate("fauna.bridges.conversation.rooms.remove")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private func openRemoveConfirm() {
+        guard canRemoveRoom else { return }
+        confirmingRemove = true
+    }
+
+    /// Closes the editor, then makes the one manager call: the thread leaves
+    /// the manager — and the shared selection with it, so the page goes back
+    /// to the list — once the nest answered; a refusal rides the page's
+    /// `error-message` and the thread stays open.
+    private func confirmRemove() {
+        confirmingRemove = false
+        guard canRemoveRoom else { return }
+        onClose()
+        Task { await vm.removeThread(threadId) }
     }
 
     /// `room-nest-read-toggle` — whether the home nest reads the room. Staged

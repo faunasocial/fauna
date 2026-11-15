@@ -27,6 +27,7 @@ import time
 
 import pytest
 
+from helpers import box_actions
 from helpers.live_handle import handle_override, sign_in_handle
 
 
@@ -161,6 +162,8 @@ def reach_admin_shell(
             app.driver.wait_for("nat-mode-confirm-button", timeout=60)
             app.onboarding.finish_nat_mode(mode=nat_mode)
             wait_logged_in(app)
+            box_actions.record(nest_url, "claimed through the app",
+                               detail={"nat_mode": nat_mode or "seeded"})
             return "claimed-fresh"
         if app.driver.is_visible("launch-retry-button"):
             try:
@@ -178,23 +181,91 @@ def reach_admin_shell(
     )
 
 
-def enable_mail(app, password: str) -> bool:
+def enable_mail(app, password: str, *, box: str | None = None) -> bool:
     """Enable mail (PLAIN password) through the mail-settings UI, reached by
-    clicks. Idempotent: returns False without mutating when a credential already
-    exists, True when this call enabled it."""
+    clicks, then make sure the deployment-wide switch is on
+    (:func:`ensure_deployment_mail_on`). Returns True when this call minted the
+    admin's credential, False when one already existed — the switch is checked
+    either way: a credential says nothing about the switch, and an off switch
+    keeps every mail port closed (`mail-bridge-lifecycle.md` § Default-off on
+    first claim). ``box`` is the nest the app drives, for the box record
+    (None: the run's box — `helpers.box_actions`)."""
     app.mail_settings.open_by_click()
     if app.mail_settings.wait_for_credential_count_at_least(1, timeout=12.0):
-        return False  # already enabled
+        ensure_deployment_mail_on(app, box=box)
+        return False  # the credential already existed
     app.mail_settings.enable_mail_plain(password, display_name="Default")
     assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=40.0), (
         "enabling mail did not mint a credential. mail-page error: "
         f"{app.mail_settings.page_error_text(timeout=3.0)!r}; "
         f"app error: {app.error_text()!r}"
     )
+    box_actions.record(box, "admin mail credential minted through the app")
+    ensure_deployment_mail_on(app, box=box)
     return True
 
 
-def approve_pending_bridges(app, *, timeout: float = 150.0) -> int:
+def bring_box_mail_up(app, password: str | None, *, box: str | None = None) -> bool:
+    """A kept box's mail step: with a stored password, :func:`enable_mail`
+    (credential, then the switch); without one — a resume whose admin
+    credential this run did not mint — the deployment switch alone. Returns
+    True only when this call minted the credential. The switch is checked on
+    every path: it, not the credential, brings the bridges up (a resume that
+    skipped it left test.fauna.build's mail ports shut, 2026-11-10)."""
+    if password:
+        return enable_mail(app, password, box=box)
+    ensure_deployment_mail_on(app, box=box)
+    return False
+
+
+_MAIL_SWITCH = "admin-mail-enabled-toggle"
+_MAIL_NOTICE = "admin-mail-unavailable-notice"
+
+
+def ensure_deployment_mail_on(app, *, timeout: float = 60.0, box: str | None = None) -> bool:
+    """Turn the deployment-wide mail switch (``admin-mail-enabled-toggle`` →
+    ``set_mail_enabled``) on through the admin Mail page, reached by clicks.
+
+    The switch is what brings the MTA/MDA bridge services up; an unset switch
+    reads off, and the admin's own mail credential does not set it. Returns True
+    when this call clicked it, False when it already read ``on``. A box that
+    cannot enable mail (``unavailable``) fails with the page's notice. Each wait
+    polls the toggle's ``state`` attribute (convention 14); the click is made
+    once, never re-clicked into an overshoot."""
+    app.admin.open_page_by_click("admin-mail", _MAIL_SWITCH)
+
+    def _state():
+        return app.driver.get_attr(_MAIL_SWITCH, "state") if app.driver.count(_MAIL_SWITCH) else None
+
+    deadline = time.monotonic() + timeout
+    state = _state()
+    while state not in ("on", "off", "unavailable") and time.monotonic() < deadline:
+        time.sleep(0.5)
+        state = _state()
+    if state == "on":
+        return False
+    if state == "unavailable":
+        notice = (app.driver.get_text(_MAIL_NOTICE)
+                  if app.driver.count(_MAIL_NOTICE) else "")
+        pytest.fail(f"this box cannot enable mail: {notice!r}")
+    assert state == "off", (
+        f"the deployment mail switch never hydrated (state={state!r}); "
+        f"app error: {app.error_text()!r}"
+    )
+    app.driver.click(_MAIL_SWITCH)
+    while time.monotonic() < deadline:
+        state = _state()
+        if state == "on":
+            box_actions.record(box, "mail enabled (the deployment switch) through the app")
+            return True
+        time.sleep(0.5)
+    pytest.fail(
+        f"turning the deployment mail switch on did not take (state={state!r}); "
+        f"app error: {app.error_text()!r}"
+    )
+
+
+def approve_pending_bridges(app, *, timeout: float = 150.0, box: str | None = None) -> int:
     """Approve the co-located mail bridge(s) through the admin UI; returns how
     many approve clicks landed.
 
@@ -212,6 +283,8 @@ def approve_pending_bridges(app, *, timeout: float = 150.0) -> int:
         n = app.driver.count("admin-bridges-pending-pubkey-hex")
         if n == 0:
             if approved:
+                box_actions.record(box, "mail bridges approved through the app",
+                                   detail={"approvals": approved})
                 return approved  # approved + the pending list has drained
             time.sleep(3.0)
             continue  # bridge hasn't enrolled yet — keep waiting
@@ -222,6 +295,9 @@ def approve_pending_bridges(app, *, timeout: float = 150.0) -> int:
             except Exception:
                 pass
         time.sleep(3.0)
+    if approved:
+        box_actions.record(box, "mail bridges approved through the app",
+                           detail={"approvals": approved})
     return approved
 
 

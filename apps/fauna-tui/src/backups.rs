@@ -4631,24 +4631,27 @@ fn reseed_elements(st: &BackupsState, out: &mut Vec<Element>) {
                     t::BACKUP_RESEED_CONFIRM_BODY.to_string(),
                 ),
             };
+            // The modal's registered text is its whole content, one line each:
+            // the title, the consequence (stated where the decision is made),
+            // then — for a pull-back — the preflight's per-set lines, what this
+            // device can and cannot vouch for in the copy, the lines the
+            // confirm accepts. They are the modal's body, no id of their own
+            // (`ui/backups.md` § Restore after losing the nest), so a driver
+            // reads them as the modal's text, as it reads a real dialog's
+            // content on the other apps; joined by newlines like
+            // `backup-destination-reseed-result`.
+            let mut lines = vec![title, body];
+            if let Some(preflight) = preflight {
+                lines.extend(
+                    fauna_client_backup::reseed::preflight_lines(preflight)
+                        .iter()
+                        .map(|line| line.resolve_nested(fauna_i18n::strings::lookup)),
+                );
+            }
             out.push(Element::label(
                 ids::BACKUP_DESTINATION_RESEED_CONFIRM_MODAL,
-                title,
+                lines.join("\n"),
             ));
-            // The consequence, stated where the decision is made (the reclaim
-            // modal's idiom); ui.yaml scopes no id to it.
-            out.push(Element::chrome(body));
-            // The pull-back's preflight: what this device can and cannot vouch
-            // for in the copy, the lines the confirm accepts (the modal's
-            // body; no id of its own — `ui/backups.md` § Restore after losing
-            // the nest).
-            if let Some(preflight) = preflight {
-                for line in fauna_client_backup::reseed::preflight_lines(preflight) {
-                    out.push(Element::chrome(
-                        line.resolve_nested(fauna_i18n::strings::lookup),
-                    ));
-                }
-            }
             out.push(
                 Element::gesture_button(
                     ids::BACKUP_DESTINATION_RESEED_CONFIRM_BUTTON,
@@ -5674,19 +5677,19 @@ mod tests {
             app.backups.reseed,
             ReseedView::ConfirmingPullBack("off".into(), Box::new(preflight.clone()))
         );
-        let body: Vec<String> = elements(&app).into_iter().map(|e| e.text).collect();
-        assert!(
-            body.contains(&t::backup_reseed_pull_back_confirm_title("Off-site")),
-            "{body:?}"
+        // The modal's registered text carries title, body and every
+        // preflight line, one per line, so a driver reads them by its id.
+        let modal = text_of(&app, "backup-destination-reseed-confirm-modal");
+        let mut expected = vec![
+            t::backup_reseed_pull_back_confirm_title("Off-site"),
+            t::backup_reseed_pull_back_confirm_body("Off-site"),
+        ];
+        expected.extend(
+            fauna_client_backup::reseed::preflight_lines(&preflight)
+                .iter()
+                .map(|line| line.resolve_nested(fauna_i18n::strings::lookup)),
         );
-        assert!(
-            body.contains(&t::backup_reseed_pull_back_confirm_body("Off-site")),
-            "{body:?}"
-        );
-        for line in fauna_client_backup::reseed::preflight_lines(&preflight) {
-            let text = line.resolve_nested(fauna_i18n::strings::lookup);
-            assert!(body.contains(&text), "the confirm shows {text:?}: {body:?}");
-        }
+        assert_eq!(modal, expected.join("\n"), "the confirm shows every line");
 
         match apply_local(&mut app, Action::ConfirmReseed) {
             Some(Op::PullBack {

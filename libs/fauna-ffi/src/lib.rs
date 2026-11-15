@@ -250,6 +250,14 @@ mod succession_witness;
 #[cfg(feature = "conversations-session")]
 mod mls_sync_launch;
 
+// The phones' engine roster for the projection walk's take-over
+// (`succession-cut.md` ruling (11)(l)): iOS and android lend which sets their
+// engine hosts are bound to, and `mls_sync_launch` reads it at each launch pass.
+#[cfg(feature = "folders-author")]
+mod engine_roster;
+#[cfg(feature = "folders-author")]
+pub use engine_roster::*;
+
 // The conversations oracle's door, staged by the conversations session factory
 // and started on the account store's runtime, so the macOS and windows apps
 // serve the account's door with no per-app glue
@@ -569,8 +577,8 @@ pub use erase_guard::*;
 
 // The residue surface's record and re-sweep (account-scoping.md § Erasure
 // follows scope → the residue surface) for the FFI seats — the same shared
-// `SignOutResidue` / `retry_sign_out_residue` tui and linux call directly.
-// Rides the erase pair's gate: it re-sweeps what that pair left behind.
+// `SignOutResidue` / `finish_sign_out_with` tui and linux call directly.
+// Rides the erase pair's gate: it finishes what that pair left behind.
 #[cfg(feature = "accounts-registry")]
 mod sign_out_residue;
 #[cfg(feature = "accounts-registry")]

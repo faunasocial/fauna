@@ -31,11 +31,12 @@
     unlinkBridge,
     updateBridgeSettings,
     listBridgeFollows,
-    addBridgeFollow,
-    removeBridgeFollow,
+    addBridgeFollowOrQueue,
+    removeBridgeFollowOrQueue,
     type BridgeSetting,
     type BridgeFollow,
   } from '#lib/bridges';
+  import { changeFollow } from '#lib/bridge-follow';
   import {
     hasNip07,
     nip07LinkFields,
@@ -452,15 +453,16 @@
     error = '';
     try {
       // The provider accepts an npub or hex id.
-      await addBridgeFollow(
-        secret,
-        BRIDGE_ID,
-        newFollowPubkey.trim(),
-        newFollowPetname.trim() || undefined,
-      );
+      const pubkey = newFollowPubkey.trim();
+      const petname = newFollowPetname.trim() || undefined;
+      // Sent or queued, the form resets; only a sent follow re-reads the list.
+      await changeFollow(() => addBridgeFollowOrQueue(secret, BRIDGE_ID, pubkey, petname), () => {
+        newFollowPubkey = '';
+        newFollowPetname = '';
+        return fetchFollows();
+      });
       newFollowPubkey = '';
       newFollowPetname = '';
-      await fetchFollows();
     } catch (e: any) {
       error = e.message;
     }
@@ -471,8 +473,7 @@
     if (!secret) return;
     error = '';
     try {
-      await removeBridgeFollow(secret, BRIDGE_ID, followId);
-      await fetchFollows();
+      await changeFollow(() => removeBridgeFollowOrQueue(secret, BRIDGE_ID, followId), fetchFollows);
     } catch (e: any) {
       error = e.message;
     }

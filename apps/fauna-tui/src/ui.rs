@@ -438,6 +438,7 @@ fn element_lines_at(
     // starts at). Cleared by any non-inline element, so a run never spans a
     // paragraph break.
     let mut run: Option<(usize, u16)> = None;
+    let mut text_starts: Vec<u16> = vec![0; elements.len()];
     for (element_index, element) in elements.iter().enumerate() {
         if !element.inline {
             run = None;
@@ -457,6 +458,8 @@ fn element_lines_at(
         // a provisioning step row's substep lines) paints indented beneath it,
         // so the visual nesting matches the scope path the registry records.
         let indent = "  ".repeat(element.path.len());
+        // Gutter and indent are ASCII, so their byte length is their cell width.
+        text_starts[element_index] = u16::try_from(gutter.len() + indent.len()).unwrap_or(u16::MAX);
         let style = if element.enabled {
             Style::default()
         } else {
@@ -674,6 +677,7 @@ fn element_lines_at(
         art: art_spans,
         element_at_line,
         inline_bands,
+        text_starts,
     }
 }
 
@@ -836,6 +840,11 @@ struct PaintedLines {
     /// within the line it shares. Empty for every page that paints one element
     /// per line, which is all of them but the month grid today.
     inline_bands: Vec<InlineBand>,
+    /// Parallel to the elements slice: the column each element's text starts at
+    /// on its lines — the gutter and indent this loop painted before it — the
+    /// one fact [`PaintedPage::laid_out_text`] needs that the lines do not
+    /// carry by element. An inline cell's room is its band instead.
+    text_starts: Vec<u16>,
 }
 
 /// One inline cell's column span on the line it shares with its run — the
@@ -1028,6 +1037,12 @@ pub struct PaintedPage {
     pub elements: Vec<crate::element::Element>,
     /// Parallel to `elements`; `None` for an element that painted no line.
     spans: Vec<Option<LineSpan>>,
+    /// Parallel to `elements`: the columns the pane left the element's text —
+    /// see [`laid_out_text`](Self::laid_out_text). `None` where it painted no
+    /// line.
+    cols: Vec<Option<u16>>,
+    /// The pane's text width, in columns (inside the block's borders).
+    width: u16,
     /// First line of the painted band.
     top: usize,
     /// How many lines the band shows.
@@ -1041,9 +1056,12 @@ impl PaintedPage {
     #[cfg(test)]
     pub fn unpainted(elements: Vec<crate::element::Element>) -> Self {
         let spans = vec![None; elements.len()];
+        let cols = vec![None; elements.len()];
         PaintedPage {
             elements,
             spans,
+            cols,
+            width: 0,
             top: 0,
             height: 0,
         }
@@ -1056,11 +1074,25 @@ impl PaintedPage {
         elements: Vec<crate::element::Element>,
         element_at_line: &[usize],
         inline_bands: &[InlineBand],
+        text_starts: &[u16],
         lead: usize,
         offset: u16,
-        height: usize,
+        (width, height): (u16, usize),
     ) -> Self {
         let mut spans: Vec<Option<LineSpan>> = vec![None; elements.len()];
+        // The room each element's text was given across the pane: a line's
+        // text starts after the gutter and indent `element_lines_at` painted
+        // before it on every line (it wraps the rest), so a prefix as wide as
+        // the pane leaves it nothing; an inline cell has exactly its band, cut
+        // at the pane's right edge, since the `Paragraph` clips there.
+        let mut cols: Vec<Option<u16>> = (0..elements.len())
+            .map(|index| Some(width.saturating_sub(text_starts.get(index).copied().unwrap_or(0))))
+            .collect();
+        for band in inline_bands {
+            if let Some(slot) = cols.get_mut(band.element) {
+                *slot = Some(band.col_end.min(width) - band.col_start.min(width));
+            }
+        }
         let mut extend = |element: usize, line: usize| {
             let line = LineSpan {
                 first: lead + line,
@@ -1078,12 +1110,54 @@ impl PaintedPage {
         for band in inline_bands {
             extend(band.element, band.line);
         }
+        for (slot, span) in cols.iter_mut().zip(&spans) {
+            if span.is_none() {
+                *slot = None;
+            }
+        }
         PaintedPage {
             elements,
             spans,
+            cols,
+            width,
             top: offset as usize,
             height,
         }
+    }
+
+    /// Every id-bearing element with text of its own, as this frame laid it
+    /// out — the tui leg of convention 17's `painted-text-has-area`
+    /// (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`), in cells: the columns the
+    /// pane left its text by its lines' prefix (or, an inline cell, its band
+    /// cut at the pane's right edge), and the lines it painted. The pane is
+    /// the page block's inside; the viewport is a scroll, never a clip, so an
+    /// element scrolled out of view keeps its box, and one that painted no
+    /// line at all reads `0×0`.
+    ///
+    /// A DOCUMENT element that painted no line has no text of its own: its
+    /// registry text is the document's plaintext, which folds in the embeds
+    /// the walker leaves to their own elements, so a repost card's
+    /// `feed-post-text` — the folded embed alone — reads the original's words
+    /// while those words paint, readable, under the embed's id. Measured: the
+    /// first tui corpus read every such card as starved before this rule.
+    ///
+    /// The sidebar and the status header are not measured: a fixed 24-column
+    /// rail of one-line rows, which clips a long label but can starve none.
+    pub fn laid_out_text(&self) -> impl Iterator<Item = fauna_e2e_agent::LaidOutText> + '_ {
+        let pane = (f64::from(self.width), self.height as f64);
+        self.elements
+            .iter()
+            .enumerate()
+            .filter(|(_, element)| !element.id.is_empty() && !element.text.trim().is_empty())
+            .filter(|(index, element)| element.doc.is_none() || self.span(*index).is_some())
+            .map(move |(index, element)| fauna_e2e_agent::LaidOutText {
+                id: element.id.clone(),
+                text: element.text.clone(),
+                width: f64::from(self.cols.get(index).copied().flatten().unwrap_or(0)),
+                height: self.span(index).map_or(0.0, |span| span.count as f64),
+                pane: Some(pane),
+                depth: 0,
+            })
     }
 
     /// Where element `index`'s lines landed, or `None` if it painted none.
@@ -1117,14 +1191,27 @@ impl PaintedPage {
         top: u16,
         height: usize,
     ) -> Self {
-        let painted = element_lines(&elements, None);
+        Self::for_test_in(elements, top, u16::MAX, height)
+    }
+
+    /// [`for_test`](Self::for_test) in a pane `width` columns wide, wrapped
+    /// there as [`render_page`] wraps it.
+    #[cfg(test)]
+    pub(crate) fn for_test_in(
+        elements: Vec<crate::element::Element>,
+        top: u16,
+        width: u16,
+        height: usize,
+    ) -> Self {
+        let painted = element_lines_at(&elements, None, Some(width as usize));
         Self::measure(
             elements,
             &painted.element_at_line,
             &painted.inline_bands,
+            &painted.text_starts,
             0,
             top,
-            height,
+            (width, height),
         )
     }
 }
@@ -1288,9 +1375,10 @@ fn render_screen(frame: &mut Frame, app: &App) -> DrawnFrame {
         elements,
         &painted.element_at_line,
         &painted.inline_bands,
+        &painted.text_starts,
         header,
         offset,
-        height,
+        (body_area.width.saturating_sub(2), height),
     );
     DrawnFrame {
         placements,
@@ -1504,9 +1592,10 @@ fn render_page(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) -> Dra
         elements,
         &painted.element_at_line,
         &painted.inline_bands,
+        &painted.text_starts,
         0,
         offset,
-        height,
+        (body_area.width.saturating_sub(2), height),
     );
     DrawnFrame {
         placements,
@@ -2503,5 +2592,112 @@ mod tests {
             Some(nav_key_hints_text(&authed).as_str()),
             "a painted footer must be registered, with the text it painted"
         );
+    }
+}
+
+/// Convention 17's `painted-text-has-area`, tui's leg: the room a frame gave
+/// each id-bearing text, read from the paint's own geometry.
+#[cfg(test)]
+mod painted_text_area_tests {
+    use super::PaintedPage;
+    use crate::element::Element;
+    use fauna_ui_ids as ids;
+
+    fn starved(page: &PaintedPage) -> Vec<(String, f64, f64)> {
+        let mut area = fauna_e2e_agent::PaintedTextArea::default();
+        area.observe(page.laid_out_text());
+        area.json()["starved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["id"].as_str().unwrap().to_string(),
+                    e["width"].as_f64().unwrap(),
+                    e["height"].as_f64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// A label nested so deep its gutter and indent fill the pane is painted
+    /// with no column left for its text — starved; the same label in a pane
+    /// with room, or shallower, is not.
+    #[test]
+    fn a_prefix_as_wide_as_the_pane_starves_the_text() {
+        let deep = Element::label(ids::PAGE_HEADING, "Room name")
+            .within("a", 0)
+            .within("b", 0)
+            .within("c", 0)
+            .within("d", 0);
+        let shallow = Element::label(ids::POST_AUTHOR, "Room name");
+        let narrow = PaintedPage::for_test_in(vec![deep.clone(), shallow.clone()], 0, 10, 20);
+        // The wrap's one-column floor folds "Room name" onto eight lines, every
+        // one painted past the pane's right edge: tall, and no column wide.
+        assert_eq!(
+            starved(&narrow),
+            vec![(ids::PAGE_HEADING.to_string(), 0.0, 8.0)]
+        );
+        let wide = PaintedPage::for_test_in(vec![deep, shallow], 0, 40, 20);
+        assert!(starved(&wide).is_empty());
+    }
+
+    /// An inline cell is its band cut at the pane's right edge: a cell that
+    /// starts past it is starved, the cells before it are not.
+    #[test]
+    fn an_inline_cell_past_the_right_edge_is_starved() {
+        let cells = vec![
+            Element::label(ids::FEED_POST_TEXT, "Mon").inline(),
+            Element::label(ids::POST_AUTHOR, "Tue").inline(),
+            Element::label(ids::REPOST_ATTRIBUTION, "Wed").inline(),
+        ];
+        let page = PaintedPage::for_test_in(cells, 0, 8, 20);
+        assert_eq!(
+            starved(&page),
+            vec![(ids::REPOST_ATTRIBUTION.to_string(), 0.0, 1.0)]
+        );
+    }
+
+    /// The viewport is a scroll, not a clip: an element scrolled far out of
+    /// view keeps its box, and an empty or id-less text is never published.
+    #[test]
+    fn scrolled_out_empty_and_chrome_text_are_not_starved() {
+        let mut elements: Vec<Element> = (0..30)
+            .map(|i| Element::label(format!("row-{i}"), format!("Row {i}")))
+            .collect();
+        elements.push(Element::label("blank", ""));
+        elements.push(Element::chrome("No posts yet."));
+        let page = PaintedPage::for_test_in(elements, 25, 40, 3);
+        assert!(starved(&page).is_empty());
+    }
+
+    /// A repost card's `feed-post-text` is the folded embed alone: its
+    /// plaintext reads the original's words, which paint under the embed's own
+    /// element, so the document paints no line and has no text of its own —
+    /// the shape the first tui corpus read as starved on every repost card.
+    #[test]
+    fn a_document_painting_only_embeds_has_no_text_of_its_own() {
+        use fauna_core::render::{
+            AuthoringOriginStatus, RenderBlock, RenderDocument, VerificationStatus,
+        };
+        let doc = RenderDocument {
+            blocks: vec![RenderBlock::QuotedPost {
+                post_id: "p".into(),
+                author: "a".into(),
+                body: "repost-original".into(),
+                verification: VerificationStatus::Verified,
+                authoring_origin: AuthoringOriginStatus::Unknown,
+                legal_takedown_ref: None,
+                admin_block_reason: None,
+                not_found: false,
+            }],
+        };
+        let element = Element::document(ids::FEED_POST_TEXT, doc);
+        assert!(
+            !element.text.trim().is_empty(),
+            "the plaintext folds the embed in"
+        );
+        let page = PaintedPage::for_test_in(vec![element], 0, 40, 20);
+        assert!(starved(&page).is_empty());
     }
 }

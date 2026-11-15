@@ -80,6 +80,7 @@ fauna-sidecar-client = { workspace = true, optional = true }
 fauna-mls = { workspace = true, optional = true }
 
 [dev-dependencies]
+noq = "1.0.0"
 # Drive the resolver-backed `build_server_config` + `spawn_relay` with a real
 # self-signed cert and prove two relay-only iroh endpoints round-trip through our
 # own relay — the durable, binary-level form of the 2026-06-28 relay-sovereignty

@@ -93,9 +93,11 @@ import com.fauna.ffi.legalTakedownTombstone
 import com.fauna.ffi.matchesMutedKeywords
 import com.fauna.ffi.urlHost
 import com.fauna.ffi.wrapMarkdownSelection
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import uniffi.fauna_conversations.AddParticipantState
 import uniffi.fauna_conversations.MessageSnapshot
+import uniffi.fauna_conversations.QueuedSendState
 // The room model's render mappings + the editor's staged state — the SAME
 // `fauna_conversations::room` / `::room_settings` helpers tui and linux call
 // directly and web reaches through its wasm twins, so nothing below hand-types
@@ -301,6 +303,18 @@ fun ConversationDetailScreen(
         runCatching { manager.refreshWithheldMessages(threadId) }
     }
 
+    // The unsent-changes re-read edge (account-offline-mutation.md § The
+    // unsent-changes surface): the outbox's drains tell the thread nothing, so
+    // while it is open the queued own copies' states are re-read every ~2 s —
+    // `refreshUnsentSends` notifies when one moved, and the detail repaints.
+    // A local store read; cancelled when the thread leaves the screen.
+    LaunchedEffect(threadId) {
+        while (true) {
+            runCatching { manager.refreshUnsentSends() }
+            delay(2_000L)
+        }
+    }
+
     // Re-resolve the thread detail whenever the snapshot ticks (the manager is
     // the single source of truth; threadDetail() is the FFI read for one thread).
     val detail: ThreadDetail? = remember(snapshot, threadId) {
@@ -436,6 +450,14 @@ fun ConversationDetailScreen(
         onLeaveRoom = {
             scope.launch { runCatching { manager.leaveRoom(threadId) } }
         },
+        // `room-remove-confirm` -> `manager.removeThread`: the nest's copy of the
+        // whole conversation, never the far side's (`bridged-adapter.md`
+        // § Removing bridged rows). The thread leaves the manager — and the
+        // selection with it — once the nest answered; a refusal rides the
+        // page's `error-message`.
+        onRemoveRoom = {
+            scope.launch { runCatching { manager.removeThread(threadId) } }
+        },
         // The room's search strip (`room-search.md` § The surface): the button
         // opens/closes it on the manager (view state on the detail, never a draft
         // here), the submit runs `room_search` — the leg, the rows and their
@@ -556,6 +578,22 @@ fun ConversationDetailScreen(
         onDeleteMessage = { msgId ->
             scope.launch { runCatching { manager.deleteMessage(threadId, msgId) } }
         },
+        // The local remove (`bridged-adapter.md` § Removing bridged rows, rule 1):
+        // the nest's copy only; the manager refuses a message whose snapshot does
+        // not say `canRemove`, and the bubble leaves once the nest answered.
+        onRemoveMessage = { msgId ->
+            scope.launch { runCatching { manager.removeMessage(threadId, msgId) } }
+        },
+        // An unsent own copy's doors (account-offline-mutation.md § The
+        // unsent-changes surface, point 2): this device's outbox, never the
+        // nest — the manager re-reads the outbox itself, and the copy repaints
+        // queued (retry) or leaves the thread (discard) on the snapshot tick.
+        onRetryQueuedSend = { msgId ->
+            scope.launch { runCatching { manager.retryQueuedSend(msgId) } }
+        },
+        onDiscardQueuedSend = { msgId ->
+            scope.launch { runCatching { manager.discardQueuedSend(msgId) } }
+        },
         // dm-reaction-more-button lifts the target up; the picker dialog (below)
         // is hosted here so the Content stays FFI-/View-free.
         onMoreReaction = { msgId -> moreReactionFor = msgId },
@@ -670,6 +708,8 @@ fun ConversationDetailContent(
     onWithdrawRoomInvite: (String) -> Unit = {},
     // `room-leave-confirm`: the walk-out, outside Save's staged set.
     onLeaveRoom: () -> Unit = {},
+    // `room-remove-confirm`: the local remove, beside the walk-out.
+    onRemoveRoom: () -> Unit = {},
     // The community room's search strip: `room-search-button` opens/closes it,
     // `room-search-submit-button` submits the typed query, and a result row opens
     // its typed target. Defaults `{}` keep the Content/test harness FFI-free.
@@ -794,6 +834,9 @@ fun ConversationDetailContent(
     // harness FFI-free (the stateful screen routes them to the shared manager).
     onToggleReaction: (String, String) -> Unit = { _, _ -> },
     onDeleteMessage: (String) -> Unit = {},
+    onRemoveMessage: (String) -> Unit = {},
+    onRetryQueuedSend: (String) -> Unit = {},
+    onDiscardQueuedSend: (String) -> Unit = {},
     onMoreReaction: (String) -> Unit = {},
     // Mark-as-spam on a received message (the live `Insert` consumer, mail-spam.md
     // § Wire shapes). The whole `MessageSnapshot` is lifted so the VM has the
@@ -1048,6 +1091,9 @@ fun ConversationDetailContent(
                                     canFlagSpam = !msg.isOwn,
                                     onToggleReaction = { emoji -> onToggleReaction(msg.messageId, emoji) },
                                     onDeleteMessage = { onDeleteMessage(msg.messageId) },
+                                    onRemoveMessage = { onRemoveMessage(msg.messageId) },
+                                    onRetryQueuedSend = { onRetryQueuedSend(msg.messageId) },
+                                    onDiscardQueuedSend = { onDiscardQueuedSend(msg.messageId) },
                                     onMoreReaction = { onMoreReaction(msg.messageId) },
                                     onMarkSpam = { onMarkSpam(msg) },
                                 )
@@ -1111,6 +1157,10 @@ fun ConversationDetailContent(
                         onLeave = {
                             roomSettingsDraft = null
                             onLeaveRoom()
+                        },
+                        onRemove = {
+                            roomSettingsDraft = null
+                            onRemoveRoom()
                         },
                         onSave = { staged ->
                             // The edits are diffed HERE, where `detail` is
@@ -1222,11 +1272,18 @@ private fun RoomSettingsDialog(
     onDraftChange: (RoomSettingsDraft) -> Unit,
     onWithdrawInvite: (String) -> Unit,
     onLeave: () -> Unit,
+    onRemove: () -> Unit,
     onSave: (RoomSettingsDraft) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val caps: ThreadCapabilities = detail.capabilities
     var leaveConfirmVisible by remember { mutableStateOf(false) }
+    var removeConfirmVisible by remember { mutableStateOf(false) }
+    // A policy-less room (a bridged room) opens this editor only for its local
+    // remove (`RoomSettingsDraft::seed`): it has no policy, roles, read or
+    // labelers to show, greyed or otherwise, so only the walk-out and the remove
+    // are painted, and no Save.
+    val hasPolicy = detail.room?.policy != null
     // The list every staging call and every read below indexes against, so a
     // gesture resolves by identity rather than by position
     // (`RoomSettingsDraft::slot_of`).
@@ -1236,164 +1293,166 @@ private fun RoomSettingsDialog(
         title = { Text(stringResource(R.string.conversations_unified_thread_room_settings)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                // The two rules. Both offer the ONE choice list shared by all
-                // seven editors, in its order, and round-trip the picker token
-                // — never a label and never a hand-typed set.
-                Text(
-                    stringResource(R.string.conversations_unified_room_join_rule_label),
-                    style = MaterialTheme.typography.labelMedium,
-                )
-                TokenSelect(
-                    testTagValue = Ids.ROOM_JOIN_RULE_SELECT,
-                    selected = roomJoinRuleToken(draft.`joinRule`),
-                    options = roomJoinRuleEditorChoices().map {
-                        roomJoinRuleToken(it) to roomJoinRuleLabel(it)
-                    },
-                    onSelect = { token -> onDraftChange(roomSettingsSetJoinRule(draft, token)) },
-                    enabled = caps.canSetPolicy,
-                )
-                Text(
-                    stringResource(R.string.conversations_unified_room_history_policy_label),
-                    style = MaterialTheme.typography.labelMedium,
-                )
-                TokenSelect(
-                    testTagValue = Ids.ROOM_HISTORY_POLICY_SELECT,
-                    selected = roomHistoryPolicyToken(draft.`historyPolicy`),
-                    options = roomHistoryPolicyEditorChoices().map {
-                        roomHistoryPolicyToken(it) to roomHistoryPolicyLabel(it)
-                    },
-                    onSelect = { token ->
-                        onDraftChange(roomSettingsSetHistoryPolicy(draft, token))
-                    },
-                    enabled = caps.canSetPolicy,
-                )
-                // One row per member, indexed exactly like
-                // `thread-member-chip[i]` so a driver's index means the same
-                // person on both. Every state — staged admin, staged hand-over,
-                // and whether either control may act on this row at all — is
-                // read straight off the draft: the owner's own row and a
-                // non-Fauna row are ineligible, and no app decides that itself.
-                detail.participantDisplays.forEachIndexed { i, display ->
-                    val eligible = roomSettingsIsEligible(draft, participants, i.toUInt())
-                    val stagedAdmin = roomSettingsAdminAt(draft, participants, i.toUInt())
-                    val stagedOwner =
-                        roomSettingsTransferStagedAt(draft, participants, i.toUInt())
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(display, modifier = Modifier.weight(1f))
-                        TextButton(
-                            onClick = {
-                                onDraftChange(
-                                    roomSettingsToggleAdmin(draft, participants, i.toUInt()),
-                                )
-                            },
-                            enabled = caps.canAppointAdmins && eligible,
-                            modifier = Modifier
-                                .testTag(Ids.ROOM_ADMIN_TOGGLE)
-                                .semantics {
-                                    stateDescription = if (stagedAdmin) "true" else "false"
-                                },
-                        ) {
-                            Text(
-                                stringResource(
-                                    if (stagedAdmin) {
-                                        R.string.conversations_unified_room_admin_yes
-                                    } else {
-                                        R.string.conversations_unified_room_admin_no
-                                    },
-                                ),
-                            )
-                        }
-                        TextButton(
-                            onClick = {
-                                onDraftChange(
-                                    roomSettingsToggleTransfer(draft, participants, i.toUInt()),
-                                )
-                            },
-                            enabled = caps.canTransferOwnership && eligible,
-                            modifier = Modifier
-                                .testTag(Ids.ROOM_OWNER_TRANSFER_BUTTON)
-                                .semantics {
-                                    stateDescription = if (stagedOwner) "true" else "false"
-                                },
-                        ) {
-                            Text(
-                                stringResource(
-                                    if (stagedOwner) {
-                                        R.string.conversations_unified_room_transfer_staged
-                                    } else {
-                                        R.string.conversations_unified_room_transfer_mark
-                                    },
-                                ),
-                            )
-                        }
-                    }
-                }
-                // The home nest's read, only where there is one to stage — a
-                // community room whose answer this device has read
-                // (`RoomSettingsDraft.nestRead`). Staged like the admin switches:
-                // Save commits it as a rotation. Greyed unless the viewer may set
-                // policy; `checked` rides `stateDescription`.
-                draft.nestRead?.let { reads ->
-                    TextButton(
-                        onClick = { onDraftChange(roomSettingsToggleNestRead(draft)) },
-                        enabled = caps.canSetPolicy,
-                        modifier = Modifier
-                            .testTag(Ids.ROOM_NEST_READ_TOGGLE)
-                            .semantics { stateDescription = if (reads) "true" else "false" },
-                    ) {
-                        Text(
-                            stringResource(
-                                if (reads) {
-                                    R.string.conversations_unified_room_nest_read_yes
-                                } else {
-                                    R.string.conversations_unified_room_nest_read_no
-                                },
-                            ),
-                        )
-                    }
-                }
-                // The room's labeler set (`room-labeler-toggle[i]` +
-                // `room-labeler-inspect-button[i]`), painted only while
-                // `draft.labelers` is set. The catalog lives in the `noKids`
-                // source set, so the rows come through the kids-excision seam.
-                RoomLabelerRows(
-                    draft = draft,
-                    canSetPolicy = caps.canSetPolicy,
-                    onDraftChange = onDraftChange,
-                )
-                // Pending invitations, off the LIVE detail (the home nest serves
-                // the list after a floor read and a withdrawal removes a row).
-                // The whole section is ABSENT while `pendingInvites` is null (not
-                // served) or empty alike. Every row is one the nest served
-                // because this viewer may withdraw it, so the button is live on
-                // every row; withdrawing acts at once with no confirm.
-                detail.room?.pendingInvites?.takeIf { it.isNotEmpty() }?.let { pending ->
+                if (hasPolicy) {
+                    // The two rules. Both offer the ONE choice list shared by all
+                    // seven editors, in its order, and round-trip the picker token
+                    // — never a label and never a hand-typed set.
                     Text(
-                        stringResource(R.string.conversations_unified_room_pending_invites_label),
+                        stringResource(R.string.conversations_unified_room_join_rule_label),
                         style = MaterialTheme.typography.labelMedium,
                     )
-                    val withdrawGate = faunaGate("fauna.conversations.room.revoke_invite")
-                    pending.forEach { invite ->
+                    TokenSelect(
+                        testTagValue = Ids.ROOM_JOIN_RULE_SELECT,
+                        selected = roomJoinRuleToken(draft.`joinRule`),
+                        options = roomJoinRuleEditorChoices().map {
+                            roomJoinRuleToken(it) to roomJoinRuleLabel(it)
+                        },
+                        onSelect = { token -> onDraftChange(roomSettingsSetJoinRule(draft, token)) },
+                        enabled = caps.canSetPolicy,
+                    )
+                    Text(
+                        stringResource(R.string.conversations_unified_room_history_policy_label),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    TokenSelect(
+                        testTagValue = Ids.ROOM_HISTORY_POLICY_SELECT,
+                        selected = roomHistoryPolicyToken(draft.`historyPolicy`),
+                        options = roomHistoryPolicyEditorChoices().map {
+                            roomHistoryPolicyToken(it) to roomHistoryPolicyLabel(it)
+                        },
+                        onSelect = { token ->
+                            onDraftChange(roomSettingsSetHistoryPolicy(draft, token))
+                        },
+                        enabled = caps.canSetPolicy,
+                    )
+                    // One row per member, indexed exactly like
+                    // `thread-member-chip[i]` so a driver's index means the same
+                    // person on both. Every state — staged admin, staged hand-over,
+                    // and whether either control may act on this row at all — is
+                    // read straight off the draft: the owner's own row and a
+                    // non-Fauna row are ineligible, and no app decides that itself.
+                    detail.participantDisplays.forEachIndexed { i, display ->
+                        val eligible = roomSettingsIsEligible(draft, participants, i.toUInt())
+                        val stagedAdmin = roomSettingsAdminAt(draft, participants, i.toUInt())
+                        val stagedOwner =
+                            roomSettingsTransferStagedAt(draft, participants, i.toUInt())
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                roomPendingInviteText(invite),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag(Ids.ROOM_PENDING_INVITE)
-                                    .semantics {
-                                        stateDescription = if (invite.lapsed) "true" else "false"
-                                    },
-                            )
+                            Text(display, modifier = Modifier.weight(1f))
                             TextButton(
-                                onClick = { onWithdrawInvite(invite.inviteeActorHex) },
-                                enabled = withdrawGate.enabled,
-                                modifier = Modifier.testTag(Ids.ROOM_PENDING_INVITE_WITHDRAW_BUTTON),
+                                onClick = {
+                                    onDraftChange(
+                                        roomSettingsToggleAdmin(draft, participants, i.toUInt()),
+                                    )
+                                },
+                                enabled = caps.canAppointAdmins && eligible,
+                                modifier = Modifier
+                                    .testTag(Ids.ROOM_ADMIN_TOGGLE)
+                                    .semantics {
+                                        stateDescription = if (stagedAdmin) "true" else "false"
+                                    },
                             ) {
-                                Text(stringResource(R.string.conversations_unified_room_pending_invite_withdraw))
+                                Text(
+                                    stringResource(
+                                        if (stagedAdmin) {
+                                            R.string.conversations_unified_room_admin_yes
+                                        } else {
+                                            R.string.conversations_unified_room_admin_no
+                                        },
+                                    ),
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    onDraftChange(
+                                        roomSettingsToggleTransfer(draft, participants, i.toUInt()),
+                                    )
+                                },
+                                enabled = caps.canTransferOwnership && eligible,
+                                modifier = Modifier
+                                    .testTag(Ids.ROOM_OWNER_TRANSFER_BUTTON)
+                                    .semantics {
+                                        stateDescription = if (stagedOwner) "true" else "false"
+                                    },
+                            ) {
+                                Text(
+                                    stringResource(
+                                        if (stagedOwner) {
+                                            R.string.conversations_unified_room_transfer_staged
+                                        } else {
+                                            R.string.conversations_unified_room_transfer_mark
+                                        },
+                                    ),
+                                )
                             }
                         }
                     }
-                    DisabledControlReasonText(withdrawGate.reason)
+                    // The home nest's read, only where there is one to stage — a
+                    // community room whose answer this device has read
+                    // (`RoomSettingsDraft.nestRead`). Staged like the admin switches:
+                    // Save commits it as a rotation. Greyed unless the viewer may set
+                    // policy; `checked` rides `stateDescription`.
+                    draft.nestRead?.let { reads ->
+                        TextButton(
+                            onClick = { onDraftChange(roomSettingsToggleNestRead(draft)) },
+                            enabled = caps.canSetPolicy,
+                            modifier = Modifier
+                                .testTag(Ids.ROOM_NEST_READ_TOGGLE)
+                                .semantics { stateDescription = if (reads) "true" else "false" },
+                        ) {
+                            Text(
+                                stringResource(
+                                    if (reads) {
+                                        R.string.conversations_unified_room_nest_read_yes
+                                    } else {
+                                        R.string.conversations_unified_room_nest_read_no
+                                    },
+                                ),
+                            )
+                        }
+                    }
+                    // The room's labeler set (`room-labeler-toggle[i]` +
+                    // `room-labeler-inspect-button[i]`), painted only while
+                    // `draft.labelers` is set. The catalog lives in the `noKids`
+                    // source set, so the rows come through the kids-excision seam.
+                    RoomLabelerRows(
+                        draft = draft,
+                        canSetPolicy = caps.canSetPolicy,
+                        onDraftChange = onDraftChange,
+                    )
+                    // Pending invitations, off the LIVE detail (the home nest serves
+                    // the list after a floor read and a withdrawal removes a row).
+                    // The whole section is ABSENT while `pendingInvites` is null (not
+                    // served) or empty alike. Every row is one the nest served
+                    // because this viewer may withdraw it, so the button is live on
+                    // every row; withdrawing acts at once with no confirm.
+                    detail.room?.pendingInvites?.takeIf { it.isNotEmpty() }?.let { pending ->
+                        Text(
+                            stringResource(R.string.conversations_unified_room_pending_invites_label),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        val withdrawGate = faunaGate("fauna.conversations.room.revoke_invite")
+                        pending.forEach { invite ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    roomPendingInviteText(invite),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag(Ids.ROOM_PENDING_INVITE)
+                                        .semantics {
+                                            stateDescription = if (invite.lapsed) "true" else "false"
+                                        },
+                                )
+                                TextButton(
+                                    onClick = { onWithdrawInvite(invite.inviteeActorHex) },
+                                    enabled = withdrawGate.enabled,
+                                    modifier = Modifier.testTag(Ids.ROOM_PENDING_INVITE_WITHDRAW_BUTTON),
+                                ) {
+                                    Text(stringResource(R.string.conversations_unified_room_pending_invite_withdraw))
+                                }
+                            }
+                        }
+                        DisabledControlReasonText(withdrawGate.reason)
+                    }
                 }
                 // The walk-out, below the staged controls and OUTSIDE Save's
                 // staged set: leaving is an immediate act, not a policy edit.
@@ -1435,17 +1494,60 @@ private fun RoomSettingsDialog(
                         },
                     )
                 }
+                // The local remove, beside the walk-out and outside Save's
+                // staged set (`bridged-adapter.md` § Removing bridged rows,
+                // rule 6): greyed unless the room's capabilities say
+                // `supportsLocalRemove`, re-checked when the confirm opens;
+                // the confirm is immediate.
+                TextButton(
+                    onClick = { if (caps.supportsLocalRemove) removeConfirmVisible = true },
+                    enabled = caps.supportsLocalRemove,
+                    modifier = Modifier.testTag(Ids.ROOM_REMOVE_BUTTON),
+                ) {
+                    Text(stringResource(R.string.conversations_unified_room_remove))
+                }
+                if (removeConfirmVisible) {
+                    val removeGate = faunaGate("fauna.bridges.conversation.rooms.remove")
+                    AlertDialog(
+                        onDismissRequest = { removeConfirmVisible = false },
+                        title = { Text(stringResource(R.string.conversations_unified_room_remove)) },
+                        text = { Text(detail.label) },
+                        confirmButton = {
+                            Column {
+                                TextButton(
+                                    onClick = {
+                                        removeConfirmVisible = false
+                                        onRemove()
+                                    },
+                                    enabled = caps.supportsLocalRemove && removeGate.enabled,
+                                    modifier = Modifier.testTag(Ids.ROOM_REMOVE_CONFIRM),
+                                ) {
+                                    Text(stringResource(R.string.conversations_unified_room_remove_confirm))
+                                }
+                                DisabledControlReasonText(removeGate.reason)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { removeConfirmVisible = false }) {
+                                Text(stringResource(R.string.common_cancel))
+                            }
+                        },
+                    )
+                }
             }
         },
         confirmButton = {
             // Greyed for a member, who opens this surface to read it and to
-            // leave: every staged edit behind it is owner-or-admin work.
-            TextButton(
-                onClick = { onSave(draft) },
-                enabled = caps.canSetPolicy,
-                modifier = Modifier.testTag(Ids.ROOM_SETTINGS_SAVE_BUTTON),
-            ) {
-                Text(stringResource(R.string.common_save))
+            // leave: every staged edit behind it is owner-or-admin work. Absent
+            // on a policy-less room, which has nothing to stage.
+            if (hasPolicy) {
+                TextButton(
+                    onClick = { onSave(draft) },
+                    enabled = caps.canSetPolicy,
+                    modifier = Modifier.testTag(Ids.ROOM_SETTINGS_SAVE_BUTTON),
+                ) {
+                    Text(stringResource(R.string.common_save))
+                }
             }
         },
         dismissButton = {
@@ -1653,6 +1755,7 @@ private fun ThreadHeader(
             // holds.
             roomNoticeFor(
                 room.awaitingKey,
+                room.severanceOwed,
                 room.moderationUnverified,
                 room.bridgeDisconnected,
             )?.let { notice ->
@@ -1922,8 +2025,15 @@ private fun MessageBubble(
     canFlagSpam: Boolean = false,
     onToggleReaction: (String) -> Unit = {},
     onDeleteMessage: () -> Unit = {},
+    // The local remove (`bridged-adapter.md` § Removing bridged rows) — gated on
+    // msg.canRemove inside the bubble.
+    onRemoveMessage: () -> Unit = {},
     onMoreReaction: () -> Unit = {},
     onMarkSpam: () -> Unit = {},
+    // An unsent own copy's retry / discard (`dm-message-retry-button`,
+    // `dm-message-discard-confirm-button`) — offered on that copy only.
+    onRetryQueuedSend: () -> Unit = {},
+    onDiscardQueuedSend: () -> Unit = {},
 ) {
     // Session-local reveal for a content-policy `collapse` verdict (the rule
     // itself persists). Declared before any early return so its remember slot is
@@ -2285,6 +2395,11 @@ private fun MessageBubble(
         documentAttachments(msg.document).forEach { att ->
             val declared = "${att.filename} (${localized(byteSize(att.sizeBytes)).orEmpty()})"
             if (att.isImage) {
+                // `image-lightbox` over the thread (conversations.md `dm-attachment-image[i]`):
+                // a tap opens it, held or placeholder; back/Escape/close dismiss it. The state
+                // lives in the bubble, so leaving the thread (the bubble leaving composition)
+                // closes it. Bytes are the shared `attachment_bytes` read — no new logic here.
+                var lightboxOpen by remember(att.blobHash) { mutableStateOf(false) }
                 val resident = attachmentResident(att.blobHash)
                 val imageBitmap = remember(att.blobHash, resident) {
                     loadAttachmentBytes(att.blobHash)?.let { bytes ->
@@ -2298,7 +2413,8 @@ private fun MessageBubble(
                         modifier = Modifier
                             .heightIn(max = 200.dp)
                             .testTag(Ids.DM_ATTACHMENT_IMAGE)
-                            .semantics { stateDescription = ATTACHMENT_STATE_PAINTED },
+                            .semantics { stateDescription = ATTACHMENT_STATE_PAINTED }
+                            .clickable { lightboxOpen = true },
                     )
                 } else {
                     Text(
@@ -2306,7 +2422,15 @@ private fun MessageBubble(
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier
                             .testTag(Ids.DM_ATTACHMENT_IMAGE)
-                            .semantics { stateDescription = ATTACHMENT_STATE_PLACEHOLDER },
+                            .semantics { stateDescription = ATTACHMENT_STATE_PLACEHOLDER }
+                            .clickable { lightboxOpen = true },
+                    )
+                }
+                if (lightboxOpen) {
+                    com.fauna.app.ui.components.ImageLightbox(
+                        model = if (imageBitmap != null) loadAttachmentBytes(att.blobHash) else null,
+                        placeholder = declared,
+                        onDismiss = { lightboxOpen = false },
                     )
                 }
             } else {
@@ -2335,6 +2459,28 @@ private fun MessageBubble(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.DM_MESSAGE_UNDELIVERED),
             )
+        }
+
+        // An own copy of a message sent with no nest (`MessageSnapshot.queuedSend`, the
+        // shared projection; account-offline-mutation.md § The unsent-changes surface,
+        // point 2): waiting, or not sent and why — the dm-message-undelivered shape, the
+        // body still in view. The copy is the draft: retry and discard live in its ⋯ menu.
+        // Twin of tui's labels of the same ids.
+        when (val queued = msg.queuedSend) {
+            is QueuedSendState.Queued -> Text(
+                stringResource(R.string.conversations_unified_dm_message_queued),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.DM_MESSAGE_QUEUED),
+            )
+            is QueuedSendState.Unsent -> Text(
+                stringResource(R.string.conversations_unified_dm_message_unsent)
+                    .replace("{reason}", localized(queued.reason) ?: queued.reasonCode),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.testTag(Ids.DM_MESSAGE_UNSENT),
+            )
+            null -> {}
         }
 
         // An own sent mail the fresh-IP warm-up is holding back (`MessageSnapshot.warmupHold`;
@@ -2397,6 +2543,7 @@ private fun MessageBubble(
             MessageActionsMenu(
                 canReact = supportsReactions,
                 canDelete = msg.canDelete,
+                canRemove = msg.canRemove,
                 // Mark-as-spam is offered on any received message (you flag
                 // others' content, not your own), never rail-branched — it
                 // silently no-ops when mail isn't enabled. Mirrors linux's
@@ -2405,8 +2552,12 @@ private fun MessageBubble(
                 onToggleReaction = onToggleReaction,
                 onMoreReaction = onMoreReaction,
                 onDeleteMessage = onDeleteMessage,
+                onRemoveMessage = onRemoveMessage,
                 onMarkSpam = onMarkSpam,
                 onReport = onReport,
+                isUnsent = msg.isOwn && msg.queuedSend is QueuedSendState.Unsent,
+                onRetryQueuedSend = onRetryQueuedSend,
+                onDiscardQueuedSend = onDiscardQueuedSend,
             )
             IconButton(
                 onClick = onReply,
@@ -2579,14 +2730,25 @@ private fun MessageActionsMenu(
     onDeleteMessage: () -> Unit,
     onMarkSpam: () -> Unit,
     onReport: (() -> Unit)? = null,
+    canRemove: Boolean = false,
+    onRemoveMessage: () -> Unit = {},
+    // An unsent own copy (`queuedSend` = Unsent): the ⋯ is offered even where no
+    // other action is (tui's `… || unsent`), carrying retry and a confirmed discard.
+    isUnsent: Boolean = false,
+    onRetryQueuedSend: () -> Unit = {},
+    onDiscardQueuedSend: () -> Unit = {},
 ) {
-    if (!canReact && !canDelete && !canFlagSpam && onReport == null) return
+    if (!canReact && !canDelete && !canRemove && !canFlagSpam && onReport == null && !isUnsent) return
 
     var expanded by remember { mutableStateOf(false) }
     // The destructive delete is a two-step inside the same flyout: tapping
     // dm-message-delete-button reveals dm-message-delete-confirm-button. Reset
     // when the menu closes so it always reopens at the first step.
     var confirmingDelete by remember { mutableStateOf(false) }
+    // The local remove's two-step, the delete's twin.
+    var confirmingRemove by remember { mutableStateOf(false) }
+    // The unsent copy's discard two-step, the delete's twin.
+    var confirmingDiscard by remember { mutableStateOf(false) }
 
     Box {
         IconButton(
@@ -2604,9 +2766,56 @@ private fun MessageActionsMenu(
             onDismissRequest = {
                 expanded = false
                 confirmingDelete = false
+                confirmingRemove = false
+                confirmingDiscard = false
             },
             modifier = Modifier.testTag(Ids.DM_MESSAGE_ACTIONS_MENU),
         ) {
+            if (isUnsent) {
+                // Retry and discard on the unsent own copy only (account-offline-
+                // mutation.md § The unsent-changes surface, point 2), the discard
+                // behind a confirm step in the delete's shape.
+                if (!confirmingDiscard) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.conversations_detail_retry_send)) },
+                        onClick = {
+                            expanded = false
+                            onRetryQueuedSend()
+                        },
+                        modifier = Modifier.testTag(Ids.DM_MESSAGE_RETRY_BUTTON),
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                stringResource(R.string.conversations_detail_discard_message),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        },
+                        onClick = { confirmingDiscard = true },
+                        modifier = Modifier.testTag(Ids.DM_MESSAGE_DISCARD_BUTTON),
+                    )
+                } else {
+                    Text(
+                        stringResource(R.string.conversations_detail_discard_message_confirm_title),
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                stringResource(R.string.conversations_detail_discard_message_confirm),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        },
+                        onClick = {
+                            expanded = false
+                            confirmingDiscard = false
+                            onDiscardQueuedSend()
+                        },
+                        modifier = Modifier.testTag(Ids.DM_MESSAGE_DISCARD_CONFIRM_BUTTON),
+                    )
+                }
+            }
             if (canReact) {
                 // Quick-set emoji row — the 6 fixed shared options. Each is a
                 // tappable `dm-reaction-option`; tapping toggles + closes.
@@ -2664,6 +2873,39 @@ private fun MessageActionsMenu(
                             onDeleteMessage()
                         },
                         modifier = Modifier.testTag(Ids.DM_MESSAGE_DELETE_CONFIRM_BUTTON),
+                    )
+                }
+            }
+            if (canRemove) {
+                // The local remove — the nest's copy only, never the far side's
+                // (`bridged-adapter.md` § Removing bridged rows, rule 1).
+                if (!confirmingRemove) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                stringResource(R.string.conversations_detail_remove_message),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        },
+                        onClick = { confirmingRemove = true },
+                        modifier = Modifier.testTag(Ids.DM_MESSAGE_REMOVE_BUTTON),
+                    )
+                } else {
+                    val removeGate = faunaGate("fauna.bridges.conversation.messages.remove")
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                stringResource(R.string.conversations_detail_remove_message_confirm),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        },
+                        onClick = {
+                            expanded = false
+                            confirmingRemove = false
+                            onRemoveMessage()
+                        },
+                        enabled = removeGate.enabled,
+                        modifier = Modifier.testTag(Ids.DM_MESSAGE_REMOVE_CONFIRM_BUTTON),
                     )
                 }
             }

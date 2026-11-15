@@ -226,20 +226,31 @@ fn rebuild_follow_rows(container: &gtk::Box, follows: &[BridgeFollow], client: &
                 let container = container.clone();
                 let fid = follow_id.clone();
                 glib::MainContext::default().spawn_local(async move {
-                    let bridges =
-                        fauna_client_bridges::BridgesClient::new(client.nest_rpc().clone());
+                    let nest = client.nest_rpc().clone();
+                    let queue = crate::offline_outbox::queue();
+                    let change = crate::client::FollowChange::Remove {
+                        bridge_id: "nostr".into(),
+                        follow_id: fid,
+                    };
                     let handle = client.runtime_handle();
                     let result = handle
-                        .spawn(async move { bridges.remove_follow("nostr", fid).await })
+                        .spawn(crate::client::send_or_queue_follow(
+                            nest,
+                            Some(queue),
+                            change,
+                        ))
                         .await;
                     match result {
+                        // Queued with no nest: the account stays on the
+                        // nest's list until the drain — change no list.
+                        Ok(Ok(true)) => return,
                         Ok(Err(e)) => {
                             tracing::error!("[settings/nostr] remove_follow error: {e}")
                         }
                         Err(e) => {
                             tracing::error!("[settings/nostr] remove_follow join error: {e}")
                         }
-                        Ok(Ok(())) => {}
+                        Ok(Ok(false)) => {}
                     }
                     refresh_follows(&client, &container);
                 });
@@ -1282,7 +1293,13 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
             } else {
                 Some(petname)
             };
-            let bridges = fauna_client_bridges::BridgesClient::new(client.nest_rpc().clone());
+            let nest = client.nest_rpc().clone();
+            let queue = crate::offline_outbox::queue();
+            let change = crate::client::FollowChange::Add {
+                bridge_id: "nostr".into(),
+                id: pubkey,
+                petname,
+            };
             let handle = client.runtime_handle();
             let pubkey_input = pubkey_input.clone();
             let petname_input = petname_input.clone();
@@ -1290,13 +1307,21 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
             let client_for_refresh = Rc::clone(&client);
             glib::MainContext::default().spawn_local(async move {
                 let result = handle
-                    .spawn(async move { bridges.add_follow("nostr", pubkey, petname, None).await })
+                    .spawn(crate::client::send_or_queue_follow(
+                        nest,
+                        Some(queue),
+                        change,
+                    ))
                     .await;
                 match result {
-                    Ok(Ok(())) => {
+                    Ok(Ok(queued)) => {
                         pubkey_input.set_text("");
                         petname_input.set_text("");
-                        refresh_follows(&client_for_refresh, &container);
+                        // Queued with no nest: the follow is not on the nest's
+                        // list until the drain — change no list.
+                        if !queued {
+                            refresh_follows(&client_for_refresh, &container);
+                        }
                     }
                     Ok(Err(e)) => tracing::error!("[settings/nostr] add_follow error: {e}"),
                     Err(e) => tracing::error!("[settings/nostr] add_follow join error: {e}"),

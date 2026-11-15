@@ -131,7 +131,6 @@ def test_an_unreachable_destination_reads_unreachable_never_missing_or_nothing_t
     """
     app, owner = dedicated_actor_app
     app.nest_trust.require_backup_trust_rows_supported()
-    app.nest_trust.require_retained_generations_supported()
     destination = trust_destination
 
     _enroll(app, nest_instance, owner, destination, "Offline")
@@ -269,7 +268,6 @@ def test_a_path_less_version_is_listed_and_a_restore_past_the_window_says_so(
     (convention 14 — a fake clock, never a month's sleep).
     """
     app, owner = dedicated_actor_app
-    app.nest_trust.require_retained_generations_supported()
     destination = trust_destination
 
     _enroll(app, nest_instance, owner, destination, "Rewind")

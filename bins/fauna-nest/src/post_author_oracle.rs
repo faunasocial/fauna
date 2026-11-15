@@ -144,7 +144,7 @@ fn record(
         params![
             actor_hex,
             principal_id,
-            now,
+            i64::try_from(now)?,
             CLASS.class.name(),
             op,
             &post_id[..],

@@ -105,14 +105,18 @@ struct MacFolderBindingSection: View {
 
             // Add a local folder to THIS set — path only (the set is contextual).
             HStack {
-                TextField(L.folders.locationPathPlaceholder, text: $newLocationPath)
+                Text(L.settings.syncPage.locationPath)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField(L.settings.syncPage.locationPath, text: $newLocationPath)
+                    .labelsHidden()
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier(Ids.folderLocationPathInput)
                     .automationField(Ids.folderLocationPathInput, text: $newLocationPath)
                 Button(L.folders.choose) { chooseFolder() }
                     .controlSize(.small)
                     .accessibilityIdentifier(Ids.folderLocationBrowseButton)
-                Button(L.folders.bindLocation) { bindLocation() }
+                Button(L.settings.syncPage.addLocation) { bindLocation() }
                     .controlSize(.small)
                     .disabled(newLocationPath.isEmpty)
                     .accessibilityIdentifier(Ids.folderLocationAddButton)

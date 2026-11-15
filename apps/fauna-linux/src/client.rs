@@ -136,6 +136,14 @@ pub struct FaunaClient {
     /// the `DataMessage::AuthSuccess` arm post-login and spawns the
     /// connection-state + push pumps (WS-RPC adoption, tracked internally).
     nest_rpc: Arc<NestClient>,
+    /// Whether this session's post-auth edge has landed — set by
+    /// [`Self::run_deployment_seed_custody_leg`], read by the account
+    /// runtime's store-ready edge, which since the runtime is hosted at
+    /// session establishment may land FIRST: the custody leg runs at whichever
+    /// of the two edges lands second, never on a launch whose nest has not
+    /// answered (where its unconfirmed verdict would be the outage's, not the
+    /// custody's).
+    post_auth_landed: Arc<std::sync::atomic::AtomicBool>,
     /// Whether this session's `fauna.account.am_i_admin` gate has already
     /// passed — so the reconnect re-read ([`Self::check_admin_status`], fired
     /// on `StaleSurfaces::admin_gate`) reports only a CHANGE, and the
@@ -313,6 +321,7 @@ impl FaunaClient {
             foreign_blobs: fauna_client::post_blob::pinned_plane(),
             nest_auth,
             nest_rpc,
+            post_auth_landed: Arc::default(),
             staged_attachment: RefCell::new(None),
             dns_machine: RefCell::new(None),
             local_domain_machine: RefCell::new(None),
@@ -564,6 +573,24 @@ impl FaunaClient {
     // Authenticate
     // -----------------------------------------------------------------------
 
+    /// Post `DataMessage::SessionEstablished` — the LOCAL half of the session's
+    /// post-auth hooks (the session instance, the MLS engine, the account
+    /// runtime, the drafts rails), which need no bearer and so run whether or
+    /// not the nest answers (`account-client-lifecycle.md` § The client-side
+    /// lifecycle; tui's `session::establish`). Called once per signed-in
+    /// session by `launch_authenticated`, BEFORE [`Self::authenticate`], so the
+    /// local half is always the first message the session's pump handles.
+    pub fn establish_session(&self) {
+        let Some(actor_id) = self.actor_id() else {
+            tracing::warn!("session: malformed secret — no session to establish");
+            return;
+        };
+        self.tx
+            .send(UiMessage::Data(DataMessage::SessionEstablished {
+                actor_id,
+            }));
+    }
+
     /// Trigger a token refresh via the LaunchMachine and emit an
     /// AuthSuccess / AuthFailed UI message. Most callers don't need this —
     /// the launch flow drives the LaunchMachine to Online before
@@ -572,8 +599,9 @@ impl FaunaClient {
     /// signal to the UI.
     ///
     /// **A machine parked in `Offline { transient: true }` is retried, not
-    /// abandoned.** The WS connect and every post-auth hook ride the
-    /// `AuthSuccess` arm, so a session built while the nest was unreachable
+    /// abandoned.** The WS connect and every network post-auth hook ride the
+    /// `AuthSuccess` arm (the local ones ran at [`Self::establish_session`]),
+    /// so a session built while the nest was unreachable
     /// (the launch's silent challenge or this refresh met a refused dial)
     /// would otherwise sit "disconnected" for its whole life, never dialing
     /// again once the nest came back — a client-reachable state only a
@@ -589,7 +617,6 @@ impl FaunaClient {
         use fauna_protocol::reconnect::{Backoff, JitterRng};
         use fauna_ws_substrate::supervisor::{INITIAL_BACKOFF, MAX_BACKOFF};
 
-        let secret_hex = self.secret_hex.clone();
         let tx = self.tx.clone();
         let machine = Arc::clone(&self.machine);
 
@@ -606,9 +633,7 @@ impl FaunaClient {
                         // the machine holds a bearer again.
                         tokio::spawn(Arc::clone(&machine).ttl_refresh_loop());
                     }
-                    let actor_id = actor_id_from_secret_hex(&secret_hex).unwrap_or_default();
                     tx.send(UiMessage::Data(DataMessage::AuthSuccess {
-                        actor_id,
                         handle: String::new(),
                     }));
                     return;
@@ -2258,6 +2283,18 @@ impl FaunaClient {
                 let sell = compose.sell;
                 manager.update_compose(text.clone(), tags.clone(), restored.clone());
 
+                // The asking price is read ONCE by the shared rule and handed to
+                // both sell phases: a mistyped price is refused on
+                // `compose-error` (already stamped by the manager) instead of
+                // publishing a post a zap cannot buy.
+                let asking_sats = match manager.compose_sell_asking_price_sats() {
+                    Ok(sats) => sats,
+                    Err(e) => {
+                        tracing::warn!("submit_post: asking price refused: {e}");
+                        return false;
+                    }
+                };
+
                 // A SOLD post's attachment seals under the tier the sale itself
                 // mints, which does not exist yet — so the mint is split in two and
                 // its first half runs before the seal can reach a period key. Only
@@ -2266,10 +2303,7 @@ impl FaunaClient {
                 // single call it has always been.
                 if let (Some(sell), Some(_)) = (sell.as_ref(), staged.as_ref())
                     && let Err(e) = manager
-                        .stage_sell_tier(
-                            sell.subscribers_get_it_free,
-                            sell.asking_price.trim().parse::<u64>().ok(),
-                        )
+                        .stage_sell_tier(sell.subscribers_get_it_free, asking_sats)
                         .await
                 {
                     // Already stamped on `compose-error`; nothing was minted,
@@ -2298,14 +2332,13 @@ impl FaunaClient {
                         .prepare_sell_post(
                             (!sell.price.trim().is_empty()).then_some(sell.price),
                             sell.subscribers_get_it_free,
-                            // Empty or unparseable means no machine price — the
-                            // tier stays a tip target forever (`monetization.md`
-                            // § The asking price). `prepare_sell_post` owns the
-                            // sats→msat conversion and the overflow refusal; this
-                            // is a plain text→u64 parse and nothing else. It must
-                            // be the SAME value `stage_sell_tier` got above:
-                            // phase one decides the tier's rank.
-                            sell.asking_price.trim().parse::<u64>().ok(),
+                            // Empty means no machine price — the tier stays a
+                            // tip target forever (`monetization.md` § The asking
+                            // price). `prepare_sell_post` owns the sats→msat
+                            // conversion and the overflow refusal. It must be
+                            // the SAME value `stage_sell_tier` got above: phase
+                            // one decides the tier's rank.
+                            asking_sats,
                         )
                         .await
                         .map(Some)
@@ -3030,59 +3063,37 @@ impl FaunaClient {
         });
     }
 
-    /// Add a follow to a bridge via `fauna.bridges.add_follow`. No `extra`
-    /// blob today — the dialog only exposes id + petname; per-provider
-    /// extra metadata lands when a UI grows it.
+    /// Add a follow to a bridge via `fauna.bridges.add_follow`, sent now or —
+    /// with no nest — queued in the device outbox (the `OfflineQueued`
+    /// composer, `account-offline-mutation.md` § The offline-mutation
+    /// contract). No `extra` blob today — the dialog only exposes id +
+    /// petname; per-provider extra metadata lands when a UI grows it.
     pub fn add_bridge_follow(&self, bridge_id: &str, id: &str, petname: Option<&str>) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
-        let bridge_id = bridge_id.to_string();
-        let id = id.to_string();
-        let petname = petname.map(str::to_string);
+        let queue = crate::offline_outbox::queue();
+        let change = FollowChange::Add {
+            bridge_id: bridge_id.to_string(),
+            id: id.to_string(),
+            petname: petname.map(str::to_string),
+        };
         self.spawn_bg(async move {
-            let bridges = fauna_client_bridges::BridgesClient::new(nest_rpc);
-            let msg = match bridges
-                .add_follow(bridge_id.clone(), id.clone(), petname, None)
-                .await
-            {
-                Ok(()) => UiMessage::Action(ActionResult::Success {
-                    context: "bridge_follow_added".into(),
-                }),
-                Err(e) => feed_source_refusal(
-                    &e,
-                    &bridge_id,
-                    fauna_core::data::FeedSourceOperation::Follow,
-                    &id,
-                )
-                .unwrap_or_else(|| {
-                    UiMessage::Action(ActionResult::Failed {
-                        context: "bridge_follow_added".into(),
-                        error: e.to_string(),
-                    })
-                }),
-            };
-            tx.send(msg);
+            tx.send(follow_change_message(nest_rpc, Some(queue), change).await);
         });
     }
 
-    /// Remove a follow from a bridge via `fauna.bridges.remove_follow`.
+    /// Remove a follow from a bridge via `fauna.bridges.remove_follow`, sent
+    /// now or queued with no nest (as [`Self::add_bridge_follow`]).
     pub fn remove_bridge_follow(&self, bridge_id: &str, follow_id: &str) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
-        let bridge_id = bridge_id.to_string();
-        let follow_id = follow_id.to_string();
+        let queue = crate::offline_outbox::queue();
+        let change = FollowChange::Remove {
+            bridge_id: bridge_id.to_string(),
+            follow_id: follow_id.to_string(),
+        };
         self.spawn_bg(async move {
-            let bridges = fauna_client_bridges::BridgesClient::new(nest_rpc);
-            let msg = match bridges.remove_follow(bridge_id, follow_id).await {
-                Ok(()) => UiMessage::Action(ActionResult::Success {
-                    context: "bridge_follow_removed".into(),
-                }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "bridge_follow_removed".into(),
-                    error: e.to_string(),
-                }),
-            };
-            tx.send(msg);
+            tx.send(follow_change_message(nest_rpc, Some(queue), change).await);
         });
     }
 
@@ -3891,6 +3902,64 @@ impl FaunaClient {
         });
     }
 
+    /// The successor's owed-nests list (`settings.md` § Recovery kit → *The
+    /// successor's owed nests*): the bound nest's served list joined with the
+    /// account runtime's last passes — the bound keeper's and each linked
+    /// keeper's — through the shared `OwedNestsView::project`, exactly tui's
+    /// Account hydrate. A failed read of the bound nest's list leaves its
+    /// entries out this time (logged); the linked keepers' entries, read by the
+    /// runtime's own pass, still list. `None` when nothing is owed.
+    pub fn owed_nests_view(
+        &self,
+    ) -> impl std::future::Future<Output = Option<fauna_client_recovery::owed_nests::OwedNestsView>>
+    + Send
+    + 'static {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        async move {
+            use fauna_client_recovery::owed_nests::{OwedNestsView, read_owed_nests};
+            let served = match read_owed_nests(&nest_rpc).await {
+                Ok(served) => served,
+                Err(e) => {
+                    tracing::warn!("[settings] owed-nests read failed: {e}");
+                    Vec::new()
+                }
+            };
+            let passes = crate::account_runtime::handle()
+                .and_then(|h| h.last_owed_nests())
+                .unwrap_or_default();
+            let bound = passes
+                .iter()
+                .find(|pass| pass.keeper.is_none())
+                .map(|pass| pass.deliveries());
+            let linked: Vec<_> = passes
+                .iter()
+                .filter_map(|pass| pass.keeper.map(|k| (k, pass.deliveries())))
+                .collect();
+            OwedNestsView::project(&served, bound, &linked)
+        }
+    }
+
+    /// `recovery-kit-owed-nest-item-dismiss-confirm-button` — settle one entry
+    /// at its keeper (the shared `dismiss_owed_nest`): a bound entry over this
+    /// session, a linked one through the shared native linked-nest dial. The
+    /// error is the reason `dismiss_failed_copy` renders.
+    pub fn dismiss_owed_nest(
+        &self,
+        entry: fauna_client_recovery::owed_nests::OwedNestEntry,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let secret_hex = self.secret_hex.clone();
+        async move {
+            let identity = recovery_identity(&secret_hex)?;
+            fauna_client_recovery::owed_nests::dismiss_owed_nest(
+                &fauna_client_recovery::RecoveryClient::new(nest_rpc),
+                &NativeLinkedNestDial::new(&identity),
+                &entry,
+            )
+            .await
+        }
+    }
+
     /// Mint the first RecoveryKey registration (`recovery-kit-create-button`,
     /// live only in `NeverCreated`) — `create_kit` with `prior: None`. Also
     /// reachable for a successor retrofitting an owed kit that never landed,
@@ -4246,8 +4315,7 @@ impl FaunaClient {
                 Ok(reply) => UiMessage::Data(DataMessage::KeyPackageCountLoaded {
                     count: reply.count as u32,
                 }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.conversations.keypackage.count".into(),
+                Err(e) => UiMessage::Data(DataMessage::KeyPackageCountFailed {
                     error: e.to_string(),
                 }),
             };
@@ -5249,11 +5317,14 @@ impl FaunaClient {
     }
 
     /// The post-auth edge of the deployment-seed custody leg (`box-recovery.md`
-    /// § The plane-era recovery floor → *(c) The writes*): runs the leg now when
-    /// the account store is already up. When it is not, this does nothing —
-    /// `account_runtime::install`'s store-ready edge, landing second, runs it.
-    /// The steady state (this box already custodied) makes no round trip.
+    /// § The plane-era recovery floor → *(c) The writes*): marks the edge
+    /// landed, then runs the leg now when the account store is already up.
+    /// When it is not, this does nothing more — `account_runtime::install`'s
+    /// store-ready edge, landing second, sees the mark and runs it. The steady
+    /// state (this box already custodied) makes no round trip.
     pub fn run_deployment_seed_custody_leg(&self) {
+        self.post_auth_landed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let Some(store) = crate::account_runtime::handle() else {
             return;
         };
@@ -6033,7 +6104,8 @@ impl FaunaClient {
     /// domain list separately from the DNS page's — tui refreshes the same
     /// machine on every entry to that page), and the settings page's membership
     /// designation picker (the admin's own subscription tier names —
-    /// monetization.md § Pillar 4). One shared call from both the real
+    /// monetization.md § Pillar 4), and the Users page's registration
+    /// posture. One shared call from both the real
     /// sidebar nav edge (`app.rs`'s content-stack notify) and the
     /// test-agent nav patch (`main.rs`), so an admin returning to the shell
     /// by either door sees resources another actor (or a WS-RPC seed)
@@ -6054,6 +6126,11 @@ impl FaunaClient {
         self.fetch_admin_services();
         self.fetch_forwarders();
         self.fetch_own_membership_tier_names();
+        // The Users page's registration posture (`fauna.setup.status`), re-read
+        // on every entry like tui's page: a posture another admin (or a newer
+        // nest) set after sign-in must show — read-only when this app cannot
+        // name it (public-mode.md § Registration Modes).
+        self.fetch_registration_mode();
     }
 
     /// Every account on the nest for the admin actor pickers
@@ -6862,6 +6939,38 @@ impl FaunaClient {
         });
     }
 
+    /// The admin take-over of a supervised account — the armed
+    /// `admin-users-take-over-confirm-button` on a ward's Users-hub row
+    /// (`family-safety.md` § App surface → *Admin take-over*):
+    /// `fauna.family.transfer { ward, self }`, a self-proposal the nest
+    /// completes at once. On success the page re-reads (the row now names the
+    /// viewer, with no offer) and the post-auth `fauna.family.status` read runs
+    /// again, so `family-tab` reveals the ward. A refusal lands on
+    /// `admin-users-action-error` (the `fauna.family.transfer` context is the
+    /// hub's — the Family page settles its own transfer inline).
+    pub fn take_over_guardianship(&self, ward: Vec<u8>) {
+        let Some(viewer) = self.actor_id().and_then(|h| hex::decode(h).ok()) else {
+            return;
+        };
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let family = fauna_client_family::FamilyClient::new(nest_rpc);
+            match family.transfer(ward, viewer).await {
+                Ok(()) => {
+                    tx.send(UiMessage::Data(DataMessage::AdminUserUpdated));
+                    if let Some(msg) = family_status_loaded(family.status().await) {
+                        tx.send(UiMessage::Data(msg));
+                    }
+                }
+                Err(e) => tx.send(UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.family.transfer".into(),
+                    error: e.to_string(),
+                })),
+            }
+        });
+    }
+
     /// Revoke the admin role over `fauna.admin.admins.remove` — the
     /// `admin-users-remove-admin-button` on an `is_admin` row. Schedules an
     /// `AdminRemove` pending action; refuses (`fauna.admin.conflict`) when it
@@ -7180,6 +7289,12 @@ impl FaunaClient {
     pub fn actor_id(&self) -> Option<String> {
         self.actor_id
             .get(|| actor_id_from_secret_hex(&self.secret_hex))
+    }
+
+    /// The post-auth edge's landed mark ([`Self::run_deployment_seed_custody_leg`]
+    /// sets it), for the account runtime's store-ready edge to read.
+    pub fn post_auth_landed(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.post_auth_landed)
     }
 
     /// Returns a clone of the UiSender.
@@ -10913,6 +11028,182 @@ mod interact_failure_tests {
         match interact_failure("nest unreachable".to_string()) {
             ActionResult::Failed { error, .. } => assert_eq!(error, "nest unreachable"),
             _ => panic!("a plain failure must keep its text"),
+        }
+    }
+}
+
+/// One follow-list change on a bridge: the bridges detail page's and the
+/// Nostr settings tab's add / remove.
+#[derive(Debug, Clone)]
+pub(crate) enum FollowChange {
+    Add {
+        bridge_id: String,
+        id: String,
+        petname: Option<String>,
+    },
+    Remove {
+        bridge_id: String,
+        follow_id: String,
+    },
+}
+
+/// The success context of a follow change QUEUED with no nest: the page error
+/// clears and no list changes (the bridges pages paint only what the nest
+/// persisted; its list after the drain is the word).
+pub(crate) const BRIDGE_FOLLOW_QUEUED: &str = "bridge_follow_queued";
+
+/// Send `change` now, or — when `queue` reports no nest — rest it in the
+/// device outbox (`BridgesClient::add_follow_or_queue` /
+/// `remove_follow_or_queue`, one drain scope per followed account). `Ok(true)`
+/// = queued.
+pub(crate) async fn send_or_queue_follow(
+    nest: Arc<NestClient>,
+    queue: Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>>,
+    change: FollowChange,
+) -> Result<bool, fauna_protocol::offline_intent::ComposeError<NestClientError>> {
+    let bridges = fauna_client_bridges::BridgesClient::new(nest);
+    let composed = match change {
+        FollowChange::Add {
+            bridge_id,
+            id,
+            petname,
+        } => {
+            bridges
+                .add_follow_or_queue(queue.as_deref(), bridge_id, id, petname, None)
+                .await?
+        }
+        FollowChange::Remove {
+            bridge_id,
+            follow_id,
+        } => {
+            bridges
+                .remove_follow_or_queue(queue.as_deref(), bridge_id, follow_id)
+                .await?
+        }
+    };
+    Ok(matches!(
+        composed,
+        fauna_protocol::offline_intent::Composed::Queued(_)
+    ))
+}
+
+/// [`send_or_queue_follow`] folded into the message the app loop applies: a
+/// sent change reports `bridge_follow_added` / `bridge_follow_removed` (the
+/// loop re-lists), a queued one [`BRIDGE_FOLLOW_QUEUED`] (no re-list), a
+/// guardian refusal of a follow the feed-source ask.
+async fn follow_change_message(
+    nest: Arc<NestClient>,
+    queue: Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>>,
+    change: FollowChange,
+) -> UiMessage {
+    let (context, refusal_target) = match &change {
+        FollowChange::Add { bridge_id, id, .. } => {
+            ("bridge_follow_added", Some((bridge_id.clone(), id.clone())))
+        }
+        FollowChange::Remove { .. } => ("bridge_follow_removed", None),
+    };
+    match send_or_queue_follow(nest, queue, change).await {
+        Ok(true) => UiMessage::Action(ActionResult::Success {
+            context: BRIDGE_FOLLOW_QUEUED.into(),
+        }),
+        Ok(false) => UiMessage::Action(ActionResult::Success {
+            context: context.into(),
+        }),
+        Err(e) => {
+            let refused = match (&e, &refusal_target) {
+                (fauna_protocol::offline_intent::ComposeError::Rpc(rpc), Some((bridge, id))) => {
+                    feed_source_refusal(
+                        rpc,
+                        bridge,
+                        fauna_core::data::FeedSourceOperation::Follow,
+                        id,
+                    )
+                }
+                _ => None,
+            };
+            refused.unwrap_or_else(|| {
+                UiMessage::Action(ActionResult::Failed {
+                    context: context.into(),
+                    error: e.to_string(),
+                })
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod follow_composer_tests {
+    use super::*;
+
+    fn run(word: &'static str, change: FollowChange) -> (UiMessage, Vec<String>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let nest = NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            ActorKeypair::from_secret([9u8; 32]),
+        );
+        let msg = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(follow_change_message(
+                nest,
+                Some(Arc::clone(&queue) as Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>),
+                change,
+            ));
+        let kinds = queue
+            .queued()
+            .into_iter()
+            .map(|q| q.0.to_string())
+            .collect();
+        (msg, kinds)
+    }
+
+    fn add() -> FollowChange {
+        FollowChange::Add {
+            bridge_id: "nostr".into(),
+            id: "npub1alice".into(),
+            petname: None,
+        }
+    }
+
+    fn remove() -> FollowChange {
+        FollowChange::Remove {
+            bridge_id: "nostr".into(),
+            follow_id: "npub1alice".into(),
+        }
+    }
+
+    fn context(msg: &UiMessage) -> Option<&str> {
+        match msg {
+            UiMessage::Action(ActionResult::Success { context }) => Some(context),
+            _ => None,
+        }
+    }
+
+    /// With no nest a follow and an unfollow rest in the outbox and report
+    /// the queued context — never `bridge_follow_added`/`_removed`, whose arm
+    /// re-lists.
+    #[test]
+    fn a_follow_change_with_no_nest_is_queued_and_relists_nothing() {
+        let (msg, kinds) = run("disconnected", add());
+        assert_eq!(context(&msg), Some(BRIDGE_FOLLOW_QUEUED));
+        assert_eq!(kinds, vec!["fauna.bridges.add_follow"]);
+        let (msg, kinds) = run("disconnected", remove());
+        assert_eq!(context(&msg), Some(BRIDGE_FOLLOW_QUEUED));
+        assert_eq!(kinds, vec!["fauna.bridges.remove_follow"]);
+    }
+
+    /// Connected, the change is sent (to this dummy nest it fails on the
+    /// transport) and nothing is queued.
+    #[test]
+    fn a_follow_change_with_the_nest_connected_is_sent_not_queued() {
+        for change in [add(), remove()] {
+            let (msg, kinds) = run("connected", change);
+            assert!(
+                matches!(msg, UiMessage::Action(ActionResult::Failed { .. })),
+                "the send was attempted"
+            );
+            assert!(kinds.is_empty());
         }
     }
 }

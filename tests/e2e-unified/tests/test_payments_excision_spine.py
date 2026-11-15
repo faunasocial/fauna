@@ -1258,6 +1258,8 @@ _PRICE_ROUTE_CLASS_IDS = (
 #: toolchain — precisely the mac-less-fleet blindness this pin exists to remove.
 _APPLE_ID_PREFIXES = (
     "subscription-provider-", "subscription-claim-", "nostr-zap-signer-",
+    # A sold post's Change price… dialog: a true prefix, every id under it in the plane.
+    "feed-post-sale-price-",
 ) + _PRICE_ROUTE_CLASS_IDS
 
 #: The `p2p-share` member's apple condition, and what it covers. It is a registry

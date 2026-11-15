@@ -39,9 +39,9 @@ public class SelfAddressHealObserverTests
         public override void SetSelfAddress(string selfAddress) => SetSelfAddressCalls.Add(selfAddress);
     }
 
-    private static LaunchSnapshot SnapshotWithIdentity(string handle, string domain) =>
+    private static LaunchSnapshot SnapshotWithIdentity(string handle, string domain, string tier = "member") =>
         new(new LaunchPhase.Online(), new TokenStatus.None(), null, null, false,
-            new LaunchIdentity(handle, domain, "member"), null);
+            new LaunchIdentity(handle, domain, tier), null);
 
     [Fact]
     public void AttachingASessionAppliesAnAlreadyResolvedIdentity()
@@ -128,6 +128,22 @@ public class SelfAddressHealObserverTests
         observer.OnChanged();
 
         Assert.Equal(2, moved);   // resolved, then renamed
+    }
+
+    [Fact]
+    public void IdentityMovedFiresWhenOnlyTheTierMoves()
+    {
+        // The Settings identity cell paints the tier too (settings.md § Layout & flow
+        // item 1): a verify reply that moved the account to another tier repaints it.
+        var machine = new FakeMachine { SnapshotToReturn = SnapshotWithIdentity("alice", "example.com", "free") };
+        var moved = 0;
+        var observer = new SelfAddressHealObserver { Machine = machine, IdentityMoved = () => moved++ };
+
+        observer.OnChanged();
+        machine.SnapshotToReturn = SnapshotWithIdentity("alice", "example.com", "pro");
+        observer.OnChanged();
+
+        Assert.Equal(2, moved);
     }
 
     [Fact]

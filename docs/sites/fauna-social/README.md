@@ -10,7 +10,7 @@ became the site; the copy left its historical `short/` subdirectory on
 | `index.md` | `/` — the pitch |
 | `what.md` | `/what` — what you get |
 | `who.md` | `/who` — who's behind it |
-| `features.md` | `/features` — what works where (prose only; the table itself is generated) |
+| `features.md` | `/features` — what works where (the opening prose only: the legend's and the Fauna Kids section's words sit in the page file's marked regions, and the tables are generated) |
 | `privacy.md` | `/privacy` — the privacy page (no nav entry, by design) |
 | `apps.md` | `/apps` (moved from `/official-apps`, which redirects, 2026-10-24) — the released apps with a direct link per file, where official downloads come from and how to check one (prose; its downloads table and its releases link are filled by page-local tokens, below; no nav entry) |
 | `code-signing-policy.md` | `/code-signing-policy` — the code signing policy (no nav entry; linked from the footer and `/apps`) |

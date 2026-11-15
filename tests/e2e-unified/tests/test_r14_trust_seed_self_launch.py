@@ -90,13 +90,14 @@ PROCESS_LAUNCHES = {
 #: Driver launches that carry no seed, and why: (file, function) → reason.
 UNSEEDED: dict[tuple[str, str], str] = {
     (
-        "tests/e2e-unified/tests/test_box_recovery_two_nest.py",
-        "_SurvivingSeat.launch",
-    ): "the seat is built from an `h1_config` whose `environment` is already "
-    "seeded by `_seeded_environment` (T4 and T6 both); the seat only launches it",
+        "tests/e2e-unified/helpers/box_recovery_launch.py",
+        "SurvivingSeat.launch",
+    ): "every caller (box recovery T4 and T6, the retire view's journey) builds "
+    "the seat from a config whose `environment` is already seeded by "
+    "`_seeded_environment`; the seat only launches it",
     (
-        "tests/e2e-unified/tests/test_box_recovery_two_nest.py",
-        "_SurvivingSeat.relaunch",
+        "tests/e2e-unified/helpers/box_recovery_launch.py",
+        "SurvivingSeat.relaunch",
     ): "relaunches the same seeded `h1_config` over the same store",
     (
         "tests/common/launch_harness.py",
@@ -332,7 +333,7 @@ UNSEEDED: dict[tuple[str, str], str] = {
     # fake `adb`, with a remote-adb-server launch config.
     (
         "tests/e2e-unified/tests/test_android_driver_adb.py",
-        "test_every_adb_call_names_the_remote_server",
+        "test_every_adb_call_names_the_venue_server",
     ): "a stubbed android driver (tier_1): no bridge and no app process start",
     (
         "tests/e2e-unified/tests/test_android_driver_adb.py",
@@ -340,21 +341,20 @@ UNSEEDED: dict[tuple[str, str], str] = {
     ): "a stubbed android driver (tier_1): no bridge and no app process start",
     (
         "tests/e2e-unified/tests/test_android_driver_adb.py",
-        "test_the_venue_forward_port_comes_from_the_fixed_range",
+        "test_the_venue_forward_and_reverses_take_any_free_port",
     ): "a stubbed android driver (tier_1): no bridge and no app process start",
     (
         "tests/e2e-unified/tests/test_android_driver_adb.py",
-        "test_two_venue_seats_get_different_forward_ports_and_give_them_back",
+        "test_the_venue_device_is_connected_before_anything_else",
     ): "a stubbed android driver (tier_1): no bridge and no app process start",
     (
         "tests/e2e-unified/tests/test_android_driver_adb.py",
-        "test_a_venue_reverse_for_an_untunnelled_nest_port_is_refused",
+        "test_a_local_serial_is_never_connected",
     ): "a stubbed android driver (tier_1): no bridge and no app process start",
     (
         "tests/e2e-unified/tests/test_android_driver_adb.py",
-        "test_a_venue_launch_pointed_at_an_untunnelled_nest_fails_before_the_app_starts",
-    ): "a stubbed android driver (tier_1): the launch raises at the reverse, "
-    "before the `/session` POST that would start an app",
+        "test_a_provider_redirected_to_loopback_gets_its_reverse",
+    ): "a stubbed android driver (tier_1): no bridge and no app process start",
 }
 
 

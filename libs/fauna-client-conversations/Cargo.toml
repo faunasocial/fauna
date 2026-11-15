@@ -82,6 +82,16 @@ fauna-media = { path = "../fauna-media", default-features = false }
 # Both targets — the gate's knock-on-lookup-failure diagnostic (a no-op on wasm,
 # where no subscriber is installed).
 tracing = { workspace = true }
+# The store seams (both targets; wasm-clean, already in the web graph through
+# `fauna-wasm`). Natively also the mail read-feed source's key cache.
+fauna-client-config = { path = "../fauna-client-config" }
+# The custody-ceremony machine (W8.4 (account-data-plane.md § Workstreams)): `StoreCustodyCeremonySink` wires
+# `custody_ceremony::ingest_payload` + the `fauna.state.custody-ceremony` capture
+# into the backend's CustodyCeremonySink seam, and `BackendCustodyPoster` feeds
+# `drive_ceremonies`' post door — on both targets, since web's conversations rail
+# mints custody offers too (`ui/devices.md` § Where logic lives). Safe direction —
+# capabilities has no conversations dep, so the edge cannot cycle.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
 
 # Native seam impl: `NestConversationsRpc` over `ConversationsClient<Arc<NestClient>>`
 # (reqwest + tokio-tungstenite). Cross-nest discovery (Spec Y2 slice 3) is
@@ -103,14 +113,6 @@ fauna-provisioning = { path = "../fauna-provisioning" }
 # own JS mail poll loop. `fauna-mail/segments-receive` is the inbound
 # `open_inbound_record` decrypt; `fauna-mls/native` derives the recipient HPKE
 # secret from the MSEK.
-fauna-client-config = { path = "../fauna-client-config" }
-# The custody-ceremony machine (W8.4 (account-data-plane.md § Workstreams)): `StoreCustodyCeremonySink` wires
-# `custody_ceremony::ingest_payload` + the `fauna.state.custody-ceremony` capture
-# into the session's CustodyCeremonySink seam, and `SessionCustodyPoster` feeds
-# `drive_ceremonies`' post door. Native-only for now (web's ceremony wiring
-# rides the web leg). Safe direction — capabilities has no
-# conversations dep, so the edge cannot cycle.
-fauna-client-capabilities = { path = "../fauna-client-capabilities" }
 fauna-client-caldav = { path = "../fauna-client-caldav" }
 # The verified succession walk `NestSchedulingSink`'s resolver runs when an
 # inbound scheduling message's author misses the event's organizer binding

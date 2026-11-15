@@ -84,6 +84,13 @@ pub struct EngineMapping {
     pub folder_ref: FolderRef,
     /// Which loop to run for this folder.
     pub mode: LocationMode,
+    /// `Some` for a **presence root** — an on-demand root no bound location
+    /// reaches, planned from the presence plan by
+    /// [`crate::presence_roots::plan_presence_roots`]
+    /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host,
+    /// decision 3d); `None` for a bound location, which [`plan_engines`]
+    /// plans from the config.
+    pub presence: Option<crate::presence_roots::PresenceRoot>,
 }
 
 impl EngineMapping {
@@ -156,6 +163,7 @@ pub fn plan_engines(config: &SyncConfig) -> Vec<EngineMapping> {
                 folder: binding.folder.to_string(),
                 folder_ref: binding.folder_ref,
                 mode: f.mode.clone(),
+                presence: None,
             }),
             None => {
                 tracing::info!(
@@ -167,6 +175,47 @@ pub fn plan_engines(config: &SyncConfig) -> Vec<EngineMapping> {
             }
         })
         .collect()
+}
+
+/// The presence roots this platform's driver serves: on the desktops the plan
+/// [`crate::presence_roots::reconcile_presence_roots`] published last
+/// ([`SyncServiceState::presence_serving`]) — a FUSE view on linux, a cfapi
+/// sync root at the presence path on windows; elsewhere none — apple presents
+/// through the File Provider.
+fn presence_to_serve(state: &SyncServiceState) -> Vec<EngineMapping> {
+    if !crate::presence_roots::SERVED {
+        return Vec::new();
+    }
+    state
+        .presence_serving
+        .lock()
+        .map(|planned| planned.clone())
+        .unwrap_or_default()
+}
+
+/// The engines to serve: every presence root, then every bound location whose
+/// set no presence root serves. The planner subtracts a bound set (decision 3d
+/// (2)), so the two meet only while a root the bind retires still DRAINS —
+/// kept serving until its engine records nothing un-recorded (rule 5), its
+/// un-recorded bytes being in its backing, which a bound engine never reads.
+/// One engine per set, so the bind's engine waits for the drain.
+fn with_presence_roots(
+    bound: Vec<EngineMapping>,
+    presence: &[EngineMapping],
+) -> Vec<EngineMapping> {
+    let keys: HashSet<String> = presence.iter().map(EngineMapping::engine_key).collect();
+    let mut out = presence.to_vec();
+    out.extend(bound.into_iter().filter(|m| {
+        let draining = keys.contains(&m.engine_key());
+        if draining {
+            tracing::info!(
+                folder = %fauna_core::log_redact::log_folder_name(&m.folder),
+                "the set's presence root still drains; its bound location starts once it has"
+            );
+        }
+        !draining
+    }));
+    out
 }
 
 /// The engine **stamp** for `folder`: everything that materially determines the
@@ -220,6 +269,11 @@ pub fn plan_engines(config: &SyncConfig) -> Vec<EngineMapping> {
 /// build read: a new tip — a generation minted after a removal — moves
 /// nothing else in the stamp, so without it the engine kept sealing under the
 /// generation the removed member still holds.
+/// A **presence root's reader flag** (`on-demand-files-shared-sets.md` § Shared
+/// sets on a capability host, decision 3d (4)) is included — `None` for a bound
+/// location — because a grant or a demotion moves nothing else here, and the
+/// view must be remounted read-write or read-only by a rebuild
+/// ([`mapping_stamp`]).
 type EngineStamp = (
     Option<Vec<u8>>,
     Option<u64>,
@@ -231,6 +285,7 @@ type EngineStamp = (
     Option<[u8; 32]>,
     bool,
     Option<[u8; 32]>,
+    Option<bool>,
 );
 
 ///
@@ -257,7 +312,20 @@ fn engine_stamp(
         keys.set_nonce,
         keys.webdav_served(),
         keys.group_tip,
+        None,
     ))
+}
+
+/// [`engine_stamp`] for `mapping`, its presence root's reader flag included —
+/// the stamp [`reconcile_resolved`] records and compares.
+fn mapping_stamp(
+    keys: Option<&FolderEngineKeys>,
+    mapping: &EngineMapping,
+    actor_scope: Option<&str>,
+) -> Option<EngineStamp> {
+    let mut stamp = engine_stamp(keys, mapping.mode.clone(), &mapping.path, actor_scope)?;
+    stamp.10 = mapping.presence.as_ref().map(|p| p.read_only);
+    Some(stamp)
 }
 
 /// The registration-lifecycle decision (`file-sync.md` § Per-file sync-status
@@ -423,6 +491,7 @@ impl EngineSpec for LocationEngineSpec {
         let folder_ref = desc.folder_ref;
         let folder = desc.folder.clone();
         let mode = desc.mode;
+        let presence = desc.presence;
         let relay_seat = Arc::clone(&self.relay_seat);
         let siblings = Arc::clone(&self.siblings);
         let folder_dbs = Arc::clone(&self.folder_dbs);
@@ -518,8 +587,24 @@ impl EngineSpec for LocationEngineSpec {
             // A linux on-demand root is built over its REACH, opened before the
             // build because the engine's `watch_dir` is fixed there.
             let mount_report = MountReport::new(state_for_wake.clone(), &path);
-            let reach = open_root_reach(mode.clone(), &path, &folder, &mount_report);
+            let reach = open_root_reach(
+                mode.clone(),
+                &path,
+                presence.as_ref(),
+                &folder,
+                &mount_report,
+            );
             let engine_dir = root_dir(&reach, &path);
+            // A presence root is a control-inverted host: its backing is reachable
+            // only through the agent, so a reader's set builds read-only; a bound
+            // location sits over a directory the user writes behind the engine and
+            // refuses one (`on-demand-files-shared-sets.md` § Shared sets on a
+            // capability host, decision 3d (4)).
+            let reader_hosting = if presence.is_some() {
+                fauna_sync_engine::engine_lifecycle::ReaderHosting::ReadOnly
+            } else {
+                fauna_sync_engine::engine_lifecycle::ReaderHosting::Refuse
+            };
             let Some(built) = build_until_served(
                 &nest_rpc,
                 || {
@@ -535,6 +620,7 @@ impl EngineSpec for LocationEngineSpec {
                         Arc::clone(&access_gate),
                         change_signer.clone(),
                         Arc::clone(&folder_keys),
+                        reader_hosting,
                     )
                 },
                 &folder,
@@ -550,6 +636,17 @@ impl EngineSpec for LocationEngineSpec {
             if cancel.is_cancelled() {
                 return;
             }
+            // A presence root's park, recorded BEFORE its view is mounted: a
+            // writer→reader move marks the set parked first (decision 3), then the
+            // view comes up read-only below; a grant clears the mark.
+            if presence.is_some() {
+                note_presence_access(&built, &folder);
+            }
+            // The view is a reader's when the plan says so or the build found the
+            // row a reader's — the stricter of the two, so a plan behind the row
+            // never mounts a read-only engine's view read-write.
+            let read_only = built.read_only || presence.as_ref().is_some_and(|p| p.read_only);
+            let reach = view_read_only(reach, presence.is_some() && read_only);
             // The home nest the relay seat announces the folder by (read before
             // the edge takes the basis).
             let serve_home = built.serve_home_nest_url();
@@ -607,6 +704,7 @@ impl EngineSpec for LocationEngineSpec {
                         Some(wake_rx),
                         Some(cmd_rx),
                         serve,
+                        read_only,
                     )
                     .await;
                 }
@@ -1345,11 +1443,17 @@ pub(crate) fn mount_error_code(error: &anyhow::Error) -> &'static str {
     }
 }
 
-/// Open `path`'s [`RootReach`] for a root of `mode`.
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+/// Open `path`'s [`RootReach`] for a root of `mode`. A presence root's reach is
+/// opened on its private backing with the view at `path`, both created first
+/// (`on-demand-files-linux.md` § Linux FUSE binding, the presence-root bullet).
+/// On windows there is no reach, and a presence root's directory — the agent's
+/// own, at the presence path (decision 3d (1), (3)) — is created here, before
+/// its sync root is registered on it.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(unused_variables))]
 fn open_root_reach(
     mode: LocationMode,
     path: &Path,
+    presence: Option<&crate::presence_roots::PresenceRoot>,
     folder: &str,
     mount_report: &MountReport,
 ) -> RootReach {
@@ -1358,7 +1462,14 @@ fn open_root_reach(
         if mode != LocationMode::OnDemand {
             return None;
         }
-        match crate::fuse_host::Reach::open(path) {
+        let opened = match presence.and_then(|p| p.backing.as_deref()) {
+            Some(backing) => std::fs::create_dir_all(path)
+                .and_then(|()| std::fs::create_dir_all(backing))
+                .map_err(anyhow::Error::from)
+                .and_then(|()| crate::fuse_host::Reach::open_backing(backing, path)),
+            None => crate::fuse_host::Reach::open(path),
+        };
+        match opened {
             Ok(reach) => Some(reach),
             Err(e) => {
                 tracing::error!(
@@ -1375,7 +1486,57 @@ fn open_root_reach(
     }
     #[cfg(not(target_os = "linux"))]
     {
+        #[cfg(windows)]
+        if mode == LocationMode::OnDemand
+            && presence.is_some()
+            && let Err(e) = std::fs::create_dir_all(path)
+        {
+            tracing::error!(
+                folder = %fauna_core::log_redact::log_folder_name(folder),
+                path = %fauna_core::log_redact::log_path(&path.to_string_lossy()),
+                error = %e,
+                "creating the presence root's directory failed; its sync root serves nothing"
+            );
+            mount_report.failed(&anyhow::Error::from(e));
+        }
         RootReach
+    }
+}
+
+/// Mark `reach`'s view a reader's ([`crate::fuse_host::Reach::read_only`]) when
+/// `read_only` — set after the build, which is when the row's access is known.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn view_read_only(reach: RootReach, read_only: bool) -> RootReach {
+    #[cfg(target_os = "linux")]
+    return reach.map(|r| r.read_only(read_only));
+    #[cfg(not(target_os = "linux"))]
+    reach
+}
+
+/// A presence root's park step at its build
+/// ([`fauna_sync_engine::engine_lifecycle::note_built_access`] over the
+/// engine's own state DB). A failed step is logged and retried at the next
+/// build: an unwritten mark leaves the persisted access unmoved.
+fn note_presence_access(built: &fauna_sync_engine::engine_lifecycle::BuiltEngine, folder: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    match fauna_sync_engine::engine_lifecycle::note_built_access(
+        built.engine.db(),
+        &built.basis,
+        now,
+    ) {
+        Ok(fauna_sync_engine::binding_edge::ParkMark::Leave) => {}
+        Ok(action) => tracing::info!(
+            folder = %fauna_core::log_redact::log_folder_name(folder),
+            action = ?action,
+            "presence root: access park mark moved at the build"
+        ),
+        Err(e) => tracing::warn!(
+            folder = %fauna_core::log_redact::log_folder_name(folder),
+            error = %format!("{e:#}"),
+            "presence root: the park step failed; the next build retries"
+        ),
     }
 }
 
@@ -1422,6 +1583,8 @@ async fn run_on_demand_root(
     // This folder's relay asks — an on-demand root serves its hydrated bodies
     // (a placeholder answers none).
     serve: ServeInbox,
+    // A reader's presence root: no write half (`bridge::RootBoot::read_only`).
+    read_only: bool,
 ) {
     // This root's command channel: the cfapi callbacks (routed by the connection
     // key) push Fetch/Populate here; the loop serves them.
@@ -1455,11 +1618,17 @@ async fn run_on_demand_root(
     // seen marks, since the unregister removes every cloud-only placeholder and
     // that removal is never a user's delete (decision (e)). If registration fails
     // the engine still runs but receives no callbacks (serves nothing) — logged.
+    //
+    // A reader's presence root is refused by the OS between its registration and
+    // its connection — its access list and the read-only attribute
+    // (`crate::cfapi_host::protect_reader_root`, decision 3d (4)) — and a writer's
+    // root lifts what a reader's left; a reader's root that could not be refused
+    // is not connected (fail closed).
     #[cfg(windows)]
     let connect = {
         let (path, folder, cmd_tx) = (path.clone(), folder.clone(), cmd_tx.clone());
         move || match crate::cfapi_host::register_and_connect_product_root(
-            &path, &folder, cmd_tx, db_path,
+            &path, &folder, cmd_tx, db_path, read_only,
         ) {
             Ok(conn) => Some(conn),
             Err(e) => {
@@ -1522,6 +1691,7 @@ async fn run_on_demand_root(
         crate::bridge::RootBoot {
             fresh_registration,
             connect,
+            read_only,
         },
         cmd_rx,
         Some(event_tx),
@@ -1716,6 +1886,9 @@ pub async fn reconcile_engines(state: &Arc<SyncServiceState>) -> Result<()> {
     // to re-read custody. It re-enters [`reconcile_resolved`] when the resolution
     // changed; this reconcile runs now on what the agent holds.
     state.content_keys_wake.notify_one();
+    // The presence roots re-plan on the same edges (`crate::presence_roots`),
+    // off this path: the plan reads the nest.
+    crate::presence_roots::spawn_reconcile(state);
     reconcile_resolved(state).await
 }
 
@@ -1735,7 +1908,7 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
         let desired = if config.paused {
             Vec::new()
         } else {
-            plan_engines(&config)
+            with_presence_roots(plan_engines(&config), &presence_to_serve(state))
         };
         let cap_guard = state.capability.read().await;
         match cap_guard.as_ref() {
@@ -1870,13 +2043,8 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
                     // `desired` is already filtered to the sets the resolution names,
                     // so every stamp resolves; `filter_map` keeps that a fact
                     // of the data rather than an `expect`.
-                    engine_stamp(
-                        keys.get(&m.engine_key()),
-                        m.mode.clone(),
-                        &m.path,
-                        actor_scope.as_deref(),
-                    )
-                    .map(|stamp| (m.engine_key(), stamp))
+                    mapping_stamp(keys.get(&m.engine_key()), m, actor_scope.as_deref())
+                        .map(|stamp| (m.engine_key(), stamp))
                 })
                 .collect();
             let spec = LocationEngineSpec::new(
@@ -1911,10 +2079,9 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
             // (`LocationEngineSpec::run`), so the restarted engine seals/opens under the
             // new content-key generation and runs the new mode's loop.
             for mapping in desired {
-                let Some(stamp) = engine_stamp(
+                let Some(stamp) = mapping_stamp(
                     keys.get(&mapping.engine_key()),
-                    mapping.mode.clone(),
-                    &mapping.path,
+                    &mapping,
                     actor_scope.as_deref(),
                 ) else {
                     continue; // filtered above; unreachable by construction
@@ -2280,6 +2447,7 @@ mod tests {
                     folder: "set-b".to_string(),
                     folder_ref: test_ref("set-b"),
                     mode: LocationMode::Always,
+                    presence: None,
                 }
                 .engine_key()
             ),
@@ -2315,6 +2483,7 @@ mod tests {
             folder: "set-a".to_string(),
             folder_ref: test_ref("set-a"),
             mode: LocationMode::Always,
+            presence: None,
         }
         .engine_key();
         // The host's OWN identity, not its stamps: a rebuild recomputes an *equal*
@@ -2388,12 +2557,14 @@ mod tests {
                     folder: "docs".to_string(),
                     folder_ref: test_ref("docs"),
                     mode: LocationMode::Always,
+                    presence: None,
                 },
                 EngineMapping {
                     path: PathBuf::from(r"C:\od"),
                     folder: "photos".to_string(),
                     folder_ref: test_ref("photos"),
                     mode: LocationMode::OnDemand,
+                    presence: None,
                 },
             ],
             "BOTH modes get an engine; an always-resident folder must not be dropped"
@@ -2420,6 +2591,7 @@ mod tests {
                 folder: "docs".to_string(),
                 folder_ref: test_ref("docs"),
                 mode: LocationMode::OnDemand,
+                presence: None,
             }],
             "an unbound folder is never served under a manufactured folder name, in either mode"
         );
@@ -2447,6 +2619,7 @@ mod tests {
                 folder: "docs".to_string(),
                 folder_ref: test_ref("docs"),
                 mode: LocationMode::Always,
+                presence: None,
             }],
             "the parked set is not served; the caller's other bindings are untouched"
         );
@@ -2529,6 +2702,72 @@ mod tests {
         );
 
         assert_ne!(on_demand, always, "a mode flip must restart the engine");
+    }
+
+    fn presence_mapping(folder: &str, read_only: bool) -> EngineMapping {
+        EngineMapping {
+            path: PathBuf::from(format!("/home/u/Fauna/{folder}")),
+            folder: folder.into(),
+            folder_ref: test_ref(folder),
+            mode: LocationMode::OnDemand,
+            presence: Some(crate::presence_roots::PresenceRoot {
+                scoped_id: format!("scoped-{folder}"),
+                backing: Some(PathBuf::from(format!("/state/presence/scoped-{folder}"))),
+                read_only,
+            }),
+        }
+    }
+
+    /// A grant or a demotion moves only a presence root's reader flag, and the
+    /// stamp must move with it so the engine restarts and the view remounts
+    /// read-write or read-only (decision 3d (4)); a bound location's stamp
+    /// carries no flag.
+    #[test]
+    fn a_presence_access_flip_changes_the_stamp_so_the_view_remounts() {
+        let keys = FolderEngineKeys::default();
+        let reader = mapping_stamp(Some(&keys), &presence_mapping("docs", true), None);
+        let writer = mapping_stamp(Some(&keys), &presence_mapping("docs", false), None);
+        assert!(reader.is_some() && writer.is_some());
+        assert_ne!(reader, writer, "an access flip must restart the engine");
+        assert_eq!(reader.as_ref().map(|s| s.10), Some(Some(true)));
+
+        let mut bound = presence_mapping("docs", true);
+        bound.presence = None;
+        let bound = mapping_stamp(Some(&keys), &bound, None).expect("keyed");
+        assert_eq!(bound.10, None);
+        assert_eq!(
+            mapping_stamp(None, &presence_mapping("docs", true), None),
+            None
+        );
+    }
+
+    /// Presence roots are served beside the bound locations; a set both serve —
+    /// only while its retired root still drains — keeps the presence engine, and
+    /// the bind starts once it has drained (rule 5).
+    #[test]
+    fn a_draining_presence_root_keeps_its_engine_over_a_bind_of_its_set() {
+        let mut bound_docs = presence_mapping("docs", false);
+        bound_docs.presence = None;
+        bound_docs.path = PathBuf::from("/home/u/docs");
+        let mut bound_pics = bound_docs.clone();
+        bound_pics.folder = "pics".into();
+        bound_pics.folder_ref = test_ref("pics");
+
+        let served = with_presence_roots(
+            vec![bound_docs, bound_pics.clone()],
+            &[
+                presence_mapping("docs", false),
+                presence_mapping("music", true),
+            ],
+        );
+        assert_eq!(
+            served,
+            vec![
+                presence_mapping("docs", false),
+                presence_mapping("music", true),
+                bound_pics
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3485,6 +3724,7 @@ mod tests {
                 None,
                 false,
                 None,
+                None,
             )
         };
         let mapping = |folder: &str, mode| EngineMapping {
@@ -3492,6 +3732,7 @@ mod tests {
             folder: "s".into(),
             folder_ref: test_ref("s"),
             mode,
+            presence: None,
         };
 
         // Unbound / folder removed → tear down the old root.
@@ -3534,6 +3775,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             None,
         );
         assert_eq!(full_teardown_location(&always, None), None);

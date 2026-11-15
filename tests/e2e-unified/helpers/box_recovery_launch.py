@@ -27,7 +27,9 @@ from conftest import (
     browser_origins_to_allow,
 )
 from helpers import nest_mode as nm
+from drivers import create_driver
 from helpers.indexed_rows import click_row
+from helpers.waiting import wait_until
 
 
 # The client's own tracing target, for RUST_LOG — linux's crate is
@@ -333,6 +335,78 @@ def wait_for_custody_leg(driver, timeout: float = 60.0) -> str:
     teardown, and every later launch of this device (T4's dead-nest local read)
     or of a sibling (T2's cold read) reads what it wrote."""
     return wait_for_log_containing_any(driver, CUSTODY_LEG_NEEDLES, timeout=timeout)
+
+
+class SurvivingSeat:
+    """The per-app seam of the journeys whose device outlives its box
+    (``test_box_recovery_two_nest.py`` T4 and T6, and the retire view's
+    "retiring keeps the recovery key"): a device whose box dies under it and
+    which then comes back over the same store. Everything between — the claim,
+    the rotation, the retire and recovery pages — is the same calls on every
+    app.
+
+    Native: a process per launch over one state tree; the first launch is torn
+    down before the box dies. Web: one tab, left open while the box dies and
+    then reloaded over the same origin store. The page itself comes from the
+    harness's SPA proxy, so it outlives the nest it talks to."""
+
+    def __init__(self, client, nest, config):
+        self.client = client
+        self.browser = client == "web"
+        self._nest = nest
+        self.config = config
+        self._live = None
+
+    def launch(self):
+        """The device's first launch, on identity_choice."""
+        self._live = create_driver(self.client)
+        self._live.launch(self.config)
+        if self.browser:
+            # The nest leg and the session's socket dial the box (see
+            # `_LinkedSeat.launch`); the param survives the reload.
+            self._live.set_provider_base_urls({"nest": self._nest["url"]})
+        return self._live
+
+    def await_custody(self, driver, secret_hex: str) -> None:
+        """The barrier before the box dies: the row launch 2 must find locally
+        has landed. Native reads the leg's own log line. A browser's log is a
+        bounded ring, so web reads the very store launch 2 will read."""
+        if not self.browser:
+            wait_for_custody_leg(driver)
+            return
+        script = (
+            "(async () => (await window.__fauna_recoveryBoxesLocalForTest("
+            f"{secret_hex!r})).length)()"
+        )
+        wait_until(
+            lambda: (driver.eval_js(script) or 0) > 0, 60.0,
+            diagnose=lambda: "this tab's own store never held the custodied "
+            f"box — it reads {driver.eval_js(script)!r}")
+
+    def leave(self) -> None:
+        """A launch ends. A tab stays open: tearing it down would take
+        the origin store with its BrowserContext."""
+        if not self.browser:
+            self.close()
+
+    def relaunch(self):
+        """The same device again, over the same store."""
+        if self.browser:
+            self._live.hard_reload()
+            return self._live
+        if self.client == "ios":
+            # Launch 1's fresh install stands: its container holds the account
+            # store the custody leg wrote into.
+            self.config["keep_container"] = True
+        self._live = create_driver(self.client)
+        self._live.launch(self.config)
+        return self._live
+
+    def close(self) -> None:
+        """Tear down whatever launch is still up. Safe to repeat."""
+        if self._live is not None:
+            live, self._live = self._live, None
+            live.teardown()
 
 
 def drive_handle_check_and_claim(app, typed_handle: str, claim_code: str) -> None:

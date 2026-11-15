@@ -165,7 +165,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_inbound_round_trip.py::test_mail_deploy_inbound_round_trip` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_outbound_submission.py::test_mail_deploy_outbound_submission` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_bidirectional_round_trip.py::test_mail_deploy_bidirectional_round_trip` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/test_mail_port25_inbound_live.py::test_port25_external_inbound_live` | — |
+| 2 | nest | `tests/e2e-unified/tests/test_mail_port25_inbound_live.py::test_port25_external_inbound_live` | nest (linux): failed |
 | 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_mx_round_trip` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_greylist_retry.py::test_mail_deploy_greylist_then_retry_delivered` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_greylist_defers_first_then_passes_on_retry` | nest (linux): passed |
@@ -185,7 +185,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 7 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_message_over_the_raw_inline_ceiling_now_delivers` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_message_formerly_over_the_at_rest_ceiling_now_delivers` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_role_address_postmaster_routes_to_admin` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_over_admin_lowered_quota_552_but_role_address_bypasses` | nest (linux): passed |
+| 8 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_over_admin_lowered_quota_552_but_role_address_bypasses` | nest (linux): passed, nest (macos): passed |
 | 9 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_while_nest_unreachable_tempfails_then_delivers` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_port25_refuses_mail_before_starttls` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_mail_ports_refuse_outdated_tls_versions` | nest (linux): passed |
@@ -218,7 +218,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_multipart_dkim_verifies` | nest (linux): passed |
 | 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_an_app_send_to_an_outside_recipient_arrives_dkim_signed` | nest (linux): passed, nest (macos): passed |
 | 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_dkim_per_domain_from_selects_second_domain_key` | nest (linux): passed |
-| 37 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_admin_reads_warmup_status` | nest (linux): passed |
+| 37 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_admin_reads_warmup_status` | nest (linux): passed, nest (macos): passed |
 | 38 | nest | `tests/e2e-unified/tests/api/test_mail_health.py::test_the_allowance_grows_along_the_ramp_and_lifts_after_thirty_days` | nest (linux): passed |
 | 39 | nest | `tests/e2e-unified/tests/api/test_mail_health.py::test_a_nest_restart_leaves_the_ramp_where_it_was` | nest (linux): passed |
 | 40 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_warmup_held_list_send_reads_back_held_on_sent` | nest (linux): passed |

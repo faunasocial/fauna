@@ -109,6 +109,14 @@ modules:
       # in the manifest so the deb/install.sh copies stay `Icon=fauna`.
       - install -Dm644 apps/fauna-linux/fauna.svg /app/share/icons/hicolor/scalable/apps/social.fauna.fauna.svg
       - sed -i 's/^Icon=fauna$/Icon=social.fauna.fauna/' /app/share/applications/social.fauna.fauna.desktop
+      # Fauna's two licence texts and the app's notices file
+      # (shipped-notices.md § Per channel). The notices file is generated
+      # OUTSIDE this sandbox, before the build, by the recipes' dependency
+      # `linux-desktop-notices` (the generator needs the host's package cache),
+      # and reaches it through the `dir` source; missing, this step fails.
+      - install -Dm644 LICENSE-MIT /app/share/doc/fauna-desktop/LICENSE-MIT
+      - install -Dm644 LICENSE-APACHE /app/share/doc/fauna-desktop/LICENSE-APACHE
+      - install -Dm644 build/shipped-notices/linux-desktop/THIRD-PARTY-NOTICES /app/share/doc/fauna-desktop/THIRD-PARTY-NOTICES
     sources:
       - type: dir
         path: ../../../..

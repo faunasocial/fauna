@@ -49,8 +49,12 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-import blake3
 import cbor2
+
+# `blake3` is imported where it is used, never here: `common/__init__.py`
+# imports this module, so a module-level import would make every standalone
+# script that dials through `common.auth` (the deploy-verify DKIM gate, whose
+# PEP 723 header declares cbor2 + websocket-client only) need blake3 too.
 
 # CID prefix: v1 (0x01) + dag-cbor codec (0x71) + blake3-256 (0x1e) + len 32 (0x20).
 CID_DAG_CBOR_PREFIX = bytes([0x01, 0x71, 0x1E, 0x20])
@@ -117,6 +121,8 @@ def cid_of_dag_cbor(payload_bytes: bytes) -> bytes:
     regardless of whether ``payload_bytes`` is JSON or dag-cbor; the receiver
     only re-hashes the same bytes, so the codec byte is informational here.
     """
+    import blake3
+
     digest = blake3.blake3(payload_bytes).digest()  # 32 bytes
     return CID_DAG_CBOR_PREFIX + digest
 
@@ -287,6 +293,8 @@ def forwarded_post_id(post_bytes: bytes, envelope_raw: bytes) -> str:
     (``forward_routes.rs`` step 3). ``GET /api/v1/posts/{id}`` reads back by
     this same key.
     """
+    import blake3
+
     return blake3.blake3(wrap_embed_as_bytes(envelope_raw, post_bytes)).digest().hex()
 
 

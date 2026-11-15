@@ -58,7 +58,13 @@ def custody_log_tail(app) -> str:
         text = app.driver.app_stderr_text() or ""
     except Exception as e:  # noqa: BLE001 — diagnostics must not mask the assert
         return f"(app stderr unreadable: {e})"
-    wanted = ("custody", "recovery", "escrow", "generation", "custodian")
+    # The conversations-session lifecycle rides along: a ceremony post owed
+    # because the engine was "handed over to a newer engine" is answered only
+    # by which build retired it, and the report carries one seat's full log.
+    wanted = (
+        "custody", "recovery", "escrow", "generation", "custodian",
+        "ConversationsSession", "re-pointed", "mls engine", "[launch]",
+    )
     lines = [ln for ln in text.splitlines() if any(w in ln for w in wanted)]
     return "\n".join(lines[-60:]) or "(no custody lines in the app log)"
 

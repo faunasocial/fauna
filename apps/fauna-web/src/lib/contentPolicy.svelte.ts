@@ -34,6 +34,7 @@ import {
 } from '#lib/rpc';
 import { regionRender } from '#lib/region.svelte';
 import { registerActorScopedReset } from '#lib/actorScope';
+import { onStoreChange } from '#lib/store-change';
 import { openRuleEditorForGuardian } from '#lib/wasm';
 
 // The supervised viewer's own guardian content policy (`fauna.family.status`).
@@ -131,15 +132,39 @@ export async function hydrateContentPolicy(secretHex: string): Promise<void> {
   // runtime may not be up yet (a fresh sign-in); it must NEVER hold the surface's
   // first paint, so it is not awaited — the list lands when it lands, and the
   // surface re-renders off the `$state`. A failed read leaves the hide as it was.
+  hidesSecret = secretHex;
+  rereadOwnHides(secretHex);
+}
+
+// The secret the own-hides reads run under, set by `hydrateContentPolicy` and
+// dropped on an actor change — what the store-change listener below re-reads
+// with.
+let hidesSecret: string | null = null;
+
+/** Re-read the hide list and its sibling on the same record, the post spam
+ *  marks — not awaited, best-effort. A read that lands after an actor change
+ *  is dropped: it answers for the account that left. */
+function rereadOwnHides(secretHex: string): void {
   void loadHiddenContent(secretHex)
-    .then(setHiddenContent)
+    .then((ids) => {
+      if (hidesSecret === secretHex) setHiddenContent(ids);
+    })
     .catch(() => {});
-  // Its sibling on the same record, the post spam marks — the same not-awaited,
-  // best-effort read.
   void loadSpamMarked(secretHex)
-    .then(setSpamMarked)
+    .then((ids) => {
+      if (hidesSecret === secretHex) setSpamMarked(ids);
+    })
     .catch(() => {});
 }
+
+// The hide list is a render source on every page, not one page's data, so a
+// store-change notice (`#lib/store-change`) re-reads it whatever page is open:
+// a sibling device of the account may have hidden or shown something again
+// (`account-runtime.md` § Multi-instance concurrency, part 4 — tui's
+// `AccountStoreChanged` arm re-reads it the same way).
+onStoreChange(() => {
+  if (hidesSecret !== null) rereadOwnHides(hidesSecret);
+});
 
 /** The content-policy render verdict for a piece of content, keyed on its
  *  labels (the reduced `[{category, confidence_per_mille}]` shape on
@@ -256,6 +281,7 @@ export function contentNotifyOn(): boolean {
  *  failure into "no floor composes for anyone", the state the fail-open was
  *  actually designed around. */
 function resetContentPolicy(): void {
+  hidesSecret = null;
   hiddenContent = [];
   wardContentPolicy = null;
   ownSpamPermille = undefined;

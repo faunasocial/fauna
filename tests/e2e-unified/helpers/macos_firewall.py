@@ -195,3 +195,53 @@ def seat_firewall_note(driver, seat: str) -> str:
     failure message; empty when nothing on the seat is held."""
     note = firewall_note(seat_binaries(driver))
     return f"  [{seat}] application firewall:\n{note}\n" if note else ""
+
+
+def skip_if_lan_self_dial_is_broken(url: str, binary_prefix: str = "fauna-nest") -> None:
+    """Preflight this box's ability to reach its own LAN address at ``url`` before a
+    test trusts anything it reads there; an environment skip naming the cause when
+    it cannot.
+
+    On macOS the cause is the application firewall, which filters a flow dialled
+    on the box's own address although the packets never leave it, and does not
+    filter loopback: the TCP connect succeeds, and then a HELD flow times the read
+    out while a BLOCKED one dies between ``accept()`` and the first read — over
+    TLS as ``ssl.SSLEOFError`` client-side, over plain HTTP as an empty read or a
+    reset, with ``Socket is not connected`` (os error 57) or a keepalive
+    ``Invalid argument`` (os error 22) server-side. This is a box property, not an
+    app or nest property (``app_surface.skip_environment``'s own charter): never
+    hide it as a green, nor let it masquerade as a regression on every baseline.
+    An ``https`` URL is checked by a TLS handshake, an ``http`` one by a status
+    line read back for a bare ``GET /``.
+    """
+    import socket
+    import ssl
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    host, port = parts.hostname, parts.port
+    try:
+        with socket.create_connection((host, port), timeout=10) as sock:
+            if parts.scheme == "https":
+                ctx = ssl._create_unverified_context()
+                with ctx.wrap_socket(sock, server_hostname=host):
+                    pass
+            else:
+                sock.settimeout(10)
+                sock.sendall(
+                    f"GET / HTTP/1.0\r\nHost: {host}:{port}\r\n\r\n".encode()
+                )
+                head = sock.recv(16)
+                if not head.startswith(b"HTTP/"):
+                    raise ConnectionError(
+                        f"the connection closed before any HTTP status line ({head!r})"
+                    )
+    except OSError as e:
+        from helpers.app_surface import skip_environment
+
+        cause = inbound_flow_note(binary_prefix) or (
+            "the application firewall logged no refusal, so the cause is not known"
+        )
+        skip_environment(
+            f"this box cannot reach its own LAN address ({host}:{port}): {e!r} — {cause}"
+        )

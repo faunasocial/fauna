@@ -156,7 +156,7 @@ class OfflineShareHost @Inject constructor(
         }.getOrDefault(FfiGroupShareViews(emptyList(), emptyList()))
         _groupShares.value = GroupShareRows(
             invitations = views.invitations.map { GroupInvitation(it.scopeId, it.initiator, it.shortId) },
-            scopes = views.scopes.map { GroupScope(it.shortId, it.memberCount, it.sharedBy) },
+            scopes = views.scopes.map { GroupScope(it.shortId, it.memberCount, it.sharedBy, it.folderId) },
         )
     }
 

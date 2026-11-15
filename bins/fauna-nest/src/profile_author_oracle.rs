@@ -153,7 +153,7 @@ fn record(
         params![
             actor_hex,
             principal_id,
-            now,
+            i64::try_from(now)?,
             CLASS.class.name(),
             OP_SET,
             format!("{OP_SET} {}", fields.join(" "))

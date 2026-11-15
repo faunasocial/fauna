@@ -258,12 +258,26 @@ impl NestsState {
     /// default.
     fn mint_duration(&self, form: &MintForm) -> Option<TrustGrantDuration> {
         let row = self.row_for(&form.nest_id)?;
-        Some(form.duration.unwrap_or(row.mint_default_duration))
+        Some(
+            form.duration
+                .unwrap_or_else(|| option_default_duration(row, form.scope)),
+        )
     }
 
     /// The catalog entry the open form has selected, if any.
     fn mint_option(&self, form: &MintForm) -> Option<&TrustMintOption> {
         self.row_for(&form.nest_id)?.mint_options.get(form.scope?)
+    }
+}
+
+/// The duration a form pre-selects before the user picks one: the shared
+/// per-option default (`mint_option_default_duration` — a materialization
+/// option pre-selects the standard window), else the row's default while no
+/// option is picked.
+fn option_default_duration(row: &LinkedNestRow, scope: Option<usize>) -> TrustGrantDuration {
+    match scope.and_then(|idx| row.mint_options.get(idx)) {
+        Some(o) => fauna_client_pair::mint_option_default_duration(o, row.mint_default_duration),
+        None => row.mint_default_duration,
     }
 }
 
@@ -788,15 +802,12 @@ fn push_grant_item(els: &mut Vec<Element>, grant: &TrustGrantRow, i: usize, j: u
         ids::NEST_TRUST_GRANT_STATUS,
         status_label(grant.liveness),
     )));
-    // A bounded (content-sealing-epochs) mail grant gets the stronger,
-    // crypto-bounded wording; every other kind/regime keeps the standing
-    // trust-until-revoke wording. Never re-derive the (class, kind, tier) check
-    // here — the shared predicate is the single source of truth (priority #2).
-    let bound_note = if fauna_client_pair::trust_scope_is_bounded_mail_grant(grant.scope.clone()) {
-        t::BOUND_NOTE_BOUNDED_MAIL
-    } else {
-        t::BOUND_NOTE_STANDING
-    };
+    // The honest bound's three regimes — materialization (revoking deletes the
+    // nest's searchable copy; a hostile box has seen it), bounded mail (the
+    // cryptographic window), standing — are picked by the shared
+    // `grant_bound_note`, never re-derived here (priority #2).
+    let bound_note = fauna_client_pair::grant_bound_note(grant.scope.clone())
+        .resolve(fauna_i18n::strings::lookup);
     els.push(nest(Element::label(
         ids::NEST_TRUST_GRANT_BOUND_NOTE,
         bound_note,
@@ -1064,7 +1075,9 @@ fn push_mint_flow(els: &mut Vec<Element>, state: &NestsState, row: &LinkedNestRo
 
     // How long the new trust lasts — the shared option list, labeled here; the
     // select round-trips the rendered label like the scope select above.
-    let duration = form.duration.unwrap_or(row.mint_default_duration);
+    let duration = form
+        .duration
+        .unwrap_or_else(|| option_default_duration(row, form.scope));
     els.push(
         Element::select(
             ids::NEST_TRUST_MINT_DURATION_SELECT,
@@ -1097,6 +1110,24 @@ fn push_mint_flow(els: &mut Vec<Element>, state: &NestsState, row: &LinkedNestRo
                 selected,
                 SelectTarget::TrustMintHolder,
                 candidates,
+            )
+            .within(ids::NESTS_ITEM, i),
+        );
+    }
+
+    // The picked option's mint-time note (the shared `mint_option_note` — the
+    // materialization options' honesty copy), read BEFORE the confirm:
+    // `capability-grants.md` § Capability tiering → *The materialization
+    // grant* (f). Absent, not empty, for an option that carries none.
+    if let Some(note) = form
+        .scope
+        .and_then(|idx| row.mint_options.get(idx))
+        .and_then(fauna_client_pair::mint_option_note)
+    {
+        els.push(
+            Element::label(
+                ids::NEST_TRUST_MINT_MATERIALIZE_NOTE,
+                note.resolve(fauna_i18n::strings::lookup),
             )
             .within(ids::NESTS_ITEM, i),
         );
@@ -2193,6 +2224,201 @@ mod tests {
                 holder_bridge_id, ..
             }) => assert_eq!(holder_bridge_id, "other-processor"),
             other => panic!("expected a Mint action, got {other:?}"),
+        }
+    }
+
+    /// The materialization option (`nests.md` § Trust facet — grants → *The
+    /// materialization option*): picking it renders the mint-time honesty note
+    /// BEFORE the confirm, and pre-selects the standard window; an ordinary
+    /// option renders no note at all.
+    #[test]
+    fn the_materialization_option_states_its_bound_before_the_confirm() {
+        let mut row = home_row();
+        row.mint_options = vec![
+            TrustMintOption {
+                use_case: TrustMintUseCase::Mail,
+                tier: None,
+                scope: vec![scope("content.read", Some("mail"), None)],
+                holder_candidates: vec!["mda".to_string()],
+            },
+            TrustMintOption {
+                use_case: TrustMintUseCase::MaterializeMail,
+                tier: None,
+                scope: vec![
+                    scope("content.read", Some("mail"), None),
+                    scope("materialize", Some("mail"), None),
+                ],
+                holder_candidates: vec!["materializer".to_string()],
+            },
+        ];
+        let nest_id = row.nest_id.clone();
+        let mut state = state_with(row);
+        state.mint = Some(MintForm {
+            nest_id,
+            scope: Some(0),
+            holder: None,
+            duration: None,
+        });
+        let els = nests_elements(&state, None);
+        assert!(
+            !ids(&els).contains(&"nest-trust-mint-materialize-note"),
+            "an ordinary option carries no mint-time note — absent, not empty"
+        );
+
+        state.mint.as_mut().unwrap().scope = Some(1);
+        let els = nests_elements(&state, None);
+        let order = ids(&els);
+        let note = order
+            .iter()
+            .position(|id| *id == "nest-trust-mint-materialize-note")
+            .expect("the materialization option renders its note");
+        let confirm = order
+            .iter()
+            .position(|id| *id == "nest-trust-mint-confirm-button")
+            .unwrap();
+        assert!(note < confirm, "the bound is read before the confirm");
+        assert_eq!(
+            text_of(&els, "nest-trust-mint-materialize-note"),
+            Some(t::MINT_MATERIALIZE_NOTE)
+        );
+        match state.mint_action() {
+            Some(LinkedNestsAction::Mint {
+                holder_bridge_id,
+                duration,
+                ..
+            }) => {
+                assert_eq!(holder_bridge_id, "materializer");
+                assert_eq!(duration, Some(TrustGrantDuration::Standard));
+            }
+            other => panic!("expected a Mint action, got {other:?}"),
+        }
+    }
+
+    /// A materialization grant's row carries the third honest-bound regime
+    /// and its scope label (`nests.md` § Honest bound).
+    #[test]
+    fn a_materialization_grant_row_names_the_copy_and_its_bound() {
+        let mut row = home_row();
+        row.trust_grants = vec![TrustGrantRow {
+            grant_id: vec![7; 16],
+            holder: vec![2; 32],
+            scope: vec![
+                scope("content.read", Some("mail"), None),
+                scope("materialize", Some("mail"), None),
+            ],
+            lasts_until: 1_700_000_000,
+            liveness: TrustLiveness::Active,
+            unattested: false,
+            folder: None,
+        }];
+        let els = nests_elements(&state_with(row), None);
+        assert_eq!(
+            text_of(&els, "nest-trust-grant-bound-note"),
+            Some(t::BOUND_NOTE_MATERIALIZE_MAIL)
+        );
+        assert!(
+            text_of(&els, "nest-trust-grant-scope")
+                .unwrap()
+                .contains(t::SCOPE_MATERIALIZE_MAIL)
+        );
+    }
+
+    /// The calendar and card options are the mail option's twins, one per
+    /// kind and never an umbrella option (`nests.md` § Trust facet — grants
+    /// → *The materialization option*): the same note element renders the
+    /// picked kind's own note before the confirm, and the kind's grant row
+    /// its own scope label and bound note — no per-kind branch in the shell.
+    #[test]
+    fn each_materialization_kind_states_its_own_note_and_bound() {
+        let kinds = [
+            (
+                TrustMintUseCase::MaterializeCalendar,
+                "calendar",
+                t::MINT_MATERIALIZE_CALENDAR_NOTE,
+                t::SCOPE_MATERIALIZE_CALENDAR,
+                t::BOUND_NOTE_MATERIALIZE_CALENDAR,
+            ),
+            (
+                TrustMintUseCase::MaterializeCard,
+                "card",
+                t::MINT_MATERIALIZE_CARD_NOTE,
+                t::SCOPE_MATERIALIZE_CARD,
+                t::BOUND_NOTE_MATERIALIZE_CARD,
+            ),
+        ];
+        for (use_case, kind, note, scope_label, bound) in kinds {
+            let kind_scope = vec![
+                scope("content.read", Some(kind), None),
+                scope("materialize", Some(kind), None),
+            ];
+            let mut row = home_row();
+            row.mint_options = vec![TrustMintOption {
+                use_case,
+                tier: None,
+                scope: kind_scope.clone(),
+                holder_candidates: vec!["materializer".to_string()],
+            }];
+            let nest_id = row.nest_id.clone();
+            let mut state = state_with(row);
+            state.mint = Some(MintForm {
+                nest_id,
+                scope: Some(0),
+                holder: None,
+                duration: None,
+            });
+            let els = nests_elements(&state, None);
+            let order = ids(&els);
+            let note_at = order
+                .iter()
+                .position(|id| *id == "nest-trust-mint-materialize-note")
+                .unwrap_or_else(|| panic!("the {kind} option renders its note"));
+            let confirm = order
+                .iter()
+                .position(|id| *id == "nest-trust-mint-confirm-button")
+                .unwrap();
+            assert!(
+                note_at < confirm,
+                "the {kind} bound is read before the confirm"
+            );
+            assert_eq!(
+                text_of(&els, "nest-trust-mint-materialize-note"),
+                Some(note),
+                "the {kind} option renders its own kind's note"
+            );
+            match state.mint_action() {
+                Some(LinkedNestsAction::Mint {
+                    holder_bridge_id,
+                    duration,
+                    ..
+                }) => {
+                    assert_eq!(holder_bridge_id, "materializer");
+                    assert_eq!(duration, Some(TrustGrantDuration::Standard));
+                }
+                other => panic!("expected a {kind} Mint action, got {other:?}"),
+            }
+
+            let mut row = home_row();
+            row.trust_grants = vec![TrustGrantRow {
+                grant_id: vec![7; 16],
+                holder: vec![2; 32],
+                scope: kind_scope,
+                lasts_until: 1_700_000_000,
+                liveness: TrustLiveness::Active,
+                unattested: false,
+                folder: None,
+            }];
+            let els = nests_elements(&state_with(row), None);
+            assert_eq!(
+                text_of(&els, "nest-trust-grant-bound-note"),
+                Some(bound),
+                "the {kind} grant row carries its own kind's bound"
+            );
+            assert!(
+                text_of(&els, "nest-trust-grant-scope")
+                    .unwrap()
+                    .contains(scope_label),
+                "the {kind} grant row names its own kind's copy"
+            );
         }
     }
 

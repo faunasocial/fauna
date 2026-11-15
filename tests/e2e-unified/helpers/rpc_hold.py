@@ -179,7 +179,7 @@ def wait_for_held_rpc(port: int, kind: str, *, count: int = 1,
 
 
 def refuse_rpc(port: int, kind: str, *, as_: str | None = None,
-               actor: str | None = None) -> None:
+               actor: str | None = None, spare: str | None = None) -> None:
     """Answer every request of ``kind`` with an error reply until
     :func:`release_rpc_hold` — the parked ones included.
 
@@ -205,10 +205,19 @@ def refuse_rpc(port: int, kind: str, *, as_: str | None = None,
     member's policy-version read refused, the founder's own delete still
     filing). A federation request has no actor and is never refused by a
     scoped refusal; ``refused`` counts only the requests turned away.
+
+    ``spare`` (a payload field name) passes every request whose payload map
+    names that field at its top level — one request SHAPE of the kind spared:
+    ``fauna.sync.changes.list`` with ``spare="item_class"`` turns away a set's
+    file rows and lets the state-entry reads through, which an iOS File
+    Provider extension's cold engine build makes for its folder-key custody
+    (`rpc_hold_test_hook.rs` § Refusal → *Sparing one request shape*).
     """
     params = [f"as={as_}"] if as_ else []
     if actor:
         params.append(f"actor={actor}")
+    if spare:
+        params.append(f"spare={spare}")
     query = f"?{'&'.join(params)}" if params else ""
     _post(port, f"/api/v1/test/rpc-hold/{kind}/refuse{query}")
 

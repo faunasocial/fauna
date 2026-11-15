@@ -227,7 +227,11 @@ def sync_live_apply_app(request, app, nest_instance, test_user, tmp_path):
     Having it up ahead of login (rather than by fixture-request-order, which
     pytest does not guarantee) is what `serving_agent` does: it adopts the
     launch's agent when the app already spawned it, and otherwise starts it on
-    that same dir. ⚠ This fixture once spawned a SECOND agent on a per-test dir
+    that same dir and in the launch's environment, the one the app's own spawn
+    would hand it. Started on the bare pytest environment, the agent read another
+    `LOCALAPPDATA` and credential store than the app's, so its account host never
+    assembled, custody stayed unreadable and the bound set's engine was withheld:
+    the `running: False` this test reported on every windows run. ⚠ This fixture once spawned a SECOND agent on a per-test dir
     for its stderr capture; since every windows launch brings its own agent
     (convention 10, windows axis (a)), that second agent exits as a duplicate
     whenever the launch's already serves the pipe.
@@ -259,7 +263,10 @@ def sync_live_apply_app(request, app, nest_instance, test_user, tmp_path):
             "this launch pinned no agent `--data-dir` (`FAUNA_E2E_SYNC_AGENT_DATA_DIR`); "
             "the test must carry `isolated_sync_agent` (convention 10)"
         )
-        with serving_agent(exe, pipe_path, data_dir, tmp_path / "agent-spawn.log"):
+        with serving_agent(
+            exe, pipe_path, data_dir, tmp_path / "agent-spawn.log",
+            launch_env=app.driver.launch_environment(),
+        ):
             _login_app_as(app, request, nest_instance, test_user)
             yield app
         return

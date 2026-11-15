@@ -13,30 +13,12 @@ public enum CustodianPassOutcome: Equatable, Sendable {
     /// A desktop shell (macOS): the external `fauna-sync-agent` ran the pass, and
     /// answered its own six-field report.
     case agent(FfiCustodianPassReport)
-    /// A shell that hosts in the app process (iOS): this process ran the pass, and
-    /// the only door it has answers the four-field summary. `nil` is **not an
-    /// enrolled custodian** — `build_custodian_host` answered `None`, which is the
-    /// ordinary state until the enrollment reaches the registry, never an error.
-    case inApp(FfiCustodianPullSummary?)
-}
-
-/// A poke this platform cannot honour, named so the harness reads the reason
-/// instead of a generic failure (testing.md convention 11).
-public enum CustodianPassPokeError: Error, Equatable, CustomStringConvertible {
-    /// The in-app pass (`FfiCustodianHost.runAllKinds`) reads the wall clock
-    /// itself and takes no offset, so a shifted clock would be silently ignored —
-    /// a test that asked for a 24-hour jump would then pass against the real
-    /// clock and prove nothing.
-    case clockOffsetNotHonoured(Int64)
-
-    public var description: String {
-        switch self {
-        case .clockOffsetNotHonoured(let offset):
-            return "this device hosts its replica in the app process, whose pass "
-                + "(`FfiCustodianHost.runAllKinds`) takes no clock offset, so "
-                + "now_offset_secs=\(offset) cannot be honoured — only 0 is"
-        }
-    }
+    /// A shell that hosts in the app process (iOS): this process ran the pass
+    /// through the shared host's test-only `runAllKindsAtOffset`, which answers
+    /// the same six-field report. `nil` is **not an enrolled custodian** —
+    /// `build_custodian_host` answered `None`, which is the ordinary state until
+    /// the enrollment reaches the registry, never an error.
+    case inApp(FfiCustodianPassReport?)
 }
 
 /// Shared handler for the cross-app `custodian_pull_run_now` TestAgent command —
@@ -55,16 +37,10 @@ public enum CustodianPassPokeError: Error, Equatable, CustomStringConvertible {
 /// (`custodianStoreFootprint`) — a provisioner means the agent hosts, none means
 /// this process does — so no `#if os(...)` appears above the seam.
 ///
-/// **The report is not the same six fields on both sides, and that is stated
-/// rather than papered over.** The agent's `custodianRunPassNow` answers
-/// `hosting` / `kinds_run` / `held_bytes` / `cap_state` / `audit_state` /
-/// `checked_in`; the in-app door answers only what `FfiCustodianPullSummary`
-/// carries. So an in-app reply omits the fields it has no honest value for
-/// rather than fabricating them, and carries `via` so a failing assertion prints
-/// WHICH side ran the pass. `hosting`, `checked_in` and `held_bytes` — all
-/// `actions/backups.py::wait_for_custodian_hosting` and the orphaned-store
-/// witness read — are on both; the summary's `checked_in` is computed by the
-/// agent's own rule, never assumed.
+/// **Both sides answer the same six fields** — `hosting` / `kinds_run` /
+/// `held_bytes` / `cap_state` / `audit_state` / `checked_in`, key-for-key with
+/// tui's and android's arms — plus `via`, so a failing assertion prints WHICH
+/// side ran the pass.
 public enum CustodianPullTestCommand {
     /// What the shell does with the command's result. Kept as data rather than
     /// two callbacks so both shells' switch arms are the same three lines and the
@@ -92,8 +68,6 @@ public enum CustodianPullTestCommand {
         do {
             let outcome = try await client.custodianPassForTest(nowOffsetSecs: offset)
             return .report(try reportJSON(outcome))
-        } catch let refusal as CustodianPassPokeError {
-            return .refused("custodian_pull_run_now: \(refusal)")
         } catch {
             return .refused("custodian_pull_run_now: \(error)")
         }
@@ -106,34 +80,30 @@ public enum CustodianPullTestCommand {
     static func reportJSON(_ outcome: CustodianPassOutcome) throws -> String {
         let body: [String: Any]
         switch outcome {
-        case .agent(let report):
-            body = [
-                "via": "agent",
-                "hosting": report.hosting,
-                "kinds_run": report.kindsRun,
-                "held_bytes": report.heldBytes,
-                "cap_state": report.capState ?? NSNull(),
-                "audit_state": report.auditState ?? NSNull(),
-                "checked_in": report.checkedIn,
-            ]
         case .inApp(nil):
             // Not hosting yet. `held_bytes` stays present at 0, as the agent's
             // not-hosting report has it, so a caller reading the shared key
             // never has to branch on `hosting` first.
             body = ["via": "in-app", "hosting": false, "held_bytes": 0]
-        case .inApp(let summary?):
-            body = [
-                "via": "in-app",
-                "hosting": true,
-                "held_bytes": summary.heldBytes,
-                "stored_segments": summary.storedSegments,
-                "tombstoned_segments": summary.tombstonedSegments,
-                "cap_reached": summary.capReached,
-                "checked_in": summary.checkedIn,
-            ]
+        case .agent(let report):
+            body = fields(report, via: "agent")
+        case .inApp(let report?):
+            body = fields(report, via: "in-app")
         }
         let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
         return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func fields(_ report: FfiCustodianPassReport, via: String) -> [String: Any] {
+        [
+            "via": via,
+            "hosting": report.hosting,
+            "kinds_run": report.kindsRun,
+            "held_bytes": report.heldBytes,
+            "cap_state": report.capState ?? NSNull(),
+            "audit_state": report.auditState ?? NSNull(),
+            "checked_in": report.checkedIn,
+        ]
     }
 }
 

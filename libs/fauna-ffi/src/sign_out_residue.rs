@@ -3,17 +3,16 @@
 //! (`account-scoping.md` § Erasure follows scope → *the residue surface*).
 //!
 //! The record and the four re-sweep rules are shared Rust
-//! (`fauna_client_accounts::SignOutResidue` / `retry_sign_out_residue`); tui and
+//! (`fauna_client_accounts::SignOutResidue` / `finish_sign_out_with`); tui and
 //! linux call them directly. This module is the door the FFI seats (android,
 //! apple, windows) take to the same code, so none of them re-decides anything:
 //!
 //! - [`sign_out_residue_record`] — the sign-out's half: record what the erase
 //!   left, persist it under the install base, and hand back the paint.
-//! - [`FfiSignOutResidue::retry`] — `sign-out-residue-retry-button`.
-//! - [`sign_out_residue_recheck_at_launch`] — the signed-out launch's silent
-//!   re-sweep, which paints only if something is still left. Retired into
-//!   [`sign_out_finish`] on every seat that has wired the sign-out record
-//!   (android, apple); kept, unchanged, for windows until its row wires it.
+//!
+//! The launch's silent re-sweep and Remove Again
+//! (`sign-out-residue-retry-button`) are not exports of their own: both are
+//! [`sign_out_finish`] runs, as the sign-out gesture's tail is.
 //!
 //! **The sign-out record** (`account-scoping.md` § Erasure follows scope → *The
 //! sign-out record is on all 7 apps*) joins this face: the gesture writes it
@@ -25,41 +24,53 @@
 //!
 //! The one thing only a seat knows is **its own credential erase** — android's
 //! `clear_all` then `SecureStorage.clear()` then `reverify_erase`, apple's and
-//! windows' their own — so the retry calls back into it through
-//! [`FfiResidueCredentialEraser`] rather than guessing at a platform reset. The
-//! read-back of the RECORDED keys is folded in here, because the registry is
-//! empty by the time a retry runs and its own read-back would find nothing to
-//! ask about (the FFI twin of `fauna_credential_store::re_erase_credentials`).
+//! windows' their own — so the finish calls back into it through
+//! [`FfiSignOutHost`] rather than guessing at a platform reset. The read-back
+//! of the RECORDED keys is folded in here, because the registry is empty by the
+//! time a re-erase runs and its own read-back would find nothing to ask about.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use fauna_client_accounts::{CredentialSweep, ResidueRetry, SignOutResidue};
+use fauna_client_accounts::{CredentialSweep, SignOutResidue};
 use fauna_core::localized::LocalizedText;
 
 use crate::account_state::{FfiCredentialSweep, FfiEraseSweep, store_root_or_logged};
 use crate::erase_guard::{serving_bases, with_own_lock_down};
 use crate::{FfiAccountInstanceLock, FfiAccountRegistry};
 
-/// The seat's own credential erase — the one its sign-out ran — re-run by a
-/// residue retry whose recorded credential half is not clean.
-///
-/// Return what the erase left, read back the way the sign-out reads it back
-/// (android: `FfiAccountRegistry::clear_all`, then the platform store's
-/// wholesale reset, then `FfiAccountRegistry::reverify_erase`). The recorded
-/// keys are re-read on top of it by the caller, never by the seat.
-#[uniffi::export(with_foreign)]
-pub trait FfiResidueCredentialEraser: Send + Sync {
-    /// Run the credential erase and report what is still readable.
-    fn erase_credentials(&self) -> FfiCredentialSweep;
+/// Which of the finish's three callers a [`sign_out_finish`] run is — the
+/// face of `fauna_client_accounts::FinishCaller`. They differ in two things:
+/// the sync agent is dismissed for every caller but the gesture (whose own stop
+/// already dismissed it), and while the registry names somebody only Remove
+/// Again re-sweeps the residue record — its recorded paths only, the credential
+/// half held as recorded (`account-scoping.md` § Erasure follows scope → *The
+/// sign-out record is on all 7 apps*, decision 3).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiFinishCaller {
+    /// The sign-out or remove-account gesture's tail.
+    Gesture,
+    /// A launch, before the launch law reads the registry.
+    Launch,
+    /// `sign-out-residue-retry-button`, pressed in a signed-out window.
+    RemoveAgain,
+}
+
+impl From<FfiFinishCaller> for fauna_client_accounts::FinishCaller {
+    fn from(caller: FfiFinishCaller) -> Self {
+        match caller {
+            FfiFinishCaller::Gesture => Self::Gesture,
+            FfiFinishCaller::Launch => Self::Launch,
+            FfiFinishCaller::RemoveAgain => Self::RemoveAgain,
+        }
+    }
 }
 
 /// A residue that still owes work — the `sign-out-residue` view's whole state.
-/// A seat holds one while the view is up and drops it when a retry hands back
-/// nothing; it never inspects the record inside.
+/// A seat holds one while the view is up and drops it when a finish hands back
+/// nothing.
 #[derive(uniffi::Object, Debug)]
 pub struct FfiSignOutResidue {
-    record: SignOutResidue,
     line: LocalizedText,
 }
 
@@ -70,31 +81,6 @@ impl FfiSignOutResidue {
     /// the residue's accounts. Resolve it through the app's i18n pipeline.
     pub fn line(&self) -> LocalizedText {
         self.line.clone()
-    }
-
-    /// Remove Again: re-sweep what this residue recorded and return what is
-    /// left — `None` when the device is now clean, which closes the view.
-    ///
-    /// `base_dir` is the install base the sign-out recorded under
-    /// ([`sign_out_residue_record`]); `store_container_dir` and `own_lock` are
-    /// what this seat passes to `sign_out_blocked`, so the retry asks the
-    /// sign-out's own serving-lock question.
-    pub fn retry(
-        &self,
-        registry: Arc<FfiAccountRegistry>,
-        base_dir: String,
-        store_container_dir: Option<String>,
-        own_lock: Option<Arc<FfiAccountInstanceLock>>,
-        eraser: Arc<dyn FfiResidueCredentialEraser>,
-    ) -> Option<Arc<FfiSignOutResidue>> {
-        run_retry(
-            &self.record,
-            &registry,
-            Path::new(&base_dir),
-            store_root_or_logged(store_container_dir.map(PathBuf::from)).as_deref(),
-            own_lock.as_deref(),
-            eraser.as_ref(),
-        )
     }
 }
 
@@ -117,37 +103,6 @@ pub fn sign_out_residue_record(
     painted(record)
 }
 
-/// The signed-out launch's silent re-check: a record a previous sign-out left
-/// under `base_dir` is re-swept FIRST, and the view comes back only if
-/// something is still left.
-///
-/// Only on a launch whose registry holds no account — the launch a sign-out
-/// hands back. A signed-in launch is not the user the residue was reported to;
-/// its record waits, untouched, for the next signed-out launch. Arguments as
-/// [`FfiSignOutResidue::retry`].
-#[uniffi::export]
-pub fn sign_out_residue_recheck_at_launch(
-    registry: Arc<FfiAccountRegistry>,
-    base_dir: String,
-    store_container_dir: Option<String>,
-    own_lock: Option<Arc<FfiAccountInstanceLock>>,
-    eraser: Arc<dyn FfiResidueCredentialEraser>,
-) -> Option<Arc<FfiSignOutResidue>> {
-    let base = PathBuf::from(&base_dir);
-    let record = SignOutResidue::load(&base)?;
-    if !registry.registry().list().is_empty() {
-        return None;
-    }
-    run_retry(
-        &record,
-        &registry,
-        &base,
-        store_root_or_logged(store_container_dir.map(PathBuf::from)).as_deref(),
-        own_lock.as_deref(),
-        eraser.as_ref(),
-    )
-}
-
 /// The seat's own acts inside the sign-out record's finish
 /// ([`sign_out_finish`]) — what only a seat can do to its own credential store.
 ///
@@ -157,16 +112,19 @@ pub fn sign_out_residue_recheck_at_launch(
 ///   not reach an auxiliary account-scoped namespace — each account's slots
 ///   there ride with its scopes (`account-scoping.md` § Erasure follows scope
 ///   → *The sign-out record is on all 7 apps*, decision 2).
-/// - [`Self::erase_credentials`] — the residue retry's credential erase, as
-///   [`FfiResidueCredentialEraser::erase_credentials`].
+/// - [`Self::erase_credentials`] — the credential erase a Remove Again or a
+///   launch re-runs when the recorded credential half is not clean: return what
+///   the erase left, read back the way the sign-out reads it back (android:
+///   `FfiAccountRegistry::clear_all`, then the platform store's wholesale reset,
+///   then `FfiAccountRegistry::reverify_erase`). The recorded keys are re-read on
+///   top of it by the caller, never by the seat.
 #[uniffi::export(with_foreign)]
 pub trait FfiSignOutHost: Send + Sync {
     /// Reset the app's own credential store wholesale. `false` when the reset
     /// failed — the finish then reports the wipe as failed.
     fn wipe_own_store(&self) -> bool;
 
-    /// Run the residue retry's credential erase and report what is still
-    /// readable.
+    /// Run the credential erase and report what is still readable.
     fn erase_credentials(&self) -> FfiCredentialSweep;
 }
 
@@ -254,13 +212,15 @@ pub fn sign_out_record_pending(base_dir: String) -> bool {
 ///   runtime (`None` on desktops); its root is swept and asked about too.
 /// - `own_lock` — a lock this process still holds, put down around the run;
 ///   `None` at the launch, which holds none yet.
-/// - `dismiss_agent` — dismiss the sync agent from each recorded account
-///   before the erase (decision 5): `true` for the launch and Remove Again,
-///   `false` for the gesture, whose own stop already dismissed it.
+/// - `caller` — which of the three callers this run is: the sync agent is
+///   dismissed from each recorded account before the erase (decision 5) for
+///   the launch and Remove Again, never for the gesture, whose own stop
+///   already dismissed it; and while the registry names somebody only Remove
+///   Again re-sweeps the residue record, its paths only (decision 3).
 /// - `written` — the accounts [`sign_out_record_begin`] returned, from the
 ///   gesture only: stands in for a record the install base refused.
 ///
-/// Blocking file I/O and, with `dismiss_agent`, up to the agent budget per
+/// Blocking file I/O and, for every caller but the gesture, up to the agent budget per
 /// recorded account: call it off the main thread.
 #[uniffi::export]
 pub fn sign_out_finish(
@@ -269,7 +229,7 @@ pub fn sign_out_finish(
     store_container_dir: Option<String>,
     own_lock: Option<Arc<FfiAccountInstanceLock>>,
     host: Arc<dyn FfiSignOutHost>,
-    dismiss_agent: bool,
+    caller: FfiFinishCaller,
     written: Option<Vec<String>>,
 ) -> FfiSignOutFinish {
     let store_root = store_root_or_logged(store_container_dir.map(PathBuf::from));
@@ -279,7 +239,7 @@ pub fn sign_out_finish(
             &base_dirs,
             store_root.as_deref(),
             host.as_ref(),
-            dismiss_agent,
+            caller.into(),
             written,
         )
     });
@@ -292,7 +252,7 @@ fn finish_under(
     base_dirs: &[String],
     store_root: Option<&Path>,
     host: &dyn FfiSignOutHost,
-    dismiss_agent: bool,
+    caller: fauna_client_accounts::FinishCaller,
     written: Option<Vec<String>>,
 ) -> fauna_client_accounts::SignOutFinish {
     let Some(install_base) = base_dirs.first().map(PathBuf::from) else {
@@ -307,7 +267,7 @@ fn finish_under(
     let mut seat_host = FfiFinishHost {
         registry,
         host,
-        dismiss_agent,
+        dismiss_agent: caller != fauna_client_accounts::FinishCaller::Gesture,
     };
     fauna_client_accounts::finish_sign_out_with(
         fauna_client_accounts::FinishSeat {
@@ -315,6 +275,7 @@ fn finish_under(
             swept_bases: &swept,
             serving: serving_bases(&install_base, store_root),
             registry: registry.registry(),
+            caller,
         },
         &mut seat_host,
         written.map(|accounts| fauna_client_accounts::SignOutRecord {
@@ -327,7 +288,7 @@ fn finish_under(
 /// The FFI seats' acts inside the shared finish: the wipe is the registry's
 /// own store (`wipe_own`) then the seat's wholesale reset of it, read back over
 /// that store alone; each account's slots in the auxiliary namespaces ride with
-/// its scopes; the residue retry's credential half is the retry's own.
+/// its scopes; the credential re-erase is the seat's own (`FfiSignOutHost`).
 struct FfiFinishHost<'a> {
     registry: &'a FfiAccountRegistry,
     host: &'a dyn FfiSignOutHost,
@@ -425,13 +386,10 @@ fn dismiss_agent_from(_actor_id_hex: &str) {}
 fn painted_finish(outcome: fauna_client_accounts::SignOutFinish) -> FfiSignOutFinish {
     let fails_closed = outcome.fails_closed();
     match outcome {
-        fauna_client_accounts::SignOutFinish::Refused {
-            residue, wipe_owed, ..
-        } => FfiSignOutFinish {
+        fauna_client_accounts::SignOutFinish::Refused { wipe_owed, .. } => FfiSignOutFinish {
             fails_closed,
             refused: true,
             residue: Some(Arc::new(FfiSignOutResidue {
-                record: residue.unwrap_or_default(),
                 line: fauna_client_accounts::sign_out_residue_retry_blocked_copy(),
             })),
             credentials_wiped: false,
@@ -451,54 +409,17 @@ fn painted_finish(outcome: fauna_client_accounts::SignOutFinish) -> FfiSignOutFi
     }
 }
 
-/// The one re-sweep both gestures run, behind the sign-out's serving-lock
-/// question asked about exactly the two bases its erase reaches.
-fn run_retry(
-    record: &SignOutResidue,
-    registry: &FfiAccountRegistry,
-    base: &Path,
-    store_root: Option<&Path>,
-    own_lock: Option<&FfiAccountInstanceLock>,
-    eraser: &dyn FfiResidueCredentialEraser,
-) -> Option<Arc<FfiSignOutResidue>> {
-    let outcome = with_own_lock_down(own_lock, || {
-        fauna_client_accounts::retry_sign_out_residue(
-            record,
-            serving_bases(base, store_root),
-            |recorded| re_erase_credentials(registry, eraser, recorded),
-        )
-    });
-    match outcome {
-        ResidueRetry::Blocked(_) => Some(Arc::new(FfiSignOutResidue {
-            record: record.clone(),
-            line: fauna_client_accounts::sign_out_residue_retry_blocked_copy(),
-        })),
-        ResidueRetry::Swept(left) => {
-            persist(&left, base);
-            painted(left)
-        }
-    }
-}
-
-/// The seat's erase, plus a read-back of the keys the sign-out recorded — the
-/// registry is empty by now, so its own read-back cannot name them.
-fn re_erase_credentials(
-    registry: &FfiAccountRegistry,
-    eraser: &dyn FfiResidueCredentialEraser,
-    recorded: CredentialSweep,
-) -> CredentialSweep {
-    let fresh: CredentialSweep = eraser.erase_credentials().into();
-    merge_read_back(registry, fresh, recorded)
-}
-
-/// A fresh credential erase plus the read-back of the keys a sign-out recorded
-/// as surviving, as one answer.
+/// A fresh credential erase plus the keys a sign-out recorded as surviving —
+/// deleted by name and read back (`AccountRegistry::erase_recorded`) — as one
+/// answer. By name, because the wipe removed the index first: the seat's erase
+/// is `clear_all` on windows and apple, which enumerates through the index and
+/// so never reaches a slot whose delete the wipe saw refused.
 fn merge_read_back(
     registry: &FfiAccountRegistry,
     fresh: CredentialSweep,
     recorded: CredentialSweep,
 ) -> CredentialSweep {
-    let read_back = registry.registry().reverify(CredentialSweep {
+    let read_back = registry.registry().erase_recorded(CredentialSweep {
         survivors: recorded.survivors,
         wipe_failed: false,
     });
@@ -517,7 +438,7 @@ fn merge_read_back(
 /// The paint for an owing record; `None` for a clean one.
 fn painted(record: SignOutResidue) -> Option<Arc<FfiSignOutResidue>> {
     let line = record.view().copy().warning?;
-    Some(Arc::new(FfiSignOutResidue { record, line }))
+    Some(Arc::new(FfiSignOutResidue { line }))
 }
 
 /// Save the record — or remove it, when clean. A failed write is logged and not
@@ -539,13 +460,15 @@ mod tests {
     use fauna_client_accounts::SIGN_OUT_RESIDUE_FILE;
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const ACTOR: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
     const KEY: &str = "fauna/aa11/secret";
 
+    /// The app store; `.1` set makes every delete a silent no-op — a locked
+    /// keystore, which reports nothing.
     #[derive(Default)]
-    struct MapStore(Mutex<HashMap<String, String>>);
+    struct MapStore(Mutex<HashMap<String, String>>, AtomicBool);
 
     impl FfiSecretStore for MapStore {
         fn get(&self, key: String) -> Option<String> {
@@ -555,24 +478,9 @@ mod tests {
             self.0.lock().unwrap().insert(key, value);
         }
         fn delete(&self, key: String) {
-            self.0.lock().unwrap().remove(&key);
-        }
-    }
-
-    /// A seat's credential erase: wipes the store when `works`, and counts calls.
-    struct Eraser {
-        store: Arc<MapStore>,
-        works: bool,
-        calls: AtomicUsize,
-    }
-
-    impl FfiResidueCredentialEraser for Eraser {
-        fn erase_credentials(&self) -> FfiCredentialSweep {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.works {
-                self.store.0.lock().unwrap().clear();
+            if !self.1.load(Ordering::SeqCst) {
+                self.0.lock().unwrap().remove(&key);
             }
-            FfiCredentialSweep::default()
         }
     }
 
@@ -631,40 +539,8 @@ mod tests {
             }
         }
 
-        fn eraser(&self, works: bool) -> Arc<Eraser> {
-            Arc::new(Eraser {
-                store: self.store.clone(),
-                works,
-                calls: AtomicUsize::new(0),
-            })
-        }
-
         fn record_file(&self) -> PathBuf {
             self.base.join(SIGN_OUT_RESIDUE_FILE)
-        }
-
-        fn retry(
-            &self,
-            residue: &FfiSignOutResidue,
-            eraser: Arc<Eraser>,
-        ) -> Option<Arc<FfiSignOutResidue>> {
-            residue.retry(
-                self.registry.clone(),
-                self.base(),
-                self.container(),
-                None,
-                eraser,
-            )
-        }
-
-        fn recheck(&self, eraser: Arc<Eraser>) -> Option<Arc<FfiSignOutResidue>> {
-            sign_out_residue_recheck_at_launch(
-                self.registry.clone(),
-                self.base(),
-                self.container(),
-                None,
-                eraser,
-            )
         }
     }
 
@@ -717,19 +593,22 @@ mod tests {
     fn remove_again_finishes_the_erase_and_closes_the_view() {
         let device = Device::new();
         let dir = device.scope();
-        let painted = sign_out_residue_record(
+        let _ = sign_out_residue_record(
             device.base(),
             Device::sweep(&[&dir]),
             FfiCredentialSweep::default(),
         )
         .expect("owes work");
-        let eraser = device.eraser(true);
-        let after = device.retry(&painted, eraser.clone());
-        assert!(after.is_none(), "a clean re-sweep closes the view");
+        let host = device.host();
+        let outcome = device.finish_as(host.clone(), FfiFinishCaller::RemoveAgain);
+        assert!(
+            outcome.residue.is_none(),
+            "a clean re-sweep closes the view"
+        );
         assert!(!dir.exists(), "the recorded scope is gone");
         assert!(!device.record_file().exists(), "and so is the record");
         assert_eq!(
-            eraser.calls.load(Ordering::SeqCst),
+            host.erases.load(Ordering::SeqCst),
             0,
             "a clean credential half is never re-erased"
         );
@@ -741,7 +620,7 @@ mod tests {
     fn remove_again_beside_a_serving_instance_erases_nothing_and_says_why() {
         let device = Device::new();
         let dir = device.scope();
-        let painted = sign_out_residue_record(
+        let _ = sign_out_residue_record(
             device.base(),
             Device::sweep(&[&dir]),
             FfiCredentialSweep::default(),
@@ -754,11 +633,10 @@ mod tests {
         )
         .expect("the sibling's acquire");
 
-        let after = device
-            .retry(&painted, device.eraser(true))
-            .expect("a refused retry keeps the view up");
+        let outcome = device.finish_as(device.host(), FfiFinishCaller::RemoveAgain);
+        assert!(outcome.refused, "a refused Remove Again says so");
         assert_eq!(
-            after.line(),
+            outcome.residue.expect("a refusal keeps the view up").line(),
             fauna_client_accounts::sign_out_residue_retry_blocked_copy()
         );
         assert!(
@@ -784,28 +662,59 @@ mod tests {
                 .expect("surviving credentials owe a line");
         assert_eq!(painted.line(), rendered_line(0, true));
 
-        let stuck = device.eraser(false);
+        device.store.1.store(true, Ordering::SeqCst);
+        let stuck = device.host_erasing(false);
         let still = device
-            .retry(&painted, stuck.clone())
+            .finish_as(stuck.clone(), FfiFinishCaller::RemoveAgain)
+            .residue
             .expect("the key is still readable");
+        device.store.1.store(false, Ordering::SeqCst);
         assert_eq!(
-            stuck.calls.load(Ordering::SeqCst),
+            stuck.erases.load(Ordering::SeqCst),
             1,
             "the seat's erase ran"
         );
         assert_eq!(still.line(), rendered_line(0, true));
 
-        let works = device.eraser(true);
-        assert!(device.retry(&still, works.clone()).is_none());
-        assert_eq!(works.calls.load(Ordering::SeqCst), 1);
+        let works = device.host_erasing(true);
+        let done = device.finish_as(works.clone(), FfiFinishCaller::RemoveAgain);
+        assert!(done.residue.is_none());
+        assert_eq!(works.erases.load(Ordering::SeqCst), 1);
         assert!(!device.record_file().exists());
     }
 
+    /// The orphan Remove Again must reach: the sign-out's wipe removed the
+    /// index first and a refused delete left the seed with nothing naming it,
+    /// so the windows and apple erase (`clear_all`, which enumerates through
+    /// the index) deletes nothing. The recorded key is deleted by name, and the
+    /// view closes.
+    #[test]
+    fn remove_again_erases_a_recorded_key_the_seats_erase_cannot_reach() {
+        let device = Device::new();
+        device.store.set(KEY.into(), "seed".into());
+        let credentials = FfiCredentialSweep {
+            survivors: vec![KEY.into()],
+            wipe_failed: false,
+        };
+        let _ = sign_out_residue_record(device.base(), Device::sweep(&[]), credentials)
+            .expect("surviving credentials owe a line");
+
+        let index_bound = device.host_erasing(false);
+        let done = device.finish_as(index_bound.clone(), FfiFinishCaller::RemoveAgain);
+        assert!(done.residue.is_none());
+        assert_eq!(index_bound.erases.load(Ordering::SeqCst), 1);
+        assert!(device.store.get(KEY.into()).is_none(), "the seed is gone");
+        assert!(!device.record_file().exists());
+    }
+
+    /// A signed-out launch re-sweeps the record silently and paints only what
+    /// is left.
     #[test]
     fn a_signed_out_launch_resweeps_silently_and_paints_only_what_is_left() {
         let device = Device::new();
+        let none = device.finish_as(device.host(), FfiFinishCaller::Launch);
         assert!(
-            device.recheck(device.eraser(true)).is_none(),
+            none.residue.is_none() && !none.found_record,
             "no record, nothing to do"
         );
 
@@ -815,43 +724,25 @@ mod tests {
             Device::sweep(&[&dir]),
             FfiCredentialSweep::default(),
         );
+        let outcome = device.finish_as(device.host(), FfiFinishCaller::Launch);
         assert!(
-            device.recheck(device.eraser(true)).is_none(),
+            outcome.residue.is_none(),
             "a residue that now goes is finished without a word"
         );
         assert!(!dir.exists());
         assert!(!device.record_file().exists());
     }
 
-    /// A launch with an account in the registry is not the user the residue
-    /// was reported to: the record waits, untouched.
-    #[test]
-    fn a_signed_in_launch_leaves_the_record_alone() {
-        let device = Device::new();
-        let dir = device.scope();
-        let _ = sign_out_residue_record(
-            device.base(),
-            Device::sweep(&[&dir]),
-            FfiCredentialSweep::default(),
-        );
-        device
-            .registry
-            .add_account("1".repeat(64), Some("https://a.example".into()), None)
-            .expect("sign in");
-
-        assert!(device.recheck(device.eraser(true)).is_none());
-        assert!(dir.join("mls.db").exists(), "nothing was swept");
-        assert!(device.record_file().exists(), "the record waits");
-    }
-
     // ── The sign-out record (`account-scoping.md` § Erasure follows scope →
     //    *The sign-out record is on all 7 apps*) ──────────────────────────────
 
     /// The seat's own acts: its wholesale reset clears the app store, and the
-    /// residue retry's erase does the same; both counted.
+    /// credential re-erase does the same when `erase_works`; both counted.
     struct Host {
         store: Arc<MapStore>,
         wipes: AtomicUsize,
+        erases: AtomicUsize,
+        erase_works: bool,
     }
 
     impl FfiSignOutHost for Host {
@@ -861,16 +752,27 @@ mod tests {
             true
         }
         fn erase_credentials(&self) -> FfiCredentialSweep {
-            self.store.0.lock().unwrap().clear();
+            self.erases.fetch_add(1, Ordering::SeqCst);
+            if self.erase_works {
+                self.store.0.lock().unwrap().clear();
+            }
             FfiCredentialSweep::default()
         }
     }
 
     impl Device {
         fn host(&self) -> Arc<Host> {
+            self.host_erasing(true)
+        }
+
+        /// A seat whose credential re-erase takes the store's keys only when
+        /// `works`.
+        fn host_erasing(&self, erase_works: bool) -> Arc<Host> {
             Arc::new(Host {
                 store: self.store.clone(),
                 wipes: AtomicUsize::new(0),
+                erases: AtomicUsize::new(0),
+                erase_works,
             })
         }
 
@@ -900,13 +802,18 @@ mod tests {
         /// The launch's call: no lock held, the agent dismissed, no record in
         /// hand.
         fn finish(&self, host: Arc<Host>) -> FfiSignOutFinish {
+            self.finish_as(host, FfiFinishCaller::Launch)
+        }
+
+        /// A launch-shaped call (no lock, no record in hand) as `caller`.
+        fn finish_as(&self, host: Arc<Host>, caller: FfiFinishCaller) -> FfiSignOutFinish {
             sign_out_finish(
                 self.registry.clone(),
                 vec![self.base()],
                 self.container(),
                 None,
                 host,
-                true,
+                caller,
                 None,
             )
         }
@@ -1033,5 +940,51 @@ mod tests {
         );
         assert_eq!(device.registry.list().len(), 1);
         assert!(!device.sign_out_record_file().exists());
+    }
+
+    /// The face carries the caller (decision 3, the registry gate): with an
+    /// account signed in over a residue record, the launch leaves the record
+    /// alone, and Remove Again re-sweeps its recorded paths while the
+    /// credential half is held as recorded — neither re-erased nor dropped.
+    #[test]
+    fn remove_again_re_sweeps_the_paths_and_holds_the_credentials_while_the_registry_names_somebody()
+     {
+        let device = Device::new();
+        let stale = device.scope();
+        device.store.set(KEY.into(), "seed".into());
+        let held = FfiCredentialSweep {
+            survivors: vec![KEY.into()],
+            wipe_failed: false,
+        };
+        let _ = sign_out_residue_record(device.base(), Device::sweep(&[&stale]), held)
+            .expect("owes work");
+        let signed_in = device.sign_in('1');
+
+        let launch = device.finish_as(device.host(), FfiFinishCaller::Launch);
+        assert!(launch.residue.is_none() && !launch.found_record);
+        assert!(stale.join("mls.db").exists(), "the launch swept nothing");
+
+        let host = device.host();
+        let outcome = device.finish_as(host.clone(), FfiFinishCaller::RemoveAgain);
+
+        assert!(!stale.exists(), "the recorded scope is re-swept");
+        assert_eq!(host.wipes.load(Ordering::SeqCst), 0, "nothing wiped");
+        assert_eq!(
+            device.store.get(KEY.into()).as_deref(),
+            Some("seed"),
+            "the wholesale credential erase must not run under a signed-in account"
+        );
+        let listed: Vec<String> = device
+            .registry
+            .list()
+            .into_iter()
+            .map(|e| e.actor_id)
+            .collect();
+        assert_eq!(listed, vec![signed_in], "still signed in");
+        let left = outcome.residue.expect("the credential half is still owed");
+        assert_eq!(left.line(), rendered_line(0, true));
+        let on_disk = SignOutResidue::load(&device.base).expect("the record stands");
+        assert!(on_disk.paths.is_empty(), "the scope left the record");
+        assert_eq!(on_disk.credentials().survivors, vec![KEY.to_string()]);
     }
 }

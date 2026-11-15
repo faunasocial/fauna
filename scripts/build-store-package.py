@@ -7,7 +7,8 @@
     python scripts/build-store-package.py --grade <msix> --arch arm64 --identity-name … --publisher …
 
 `--grade` reads a finished package back and checks it is a Store upload (identity,
-capabilities, every PE's arch, no symbols, no automation surface, and its store
+capabilities, every PE's arch, no symbols, no automation surface, its three licence
+files at the root, and its store
 flavour's excision in its native core: for `store-no-payments`, the Store's and the
 default, no payments or zaps plane and the peer-to-peer sharing plane present; for
 `store-safe`, none of the three); the public `release-store-windows.yml` workflow
@@ -16,7 +17,7 @@ grades every package it builds with it.
 This script PACKS. The payload it packs — the self-contained WinUI publish, the sync
 agent and the shell extension, all in their shipped flavour — is built and staged by
 `just windows-store-package`, which then calls this script. The MSI test helper
-(`test_installer.py::_build_msi`) also stages a payload, but a deliberately
+(`tests/e2e-unified/helpers/windows_installer.py::build_msi`) also stages a payload, but a deliberately
 TEST-flavoured one (the e2e agent compiled in), so this script refuses it unless a
 caller passes `--allow-test-surface` (§ the automation-surface check below).
 
@@ -92,7 +93,14 @@ PAYLOAD = (
     # Path 1's stamped filename exists to dodge an MSI's inability to replace a DLL
     # Explorer holds open, and an MSIX is replaced atomically.
     ("fauna_shell.dll", "fauna_shell.dll"),
-)
+) + tuple((name, name) for name in (
+    # The three licence files every shipped binary carries, at the package root
+    # (docs/goal/architecture/shipped-notices.md § Per channel, the Microsoft Store
+    # row). `just windows-store-package` stages them; the notices file is
+    # dependency-authored text this script copies and never opens.
+    "LICENSE-MIT.txt", "LICENSE-APACHE.txt", "THIRD-PARTY-NOTICES.txt",
+))
+NOTICE_FILES = PAYLOAD[-3:]
 
 
 def _sdk_tool(name):
@@ -122,7 +130,7 @@ def _default_payload_root(arch):
     """Where `just windows-store-package` stages the shipped-flavour payload.
 
     Deliberately NOT the MSI's `build/installer/stage/<arch>/`: the only thing that
-    writes there locally is `test_installer.py::_build_msi`, which compiles the e2e
+    writes there locally is `windows_installer.py::build_msi`, which compiles the e2e
     automation surface in on purpose. Defaulting to it once meant a bare run of this
     script packaged the test agent for upload.
     """
@@ -394,6 +402,16 @@ def grade_package(msix_path, arch, identity_name, publisher, version, flavour=ST
         if declared != STORE_CAPABILITIES:
             problems.append(f"capabilities are {sorted(declared)}, an upload declares "
                             f"exactly {sorted(STORE_CAPABILITIES)}")
+
+        # Present and non-empty, read by size only: the notices file is
+        # dependency-authored text (shipped-notices.md § How the notices file is
+        # produced).
+        sizes = {i.filename: i.file_size for i in z.infolist()}
+        for inside, _ in NOTICE_FILES:
+            if not sizes.get(inside):
+                problems.append(f"{inside} is {'empty' if inside in sizes else 'missing'} at the "
+                                "package root; every shipped package carries the two licence texts "
+                                "and its notices file")
 
         for name in names:
             lower = name.lower()

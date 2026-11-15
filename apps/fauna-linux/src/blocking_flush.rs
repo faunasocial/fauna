@@ -45,8 +45,11 @@ where
 /// `conversations::manager().clear_for_identity_change()` and
 /// `actor_scope::reset_actor_scoped_state`: after either clear the snapshot it
 /// reads is empty (or the feed manager gone), and `save_if_changed` would
-/// upload the emptied draft over the user's real one. A rail with nothing new
-/// since its last save costs no round trip (`DraftsSync::save_if_changed`).
+/// upload the emptied draft over the user's real one. Each rail saves through
+/// the shared `DraftsSync::save_on_leave`: a door taken before the launch load
+/// has lifted the rail's save gate reads once and fills from what rests before
+/// saving, so it still saves; a rail with nothing new since its last save
+/// costs no round trip.
 pub fn flush_leave_door(bounded: bool) {
     crate::feed::host::flush_cues_on_close(bounded);
     crate::conversations::drafts::flush_now_blocking(bounded);

@@ -3,7 +3,7 @@ import Foundation
 @testable import FaunaKit
 
 // Non-e2e pins for the shared `custodian_pull_run_now` TestAgent command
-// (`CustodianPullTestCommand`) — the reply SHAPE and the two refusals, the parts
+// (`CustodianPullTestCommand`) — the reply SHAPE and the refusal, the parts
 // that go silently wrong without a nest in the loop. The pass itself (agent or
 // in-app) is the e2e's: `test_backups.py::
 // test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_store`
@@ -61,29 +61,28 @@ struct CustodianPullTestCommandTests {
         #expect(body.keys.contains("audit_state") && body["audit_state"] is NSNull)
     }
 
-    /// The in-app door has no `kinds_run` / `cap_state` / `audit_state` to
-    /// report, so the reply must OMIT them. `checked_in` it does have — the
-    /// summary computes it by the agent's rule — and it is passed through, never
-    /// defaulted: `wait_for_custodian_hosting` requires `hosting` AND
-    /// `checked_in`, so an in-app host that omitted it could never be seen
-    /// hosting at all.
-    @Test func anInAppReportOmitsWhatItHasNoHonestValueFor() throws {
+    /// The in-app pass (`runAllKindsAtOffset`) answers the agent's six fields, so
+    /// the reply carries them key-for-key with only `via` telling the sides
+    /// apart: the rot witness reads `audit_state` and `checked_in` off every app
+    /// alike, and `checked_in` is passed through, never defaulted —
+    /// `wait_for_custodian_hosting` requires `hosting` AND `checked_in`.
+    @Test func anInAppReportCarriesTheSameSixFieldsPlusItsVia() throws {
         let body = try decode(
             CustodianPullTestCommand.reportJSON(
                 .inApp(
-                    FfiCustodianPullSummary(
-                        storedSegments: 2, tombstonedSegments: 1, heldBytes: 900,
-                        capReached: false, checkedIn: false))))
+                    FfiCustodianPassReport(
+                        hosting: true, kindsRun: 2, heldBytes: 900, capState: "ok",
+                        auditState: "failed", checkedIn: false))))
+        #expect(Set(body.keys) == [
+            "via", "hosting", "kinds_run", "held_bytes", "cap_state", "audit_state", "checked_in",
+        ])
         #expect(body["via"] as? String == "in-app")
         #expect(body["hosting"] as? Bool == true)
+        #expect(body["kinds_run"] as? Int == 2)
         #expect(body["held_bytes"] as? Int == 900)
-        #expect(body["stored_segments"] as? Int == 2)
-        #expect(body["tombstoned_segments"] as? Int == 1)
-        #expect(body["cap_reached"] as? Bool == false)
+        #expect(body["cap_state"] as? String == "ok")
+        #expect(body["audit_state"] as? String == "failed")
         #expect(body["checked_in"] as? Bool == false)
-        for fabricated in ["kinds_run", "cap_state", "audit_state"] {
-            #expect(!body.keys.contains(fabricated), "in-app must not invent \(fabricated)")
-        }
     }
 
     /// A device that is not an enrolled custodian (`build_custodian_host` → `None`)
@@ -109,16 +108,6 @@ struct CustodianPullTestCommandTests {
         }
         #expect(reason.hasPrefix("custodian_pull_run_now:"), "the refusal must name the command: \(reason)")
         #expect(reason.contains("no authenticated session"))
-    }
-
-    /// The in-app pass reads the wall clock itself, so a shifted clock is refused
-    /// with the value it was asked for rather than dropped: a caller that believed
-    /// it had jumped a 24-hour audit debounce would otherwise pass against the
-    /// real clock and prove nothing.
-    @Test func aClockOffsetTheInAppPassCannotHonourIsRefusedWithItsValue() {
-        let text = CustodianPassPokeError.clockOffsetNotHonoured(86_400).description
-        #expect(text.contains("now_offset_secs=86400"))
-        #expect(text.contains("cannot be honoured"))
     }
 }
 

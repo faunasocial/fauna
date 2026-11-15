@@ -371,6 +371,7 @@ pub(super) fn account_elements(
         Gesture::Settings(Action::DeleteAccount),
     ));
     els.extend(pending_actions_elements(state));
+    els.extend(unsent_changes_elements(state));
     els.push(
         Element::gesture_button(
             ids::SETTINGS_NAV_BACK,
@@ -439,6 +440,96 @@ fn pending_actions_elements(state: &SettingsState) -> Vec<Element> {
         }
     }
     els
+}
+
+/// The STANDING unsent-changes section (`account-offline-mutation.md` § The
+/// offline-mutation contract → *The unsent-changes surface*, point 1;
+/// ui.yaml's seven `unsent-change*` ids), the pending-actions section's
+/// sibling and shape: always present, its container text answering in all
+/// three states — the bare title before the first read, the empty line once
+/// read and empty, the counted title with rows. One row per intent in the
+/// shared model's order (scope, then compose), its description and state
+/// from the shared describer. Retry and discard are offered on a not-sent row
+/// only; discard arms a confirm on that row first.
+fn unsent_changes_elements(state: &SettingsState) -> Vec<Element> {
+    use fauna_core::offline_intent::UnsentState;
+    use fauna_i18n::strings::settings::unsent_changes as uc;
+    let mut els = Vec::new();
+    els.push(Element::label(
+        ids::UNSENT_CHANGES_SECTION,
+        match &state.unsent_changes {
+            None => uc::TITLE.to_string(),
+            Some(rows) if rows.is_empty() => uc::NONE.to_string(),
+            Some(rows) => uc::title_count(&rows.len().to_string()),
+        },
+    ));
+    let Some(rows) = &state.unsent_changes else {
+        return els;
+    };
+    for (i, row) in rows.iter().enumerate() {
+        els.push(Element::label(ids::UNSENT_CHANGE_ITEM, " ").within(ids::UNSENT_CHANGE_ITEM, i));
+        els.push(
+            Element::label(ids::UNSENT_CHANGE_DESCRIPTION, unsent_description(row))
+                .within(ids::UNSENT_CHANGE_ITEM, i),
+        );
+        els.push(
+            Element::label(ids::UNSENT_CHANGE_STATUS, unsent_status(row))
+                .within(ids::UNSENT_CHANGE_ITEM, i),
+        );
+        if !matches!(row.state, UnsentState::Unsent { .. }) {
+            continue;
+        }
+        els.push(
+            Element::gesture_button(
+                ids::UNSENT_CHANGE_RETRY_BUTTON,
+                uc::RETRY,
+                true,
+                Gesture::Settings(Action::UnsentChangeRetry(row.intent_id.clone())),
+            )
+            .within(ids::UNSENT_CHANGE_ITEM, i),
+        );
+        els.push(
+            Element::gesture_button(
+                ids::UNSENT_CHANGE_DISCARD_BUTTON,
+                uc::DISCARD,
+                true,
+                Gesture::Settings(Action::UnsentChangeDiscard(row.intent_id.clone())),
+            )
+            .within(ids::UNSENT_CHANGE_ITEM, i),
+        );
+        if state.unsent_discard_armed.as_deref() == Some(row.intent_id.as_str()) {
+            els.push(
+                Element::gesture_button(
+                    ids::UNSENT_CHANGE_DISCARD_CONFIRM_BUTTON,
+                    uc::DISCARD_CONFIRM,
+                    true,
+                    Gesture::Settings(Action::UnsentChangeDiscardConfirm(row.intent_id.clone())),
+                )
+                .within(ids::UNSENT_CHANGE_ITEM, i),
+            );
+        }
+    }
+    els
+}
+
+/// An unsent change's kind and target in words — the shared describer's
+/// label, resolved here and composed nowhere else.
+pub(super) fn unsent_description(row: &fauna_core::offline_intent::UnsentChange) -> String {
+    row.description.label.resolve(fauna_i18n::strings::lookup)
+}
+
+/// An unsent change's state line: the shared state text, and on a not-sent
+/// row why — the stored code through the shared reason map.
+pub(super) fn unsent_status(row: &fauna_core::offline_intent::UnsentChange) -> String {
+    use fauna_protocol::offline_describe::{change_reason_text, change_state_text};
+    let state = change_state_text(row).resolve(fauna_i18n::strings::lookup);
+    match change_reason_text(row) {
+        Some(reason) => fauna_i18n::strings::settings::unsent_changes::status_with_reason(
+            &state,
+            &reason.resolve(fauna_i18n::strings::lookup),
+        ),
+        None => state,
+    }
 }
 
 /// What will happen, as one sentence — verb + target (`ui.yaml`'s
@@ -621,6 +712,98 @@ mod tests {
     /// bare title while un-hydrated (never a settled "nothing scheduled"
     /// claim with no basis, the un-hydrated-paint rule), the empty-state
     /// line when loaded and empty, the counted title with rows.
+    /// The unsent-changes section (`account-offline-mutation.md` § The
+    /// unsent-changes surface, point 1): standing in all three states, one
+    /// row per change with the shared describer's words, retry and discard on
+    /// a not-sent row only, and the confirm only once discard is armed.
+    #[test]
+    fn the_unsent_changes_section_is_standing_and_offers_retry_on_a_not_sent_row_only() {
+        use fauna_core::localized::LocalizedText;
+        use fauna_core::offline_intent::{IntentDescription, UnsentChange, UnsentState};
+        use fauna_i18n::strings::settings::unsent_changes as uc;
+        let paint = |state: &SettingsState| {
+            account_elements(
+                state,
+                None,
+                &AftermathProgress::default(),
+                false,
+                None,
+                crate::settings::recovery::MemberReviewPass::empty(),
+            )
+        };
+        let section = |state: &SettingsState| {
+            paint(state)
+                .into_iter()
+                .find(|e| e.id == "unsent-changes-section")
+                .expect("the section is standing")
+                .text
+        };
+        let count =
+            |state: &SettingsState, id: &str| paint(state).iter().filter(|e| e.id == id).count();
+        let change = |id: &str, state: UnsentState| UnsentChange {
+            intent_id: id.to_string(),
+            kind: "fauna.posts.interact".to_string(),
+            scope: "posts.interact:p".to_string(),
+            state,
+            created_at: 0,
+            attempts: 0,
+            description: IntentDescription {
+                label: LocalizedText::key("settings.unsent_changes.kind_like"),
+                target: None,
+            },
+            hold: None,
+        };
+
+        let mut state = SettingsState::default();
+        assert_eq!(section(&state), uc::TITLE);
+        state.unsent_changes = Some(Vec::new());
+        assert_eq!(section(&state), uc::NONE);
+
+        state.unsent_changes = Some(vec![
+            change(
+                "aa",
+                UnsentState::Unsent {
+                    reason_code: "not_found".to_string(),
+                },
+            ),
+            change("bb", UnsentState::Held),
+        ]);
+        assert_eq!(section(&state), uc::title_count("2"));
+        let painted = paint(&state);
+        let texts: Vec<&str> = painted
+            .iter()
+            .filter(|e| e.id == "unsent-change-status")
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                uc::status_with_reason(uc::STATE_UNSENT, &uc::reason_fallback("not_found"))
+                    .as_str(),
+                uc::STATE_HELD,
+            ]
+        );
+        assert!(
+            painted
+                .iter()
+                .filter(|e| e.id == "unsent-change-description")
+                .all(|e| e.text == uc::KIND_LIKE)
+        );
+        assert_eq!(
+            count(&state, "unsent-change-retry-button"),
+            1,
+            "the not-sent row only"
+        );
+        assert_eq!(
+            count(&state, "unsent-change-discard-button"),
+            1,
+            "the not-sent row only"
+        );
+        assert_eq!(count(&state, "unsent-change-discard-confirm-button"), 0);
+        state.unsent_discard_armed = Some("aa".to_string());
+        assert_eq!(count(&state, "unsent-change-discard-confirm-button"), 1);
+    }
+
     #[test]
     fn the_pending_actions_section_is_standing_and_answers_honestly() {
         use fauna_i18n::strings::settings::pending_actions as pa;

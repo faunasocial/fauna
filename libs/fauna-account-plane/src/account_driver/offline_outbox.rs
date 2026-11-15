@@ -50,6 +50,7 @@ use fauna_core::offline_intent::{
 
 use super::{AccountHandleSource, AccountStoreHandle, RUNTIME_ABSENT};
 use crate::outbox::DrainReport;
+use crate::outbox_carry::OutboxCarry;
 
 /// How many drain passes one online edge runs before leaving a still-retrying
 /// app-only intent to the next reconnect ([`AccountOutbox::drain_until_settled`]).
@@ -81,6 +82,9 @@ pub struct AccountOutbox {
     /// ([`Self::set_identity_sender`]); unseated, the identity leg of
     /// [`Self::drain_until_settled`] sends nothing and the intents wait.
     identity_sender: RwLock<Option<Arc<dyn IdentityIntentSender>>>,
+    /// The outbox carry's seat ([`Self::set_carry`]): unseated, no retired
+    /// identity's outbox is carried in and none is listed.
+    carry: RwLock<Option<Arc<OutboxCarry>>>,
 }
 
 /// Starts one app-only drain on the host's own runtime, fire-and-forget —
@@ -108,6 +112,7 @@ impl AccountOutbox {
             app_drain: tokio::sync::Mutex::new(()),
             drain_wake: RwLock::new(None),
             identity_sender: RwLock::new(None),
+            carry: RwLock::new(None),
         })
     }
 
@@ -129,12 +134,78 @@ impl AccountOutbox {
             .unwrap_or_else(|e| e.into_inner()) = sender;
     }
 
+    /// Seat (or, with `None`, unseat) the outbox carry
+    /// (`succession-aftermath.md` § Re-key scope, the device-local outbox
+    /// row): from here on every app drain loop first carries the retired
+    /// identities' undrained outboxes this device owes into this one, and the
+    /// unsent-changes list shows what has not moved yet. Only an app seats
+    /// it — the registry it reads holds the seeds.
+    pub fn set_carry(&self, carry: Option<Arc<OutboxCarry>>) {
+        *self.carry.write().unwrap_or_else(|e| e.into_inner()) = carry;
+    }
+
+    /// The seated carry, if any — what a host's seat test reads back.
+    pub fn carry(&self) -> Option<Arc<OutboxCarry>> {
+        self.carry.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// One carry pass into the runtime's outbox, when a carry is seated and
+    /// the runtime's account is known. `mls` answers the MLS hold.
+    async fn run_carry(&self, handle: &AccountStoreHandle, mls: Option<&dyn MlsIntentSender>) {
+        let (Some(carry), Some(actor)) = (self.carry(), handle.account_actor()) else {
+            return;
+        };
+        carry.run(&actor.to_hex(), handle, mls).await;
+    }
+
+    /// Ring the host's app drain, when it registered one.
+    fn ring_drain_wake(&self) {
+        let wake = self
+            .drain_wake
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    /// The user's word on a retired identity's row not carried yet: a retry
+    /// rings the app drain, whose loop carries first; a discard deletes it
+    /// from the predecessor's store. `None` = not such a row.
+    async fn settle_held(
+        &self,
+        handle: &AccountStoreHandle,
+        intent_id: [u8; 16],
+        retry: bool,
+    ) -> Result<Option<bool>, String> {
+        let (Some(carry), Some(actor)) = (self.carry(), handle.account_actor()) else {
+            return Ok(None);
+        };
+        let successor = actor.to_hex();
+        if !carry.holds(&successor, intent_id).await {
+            return Ok(None);
+        }
+        if retry {
+            self.ring_drain_wake();
+            return Ok(Some(true));
+        }
+        carry
+            .discard(&successor, intent_id)
+            .await
+            .map(Some)
+            .map_err(|e| format!("{e:#}"))
+    }
+
     /// Settle one parked intent by the user's word, then start the drain that
     /// owns its scope: a full pump pass for an RPC intent, the host's app
     /// drain for an MLS or identity one (the scope's remainder shares its
     /// drainer).
     async fn settle(&self, intent_id: [u8; 16], retry: bool) -> Result<bool, String> {
         let handle = self.handle()?;
+        if let Some(settled) = self.settle_held(&handle, intent_id, retry).await? {
+            return Ok(settled);
+        }
         let drainer = handle
             .outbox_rows()
             .await
@@ -150,16 +221,7 @@ impl AccountOutbox {
         .map_err(|e| format!("{e:#}"))?;
         if settled {
             match drainer {
-                Some(IntentDrainer::Mls | IntentDrainer::Identity) => {
-                    let wake = self
-                        .drain_wake
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    if let Some(wake) = wake {
-                        wake();
-                    }
-                }
+                Some(IntentDrainer::Mls | IntentDrainer::Identity) => self.ring_drain_wake(),
                 _ => handle.wake_outbox_drain(),
             }
         }
@@ -188,6 +250,19 @@ impl AccountOutbox {
                 };
             }
         };
+        // The carry first, so a retired identity's intent whose group
+        // arrived since is carried and drained in this same pass.
+        self.run_carry(&handle, mls).await;
+        // The e2e drain hold (`crate::outbox::outbox_drain_held`, compiled
+        // out of release builds) keeps both app-only legs from sending while
+        // the carry above still runs: a message queued as a retired identity
+        // must not drain as it before the ceremony. A held pass reports
+        // nothing to retry, so the loop ends and holds no conversations
+        // engine alive; the test's release rings the app drain again.
+        if crate::outbox::outbox_drain_held() {
+            tracing::info!("app outbox drain held by the e2e hold file; only the carry ran");
+            return DrainReport::default();
+        }
         let mut report = match mls {
             Some(sender) => handle.drain_mls_outbox(sender).await,
             None => DrainReport::default(),
@@ -226,6 +301,14 @@ impl AccountOutbox {
         let mut backoff = APP_DRAIN_FIRST_BACKOFF;
         for pass in 0..APP_DRAIN_PASSES {
             if !fauna_protocol::offline_class::is_online(&self.connection_state()) {
+                // Offline the carry still runs once: it is local, and the
+                // carried rows are listed (and drain) as the successor's.
+                if pass == 0
+                    && let Ok(handle) = self.handle()
+                {
+                    let _one_at_a_time = self.app_drain.lock().await;
+                    self.run_carry(&handle, mls).await;
+                }
                 return last;
             }
             if pass > 0 {
@@ -305,10 +388,18 @@ impl OfflineIntentQueue for AccountOutbox {
     }
 
     async fn unsent_changes(&self) -> Result<Vec<UnsentChange>, String> {
-        self.handle()?
+        let handle = self.handle()?;
+        let mut changes = handle
             .unsent_changes()
             .await
-            .map_err(|e| format!("{e:#}"))
+            .map_err(|e| format!("{e:#}"))?;
+        // A retired identity's rows not carried yet, listed from the first
+        // sign-in (`succession-aftermath.md`, the device-local outbox row,
+        // point 5).
+        if let (Some(carry), Some(actor)) = (self.carry(), handle.account_actor()) {
+            changes.extend(carry.held_changes(&actor.to_hex()).await);
+        }
+        Ok(changes)
     }
 
     async fn retry_intent(&self, intent_id: [u8; 16]) -> Result<bool, String> {

@@ -6,8 +6,8 @@ namespace FaunaApp.Tests;
 /// <summary>
 /// Windows' home-screen widget — the taskbar badge (apps/windows.md § Home-screen
 /// widget). The WinRT push is windows-glue; the payload decision
-/// (<see cref="TaskbarBadgePolicy"/>) and the push de-duplication
-/// (<see cref="TaskbarBadgeTracker"/>) are pure and pinned here. The number itself
+/// (<see cref="TaskbarBadgePolicy"/>) and the push de-duplication with its
+/// account-end rule (<see cref="TaskbarBadgeTracker"/>) are pure and pinned here. The number itself
 /// is the shared <c>sum_unread</c> fold, unit-tested in <c>fauna_conversations</c>.
 /// </summary>
 public class TaskbarBadgePolicyTests
@@ -40,7 +40,7 @@ public class TaskbarBadgePolicyTests
     {
         var t = new TaskbarBadgeTracker();
         Assert.Null(t.LastPushed);
-        Assert.True(t.ShouldPush(0));
+        Assert.True(t.ShouldPush(0, t.Generation));
         Assert.Equal(0u, t.LastPushed);
     }
 
@@ -51,9 +51,10 @@ public class TaskbarBadgePolicyTests
     public void Tracker_RepeatedTotal_DoesNotPush()
     {
         var t = new TaskbarBadgeTracker();
-        Assert.True(t.ShouldPush(3));
-        Assert.False(t.ShouldPush(3));
-        Assert.False(t.ShouldPush(3));
+        var g = t.Generation;
+        Assert.True(t.ShouldPush(3, g));
+        Assert.False(t.ShouldPush(3, g));
+        Assert.False(t.ShouldPush(3, g));
         Assert.Equal(3u, t.LastPushed);
     }
 
@@ -63,10 +64,45 @@ public class TaskbarBadgePolicyTests
     public void Tracker_ChangedTotal_PushesEachChange()
     {
         var t = new TaskbarBadgeTracker();
-        Assert.True(t.ShouldPush(1));
-        Assert.True(t.ShouldPush(2));
-        Assert.True(t.ShouldPush(0));
-        Assert.True(t.ShouldPush(2));
+        var g = t.Generation;
+        Assert.True(t.ShouldPush(1, g));
+        Assert.True(t.ShouldPush(2, g));
+        Assert.True(t.ShouldPush(0, g));
+        Assert.True(t.ShouldPush(2, g));
         Assert.Equal(2u, t.LastPushed);
+    }
+
+    // A sign-out, a switch or a factory reset ends the account (common.md
+    // § Home-screen widget: a switch or sign-out never leaves the previous account's
+    // count). A reading the outgoing account's reader still had in flight carries the
+    // ended generation and is never pushed, whatever its number — it would repaint
+    // the signed-out account's count over the clear.
+    [Fact]
+    public void Tracker_EndAccount_DropsTheEndedAccountsReadings()
+    {
+        var t = new TaskbarBadgeTracker();
+        var ended = t.Generation;
+        Assert.True(t.ShouldPush(3, ended));
+        t.EndAccount();
+        Assert.NotEqual(ended, t.Generation);
+        Assert.Null(t.LastPushed);
+        Assert.False(t.ShouldPush(3, ended));
+        Assert.False(t.ShouldPush(7, ended));
+        Assert.Null(t.LastPushed);
+    }
+
+    // The next account's first reading always pushes — the outgoing account's number
+    // included, since the account end cleared the OS badge — and de-duplicates as
+    // before from there.
+    [Fact]
+    public void Tracker_EndAccount_NextAccountsFirstReadingAlwaysPushes()
+    {
+        var t = new TaskbarBadgeTracker();
+        Assert.True(t.ShouldPush(3, t.Generation));
+        t.EndAccount();
+        var next = t.Generation;
+        Assert.True(t.ShouldPush(3, next));
+        Assert.False(t.ShouldPush(3, next));
+        Assert.Equal(3u, t.LastPushed);
     }
 }

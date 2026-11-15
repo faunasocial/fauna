@@ -92,6 +92,10 @@ interface WatchedDirectoryDao {
     @Query("SELECT * FROM watched_directories WHERE enabled = 1")
     fun getEnabled(): Flow<List<WatchedDirectory>>
 
+    /** Every watched directory, a disabled one included — the engine roster's reading. */
+    @Query("SELECT * FROM watched_directories")
+    suspend fun getAllOnce(): List<WatchedDirectory>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(dir: WatchedDirectory)
 

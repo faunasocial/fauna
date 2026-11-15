@@ -661,3 +661,107 @@ def test_a_removal_whose_rekey_fails_says_so_and_the_next_pass_completes_it(
     assert member.actor_hex not in (_floor_principals(port, founder.actor, room_id) or []), (
         "and the removal stood throughout — nothing re-seated the member"
     )
+
+
+def _room_notice_state(seat) -> str | None:
+    """``thread-room-notice``'s ``state`` on the seat's open thread — ``None``
+    while no notice holds (the element is then absent, never empty)."""
+    d = seat.app.driver
+    if d.count("thread-room-notice") == 0:
+        return None
+    return d.get_attr("thread-room-notice", "state")
+
+
+@pytest.mark.feature("group-conversations")
+@pytest.mark.requires_surface("community-room-rekey-notice")
+def test_a_room_whose_rekey_is_owed_says_so_until_the_new_key_is_in_place(
+    room_seat_pair, nest_instance
+):
+    """A community room whose re-key after a removal is still owed says so on
+    its own row, and stops saying so once the new key is in place
+    (``community-rooms.md`` § The three classes → *Community* → *A removal's
+    re-key is owed until it lands*; ``ui/conversations.md`` § Element IDs →
+    ``thread-room-notice``, the ``rekey-pending`` state).
+
+    The home nest refuses the founder's mint (the test hook's refusal), so the
+    chip's removal lands its unseat and not its rotation, and the floor
+    answers ``severance_owed``. The founder's room reads that floor and
+    ``thread-room-notice`` states ``rekey-pending`` with its one shared
+    sentence — a standing notice, where ``error-message`` was the one
+    device's transient text. With the refusal lifted, the founder's own tend
+    pass mints with no gesture, the floor answers ``severance_owed = false``,
+    and the notice goes.
+
+    Every mutation is a gesture (convention 8); every wait is a deadline poll
+    on the nest's own floor or on painted state (convention 14)."""
+    from helpers.room_seats import found_community_room
+    from helpers.rpc_hold import refuse_rpc, release_rpc_hold, wait_for_refused_rpc
+    from i18n.strings import S
+
+    founder, member = room_seat_pair
+    port = nest_instance["port"]
+    room_id, _founder_thread, _member_thread = found_community_room(
+        founder, member, f"hello {secrets.token_hex(4)}"
+    )
+    conv = founder.app.conversations
+    removing = wait_for(
+        "the member listed on the founder's thread",
+        lambda: thread_by_channel(founder.app, room_id),
+        lambda t: t is not None and member.actor_hex in t.participant_actor_ids,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: seat_story(founder),
+    )
+    conv.open_thread_by_id(removing.thread_id)
+    assert _room_notice_state(founder) is None, (
+        "a keyed room with nobody unseated states no notice: "
+        f"{seat_element(founder, 'thread-room-notice')}"
+    )
+
+    def diagnose() -> str:
+        return (
+            f"owed={_severance_owed(port, founder.actor, room_id)!r} "
+            f"error={founder.app.error_text()!r}\n"
+            f"{seat_element(founder, 'thread-room-notice')}\n{seat_story(founder)}\n"
+            f"{seat_log(founder, 'severance', 'tend', 'rotate', 'mint')}"
+        )
+
+    # ── the unseat lands, the re-key is refused: the room says so ────────
+    refuse_rpc(port, PUBLISH_GENERATION_KIND)
+    try:
+        conv.remove_member(index_of(removing, member.actor_hex))
+        wait_for_refused_rpc(port, PUBLISH_GENERATION_KIND)
+        wait_for(
+            "the floor naming the owed re-key",
+            lambda: _severance_owed(port, founder.actor, room_id),
+            lambda owed: owed is True,
+            MEMBERSHIP_BUDGET_S,
+            diagnose=diagnose,
+        )
+        wait_for(
+            "the founder's room stating the pending re-key",
+            lambda: _room_notice_state(founder),
+            lambda state: state == "rekey-pending",
+            MEMBERSHIP_BUDGET_S,
+            diagnose=diagnose,
+        )
+        assert conv.room_notice() == S.conversations.unified.room_notice_rekey_pending, (
+            f"the state's one shared sentence: {conv.room_notice()!r}"
+        )
+    finally:
+        release_rpc_hold(port, PUBLISH_GENERATION_KIND)
+
+    # ── the next tend pass pays the debt, and the notice goes ────────────
+    wait_for(
+        "the founder's tend pass re-keying the room past the removed member",
+        lambda: _severance_owed(port, founder.actor, room_id),
+        lambda owed: owed is False,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=diagnose,
+    )
+    wait_for(
+        "the notice clearing at the floor read that shows the debt paid",
+        lambda: _room_notice_state(founder),
+        lambda state: state is None,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=diagnose,
+    )

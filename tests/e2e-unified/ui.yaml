@@ -149,6 +149,7 @@ gated_features:
       - gated-post-payment-link               # the price-and-route class: a gated post's payment link
       - gated-post-buy-button                 # the price-and-route class: a gated post's buy button
       - gated-post-purchase-pending           # the price-and-route class: a bought sold post's purchase-pending line
+      - feed-post-sale-price-                 # the price-and-route class: a sold post's Change price… verb and dialog (monetization.md § The asking price → Re-pricing a sold post); watched by tui's witness, the app that renders it first
   # The NIP-57 Lightning zap plane — a subset member of `payments` (excising `payments`
   # excises this too; excising this alone keeps provider-rail payments).
   zaps:
@@ -519,6 +520,8 @@ pages:
       - room-leave-confirm             # button — confirms the departure; the class picks the door beneath it (roster report / room.leave ceremony) (user-approved 2026-09-20)
       - room-nest-read-toggle          # button — the room_settings editor's home-nest read on a community room; `checked` attribute true | false; painted only when the draft carries a nest read; greyed unless capabilities.can_set_policy (user-approved 2026-09-25)
       - room-owner-transfer-button     # button, indexed — the room_settings editor's hand-over control per participant, index-parallel with thread-member-chip; `checked` attribute true | false (at most one row staged); greyed unless capabilities.can_transfer_ownership (owner only) (user-approved 2026-09-09)
+      - room-remove-button             # button — the room_settings editor's local remove of the whole conversation from my nest, beside room-leave-button; greyed unless capabilities.supports_local_remove (a bridged room today); never staged through Save (declared 2026-11-14 under rule A's advisory class; behavior owner bridged-adapter.md § Removing bridged rows)
+      - room-remove-confirm            # button — confirms the remove; the far side keeps its copy, a new arrival brings the conversation back (declared 2026-11-14)
       - room-pending-invite            # view, indexed — the room_settings editor's pending-invitation row: invitee, inviter, rank on offer; `lapsed` attribute true | false; the section is absent while the room's pending_invites is None or empty (user-approved 2026-09-25)
       - room-pending-invite-withdraw-button  # button, indexed — withdraws the pending invitation on the same row; live on every painted row, acts immediately, no confirm (user-approved 2026-09-25)
       - room-settings-save-button      # button — commit every staged room_settings change (one policy commit each); closes only when all landed (user-approved 2026-09-09)
@@ -599,7 +602,7 @@ pages:
         elements: [dm-message-text, dm-message-timestamp, dm-text-field, dm-send-button, dm-attachment-image, dm-attachment-file, subject-divider, subject-input, topic-toggle-button, attachment-button, thread-header, thread-member-chip, thread-add-participant-button, thread-rename-button, thread-rename-field, thread-rename-confirm, thread-room-class, thread-room-settings-button, room-search-button, add-participant-confirm, markdown-bold-button]
       room_settings:
         trigger: "click thread-room-settings-button"
-        elements: [room-join-rule-select, room-history-policy-select, room-admin-toggle, room-owner-transfer-button, room-pending-invite, room-pending-invite-withdraw-button, room-nest-read-toggle, room-labeler-toggle, room-labeler-inspect-button, room-settings-save-button, room-leave-button, room-leave-confirm, error-message]
+        elements: [room-join-rule-select, room-history-policy-select, room-admin-toggle, room-owner-transfer-button, room-pending-invite, room-pending-invite-withdraw-button, room-nest-read-toggle, room-labeler-toggle, room-labeler-inspect-button, room-settings-save-button, room-leave-button, room-leave-confirm, room-remove-button, room-remove-confirm, error-message]
     notes:
       ios: >
         conversation-search-box is inside the List (first Section row), hittable
@@ -1234,7 +1237,21 @@ pages:
       - pending-action-description     # text, indexed — what will happen (verb + target, e.g. the new handle)
       - pending-action-execute-after   # text, indexed — when it will apply
       - pending-action-cancel-button   # button, indexed — cancel the scheduled action (one click)
-      - sign-out-button            # button — sign out (clears local credentials + state, returns to onboarding)
+      # ── Unsent changes (ids DECLARED 2026-11-14 under rule A's additive carve-out — an advisory
+      # declaration, vetoable for a week; account-offline-mutation.md § The offline-mutation
+      # contract (W4) → The unsent-changes surface). The STANDING sibling of the pending-actions
+      # section: always present, empty when nothing is queued. The ONE place every change this
+      # app holds that has not reached the nest is listed — one row per undrained outbox intent,
+      # scope order then compose order, in one of three states (waiting / held / not sent).
+      # Retry and discard render on a not-sent row only; discard is behind a confirm. ──
+      - unsent-changes-section         # view — the standing section container
+      - unsent-change-item             # view, indexed — one row per undrained intent
+      - unsent-change-description      # text, indexed — the kind in user words with its target
+      - unsent-change-status           # text, indexed — the state, and on a not-sent row why
+      - unsent-change-retry-button     # button, indexed — re-arm a not-sent intent (not-sent rows only)
+      - unsent-change-discard-button   # button, indexed — discard a not-sent intent (not-sent rows only; arms the confirm)
+      - unsent-change-discard-confirm-button  # button, indexed — destructive-action confirm step for discard
+      - sign-out-button           # button — sign out (clears local credentials + state, returns to onboarding)
       # "Export My Data" — fetches the full account archive (payload bytes
       # included; account-data-plane.md § Nest-side requirements item 1,
       # *Payload stores* decision (5) — no toggle, the full archive is the
@@ -1445,6 +1462,11 @@ pages:
       # `-status` grammar was explicitly weighed against a `-review` rename on
       # exactly the not-a-leg-status ground above, and the sibling grammar won.
       - recovery-kit-inherited-filters-status  # text — "N rules from before your recovery are unchecked"
+      # The successor's owed nests — the linked nests the succession has not
+      # reached yet, each with what this device's last delivery found and a
+      # dismiss that settles it on the user's word.
+      - recovery-kit-owed-nests-status  # text — "N other servers have not yet been told your account moved"
+      - recovery-kit-owed-nest-item  # indexed — components.recovery-kit-owed-nest-item
       # ── The ephemeral kit-side unattested-member review pass
       #    (identity-succession.md § Propagation → MLS groups, ruling 1). ──
       # Optional, and the gate is the ruling itself: this pass is shown ONCE per
@@ -1810,6 +1832,11 @@ pages:
       - admin-users-cancel-eviction-button  # button, indexed — restore a suspended/evicted user
       - admin-users-make-admin-button    # button, indexed — grant the admin role (admin.md § Admin continuity and succession)
       - admin-users-remove-admin-button  # button, indexed — revoke the admin role (admin.md § Admin continuity and succession)
+      - admin-users-supervised-by        # text, indexed — the supervised row's guardian, present only on a supervised row (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
+      - admin-users-take-over-button     # button, indexed — arms the take-over confirm on a row supervised by someone other than the viewer (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
+      - admin-users-take-over-confirm-summary  # text, indexed — the armed confirm's decision surface, present only while armed (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
+      - admin-users-take-over-confirm-button   # button, indexed — dispatches the take-over, present only while armed (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
+      - admin-users-take-over-cancel-button    # button, indexed — disarms the confirm, present only while armed (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
       - admin-users-action-error         # text — user action error display
       - admin-users-pagination           # view — pagination container
       - admin-users-prev-page            # button — previous page
@@ -2989,6 +3016,9 @@ pages:
       # ── Tiers tab · OTHER · offers ──
       - subscription-offers-section       # view — another creator's offered tiers
       #   rows → subscription-offer-list (component)
+      #   the redeem row (monetization.md § Pillar 3 → Buyer↔actor binding (Q4) → The doors, ruled 2026-11-08; profile.md § Layout & flow): the subscription-settings pair, also in this page's scope — an additive scope widening declared 2026-11-10 (rule A's advisory class); unbuilt on every app — tui leads
+      - subscription-claim-redeem-input   # text_input — paste a claim code of THIS creator; redeems at the page's actor_home (OTHER only)
+      - subscription-claim-redeem-button  # button — redeem the pasted code at the creator's home (OTHER only)
       # ── Tiers tab · SELF · §4 Payment providers (Pillar 3; IDs reserved 2026-07-12) ──
       - subscription-provider-section     # view — the author's configured payment providers + add
       - subscription-provider-add-button  # button — open the provider add/edit form
@@ -5415,6 +5445,18 @@ components:
       - feed-post-unpublish-web-button     # indexed — take the published page down (fauna.web.publish.unset; one-tap — idempotent + reversible, unlike delete); gated is_own && web_slug
       - feed-post-copy-web-link-button     # indexed — copy the public page URL (shared site_link_view origin + post/{slug}.html; the selling link — visitors get the teaser); gated is_own && web_slug; disabled with reason when no serving origin
       - feed-post-copy-paywall-link-button # indexed — mint + copy a short-lived full-access capability URL (fauna.web.paywall.mint_token; UI copy states the ~10-min validity — durable comps are Pillar-3 claim codes); gated is_own && web_slug && gated_tier (monetization.md § Pillar 2 → Creator comp-link surface)
+      - feed-post-advertise-nostr-button   # indexed — advertise this sold post on Nostr (fauna.nostr.advertise.set; the first act opens advertise-nostr-confirm-dialog); gated is_own && gated_tier && !nostr_advertised && a linked Nostr key && the nest's `nostr-advertise` capability (monetization.md § The Nostr advertisement of a sold post → What the author sees and agrees to; IDs declared 2026-11-13 under the advisory approvals, vetoable for a week; unbuilt, tui leads)
+      - feed-post-stop-advertising-nostr-button # indexed — withdraw the advertisement (fauna.nostr.advertise.clear; one-tap — de-escalation, never gated by the zaps member); gated is_own && nostr_advertised
+      - advertise-nostr-confirm-dialog     # view — the confirm step before the advertise act, stating the consequence in plain words (the media-delete-confirm-modal precedent); present only while open
+      - advertise-nostr-confirm-button     # confirm — runs fauna.nostr.advertise.set; a typed refusal surfaces as it is
+      - advertise-nostr-cancel-button      # close the confirm step without side effect
+      - feed-post-sale-price-button        # indexed — Change price…: set, change or clear a sold post's price; gated is_own && the post is sold; payments plane (monetization.md § The asking price → Re-pricing a sold post; IDs declared 2026-11-14 under the advisory approvals, vetoable for a week; unbuilt, tui leads)
+      - feed-post-sale-price-dialog        # view — the price editor (the composer's two price fields, pre-filled); present only while open
+      - feed-post-sale-price-hint          # the free-text price (price_hint); emptied + saved clears
+      - feed-post-sale-price-asking        # the machine sats price (asking_price); emptied + saved clears
+      - feed-post-sale-price-advertised-note # shown only when the post is advertised on Nostr — what the edit does to the advertisement
+      - feed-post-sale-price-save-button   # save: tiers.update for changed fields, tiers.clear_field for emptied ones (one shared-Rust plan)
+      - feed-post-sale-price-cancel-button # close without side effect
       - feed-post-report-button            # indexed — report this post to your nest admins (opens the shared report-sheet with subject post {cid}); gated !is_own (moderation.md § User-initiated reporting → App surface; IDs user-approved 2026-09-25; built on all 7 apps by 2026-10-08). The post's mark-as-spam verb sits beside it (report-sharing.md § Report capture → The post's mark-as-spam verb, ruled 2026-11-07; IDs user-approved 2026-11-07)
       - feed-post-mark-as-spam-button      # indexed — mark someone else's post as spam, or un-mark it (a toggle; state on/off off the spam_marked list): MailSettingsMachine::train_moderation_correction(post_id, is_spam) — the sealed model half when mail is on, then fauna.moderation.train {spam|ham} (the opt-in report:spam capture) — plus the marker's own spam collapse (report-sharing.md § Report capture → The post's mark-as-spam verb; ruled 2026-11-07; IDs user-approved 2026-11-07); gated !is_own; sits BESIDE the report verb, never replacing it
     used_in: [feed (inside post-card)]
@@ -5712,6 +5754,8 @@ components:
       - dm-message-muted             # indexed — collapse placeholder shown iff this decrypted message's body matches a muted keyword (client-side, post-decrypt, via the shared matches_muted_keywords / matchesMutedKeywords over the muted-keywords list on the account plane); the body/attachments are hidden behind it. Localized "Muted word" (content-moderation-and-ranking.md § Q3; moderation.md § Muted keywords). Reveal via dm-message-muted-reveal-button.
       - dm-message-muted-reveal-button # indexed — one tap reveals a muted-collapsed message's body (per-message, session-local; the mute stays, this just un-collapses this instance). Mirrors load-remote-content-button's reveal gesture.
       - dm-message-undelivered       # indexed, text — "not delivered" line under the body of the user's OWN bridged message whose queued item the bridge never drained (MessageSnapshot.undelivered, from inbox.fetch's `undelivered`; apps/bridges.md § Phase G → When the bridge stops serving). Body stays in view (the user sends again from the composer); no resend button. ID user-approved 2026-10-16; built on tui 2026-10-17, the six follow (conversations.md § Element IDs → A bridged room no bridge serves).
+      - dm-message-queued            # indexed, text — "Waiting to send" line under the body of the user's OWN queued copy of an MLS send the app holds for a nest it cannot reach (the `queued:<intent>` copy; MessageSnapshot.queued_send = Queued), and under the held remainder behind a parked head. Body stays in view. ID declared 2026-11-14 (rule A, additive; devices.md § Offline compose → What "resurfaced as drafts" means).
+      - dm-message-unsent            # indexed, text — "Not sent — <reason>" line under the body of the user's OWN parked copy (MessageSnapshot.queued_send = Unsent { reason_code, reason }). The dm-message-undelivered shape, body in view; its actions menu offers retry and discard. ID declared 2026-11-14 (rule A, additive; same owner).
       - dm-message-warmup-deferred   # indexed, text — "Delivery deferred until <date> per IP warm-up schedule. <queue position>" under the body of the user's OWN sent mail the fresh-IP warm-up holds (MessageSnapshot.warmup_hold, from sent.fetch's `warmup_hold`; worded by the shared warmup_deferred_text). Absent once released. ID user-approved 2026-10-16; built on tui 2026-10-17, the six follow (mail-deliverability.md § Enforcement at submission time).
       - dm-message-delivered-to-alias # indexed, text — "Delivered to: <address> [<label>]" on a received mail message: the alias the message arrived on, resolved client-side by fauna_mail::aliases::delivered::delivered_alias from the nest's X-Fauna-Delivered-To stamp plus the account's alias list (mail-aliases.md § Label). Absent when the message carries no stamp or the alias is not the user's. ID user-approved 2026-10-16.
       - dm-message-withheld-badge   # indexed, button — "withheld by this nest — appeal" beside the body of the user's OWN fauna-native message the nest took down or blocked (MessageSnapshot.withheld, matched to the author's moderation queue row by record digest, read when the thread opens). One tap opens that row's appeal — the same appeal flow and appeal-* ids the queue uses. Replaces, never doubles, the beside-body block notice. ID owner-approved 2026-10-19; built on tui first, the six follow (moderation.md § Legal takedown → App render).
@@ -5738,6 +5782,11 @@ components:
     optional_elements:
       - dm-message-delete-button          # delete this message; gated supports_message_delete && is_own
       - dm-message-delete-confirm-button  # destructive-action confirm step for delete
+      - dm-message-retry-button           # indexed — retry this unsent own copy (re-arms the parked intent; the channel's held remainder follows in order); present on an unsent own copy only. ID declared 2026-11-14 (rule A, additive; account-offline-mutation.md § The unsent-changes surface)
+      - dm-message-discard-button         # indexed — discard this unsent own copy (deletes the parked intent and takes the copy out of the thread); present on an unsent own copy only; arms the confirm. ID declared 2026-11-14 (same)
+      - dm-message-discard-confirm-button # destructive-action confirm step for discard (the dm-message-delete-confirm-button shape). ID declared 2026-11-14 (same)
+      - dm-message-remove-button         # remove this message from my nest only — the far side keeps its copy; gated MessageSnapshot.can_remove (capabilities.supports_local_remove, a bridged room today), own rows too (declared 2026-11-14 under rule A's advisory class; behavior owner bridged-adapter.md § Removing bridged rows)
+      - dm-message-remove-confirm-button  # destructive-action confirm step for the remove
       - dm-message-mark-as-spam-button    # indexed — mark a received message as spam; gated !is_own. The live Insert consumer (mail-spam.md § Wire shapes put_spam_model history_op): trains the per-user spam model client-side (sealed, self-servicing tier-1) AND writes a sealed training-history row via train_spam_model_client_mail → apply_spam_model_write(Train, Some(HistoryWrite::Insert)). On a mail-disabled actor (no spam-model-sealed-at-rest advert) the gesture is a silent no-op — a conversation message is client-only encrypted content the nest cannot read, so there is NO server-train (fauna.moderation.train) fallback (unlike the moderation-queue server-row correction). NOT the muted-keyword collapse (that's dm-message-muted).
       - dm-message-report-button          # indexed — report this received message to your nest admins (opens the shared report-sheet with subject message {channel, record_cid}); gated !is_own. Sits BESIDE mark-as-spam, never replacing it: spam trains the reporter's own sealed model and reaches no human, report is evidence to an admin (moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; built on all 7 apps by 2026-10-08)
     used_in: [conversations.conversation_detail]
@@ -5853,7 +5902,6 @@ components:
     used_in: [events]
     notes:
       windows: "ItemTemplate in EventsPage agenda view with left color bar."
-      android: "Only the separate invited-events quick-list carries inline event-rsvp-*; the main event-card list does not — a narrower placement than web/linux/windows/macos/ios, flagged for whoever next touches android's events screen (priority #4)."
 
   rsvp-button-group:
     description: "RSVP response buttons: Going, Interested, Decline"
@@ -6400,6 +6448,7 @@ components:
       - connected-apps-request-approve     # button — resolve_consent(approved)
       - connected-apps-request-decline     # button — resolve_consent(declined), recorded nest-side
       - connected-apps-request-block       # button — Never show requests from this app (per-client block)
+      - connected-apps-request-folder      # select — the folder picker, only on a card carrying a bare folder-plane scope (ConsentCardRow.folder_picker; authorization-server.md § Consent → The card chooses the folder). Owner-approved 2026-10-16.
       # ── The install section — only on an admin's hosted-plugin install card (ConsentCardRow.install;
       # third-party.md § The install-approval leg). IDs owner-approved 2026-10-16. ──
       - connected-apps-request-install            # text — the section heading (installing runs this code on your nest)
@@ -6433,6 +6482,32 @@ components:
       # (connected-apps.md § Layout & flow, region 3). Owner-approved
       # 2026-10-16.
       - connected-apps-item-settings-link  # button — open the plugin's settings card
+      # The trust facet and history lens — render only on a principal that
+      # attested a holder key, on an app that reads the owner's grant log
+      # (connected-apps.md § The trust facet and history lens). The Nests
+      # page's IDs reused verbatim, scoped within this item (owner-ruled
+      # 2026-10-16); declared 2026-11-13 under rule A's advisory class.
+      - nest-trust-view-now                # button — the row's Now lens
+      - nest-trust-view-history            # button — the row's History lens
+      - nest-trust-grant-list              # view — Now: the live keys (holds nest-trust-grant-item rows)
+      - nest-trust-empty                   # text — Now: "This app holds no keys to your records"
+      - nest-trust-history-list            # view — History: the grant-event timeline
+      - nest-trust-history-item            # text, indexed within the history list — Minted / Revoked ‹scope› · ‹when›
+      # Render only on a principal row the oracle served (the shared
+      # opens_record — an app-password session's summary has no record):
+      # the per-operation record, newest first (connected-apps.md § Layout &
+      # flow, region 3). Owner-approved 2026-10-16.
+      - connected-apps-oracle-open         # button — open the record; while open, close it
+      - connected-apps-oracle-list         # view — the open record, once its read returned
+      - connected-apps-oracle-op           # component (indexed) — one operation
+      - connected-apps-oracle-empty        # text — an open record with no operation
+    used_in: [connected-apps]
+
+  connected-apps-oracle-op:
+    description: "One operation of a served principal's open record (indexed, newest first), scoped within its connected-apps-item: when, its class in the consent card's words, its detail verbatim; the class verbatim as its `class` value. connected-apps.md § Layout & flow, region 3."
+    indexed: true
+    elements:
+      - connected-apps-oracle-op
     used_in: [connected-apps]
 
   connected-apps-blocked-item:
@@ -6840,11 +6915,12 @@ components:
       - nest-trust-mint-scope-select       # scope-first use-case picker: one option per LinkedNestRow.mint_options entry (mail / calendar / per-tier paywalled posts)
       - nest-trust-mint-holder-select      # CONDITIONAL: rendered only when the chosen option has >1 holder candidate (ambiguity case; today every option derives exactly one holder)
       - nest-trust-mint-duration-select    # how long the new trust lasts: 'For a few hours' / 'For 90 days' (the shared mint_duration_options); pre-selects LinkedNestRow.mint_default_duration (IDs user-approved 2026-09-24)
+      - nest-trust-mint-materialize-note   # text, CONDITIONAL: the picked option's mint-time note (the shared mint_option_note — today the materialization options' honesty copy), before the confirm (declared 2026-11-13 under rule A's advisory class; docs/goal/architecture/capability-grants.md § Capability tiering → The materialization grant (f))
       - nest-trust-mint-confirm-button     # dispatch Mint{nest_id, holder_bridge_id (derived or picked), scope, duration}
     used_in: [nests]
 
   nest-trust-grant-item:
-    description: "One current content-processing grant on a nest. Indexed; nested inside `nests-item` — queried scoped (e.g. scope=nests-item[i] then nest-trust-grant-item[j]). Shows the trust scope, lasts-until, liveness status, the REQUIRED honest-bound copy, and renew/revoke controls. Rendered copy uses 'trust'/'trusted to read …' — never 'capability'/'grant' (participants.md § Naming). docs/goal/ui/nests.md § Trust facet."
+    description: "One current content-processing grant on a nest, or one live key a connected app holds to the user's records. Indexed; nested inside `nests-item` or `connected-apps-item` — queried scoped (e.g. scope=nests-item[i] then nest-trust-grant-item[j]). Shows the trust scope, lasts-until, liveness status, the REQUIRED honest-bound copy, and renew/revoke controls. On a connected app's row (a third-party principal) the renew, revoke, unattested-mark and keep leaves are ABSENT: the row's one Revoke is the participant's revoke control, and only the app asking again renews (connected-apps.md § The trust facet and history lens; owner-ruled 2026-10-16). Rendered copy uses 'trust'/'trusted to read …' — never 'capability'/'grant' (participants.md § Naming). docs/goal/ui/nests.md § Trust facet."
     elements:
       - nest-trust-grant-item
       - nest-trust-grant-scope             # "Trusted to read: Mail, Calendar"
@@ -6862,7 +6938,7 @@ components:
       # across). IDs user-approved 2026-08-03.
       - nest-trust-grant-unattested-mark   # text, indexed — the review mark
       - nest-trust-grant-keep-button       # button, indexed — Keep clears it
-    used_in: [nests]
+    used_in: [nests, connected-apps]
 
   nest-trust-backup-item:
     description: "One backup trust row on the HOME nest's row (indexed; nested inside nests-item, queried scoped like nest-trust-grant-item). Renders in the Now lens after the content-processing grant rows. Two instances today, distinguished by scope text: the owner→source-nest NestBackupKey seal grant ('Backs up your messages…'; read: fauna.backup.status enrolled; revoke → fauna.backup.nest_key.revoke) and one row per destination for the source nest's writer authorization there ('Writes your backups to ‹dest›'; read: fauna.backup.writer_grant.list on the destination's own connection; revoke → fauna.backup.writer_grant.revoke, spoken to the destination — operable with the source nest hostile). Live nest reads, NOT the grant-event log — hence no lasts-until/renew/History leaves. Rendered copy uses trust vocabulary, never 'capability'/'grant'. IDs user-approved 2026-07-24; docs/goal/ui/nests.md § Trust facet — backup rows."
@@ -6932,6 +7008,17 @@ components:
       - custody-offer-accept-button        # consent: bind the chosen target, pick the budget
       - custody-offer-decline-button       # dismiss locally; the offer decays owner-side
     used_in: [devices]
+
+  recovery-kit-owed-nest-item:
+    description: "One owed nest (indexed) in Settings' Recovery kit section: a nest the successor's predecessor identity was linked to that the keeping nest still serves on fauna.recovery.succession.status's owed_nests, with what this device's last delivery found (succession-linked-nests.md § The road → What the dial does with an entry it cannot land, the second rule: the user ends what the runtime cannot). The entry is the keeping nest's word (it lists only what the nest serves); the outcome is this device's (OwedNestsView::project joins the two; NotTried when this runtime has delivered nothing). The dismiss is the one way an entry naming a nest the user does not recognise, a box the user replaced, or a fork with no winner leaves the list — the two-step inline destructive confirm, settled with fauna.recovery.succession.owed_settle; nothing is dialed on a confirm, and the runtime never settles on a mismatch. Copy never grades the user safe or unsafe. Lists the entries the BOUND nest keeps; entries a linked nest keeps are delivered but not yet listed. Declared additive 2026-11-14; tui first."
+    elements:
+      - recovery-kit-owed-nest-item
+      - recovery-kit-owed-nest-address              # the recorded address, or "no address was recorded"
+      - recovery-kit-owed-nest-outcome              # this device's last delivery's finding
+      - recovery-kit-owed-nest-dismiss-button        # step one: reveals the confirm/cancel pair on THIS entry
+      - recovery-kit-owed-nest-dismiss-confirm-button  # step two: owed_settle at the keeping nest; nothing dialed
+      - recovery-kit-owed-nest-dismiss-cancel-button   # step two: hides the pair, nothing sent
+    used_in: [settings]
 
   device-member-card:
     description: "One signed-in device without a matching entry (indexed): a verified fleet member — a device holding this account's keys — that NO roster row accounts for, offered direct removal BY ITS KEY through the member-addressed door (fleet-scope-reclamation.md § Fleet-scope reclamation, clause (4), *A disagreement is the user's to settle*; devices.md § Members without a matching entry). Who lists here: a device removed from the web app (its nest row deleted alone), a device whose own record names a row that is not its roster row (fabricated, a sibling's, this device's own — and then BOTH devices stating one row), a non-stating device whose claim the nest stripped or re-aimed, and a device signed in but not yet registered with the server (until it does). An honest fleet lists nobody. Such a member has NO name — the label is the nest row's, exactly what cannot be trusted here — so the card carries its key fingerprint (first 8 + … + last 8 hex, the shared `fleet_fingerprint`) and the sign-in time the device itself claims (its own self-signed word, a hint never proof). The user settles by elimination against `device-own-fingerprint` on each device still in hand; the honest re-minted machine yields two cards, one matching its own fingerprint. Removal is PERMANENT (the fleet's Removed record is absorbing; the device must sign in again from scratch) — hence the two-step confirm the user chose. A separately-labelled group below the roster, never intermixed with device-card rows. IDs user-approved 2026-09-25; tui first."
@@ -8463,6 +8550,38 @@ elements:
     description: "The line that ROUTES the successor to their filter list — the remedy a prior finding found missing (succession-aftermath.md § Adjudicating what the aftermath carries across, 2026-08-14). Names how many email filter rules the account carried across the succession and has not yet kept or removed, says why that is worth a look (a filter can silently bin or redirect incoming mail), and points at Settings ▸ Privacy ▸ Email Filters, where each rule is marked (filter-unattested-mark) and answered. ⚠ NOT a leg status like its six siblings above: there is no done line, because the honest done state of a review backlog is an ABSENT line — it renders only while rules are still unadjudicated and disappears by itself, which is what keeps the Recovery Kit section from carrying permanent clutter for every account that ever ran a recovery. Copy must not accuse: after a recovery almost every rule is the owner's own. ✅ rule-A sign-off GRANTED 2026-08-15 (name stands as-is). Built on tui only."
     type: text
 
+  # --- The successor's owed nests (succession-linked-nests.md § The road,
+  #     *What the dial does with an entry it cannot land*, its second rule).
+  #     Declared additive under UI rule A 2026-11-14 (the goal doc designs the
+  #     behaviour; vetoable for the advisory window). ---
+  recovery-kit-owed-nests-status:
+    description: "The owed-nests list's one line: how many of the nests the successor's predecessors were linked to have not yet been told of the succession (fauna.recovery.succession.status's owed_nests, the bound nest's entries). Optional: renders only for an identity that succeeded from another and whose list is non-empty — an empty list is no line. Copy from the shared projection (fauna_client_recovery::owed_nests::OwedNestsView::status): it says what is still being retired where and that an entry the user does not recognise may be removed; it never grades the user safe or unsafe and never calls a delivery attempt dangerous."
+    type: text
+  recovery-kit-owed-nest-item:
+    type: view
+    description: "One owed nest (indexed; components.recovery-kit-owed-nest-item owns the full description)"
+    indexed: true
+  recovery-kit-owed-nest-address:
+    type: text
+    description: "The owed nest's address as the burned pairing recorded it, or a sentence saying none was recorded"
+    indexed: true
+  recovery-kit-owed-nest-outcome:
+    type: text
+    description: "What this device's last delivery to that nest found — not tried yet, landed, unreachable, another nest answers there (parked until a relaunch), refused with its code, no seed held, chain forked, successor exists, or waiting — one arm of the shared OwedOutcome, its copy from OwedOutcome::copy"
+    indexed: true
+  recovery-kit-owed-nest-dismiss-button:
+    type: button
+    description: "Step one of the dismiss: reveals the confirm/cancel pair on THIS entry; nothing is sent"
+    indexed: true
+  recovery-kit-owed-nest-dismiss-confirm-button:
+    type: button
+    description: "Step two: settles the entry on the user's word — fauna.recovery.succession.owed_settle { old_actor_id, nest_id } at the keeping nest (idempotent); nothing is dialed. On success the entry leaves the list; a refusal paints error-message and keeps the entry"
+    indexed: true
+  recovery-kit-owed-nest-dismiss-cancel-button:
+    type: button
+    description: "Step two: hides the pair; nothing is sent"
+    indexed: true
+
   # --- The unattested-member review pass (identity-succession.md § Propagation
   #     → MLS groups). One id family, rendered on TWO surfaces: the ephemeral
   #     kit-side pass inside the Settings Recovery Kit section, and (when it
@@ -9171,6 +9290,14 @@ elements:
     description: "Not-delivered line under the body of the user's OWN bridged message whose queued item the bridge never drained — the nest stamped the Sent copy `undelivered` when its serving principal ended (apps/bridges.md § Phase G → When the bridge stops serving; MessageSnapshot.undelivered, additive). The dm-message-deleted / dm-message-muted shape, except the body stays in view so the user can send it again; no resend button — the user sends again from the composer once a bridge serves the room. Text is the shared i18n string, one sentence in user voice (conversations.md § Element IDs → A bridged room no bridge serves). ID user-approved 2026-10-16; built on tui 2026-10-17, the six follow."
     type: text
     indexed: true
+  dm-message-queued:
+    description: "Waiting-to-send line under the body of the user's OWN queued copy of an MLS send the app holds for a nest it cannot reach (the `queued:<intent>` copy), and under each held copy behind a parked head of the same channel. The dm-message-undelivered shape: the body stays in view. Projected in shared Rust (MessageSnapshot.queued_send = Queued, from ConversationsManager::refresh_unsent_sends); text is the shared i18n string. Absent once the intent drains (devices.md § Offline compose → What \"resurfaced as drafts\" means; account-offline-mutation.md § The offline-mutation contract (W4) → The unsent-changes surface). ID declared 2026-11-14 under rule A's additive carve-out (advisory, vetoable for a week); tui first."
+    type: text
+    indexed: true
+  dm-message-unsent:
+    description: "Not-sent line under the body of the user's OWN parked copy of an MLS send: 'Not sent — <reason>', the reason rendered in shared Rust from the stored failure code (MessageSnapshot.queued_send = Unsent { reason_code, reason }). The dm-message-undelivered shape with the body in view — the copy IS the draft, nothing moves into the composer; its dm-message-actions-menu offers dm-message-retry-button and dm-message-discard-button (devices.md § Offline compose → What \"resurfaced as drafts\" means). ID declared 2026-11-14 under rule A's additive carve-out (advisory, vetoable for a week); tui first."
+    type: text
+    indexed: true
   dm-message-warmup-deferred:
     description: "Deferred-delivery line under the body of the user's OWN sent mail the fresh-IP warm-up is holding back — the nest accepted it but will deliver it only when the day's ramp allows (mail-deliverability.md § Enforcement at submission time). Says when it will be delivered (the release time, local clock) and how many held messages are ahead of it, in the shared wording (fauna_conversations::message::warmup_deferred_text over MessageSnapshot.warmup_hold, from the Sent read's InboxMessage.warmup_hold — no app formats the date or count); absent once the release has come or a later Sent read no longer carries the hold. Received and sent mail render in the DM thread, so this is a leaf of the sent message's bubble, not of a mail message-detail page (none exists). ID user-approved 2026-10-16 (renamed from mail-message-detail-warmup-deferred-row); built on tui 2026-10-17, the six follow."
     type: text
@@ -9199,6 +9326,23 @@ elements:
     type: button
   dm-message-delete-confirm-button:
     description: "Destructive-action confirm step for dm-message-delete-button."
+    type: button
+  dm-message-retry-button:
+    description: "Retry this unsent own copy, in the dm-message-actions-menu overflow: re-arms the parked intent (ConversationsManager::retry_queued_send), and the channel's held remainder follows in order. Present on an unsent own copy only (account-offline-mutation.md § The offline-mutation contract (W4) → The unsent-changes surface, point 2). ID declared 2026-11-14 under rule A's additive carve-out (advisory, vetoable for a week)."
+    type: button
+    indexed: true
+  dm-message-discard-button:
+    description: "Discard this unsent own copy, in the dm-message-actions-menu overflow: arms dm-message-discard-confirm-button; confirmed, it deletes the parked intent and takes the copy out of the thread (ConversationsManager::discard_queued_send). Per message — never the channel's remainder. Present on an unsent own copy only. ID declared 2026-11-14 under rule A's additive carve-out (advisory, vetoable for a week)."
+    type: button
+    indexed: true
+  dm-message-discard-confirm-button:
+    description: "Destructive-action confirm step for dm-message-discard-button (the dm-message-delete-confirm-button shape). ID declared 2026-11-14 under rule A's additive carve-out (advisory, vetoable for a week)."
+    type: button
+  dm-message-remove-button:
+    description: "Remove this message from my nest, in the dm-message-actions-menu overflow — the nest's copy only, never the far side's (a remove, not the cooperative delete). Gated MessageSnapshot.can_remove, which follows capabilities.supports_local_remove (a bridged room today), on own rows too. Opens dm-message-remove-confirm-button. Declared 2026-11-14 under rule A's advisory class; behavior owner bridged-adapter.md § Removing bridged rows."
+    type: button
+  dm-message-remove-confirm-button:
+    description: "Destructive-action confirm step for dm-message-remove-button; its copy names that the far side keeps its copy. One manager.remove_message call; the bubble leaves when the nest answers, a refusal surfaces on error-message."
     type: button
   dm-message-mark-as-spam-button:
     description: "Mark this received message as spam (in the dm-message-actions-menu overflow; gated !is_own). Trains the per-user spam model client-side over the retained decrypted body and writes a sealed training-history row (the live Insert consumer — train_spam_model_client_mail → apply_spam_model_write(Train, Some(HistoryWrite::Insert)); mail-spam.md § Encrypted-mode interaction + § Wire shapes). The sealed row renders on the mail-spam page with per-row undo. On a mail-disabled actor (no spam-model-sealed-at-rest advert) the gesture is a silent no-op — a conversation message is client-only encrypted content the nest cannot read, so there is NO server-train (fauna.moderation.train) fallback (unlike the moderation-queue server-row correction). Distinct from dm-message-muted (the muted-keyword collapse, a hide not a spam-train)."
@@ -9261,7 +9405,7 @@ elements:
     description: "The room's class stated on the thread header (ThreadDetail.room.class; conversation-rooms.md § The three classes). State exposed via the `class` attribute (end-to-end | community | transport-only). Not encrypted-badge, which is per-message. Absent where the rail models no room."
     type: text
   thread-room-notice:
-    description: "The room's standing notice on the thread header (conversations.md § Element IDs; user-approved 2026-09-25). One text element, painted only while a notice holds, its state exposed via the `state` attribute: moderation-unverified (ThreadDetail.room.moderation_unverified — this device could not verify some of the room's moderation; conversation-rooms.md § Members verify what they paint) | awaiting-key (ThreadDetail.room.awaiting_key — a newcomer waiting to be keyed in; community-rooms.md) | bridge-disconnected (ThreadDetail.room.bridge_disconnected — a bridged room no live bridge principal serves, from rooms.list's `disconnected`: readable, never writable; apps/bridges.md § Phase G → When the bridge stops serving; third state user-approved 2026-10-16, built on tui 2026-10-17 — the shared RoomNoticeFor answers it on every app, the six's paint unwitnessed). awaiting-key wins when both of the first two hold; bridge-disconnected holds only on a transport-only room, where neither of the others can, so no precedence question arises. Never a mark on a message a parked record targets."
+    description: "The room's standing notice on the thread header (conversations.md § Element IDs; user-approved 2026-09-25). One text element, painted only while a notice holds, its state exposed via the `state` attribute: moderation-unverified (ThreadDetail.room.moderation_unverified — this device could not verify some of the room's moderation; conversation-rooms.md § Members verify what they paint) | awaiting-key (ThreadDetail.room.awaiting_key — a newcomer waiting to be keyed in; community-rooms.md) | rekey-pending (ThreadDetail.room.severance_owed — someone was removed and the room's re-key has not landed yet, from the floor's `severance_owed` on every seated device, cleared by the floor read that shows it paid; community-rooms.md § The three classes → A removal's re-key is owed until it lands; fourth state DECLARED 2026-11-14 under rule A's additive carve-out, built on tui the same day — the shared RoomNoticeFor answers it on every app, the six's paint unwitnessed) | bridge-disconnected (ThreadDetail.room.bridge_disconnected — a bridged room no live bridge principal serves, from rooms.list's `disconnected`: readable, never writable; apps/bridges.md § Phase G → When the bridge stops serving; third state user-approved 2026-10-16, built on tui 2026-10-17 — the shared RoomNoticeFor answers it on every app, the six's paint unwitnessed). awaiting-key wins over the other two community-room states, and rekey-pending wins over moderation-unverified; bridge-disconnected holds only on a transport-only room, where none of the others can, so no precedence question arises there. Never a mark on a message a parked record targets."
     type: text
   thread-room-settings-button:
     description: "Opens the room policy editor (the room_settings sub-page). Painted AND LIVE whenever the thread is a room — any member opens it (user-approved 2026-09-20): the surface carries room-leave-button, a plain member's verb, so a door gated on capabilities.can_set_policy put the one control a member needs behind the one capability a member never has. The greying is per control INSIDE (conversations.md § Architectural rules 5); a member sees every policy control and Save greyed, and only the walk-out live."
@@ -9288,6 +9432,12 @@ elements:
     type: button
   room-leave-confirm:
     description: "Commits the departure room-leave-button opened — the thread-rename-confirm / add-participant-confirm shape this page already uses (user-approved 2026-09-20). One gesture, and the room's class picks the door beneath it: an end-to-end room reports its roster minus this account, a community room opens the room.leave ceremony; no app branches on class. The thread stays in the leaver's own list afterwards — the user keeps their copy of the conversation. A refusal surfaces on the page's error-message."
+    type: button
+  room-remove-button:
+    description: "The room policy editor's local remove of the whole conversation from my nest, beside room-leave-button (declared 2026-11-14 under rule A's advisory class; behavior owner bridged-adapter.md § Removing bridged rows). Greyed, never hidden, unless capabilities.supports_local_remove — a bridged room today, whose policy-less room still opens the editor for it (RoomSettingsDraft::seed), the policy controls absent there. Opens room-remove-confirm; NOT staged through room-settings-save-button — a remove is an immediate act."
+    type: button
+  room-remove-confirm:
+    description: "Commits the remove room-remove-button opened: one manager.remove_thread call; the thread leaves the list when the nest answers, the far side keeps its copy and is not told, and the next arrival from the peer brings the conversation back holding only what arrived since. A refusal surfaces on the page's error-message."
     type: button
   room-pending-invite:
     description: "One pending invitation on a community room, in the room policy editor's section between the per-participant controls and Save (user-approved 2026-09-25 under rule A; behavior owner conversation-rooms.md § Join rules and invites → Pending invitations are visible to whoever may withdraw them). One row per entry of ThreadDetail.room.pending_invites — the nest serves a viewer exactly the invitations that viewer may withdraw (owner and admins: all; another seated member: its own), so no capability gates the row. Its text names the invitee, who invited them and the rank on offer; `lapsed` attribute true | false (the room-admin-toggle `checked` shape) — a lapsed row would no longer be accepted and is listed so it can be cleared, and says so in words. The whole section is ABSENT while pending_invites is None (not served) or empty. Not an overlay on thread-member-chip[i]: an invitee is not a participant."
@@ -9461,6 +9611,33 @@ elements:
     indexed: true
   pending-action-cancel-button:
     description: "Cancel the scheduled action — one click, no confirm (cancelling is the safe direction)"
+    type: button
+    indexed: true
+  unsent-changes-section:
+    description: "STANDING account-page section listing every change this app holds that has not reached the nest yet (every undrained outbox intent) — always present, empty when nothing is queued; the sibling of pending-actions-section and its shape (account-offline-mutation.md § The offline-mutation contract (W4) → The unsent-changes surface; settings.md § Element IDs). IDs of this family declared 2026-11-14 under rule A's additive carve-out (advisory, vetoable for a week); tui first."
+    type: view
+  unsent-change-item:
+    description: "One row per undrained intent, scope order then compose order (the shared read model's UnsentChange list)"
+    type: view
+    indexed: true
+  unsent-change-description:
+    description: "The kind in user words with its target (e.g. 'Like on a post'; 'Message in <conversation>: <excerpt>') — the shared describer's text, never composed per app"
+    type: text
+    indexed: true
+  unsent-change-status:
+    description: "The row's state in user words (waiting / held / not sent) and, on a not-sent row, why — the stored failure code rendered through the shared localized reason, falling back to 'Your nest refused this change (<code>)'"
+    type: text
+    indexed: true
+  unsent-change-retry-button:
+    description: "Re-arm this not-sent intent (retry_unsent_change); the scope's held remainder follows in order. Rendered on a not-sent row only"
+    type: button
+    indexed: true
+  unsent-change-discard-button:
+    description: "Discard this not-sent intent — arms unsent-change-discard-confirm-button. Per intent, never scope-wide. Rendered on a not-sent row only"
+    type: button
+    indexed: true
+  unsent-change-discard-confirm-button:
+    description: "Destructive-action confirm step for unsent-change-discard-button (the dm-message-delete-confirm-button shape): confirmed, the intent is deleted (discard_unsent_change) — the one user-initiated deletion of a pending write"
     type: button
     indexed: true
   admin-users-pending-section:
@@ -9755,7 +9932,7 @@ elements:
   # REMOVED: feed-post-button (duplicate of post-submit-button)
   # REMOVED: feed-post-item (never used; post-card is the canonical post container)
   feed-like-button:
-    description: "Like button on a post"
+    description: "Like button on a post. Its `state` attribute reads on | off | queued | unsent (PostSummary.like_state, folded in shared Rust): `queued` marks a like the app holds for a nest it cannot reach — it toggles as usual, the compensating intent queueing behind; `unsent` marks one the nest refused — activating it RETRIES, and discard lives in the account page's unsent-changes list. The two state words declared 2026-11-14 under rule A's additive carve-out (advisory, vetoable for a week; account-offline-mutation.md § The offline-mutation contract (W4) → The unsent-changes surface, point 2)."
     type: button
     indexed: true
   feed-reply-button:
@@ -10090,6 +10267,45 @@ elements:
     description: "Mint + copy a short-lived full-access capability URL for a published post (fauna.web.paywall.mint_token; UI copy states the ~10-min validity — durable comps are Pillar-3 claim codes); gated is_own && web_slug && gated_tier (monetization.md § Pillar 2 → Creator comp-link surface)."
     type: button
     indexed: true
+  feed-post-advertise-nostr-button:
+    description: "Advertise this sold post on Nostr (in the feed-post-actions-menu overflow, beside the web-publish family): opens advertise-nostr-confirm-dialog, whose confirm runs fauna.nostr.advertise.set { post_id } — the post's teaser is published as a kind-1 note carrying the tier's price, so a zap of at least that price buys the post. Gated is_own && a tier sells the post && not advertised yet && the account has a linked Nostr key && the nest advertises the `nostr-advertise` capability. monetization.md § The Nostr advertisement of a sold post → What the author sees and agrees to; IDs declared 2026-11-13 under the advisory approvals (vetoable for a week); unbuilt (tui leads)."
+    type: button
+    indexed: true
+  feed-post-stop-advertising-nostr-button:
+    description: "Withdraw a sold post's Nostr advertisement (fauna.nostr.advertise.clear { post_id }; one-tap — de-escalation, reversible by advertising again): the note is deleted from the author's relay and the publish relays are asked to delete their copies. Gated is_own && advertised. monetization.md § The Nostr advertisement of a sold post; unbuilt (tui leads)."
+    type: button
+    indexed: true
+  advertise-nostr-confirm-dialog:
+    description: "Confirm step before the Advertise on Nostr act (the media-delete-confirm-modal precedent). States the consequence in plain words: the post's preview text is published to your relay and your Nostr publish relays with its price; anyone on Nostr can read it; a zap of at least that price buys the post for the zapper; stopping deletes it from your relay and asks the other relays to delete their copies, which may persist. Present only while open. monetization.md § The Nostr advertisement of a sold post → What the author sees and agrees to; unbuilt (tui leads)."
+    type: view
+  advertise-nostr-confirm-button:
+    description: "Confirm the advertisement — runs fauna.nostr.advertise.set for the post the dialog was opened on; the kind's typed refusals (not sold, no asking price, no linked key) surface as they are."
+    type: button
+  advertise-nostr-cancel-button:
+    description: "Close the advertise confirm step without side effect"
+    type: button
+  feed-post-sale-price-button:
+    description: "Change price… — set, change or clear the price of a post the author already sells (in the feed-post-actions-menu overflow, beside the web-publish family and the Nostr advertisement pair): opens feed-post-sale-price-dialog. Gated is_own && the post is sold (its gate names a per-post unlock tier). Inside the payments plane (its gated_features prefix feed-post-sale-price- lands with the first build, beside the store-safe witnesses that watch it). monetization.md § The asking price → Re-pricing a sold post; IDs declared 2026-11-14 under the advisory approvals (vetoable for a week); unbuilt (tui leads)."
+    type: button
+    indexed: true
+  feed-post-sale-price-dialog:
+    description: "The sold post's price editor: the composer's two price fields, pre-filled from the selling tier, plus save and cancel. Present only while open. Save sends only what changed — a changed non-empty field by fauna.subscriptions.tiers.update, a field emptied from a stored value by fauna.subscriptions.tiers.clear_field — through one shared-Rust plan; then the feed is re-read. monetization.md § The asking price → Re-pricing a sold post; unbuilt (tui leads)."
+    type: view
+  feed-post-sale-price-hint:
+    description: "The sold post's free-text price (the selling tier's price_hint; compose-sell-price's twin), pre-filled. Emptied and saved, it clears the stored value."
+    type: text_input
+  feed-post-sale-price-asking:
+    description: "The sold post's machine-comparable sats price (the selling tier's asking_price; compose-sell-asking-price's twin), pre-filled — independent of feed-post-sale-price-hint, no parsing infers one from the other. Emptied and saved, it clears the stored value (and the nest then stops the post's Nostr advertisement)."
+    type: text_input
+  feed-post-sale-price-advertised-note:
+    description: "Shown in feed-post-sale-price-dialog only when the post is advertised on Nostr: changing the price replaces the advertisement with one carrying the new price; removing the price stops the advertisement (monetization.md § The Nostr advertisement of a sold post → Lifecycle (1)–(2))."
+    type: text
+  feed-post-sale-price-save-button:
+    description: "Save the sold post's price edit; a refused asking-price parse keeps the dialog open with the composer's error; saving with nothing changed sends nothing"
+    type: button
+  feed-post-sale-price-cancel-button:
+    description: "Close the sold post's price editor without side effect"
+    type: button
   feed-post-muted:
     description: "Collapse placeholder shown iff this post matches a muted keyword (client-side via FeedManager::is_muted over the muted-keywords list on the account plane); the body/media are hidden behind it. The feed twin of dm-message-muted. A mute collapses in EVERY feed including chronological ones (topic-factors.md § Scoring); moderation.md § Muted keywords."
     type: view
@@ -12057,6 +12273,10 @@ elements:
     description: "One live consent request in the Requests tray (indexed): the built consent card — client identity verbatim, scopes in words, the binding code. The tray paints no row when no request is live."
     type: view
     indexed: true
+  connected-apps-request-folder:
+    description: "The consent card's folder picker, scoped within connected-apps-request-card, present exactly on a card carrying a bare folder-plane scope (fauna:folder:deposit / fauna:folder:read with no folder named). Option keys (native dropdowns show the human label, which the driver's select() normalizes onto the key): the folder's row id in decimal; labels the owner's folder names. Offers only the folders every bare folder verb on the card can take (deposit: not metadata-only; read: served by the owner's custody); no option is chosen until the user chooses, and the card's Approve is disabled until then. A card with no eligible folder offers no option and says why in its own text, Approve disabled. authorization-server.md § Consent → The card chooses the folder; connected-apps.md § Element IDs."
+    type: select
+    indexed: true
   connected-apps-request-code:
     description: "The binding code on a request card (also carried as the `code` attr), scoped within connected-apps-request-card"
     type: text
@@ -12146,6 +12366,22 @@ elements:
   connected-apps-item-settings-link:
     description: "On a hosted plugin's row only, scoped within its connected-apps-item — opens the plugin's settings card on the Bridges page (connected-apps.md § Layout & flow, region 3)"
     type: button
+    indexed: true
+  connected-apps-oracle-open:
+    description: "On a principal row the oracle served only (the shared opens_record; an app-password session's row carries the summary but no record), scoped within its connected-apps-item — opens the row's per-operation record and, while open, closes it; one record open at a time (connected-apps.md § Layout & flow, region 3)"
+    type: button
+    indexed: true
+  connected-apps-oracle-list:
+    description: "The open record's container, scoped within its connected-apps-item — painted once the record's read has returned (connected-apps.md § Layout & flow, region 3)"
+    type: view
+    indexed: true
+  connected-apps-oracle-op:
+    description: "One operation of the open record (indexed, newest first), scoped within its connected-apps-item: when, its class in words, its detail verbatim; `class` attr = the identity.op class verbatim (connected-apps.md § Layout & flow, region 3)"
+    type: text
+    indexed: true
+  connected-apps-oracle-empty:
+    description: "The open record's empty state, scoped within its connected-apps-item — its read returned no operation (connected-apps.md § Layout & flow, region 3)"
+    type: text
     indexed: true
   connected-apps-blocked-item:
     description: "One blocked app in the Blocked apps section (indexed): the client identity verbatim and when it was blocked. The section paints only while something is blocked."
@@ -12655,6 +12891,26 @@ elements:
     type: button
     description: "Revoke this user's admin role. Offered on any admin row; the nest refuses when it would leave zero superadmins, surfaced on admin-users-action-error. A scheduled (pending-action) act. See admin.md § Admin continuity and succession."
     indexed: true
+  admin-users-supervised-by:
+    type: text
+    description: "The supervised row's current guardian: the handle, the full actor hex for a handle-less account (one shared fallback in fauna-client-admin). Present only on a supervised row; view only. Data: AdminUser.guardian. See family-safety.md § App surface → Admin take-over."
+    indexed: true
+  admin-users-take-over-button:
+    type: button
+    description: "Arms the inline take-over confirm on this row. Offered by the shared admin_user_row_controls(…).take_over: on a row supervised by someone other than the viewing admin, whatever the row's lifecycle state. One row armed at a time; arming another disarms it. See family-safety.md § App surface → Admin take-over."
+    indexed: true
+  admin-users-take-over-confirm-summary:
+    type: text
+    description: "The armed confirm's decision surface: the ward's handle, the current guardian, that the viewer becomes the guardian at once and a pending hand-over, if any, is withdrawn, and that the policy is then theirs on the Family page. Present only while armed."
+    indexed: true
+  admin-users-take-over-confirm-button:
+    type: button
+    description: "Dispatches fauna.family.transfer with the ward as supervised and the viewing admin as the new guardian (disarm-before-dispatch); a self-proposal completes at once. A nest refusal surfaces on admin-users-action-error. Present only while armed."
+    indexed: true
+  admin-users-take-over-cancel-button:
+    type: button
+    description: "Disarms the take-over confirm, touching nothing. Present only while armed."
+    indexed: true
   admin-users-pagination:
     type: view
     description: "Pagination controls for admin users list"
@@ -13134,6 +13390,10 @@ elements:
   nest-trust-mint-duration-select:
     type: select
     description: "How long the new trust lasts — one option per the shared mint_duration_options list: 'For a few hours' (the one-off window, never renewed) and 'For 90 days' (renews itself on a blessed nest). Pre-selects LinkedNestRow.mint_default_duration: 90 days on a blessed nest, a few hours otherwise. IDs user-approved 2026-09-24; docs/goal/ui/nests.md § Expiry / renewal → Duration and blessing."
+    indexed: true
+  nest-trust-mint-materialize-note:
+    type: text
+    description: "CONDITIONAL mint-time note: rendered inside the mint flow, before nest-trust-mint-confirm-button, only while the picked scope option carries a note (the shared mint_option_note — the materialization options: mail, calendar, card, each its kind's honesty copy: the nest can read it and keeps a searchable copy on its disk; anyone who can read that disk can read the copy; on an honest nest turning it off deletes the copy and the key, and cannot undo what a hostile nest already read). Declared 2026-11-13 under rule A's advisory class; docs/goal/architecture/capability-grants.md § Capability tiering → The materialization grant (f), docs/goal/ui/nests.md § Trust facet — grants → The materialization option."
     indexed: true
   nest-trust-mint-confirm-button:
     type: button
@@ -15718,10 +15978,10 @@ elements:
     type: button
     indexed: true
   subscription-claim-redeem-input:
-    description: "Paste a post-payment claim code, on subscription-settings (consumer side). monetization.md § Pillar 3 Q4 fallback."
+    description: "Paste a post-payment claim code (consumer side). On subscription-settings: a code of the buyer's own nest. On profile, in the OTHER Tiers tab's subscription-offers-section: a code of that creator, bound at the page's actor_home. monetization.md § Pillar 3 Q4 fallback → The doors."
     type: text_input
   subscription-claim-redeem-button:
-    description: "Redeem the pasted claim code: binds the payment to this actor and the entitlement lands (both webhook and manual-mint rails). monetization.md § Pillar 3 Q4 fallback."
+    description: "Redeem the pasted claim code: binds the payment to this actor and the entitlement lands (both webhook and manual-mint rails). On subscription-settings and, in the OTHER Tiers tab's subscription-offers-section, on profile — there redeeming at the page's actor_home, the creator's nest. monetization.md § Pillar 3 Q4 fallback → The doors."
     type: button
   subscription-mine-section:
     description: "subscription-settings page — the consumer's list of subscriptions across all creators."

@@ -63,6 +63,13 @@ pub const UNMATCHED_AMBIGUOUS_LINK: &str = "several posts share the link it name
 /// The ledger reason for a reaction kind with no fixed emoji (ruling 7).
 pub const UNMATCHED_REACTION_KIND: &str = "a reaction kind with no mapping";
 
+/// How long after a failed [`ArchiveLinks::drive`] its work reads due again,
+/// the first time (µs) — one tick of the apps' wiring.
+pub const INITIAL_REDRIVE_BACKOFF_MICROS: u64 = 1_000_000;
+/// The ceiling the doubling backoff of a drive that keeps failing stops at
+/// (µs): an unreachable nest is asked once a minute, never once a tick.
+pub const MAX_REDRIVE_BACKOFF_MICROS: u64 = 60_000_000;
+
 /// BLAKE3 over the domain string, the platform token and `key` — each
 /// followed by a zero byte, so no two inputs share an encoding.
 fn fingerprint_key(platform: &Platform, key: &str) -> [u8; 32] {
@@ -312,8 +319,17 @@ pub struct ArchiveLinks {
     /// just linked owes its index; a stored index owes a claim run; a
     /// re-driven offer owes its answer). The sink never sends — it runs
     /// inside the receive loop — so the app's wiring polls [`Self::work_due`]
-    /// and calls [`Self::drive`].
+    /// and calls [`Self::drive`]. A drive that could not run sets it again
+    /// (ruling 4's session-start re-drive survives a nest that was not ready
+    /// yet), held back until [`Self::redrive_at`] passes.
     due: std::sync::atomic::AtomicBool,
+    /// When the work a failed drive left owed reads due again (µs since the
+    /// epoch; 0 once a drive ran) — [`Self::work_due_at`].
+    redrive_at: std::sync::atomic::AtomicU64,
+    /// The wait the last failed drive armed (µs; 0 once a drive ran): the
+    /// next failure doubles it, from [`INITIAL_REDRIVE_BACKOFF_MICROS`] up to
+    /// [`MAX_REDRIVE_BACKOFF_MICROS`].
+    redrive_backoff: std::sync::atomic::AtomicU64,
     /// Bumped on every state change the sink captures, so an app can repaint
     /// the Contacts rows when a question arrives without re-reading the
     /// folders on a timer ([`Self::captures`]).
@@ -358,7 +374,7 @@ impl ArchiveLinks {
         self.drive().await
     }
 
-    /// [`Self::work_due`] — an atomic load, cheap on a one-second tick.
+    /// [`Self::work_due`] — two atomic loads, cheap on a one-second tick.
     pub fn link_work_due(&self) -> bool {
         self.work_due()
     }
@@ -389,6 +405,8 @@ impl ArchiveLinks {
             tally: Mutex::new(LinkTally::default()),
             write: WriteLock::default(),
             due: std::sync::atomic::AtomicBool::new(false),
+            redrive_at: std::sync::atomic::AtomicU64::new(0),
+            redrive_backoff: std::sync::atomic::AtomicU64::new(0),
             captures: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -400,9 +418,50 @@ impl ArchiveLinks {
         self.captures.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Whether a captured signal left work owed since the last [`Self::drive`].
+    /// Whether work is owed now: a captured signal left some since the last
+    /// [`Self::drive`], or a drive could not run and its backoff has passed.
     pub fn work_due(&self) -> bool {
-        self.due.load(std::sync::atomic::Ordering::Acquire)
+        self.work_due_at(Timestamp::now())
+    }
+
+    /// [`Self::work_due`] read at `now` — the clock a test controls.
+    pub fn work_due_at(&self, now: Timestamp) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        self.due.load(Acquire) && now.0 >= self.redrive_at.load(Acquire)
+    }
+
+    /// When the retry of a drive that could not run falls due; `None` while
+    /// no drive has failed since the last one that ran.
+    pub fn redrive_after(&self) -> Option<Timestamp> {
+        use std::sync::atomic::Ordering::Acquire;
+        match self.redrive_backoff.load(Acquire) {
+            0 => None,
+            _ => Some(Timestamp(self.redrive_at.load(Acquire))),
+        }
+    }
+
+    /// A drive could not run (the folders unreadable, the account runtime not
+    /// mounted yet): its work stays owed, retried after a wait that doubles
+    /// on every failure up to a minute. A failed SEND is not this — it stays
+    /// pending for the next drive (ruling 4) and arms nothing.
+    fn arm_redrive(&self) {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        let last = self.redrive_backoff.load(Acquire);
+        let wait = match last {
+            0 => INITIAL_REDRIVE_BACKOFF_MICROS,
+            _ => last.saturating_mul(2).min(MAX_REDRIVE_BACKOFF_MICROS),
+        };
+        self.redrive_backoff.store(wait, Release);
+        self.redrive_at
+            .store(Timestamp::now().0.saturating_add(wait), Release);
+        self.due.store(true, Release);
+    }
+
+    /// A drive ran: the backoff starts over at the next failure.
+    fn settle_redrive(&self) {
+        use std::sync::atomic::Ordering::Release;
+        self.redrive_backoff.store(0, Release);
+        self.redrive_at.store(0, Release);
     }
 
     pub fn tally(&self) -> LinkTally {
@@ -578,9 +637,11 @@ impl ArchiveLinks {
             self.bump(|t| t.unknown += 1);
             return true;
         };
+        tracing::debug!(sender = %sender_hex, platform = platform.token(), "archive signal: received");
         match self.nest.contact_status(sender_hex).await {
             Ok(Some(status)) if matches!(status.as_str(), "accepted" | "confirmed") => {}
-            Ok(_) => {
+            Ok(status) => {
+                tracing::debug!(sender = %sender_hex, ?status, "archive signal: refused, the sender is not an accepted contact");
                 self.bump(|t| t.not_a_contact += 1);
                 return false;
             }
@@ -600,11 +661,15 @@ impl ArchiveLinks {
             }
         };
         match self.apply(&mut loaded, sender_hex, &platform, signal).await {
-            Ok(false) => true,
+            Ok(false) => {
+                tracing::debug!(sender = %sender_hex, "archive signal: changed nothing");
+                true
+            }
             Ok(true) => match self.save(&mut loaded).await {
                 Ok(()) => {
                     self.captures
                         .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    tracing::debug!(sender = %sender_hex, "archive signal: captured");
                     if !loaded.state.pending.is_empty()
                         || loaded
                             .state
@@ -744,13 +809,27 @@ impl ArchiveLinks {
                 Ok(true)
             }
             ArchiveSignal::LinkDecline { .. } => {
-                if !matches!(current, Some(PairState::Offered | PairState::Asked)) {
-                    return Ok(false);
+                match current {
+                    Some(PairState::Offered | PairState::Asked) => {
+                        upsert_pair(&mut loaded.state, sender, platform, now, |p| {
+                            p.state = PairState::Declined;
+                        });
+                        clear_awaiting(&mut loaded.state, sender, platform);
+                    }
+                    // A no to the question our own `Announce` raised: we hold
+                    // no pair yet, so store the decline — else the contact's
+                    // later `Announce` would ask us a settled question
+                    // (outcome 51: neither side asks again).
+                    None => loaded.state.pairs.push(new_pair(
+                        sender,
+                        platform,
+                        PairState::Declined,
+                        None,
+                        false,
+                        now,
+                    )),
+                    _ => return Ok(false),
                 }
-                upsert_pair(&mut loaded.state, sender, platform, now, |p| {
-                    p.state = PairState::Declined;
-                });
-                clear_awaiting(&mut loaded.state, sender, platform);
                 Ok(true)
             }
             ArchiveSignal::Unlink { .. } => {
@@ -899,7 +978,10 @@ impl ArchiveLinks {
             queue(&mut loaded.state, contact, signal, awaits, now);
             self.save(&mut loaded).await?;
         }
-        self.drive_platform(platform).await
+        tracing::debug!(%contact, platform = platform.token(), yes, "archive link: answer recorded; driving its send");
+        let ran = self.drive_platform(platform).await;
+        tracing::debug!(%contact, ok = ran.is_ok(), "archive link: the answer's drive returned");
+        ran
     }
 
     /// Unlink from the contact's row: future merges stop, the stored index
@@ -974,16 +1056,39 @@ impl ArchiveLinks {
     }
 
     /// The session-start re-drive, every platform: each linked pair's due
-    /// index and due claim run, then every pending send.
+    /// index and due claim run, then every pending send. One that could not
+    /// run leaves its work due again ([`Self::arm_redrive`]), so a login whose
+    /// first drive beat the account runtime's mount is driven a tick later.
     pub async fn drive(&self) -> Result<(), LinkError> {
         self.due.store(false, std::sync::atomic::Ordering::Release);
+        let ran = self.drive_every_platform().await;
+        match ran {
+            Ok(()) => self.settle_redrive(),
+            Err(_) => self.arm_redrive(),
+        }
+        ran
+    }
+
+    async fn drive_every_platform(&self) -> Result<(), LinkError> {
         for platform in self.platforms().await? {
-            self.drive_platform(&platform).await?;
+            self.run_platform(&platform).await?;
         }
         Ok(())
     }
 
+    /// The drive a user's action ends on (an answer, an unlink, an import's
+    /// announce): its own state is already written, so a drive that could
+    /// not run leaves the work due ([`Self::arm_redrive`]) rather than lost
+    /// until the next session.
     async fn drive_platform(&self, platform: &Platform) -> Result<(), LinkError> {
+        let ran = self.run_platform(platform).await;
+        if ran.is_err() {
+            self.arm_redrive();
+        }
+        ran
+    }
+
+    async fn run_platform(&self, platform: &Platform) -> Result<(), LinkError> {
         {
             let _guard = self.write.lock().await;
             let Some(mut loaded) = self.load(platform).await? else {
@@ -1057,11 +1162,19 @@ impl ArchiveLinks {
             }
         };
         let mut delivered = Vec::new();
+        tracing::debug!(
+            platform = platform.token(),
+            pending = to_send.len(),
+            "archive link: posting the pending signals"
+        );
         for pending in to_send {
             let bytes = fauna_cbor::encode_canonical(&pending.signal)
                 .map_err(|e| LinkError::Build(e.to_string()))?;
             match self.poster.post(&pending.contact, bytes).await {
-                Ok(()) => delivered.push(pending),
+                Ok(()) => {
+                    tracing::debug!(contact = %pending.contact, "archive link: signal posted");
+                    delivered.push(pending)
+                }
                 Err(e) => {
                     tracing::warn!(contact = %pending.contact, "archive signal send failed: {e}")
                 }
@@ -1071,6 +1184,10 @@ impl ArchiveLinks {
             return Ok(());
         }
         let _guard = self.write.lock().await;
+        tracing::debug!(
+            platform = platform.token(),
+            "archive link: fold-back holds the write lock; reading the folder"
+        );
         let mut loaded = self.load(platform).await?.ok_or(LinkError::NoArchive)?;
         for sent in delivered {
             let Some(at) = loaded.state.pending.iter().position(|p| *p == sent) else {
@@ -1083,6 +1200,10 @@ impl ArchiveLinks {
             }
         }
         self.save(&mut loaded).await?;
+        tracing::debug!(
+            platform = platform.token(),
+            "archive link: the posted signals are folded into the folder"
+        );
         Ok(())
     }
 
@@ -1437,6 +1558,7 @@ impl ArchiveLinks {
                 });
             }
         }
+        tracing::debug!(views = out.len(), "archive link: views read");
         Ok(out)
     }
 

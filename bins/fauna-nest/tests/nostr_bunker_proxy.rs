@@ -43,6 +43,16 @@ async fn state() -> Arc<AppState> {
 
 /// Link a custodial account (deposited nsec) and return the user's keypair.
 async fn link_custodial(state: &AppState, actor_hex: &str) -> Keypair {
+    // The `users` row the signer's door reads the account's authority from
+    // (`bunker::account_stands`): a real account has one, and with none the
+    // bunker answers every request, `connect` included, `unauthorized`.
+    // Only a 32-byte hex actor is an account id; the relay-only tests' text
+    // ids never reach the bunker.
+    if let Ok(bytes) = hex::decode(actor_hex)
+        && let Ok(actor) = <[u8; 32]>::try_from(bytes.as_slice())
+    {
+        state.db.create_user(&actor, "free", "test").await.unwrap();
+    }
     let nest_key = state.nest_identity.signing_key.to_bytes();
     let kp = Keypair::generate();
     let encrypted = encrypt_nostr_privkey(&nest_key, &kp.secret_bytes()).unwrap();
@@ -274,11 +284,16 @@ async fn part_a_unsigned_probe_is_rejected_before_the_fall_through() {
 
 // ── Part B — the shared bunker core the head runs ──────────────────────
 
+/// Part B's account: a 32-byte hex actor id, so its `users` row can be seated.
+fn head_actor() -> String {
+    "dd".repeat(32)
+}
+
 #[tokio::test]
 async fn part_b_head_core_builds_valid_signed_responses() {
     let state = state().await;
-    let user_kp = link_custodial(&state, "actor-head").await;
-    let inv = invite(&state, "actor-head").await;
+    let user_kp = link_custodial(&state, &head_actor()).await;
+    let inv = invite(&state, &head_actor()).await;
     let app = connect_app_core(&state, &inv).await;
 
     let nest_key = state.nest_identity.signing_key.to_bytes();

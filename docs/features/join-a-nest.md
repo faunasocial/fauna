@@ -79,13 +79,13 @@ Stamped 2026-11-07 at b844c771f6.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
-| linux | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
-| windows | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
-| macos | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
-| ios | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
+| web | ⚠ partial | 0.1.5-dev+1c9a6a26 standalone |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.6-dev+89d36747 standalone |
+| macos | ⚠ partial | 0.1.6-dev+e896a55d standalone |
+| ios | ⚠ partial | 0.1.6-dev+e896a55d standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+52eff9ec standalone |
+| tui | ✅ full | 0.1.6-dev+89d36747 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -117,12 +117,12 @@ Stamped 2026-11-07 at b844c771f6.
 | 12 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_is_declared_for_an_attestation_the_nest_did_not_list` | web (linux): skipped, linux (linux): skipped, macos (macos): skipped, ios (macos): passed, tui (linux): skipped, tui (macos): skipped |
 | 12 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_follows_the_minted_nonces_platform_list` — requires `machine-async-dispatch-bridge` (test harness) (not built: web, linux, windows, macos, tui) | web (linux): skipped, linux (linux): skipped, macos (macos): skipped, ios (macos): passed, tui (linux): skipped, tui (macos): skipped |
 | 12 | app | absent by design on web, linux, windows, macos, tui | — |
-| 13 | nest | `tests/e2e-unified/tests/api/test_registration_reserved_and_unadmitted.py::test_a_reserved_handle_is_refused_at_sign_up_and_as_a_handle_change` | nest (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/api/test_registration_reserved_and_unadmitted.py::test_a_key_the_nest_never_admitted_is_refused_sign_in_whatever_the_mode` | nest (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_pending_invite_recheck_verdicts.py::test_a_pending_request_stays_pending_while_the_nest_is_unreachable` | tui (macos): passed |
-| 15 | app | `tests/e2e-unified/tests/test_pending_invite_recheck_verdicts.py::test_a_changed_nest_identity_ends_the_pending_request_with_no_trust_offer` | tui (macos): passed |
-| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_nonce_the_nest_never_minted_refuses_the_whole_admission` | nest (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_replayed_nonce_is_refused_because_the_first_attempt_spent_it` | nest (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_an_attestation_naming_a_bundle_the_nest_does_not_pin_is_refused` | nest (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_platform_the_nest_cannot_check_is_admitted_as_declared_not_verified` | nest (linux): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_registration_reserved_and_unadmitted.py::test_a_reserved_handle_is_refused_at_sign_up_and_as_a_handle_change` | nest (linux): passed, nest (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_registration_reserved_and_unadmitted.py::test_a_key_the_nest_never_admitted_is_refused_sign_in_whatever_the_mode` | nest (linux): passed, nest (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_pending_invite_recheck_verdicts.py::test_a_pending_request_stays_pending_while_the_nest_is_unreachable` | tui (linux): passed, tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_pending_invite_recheck_verdicts.py::test_a_changed_nest_identity_ends_the_pending_request_with_no_trust_offer` | tui (linux): passed, tui (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_nonce_the_nest_never_minted_refuses_the_whole_admission` | nest (linux): passed, nest (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_replayed_nonce_is_refused_because_the_first_attempt_spent_it` | nest (linux): passed, nest (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_an_attestation_naming_a_bundle_the_nest_does_not_pin_is_refused` | nest (linux): passed, nest (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_platform_the_nest_cannot_check_is_admitted_as_declared_not_verified` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

@@ -4,6 +4,7 @@ import time
 from typing import TYPE_CHECKING
 
 from helpers.budgets import RPC_ROUNDTRIP_S
+from helpers.waiting import wait_until
 from i18n.strings import S
 
 if TYPE_CHECKING:
@@ -143,6 +144,50 @@ class ConnectedAppsActions:
     def approve_request(self, index: int) -> None:
         self.driver.click(
             "connected-apps-request-approve", scope=f"connected-apps-request-card[{index}]"
+        )
+
+    # The card's folder picker — only on a card carrying a bare folder-plane
+    # scope (authorization-server.md § Consent → The card chooses the folder).
+    # Option keys are the folders' row ids in decimal; the labels their names.
+
+    def request_has_folder_picker(self, index: int) -> bool:
+        return self.driver.is_visible(
+            "connected-apps-request-folder", scope=f"connected-apps-request-card[{index}]"
+        )
+
+    def request_folder_options(self, index: int) -> list[str]:
+        """The folder names the card's picker offers, as painted."""
+        return (
+            self.driver.option_texts(
+                "connected-apps-request-folder", scope=f"connected-apps-request-card[{index}]"
+            )
+            or []
+        )
+
+    def choose_request_folder(self, index: int, folder_id: int) -> None:
+        self.driver.select(
+            "connected-apps-request-folder",
+            str(folder_id),
+            scope=f"connected-apps-request-card[{index}]",
+        )
+
+    def request_chosen_folder(self, index: int) -> str:
+        """The option key the picker holds — ``""`` until a folder is chosen."""
+        return (
+            self.driver.get_text(
+                "connected-apps-request-folder", scope=f"connected-apps-request-card[{index}]"
+            )
+            or ""
+        ).strip()
+
+    def request_approve_disabled(self, index: int) -> bool:
+        return (
+            self.driver.get_attr(
+                "connected-apps-request-approve",
+                "disabled",
+                scope=f"connected-apps-request-card[{index}]",
+            )
+            == "true"
         )
 
     def decline_request(self, index: int) -> None:
@@ -308,6 +353,113 @@ class ConnectedAppsActions:
         """Follow a plugin row's link to its settings card on the Bridges page."""
         self.driver.click(
             "connected-apps-item-settings-link", scope=f"connected-apps-item[{index}]"
+        )
+
+    # ── The trust facet (connected-apps.md § The trust facet and history lens) ─
+    # The Nests page's `nest-trust-*` IDs, scoped within one roster row
+    # (owner-ruled 2026-10-16). Absent on a row with no facet — never empty.
+
+    def has_trust_lens(self, index: int) -> bool:
+        """Whether the row carries the trust facet's lens pair."""
+        return (
+            self.driver.count("nest-trust-view-now", scope=f"connected-apps-item[{index}]")
+            == 1
+        )
+
+    def trust_grant_count(self, index: int) -> int:
+        """How many live keys the row's Now lens lists."""
+        return self.driver.count(
+            "nest-trust-grant-item", scope=f"connected-apps-item[{index}]"
+        )
+
+    def wait_for_trust_grants(
+        self, needle: str, expected: int, timeout: float = RPC_ROUNDTRIP_S
+    ) -> int | None:
+        """Wait for the row whose text contains `needle` to list `expected`
+        live keys on its Now lens, re-reading by revisiting the page; its
+        index or None."""
+
+        def probe():
+            index = self.item_index_containing(needle)
+            if index is not None and self.trust_grant_count(index) == expected:
+                return index
+            return None
+
+        return self._poll(probe, timeout, renavigate=True)
+
+    def trust_grant_text(self, index: int, grant: int, leaf: str) -> str:
+        """One leaf of one live key — `scope`, `lasts-until`, `status` or
+        `bound-note` (`nest-trust-grant-<leaf>`)."""
+        return (
+            self.driver.get_text(
+                f"nest-trust-grant-{leaf}",
+                scope=f"connected-apps-item[{index}]/nest-trust-grant-item[{grant}]",
+            )
+            or ""
+        )
+
+    def show_trust_history(self, index: int, timeout: float = 10.0) -> list[str]:
+        """Flip the row to its History lens and return its lines, most recent
+        first — once the history container paints (a state, not a pause)."""
+        scope = f"connected-apps-item[{index}]"
+        self.driver.click("nest-trust-view-history", scope=scope)
+        wait_until(
+            lambda: self.driver.count("nest-trust-history-list", scope=scope) == 1,
+            timeout,
+            diagnose=lambda: (
+                f"row {index} never painted its History lens; "
+                f"{self.driver.diagnose('nest-trust-history-list', scope=scope)}"
+            ),
+        )
+        return self.driver.get_texts("nest-trust-history-item", scope=scope)
+
+    # ── The oracle record (connected-apps.md § Layout & flow, region 3) ──
+    # Present exactly on a row the oracle served; the record is the nest's
+    # read, shown once it has returned. Built on tui (surface
+    # `connected-apps-oracle-record`).
+    ORACLE_OPEN = "connected-apps-oracle-open"
+    ORACLE_LIST = "connected-apps-oracle-list"
+    ORACLE_OP = "connected-apps-oracle-op"
+    ORACLE_EMPTY = "connected-apps-oracle-empty"
+
+    def oracle_record_open(self, index: int) -> bool:
+        """Whether row `index`'s record is open and its read has returned."""
+        return self.driver.count(self.ORACLE_LIST, scope=f"connected-apps-item[{index}]") == 1
+
+    def oracle_record_empty(self, index: int) -> bool:
+        return self.driver.count(self.ORACLE_EMPTY, scope=f"connected-apps-item[{index}]") == 1
+
+    def oracle_record_ops(self, index: int) -> list[tuple[str, str | None]]:
+        """The open record's operations, newest first: (text, `class` value)."""
+        scope = f"connected-apps-item[{index}]"
+        texts = self.driver.get_texts(self.ORACLE_OP, scope=scope)
+        classes = self.driver.get_attrs(self.ORACLE_OP, "class", scope=scope)
+        return list(zip(texts, classes))
+
+    def open_oracle_record(
+        self, index: int, timeout: float = RPC_ROUNDTRIP_S
+    ) -> list[tuple[str, str | None]]:
+        """Open row `index`'s record and wait for its read (the list, or the
+        empty state); its operations, newest first."""
+        self.driver.click(self.ORACLE_OPEN, scope=f"connected-apps-item[{index}]")
+        self._poll(
+            lambda: True
+            if self.oracle_record_open(index) or self.oracle_record_empty(index)
+            else None,
+            timeout,
+            renavigate=False,
+        )
+        return self.oracle_record_ops(index)
+
+    def close_oracle_record(self, index: int, timeout: float = RPC_ROUNDTRIP_S) -> None:
+        """The same control closes the open record."""
+        self.driver.click(self.ORACLE_OPEN, scope=f"connected-apps-item[{index}]")
+        self._poll(
+            lambda: True
+            if not (self.oracle_record_open(index) or self.oracle_record_empty(index))
+            else None,
+            timeout,
+            renavigate=False,
         )
 
     def revoke_item(self, index: int) -> None:

@@ -1665,6 +1665,24 @@ def _tiny_video(app) -> tuple[Path, float]:
     if app.driver.is_web() or app.driver.is_linux():
         return FIXTURE_DIR / "tiny-video.webm", 5.0
     return FIXTURE_DIR / "tiny-video.mp4", 1.0
+
+
+def _edge_video(app) -> tuple[Path, float]:
+    """The clip the bottom-edge journey plays, and its length in seconds: one
+    that outlasts the bottom-edge placement on every app, so the card is
+    under the gate before the play can complete. Five seconds everywhere —
+    the 5 s VP9 ``tiny-video.webm`` on web and linux, and on the apps whose
+    native player plays no VP9 (macos, ios, windows) the 5 s H.264
+    ``tiny-video-5s.mp4``, generated with ``ffmpeg -f lavfi -i
+    testsrc=s=64x64:d=5:r=10 -c:v libx264 -preset ultrafast -profile:v
+    baseline -pix_fmt yuv420p -movflags +faststart -an``. The 1 s clip the
+    other journeys play cannot: measured on windows 2026-11-11, the placement
+    alone took 1.16 s (three edge-walk moves), and the reads around it more."""
+    if app.driver.is_web() or app.driver.is_linux():
+        return FIXTURE_DIR / "tiny-video.webm", 5.0
+    return FIXTURE_DIR / "tiny-video-5s.mp4", 5.0
+
+
 CUE_COMPLETE_FRACTION_PM = 850  # fauna_core::scoring::cues::CUE_COMPLETE_FRACTION_PM
 
 
@@ -1992,6 +2010,7 @@ BOTTOM_EDGE_DECOYS = 7
 @pytest.mark.web
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("learn-from-my-activity")
 def test_a_video_played_near_the_bottom_edge_still_counts_as_watched(
     logged_in_app, nest_instance, test_user
@@ -2025,7 +2044,7 @@ def test_a_video_played_near_the_bottom_edge_still_counts_as_watched(
     """
     app = logged_in_app
     port = nest_instance["port"]
-    tiny_video, tiny_video_s = _tiny_video(app)
+    tiny_video, tiny_video_s = _edge_video(app)
     assert tiny_video.exists(), f"fixture video missing: {tiny_video}"
 
     # ── 1. Trained topic, engagement learning still off ──────────────────
@@ -2567,6 +2586,7 @@ def _wait_muted_words(app, word: str, present: bool) -> None:
 @pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("learn-from-my-activity")
 def test_only_a_scroll_counts_as_a_skip_a_switch_a_drop_a_placeholder_and_a_quit_teach_nothing(
     logged_in_app, nest_instance, test_user
@@ -2640,13 +2660,26 @@ def test_only_a_scroll_counts_as_a_skip_a_switch_a_drop_a_placeholder_and_a_quit
         assert app.muted_words.wait_for_word(muted_token), (
             f"the muted word did not persist; words={app.muted_words.words()!r}"
         )
+        def wait_for_the_fold() -> None:
+            wait_until(
+                lambda: app.driver.count("feed-post-muted") == 1 or None,
+                budgets.RPC_ROUNDTRIP_S,
+                diagnose=lambda: f"the on-topic post never folded; feed reads "
+                                 f"{_rendered_order(app)!r}; error={app.error_text()!r}",
+            )
+
         _open_feed(app, composed)
-        wait_until(
-            lambda: app.driver.count("feed-post-muted") == 1 or None,
-            budgets.RPC_ROUNDTRIP_S,
-            diagnose=lambda: f"the on-topic post never folded; feed reads "
-                             f"{_rendered_order(app)!r}; error={app.error_text()!r}",
-        )
+        wait_for_the_fold()
+        # The first paint after a mute can still show the post: a reload
+        # publishes the list it keeps before it reads the muted words, and
+        # the capture may open an exposure on the unfolded card, which it then
+        # holds, uncredited, behind the fold — no linger on the placeholder,
+        # but a tracked exposure all the same. Leave (the page leave drains
+        # it) and come back: the manager now knows the word, so this paint is
+        # folded from the start and the linger below meets nothing earlier.
+        app.muted_words.navigate()
+        _open_feed(app, composed)
+        wait_for_the_fold()
         # The state list leaves a collapsed post out (it must not leak its
         # body), so the fold is found by the placeholder its card paints.
         folds = [
@@ -2793,6 +2826,7 @@ CUE_HYDRATION_HOLD_ENV = "FAUNA_E2E_CUE_HYDRATION_HOLD_FILE"
 @pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("learn-from-my-activity")
 def test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it(
     request, logged_in_app, nest_instance, test_user, tmp_path, monkeypatch
@@ -2827,6 +2861,12 @@ def test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it(
     whose launch environment the hold file does not reach, so it signs in off
     the feed and arms the same in-memory hold through FaunaKit; FaunaKit's
     capture loop samples only once the feed's hydrate returns, as web's does.
+    windows takes it too: its driver builds the app's launch environment from
+    scratch, so seat B — a second windows instance — signs in off the feed and
+    arms the hold through its agent, kept until the Feed page first builds the
+    manager; windows' capture starts only once the hydrate returns. Unlike web
+    and apple, windows has a quit door, so seat B's hydrated save is flushed by
+    quitting through it, as on tui and linux.
 
     On android seat A is the phone and seat B the tui seat
     ``alice_second_device`` launches beside the emulator, so seat B takes the
@@ -2887,8 +2927,9 @@ def test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it(
     # tui and linux take the hold as a file the launch environment names; a
     # browser reads no environment, so web's twin seat signs in off the feed
     # and arms the manager's in-memory hold before the feed first mounts.
-    # web and the apple apps arm it in memory: a browser reads no environment,
-    # and a second apple app's launch environment is not the harness's.
+    # web, the apple apps and windows arm it in memory: a browser reads no
+    # environment, and a second apple or windows app's launch environment is
+    # not the harness's.
     in_memory = app.feed.has_in_memory_cue_hydration_hold()
     hold = tmp_path / "cue-hydration-hold"
     if in_memory:
@@ -2901,7 +2942,9 @@ def test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it(
         else:
             from conftest import _alice_extra_seat
             seat_gen = _alice_extra_seat(
-                "macos" if app.driver.is_macos() else "ios",
+                "macos" if app.driver.is_macos()
+                else "ios" if app.driver.is_ios()
+                else "windows",
                 request, test_user, nest_instance,
                 screenshot_tag="cue-hydration-hold-seat", landing_view="settings",
             )
@@ -2939,7 +2982,8 @@ def test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it(
         # starts), so a held seat measures nothing at all: there is no
         # un-hydrated verdict to put, and the linger leaves Y unjudged.
         # FaunaKit's `CueViewportObserver.run` awaits the hydrate before its
-        # first tick the same way.
+        # first tick the same way, and windows wires its observer only once the
+        # hydrate returns (`FeedPage.StartCueCaptureWhenHydratedAsync`).
         before = seat_b.feed.cue_verdict_for_test(y_id)
         assert before == {"hydrated": False, "verdict": None}, (
             f"web captured before its rollup fetch: {before!r}"
@@ -2957,6 +3001,10 @@ def test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it(
         assert seat_b.driver.wait_app_exit(APP_EXIT_S), (
             f"seat B did not exit; still alive={seat_b.driver.is_app_alive()}"
         )
+    # Seat B's save barrier: leaving the feed where the cue step is the record
+    # barrier (web, apple — no quit door a test can drive), its own quit door
+    # everywhere else (tui, linux, windows; android's seat B is a tui seat).
+    seat_b_quits = not seat_b.feed.cue_step_is_the_record_barrier()
     after_b = ws_api.personalization_model_fetch(port, test_user, CUES_ROLLUP_FACTOR)
     assert after_b.get("sealed_blob") == seat_a_rollup, (
         "seat B's flush, before it had fetched the rollup, replaced seat A's "
@@ -2983,7 +3031,7 @@ def test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it(
     assert seat_b.feed.wait_for_post_text(y_text, timeout_s=15)
     seat_b.feed.dwell_on_post(seat_b.feed.card_index_by_id(y_id), CUE_DWELL_LONG_S + 1.0)
     seat_b.personalization.navigate()
-    if in_memory:
+    if not seat_b_quits:
         # Leaving the feed stopped the capture, which awaits every record
         # before it puts the rollup (`_quit_and_wait_for_the_rollup`'s note):
         # the new rollup arriving is the barrier the exit is elsewhere.
@@ -3007,8 +3055,8 @@ def test_a_device_that_has_not_fetched_your_activity_data_never_overwrites_it(
 
     app.driver.hard_reload()
     if in_memory or app.driver.is_android():
-        # web, android and the apple apps hydrate when the feed page is
-        # entered, not at launch.
+        # web, android, the apple apps and windows hydrate when the feed page
+        # is entered, not at launch.
         app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
     merged = {
         post_id: wait_until(

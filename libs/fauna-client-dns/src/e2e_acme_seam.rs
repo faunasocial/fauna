@@ -171,7 +171,7 @@ fn seam_from_values(
 /// harness's fake applies it to an in-memory overlay above its records file, so
 /// the records the harness wrote itself (`AcmePebble.publish_txt`) are kept, and
 /// the write rides the same TCP port the propagation probe's retry does — the
-/// one an android venue reverses (`e2e-automation-surface-gating.md` § The ACME
+/// one an android emulator reverses (`e2e-automation-surface-gating.md` § The ACME
 /// directory seed → *The name server's reach*). A failure is logged, never
 /// raised — the order then fails at its propagation gate with the gate's own
 /// error, which names the record nobody served.

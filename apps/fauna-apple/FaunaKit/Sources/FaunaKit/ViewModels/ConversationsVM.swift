@@ -210,7 +210,36 @@ public final class ConversationsVM {
     /// Throws rather than swallowing: every call site already wraps its own
     /// best-effort `do/catch` around the three statements this replaces, so
     /// the failure handling stays exactly where it was.
+    ///
+    /// **Rebuilds run one at a time, in call order.** Two logins can overlap in
+    /// one process — a launch's own sign-in still building its session when an
+    /// e2e session patch (or an account switch) starts the next — and the build
+    /// registers its rails on the one shared `manager`, so whichever build
+    /// FINISHED last would own the rails, however stale its client. Chaining each
+    /// call behind the previous one makes the latest login's build the last to
+    /// run, every time.
     public func rebuild(
+        api: APIClient, selfAddress: String, selfSecretHex: String,
+        deviceIdHex: String, predecessorBackupKeys: [Data],
+        archiveLinks: ArchiveLinksStore
+    ) async throws {
+        let previous = rebuildTail
+        let mine = Task { @MainActor in
+            await previous?.value
+            try await self.rebuildNow(
+                api: api, selfAddress: selfAddress, selfSecretHex: selfSecretHex,
+                deviceIdHex: deviceIdHex, predecessorBackupKeys: predecessorBackupKeys,
+                archiveLinks: archiveLinks)
+        }
+        rebuildTail = Task { @MainActor in _ = try? await mine.value }
+        try await mine.value
+    }
+
+    /// The tail of the `rebuild` chain — completes (never throws) when the most
+    /// recently started rebuild has.
+    @ObservationIgnored private var rebuildTail: Task<Void, Never>?
+
+    private func rebuildNow(
         api: APIClient, selfAddress: String, selfSecretHex: String,
         deviceIdHex: String, predecessorBackupKeys: [Data],
         archiveLinks: ArchiveLinksStore
@@ -471,17 +500,25 @@ public final class ConversationsVM {
     /// which reach this VM through `AppState.conversationsVM`. The events rail's
     /// twin is `EventsVM.flushDraftsNow`; `FeedVM` carries the mirror of this one.
     ///
-    /// Cancels the debounced task first so the two cannot both fire, then runs
-    /// the save it would have run. A no-op when no `draftsSync` is attached
+    /// Cancels the debounced task first so the two cannot both fire, then saves
+    /// through the rail's leave face, `FfiDraftsSync.saveConversationsOnLeave` —
+    /// so a door taken before the launch load has lifted the save gate still
+    /// saves, by one read of its own. A no-op when no `draftsSync` is attached
     /// (pre-login / E2E), which is what lets the leave doors call it
     /// unconditionally.
     public func flushDraftsNow() async {
         draftsSaveTask?.cancel()
         draftsSaveTask = nil
         guard let sync = draftsSync else { return }
+        // Captured at the door, before the first await: a teardown that clears
+        // the manager after this moves its epoch, and the leave face's fill then
+        // fills nothing, so `captured` is what is saved.
         let manager = self.manager
-        await flushDraftsAutosave(sync: sync, logTarget: "fauna.conversations.drafts") {
-            manager.draftsSnapshotBytes()
+        let epoch = manager.identityEpoch()
+        let captured = manager.draftsSnapshotBytes()
+        await flushDraftsAutosave(logTarget: "fauna.conversations.drafts") {
+            _ = try await sync.saveConversationsOnLeave(manager: manager, epoch: epoch,
+                                                        captured: captured)
         }
     }
 
@@ -661,6 +698,32 @@ public final class ConversationsVM {
     /// client-side on `supportsMessageDelete && isOwn`.
     public func deleteMessage(_ id: ThreadId, _ msgId: MessageId) async {
         await manager.deleteMessage(thread: id, message: msgId)
+    }
+    /// Remove `msgId` from this nest's copy only (`dm-message-remove-confirm-button`;
+    /// `bridged-adapter.md` § Removing bridged rows) — the far side keeps its copy.
+    /// The manager refuses a message whose snapshot does not say `canRemove`; the
+    /// row leaves the snapshot once the nest answers, a refusal rides the page error.
+    public func removeMessage(_ id: ThreadId, _ msgId: MessageId) async {
+        await manager.removeMessage(thread: id, message: msgId)
+    }
+
+    // ── Unsent own copies (account-offline-mutation.md § The unsent-changes surface) ──
+    /// Re-read the outbox into each thread's queued own copies
+    /// (`MessageSnapshot.queuedSend`) — the shared manager projects it on every
+    /// `thread_detail`. A read of this device's store: no nest needed. Run on the
+    /// thread view's unsent tick (``View/unsentRefresh(_:)``), since the
+    /// runtime's generic drain tells the app nothing when it sends or parks.
+    public func refreshUnsentSends() async {
+        await manager.refreshUnsentSends()
+    }
+    /// `dm-message-retry-button` — re-arm the unsent own copy `msgId`.
+    public func retryQueuedSend(_ msgId: MessageId) async {
+        _ = await manager.retryQueuedSend(messageId: msgId)
+    }
+    /// `dm-message-discard-confirm-button` — delete the unsent own copy's intent
+    /// and take the copy out of the thread.
+    public func discardQueuedSend(_ msgId: MessageId) async {
+        _ = await manager.discardQueuedSend(messageId: msgId)
     }
 
     // ── Selection / list ───────────────────────────────────────────────────
@@ -862,6 +925,12 @@ public final class ConversationsVM {
     /// picks the door inside shared Rust, and a refusal lands on the page error;
     /// the thread stays in the leaver's own list.
     public func leaveRoom(_ id: ThreadId) async { await manager.leaveRoom(id: id) }
+
+    /// `room-remove-confirm` — the local remove of a whole conversation from this
+    /// nest (`bridged-adapter.md` § Removing bridged rows, rule 4). Refused unless
+    /// `capabilities.supportsLocalRemove`; the manager forgets the thread once the
+    /// nest answers, and the shared selection clears with it.
+    public func removeThread(_ id: ThreadId) async { await manager.removeThread(thread: id) }
 
     // ── Attachments (outbound staging) ──────────────────────────────────────
     /// Client-glue error for the page's `error-message` element — set by shell

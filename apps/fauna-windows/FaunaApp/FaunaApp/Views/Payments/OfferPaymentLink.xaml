@@ -11,7 +11,9 @@
   header). ProfilePage's offer-row DataTemplate hosts one of these per row through
   a ContentControl whose Loaded handler fills it under `#if PAYMENTS`; nothing
   outside Views\Payments\ may name this type from markup. The click is raised as
-  OpenRequested and the page opens the URL, behind the shared https-only guard.
+  OpenRequested; behind the shared https-only guard the page subscribes first and
+  opens the checkout URL the shared rule composes (monetization.md § Pillar 3 →
+  Buyer↔actor binding (Q4)).
 -->
 <UserControl
     x:Class="FaunaApp.Views.Payments.OfferPaymentLink"

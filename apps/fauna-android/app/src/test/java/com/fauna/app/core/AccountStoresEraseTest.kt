@@ -203,11 +203,11 @@ class AccountStoresEraseTest {
         assertNotNull("precondition: the erase left the scope", s.signOutNow().residue)
 
         val host = TestHost()
-        val stillThere = s.finishSignOut(host, dismissAgent = true, written = null).residue
+        val stillThere = s.finishSignOut(host, caller = com.fauna.ffi.FfiFinishCaller.REMOVE_AGAIN, written = null).residue
         assertNotNull("the fault still holds, so the view stays up", stillThere)
 
         scope.setWritable(true)
-        val after = s.finishSignOut(host, dismissAgent = true, written = null).residue
+        val after = s.finishSignOut(host, caller = com.fauna.ffi.FfiFinishCaller.REMOVE_AGAIN, written = null).residue
 
         assertEquals("a clean re-sweep closes the view", null, after)
         assertFalse("the recorded scope is gone", scope.exists())
@@ -337,11 +337,11 @@ class AccountStoresEraseTest {
 
     /** The sign-out gesture as `AccountSettingsVM.signOut` runs it, minus the stop. */
     private fun AccountStores.signOutNow(host: TestHost = TestHost()): com.fauna.ffi.FfiSignOutFinish =
-        finishSignOut(host, dismissAgent = false, written = recordSignOut(activeActorHex()))
+        finishSignOut(host, caller = com.fauna.ffi.FfiFinishCaller.GESTURE, written = recordSignOut(activeActorHex()))
 
     /** The cold launch's call (`AppLaunchVM.start`). */
     private fun AccountStores.launchFinish(host: TestHost = TestHost()): com.fauna.ffi.FfiSignOutFinish =
-        finishSignOut(host, dismissAgent = true, written = null)
+        finishSignOut(host, caller = com.fauna.ffi.FfiFinishCaller.LAUNCH, written = null)
 
     private fun residueRecord(ctx: android.content.Context): File =
         File(ctx.filesDir, "sign-out-residue.json")

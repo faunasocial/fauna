@@ -119,6 +119,14 @@ pub struct RecoveryState {
     /// gates `recovery-kit-let-go-button`, the stolen gate's idiom: the data
     /// cannot be brought back. Holds the literal [`LET_GO_CONFIRM_WORD`].
     pub let_go_confirm_input: String,
+    /// The successor's owed nests, joined with this runtime's last delivery
+    /// (`fauna_client_recovery::owed_nests`) — `None` when nothing is owed,
+    /// before the read lands, and with no session.
+    pub owed: Option<fauna_client_recovery::owed_nests::OwedNestsView>,
+    /// Which owed entry has its dismiss ARMED, by `(old_actor_id, nest_id)` —
+    /// never a painted index. Cleared by cancel, by the confirm, and on a
+    /// fresh visit.
+    pub owed_dismiss_pending: Option<fauna_client_recovery::owed_nests::OwedNestKey>,
 }
 
 /// The let-go's confirm word — shared Rust's one constant, so all seven apps
@@ -148,6 +156,8 @@ impl RecoveryState {
         self.stolen_confirm_input = String::new();
         self.dead_generations = Vec::new();
         self.let_go_confirm_input = String::new();
+        self.owed = None;
+        self.owed_dismiss_pending = None;
     }
 }
 
@@ -291,6 +301,7 @@ pub(super) fn recovery_elements(
     els.extend(drafts_reseal_elements(aftermath.drafts_reseal.as_ref()));
     els.extend(mail_burn_elements(aftermath.mail_burn.as_ref()));
     els.extend(inherited_filters_elements(pass.inherited_filters));
+    els.extend(owed_nests_elements(recovery));
 
     // The status line. Its text comes from the shared projection as
     // `LocalizedText`; tui resolves the key through the generated table rather
@@ -677,6 +688,78 @@ fn inherited_filters_elements(open: usize) -> Vec<Element> {
         ids::RECOVERY_KIT_INHERITED_FILTERS_STATUS,
         t::recovery_kit::inherited_filters(&open.to_string()),
     )]
+}
+
+/// The successor's **owed nests** — the linked nests the succession has not
+/// reached yet, each with what this device's last delivery found, and the
+/// two-step dismiss that settles one on the user's word
+/// (`succession-linked-nests.md` § The road → *What the dial does with an
+/// entry it cannot land*, *the user ends what the runtime cannot*).
+///
+/// The selection and copy are the shared projection's
+/// ([`fauna_client_recovery::owed_nests::OwedNestsView`]); this resolves keys
+/// and lays out the member card's shape (anchor + `.within`).
+fn owed_nests_elements(recovery: &RecoveryState) -> Vec<Element> {
+    let Some(view) = recovery.owed.as_ref() else {
+        return Vec::new();
+    };
+    let lookup = fauna_i18n::strings::lookup;
+    let mut els = vec![Element::label(
+        ids::RECOVERY_KIT_OWED_NESTS_STATUS,
+        view.status().resolve(lookup),
+    )];
+    for (i, entry) in view.entries.iter().enumerate() {
+        els.push(Element::label(
+            ids::RECOVERY_KIT_OWED_NEST_ITEM,
+            String::new(),
+        ));
+        els.push(
+            Element::label(
+                ids::RECOVERY_KIT_OWED_NEST_ADDRESS,
+                entry.address_copy().resolve(lookup),
+            )
+            .within(ids::RECOVERY_KIT_OWED_NEST_ITEM, i),
+        );
+        els.push(
+            Element::label(
+                ids::RECOVERY_KIT_OWED_NEST_OUTCOME,
+                entry.outcome_copy().resolve(lookup),
+            )
+            .within(ids::RECOVERY_KIT_OWED_NEST_ITEM, i),
+        );
+        let key = entry.key();
+        if recovery.owed_dismiss_pending.as_ref() == Some(&key) {
+            els.push(
+                Element::gesture_button(
+                    ids::RECOVERY_KIT_OWED_NEST_DISMISS_CONFIRM_BUTTON,
+                    t::recovery_kit::OWED_NEST_DISMISS_CONFIRM,
+                    true,
+                    Gesture::Settings(Action::ConfirmDismissOwedNest(key)),
+                )
+                .within(ids::RECOVERY_KIT_OWED_NEST_ITEM, i),
+            );
+            els.push(
+                Element::gesture_button(
+                    ids::RECOVERY_KIT_OWED_NEST_DISMISS_CANCEL_BUTTON,
+                    fauna_i18n::strings::common::CANCEL,
+                    true,
+                    Gesture::Settings(Action::CancelDismissOwedNest),
+                )
+                .within(ids::RECOVERY_KIT_OWED_NEST_ITEM, i),
+            );
+        } else {
+            els.push(
+                Element::gesture_button(
+                    ids::RECOVERY_KIT_OWED_NEST_DISMISS_BUTTON,
+                    t::recovery_kit::OWED_NEST_DISMISS,
+                    true,
+                    Gesture::Settings(Action::DismissOwedNest(key)),
+                )
+                .within(ids::RECOVERY_KIT_OWED_NEST_ITEM, i),
+            );
+        }
+    }
+    els
 }
 
 /// Unix seconds — the countdown's clock. The projection itself is pure and

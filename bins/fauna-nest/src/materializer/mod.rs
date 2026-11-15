@@ -492,14 +492,17 @@ impl Materializer {
                 )
                 .await
                 {
-                    Ok(Some((body, _hint, floor))) => match worker::open_mail_body(&body, key) {
-                        Some(pt) => {
-                            if let Some(doc) = worker::mail_doc(&pt, &digest, floor.received_at) {
-                                area.add_doc(doc)?;
+                    Ok(Some((body, _hint, floor))) => {
+                        match worker::open_mail_body(&body, key, floor.stored_at) {
+                            Some(pt) => {
+                                if let Some(doc) = worker::mail_doc(&pt, &digest, floor.received_at)
+                                {
+                                    area.add_doc(doc)?;
+                                }
                             }
+                            None => area.skipped += 1,
                         }
-                        None => area.skipped += 1,
-                    },
+                    }
                     // Gone between the list and the read (a racing tombstone),
                     // or a continuation whose part is still in flight: the
                     // retire sweep / a later walk settles it.
@@ -703,14 +706,15 @@ impl Materializer {
     ) -> String {
         match kind {
             MatKind::Mail => {
-                if let Ok(Some((body, _, _))) = crate::segments::mail::read_sealed_body_with_floor(
-                    &self.stores.mail,
-                    &self.db,
-                    actor,
-                    nest_id,
-                )
-                .await
-                    && let Some(pt) = worker::open_mail_body(&body, key)
+                if let Ok(Some((body, _, floor))) =
+                    crate::segments::mail::read_sealed_body_with_floor(
+                        &self.stores.mail,
+                        &self.db,
+                        actor,
+                        nest_id,
+                    )
+                    .await
+                    && let Some(pt) = worker::open_mail_body(&body, key, floor.stored_at)
                 {
                     return worker::mail_snippet(&pt, query);
                 }

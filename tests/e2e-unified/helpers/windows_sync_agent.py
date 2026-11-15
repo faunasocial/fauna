@@ -451,7 +451,7 @@ def running_agent(exe, pipe_path, data_dir, log_path, extra_env=None):
 
 
 @contextmanager
-def serving_agent(exe, pipe_path, data_dir, log_path):
+def serving_agent(exe, pipe_path, data_dir, log_path, *, launch_env):
     """An agent keeping its state in ``data_dir`` serves ``pipe_path`` for the
     ``with`` body — spawned here only if nothing serves the pipe yet.
 
@@ -463,6 +463,19 @@ def serving_agent(exe, pipe_path, data_dir, log_path):
     adopted (yields ``None``; not ours to stop). One on any other dir raises
     :class:`AgentNotServingError`. Nothing served → spawns via the same path as
     :func:`running_agent` and yields its process, stopped on exit.
+
+    ``launch_env`` is the environment the launch handed its app
+    (``driver.launch_environment()``), and it is required. The app's own spawn
+    (``WindowsDetachedSpawner``) inherits the app's whole environment, so an
+    agent started here in its place runs on the same overrides: the relocated
+    ``LOCALAPPDATA`` the account store hangs off (``%LOCALAPPDATA%\\Fauna\\sync``)
+    and the launch's credential dir and namespace, which hold the account's keys.
+    Spawned on the bare pytest environment, the agent's account host found
+    neither and never assembled, custody stayed unreadable ("the account runtime
+    is not running"), and every bound set's engine was withheld
+    (``tests/platform/windows/test_serving_agent_launch_env.py``). ``None`` is for
+    a caller with no launch (this helper's own tests): the agent then keeps the
+    private credential store :func:`running_agent` gives it.
     """
     try:
         ipc.wait_for_pipe(pipe_path, timeout=0.3)
@@ -471,7 +484,7 @@ def serving_agent(exe, pipe_path, data_dir, log_path):
         served = False
 
     if not served:
-        proc, log = _spawn(exe, pipe_path, data_dir, log_path)
+        proc, log = _spawn(exe, pipe_path, data_dir, log_path, launch_env)
         try:
             ipc.wait_for_pipe(pipe_path, timeout=20)
             server_pid = ipc.pipe_server_pid(pipe_path, timeout=20)
@@ -652,50 +665,6 @@ def list_locations(pipe_path: str) -> list[dict]:
     binding model is rebuilt from at attach (`sync-agent.md` § The per-actor
     scope follows the account across a succession)."""
     return request(pipe_path, {"id": 1, "method": "ListLocations"})["Locations"]
-
-
-#: The registry home of shell sync-root registrations — the one surface an
-#: unpackaged process can READ them from (`fauna_cfapi::SYNC_ROOT_MANAGER_KEY`
-#: says why WinRT's getters answer empty here).
-_SYNC_ROOT_MANAGER_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager"
-
-
-def shell_sync_root_id_for(path) -> str | None:
-    """The ``Fauna!<SID>!<account>`` Id Explorer's ``SyncRootManager`` holds for
-    ``path``, or ``None`` when no Fauna shell registration covers it — the OS's
-    own record, read the way `fauna_cfapi::shell_registration_for` reads it:
-    each ``Fauna!`` key's ``UserSyncRoots\\<SID>`` value, compared
-    case-insensitively with trailing separators ignored.
-
-    Read-only: nothing here registers or unregisters a root."""
-    import winreg
-
-    def norm(p: str) -> str:
-        return str(p).rstrip("\\/").lower()
-
-    wanted = norm(path)
-    try:
-        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _SYNC_ROOT_MANAGER_KEY)
-    except FileNotFoundError:
-        return None  # no shell registration on this machine at all
-    with root:
-        index = 0
-        while True:
-            try:
-                sync_root_id = winreg.EnumKey(root, index)
-            except OSError:
-                return None  # ERROR_NO_MORE_ITEMS
-            index += 1
-            if not sync_root_id.startswith("Fauna!"):
-                continue
-            sid = sync_root_id.split("!")[1]
-            try:
-                with winreg.OpenKey(root, rf"{sync_root_id}\UserSyncRoots") as user_roots:
-                    registered, _kind = winreg.QueryValueEx(user_roots, sid)
-            except OSError:
-                continue
-            if norm(registered) == wanted:
-                return sync_root_id
 
 
 def file_status(pipe_path: str, abs_path: str) -> str:

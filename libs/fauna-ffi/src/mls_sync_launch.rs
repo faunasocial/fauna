@@ -135,17 +135,29 @@ fn post_restore_hook(
     attested_predecessors: Vec<[u8; 32]>,
 ) -> Option<Arc<dyn PostRestoreHook>> {
     let seed: [u8; 32] = self_secret.try_into().ok()?;
-    Some(Arc::new(
-        fauna_client_folders::FolderRemovalResume::new(
-            Arc::clone(nest),
-            seed,
-            crate::account_runtime::folder_key_store(),
-            crate::account_runtime::mail_store(),
-            crate::ledger_seam(),
-        )
-        .with_recording_device(recording_device)
-        .with_predecessors(attested_predecessors),
-    ))
+    let resume = fauna_client_folders::FolderRemovalResume::new(
+        Arc::clone(nest),
+        seed,
+        crate::account_runtime::folder_key_store(),
+        crate::account_runtime::mail_store(),
+        crate::ledger_seam(),
+    )
+    .with_recording_device(recording_device)
+    .with_predecessors(attested_predecessors);
+    // The projection walk's take-over (`succession-cut.md` ruling (11)(l)) for
+    // a set no engine here is bound to: on a desktop the sync agent hosts every
+    // engine, so its location roster is the device's; iOS and android host
+    // engines in places only the app sees, so the app lends that roster
+    // (`crate::engine_roster`), unread until it is installed.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    let resume = resume.with_engine_bound_sets(fauna_client_folders::agent_bound_sets());
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let resume = resume.with_engine_bound_sets(crate::engine_roster::installed_engine_roster(
+        fauna_core::identity::ActorKeypair::from_secret(seed)
+            .actor_id()
+            .0,
+    ));
+    Some(Arc::new(resume))
 }
 
 /// No-op twin for the `--no-default-features` (Go mail-bridge) build, which

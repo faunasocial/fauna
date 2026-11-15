@@ -16,11 +16,31 @@ name: Release (macOS)
 # docs/goal/architecture/installers/macos.md § Build Pipeline → The `.dmg`
 # release pipeline; credential custody: docs/goal/architecture/release-integrity.md
 # § Implementation status today.
+#
+# The App Store (docs/goal/architecture/installers/store-review.md § The store
+# legs, *How the iOS store app is signed*): `ios-store-app` archives the iOS app
+# UNSIGNED, store-safe, with no credential and no Environment; the approved
+# `sign` job signs it bundle by bundle with the tree's own signer, uploads it
+# with Apple's own tool and takes it to the TestFlight groups and Beta App
+# Review as its LAST steps, after the downloads are out, so the owner's one
+# approval of the run covers the store too. A stores-only dispatch
+# (`stores_commit`, at the version's tag) builds the store app from that
+# recorded commit and runs the store steps alone, publishing no download.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      # A stores-only run, as release.yml's: the public commit a version
+      # records. The store app is built from it and the approved job runs its
+      # store steps alone and publishes no download. Empty (and on every tag
+      # push): the full release.
+      stores_commit:
+        description: "Stores only: the public commit the version records (full 40-hex SHA); empty for the full release"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -38,6 +58,7 @@ env:
 jobs:
   build:
     name: Build Fauna.app (no credentials)
+    if: inputs.stores_commit == ''
     runs-on: macos-15
     # Measured at most 99 min over five 0.1.5 runs (80-99 min); the serial job,
     # with the terminal app's two darwin builds, took 2 h 47 m -- which is why
@@ -90,6 +111,7 @@ jobs:
   # Developer ID certificate; one job per target, in parallel with `build`.
   build-tui:
     name: Build the fauna-tui archive (no credentials)
+    if: inputs.stores_commit == ''
     strategy:
       matrix:
         include:
@@ -126,8 +148,10 @@ jobs:
         run: just tui-release ${{ matrix.target }}
       - name: Stage the archive
         run: |
+          just shipped-notices terminal-archive-macos notices/terminal-archive-macos.txt --target ${{ matrix.target }}
           bash apps/fauna-tui/packaging/assemble-archive.sh --no-tar \
-            --bin-dir target/${{ matrix.target }}/release --out tui-unsigned --suffix ${{ matrix.suffix }}
+            --bin-dir target/${{ matrix.target }}/release --out tui-unsigned --suffix ${{ matrix.suffix }} \
+            --notices notices/terminal-archive-macos.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: fauna-tui-unsigned-${{ matrix.suffix }}
@@ -138,9 +162,85 @@ jobs:
         if: ${{ !cancelled() }}
         run: uv run --no-project python scripts/cargo-boundary.py runner-witness
 
+  # The App Store build: the iOS app archived UNSIGNED, store-safe, from the
+  # version's recorded commit (`stores_commit`) or this tree, with NO
+  # credential and no Environment — signing happens only in `sign`, by the
+  # tree's own signer (installers/store-review.md § The store legs, *How the
+  # iOS store app is signed*). The artifact's name is no publish pattern.
+  ios-store-app:
+    name: Build the App Store app (no credentials)
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        if: inputs.stores_commit != ''
+        with:
+          ref: ${{ inputs.stores_commit }}
+          path: store-build
+          persist-credentials: false
+      - name: Resolve the tree and the version
+        env:
+          STORES_COMMIT: ${{ inputs.stores_commit }}
+        run: |
+          set -euo pipefail
+          if [ -n "$STORES_COMMIT" ]; then
+            [[ "$STORES_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "stores_commit is not a full 40-hex SHA" >&2; exit 1; }
+            [ "$(git -C store-build rev-parse HEAD)" = "$STORES_COMMIT" ] || { echo "the checkout is not $STORES_COMMIT" >&2; exit 1; }
+            TREE="$PWD/store-build"
+          else
+            TREE="$PWD"
+          fi
+          VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$TREE/Cargo.toml")"
+          if [ -z "$STORES_COMMIT" ] && [[ "$GITHUB_REF" == refs/tags/v* ]] && [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "the tree's version $VERSION is not the tag $GITHUB_REF_NAME" >&2; exit 1
+          fi
+          echo "TREE=$TREE" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          target: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-apple-darwin
+          rustflags: ""
+          cache: false
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # The App Store leg's text is checked here, with no credential in scope: a
+      # text missing or approved for another version is red before any store
+      # call. A dry run (a branch dispatch) stops at this job's end: `sign`
+      # never runs.
+      - name: Check the App Store leg's text
+        run: |
+          set -euo pipefail
+          mkdir -p store-ios-app
+          uv run --no-project python scripts/store-legs.py text app-store what-to-test "$VERSION" \
+            > store-ios-app/what-to-test.txt
+      - name: Archive the App Store app (unsigned, store-safe)
+        run: bash scripts/ios-store-upload.sh "$VERSION" build --tree "$TREE" --out "$RUNNER_TEMP/ios-store"
+      - name: Package the unsigned app and its symbols
+        run: |
+          set -euo pipefail
+          ditto -c -k "$RUNNER_TEMP/ios-store/unsigned" store-ios-app/unsigned.zip
+          ditto -c -k --keepParent "$RUNNER_TEMP/ios-store/dSYMs" store-ios-app/dSYMs.zip
+          echo "$VERSION" > store-ios-app/VERSION
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: store-ios-app
+          path: store-ios-app/
+          if-no-files-found: error
+
   sign:
     name: Sign, notarize, attest, publish
-    needs: [build, build-tui]
+    # A stores-only run (`stores_commit`) skips the download builds, so the
+    # guard reads each need's result instead of the default "every need passed".
+    if: >-
+      !cancelled()
+      && needs.ios-store-app.result == 'success'
+      && (inputs.stores_commit != ''
+          || (needs.build.result == 'success' && needs.build-tui.result == 'success'))
+    needs: [build, build-tui, ios-store-app]
     runs-on: macos-15
     timeout-minutes: 60
     environment: release-macos
@@ -159,14 +259,17 @@ jobs:
           persist-credentials: false
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        if: inputs.stores_commit == ''
         with:
           name: Fauna.app-unsigned
       - name: Restore the bundle
+        if: inputs.stores_commit == ''
         run: |
           mkdir -p build/Release
           ditto -x -k Fauna.app.zip build/Release
           test -d build/Release/Fauna.app
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        if: inputs.stores_commit == ''
         with:
           pattern: fauna-tui-unsigned-*
           path: tui-unsigned
@@ -178,6 +281,7 @@ jobs:
       # this job is that nothing but the runner image and this file touches the
       # key material.
       - name: Import the Developer ID certificate into a throwaway keychain
+        if: inputs.stores_commit == ''
         env:
           CERT_P12_BASE64: ${{ secrets.FAUNA_SIGN_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.FAUNA_SIGN_CERT_PASSWORD }}
@@ -197,6 +301,7 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN"
 
       - name: Write the App Store Connect API key
+        if: inputs.stores_commit == ''
         env:
           NOTARY_KEY_P8: ${{ secrets.FAUNA_NOTARY_KEY_P8 }}
         run: |
@@ -209,6 +314,7 @@ jobs:
       # it, notarizes (App Store Connect API key), and staples the .dmg AND the
       # bundle.
       - name: Sign, notarize and staple
+        if: inputs.stores_commit == ''
         run: just mac-dmg-package
 
       # The terminal app's archives: Developer ID + hardened runtime on all
@@ -217,6 +323,7 @@ jobs:
       # ad-hoc-signed archive never ships (installers/tui.md § Decisions).
       # Same recipe for both targets.
       - name: Sign and notarize the fauna-tui archives
+        if: inputs.stores_commit == ''
         run: |
           just mac-tui-archive aarch64-darwin tui-unsigned/fauna-tui-aarch64-darwin
           just mac-tui-archive x86_64-darwin tui-unsigned/fauna-tui-x86_64-darwin
@@ -236,6 +343,7 @@ jobs:
         run: bash scripts/install-uv.sh
 
       - name: The downloads table matches the release
+        if: inputs.stores_commit == ''
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           uv run --no-project python installer/check-downloads.py installer/downloads.json release-macos.yml build "$VERSION"
@@ -243,6 +351,7 @@ jobs:
       # Build provenance: a signed, transparency-logged statement binding each
       # artifact's digest to this repository, this commit and this workflow.
       - name: Attest build provenance
+        if: inputs.stores_commit == ''
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2.4.0
         with:
           subject-path: |
@@ -250,6 +359,7 @@ jobs:
             build/fauna-tui-*-darwin.tar.gz
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: inputs.stores_commit == ''
         with:
           name: Fauna-macos
           path: |
@@ -260,7 +370,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish the GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && inputs.stores_commit == ''
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           files: |
@@ -271,7 +381,10 @@ jobs:
           # A pre-release, as release.yml's: the tag is pushed at UAT entry and
           # `fauna-publish release` flips the Release after the promote.
           prerelease: true
-          generate_release_notes: true
+          # release.yml publishes into this same Release, in whichever order the
+          # two runs finish: append, never replace, its notes; release.yml's
+          # step alone generates the change list, so it is listed once.
+          append_body: true
           # public-text: release-body-macos
           body: |
             ## Verify the macOS download
@@ -279,7 +392,8 @@ jobs:
             The `.dmg` was built by this repository's `Release (macOS)` workflow
             from this tag on a GitHub-hosted runner, and its provenance is
             recorded in the Sigstore transparency log. To check that the file you
-            downloaded is that exact output, install the GitHub CLI and run:
+            downloaded is that exact output, install the GitHub CLI, sign in
+            with `gh auth login` and run:
 
             ```bash
             gh attestation verify Fauna-<version>.dmg --repo faunasocial/fauna
@@ -291,3 +405,110 @@ jobs:
             The terminal app's `fauna-tui-<arch>-darwin.tar.gz` archives — the terminal app, its sync agent and `fauna-cli`, the program an AI assistant runs to work in Fauna — are built, attested, Developer-ID-signed and notarized the same way. Unpack one and
             run its `install.sh`, or `gh attestation verify` it first.
           # public-text-end: release-body-macos
+
+      # ---- the App Store leg: last, converging (installers/store-review.md
+      # § The store legs, *How the iOS store app is signed*). The app
+      # `ios-store-app` archived unsigned is signed here, bundle by bundle, by
+      # the tree's own signer with the Distribution identity — in a throwaway
+      # keychain of its own, deleted by an always-run step — then uploaded by
+      # Apple's own tool unless App Store Connect already holds the build, then
+      # taken to the TestFlight groups and Beta App Review. The App Manager key,
+      # the identity and the four profiles rest in this Environment only. A dry
+      # run never reaches this job, so it signs nothing and performs no store
+      # act. ----
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        if: inputs.stores_commit != ''
+        with:
+          ref: ${{ inputs.stores_commit }}
+          path: store-build
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: store-ios-app
+          path: store-ios-app
+      - name: "App Store: import the Distribution identity, the profiles and the key"
+        env:
+          DIST_P12_BASE64: ${{ secrets.FAUNA_IOS_DIST_CERT_P12 }}
+          DIST_PASSWORD: ${{ secrets.FAUNA_IOS_DIST_CERT_PASSWORD }}
+          PROFILE_APP: ${{ secrets.FAUNA_IOS_PROFILE_APP }}
+          PROFILE_FILEPROVIDER: ${{ secrets.FAUNA_IOS_PROFILE_FILEPROVIDER }}
+          PROFILE_FILEPROVIDER_UI: ${{ secrets.FAUNA_IOS_PROFILE_FILEPROVIDER_UI }}
+          PROFILE_WIDGET: ${{ secrets.FAUNA_IOS_PROFILE_WIDGET }}
+          STORE_KEY_P8: ${{ secrets.FAUNA_ASC_STORE_KEY_P8 }}
+          STORE_KEY_ID: ${{ secrets.FAUNA_ASC_STORE_KEY_ID }}
+          STORE_ISSUER: ${{ secrets.FAUNA_ASC_STORE_ISSUER }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/store.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          printf '%s' "$DIST_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" -P "$DIST_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/dist.p12"
+          mkdir -p "$RUNNER_TEMP/store-profiles"
+          printf '%s' "$PROFILE_APP" | base64 --decode > "$RUNNER_TEMP/store-profiles/app.mobileprovision"
+          printf '%s' "$PROFILE_FILEPROVIDER" | base64 --decode > "$RUNNER_TEMP/store-profiles/fileprovider.mobileprovision"
+          printf '%s' "$PROFILE_FILEPROVIDER_UI" | base64 --decode > "$RUNNER_TEMP/store-profiles/fileprovider-ui.mobileprovision"
+          printf '%s' "$PROFILE_WIDGET" | base64 --decode > "$RUNNER_TEMP/store-profiles/widget.mobileprovision"
+          mkdir -p "$RUNNER_TEMP/store-key"
+          printf '%s\n' "$STORE_KEY_P8" > "$RUNNER_TEMP/store-key/AuthKey_${STORE_KEY_ID}.p8"
+          chmod 600 "$RUNNER_TEMP/store-key/AuthKey_${STORE_KEY_ID}.p8"
+          {
+            echo "FAUNA_ASC_STORE_KEY_FILE=$RUNNER_TEMP/store-key/AuthKey_${STORE_KEY_ID}.p8"
+            echo "FAUNA_ASC_STORE_KEY_ID=$STORE_KEY_ID"
+            echo "FAUNA_ASC_STORE_ISSUER=$STORE_ISSUER"
+            echo "STORE_TREE=${{ inputs.stores_commit != '' && format('{0}/store-build', github.workspace) || github.workspace }}"
+            echo "STORE_VERSION=$(cat store-ios-app/VERSION)"
+          } >> "$GITHUB_ENV"
+      - name: "App Store: sign the app with the tree's own signer"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ios-store/unsigned"
+          ditto -x -k store-ios-app/unsigned.zip "$RUNNER_TEMP/ios-store/unsigned"
+          bash scripts/ios-store-upload.sh "$STORE_VERSION" sign --tree "$STORE_TREE" \
+            --out "$RUNNER_TEMP/ios-store" --profiles-dir "$RUNNER_TEMP/store-profiles" \
+            --keychain "$RUNNER_TEMP/store.keychain-db"
+      - name: "App Store: upload unless App Store Connect holds the build"
+        run: |
+          set -euo pipefail
+          rc=0
+          cat scripts/asc/common.swift scripts/asc/store-leg.swift | xcrun swift - \
+            --version "$STORE_VERSION" --status || rc=$?
+          case "$rc" in
+            0) echo "App Store Connect already holds $STORE_VERSION: no upload" ;;
+            5) bash scripts/ios-store-upload.sh "$STORE_VERSION" send --tree "$STORE_TREE" --out "$RUNNER_TEMP/ios-store" ;;
+            *) exit "$rc" ;;
+          esac
+      - name: "App Store: TestFlight groups and Beta App Review"
+        run: |
+          set -euo pipefail
+          cat scripts/asc/common.swift scripts/asc/store-leg.swift | xcrun swift - \
+            --version "$STORE_VERSION" --what-to-test store-ios-app/what-to-test.txt \
+            --legs "$RUNNER_TEMP/app-store-leg.json" \
+            --furthest "$(uv run --no-project python scripts/store-legs.py furthest app-store)"
+      - name: "App Store: add the leg to the record"
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/app-store-leg.json" ]; then
+            uv run --no-project python scripts/store-legs.py add store-legs.json "$RUNNER_TEMP/app-store-leg.json"
+          fi
+      - name: "App Store: delete the throwaway keychain, the profiles and the key"
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/store.keychain-db" || true
+          rm -rf "$RUNNER_TEMP/store-profiles" "$RUNNER_TEMP/store-key"
+      # The leg's result, read by the release attempt's `stores` step: store,
+      # version, build, track, state, the stamp of the store's reading and its
+      # identifiers — no secret, no address, no tester.
+      - name: Keep the store legs' record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: store-legs
+          path: store-legs.json
+          if-no-files-found: ignore

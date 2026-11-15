@@ -589,7 +589,7 @@ const ACTOR_BEARING_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
         "the canonical reply body of ANY successful non-read RPC on an authenticated connection \
          (64 KiB cap): so it names whoever that reply named, including THIRD PARTIES -- the \
          invite-approval reply carries the approved user's actor id and handle on the approving \
-         admin's row. The row follows its caller (Purge / Stay), which cannot reach a third \
+         admin's row. The row follows its caller (Purge / Move), which cannot reach a third \
          party's id inside it; what bounds THAT is the seven-day retention sweep, and it is the \
          load-bearing half of this ruling: lengthening that window lengthens how long a deleted \
          account's id survives in other callers' replay cache. Never exported, for the registry's \

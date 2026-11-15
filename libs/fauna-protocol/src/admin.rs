@@ -100,6 +100,30 @@ pub struct AdminUser {
     /// enforcer; this flag is presentation).
     #[serde(default)]
     pub is_admin: bool,
+    /// The account's current guardian — `Some` only on a supervised
+    /// (guardian-linked) account. Read-only: the link moves only through
+    /// `fauna.family.transfer` / `.graduate`. It is on this projection so the
+    /// Users hub can name the guardian and offer the admin's one family act,
+    /// taking the guardianship over (`family-safety.md` § App surface →
+    /// *Admin take-over*). A pending hand-over is not projected. A missing key
+    /// on the wire decodes to `None`, the safe direction (no control offered).
+    /// Additive 2026-11-14.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardian: Option<AdminUserGuardian>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// A supervised account's guardian, as the admin Users projection names it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AdminUserGuardian {
+    /// Raw 32-byte actor id of the guardian.
+    pub actor_id: ByteBuf,
+    /// The guardian's handle; `None` for a blank-handle account (folded to
+    /// absent like [`AdminUser::handle`]), so the label falls back to the
+    /// full actor hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

@@ -65,7 +65,7 @@ pub(crate) mod nests;
 mod privacy;
 pub(crate) mod recovery;
 mod root;
-mod subscriptions;
+pub(crate) mod subscriptions;
 mod task_delegation;
 // `pub(crate)`: `element::SelectTarget` resolves the publish sheet's kind
 // picker through this module's `PublishKind`, so the select's raw-value
@@ -771,6 +771,18 @@ pub struct SettingsState {
     /// "nothing scheduled" claim it has no basis for (the un-hydrated-paint
     /// rule); `Some(empty)` is the honest empty.
     pub(crate) pending_actions: Option<Vec<PendingActionRow>>,
+    /// The standing unsent-changes section's rows
+    /// (`account-offline-mutation.md` § The offline-mutation contract →
+    /// *The unsent-changes surface*, point 1): every change this device's
+    /// outbox holds that has not reached the nest, read from the shared model
+    /// (`OfflineIntentQueue::unsent_changes`) — never from the nest, so the
+    /// list answers with the nest down. Re-read on the unsent tick while the
+    /// Account sub-page shows, and after a retry or discard. `None` = not read
+    /// yet (the bare title, never a settled "nothing" claim).
+    pub(crate) unsent_changes: Option<Vec<fauna_core::offline_intent::UnsentChange>>,
+    /// The intent id whose discard is armed (`unsent-change-discard-button`
+    /// pressed, `unsent-change-discard-confirm-button` showing on that row).
+    pub(crate) unsent_discard_armed: Option<String>,
     /// The `new-handle` input buffer (`settings.md` § Handle change). A local
     /// buffer committed only on `change-handle`, like profile's edit buffers.
     handle_input: String,
@@ -1101,6 +1113,8 @@ impl Default for SettingsState {
             encryption_error: None,
             recovery: recovery::RecoveryState::default(),
             pending_actions: None,
+            unsent_changes: None,
+            unsent_discard_armed: None,
             handle_input: String::new(),
             sign_out_pending: false,
             delete_confirm_input: String::new(),
@@ -3514,6 +3528,16 @@ pub enum Action {
     /// NO confirm — cancelling is the safe direction, `settings.md` § Pending
     /// actions; needs the nest → [`apply_local`]).
     PendingActionCancel(i64),
+    /// `unsent-change-retry-button[i]` — re-arm the not-sent intent whose id
+    /// (lowercase hex) this carries; a local outbox write (→ [`apply_local`]).
+    UnsentChangeRetry(String),
+    /// `unsent-change-discard-button[i]` — arm the discard confirm on that
+    /// row. Sync.
+    UnsentChangeDiscard(String),
+    /// `unsent-change-discard-confirm-button[i]` — delete the not-sent intent
+    /// (the one user-initiated deletion of a pending write); a local outbox
+    /// write (→ [`apply_local`]).
+    UnsentChangeDiscardConfirm(String),
     /// `settings-export-data-button` — fetch the full account archive
     /// (payload bytes included, `fauna_nest_http::paths::account::EXPORT_FULL`
     /// — never composed by hand) and save it to the downloads dir. No toggle:
@@ -3683,6 +3707,11 @@ pub enum Action {
         consent_id_hex: String,
         approved: bool,
     },
+    /// `connected-apps-request-folder` — choose the folder on the request
+    /// card at index `card` (a bare folder-plane request); `id` is the
+    /// option key, the folder's row id in decimal. Local to the machine, no
+    /// nest call.
+    ConnectedAppsSetFolder { card: usize, id: String },
     /// `connected-apps-request-block` — *Never show requests from this app*.
     ConnectedAppsBlockRequest(String),
     /// `connected-apps-item-revoke` — open the row's inline confirm. Local.
@@ -3714,6 +3743,16 @@ pub enum Action {
     /// write, never a local optimistic guess (needs the machine →
     /// [`apply_local`]).
     ConnectedAppsToggleExternalApps,
+    /// `nest-trust-view-now` / `nest-trust-view-history` on a principal's
+    /// roster row — show its trust facet's Now or History lens. Keyed by the
+    /// row's opaque key, never an index. Local: the lens is the shared
+    /// machine's page state, no nest call.
+    ConnectedAppsSetLens { key: String, history: bool },
+    /// `connected-apps-oracle-open` — open a served principal's per-operation
+    /// record, by row key, or close it when it is the one open (one record
+    /// open at a time — `connected-apps.md` § Layout & flow, region 3). The
+    /// open is a Read of the record; the close is local to the machine.
+    ConnectedAppsToggleRecord(String),
     /// A rail row → enter the Mail → Aliases sub-page (self-hydrates the shared
     /// machine). The human affordance for a page that, until this landed, could
     /// only be reached from the e2e nav patch.
@@ -3940,6 +3979,17 @@ pub enum Action {
     ConfirmRemoveMember(String),
     /// `device-member-remove-cancel-button[i]` — disarm; nothing written.
     CancelRemoveMember,
+    /// `recovery-kit-owed-nest-dismiss-button[i]` — ARM the two-step dismiss
+    /// on the owed entry keyed `(old_actor_id, nest_id)`
+    /// (`succession-linked-nests.md` § The road, *the user ends what the
+    /// runtime cannot*). View state only.
+    DismissOwedNest(fauna_client_recovery::owed_nests::OwedNestKey),
+    /// `recovery-kit-owed-nest-dismiss-confirm-button[i]` — settle that entry
+    /// at the bound nest (`fauna.recovery.succession.owed_settle`); nothing is
+    /// dialed. Issues `Op::SettleOwedNest` ([`apply_local`]); disarms either way.
+    ConfirmDismissOwedNest(fauna_client_recovery::owed_nests::OwedNestKey),
+    /// `recovery-kit-owed-nest-dismiss-cancel-button[i]` — disarm; nothing sent.
+    CancelDismissOwedNest,
     /// `device-rename-button[i]` — open the name editor over the card of
     /// listed device `device_id` (`ui/devices.md` § Device names), prefilled
     /// with its name (`DevicesMachine::device_name`). View state only
@@ -4543,6 +4593,9 @@ impl Action {
             // The reveal reads this account's own mail custody off its local
             // account store — no wire call.
             Action::ConnectedAppsRevealSecret(_) | Action::ConnectedAppsCopySecret(_) => None,
+            // Opening the record is a Read (`list_principal_ops`), which the
+            // gate declines to decide on; closing it is local.
+            Action::ConnectedAppsToggleRecord(_) => None,
 
             // ── Mail → credentials (`mail-settings.md`) ─────────────────────
             // Both submit arms — first credential (`EnableMail`) and subsequent
@@ -4729,6 +4782,11 @@ impl Action {
             | Action::CancelOwnFeatureLimitEditor => None,
             Action::DeleteAccount => Some("fauna.account.delete"),
             Action::PendingActionCancel(_) => Some("fauna.pending_actions.cancel"),
+            // The unsent-changes doors are this device's outbox, never the nest:
+            // they work with the nest down, which is when they matter.
+            Action::UnsentChangeRetry(_)
+            | Action::UnsentChangeDiscard(_)
+            | Action::UnsentChangeDiscardConfirm(_) => None,
             // Network-shaped with no kind at all, the same reason
             // `backups::Action::DownloadFile` answers `None`: its bytes ride
             // the bulk-binary `/api/v1/export` carve-out, not a `fauna.*` kind.
@@ -4848,6 +4906,12 @@ impl Action {
             // cancel are view state. The budget/stop precedent below.
             Action::RemoveMember(_) | Action::ConfirmRemoveMember(_) | Action::CancelRemoveMember => {
                 None
+            }
+            // The owed-nest dismiss: arm and cancel are view state; the
+            // confirm is the settle kind, at the bound nest.
+            Action::DismissOwedNest(_) | Action::CancelDismissOwedNest => None,
+            Action::ConfirmDismissOwedNest(_) => {
+                Some(fauna_protocol::recovery::SUCCESSION_OWED_SETTLE_KIND)
             }
             // Opening and closing the name editor are view state; the save is
             // the rename kind (`devices.md` § Device names).
@@ -5019,7 +5083,9 @@ impl Action {
             // never nest state, which is also why they return no `Op`.
             Action::ConnectedAppsArmRevoke(_)
             | Action::ConnectedAppsCancelRevoke
+            | Action::ConnectedAppsSetFolder { .. }
             | Action::ConnectedAppsCopyUsername(_)
+            | Action::ConnectedAppsSetLens { .. }
             | Action::SessionsRevokeOthersArm
             | Action::SessionsRevokeOthersCancel
             | Action::ToggleMailEnabled
@@ -5233,6 +5299,9 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         // pair on THAT card, cancel disarms; the confirm is `apply_local`'s.
         Action::RemoveMember(id) => state.devices.member_remove_pending = Some(id),
         Action::CancelRemoveMember => state.devices.member_remove_pending = None,
+        // The owed entry's two-step dismiss, the member card's shape.
+        Action::DismissOwedNest(key) => state.recovery.owed_dismiss_pending = Some(key),
+        Action::CancelDismissOwedNest => state.recovery.owed_dismiss_pending = None,
         // The name editor opens on the row's NAME — the machine's opened
         // name, never the painted label, which may carry rule (c)'s ` · code`.
         Action::RenameDevice(device_id) => {
@@ -5577,6 +5646,9 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::CredentialStoreRekeySubmit
         | Action::DeleteAccount
         | Action::PendingActionCancel(_)
+        | Action::UnsentChangeRetry(_)
+        | Action::UnsentChangeDiscard(_)
+        | Action::UnsentChangeDiscardConfirm(_)
         | Action::ExportData
         | Action::RecoveryCreateKit
         | Action::RecoveryReplaceKit
@@ -5630,12 +5702,15 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::ConnectedAppsBlockRequest(_)
         | Action::ConnectedAppsArmRevoke(_)
         | Action::ConnectedAppsCancelRevoke
+        | Action::ConnectedAppsSetFolder { .. }
         | Action::ConnectedAppsConfirmRevoke(_)
         | Action::ConnectedAppsRevealSecret(_)
         | Action::ConnectedAppsCopySecret(_)
         | Action::ConnectedAppsCopyUsername(_)
         | Action::ConnectedAppsUnblock(_)
         | Action::ConnectedAppsToggleExternalApps
+        | Action::ConnectedAppsSetLens { .. }
+        | Action::ConnectedAppsToggleRecord(_)
         | Action::OpenWeb
         | Action::ToggleWebSubdomain
         | Action::CopyWebLink(_)
@@ -5666,6 +5741,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::RemoveDevice(_)
         | Action::SetP2pParticipation { .. }
         | Action::ConfirmRemoveMember(_)
+        | Action::ConfirmDismissOwedNest(_)
         | Action::ConfirmRenameDevice
         | Action::OpenFolders
         | Action::WizardCreate
@@ -6226,6 +6302,30 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             .nest
             .clone()
             .map(|nest| Op::PendingActionCancel { nest, id }),
+        Action::UnsentChangeRetry(intent_id) => {
+            app.settings.unsent_discard_armed = None;
+            app.account_outbox
+                .clone()
+                .map(|outbox| Op::SettleUnsentChange {
+                    outbox,
+                    intent_id,
+                    retry: true,
+                })
+        }
+        Action::UnsentChangeDiscard(intent_id) => {
+            app.settings.unsent_discard_armed = Some(intent_id);
+            None
+        }
+        Action::UnsentChangeDiscardConfirm(intent_id) => {
+            app.settings.unsent_discard_armed = None;
+            app.account_outbox
+                .clone()
+                .map(|outbox| Op::SettleUnsentChange {
+                    outbox,
+                    intent_id,
+                    retry: false,
+                })
+        }
         Action::ExportData => app.settings.nest.clone().map(|nest| Op::ExportData {
             nest,
             node_url: app.settings.node_url.clone(),
@@ -6613,6 +6713,27 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // `device-member-remove-confirm-button[i]` — the member door's one
         // leg, by key. The arm clears whatever the door answers: a refusal
         // paints `error-message` with the card still there to re-arm.
+        // `recovery-kit-owed-nest-dismiss-confirm-button[i]` — the settle on
+        // the user's word. The arm clears whatever the nest answers: a
+        // refusal paints `error-message` with the entry still listed.
+        Action::ConfirmDismissOwedNest(key) => {
+            let recovery = &mut app.settings.recovery;
+            recovery.owed_dismiss_pending = None;
+            let entry = recovery
+                .owed
+                .as_ref()?
+                .entries
+                .iter()
+                .find(|e| e.key() == key)?
+                .clone();
+            let nest = app.settings.nest.clone()?;
+            let secret_hex = app.settings.secret_hex.as_str().to_string();
+            Some(Op::SettleOwedNest {
+                nest,
+                secret_hex,
+                entry,
+            })
+        }
         Action::ConfirmRemoveMember(device_id) => {
             app.settings.devices.member_remove_pending = None;
             app.settings
@@ -8541,6 +8662,25 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 approved,
             },
         }),
+        // The card's folder choice: the index the picker was painted at names
+        // the card, the option key the folder; a key that is no row id, or a
+        // card no longer listed, changes nothing.
+        Action::ConnectedAppsSetFolder { card, id } => {
+            let c = &app.settings.connected_apps;
+            let machine = c.machine.clone()?;
+            let consent_id_hex = c
+                .snapshot
+                .as_ref()?
+                .requests
+                .get(card)?
+                .consent_id_hex
+                .clone();
+            let id = id.trim().parse::<i64>().ok()?;
+            Some(Op::ConnectedApps {
+                machine,
+                gesture: ConnectedAppsGesture::SetFolder { consent_id_hex, id },
+            })
+        }
         Action::ConnectedAppsBlockRequest(consent_id_hex) => Some(Op::ConnectedApps {
             machine: app.settings.connected_apps.machine.clone()?,
             gesture: ConnectedAppsGesture::Block(consent_id_hex),
@@ -8606,6 +8746,20 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             crate::wizard::copy_to_clipboard(&username);
             None
         }
+        Action::ConnectedAppsSetLens { key, history } => {
+            let c = &mut app.settings.connected_apps;
+            let machine = c.machine.clone()?;
+            machine.set_lens(
+                key,
+                if history {
+                    fauna_client_connected_apps::TrustLens::History
+                } else {
+                    fauna_client_connected_apps::TrustLens::Now
+                },
+            );
+            c.snapshot = Some(machine.snapshot());
+            None
+        }
         Action::ConnectedAppsUnblock(client_id) => Some(Op::ConnectedApps {
             machine: app.settings.connected_apps.machine.clone()?,
             gesture: ConnectedAppsGesture::Unblock(client_id),
@@ -8626,6 +8780,24 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::ConnectedApps {
                 machine: app.settings.connected_apps.machine.clone()?,
                 gesture: ConnectedAppsGesture::SetExternalApps(enabled),
+            })
+        }
+        // The record's open control toggles: the one open record closes, any
+        // other row's opens (the machine keeps one open at a time).
+        Action::ConnectedAppsToggleRecord(key) => {
+            let c = &app.settings.connected_apps;
+            let open = c
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.record.as_ref())
+                .is_some_and(|r| r.key == key);
+            Some(Op::ConnectedApps {
+                machine: c.machine.clone()?,
+                gesture: if open {
+                    ConnectedAppsGesture::CloseRecord
+                } else {
+                    ConnectedAppsGesture::OpenRecord(key)
+                },
             })
         }
         // Both rail rows route through `route_subpage`, the one place a settings
@@ -8756,7 +8928,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         #[cfg(feature = "payments")]
         Action::RedeemClaim => Some(Op::SubscriptionsConsumer {
             nest: app.settings.nest.clone()?,
-            action: ConsumerOp::RedeemClaim(app.settings.subscriptions.claim_code()?),
+            action: ConsumerOp::RedeemClaim {
+                code: app.settings.subscriptions.claim_code()?,
+                secret_hex: app.settings.secret_hex.clone(),
+            },
         }),
         // Each gesture is index-addressed into the machine's UNFILTERED entries —
         // the element carried the snapshot index, so no re-derivation here.
@@ -9601,6 +9776,14 @@ pub enum Op {
     /// list read in the same op — the row's disappearance is the receipt, so
     /// the outcome carries the post-cancel truth rather than a local guess.
     PendingActionCancel { nest: Arc<NestClient>, id: i64 },
+    /// Retry (`retry`) or discard one not-sent intent through the outbox's
+    /// door, then re-read the list in the same op — the row's new state (or
+    /// its absence) is the receipt.
+    SettleUnsentChange {
+        outbox: Arc<fauna_sync_engine::offline_intent_queue::AccountOutbox>,
+        intent_id: String,
+        retry: bool,
+    },
     /// Mint + register a recovery kit and escrow the seed in one ceremony
     /// (`fauna_client_recovery::create_kit`). `prior: None` — the arms needing
     /// a kit in hand are gated on the phrase-entry ID question, see
@@ -10409,6 +10592,16 @@ pub enum Op {
     RemoveMember {
         machine: Arc<DevicesMachine>,
         device_id: String,
+    },
+    /// `fauna_client_recovery::owed_nests::dismiss_owed_nest` at the entry's
+    /// keeper — `recovery-kit-owed-nest-dismiss-confirm-button[i]`: the bound
+    /// session for a bound entry, an owner connection through the shared
+    /// linked-nest dial (signed in as `secret_hex`'s identity) for a linked
+    /// keeper's.
+    SettleOwedNest {
+        nest: Arc<NestClient>,
+        secret_hex: String,
+        entry: fauna_client_recovery::owed_nests::OwedNestEntry,
     },
     /// `DevicesMachine::rename_device`, then re-snapshot —
     /// `device-rename-confirm-button` (`ui/devices.md` § Device names).
@@ -11235,6 +11428,14 @@ pub enum Outcome {
         /// The let-go's dead read — empty with no runtime, and on a failed
         /// read (logged): a let-go that cannot be shown is not offered.
         dead: Vec<fauna_sync_engine::generation_let_go::DeadGeneration>,
+        /// The owed nests, joined with this runtime's last delivery — `None`
+        /// when nothing is owed, and on a failed read (logged).
+        owed: Option<fauna_client_recovery::owed_nests::OwedNestsView>,
+    },
+    /// An owed entry's settle answered — `key` names the entry and its keeper.
+    OwedNestSettled {
+        key: fauna_client_recovery::owed_nests::OwedNestKey,
+        result: Result<(), String>,
     },
     /// The let-go settled: what it did, and the dead read behind it.
     RecoveryLetGoDone(
@@ -11255,6 +11456,9 @@ pub enum Outcome {
     /// The cancel was refused (already executed / not the creator) — surfaced
     /// on `error-message`.
     PendingActionCancelFailed(String),
+    /// A retry or discard ran; the re-read list, or why it could not be read
+    /// or the door refused.
+    UnsentChangeSettled(Result<Vec<fauna_core::offline_intent::UnsentChange>, String>),
     /// The account archive was fetched and saved — the absolute path it
     /// landed at. Clears the page error.
     DataExported(String),
@@ -11815,6 +12019,27 @@ impl Op {
                     Err(e) => Outcome::PendingActionCancelFailed(format!("{e}")),
                 }
             }
+            Op::SettleUnsentChange {
+                outbox,
+                intent_id,
+                retry,
+            } => {
+                use fauna_core::offline_intent::{OfflineIntentQueue, parse_intent_id};
+                let Some(id) = parse_intent_id(&intent_id) else {
+                    return Outcome::UnsentChangeSettled(Err(format!(
+                        "not an intent id: {intent_id}"
+                    )));
+                };
+                let settled = if retry {
+                    outbox.retry_intent(id).await
+                } else {
+                    outbox.discard_intent(id).await
+                };
+                Outcome::UnsentChangeSettled(match settled {
+                    Ok(_) => outbox.unsent_changes().await,
+                    Err(why) => Err(why),
+                })
+            }
             Op::ExportData { nest, node_url } => {
                 let content = fauna_nest_http::ReqwestNestContentApi::new(
                     node_url,
@@ -11848,6 +12073,8 @@ impl Op {
                 store,
             } => {
                 let account = AccountClient::new(Arc::clone(&nest));
+                let nest_for_owed = Arc::clone(&nest);
+                let owed_store = store.clone();
                 let recovery = async {
                     match recovery_identity(&secret_hex) {
                         Ok(identity) => {
@@ -11869,12 +12096,46 @@ impl Op {
                         Vec::new()
                     })
                 };
-                let (recovery, pending, dead) =
-                    tokio::join!(recovery, list_pending_actions(&account), dead);
+                let owed = async {
+                    // A failed read of the bound nest's list leaves its
+                    // entries out this time (logged); the linked keepers'
+                    // entries, read by the runtime's own pass, still list.
+                    let served =
+                        match fauna_client_recovery::owed_nests::read_owed_nests(&nest_for_owed)
+                            .await
+                        {
+                            Ok(served) => served,
+                            Err(e) => {
+                                tracing::warn!("[settings] owed-nests read failed: {e}");
+                                Vec::new()
+                            }
+                        };
+                    // This device's last delivery at the bound nest (keeper
+                    // `None`) and at each linked keeper (`Some`); nothing
+                    // when this runtime delivered nothing.
+                    let passes = owed_store
+                        .as_ref()
+                        .and_then(|s| s.last_owed_nests())
+                        .unwrap_or_default();
+                    let bound = passes
+                        .iter()
+                        .find(|pass| pass.keeper.is_none())
+                        .map(|pass| pass.deliveries());
+                    let linked: Vec<_> = passes
+                        .iter()
+                        .filter_map(|pass| pass.keeper.map(|k| (k, pass.deliveries())))
+                        .collect();
+                    fauna_client_recovery::owed_nests::OwedNestsView::project(
+                        &served, bound, &linked,
+                    )
+                };
+                let (recovery, pending, dead, owed) =
+                    tokio::join!(recovery, list_pending_actions(&account), dead, owed);
                 Outcome::AccountHydrated {
                     recovery,
                     pending,
                     dead,
+                    owed,
                 }
             }
             Op::RecoveryLetGo { store, generations } => Outcome::RecoveryLetGoDone(
@@ -13262,6 +13523,24 @@ impl Op {
                 machine.remove_member_by_id(device_id).await;
                 Outcome::DevicesSnapshot(Box::new(machine.snapshot()))
             }
+            Op::SettleOwedNest {
+                nest,
+                secret_hex,
+                entry,
+            } => Outcome::OwedNestSettled {
+                key: entry.key(),
+                result: match recovery_identity(&secret_hex) {
+                    Ok(identity) => {
+                        fauna_client_recovery::owed_nests::dismiss_owed_nest(
+                            &RecoveryClient::new(nest),
+                            &NativeLinkedNestDial::new(&identity),
+                            &entry,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                },
+            },
             Op::RenameDevice {
                 machine,
                 device_id,
@@ -15218,15 +15497,36 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::AccountDeleteFailed(message) => {
             app.errors.insert(Page::Settings, message);
         }
+        // The settle answered: the entry leaves the list on success (the
+        // nest's next serve reads the same); a refusal keeps it and says why.
+        Outcome::OwedNestSettled { key, result } => match result {
+            Ok(()) => {
+                if let Some(view) = app.settings.recovery.owed.as_mut() {
+                    view.remove(&key);
+                    if view.entries.is_empty() {
+                        app.settings.recovery.owed = None;
+                    }
+                }
+            }
+            Err(reason) => {
+                app.errors.insert(
+                    Page::Settings,
+                    fauna_client_recovery::owed_nests::dismiss_failed_copy(&reason)
+                        .resolve(fauna_i18n::strings::lookup),
+                );
+            }
+        },
         // The Account hydrate's two halves fold independently; the recovery
         // half reuses its own outcome's fold verbatim (one fold per fact).
         Outcome::AccountHydrated {
             recovery,
             pending,
             dead,
+            owed,
         } => {
             fold_pending_actions(app, pending);
             app.settings.recovery.dead_generations = dead;
+            app.settings.recovery.owed = owed;
             apply_outcome(app, Outcome::RecoveryStatus(recovery));
         }
         // The let-go settled. The refreshed dead read REPLACES the list, so the
@@ -15265,6 +15565,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::PendingActionCancelFailed(message) => {
             app.errors.insert(Page::Settings, message);
         }
+        Outcome::UnsentChangeSettled(changes) => match changes {
+            Ok(rows) => {
+                app.errors.remove(&Page::Settings);
+                app.settings.unsent_changes = Some(rows);
+            }
+            Err(message) => {
+                app.errors.insert(Page::Settings, message);
+            }
+        },
         Outcome::DataExported(path) => {
             app.errors.remove(&Page::Settings);
             tracing::info!("[settings] account archive exported to {path}");
@@ -16149,6 +16458,10 @@ pub fn route_subpage(
     // page-level default conflict policy), so it takes the compound op —
     // Devices, which has no such facet, keeps the plain machine hydrate.
     if state.sub == SubPage::Folders {
+        // The linger reading, once per nav into the page — the same read the
+        // rail click (`Action::OpenFolders`) makes, so both entries paint the
+        // `sync-agent-linger-toggle` alike.
+        state.folders.linger_enabled = crate::sync_agent::linger_enabled();
         return folders_hydrate_op(state, false);
     }
     if state.sub == SubPage::Devices {
@@ -18610,6 +18923,184 @@ mod tests {
     /// owed** — the idempotent steady state every later catch-up reaches, which
     /// on this leg arrives on *every* poll tick rather than once per sign-in, so
     /// a line there would be permanently on screen.
+    #[test]
+    fn the_owed_nests_list_renders_arms_and_drops_an_entry_on_its_settle() {
+        use fauna_client_core::succession_delivery::{Delivery, OwedReason};
+        use fauna_client_recovery::owed_nests::OwedNestsView;
+        use fauna_protocol::recovery::OwedNest;
+        let owed = |nest: u8| OwedNest {
+            old_actor_id: fauna_protocol::ByteBuf::from(vec![1; 32]),
+            nest_id: fauna_protocol::ByteBuf::from(vec![nest; 32]),
+            nest_url: Some(format!("wss://n{nest}.example")),
+            ..Default::default()
+        };
+        let mut app = crate::app::tests::authed_app();
+        app.settings.sub = SubPage::Account;
+        let ids =
+            |app: &App| -> Vec<String> { elements(app).iter().map(|e| e.id.clone()).collect() };
+        assert!(
+            !ids(&app).contains(&"recovery-kit-owed-nests-status".to_string()),
+            "nothing owed → no line"
+        );
+
+        let served = [owed(2), owed(3)];
+        let deliveries = [(
+            served[0].clone(),
+            Delivery::Owed(OwedReason::Unreachable("refused".into())),
+        )];
+        app.settings.recovery.owed = OwedNestsView::project(&served, Some(&deliveries), &[]);
+        let els = elements(&app);
+        let of = |id: &str| -> Vec<&Element> { els.iter().filter(|e| e.id == id).collect() };
+        assert_eq!(of("recovery-kit-owed-nests-status").len(), 1);
+        assert_eq!(of("recovery-kit-owed-nest-item").len(), 2);
+        let outcomes = of("recovery-kit-owed-nest-outcome");
+        assert_eq!(
+            outcomes[0].text,
+            fauna_i18n::strings::settings::recovery_kit::OWED_NEST_UNREACHABLE
+        );
+        assert_eq!(
+            outcomes[1].text,
+            fauna_i18n::strings::settings::recovery_kit::OWED_NEST_NOT_TRIED
+        );
+        assert!(of("recovery-kit-owed-nest-dismiss-confirm-button").is_empty());
+
+        // Arm the SECOND entry: its dismiss gives way to confirm + cancel there.
+        let Some(Gesture::Settings(arm)) = of("recovery-kit-owed-nest-dismiss-button")[1].gesture()
+        else {
+            panic!("the dismiss is a settings gesture");
+        };
+        drop(els);
+        apply(&mut app.settings, arm);
+        let els = elements(&app);
+        let confirm: Vec<&Element> = els
+            .iter()
+            .filter(|e| e.id == "recovery-kit-owed-nest-dismiss-confirm-button")
+            .collect();
+        assert_eq!(confirm.len(), 1);
+        assert_eq!(
+            confirm[0].path,
+            vec![("recovery-kit-owed-nest-item".to_string(), 1)]
+        );
+        drop(els);
+
+        // The settle answered: that entry leaves; a refusal keeps the rest.
+        apply_outcome(
+            &mut app,
+            Outcome::OwedNestSettled {
+                key: fauna_client_recovery::owed_nests::OwedNestKey {
+                    keeper: None,
+                    old_actor_id: vec![1; 32],
+                    nest_id: vec![3; 32],
+                },
+                result: Ok(()),
+            },
+        );
+        assert_eq!(
+            app.settings.recovery.owed.as_ref().unwrap().entries.len(),
+            1
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::OwedNestSettled {
+                key: fauna_client_recovery::owed_nests::OwedNestKey {
+                    keeper: None,
+                    old_actor_id: vec![1; 32],
+                    nest_id: vec![2; 32],
+                },
+                result: Err("offline".into()),
+            },
+        );
+        assert_eq!(
+            app.settings.recovery.owed.as_ref().unwrap().entries.len(),
+            1
+        );
+        assert!(app.errors.get(&Page::Settings).is_some());
+        apply_outcome(
+            &mut app,
+            Outcome::OwedNestSettled {
+                key: fauna_client_recovery::owed_nests::OwedNestKey {
+                    keeper: None,
+                    old_actor_id: vec![1; 32],
+                    nest_id: vec![2; 32],
+                },
+                result: Ok(()),
+            },
+        );
+        assert!(
+            app.settings.recovery.owed.is_none(),
+            "the last entry gone → no line"
+        );
+    }
+
+    /// A linked nest keeps owed entries of its own (`succession-linked-nests.md`
+    /// § The road): they list beside the bound nest's, their dismiss is a
+    /// settle at THAT keeper (the op carries the entry's keeper and the
+    /// identity the linked dial signs in as), and its answer drops only that
+    /// keeper's entry — the same owed nest kept at the bound nest stays.
+    #[test]
+    fn a_linked_keepers_entry_renders_and_its_dismiss_settles_at_that_keeper() {
+        use fauna_client_core::succession_delivery::{Delivery, OwedReason};
+        use fauna_client_recovery::owed_nests::OwedNestsView;
+        use fauna_protocol::recovery::OwedNest;
+        const KEEPER: [u8; 32] = [0x4b; 32];
+        let owed = OwedNest {
+            old_actor_id: fauna_protocol::ByteBuf::from(vec![1; 32]),
+            nest_id: fauna_protocol::ByteBuf::from(vec![2; 32]),
+            nest_url: Some("wss://n2.example".to_string()),
+            ..Default::default()
+        };
+        let mut app = crate::app::tests::authed_app();
+        app.settings.sub = SubPage::Account;
+        let served = [owed.clone()];
+        let at_keeper = [(
+            owed,
+            Delivery::Owed(OwedReason::Parked { presented: [9; 32] }),
+        )];
+        app.settings.recovery.owed = OwedNestsView::project(&served, None, &[(KEEPER, &at_keeper)]);
+        let els = elements(&app);
+        let of = |id: &str| -> Vec<&Element> { els.iter().filter(|e| e.id == id).collect() };
+        assert_eq!(of("recovery-kit-owed-nest-item").len(), 2);
+        assert_eq!(
+            of("recovery-kit-owed-nest-outcome")[1].text,
+            fauna_i18n::strings::settings::recovery_kit::OWED_NEST_OTHER_NEST
+        );
+        let Some(Gesture::Settings(arm)) = of("recovery-kit-owed-nest-dismiss-button")[1].gesture()
+        else {
+            panic!("the dismiss is a settings gesture");
+        };
+        drop(els);
+        apply(&mut app.settings, arm);
+        let els = elements(&app);
+        let Some(Gesture::Settings(confirm)) = els
+            .iter()
+            .find(|e| e.id == "recovery-kit-owed-nest-dismiss-confirm-button")
+            .and_then(Element::gesture)
+        else {
+            panic!("the armed entry offers its confirm");
+        };
+        drop(els);
+        app.settings.nest = Some(nest_for_test());
+        let Some(Op::SettleOwedNest {
+            entry, secret_hex, ..
+        }) = apply_local(&mut app, confirm)
+        else {
+            panic!("the confirm issues the settle");
+        };
+        assert_eq!(entry.keeper, Some(KEEPER));
+        assert_eq!(secret_hex, app.settings.secret_hex.as_str());
+
+        apply_outcome(
+            &mut app,
+            Outcome::OwedNestSettled {
+                key: entry.key(),
+                result: Ok(()),
+            },
+        );
+        let left = &app.settings.recovery.owed.as_ref().unwrap().entries;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].keeper, None, "the bound nest's record stays");
+    }
+
     #[test]
     fn the_corpus_reseal_line_renders_exactly_when_the_projection_says_to() {
         use fauna_client_sync::agent::{CorpusResealOutcome, CorpusResealProgress};
@@ -21362,6 +21853,23 @@ mod tests {
         state.sub = SubPage::TuiSettings;
         route_subpage(&mut state, Some("no-such-page"), None);
         assert_eq!(state.sub, SubPage::Root, "an unknown id falls back to Root");
+    }
+
+    /// The nav-patch entry into Folders resolves the linger reading exactly as
+    /// the rail click (`Action::OpenFolders`) does. It used to reset the page
+    /// state to its default, so `linger_enabled` stayed `None` and the
+    /// `sync-agent-linger-toggle` never rendered on that path — on a box whose
+    /// linger is readable, the e2e witness found no toggle at all.
+    #[test]
+    fn route_subpage_into_folders_resolves_the_linger_reading() {
+        let mut state = SettingsState::default();
+        route_subpage(&mut state, Some("folders"), None);
+        assert_eq!(state.sub, SubPage::Folders);
+        assert_eq!(
+            state.folders.linger_enabled,
+            crate::sync_agent::linger_enabled(),
+            "the nav patch must read linger like the rail click"
+        );
     }
 
     #[test]
@@ -25050,13 +25558,22 @@ mod tests {
                 approved: true,
             },
             Action::ConnectedAppsBlockRequest(String::new()),
+            Action::ConnectedAppsSetFolder {
+                card: 0,
+                id: String::new(),
+            },
             Action::ConnectedAppsArmRevoke(String::new()),
             Action::ConnectedAppsCancelRevoke,
             Action::ConnectedAppsConfirmRevoke(String::new()),
             Action::ConnectedAppsRevealSecret(String::new()),
             Action::ConnectedAppsCopySecret(String::new()),
             Action::ConnectedAppsCopyUsername(String::new()),
+            Action::ConnectedAppsSetLens {
+                key: String::new(),
+                history: true,
+            },
             Action::ConnectedAppsUnblock(String::new()),
+            Action::ConnectedAppsToggleRecord(String::new()),
             Action::OpenMailAliases,
             Action::OpenMailSpam,
             Action::OpenMailExport,
@@ -25639,7 +26156,15 @@ mod tests {
     // 278 → 280 on 2026-11-08: `WizardSetAudience` (`wizard-audience-select`)
     // and `WizardConfirmPublic` (the wizard's `folder-audience-public-confirm`),
     // added to every_action() in the same commit.
-    const ACTION_COUNT: usize = 280;
+    // 280 → 281 on 2026-11-13: `ConnectedAppsToggleRecord`
+    // (`connected-apps-oracle-open`), added to every_action() in the same
+    // commit; → 282 the same day for `ConnectedAppsSetLens`
+    // (`nest-trust-view-now` / `-history` on a roster row), already in
+    // every_action() without this count moving.
+    // → 283 the same day: `ConnectedAppsSetFolder`
+    // (`connected-apps-request-folder`), added to every_action() in the same
+    // commit.
+    const ACTION_COUNT: usize = 283;
 
     #[test]
     fn every_settings_action_is_in_the_corpus() {
@@ -25893,6 +26418,7 @@ mod tests {
             "ConnectedAppsArmRevoke",
             "ConnectedAppsCancelRevoke",
             "ConnectedAppsCopyUsername",
+            "ConnectedAppsSetLens",
             "ToggleMailEnabled",
             "MailOpenAddCredential",
             "MailAddCredentialCancel",
@@ -26003,6 +26529,13 @@ mod tests {
             "AtprotoReveal",
             "ConnectedAppsRevealSecret",
             "ConnectedAppsCopySecret",
+            // The record's open is a Read of the nest's record (the gate
+            // declines to decide on reads); its close is local.
+            "ConnectedAppsToggleRecord",
+            // The consent card's folder choice is the machine's own state for
+            // this visit; the approve that carries it is the declared
+            // `resolve_consent`.
+            "ConnectedAppsSetFolder",
         ];
 
         let mut expected: Vec<&str> = nav

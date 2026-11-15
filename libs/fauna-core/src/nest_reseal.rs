@@ -86,6 +86,50 @@ pub trait ServedSetConverge: crate::MaybeSendSync {
     async fn converge_served_set(&self, folder: &str) -> Result<ServedSetConvergence>;
 }
 
+/// One take-over candidate (`succession-cut.md` ruling (11)(d)): the path's
+/// hash (lower-case hex, as the change log carries it) and the seq of the
+/// history head the first pass saw there.
+pub type TakeOverCandidate = (String, i64);
+
+/// What one pass of the projection walk's take-over did (`succession-cut.md`
+/// ruling (11)(l)) — counted, as the served-set walk's tally is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TakeOverPass {
+    /// Bound heads re-signed as the current identity under the live nonce.
+    pub rerecorded: usize,
+    /// Bound heads left on purpose: no longer the path's head (taken by
+    /// another device, or this walk's own earlier pass), or opening under
+    /// none of the roots their signer is allowed (noted). Never retried.
+    pub skipped: usize,
+    /// Bound heads not carried this pass that a later pass may still carry:
+    /// a failed fetch, store or record, or a head resting under an owner
+    /// root whose signer's retired root this device does not hold yet. The
+    /// marker stays unspent while any is left.
+    pub owed: usize,
+}
+
+/// **The take-over where no engine runs for the set** (`succession-cut.md`
+/// ruling (11)(l)), as the seam the identity app's launch pass calls: the
+/// projection walk that consumes this device's adoption marker for a set no
+/// engine on this device is bound to. Implemented over a seat's session by
+/// `fauna_media_machine::succession_take_over`; driven by
+/// `fauna_client_folders::FoldersAuthor`, which owns the marker, its claim,
+/// the bound candidates and the spend, and knows nothing of bytes.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait SuccessionTakeOver: crate::MaybeSendSync {
+    /// Every path of `folder` whose newest non-retention row judges history
+    /// under this seat's reader (ruling (11)(c), arm (2)), with that head's
+    /// seq — the candidates a first pass binds. Records nothing.
+    async fn history_heads(&self, folder: &str) -> Result<Vec<TakeOverCandidate>>;
+
+    /// Re-sign the `bound` candidates still undone — a path whose head is
+    /// still the bound row and still judges history — as the current
+    /// identity, over the same manifest, with no supersede. Never a head
+    /// outside `bound`. An error means the pass could not start.
+    async fn take_over(&self, folder: &str, bound: &[TakeOverCandidate]) -> Result<TakeOverPass>;
+}
+
 /// The detail a restore reports when the version was recorded under a
 /// previous identity of this account and its bytes do not open under any key
 /// that identity could have sealed them with (`writer-signed-change-records.md`

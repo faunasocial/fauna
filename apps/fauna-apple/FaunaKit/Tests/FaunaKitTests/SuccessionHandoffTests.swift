@@ -317,6 +317,52 @@ private func landedFixture(
     SuccessionHandoff.clearOnFactoryReset()
 }
 
+/// The right seat on a TORN-DOWN client is refused before the claim, exactly as
+/// a stranger's seat is. A retired `APIClient` can still name the successor (a
+/// re-point reaches the outgoing session's client too), and every call through
+/// it fails "this session was torn down" — measured on iOS 2026-11-10: the
+/// discharge passed the seat check on that client, spent its five mints there
+/// and the successor was never shown a kit.
+///
+/// Same witness as the test above, for the same reason: `kitOwed` reads `true`
+/// either way (the loop re-arms), so only `errorText` tells a refusal before
+/// the claim from five failed mints after it.
+///
+/// Mutation check — deleting the `api?.isRetired == false` guard from
+/// `dischargeOwedSuccessionKit` turns the `errorText` expectation red.
+@MainActor
+@Test func aKitIsNeverMintedOverATornDownClientThatNamesTheSuccessor() async {
+    SuccessionHandoff.clearOnFactoryReset()
+    let seat = APIClient(nodeUrl: URL(string: "https://nest.invalid")!)
+    seat.primeSecret(String(repeating: "44", count: 32))
+    guard let successor = seat.boundActorIdHex else {
+        Issue.record("a primed seat must name its actor")
+        return
+    }
+    // Retire BEFORE arming the obligation: `SuccessionHandoff` is process-global
+    // and the other `@MainActor` tests here reset it at their own suspension
+    // points, so no `await` may sit between the arm and the discharge.
+    await seat.retire()
+    #expect(seat.isRetired)
+    #expect(seat.boundActorIdHex == successor,
+            "fixture error: the retired client must still name the successor")
+    SuccessionHandoff.recordRelaunchAdoption(
+        predecessorActorIdHex: predecessorId, successorActorIdHex: successor)
+
+    let vm = RecoveryKitVM()
+    vm.configure(api: seat)
+    await vm.dischargeOwedSuccessionKit(sessionActorIdHex: successor)
+
+    #expect(SuccessionHandoff.kitOwed, "the obligation must wait for the live client")
+    #expect(vm.errorText == nil,
+            """
+            the discharge claimed and minted on a torn-down client — an error surface \
+            means the one-shot claim was spent where every call is refused
+            """)
+
+    SuccessionHandoff.clearOnFactoryReset()
+}
+
 /// The witness the guard above is built on, pinned on its own: a seat names the
 /// actor it signs as, and two seats primed with different secrets never agree.
 ///

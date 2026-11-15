@@ -1033,7 +1033,7 @@ class HetznerDnsHandlers:
         # GET /zones?per_page=50 — verify(). Cloud-API zone ids are INTEGERS
         # (mapped to strings client-side via `z.id.to_string()`); a string id
         # fails the `HetznerZone { id: i64 }` decode → verify() Err →
-        # ProviderUnauthorized ("provider hetzner rejected the credentials").
+        # an error reading "Verify failed: <the decode error>".
         # The preselect flow exercises only this endpoint.
         self._h.expect_request(f"{p}/zones", method="GET").respond_with_handler(
             self._zones

@@ -113,7 +113,9 @@ def test_a_room_says_so_when_its_moderation_rests_on_a_retired_name_from_another
     # reception keys are not re-sealed — `community-rooms.md` § Implementation
     # status today, *A seat gains or rotates its wrap target*), so what it
     # shows of the room's past is what this device folded into the history
-    # slice (`succession-aftermath.md` § Re-key scope, rule (2)).
+    # slice — landed by the ceremony's flush before its submit
+    # (`succession-aftermath.md` § Re-key scope → *The predecessor's replica
+    # is flushed before the submit*).
     founder.app.conversations.open_thread_by_id(founder_thread)
     wait_for(
         "the member's message shown on the founder's seat before the ceremony",

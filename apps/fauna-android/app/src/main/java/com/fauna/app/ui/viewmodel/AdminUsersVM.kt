@@ -78,6 +78,19 @@ class AdminUsersVM @Inject constructor(
     private val _pendingActions = MutableStateFlow<List<FfiAdminPendingAction>>(emptyList())
     val pendingActions: StateFlow<List<FfiAdminPendingAction>> = _pendingActions
 
+    /**
+     * The admin take-over's armed confirm (`admin-users-take-over-confirm-*`,
+     * family-safety.md § App surface → *Admin take-over*; tui's
+     * `take_over_armed`): the ward's actor id, captured at arm time so a
+     * re-read that re-orders the rows cannot retarget it. One row armed at a
+     * time; `null` while un-armed.
+     */
+    private val _takeOverArmed = MutableStateFlow<ByteArray?>(null)
+    val takeOverArmed: StateFlow<ByteArray?> = _takeOverArmed
+
+    /** The viewing admin's raw actor id — what the shared take-over offer keys on. */
+    fun viewerActor(): ByteArray? = api.ownActorId()
+
     /** The freshly minted invite token, surfaced for the copy button. */
     private val _mintedCode = MutableStateFlow<String?>(null)
     val mintedCode: StateFlow<String?> = _mintedCode
@@ -221,6 +234,35 @@ class AdminUsersVM @Inject constructor(
             api.adminAdminsRemove(user.actorId)
             reloadUsers()
             _pendingActions.value = api.adminPendingActionsList()
+        }
+    }
+
+    /** `admin-users-take-over-button` — arm the inline confirm on [user]'s
+     *  row, disarming any other (local). */
+    fun armTakeOver(user: FfiAdminUser) {
+        _takeOverArmed.value = user.actorId
+    }
+
+    /** `admin-users-take-over-cancel-button` — disarm, touching nothing. */
+    fun cancelTakeOver() {
+        _takeOverArmed.value = null
+    }
+
+    /**
+     * `admin-users-take-over-confirm-button` — disarm BEFORE dispatch, then
+     * `fauna.family.transfer { ward, self }`, a self-proposal the nest completes
+     * at once. On success the page re-reads (the row now names the viewer, with
+     * no offer) and the Settings family gate re-reads `fauna.family.status`, so
+     * `family-tab` reveals the ward. Mirrors linux `take_over_guardianship`.
+     */
+    fun confirmTakeOver() {
+        val ward = _takeOverArmed.value ?: return
+        _takeOverArmed.value = null
+        val viewer = api.ownActorId() ?: return
+        action {
+            api.familyTransfer(ward, viewer)
+            com.fauna.app.core.FamilyStatusEpoch.bump()
+            reloadUsers()
         }
     }
 

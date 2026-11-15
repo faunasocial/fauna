@@ -12,7 +12,10 @@ import com.fauna.app.testing.TestAgent
  * open-something-external call site in this app shares: the hosted-auth
  * verification link and the DNS/VPS provider "open in browser" button
  * (`DnsConfigScreen.kt`, `VpsConfigScreen.kt`), and the Bluesky/bridge OAuth
- * authorize links (`AtprotoSettingsScreen.kt`, `BridgesScreen.kt`).
+ * authorize links (`AtprotoSettingsScreen.kt`, `BridgesScreen.kt`), and the
+ * checkout URLs the payment links open after their subscribe
+ * (`subscription-offer-payment-link` in `ProfileOffersTab.kt`,
+ * `gated-post-payment-link` in `FeedScreen.kt`).
  *
  * Mirrors linux's `url_opener::open` / windows' `Services/UrlOpener.cs` /
  * apple's `OpenURL.open`: the OS already owns "which program opens a URL", so

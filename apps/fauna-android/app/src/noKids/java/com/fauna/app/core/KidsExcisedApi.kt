@@ -127,13 +127,16 @@ abstract class KidsExcisedApi {
      * [ApiClient.clearAuth] can run the save before it closes the client —
      * [detachKidsExcised] nulls the manager and `clearAuth` nulls the handle
      * right after. `null` when no manager was ever built (no Feed page opened,
-     * so no compose input exists to lose) or no session is wired. The same
-     * `saveIfChanged` launch gate and dedup as the debounced save.
+     * so no compose input exists to lose) or no session is wired. Saved
+     * through the shared `FfiFeedManager.saveDraftsOnLeave`, so a door taken
+     * before the launch load has lifted the save gate still saves, by one read
+     * of its own and the rail's FILL rule.
      */
     internal fun captureFeedLeaveFlush(): (suspend () -> Unit)? {
         val sync = api.postsDraftsSync() ?: return null
-        val snapshot = feedManager?.draftsSnapshotBytes() ?: return null
-        return { sync.saveIfChanged(snapshot) }
+        val m = feedManager ?: return null
+        val snapshot = m.draftsSnapshotBytes()
+        return { m.saveDraftsOnLeave(sync, snapshot) }
     }
 
     /**
@@ -887,6 +890,30 @@ abstract class KidsExcisedApi {
     ): com.fauna.ffi.FfiSubscribeReply =
         com.fauna.ffi.subscriptionsSubscribeAcrossNests(
             api.nestRpc(), api.ownerSecretBytes(), HexUtil.hexToBytes(authorIdHex), tier, homeNestUrl)
+
+    /**
+     * The payment-link gesture (`subscription-offer-payment-link`): subscribe the
+     * viewer to [authorIdHex]'s [tier] FIRST — across nests at [homeNestUrl], the
+     * page's actor-home slot, exactly as [subscriptionSubscribe] goes — then hand
+     * back the checkout URL the shared rule composes from [paymentUrl], so the
+     * external checkout is bound to the buyer's actor (`monetization.md` § Pillar 3
+     * → *Buyer↔actor binding (Q4)*, the Q13 rules (1) and (2); tui's
+     * `Action::OpenPaymentLink`, linux `offers.rs::pay_to`). `null` = nothing to
+     * open (a URL the shared guard refuses — and nothing subscribed then); a refused
+     * subscribe throws and opens nothing. Mapped onto the app-local
+     * [SubscribeCheckout] because `FfiCheckoutOpen` is a `subscriptions-author`
+     * export the kids flavor does not carry, and `src/main` names the result.
+     */
+    suspend fun subscriptionSubscribeAndCheckout(
+        authorIdHex: String,
+        tier: String,
+        paymentUrl: String,
+        homeNestUrl: String?,
+    ): SubscribeCheckout? =
+        com.fauna.ffi.subscriptionsSubscribeAndCheckout(
+            api.nestRpc(), api.ownerSecretBytes(), HexUtil.hexToBytes(authorIdHex), tier,
+            paymentUrl, homeNestUrl,
+        )?.let { SubscribeCheckout(reply = it.reply, url = it.url) }
 
     /**
      * The leave twin of [subscriptionSubscribe]: unsubscribe from [authorId]'s [tier],

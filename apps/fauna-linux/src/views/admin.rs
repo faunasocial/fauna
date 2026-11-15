@@ -92,6 +92,10 @@ pub struct AdminHandles {
     /// page cycles through these. Seeded with the nest defaults so the pickers
     /// work before `AdminTiersLoaded` lands; overwritten on arrival.
     pub tier_names: Rc<RefCell<Vec<String>>>,
+    /// The admin take-over's armed confirm (`admin-users-take-over-confirm-*`,
+    /// `family-safety.md` § App surface → *Admin take-over*): which ward is
+    /// armed, and the rendered rows' take-over widgets it toggles.
+    pub users_take_over: Rc<TakeOverArm>,
     /// The hub's dedicated `admin-users-action-error` label (admin.md § Errors —
     /// Users-section action failures route here, NOT the app-wide `error-message`
     /// banner). Set by `app.rs`'s `ActionResult::Failed` routing via
@@ -636,6 +640,9 @@ pub fn is_users_hub_context(context: &str) -> bool {
         || context.starts_with("fauna.admin.pending_actions.")
         || context == "fauna.admin.set_registration_mode"
         || context == "fauna.admin.set_age_verification_required"
+        // The admin take-over's one sender (`FaunaClient::take_over_guardianship`);
+        // the Family page settles its own transfer inline, never through here.
+        || context == "fauna.family.transfer"
 }
 
 /// Render an `error` onto the Users hub's `admin-users-action-error` label
@@ -1052,6 +1059,7 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         invite_requests_list: hub.invite_requests_list,
         pending_actions: hub.pending_actions,
         last_invite_requests: Rc::new(RefCell::new(None)),
+        users_take_over: Rc::new(TakeOverArm::default()),
         tier_names: hub.tier_names,
         users_action_error: hub.users_action_error,
         registration_readonly_label: hub.registration_readonly_label,
@@ -1613,6 +1621,14 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
     registration_readonly_label.set_margin_bottom(8);
     registration_readonly_label.add_css_class("dim-label");
     registration_readonly_label.set_visible(false);
+    // The read-only reading carries the select's id, as tui's label does: the
+    // dropdown sits in the hidden editable box then, so the driver's read of
+    // `admin-users-registration-mode-select` lands on the explainer naming the
+    // raw mode — never on a stale known selection.
+    crate::testid::set_test_id(
+        &registration_readonly_label,
+        ids::ADMIN_USERS_REGISTRATION_MODE_SELECT,
+    );
     registration_section.append(&registration_readonly_label);
 
     let registration_editable_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -9555,10 +9571,71 @@ pub fn update_users_page(
         ));
 
     clear_list_box(&handles.users_list_box);
+    handles.users_take_over.rows.borrow_mut().clear();
+    // The viewing admin's raw actor id — what the shared take-over offer keys on.
+    let viewer = client
+        .actor_id()
+        .and_then(|h| hex::decode(h).ok())
+        .unwrap_or_default();
     for user in &reply.users {
-        handles
-            .users_list_box
-            .append(&build_user_row(user, &handles.tier_names, client));
+        handles.users_list_box.append(&build_user_row(
+            user,
+            &handles.tier_names,
+            client,
+            &viewer,
+            &handles.users_take_over,
+        ));
+    }
+    handles.users_take_over.sync();
+}
+
+/// The admin take-over's armed confirm on the Users hub (`family-safety.md`
+/// § App surface → *Admin take-over*; tui's `UsersState::take_over_armed`).
+/// The armed ward is captured by ACTOR ID at arm time, so a re-read that
+/// re-orders the rows cannot retarget the confirm; one row is armed at a time.
+/// The confirm triple is present only while armed — each row's widgets are
+/// shown or hidden by [`Self::sync`].
+#[derive(Default)]
+pub struct TakeOverArm {
+    armed: RefCell<Option<Vec<u8>>>,
+    rows: RefCell<Vec<TakeOverRowWidgets>>,
+}
+
+/// One rendered supervised row's take-over widgets.
+struct TakeOverRowWidgets {
+    ward: Vec<u8>,
+    /// `admin-users-take-over-button`, `None` when the shared decision does not
+    /// offer it (the viewer already guards the ward).
+    button: Option<gtk::Button>,
+    /// The armed triple's container (`-confirm-summary` / `-confirm-button` /
+    /// `-cancel-button`).
+    confirm: gtk::Box,
+}
+
+impl TakeOverArm {
+    /// Arm `ward`'s row, disarming any other.
+    fn arm(&self, ward: Vec<u8>) {
+        *self.armed.borrow_mut() = Some(ward);
+        self.sync();
+    }
+
+    /// Disarm, returning the ward that was armed.
+    fn disarm(&self) -> Option<Vec<u8>> {
+        let ward = self.armed.borrow_mut().take();
+        self.sync();
+        ward
+    }
+
+    /// Show each rendered row's button or armed triple from the armed ward.
+    fn sync(&self) {
+        let armed = self.armed.borrow();
+        for row in self.rows.borrow().iter() {
+            let is_armed = armed.as_deref() == Some(row.ward.as_slice());
+            if let Some(button) = &row.button {
+                button.set_visible(!is_armed);
+            }
+            row.confirm.set_visible(is_armed);
+        }
     }
 }
 
@@ -9719,6 +9796,8 @@ fn build_user_row(
     user: &fauna_client_admin::admin::AdminUser,
     tier_names: &Rc<RefCell<Vec<String>>>,
     client: &Rc<FaunaClient>,
+    viewer: &[u8],
+    take_over: &Rc<TakeOverArm>,
 ) -> gtk::ListBoxRow {
     // A `gtk::ListBoxRow` (not `adw::ActionRow`): a bare ListBoxRow surfaces its
     // `set_test_id` widget-name to the automation agent, matching the
@@ -9727,6 +9806,9 @@ fn build_user_row(
     row.set_selectable(false);
     crate::testid::set_test_id(&row, ids::USER_ROW);
 
+    // The row is the handle line plus, on a supervised row, the take-over line
+    // beneath it (`family-safety.md` § App surface → *Admin take-over*).
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     hbox.set_margin_top(8);
     hbox.set_margin_bottom(8);
@@ -9774,6 +9856,8 @@ fn build_user_row(
     // Clone for the roster controls (make/remove admin), same reasoning.
     let actor_for_role = user.actor_id.as_ref().to_vec();
     let role_client = Rc::clone(client);
+    // …and for the take-over line.
+    let take_over_client = Rc::clone(client);
 
     // Per-row tier picker: selecting a tier applies it via
     // `fauna.admin.users.update` (the tier is the quota — admin.md § Users).
@@ -9806,7 +9890,9 @@ fn build_user_row(
     // the e2e queries them scoped to the row (`user-row[i]`). One click acts
     // immediately — no confirm dialog, since both cut-off paths are reversible by
     // the Cancel-eviction control beside them.
-    let controls = fauna_client_admin::admin_user_row_controls(user);
+    // The viewer id keys the take-over offer (the row's guardian is not the
+    // viewing admin).
+    let controls = fauna_client_admin::admin_user_row_controls(user, viewer);
 
     if controls.evict {
         let actor = evict_actor.clone();
@@ -9882,8 +9968,105 @@ fn build_user_row(
         hbox.append(&remove_admin_btn);
     }
 
-    row.set_child(Some(&hbox));
+    vbox.append(&hbox);
+    if let Some(take_over_line) =
+        build_take_over_line(user, controls.take_over, &take_over_client, take_over)
+    {
+        vbox.append(&take_over_line);
+    }
+    row.set_child(Some(&vbox));
     row
+}
+
+/// A supervised row's take-over line (`family-safety.md` § App surface →
+/// *Admin take-over*; tui's `user_list_section`): `admin-users-supervised-by`
+/// names the guardian (the SHARED label), `admin-users-take-over-button` when
+/// the SHARED decision offers it, and the armed inline confirm triple, shown
+/// only while this row is armed. Confirm disarms BEFORE it dispatches
+/// `fauna.family.transfer { ward, self }`. `None` on an unsupervised row.
+fn build_take_over_line(
+    user: &fauna_client_admin::admin::AdminUser,
+    offered: bool,
+    client: &Rc<FaunaClient>,
+    take_over: &Rc<TakeOverArm>,
+) -> Option<gtk::Box> {
+    let guardian = fauna_client_admin::admin_user_guardian_label(user)?;
+    let ward = user.actor_id.as_ref().to_vec();
+
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.set_margin_start(12);
+    line.set_margin_end(12);
+    line.set_margin_bottom(8);
+
+    let supervised_by = gtk::Label::new(Some(&admin::users_page::supervised_by(&guardian)));
+    supervised_by.add_css_class("dim-label");
+    supervised_by.set_halign(gtk::Align::Start);
+    supervised_by.set_hexpand(true);
+    supervised_by.set_xalign(0.0);
+    supervised_by.set_wrap(true);
+    crate::testid::set_test_id(&supervised_by, ids::ADMIN_USERS_SUPERVISED_BY);
+    line.append(&supervised_by);
+
+    let button = offered.then(|| {
+        let button = gtk::Button::with_label(admin::users_page::TAKE_OVER);
+        button.add_css_class("flat");
+        button.set_valign(gtk::Align::Center);
+        crate::testid::set_test_id(&button, ids::ADMIN_USERS_TAKE_OVER_BUTTON);
+        let arm = Rc::clone(take_over);
+        let ward = ward.clone();
+        button.connect_clicked(move |_| arm.arm(ward.clone()));
+        line.append(&button);
+        button
+    });
+
+    let confirm = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    confirm.set_visible(false);
+    let summary = gtk::Label::new(Some(&admin::users_page::take_over_confirm_summary(
+        &fauna_client_admin::admin_picker_option(user),
+        &guardian,
+    )));
+    summary.set_wrap(true);
+    summary.set_xalign(0.0);
+    summary.set_hexpand(true);
+    crate::testid::set_test_id(&summary, ids::ADMIN_USERS_TAKE_OVER_CONFIRM_SUMMARY);
+    confirm.append(&summary);
+
+    let confirm_btn = gtk::Button::with_label(admin::users_page::TAKE_OVER_CONFIRM);
+    confirm_btn.add_css_class("destructive-action");
+    confirm_btn.set_valign(gtk::Align::Center);
+    crate::testid::set_test_id(&confirm_btn, ids::ADMIN_USERS_TAKE_OVER_CONFIRM_BUTTON);
+    // tui's `admin::Action::ConfirmTakeOver`.
+    crate::offline_gate::declare_wire_kind(&confirm_btn, "fauna.family.transfer");
+    {
+        let arm = Rc::clone(take_over);
+        let client = Rc::clone(client);
+        confirm_btn.connect_clicked(move |_| {
+            if let Some(ward) = arm.disarm() {
+                client.take_over_guardianship(ward);
+            }
+        });
+    }
+    confirm.append(&confirm_btn);
+
+    let cancel_btn = gtk::Button::with_label(admin::users_page::TAKE_OVER_CANCEL);
+    cancel_btn.add_css_class("flat");
+    cancel_btn.set_valign(gtk::Align::Center);
+    crate::testid::set_test_id(&cancel_btn, ids::ADMIN_USERS_TAKE_OVER_CANCEL_BUTTON);
+    {
+        let arm = Rc::clone(take_over);
+        cancel_btn.connect_clicked(move |_| {
+            arm.disarm();
+        });
+    }
+    confirm.append(&cancel_btn);
+    line.append(&confirm);
+
+    take_over.rows.borrow_mut().push(TakeOverRowWidgets {
+        ward,
+        button,
+        confirm,
+    });
+    Some(line)
 }
 
 #[cfg(test)]
@@ -10009,12 +10192,54 @@ mod tests {
             // age require-knob when it changed.
             "fauna.admin.set_registration_mode",
             "fauna.admin.set_age_verification_required",
+            // The admin take-over of a supervised row (family-safety.md § App
+            // surface → Admin take-over).
+            "fauna.family.transfer",
         ] {
             assert!(
                 is_users_hub_context(ctx),
                 "{ctx} should route to admin-users-action-error"
             );
         }
+    }
+
+    /// The take-over arm (family-safety.md § App surface → Admin take-over):
+    /// arming a row shows its confirm triple in place of its button, arming
+    /// another disarms the first (one row at a time), and disarm hands back the
+    /// ward captured at arm time.
+    #[test]
+    fn take_over_arms_one_row_at_a_time_and_disarm_returns_the_ward() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let arm = super::TakeOverArm::default();
+            let row = |ward: u8| super::TakeOverRowWidgets {
+                ward: vec![ward; 32],
+                button: Some(gtk::Button::new()),
+                confirm: gtk::Box::new(gtk::Orientation::Horizontal, 0),
+            };
+            arm.rows.borrow_mut().extend([row(1), row(2)]);
+            arm.sync();
+            let visible = |arm: &super::TakeOverArm| -> Vec<(bool, bool)> {
+                arm.rows
+                    .borrow()
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.button.as_ref().unwrap().is_visible(),
+                            r.confirm.is_visible(),
+                        )
+                    })
+                    .collect()
+            };
+            assert_eq!(visible(&arm), vec![(true, false), (true, false)]);
+            arm.arm(vec![1; 32]);
+            assert_eq!(visible(&arm), vec![(false, true), (true, false)]);
+            arm.arm(vec![2; 32]);
+            assert_eq!(visible(&arm), vec![(true, false), (false, true)]);
+            assert_eq!(arm.disarm(), Some(vec![2; 32]));
+            assert_eq!(visible(&arm), vec![(true, false), (true, false)]);
+            assert_eq!(arm.disarm(), None);
+        });
     }
 
     #[test]

@@ -54,13 +54,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use fauna_client::{AuthClient, NestClient, graduate_home_nest_pin, pinned_http_client};
+use fauna_client::{
+    AuthClient, NestClient, ReadFailure, graduate_home_nest_pin, pinned_http_client,
+};
 use fauna_client_folders::FolderKeyReader;
 use fauna_client_folders::folders::FolderSummary;
 use fauna_client_folders::{
     resolve_engine_key_binding, resolve_foreign_engine_key_bindings, retired_serve_custody,
 };
-use fauna_core::crypto::BackupKey;
+use fauna_core::crypto::{BackupKey, BindingRecordKey};
 use fauna_core::data::FoldersConfig;
 use fauna_core::folder_keys::{FolderContentKeys, FolderRef};
 use fauna_core::identity::ActorKeypair;
@@ -71,6 +73,7 @@ use fauna_protocol::folders::AttestationMemory;
 use crate::access_gate::AccessGate;
 use crate::adaptive::AdaptiveConcurrency;
 use crate::binding_edge::SealFloor;
+use crate::binding_record::{self, BindingRecord, OpenError};
 use crate::db::SyncDb;
 use crate::engine::{SyncEngine, default_format_registry};
 use crate::ignore::IgnoreMatcher;
@@ -427,6 +430,42 @@ pub use crate::binding_edge::{
     BindingBasis, EdgeVerdict, SealHold, edge_verdict, floor_ahead, summary_for_ref,
 };
 
+/// A capability host's park step at a (re)build, over the set's state DB
+/// (`file-sync.md` § Multi-writer shared sets → *Revocation on a capability
+/// host*): compare the access the engine was just built from (`basis`) with
+/// the one the host's last build persisted, write the park mark at a
+/// writer→reader move — BEFORE the new access is persisted, so a process that
+/// dies between the two still reads `writer` at its next build and marks then —
+/// clear it when the row reads `writer` again, then persist the new access.
+/// A basis with no access (an owned set) decides nothing. Returns the action
+/// [`crate::binding_edge::park_mark_at_edge`] chose.
+///
+/// # Errors
+/// A state-DB read or write failed; the caller logs it and the next build
+/// retries (an unwritten mark leaves the persisted access as it was).
+pub fn note_built_access(
+    db: &SyncDb,
+    basis: &BindingBasis,
+    now_unix_s: i64,
+) -> Result<crate::binding_edge::ParkMark> {
+    use crate::binding_edge::{ParkMark, park_mark_at_edge};
+    let Some(access) = basis.access() else {
+        return Ok(ParkMark::Leave);
+    };
+    let marked = db.access_revoked_at()?.is_some();
+    let prior = db.host_built_access()?;
+    let action = park_mark_at_edge(prior.as_deref(), Some(basis), marked, false);
+    match action {
+        ParkMark::Write => db.mark_access_revoked(now_unix_s)?,
+        ParkMark::Clear => db.clear_access_revoked()?,
+        ParkMark::Leave => {}
+    }
+    if prior.as_deref() != Some(access) {
+        db.set_host_built_access(access)?;
+    }
+    Ok(action)
+}
+
 impl BuiltEngine {
     /// [`edge_verdict`] for this engine.
     #[must_use]
@@ -678,8 +717,11 @@ pub fn decide_engine_content_binding(
 // ---------------------------------------------------------------------------
 
 /// Fetch this device's folder summaries for engine binding, retrying through
-/// the WS-RPC warm-up. `None` after the final attempt — the caller treats an
-/// unavailable list as an *indeterminate* binding and fails closed.
+/// the WS-RPC warm-up. An `Err` after the final attempt says why
+/// (`on-demand-files-shared-sets.md` decision 2″ (4)): an
+/// [`ReadFailure::Answered`] list is an *indeterminate* binding and the caller
+/// fails closed; only an [`ReadFailure::Unreachable`] nest lets it stand on the
+/// set's binding record.
 ///
 /// Uses the `include_shared_with_me` projection (`list_owned_and_shared`), not the
 /// owner-only `list`: a **writer member** binds a set shared *with* this device, so
@@ -688,16 +730,116 @@ pub fn decide_engine_content_binding(
 /// the member's own custody (multi-writer Phase 1). Owner rows are unaffected (they
 /// appear in both projections); a rostered-but-unbound set never builds an engine
 /// (only a location-map entry does), and a reader member is refused by the guard.
-async fn fetch_folders_retry(nest_rpc: &Arc<NestClient>) -> Option<Vec<FolderSummary>> {
+async fn fetch_folders_retry(
+    nest_rpc: &Arc<NestClient>,
+    auth: &AuthClient,
+) -> Result<Vec<FolderSummary>, ReadFailure> {
     let client = fauna_client_folders::FoldersClient::new(nest_rpc.clone());
     match fauna_sleep::retry(BINDING_LOAD_ATTEMPTS, BINDING_LOAD_RETRY_DELAY, || {
         client.list_owned_and_shared_wire()
     })
     .await
     {
-        Ok(reply) => Some(reply.folders),
+        Ok(reply) => Ok(reply.folders),
         Err(e) => {
-            tracing::warn!("folder list for engine binding: {e}");
+            let failure = e.read_failure(Some(auth));
+            tracing::warn!("folder list for engine binding ({failure:?}): {e}");
+            Err(failure)
+        }
+    }
+}
+
+/// Whether a failed custody load means the nest could not be reached — the
+/// cross-nest arm's row read (its custody record is its row; decision 2″ (4)).
+/// A nest error anywhere in the chain is classified as the list read's is;
+/// a failure that carries none reads as unreachable only while this host's
+/// control plane is not connected, so a reader that fails beside a connected
+/// nest never stands on the record.
+fn custody_failure(err: &anyhow::Error, params: &EngineParams) -> ReadFailure {
+    if let Some(e) = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<fauna_client::NestClientError>())
+    {
+        return e.read_failure(Some(&params.auth));
+    }
+    if *params.nest_rpc.connection_state().borrow() == fauna_client::ConnectionState::Connected {
+        ReadFailure::Answered
+    } else {
+        ReadFailure::Unreachable
+    }
+}
+
+/// The set's binding-record key and this account's id, as the record is
+/// sealed for them (decision 2″ (2)). `None` when the credential yields no
+/// `BackupKey` (a seed whose hex will not decode): no record is written or
+/// read.
+fn record_key(params: &EngineParams) -> Option<(BindingRecordKey, String)> {
+    owner_backup_key(&params.credential)
+        .map(|k| (BindingRecordKey::derive(&k), params.auth.actor_id_hex()))
+}
+
+/// Write the set's binding record after a resolution that read the row from a
+/// nest in reach (decision 2″ (3)). Best effort: a failed write is logged and
+/// leaves the build standing — the next build that reaches the nest writes it.
+fn write_record(params: &EngineParams, db: &SyncDb, record: &BindingRecord) {
+    let folder_id = params.folder_ref.to_wire();
+    let Some((key, actor)) = record_key(params) else {
+        tracing::warn!("folder {folder_id}: no BackupKey to seal the binding record under");
+        return;
+    };
+    if let Err(e) = binding_record::put(db, &key, &actor, params.folder_ref, record) {
+        tracing::warn!("folder {folder_id}: writing the binding record failed: {e:#}");
+    }
+}
+
+/// Remove the set's binding record — a successful read found the row gone, or
+/// the row itself refused the build (decision 2″ (3)), so no later outage can
+/// resurrect a set the host was told it lost.
+fn retire_record(params: &EngineParams, db: &SyncDb) {
+    if let Err(e) = binding_record::remove(db) {
+        tracing::error!(
+            "folder {}: removing the binding record failed: {e:#}",
+            params.folder_ref.to_wire()
+        );
+    }
+}
+
+/// Open the set's binding record for a build whose row read found the nest
+/// unreachable (decision 2″ (4), (7)). `None` refuses the build: no record, a
+/// record of an unknown version, or one that will not open — the last an
+/// error in the log, never an empty binding.
+fn open_record(params: &EngineParams, db: &SyncDb) -> Option<BindingRecord> {
+    let folder_id = params.folder_ref.to_wire();
+    let Some((key, actor)) = record_key(params) else {
+        tracing::error!(
+            "folder {folder_id}: the nest is unreachable and no BackupKey opens a binding \
+             record; refusing to run engine"
+        );
+        return None;
+    };
+    match binding_record::get(db, &key, &actor, params.folder_ref) {
+        Ok(record) => {
+            tracing::warn!(
+                "folder {folder_id}: the nest is unreachable — building on the set's binding \
+                 record (the last row and custody read); nothing it seals is published until a \
+                 read reaches the nest"
+            );
+            Some(record)
+        }
+        Err(OpenError::Missing) => {
+            tracing::error!(
+                "folder {folder_id}: the nest is unreachable and this host holds no binding \
+                 record for the set; refusing to run engine. The first build that reaches the \
+                 nest writes one."
+            );
+            None
+        }
+        Err(e @ OpenError::UnknownVersion(_)) => {
+            tracing::error!("folder {folder_id}: {e}; refusing to run engine");
+            None
+        }
+        Err(e @ OpenError::WillNotOpen(_)) => {
+            tracing::error!("folder {folder_id}: {e}; refusing to run engine");
             None
         }
     }
@@ -971,29 +1113,73 @@ async fn resolve_local_binding(params: &EngineParams) -> Option<ResolvedBinding>
     // Fetch this owner's folder summaries ONCE — the single read that drives
     // the content-key binding (whether this is a *bound* cross-user shared
     // set). Retried through the WS-RPC warm-up (an engine can start moments
-    // after login, before the socket is ready). `None` = the list is
-    // unavailable after retries → the binding is indeterminate → refuse
-    // (`decide_engine_content_binding`'s `!list_ok` arm, settled here so the
-    // row lookup below runs over a real list).
-    let Some(summaries) = fetch_folders_retry(&params.nest_rpc).await else {
-        tracing::error!(
-            "folder {folder_id}: folder list unavailable — the content-key binding is \
-             indeterminate; refusing to run engine (fail closed). The host rebuilds it on \
-             the next request."
-        );
-        return None;
-    };
-    // The set's own row, by identity. Absent from a successful list = deleted
-    // on the nest, or the caller removed from it: a host has nothing to ingest
-    // into or serve for such a set — the nest refuses a `changes.record` into
-    // it — so refuse rather than run owner-only against a phantom.
-    let Some(summary) = summary_for_ref(&summaries, folder_ref) else {
-        tracing::error!(
-            "folder {folder_id}: no row on this nest (deleted, or this account was removed \
-             from it); refusing to run engine"
-        );
-        return None;
-    };
+    // after login, before the socket is ready). A list the nest ANSWERED with
+    // a refusal is an indeterminate binding → refuse (fail closed,
+    // `decide_engine_content_binding`'s `!list_ok` arm, settled here so the
+    // row lookup below runs over a real list). A nest that could not be
+    // REACHED lets the build stand on the set's binding record — the last row
+    // and custody slice this host read, in the posture decision 2′ names for a
+    // failed read (`on-demand-files-shared-sets.md` § Shared sets on a
+    // capability host, decision 2″ (4)–(5)).
+    let (raw_row, config, recorded_marker, offline) =
+        match fetch_folders_retry(&params.nest_rpc, &params.auth).await {
+            Ok(summaries) => {
+                // The set's own row, by identity. Absent from a successful list =
+                // deleted on the nest, or the caller removed from it: a host has
+                // nothing to ingest into or serve for such a set — the nest
+                // refuses a `changes.record` into it — so refuse rather than run
+                // owner-only against a phantom, and retire the record so no later
+                // outage resurrects it (decision 2″ (3)).
+                let Some(summary) = summary_for_ref(&summaries, folder_ref) else {
+                    retire_record(params, &db);
+                    tracing::error!(
+                        "folder {folder_id}: no row on this nest (deleted, or this account was \
+                         removed from it); refusing to run engine"
+                    );
+                    return None;
+                };
+                // Custody through the host's reader — see the load's note below.
+                (
+                    summary.clone(),
+                    load_custody_retry(&*params.folder_keys).await,
+                    None,
+                    false,
+                )
+            }
+            Err(ReadFailure::Answered) => {
+                tracing::error!(
+                    "folder {folder_id}: the nest answered the folder list with a refusal — the \
+                     content-key binding is indeterminate; refusing to run engine (fail closed). \
+                     The host rebuilds it on the next request."
+                );
+                return None;
+            }
+            Err(ReadFailure::Unreachable) => {
+                let record = open_record(params, &db)?;
+                let Some(row) = record.row else {
+                    tracing::error!(
+                        "folder {folder_id}: the binding record carries no same-nest row; \
+                         refusing to run engine"
+                    );
+                    return None;
+                };
+                // The row comes from the record whole; custody from the host's
+                // own reader when it answers without a nest (a host that mounts
+                // the account store), else from the record — never a row from
+                // one read joined to custody the record did not carry with it
+                // (decision 2″ (4)). One attempt: the nest is known out of reach.
+                match params.folder_keys.load().await {
+                    Ok(cfg) => (row, Some(cfg), None, true),
+                    Err(_) => (
+                        row,
+                        Some(record.custody),
+                        Some(record.adoption_marker),
+                        true,
+                    ),
+                }
+            }
+        };
+    let summary = &raw_row;
     // Resolve the content-key binding, FAIL CLOSED: a bound set must never seal
     // its content in plaintext, so the engine is built only once we can positively
     // determine the binding (`mls-group-key-material.md` § M2 content-key
@@ -1009,12 +1195,13 @@ async fn resolve_local_binding(params: &EngineParams) -> Option<ResolvedBinding>
     // seat's account store, or on a capability host the throwaway fleet replica
     // keyed by the machine principal's wraps (`on-demand-files-shared-sets.md` § Shared sets
     // on a capability host, decision 1′). The keys are held in memory for the
-    // engine's life, never written anywhere. Retired serve custody rides the
-    // same load, so a seed-less build re-seals a once-served set's
+    // engine's life, and THIS set's slice of them — with the row — rests
+    // sealed in the set's own state DB as its binding record (decision 2″,
+    // written below), the one place they touch disk. Retired serve custody
+    // rides the same load, so a seed-less build re-seals a once-served set's
     // back-catalogue as a seeded one does. A load that fails leaves `config`
     // `None`: a bound set then builds keyless and fails closed per operation,
     // never plaintext.
-    let config = load_custody_retry(&*params.folder_keys).await;
     // The engine takes its set's NAME from this row, and a sealed set's row
     // rests none (`path-sealing.md` § the set-name plane): name it from the
     // custody just loaded. A blank name here once built an engine that
@@ -1079,6 +1266,12 @@ async fn resolve_local_binding(params: &EngineParams) -> Option<ResolvedBinding>
     ) {
         EngineContentDecision::Run(gid, keys, verdict) => (gid, keys, verdict),
         EngineContentDecision::Refuse => {
+            // The row itself refused (a corrupt projection, a reader on a host
+            // that refuses readers): a record read online never outlives that
+            // answer (decision 2″ (3)).
+            if !offline {
+                retire_record(params, &db);
+            }
             tracing::error!(
                 "folder {folder_r}: content-key binding indeterminate (list unavailable or \
                  corrupt mls_group_id projection); refusing to run engine (fail closed). The \
@@ -1118,7 +1311,10 @@ async fn resolve_local_binding(params: &EngineParams) -> Option<ResolvedBinding>
     let retired: Vec<[u8; 32]> = lineage.retired.iter().map(|r| r.nonce).collect();
     // This device's adoption marker for an owned set — the one naming a nonce
     // of its lineage (ruling (11)(d)).
-    let adoption_marker = if owned && config.is_some() {
+    // Built on the record's custody, the marker is the record's too.
+    let adoption_marker = if let Some(recorded) = recorded_marker {
+        recorded.filter(|m| owned && retired.contains(m))
+    } else if owned && config.is_some() {
         fauna_client_folders::adoption_markers_or_none(&*params.folder_keys)
             .await
             .into_iter()
@@ -1135,6 +1331,24 @@ async fn resolve_local_binding(params: &EngineParams) -> Option<ResolvedBinding>
         .collect();
     // The re-record leg reads the OWNER's retired nonces only.
     let retired_set_nonces = if owned { retired } else { Vec::new() };
+
+    // Decision 2″ (3): a resolution that read the row from a nest in reach
+    // records what it read — the row as returned and this set's custody slice
+    // (empty when custody was unreadable: the record is what the host knew,
+    // never better) — before the engine is armed.
+    if !offline {
+        write_record(
+            params,
+            &db,
+            &BindingRecord {
+                custody: config.as_ref().map_or_else(FoldersConfig::default, |cfg| {
+                    fauna_client_folders::engine_binding::custody_slice_for_row(cfg, &raw_row)
+                }),
+                row: Some(raw_row.clone()),
+                adoption_marker,
+            },
+        );
+    }
 
     Some(ResolvedBinding {
         folder: summary.name.clone(),
@@ -1158,8 +1372,14 @@ async fn resolve_local_binding(params: &EngineParams) -> Option<ResolvedBinding>
         metadata_only_residency: Some(summary.is_metadata_only()),
         // Decision 2's pre-seal hold, armed from the row the binding was
         // resolved from: a set whose floor is already ahead of custody holds its
-        // first write.
-        seal_floor: SealFloor::Floor(summary.content_key_floor),
+        // first write. Built on the record, the floor is the recorded one
+        // marked unread (decision 2″ (5)): it binds every seal, and nothing
+        // sealed is published until a read checks it against a nest in reach.
+        seal_floor: if offline {
+            SealFloor::Floor(summary.content_key_floor).after_failed_read()
+        } else {
+            SealFloor::Floor(summary.content_key_floor)
+        },
         basis: BindingBasis::of(summary),
         foreign: None,
         set_nonce,
@@ -1235,15 +1455,48 @@ async fn resolve_foreign_binding(
     // record is its row. Unreadable custody refuses rather than building
     // keyless — without the record there is no home nest to dial, so there is
     // nothing to build; the host's next edge re-reads it.
-    let Some(cfg) = load_custody_retry(&*params.folder_keys).await else {
-        tracing::error!(
-            "folder {folder_id}: custody unreadable — a cross-nest set's transport is its \
-             custody record; refusing to run engine (fail closed). The host rebuilds it at its \
-             next edge."
-        );
-        return None;
+    // Its record is its row, so a load that fails because the nest could not
+    // be reached stands on the set's binding record — the custody slice the
+    // last read carried (decision 2″ (4)); any other failure refuses.
+    // The state DB is opened only where the record is touched, and only when it
+    // already exists: a refused set mints no state DB this host cannot serve.
+    let existing_db = || {
+        let path = folder_ref.state_db_path(&params.state_dir);
+        if !path.exists() {
+            return None;
+        }
+        SyncDb::open(path)
+            .inspect_err(|e| tracing::error!("open state db for {folder_id}: {e}"))
+            .ok()
     };
+    let (cfg, offline) =
+        match fauna_sleep::retry(BINDING_LOAD_ATTEMPTS, BINDING_LOAD_RETRY_DELAY, || {
+            params.folder_keys.load()
+        })
+        .await
+        {
+            Ok(cfg) => (cfg, false),
+            Err(e) => match custody_failure(&e, params) {
+                ReadFailure::Unreachable => {
+                    tracing::warn!(
+                        "folder {folder_id}: custody unreadable, the nest unreachable: {e:#}"
+                    );
+                    (open_record(params, &existing_db()?)?.custody, true)
+                }
+                ReadFailure::Answered => {
+                    tracing::error!(
+                        "folder {folder_id}: custody unreadable — a cross-nest set's transport is \
+                     its custody record; refusing to run engine (fail closed). The host \
+                     rebuilds it at its next edge: {e:#}"
+                    );
+                    return None;
+                }
+            },
+        };
     let Some(record) = fauna_client_folders::custody::find_foreign_set(&cfg, &channel) else {
+        if !offline && let Some(db) = existing_db() {
+            retire_record(params, &db);
+        }
         tracing::error!(
             "folder {folder_id}: no custody record for this cross-nest set (left, or this \
              account was removed from it); refusing to run engine"
@@ -1257,6 +1510,9 @@ async fn resolve_foreign_binding(
         .into_iter()
         .find(|k| FolderRef::parse(&k.folder_id) == Some(folder_ref))
     else {
+        if !offline && let Some(db) = existing_db() {
+            retire_record(params, &db);
+        }
         tracing::error!(
             "folder {folder_id}: the custody record carries no set name (a peer-supplied record \
              that omits the set name), so the set is not bindable; refusing to run engine"
@@ -1266,6 +1522,9 @@ async fn resolve_foreign_binding(
     let (Some(home_nest_url), Some(channel_id_hex)) =
         (keys.home_nest_url.clone(), keys.channel_id_hex.clone())
     else {
+        if !offline && let Some(db) = existing_db() {
+            retire_record(params, &db);
+        }
         tracing::error!(
             "folder {folder_id}: a cross-nest resolution without its routing pair; refusing"
         );
@@ -1302,6 +1561,22 @@ async fn resolve_foreign_binding(
             .folder_channel_owner(&channel)
             .map(|a| a.0)
     });
+    // Decision 2″ (3): a load that read the record from custody records this
+    // set's slice of it — its row.
+    // The set builds, so its state DB is the engine's to create anyway.
+    if !offline && let Ok(db) = SyncDb::open(folder_ref.state_db_path(&params.state_dir)) {
+        write_record(
+            params,
+            &db,
+            &BindingRecord {
+                row: None,
+                custody: fauna_client_folders::engine_binding::custody_slice_for_foreign(
+                    &cfg, &channel,
+                ),
+                adoption_marker: None,
+            },
+        );
+    }
     Some(ResolvedBinding {
         owner_actor_id,
         // A cross-nest set is never this account's own.
@@ -1348,7 +1623,13 @@ async fn resolve_foreign_binding(
         // write locally, ahead of the home nest's `stale_content_key` refusal,
         // and a floor move reaches it as a basis change at the custody edge. A
         // record without a stamp arms nothing — the refusal alone, as before.
-        seal_floor: SealFloor::Floor(record.content_key_floor),
+        // Built on the binding record, the recorded floor is marked unread
+        // (decision 2″ (5)).
+        seal_floor: if offline {
+            SealFloor::Floor(record.content_key_floor).after_failed_read()
+        } else {
+            SealFloor::Floor(record.content_key_floor)
+        },
         basis: BindingBasis::of_foreign(record, held),
         foreign: Some(ForeignTransport {
             home_nest_url,
@@ -2961,5 +3242,50 @@ mod tests {
         );
         assert_eq!(built(true, true).serve_home_nest_url(), None);
         assert_eq!(built(false, false).serve_home_nest_url(), None);
+    }
+
+    /// The park step at a build: a writer's build persists `writer`; a later
+    /// build from a `reader` row marks the park BEFORE persisting `reader`, the
+    /// mark keeping its first stamp; a build from a `writer` row clears it.
+    #[test]
+    fn note_built_access_marks_a_demotion_and_clears_on_a_grant() {
+        use crate::binding_edge::ParkMark;
+        let tmp = tempfile::tempdir().unwrap();
+        let db = SyncDb::open(tmp.path().join("fs.db")).unwrap();
+        let basis = BindingBasis::member_for_tests;
+        assert_eq!(
+            note_built_access(&db, &basis("writer"), 10).unwrap(),
+            ParkMark::Leave
+        );
+        assert_eq!(db.host_built_access().unwrap().as_deref(), Some("writer"));
+        assert_eq!(db.access_revoked_at().unwrap(), None);
+
+        assert_eq!(
+            note_built_access(&db, &basis("reader"), 20).unwrap(),
+            ParkMark::Write
+        );
+        assert_eq!(db.access_revoked_at().unwrap(), Some(20));
+        assert_eq!(db.host_built_access().unwrap().as_deref(), Some("reader"));
+        // A second reader build leaves the first stamp.
+        assert_eq!(
+            note_built_access(&db, &basis("reader"), 30).unwrap(),
+            ParkMark::Leave
+        );
+        assert_eq!(db.access_revoked_at().unwrap(), Some(20));
+
+        assert_eq!(
+            note_built_access(&db, &basis("writer"), 40).unwrap(),
+            ParkMark::Clear
+        );
+        assert_eq!(db.access_revoked_at().unwrap(), None);
+        assert_eq!(db.host_built_access().unwrap().as_deref(), Some("writer"));
+
+        // An owned set's basis carries no access: nothing decided or written.
+        let own = SyncDb::open(tmp.path().join("own.db")).unwrap();
+        assert_eq!(
+            note_built_access(&own, &BindingBasis::default(), 50).unwrap(),
+            ParkMark::Leave
+        );
+        assert_eq!(own.host_built_access().unwrap(), None);
     }
 }

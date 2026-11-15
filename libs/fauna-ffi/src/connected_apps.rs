@@ -10,7 +10,7 @@ use fauna_atproto_settings_machine::ConsentCardRow;
 pub use fauna_client_connected_apps::compose::{ComposedText, RosterRowText};
 pub use fauna_client_connected_apps::{
     BlockedAppRow, ConnectedAppRow, ConnectedAppsMachine, ConnectedAppsObserver,
-    ConnectedAppsSnapshot, MailAppPassword,
+    ConnectedAppsSnapshot, MailAppPassword, OracleOpRow,
 };
 use fauna_client_mail_settings::MailSettingsMachine;
 
@@ -20,7 +20,7 @@ use crate::FfiNestClient;
 /// (`docs/goal/ui/connected-apps.md`) over `nest`'s authenticated WS-RPC
 /// connection. `observer` ticks on every snapshot change. The machine owns the
 /// roster read (`refresh()`), the typed-code start (`submit_code()`), the
-/// same-device handoff's open (`open_handoff()`), the Requests tray gestures (`resolve_request()` / `block_request()` /
+/// same-device handoff's open (`open_handoff()`), the Requests tray gestures (`set_folder()` / `resolve_request()` / `block_request()` /
 /// `unblock()`) and the one revoke (`revoke(key)`, whose verb the machine —
 /// never the app — picks). Needs no actor secret: every call is a plain
 /// authenticated nest request.
@@ -78,6 +78,17 @@ pub fn wire_connected_apps_consent_grant(
 #[uniffi::export]
 pub fn connected_apps_roster_row_text(row: ConnectedAppRow) -> RosterRowText {
     fauna_client_connected_apps::compose::roster_row_text(&row)
+}
+
+/// One operation of an open per-operation record
+/// (`connected-apps-oracle-op`, `docs/goal/ui/connected-apps.md` § Layout &
+/// flow, region 3), composed once in shared Rust
+/// (`compose::oracle_op_text`): when, the class in the consent card's words,
+/// its detail verbatim — the summary's newest-operation wording. The instant
+/// is formatted in the device's local timezone here.
+#[uniffi::export]
+pub fn connected_apps_oracle_op_text(op: OracleOpRow) -> ComposedText {
+    fauna_client_connected_apps::compose::oracle_op_text(&op)
 }
 
 /// A request card's lines, composed once in shared Rust

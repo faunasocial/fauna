@@ -41,9 +41,11 @@ pub mod doors {
     pub const RECORD_ADOPTION_MARKER: &str = "folder_keys.record_adoption_marker";
     pub const MINTING_IDENTITY: &str = "folder_keys.minting_identity";
     pub const DROP_SET_SHARE_ENDPOINTS: &str = "folder_keys.drop_set_share_endpoints";
+    pub const ADOPTION_WALKS: &str = "folder_keys.adoption_walks";
+    pub const RECORD_ADOPTION_WALK: &str = "folder_keys.record_adoption_walk";
 
     /// Every door of the seam.
-    pub const ALL: [&str; 8] = [
+    pub const ALL: [&str; 10] = [
         LOAD,
         LOAD_FOR_WRITE,
         MERGE,
@@ -52,6 +54,8 @@ pub mod doors {
         RECORD_ADOPTION_MARKER,
         MINTING_IDENTITY,
         DROP_SET_SHARE_ENDPOINTS,
+        ADOPTION_WALKS,
+        RECORD_ADOPTION_WALK,
     ];
 }
 
@@ -92,6 +96,16 @@ impl<T: PortTransport> FolderKeyReader for PortFolderKeys<T> {
             .map_err(|e| anyhow::anyhow!(e))?;
         crate::key_reader::decode_adoption_markers(Some(&bytes))
     }
+
+    // The list crosses in its stored form (`encode_adoption_walks`).
+    async fn adoption_walks(&self) -> anyhow::Result<Vec<crate::key_reader::AdoptionWalk>> {
+        let crossed: Result<Result<fauna_protocol::ByteBuf, String>, PortFault> =
+            forward(&self.transport, doors::ADOPTION_WALKS, &()).await;
+        let bytes = crossed
+            .map_err(|f| anyhow::anyhow!(f.to_string()))?
+            .map_err(|e| anyhow::anyhow!(e))?;
+        crate::key_reader::decode_adoption_walks(Some(&bytes))
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -117,6 +131,22 @@ impl<T: PortTransport> FolderKeyStore for PortFolderKeys<T> {
             &self.transport,
             doors::RECORD_ADOPTION_MARKER,
             &fauna_protocol::ByteBuf::from(replaced.to_vec()),
+        )
+        .await;
+        crossed
+            .map_err(|f| anyhow::anyhow!(f.to_string()))?
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    async fn record_adoption_walk(
+        &self,
+        walk: crate::key_reader::AdoptionWalk,
+    ) -> anyhow::Result<()> {
+        let stored = crate::key_reader::encode_adoption_walks(&[walk])?;
+        let crossed: Result<Result<(), String>, PortFault> = forward(
+            &self.transport,
+            doors::RECORD_ADOPTION_WALK,
+            &fauna_protocol::ByteBuf::from(stored),
         )
         .await;
         crossed
@@ -197,6 +227,27 @@ pub async fn serve(
                     .try_into()
                     .map_err(|_| "an adoption marker is 32 bytes".to_string())?;
                 seam.record_adoption_marker(replaced).await.map_err(said)
+            })
+            .await
+        }
+        doors::ADOPTION_WALKS => {
+            answer(payload, |(): ()| async move {
+                let walks = seam.adoption_walks().await.map_err(said)?;
+                crate::key_reader::encode_adoption_walks(&walks)
+                    .map(fauna_protocol::ByteBuf::from)
+                    .map_err(said)
+            })
+            .await
+        }
+        doors::RECORD_ADOPTION_WALK => {
+            answer(payload, |stored: fauna_protocol::ByteBuf| async move {
+                let mut walks =
+                    crate::key_reader::decode_adoption_walks(Some(&stored)).map_err(said)?;
+                let walk = walks
+                    .pop()
+                    .filter(|_| walks.is_empty())
+                    .ok_or_else(|| "an adoption walk record carries one walk".to_string())?;
+                seam.record_adoption_walk(walk).await.map_err(said)
             })
             .await
         }
@@ -296,6 +347,35 @@ mod tests {
         assert_eq!(
             block_on(port.minting_identity()).unwrap(),
             Some(ActorId([4; 32]))
+        );
+    }
+
+    /// The projection walk's claim crosses both ways (`succession-cut.md`
+    /// ruling (11)(l)): a walk recorded over the port rests in the far seam, a
+    /// rewrite under the same nonce replaces it, and the read answers it back.
+    #[test]
+    fn the_adoption_walks_cross() {
+        let seam = std::sync::Arc::new(MemoryFolderKeyStore::default());
+        let port = over(std::sync::Arc::clone(&seam));
+        assert!(block_on(port.adoption_walks()).unwrap().is_empty());
+        let claimed = crate::key_reader::AdoptionWalk {
+            nonce: fauna_protocol::ByteBuf::from(vec![7; 32]),
+            candidates: vec![("ab".into(), 3)],
+            spent: false,
+        };
+        block_on(port.record_adoption_walk(claimed.clone())).unwrap();
+        let spent = crate::key_reader::AdoptionWalk {
+            spent: true,
+            ..claimed
+        };
+        block_on(port.record_adoption_walk(spent.clone())).unwrap();
+        assert_eq!(
+            block_on(port.adoption_walks()).unwrap(),
+            vec![spent.clone()]
+        );
+        assert_eq!(
+            block_on(FolderKeyReader::adoption_walks(&*seam)).unwrap(),
+            vec![spent]
         );
     }
 

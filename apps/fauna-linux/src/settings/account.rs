@@ -573,6 +573,16 @@ pub fn build_account_page() -> (gtk::Box, std::rc::Rc<dyn Fn()>) {
         crate::settings::pending_actions::build_pending_actions_group();
     page.add(&pending_actions_group);
 
+    // --- Unsent changes group ---
+    // The STANDING unsent-changes section (`account-offline-mutation.md`
+    // § The unsent-changes surface, point 1), right after its sibling, the
+    // pending-actions section — tui's placement. Read from this device's
+    // outbox only, so it answers with the nest down; it re-reads itself while
+    // mapped, and on this page's on-visible refresh below.
+    let (unsent_changes_group, unsent_changes_refresh) =
+        crate::settings::unsent_changes::build_unsent_changes_group();
+    page.add(&unsent_changes_group);
+
     let (push_group, push_refresh) = build_push_group();
     page.add(&push_group);
 
@@ -629,6 +639,7 @@ pub fn build_account_page() -> (gtk::Box, std::rc::Rc<dyn Fn()>) {
             }
             recovery_kit_refresh();
             pending_actions_refresh();
+            unsent_changes_refresh();
             push_refresh();
         })
     };

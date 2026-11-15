@@ -1110,4 +1110,81 @@ static class SelfTest
             : $"[self-test] {failures} FAILURE(S)");
         return failures;
     }
+
+    /// <summary>
+    /// <see cref="CaptureContent.RegionIsUniform"/>, graded on synthetic frames: a capture
+    /// whose title bar painted but whose client area is one flat colour is refused, while one
+    /// differing pixel inside the client area keeps it.
+    ///
+    /// <para>The load-bearing case is the FIRST: the frame a disconnected session hands back
+    /// (a title bar over a white client area). A check of the whole frame calls it content,
+    /// which is how a blank pair of store-listing shots passed on 2026-11-12.</para>
+    ///
+    /// <para>Run: <c>FauiBridge.exe --self-test-capture-content</c>; exit code = failures.</para>
+    /// </summary>
+    public static int CaptureContentChecks()
+    {
+        var failures = 0;
+        void Check(bool condition, string description)
+        {
+            Console.WriteLine(condition
+                ? $"[self-test] PASS: {description}"
+                : $"[self-test] FAIL: {description}");
+            if (!condition) failures++;
+        }
+
+        const int W = 12, H = 10, TitleRows = 3;
+        // A frame shaped like the 2026-11-12 shots: a grey title band with a darker
+        // caption mark in it, then a white client area.
+        byte[] Frame()
+        {
+            var px = new byte[W * H * 3];
+            for (var y = 0; y < H; y++)
+                for (var x = 0; x < W; x++)
+                {
+                    var v = (byte)(y < TitleRows ? 0xF3 : 0xFF);
+                    if (y == 1 && x is >= 1 and <= 3) v = 0x40;
+                    var i = (y * W + x) * 3;
+                    px[i] = px[i + 1] = px[i + 2] = v;
+                }
+            return px;
+        }
+        var client = new System.Drawing.Rectangle(0, TitleRows, W, H - TitleRows);
+
+        // 1. The disconnected-session frame: content in the title bar, none below it.
+        Check(CaptureContent.RegionIsUniform(Frame(), W, H, client),
+            "a flat client area under a painted title bar is refused — the whole frame is not one colour, the client area is");
+
+        // 2. One painted pixel inside the client area is content.
+        var painted = Frame();
+        var at = ((H - 2) * W + (W - 2)) * 3;
+        painted[at] = 0x10;
+        Check(!CaptureContent.RegionIsUniform(painted, W, H, client),
+            "one differing pixel inside the client area keeps the capture");
+
+        // 3. The region is the ONLY place looked at: the title band's own variety does not
+        // count, whichever way round.
+        Check(!CaptureContent.RegionIsUniform(Frame(), W, H, new System.Drawing.Rectangle(0, 0, W, TitleRows)),
+            "the title band alone, which carries a caption mark, is content");
+
+        // 4. A region reaching past the frame is clipped to it, not read out of bounds.
+        Check(CaptureContent.RegionIsUniform(Frame(), W, H, new System.Drawing.Rectangle(-4, TitleRows, W + 8, H)),
+            "a region wider and taller than the frame is clipped to it");
+
+        // 5. A region with nothing left after the clip shows nothing.
+        Check(CaptureContent.RegionIsUniform(Frame(), W, H, new System.Drawing.Rectangle(W + 1, 0, 5, 5)),
+            "a region wholly outside the frame shows nothing");
+
+        // 6. The whole frame stays a valid region (the fallback when no client rect reads).
+        var flat = new byte[W * H * 3];
+        Check(CaptureContent.RegionIsUniform(flat, W, H, new System.Drawing.Rectangle(0, 0, W, H)),
+            "a frame of one colour throughout is refused");
+        Check(!CaptureContent.RegionIsUniform(Frame(), W, H, new System.Drawing.Rectangle(0, 0, W, H)),
+            "the whole two-band frame is content");
+
+        Console.WriteLine(failures == 0
+            ? "[self-test] PASS — a capture is kept only when its client area holds more than one colour."
+            : $"[self-test] {failures} FAILURE(S)");
+        return failures;
+    }
 }

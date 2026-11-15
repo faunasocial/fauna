@@ -1,6 +1,6 @@
 ---
 slug: import-your-social-archive
-title: Bring your posts from Facebook
+title: Bring your posts from Facebook or Instagram
 section: bridges and other networks
 goal: docs/goal/behavior/archive-import.md § Goal
 guide: docs/guides/import-your-social-archive.md § 2. Import it
@@ -11,14 +11,7 @@ absences:
 
 ## What a user gets
 
-Download the export archive Facebook gives you and bring it into Fauna from the
-app; importing Instagram archives is planned. Your posts and albums come back at the dates they happened — unless you choose Only me, a public one can be seen on Fauna, a Friends-only one by the people who follow you, and any other only by you — each marked with the service it came from, and your events land in your
-own calendar. The untouched archive is stored encrypted in a folder on your
-nest, so nothing in it is lost. Other people's comments, and your message
-threads, stay in the archive for you alone and are never published; showing them
-in the app is planned, and so is linking with a friend who also imported, so
-that your comments and reactions on each other's posts come back, each signed by
-the person who wrote it.
+Download the export archive Facebook or Instagram gives you and bring it into Fauna from the app. Your posts and albums come back at the dates they happened — unless you choose Only me, a public one can be seen on Fauna, a Friends-only one by the people who follow you, and any other only by you — each marked with the service it came from, and your events land in your own calendar. Instagram's archive records no audience, so every Instagram post is visible only to you. The untouched archive is stored encrypted in a folder on your nest, so nothing in it is lost. Other people's comments and your message threads stay in the archive for you alone and are never published. Comments under your own posts are shown beneath the post they belong to where Fauna can match them, and your message threads are listed among your conversations, read-only and marked as coming from the archive. A friend from your archive who is one of your contacts and has imported from the same service can link with you: when either of you finishes an import while you are contacts, Fauna asks each of you once, on the other's row in Contacts, whether they are the person from your archive. Once you both say yes, your comments and reactions on each other's posts come back where Fauna can match them, each signed by the person who wrote it — only on a post its writer can see on Fauna, and a comment on a Friends-only post only when you each follow the other.
 
 ## Coverage contract
 
@@ -192,8 +185,8 @@ Stamped 2026-11-07 at ac836c937b.
 | 15 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_comment_on_the_owners_post_is_folded_under_it_for_the_owner_alone` — requires `post-archive-comments` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 16 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_archive_thread_is_listed_read_only_on_the_archive_rail_for_its_owner_alone` — requires `conversations-archive-rail` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_an_imported_post_is_never_sent_on_or_shown_to_anonymous_outside_visitors` | nest (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 19 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 18 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
+| 19 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 20 | app | `tests/e2e-unified/tests/test_archive_import.py::test_imported_events_land_in_the_calendar_at_their_times_visible_to_the_owner_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 21 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 21 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -226,16 +219,16 @@ Stamped 2026-11-07 at ac836c937b.
 | 47 | nest | `tests/e2e-unified/tests/api/test_only_me_tier_never_offered.py::test_the_only_you_audience_is_never_offered_and_cannot_be_subscribed` | nest (linux): passed |
 | 48 | nest | `tests/e2e-unified/tests/api/test_only_me_tier_never_offered.py::test_a_subscriber_to_the_highest_tier_never_opens_an_only_you_import` | nest (linux): passed |
 | 49 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_nobody_can_look_the_importer_up_by_their_identity_on_the_other_service` | nest (linux): passed |
-| 50 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 51 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 52 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 53 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 54 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 55 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 50 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
+| 51 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
+| 52 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
+| 53 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
+| 54 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
+| 55 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 56 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 57 | app | `tests/e2e-unified/tests/test_archive_import.py::test_view_imported_lists_only_the_imported_posts_and_the_done_links_lead_on` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 57 | app | `tests/e2e-unified/tests/test_archive_import.py::test_view_imported_lists_only_the_imported_posts_and_the_done_links_lead_on` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 58 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_comment_no_post_places_is_counted_on_the_done_step` | tui (linux): passed |
-| 58 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 58 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 59 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_an_imported_event_names_the_owner_organizer_only_when_they_hosted_it` | web (linux): passed, tui (linux): passed, tui (windows): passed |
 | 60 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_resume_refuses_an_archive_that_is_not_the_one_the_import_started_from` — requires `archive-import-resume-handback` (not built: web, linux, windows, macos, ios, android, tui, android-kids, ios-kids) | tui (linux): skipped |
 <!-- features-render:end -->

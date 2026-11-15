@@ -198,11 +198,17 @@ def test_a_connected_app_hears_only_its_own_scopes_change(
 
     # ── WS-RPC push, with the causal barrier: B first, then A. ──
     b.write()
-    # B's row moved the account's log past the idle cursor, and A's filter
-    # emptied the page — the cursor the webhook's notification must exceed.
+    # B's row moved the account's log, but A's filter emptied the page, and an
+    # empty page leaves the cursor where it was: it moves only to a `seq` A may
+    # list, never on another publisher's write (transport.md § Push events →
+    # *Third-party event doors*) — the cursor the webhook's notification must
+    # exceed.
     status, after_b = _events(nest, a, None, wait=0)
     assert status == 200 and after_b["frames"] == [], after_b
-    assert after_b["cursor"] > idle["cursor"], (idle, after_b)
+    assert after_b["cursor"] == idle["cursor"], (
+        f"B's write must not move A's cursor — a moved cursor under an empty "
+        f"page tells A that someone else wrote: {idle!r} vs {after_b!r}"
+    )
     a.write()
     kind, payload = a.session.next_push()
     assert kind == "fauna.sync.changed", (kind, payload)

@@ -983,11 +983,14 @@ func IndexHintMlkemEk(indexPubkey, mlsPubkey, mlkemEk []byte) []byte {
 // re-score drain opens a sealed record with the minimal derived key a
 // user-minted `content.read{mail}` grant carried (a CapabilityScopeKey.Key from
 // UnsealCapabilityGrant). The key self-describes its reach by length: 32 bytes
-// (x25519 secret) opens classical records only; 32+2400 bytes
-// (x25519∥mlkem_dk) opens both classical and hybrid (X-Wing) records. A wrong
-// or insufficient key fails AEAD-closed — never a mis-decrypt.
-func OpenMailRecordWithKey(envelope, key []byte) ([]byte, error) {
-	pt, err := faunaFfi.OpenMailRecordWithKey(envelope, key)
+// (x25519 secret) opens classical records only; k×(32+2400) bytes
+// (x25519∥mlkem_dk) opens both classical and hybrid (X-Wing) records; a
+// k×2464-byte master-key payload (per MSEK generation: standing secret ∥
+// mail-epoch root) runs the epoch trial chain keyed off sealUnix, the record's
+// seal instant (FetchedCiphertext.SealEpochBasisUnix; 0 = unknown). A wrong or
+// insufficient key fails AEAD-closed — never a mis-decrypt.
+func OpenMailRecordWithKey(envelope, key []byte, sealUnix uint64) ([]byte, error) {
+	pt, err := faunaFfi.OpenMailRecordWithKey(envelope, key, sealUnix)
 	if err != nil {
 		return nil, fmt.Errorf("OpenMailRecordWithKey: %w", err)
 	}

@@ -121,6 +121,14 @@ internal sealed class PostCardHost
     /// <summary>The page's bound render projection of the snapshot (reconciled each tick).</summary>
     public ObservableCollection<FeedPostItem> Posts { get; } = new();
 
+    /// <summary>The inline players this list's cards show, kept apart from the cards
+    /// (<see cref="InlinePlayerKeep{TPlayer}"/>; render-model.md § D6c → <i>Inline
+    /// playback</i>): a row the feed moves gets a new container, and the card rebuilt for
+    /// its post adopts the player still playing. <see cref="Sync"/> stops a player whose
+    /// post or video the list no longer holds; the list leaving the screen stops them
+    /// all.</summary>
+    internal InlinePlayerKeep<Controls.InlineVideoSession> Players { get; } = new(session => session.Stop());
+
     /// <param name="witnessSurface">The surface prefix of convention 17's region / nest
     /// block witness keys (<c>"feed"</c>, <c>"profile"</c>), so one post painted on two
     /// surfaces is two witnesses.</param>
@@ -133,6 +141,10 @@ internal sealed class PostCardHost
         _witnessSurface = witnessSurface;
         list.SetValue(HostProperty, this);
         list.ItemsSource = Posts;
+        // Nothing plays where the reader cannot see it: the page leaving, or the profile's
+        // Posts tab leaving the tree, stops every kept player (each card's own Unloaded only
+        // lets go of its player, for the card rebuilt for its post).
+        list.Unloaded += (_, _) => Players.StopAll();
 #if PAYMENTS
         // §§ TipDisplayHost / the tip list window — the payments plane lives in its
         // own removable build item (dynamic-features.md § Platform-family surface
@@ -173,6 +185,14 @@ internal sealed class PostCardHost
             target.Add(new FeedPostItem(p, ViewModel?.Manager, bridgeRoster));
         ObservableCollectionReconcile.Reconcile(
             Posts, target, item => item.PostId, static (a, b) => a.ContentEquals(b));
+        // A kept player lives while its post is on the list with that video: a post the
+        // snapshot dropped (another feed selected, a search narrowing it out, the post
+        // deleted) takes its player with it. A post the reconcile only MOVED keeps it, for
+        // the card rebuilt for it to adopt.
+        // A post may carry several videos (render-model.md § D6b): each is kept on its own key.
+        Players.Retain(Posts.SelectMany(item => item.MediaElements
+            .Where(element => element.IsVideo)
+            .Select(element => (item.PostId, InlineVideoKey.Of(element.Block)))));
 
         // Kick off the lazy per-post media + quoted-post + link-preview resolution. Each trigger
         // is fire-once (the guards below); the manager folds the resolved block + re-emits, and
@@ -532,22 +552,39 @@ internal sealed class PostCardHost
         teaser.Bind(post);
     }
 
-    /// <summary>Open the sold-post offer's external payment_url (the teaser's payment
-    /// link) — mirrors <c>ProfilePage.OpenOfferPaymentLink</c>, plus the shared
-    /// <c>uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl</c> guard (F-CL2
+    /// <summary>The teaser's payment link (<c>gated-post-payment-link</c>) — mirrors
+    /// <c>ProfilePage.OpenOfferPaymentLink</c>: the shared
+    /// <c>uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl</c> guard first (F-CL2
     /// anti-phishing-redirect class — the nest/author-supplied url is
     /// untrusted): a non-https url shows <c>subscriptions/unsafe_payment_url</c> on
-    /// `error-message` instead of launching.</summary>
-    private void OpenUnlockOfferPaymentLink(FeedPostItem post)
+    /// `error-message` and nothing is sent. Otherwise SUBSCRIBE FIRST and open the
+    /// checkout URL the manager's shared <c>pay_unlock_offer</c> composed, bound to the
+    /// buyer's actor (<see cref="FeedViewModel.PayUnlockOfferAsync"/>; <c>monetization.md</c>
+    /// § Pillar 3 → Buyer↔actor binding (Q4)) — never the author's raw payment_url.
+    /// <c>null</c> → nothing opens; a refused subscribe surfaces as
+    /// <c>feed/error_buy_unlock</c> (the buy button's convention) and opens nothing.
+    /// Opened only through the one <see cref="FaunaApp.Services.UrlOpener"/>.</summary>
+    private async void OpenUnlockOfferPaymentLink(FeedPostItem post)
     {
-        if (string.IsNullOrEmpty(post.UnlockOfferPaymentUrl)) return;
+        if (ViewModel is null || string.IsNullOrEmpty(post.UnlockOfferPaymentUrl)) return;
         if (!uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl(post.UnlockOfferPaymentUrl))
         {
             var msg = S.Get("subscriptions/unsafe_payment_url");
             _page.ShowError(msg);
             return;
         }
-        FaunaApp.Services.UrlOpener.Open(post.UnlockOfferPaymentUrl, "Feed");
+        string? url;
+        try
+        {
+            url = await ViewModel.PayUnlockOfferAsync(post.PostId);
+        }
+        catch (Exception ex)
+        {
+            var msg = S.Format("feed/error_buy_unlock", ex.Message);
+            _page.ShowError(msg);
+            return;
+        }
+        if (url is not null) FaunaApp.Services.UrlOpener.Open(url, "Feed");
     }
 
     /// <summary>Buy the sold post's unlock tier off the resolved teaser offer (the teaser's
@@ -1152,6 +1189,33 @@ internal sealed class PostCardHost
     {
         if (sender is not Button { Tag: FeedPostItem item }) return;
         item.RevealContent();
+    }
+
+    /// <summary>The reporter's show-again (<c>content-policy-show-again-button</c>,
+    /// moderation.md § Corollary — the reporter's hide is theirs to undo): one
+    /// persisted un-hide per id the card's offer names
+    /// (<see cref="ReportSheetViewModel.ShowAgainAsync"/>), the stored list into the
+    /// render state, then the rows re-read — the card paints its post again, and every
+    /// other card the same ids hid with it. A failure stays on the page's
+    /// <c>error-message</c>; the report itself is never withdrawn.</summary>
+    internal async void ShowAgain_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: FeedPostItem { ShowAgain: { } offer } } button) return;
+        if (Rpc is not { } rpc) return;
+        button.IsEnabled = false;
+        try
+        {
+            if (await ReportSheetViewModel.ShowAgainAsync(rpc, offer.Ids) is { } error)
+                _page.ReportPageError(error);
+            else
+                _page.ClearPageError();
+        }
+        finally
+        {
+            button.IsEnabled = true;
+        }
+        // The hide list changed: re-read the rows (each verdict is read at construction).
+        _page.RefreshCards();
     }
 
     // ── Convention 17's "a region Block never renders silent" walk

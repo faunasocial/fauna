@@ -98,6 +98,12 @@ class EventDraftsHostTest {
         ) {
             saved += FfiEventDrafts(summary, dtstart, dtend, description, location)
         }
+
+        // The leave doors' save: what this actor's handle was asked to persist,
+        // the same record as a debounced save.
+        override suspend fun `saveDraftsOnLeave`(`draft`: FfiEventDrafts) {
+            saved += draft
+        }
     }
 
     /**

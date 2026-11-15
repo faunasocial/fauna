@@ -65,6 +65,12 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.web,
     pytest.mark.windows,
+    # android joined 2026-11-14 with no app work:
+    # the port change is the Admin WS-RPC and the round-trip is the host's
+    # CalDAV client, so the app's part is the admin login (whose relaunch
+    # reverses the dedicated nest's port onto the device) and the mailbox mint,
+    # `TestAgent.kt`'s `enable_caldav_mailbox` arm.
+    pytest.mark.android,
 ]
 
 # The PLAIN CalDAV credential the client mints and the MUA authenticates with.

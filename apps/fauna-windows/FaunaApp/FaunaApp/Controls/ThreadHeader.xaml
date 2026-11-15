@@ -53,7 +53,6 @@
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="Auto" />
-            <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
 
         <!-- thread-header id lives on the always-present label TextBlock (a realized
@@ -72,9 +71,20 @@
                    VerticalAlignment="Center"
                    Style="{StaticResource SubtitleTextBlockStyle}" />
         <!-- protocol-icon: source-concept glyph as a color emoji (render-model.md § D5);
-             no Segoe MDL2 Assets symbol font — the default emoji fallback renders it. -->
+             no Segoe MDL2 Assets symbol font — the default emoji fallback renders it.
+             CAPPED and ellipsised, like the title: on a bridged room it carries
+             the bridge's declared label too ("🌐 Example Notes", ~115 px), and
+             with the 48-DIP nav rail the detail pane at the 600-DIP default
+             window is ~218 px — the uncapped label plus the settings and the
+             (since removed, inert) overflow button left the `*` title column
+             0 px, so `thread-header` read NOT VISIBLE (an empty rect is
+             IsOffscreen) on test_bridged_conversation.py, 2026-11-10. The
+             full text stays readable to a driver: get_text reads the
+             TextBlock's Text, not its rendered glyphs. -->
         <TextBlock Grid.Row="0" Grid.Column="1" x:Name="ProtocolIcon"
-                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ProtocolIcon}" />
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ProtocolIcon}"
+                   MaxWidth="96" VerticalAlignment="Center"
+                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
         <!-- The policy editor's door. COLLAPSED where the rail models no room,
              like the class statement in row 1 — collapsed is what "absent"
              means to the driver on WinUI, since a collapsed element carries no
@@ -104,8 +114,6 @@
                 Visibility="Collapsed"
                 ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/thread_rename}"
                 Click="OnRenameClicked" />
-        <Button Grid.Row="0" Grid.Column="5" x:Name="OverflowButton"
-                Content="&#xE712;" FontFamily="Segoe MDL2 Assets" />
         </Grid>
 
         <!-- Row 1 — the room's class, stated on the header

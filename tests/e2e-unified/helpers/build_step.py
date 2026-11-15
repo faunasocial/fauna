@@ -6,7 +6,9 @@ import pytest
 
 
 def run_build_step(cmd, what, cwd=None):
-    """Run one build step to completion; `pytest.fail` with its tail on error.
+    """Run one build step to completion; `pytest.fail` with its tail on error,
+    else return its last 400 output lines (a step whose verdict lines the
+    caller checks — the MSI's notices run).
 
     No wall-clock bound, the same shape as conftest's `_build_via_just`. Every
     step here is a compile or a link, and on a machine running several build
@@ -37,6 +39,7 @@ def run_build_step(cmd, what, cwd=None):
     reap_descendants_of(proc.pid)
     recent = drain_pipes(proc, maxlen=400)
     rc = proc.wait()
+    wait_pipes_drained(proc, timeout=10.0)
     if rc != 0:
-        wait_pipes_drained(proc, timeout=10.0)
         pytest.fail(f"{what} failed (rc={rc}):\n" + "\n".join(recent))
+    return list(recent)

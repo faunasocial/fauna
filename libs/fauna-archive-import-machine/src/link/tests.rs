@@ -499,8 +499,8 @@ async fn the_question_is_asked_once_and_a_no_is_final_on_both_sides() {
     deliver(&bob, &alice).await;
     assert_eq!(
         pair_state(&alice, &bob),
-        None,
-        "a decline to an announce leaves the announcer unasked"
+        Some(PairState::Declined),
+        "a decline to an announce settles the pair on the announcer's side too"
     );
 
     // A re-import announces again: Bob is not asked a second time.
@@ -510,6 +510,30 @@ async fn the_question_is_asked_once_and_a_no_is_final_on_both_sides() {
     assert_eq!(
         bob.links.answer_link(&alice.hex, &FB, true).await,
         Err(LinkError::NotAsked)
+    );
+}
+
+#[tokio::test]
+async fn a_declined_announce_is_never_asked_of_the_announcer_after_a_re_import() {
+    let (alice, bob) = alice_and_bob();
+    alice.links.announce_round(&FB).await.unwrap();
+    deliver(&alice, &bob).await;
+    bob.links.answer_link(&alice.hex, &FB, false).await.unwrap();
+    deliver(&bob, &alice).await;
+
+    // Bob imports again: his announce reaches Alice, who must not be asked a
+    // question Bob already answered no to (outcome 51).
+    bob.links.announce_round(&FB).await.unwrap();
+    deliver(&bob, &alice).await;
+    assert_eq!(pair_state(&alice, &bob), Some(PairState::Declined));
+    assert_eq!(
+        alice.links.answer_link(&bob.hex, &FB, true).await,
+        Err(LinkError::NotAsked)
+    );
+    alice.links.drive().await.unwrap();
+    assert!(
+        alice.wire.take().is_empty(),
+        "nothing is owed once declined"
     );
 }
 
@@ -762,6 +786,82 @@ async fn the_redrive_resends_exactly_the_pending_signals() {
         links_state(&bob).pending.is_empty(),
         "{:?}",
         links_state(&bob).pending
+    );
+}
+
+/// Ruling 4's session-start re-drive is owed even when that drive cannot read
+/// the folders yet: windows' login drive runs before the account runtime has
+/// mounted, so the folder keys answer "not running" for a moment. The failed
+/// drive leaves its work due (after a short backoff), the app's tick drives
+/// again, and the drive that runs sends what was pending.
+#[tokio::test]
+async fn a_drive_that_could_not_read_the_folders_leaves_its_work_due() {
+    let (alice, bob) = alice_and_bob();
+    bob.wire.set_down(true);
+    alice.links.announce_round(&FB).await.unwrap();
+    deliver(&alice, &bob).await;
+    bob.links.answer_link(&alice.hex, &FB, true).await.unwrap();
+    assert!(bob.wire.take().is_empty());
+    bob.wire.set_down(false);
+    assert!(!bob.links.work_due(), "a failed send alone owes no drive");
+
+    // The next session's first drive meets folders it cannot read yet.
+    bob.nest.set_folders_down(true);
+    assert!(bob.links.drive().await.is_err());
+    let later = Timestamp(Timestamp::now().0 + MAX_REDRIVE_BACKOFF_MICROS + 1);
+    assert!(
+        bob.links.work_due_at(later),
+        "the lost re-drive is owed again"
+    );
+
+    bob.nest.set_folders_down(false);
+    bob.links.drive().await.unwrap();
+    let sent = bob.wire.take();
+    assert_eq!(sent.len(), 1, "the drive that ran sent the pending offer");
+    assert!(
+        matches!(sent[0].1, ArchiveSignal::LinkOffer { .. }),
+        "{sent:?}"
+    );
+    assert!(
+        !bob.links.work_due_at(later),
+        "nothing is owed once a drive ran"
+    );
+    assert_eq!(bob.links.redrive_after(), None);
+}
+
+/// A drive that keeps failing is retried on a doubling backoff that stops at
+/// a minute — never on every one-second tick of the app's wiring — and the
+/// first drive that runs resets it.
+#[tokio::test]
+async fn a_failing_drive_backs_off_doubling_to_a_minute() {
+    let (_alice, bob) = alice_and_bob();
+    bob.nest.set_folders_down(true);
+    let mut backoff = INITIAL_REDRIVE_BACKOFF_MICROS;
+    for attempt in 0..10 {
+        let before = Timestamp::now().0;
+        assert!(bob.links.drive().await.is_err());
+        let after = Timestamp::now().0;
+        let at = bob.links.redrive_after().expect("a retry is owed").0;
+        assert!(
+            at >= before + backoff && at <= after + backoff,
+            "attempt {attempt}: retry {}µs out, wanted {backoff}µs",
+            at - before
+        );
+        assert!(!bob.links.work_due_at(Timestamp(before + backoff - 1)));
+        assert!(bob.links.work_due_at(Timestamp(after + backoff)));
+        backoff = (backoff * 2).min(MAX_REDRIVE_BACKOFF_MICROS);
+    }
+    assert_eq!(backoff, MAX_REDRIVE_BACKOFF_MICROS);
+
+    bob.nest.set_folders_down(false);
+    bob.links.drive().await.unwrap();
+    assert_eq!(bob.links.redrive_after(), None);
+    bob.nest.set_folders_down(true);
+    let before = Timestamp::now().0;
+    assert!(bob.links.drive().await.is_err());
+    assert!(
+        bob.links.redrive_after().unwrap().0 < before + 2 * INITIAL_REDRIVE_BACKOFF_MICROS,
+        "a drive that ran resets the backoff"
     );
 }
 

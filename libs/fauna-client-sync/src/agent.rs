@@ -421,6 +421,38 @@ fn probe_serving(timeout: std::time::Duration) -> bool {
     probe_serving_at(&endpoint, timeout)
 }
 
+/// The `FolderRef` wire form of every set this user's agent holds a location
+/// binding for (`ListLocations`), a parked binding included — the device's
+/// binding roster the projection walk's take-over asks before it claims an
+/// adoption marker (`succession-cut.md` ruling (11)(l), *one consumer per
+/// marker*). Blocking: one local socket exchange, so an async caller runs it
+/// off its executor. `Err` when no agent answers — the roster is unread, never
+/// empty.
+pub fn bound_folder_refs() -> Result<std::collections::BTreeSet<String>, AgentControlError> {
+    let endpoint = AgentEndpoint::default_for_user()
+        .map_err(|e| AgentControlError::new(format!("no agent endpoint: {e}")))?;
+    let client = endpoint
+        .connect()
+        .map_err(|e| AgentControlError::new(format!("the agent did not accept: {e}")))?;
+    let response = client
+        .request_with_timeout(
+            RequestMethod::ListLocations,
+            fauna_ipc::sync_pipe_client::REQUEST_TIMEOUT,
+        )
+        .map_err(|e| AgentControlError::new(format!("ListLocations failed: {e}")))?;
+    match response.result {
+        ResponseResult::Ok(ResponsePayload::Locations(rows)) => Ok(bound_refs_of(&rows)),
+        other => Err(AgentControlError::new(format!(
+            "agent ListLocations returned an unexpected answer: {other:?}"
+        ))),
+    }
+}
+
+/// The I/O-free half of [`bound_folder_refs`]: the ref of every bound row.
+fn bound_refs_of(rows: &[LocationInfo]) -> std::collections::BTreeSet<String> {
+    rows.iter().filter_map(|r| r.folder_id.clone()).collect()
+}
+
 /// A last-known-answer cache with a one-at-a-time background refresh — the
 /// shape that makes a liveness read safe to call from a path that must not
 /// block (an e2e state provider, a UI thread).
@@ -1370,6 +1402,29 @@ where
             fauna_ipc::sync::ResponsePayload::CustodianFolderNames(names) => Ok(names),
             other => Err(AgentControlError::new(format!(
                 "GetCustodianFolderNames expected CustodianFolderNames, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Set this device's "show on demand" preference for one set
+    /// (`RequestMethod::SetPresenceEnabled`) — the desktops'
+    /// `folder-on-demand-toggle`: the agent holds the device-local toggle and
+    /// plans its presence roots from it (`on-demand-files-shared-sets.md`
+    /// § Shared sets on a capability host, decision 3d). `scoped_id` is the
+    /// set's actor-scoped identifier (`ActorScopedFolderRef::to_wire`).
+    pub async fn set_presence_enabled(
+        &self,
+        scoped_id: String,
+        enabled: bool,
+    ) -> Result<(), AgentControlError> {
+        match self
+            .inner
+            .agent_request_ensuring_agent(RequestMethod::SetPresenceEnabled { scoped_id, enabled })
+            .await?
+        {
+            fauna_ipc::sync::ResponsePayload::Empty => Ok(()),
+            other => Err(AgentControlError::new(format!(
+                "SetPresenceEnabled expected Empty, got {other:?}"
             ))),
         }
     }
@@ -4559,6 +4614,19 @@ mod tests {
             mode: "always".to_string(),
             ..Default::default()
         }
+    }
+
+    /// The take-over's roster (`succession-cut.md` ruling (11)(l)): every
+    /// bound row's ref, a parked one included; an unbound row names no set.
+    #[test]
+    fn the_bound_roster_is_every_bound_rows_ref_parked_included() {
+        let mut parked = agent_row("/p", Some("parked"));
+        parked.access_revoked = true;
+        let refs = bound_refs_of(&[agent_row("/a", Some("docs")), parked, agent_row("/u", None)]);
+        assert_eq!(
+            refs,
+            [set_ref("docs"), set_ref("parked")].into_iter().collect()
+        );
     }
 
     fn status(available: Option<bool>, reason: Option<&str>) -> fauna_ipc::sync::ServiceStatusInfo {

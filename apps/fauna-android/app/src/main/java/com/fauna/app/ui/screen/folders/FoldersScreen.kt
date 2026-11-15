@@ -42,6 +42,7 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.DevicesVM
+import com.fauna.app.ui.viewmodel.GroupReviewRow
 import com.fauna.app.ui.viewmodel.OnDemandRow
 import com.fauna.app.ui.viewmodel.OnDemandRowKey
 import com.fauna.app.ui.viewmodel.PhotoBackupVM
@@ -108,7 +109,9 @@ fun FoldersScreen(
     val offlineShareChanges by vm.offlineShareChanges.collectAsState()
     val groupShares by vm.groupShares.collectAsState()
     val offlineShareError by vm.offlineShareError.collectAsState()
+    val sharePlane by vm.sharePlaneReadings.collectAsState()
     val onDemand by vm.onDemand.collectAsState()
+    val groupOnDemand by vm.groupOnDemand.collectAsState()
     val appMessages = LocalAppMessages.current
 
     // The co-present affordance's whole paint, from shared Rust (the view, its
@@ -141,6 +144,19 @@ fun FoldersScreen(
     // whenever the folder list changes (never held only in view state).
     val folderList = snapshot?.folders
     LaunchedEffect(folderList) { folderList?.let { vm.loadOnDemand(it) } }
+    // The group-scope rows' readings, re-read whenever the scope list changes
+    // (`group-set.md` decision 11: a phone's seat is its on-demand replica).
+    val groupRefs = groupShares.scopes.map { it.folderId }
+    LaunchedEffect(groupRefs) { vm.loadGroupOnDemand(groupRefs) }
+    // Each group set's review rows, re-read on a poll while the page is shown
+    // (`group-set.md` decision 9), under the label its row carries.
+    val groupReviewRows by vm.groupReviewRows.collectAsState()
+    val reviewScopes = groupShares.scopes.map {
+        it.folderId to stringResourceFmt(R.string.folders_offline_share_set, it.shortId)
+    }
+    if (BuildConfig.P2P_SHARE) {
+        LaunchedEffect(reviewScopes) { vm.pollGroupReviewRows(reviewScopes) }
+    }
 
     // Single `error-message` surface: the page error, falling back to the open
     // wizard's submit error. Both flow to the navigation shell's banner.
@@ -220,6 +236,16 @@ fun FoldersScreen(
             conflictBadgeLabels = snapshot?.conflicts.orEmpty().associate {
                 it.id to com.fauna.ffi.conflictBadgeLabel(it.resolution, it.resolvedAt, it.conflictType)
             },
+            // The group sets' review rows, each with its badge text (FFI, here):
+            // a row id is the set's own, so it is never a key into the map above.
+            groupReviewRows = if (BuildConfig.P2P_SHARE) {
+                groupReviewRows.map { row ->
+                    val c = row.conflict
+                    GroupReviewPaint(row, com.fauna.ffi.conflictBadgeLabel(c.resolution, c.resolvedAt, c.conflictType))
+                }
+            } else {
+                emptyList()
+            },
             // The three-state select's catalog + each row's prefill, computed here
             // (FFI) and injected as plain data — same shape as conflictBadgeLabels
             // above. The prefill is the SHARED rule set (blank for unset, blank for a
@@ -243,6 +269,7 @@ fun FoldersScreen(
                 onSavePaths = vm::saveFolderPaths,
                 onSaveNestPlace = vm::setFolderNestPlace,
                 onUseOtherVersion = vm::useOtherVersion,
+                onUseRetainedVersion = vm::useRetainedVersion,
                 onLoadMembers = vm::loadFolderActors,
                 onFolderExpandedChanged = vm::setFolderExpanded,
                 onSetFolderPlace = vm::setFolderPlace,
@@ -263,6 +290,7 @@ fun FoldersScreen(
                 onDeclineShare = vm::declinePendingShare,
                 onLeaveFolder = vm::leaveFolder,
                 onSetOnDemand = vm::setFolderOnDemand,
+                onSetGroupOnDemand = vm::setGroupOnDemand,
                 onOpenOfflineShare = { vm.openOfflineSharePanel(OfflinePanel.INITIATE) },
                 onOpenOfflineReceive = { vm.openOfflineSharePanel(OfflinePanel.RECEIVE) },
                 onOfflinePeerCodeChanged = vm::setOfflinePeerCode,
@@ -295,8 +323,10 @@ fun FoldersScreen(
             // and the kids manifest declares none of its permissions.
             photoBackupSection = { if (!BuildConfig.KIDS) PhotoBackupSection() },
             offlineShare = offlineShare,
+            sharePlane = if (BuildConfig.P2P_SHARE) sharePlane else null,
             groupInvitations = groupShares.invitations,
             groupScopes = groupShares.scopes,
+            groupOnDemand = groupOnDemand,
         )
     }
 }
@@ -336,6 +366,13 @@ data class FoldersActions(
      * `DevicesMachine.use_other_version` (the VM resolves this device's id).
      */
     val onUseOtherVersion: (conflictId: Long) -> Unit = {},
+    /**
+     * A group set's review row's `conflict-resolve-button`: *use the other
+     * version* on the set's own host, keyed by the set's `group:` ref and the
+     * row id (`group-set.md` § Build design — the group set, decision 9) —
+     * never [onUseOtherVersion], whose nest machine knows no such row.
+     */
+    val onUseRetainedVersion: (folderId: String, conflictId: Long) -> Unit = { _, _ -> },
     // ── Cross-user sharing (owner side) — folders.md § Sharing ──
     /** Load a set's "Shared with" actor roster (fauna.folders.members.list_actors). */
     val onLoadMembers: (name: String) -> Unit = {},
@@ -433,6 +470,8 @@ data class FoldersActions(
      * member's row is hide-only (`DevicesVM.setFolderOnDemand`).
      */
     val onSetOnDemand: (folder: FolderSummary, shown: Boolean) -> Unit = { _, _ -> },
+    /** A group-scope row's hide-only `folder-on-demand-toggle`, keyed by its `group:` ref. */
+    val onSetGroupOnDemand: (folderRef: String, shown: Boolean) -> Unit = { _, _ -> },
     // ── Co-present offline share — p2p.md § Offline share initiation ──
     /** `offline-share-button` — open the initiator panel. */
     val onOpenOfflineShare: () -> Unit = {},
@@ -565,6 +604,9 @@ fun FoldersContent(
     // shared `conflictBadgeLabel` FFI fn at the Screen level and injected so this
     // Content stays FFI-free.
     conflictBadgeLabels: Map<Long, LocalizedText> = emptyMap(),
+    // Each group set's review rows (`group-set.md` decision 9), already read
+    // and badged at the Screen — they continue the flat `conflict-*` list.
+    groupReviewRows: List<GroupReviewPaint> = emptyList(),
     // The three-state `folder-nest-snapshots-select` catalog (value + localized
     // label) from the shared `nestSnapshotsOptions()` — injected so the Content
     // stays FFI-free under Robolectric.
@@ -589,12 +631,18 @@ fun FoldersContent(
     // initiation), already decided at the Screen — `null` hides the section
     // (no usable identity: an affordance that cannot work is worse than none).
     offlineShare: OfflineSharePaint? = null,
+    // The cross-user peer-transfer plane's six readings, already resolved —
+    // `null` while this device is not running the plane, which renders nothing.
+    sharePlane: com.fauna.app.p2pshare.SharePlaneReadings? = null,
     // Offered sets awaiting this account's consent — the knock trio's group
     // arm, painted into the SAME "Shared with you" list as [pendingShares].
     groupInvitations: List<GroupInvitation> = emptyList(),
     // Shared sets this device holds the machinery for — ordinary, read-only
     // `folder-row`s after the folder list.
     groupScopes: List<GroupScope> = emptyList(),
+    // Each group-scope row's `folder-on-demand-toggle` reading, keyed by the
+    // scope's `group:` ref — the member row's twin (`group-set.md` decision 11).
+    groupOnDemand: Map<String, OnDemandRow> = emptyMap(),
     // Member rows whose device-local section is headed by
     // `folder-access-revoked-warning`, already decided at the Screen.
     accessRevoked: Set<OnDemandRowKey> = emptySet(),
@@ -634,12 +682,29 @@ fun FoldersContent(
                 OfflineShareSection(paint, actions)
                 HorizontalDivider()
             }
+            // ── Transfers between members' devices (the peer-transfer plane) ──
+            // Page-level under the ceremony panel — the placement tui, linux
+            // and apple use (p2p-shared-set-build.md § Phone peers — design,
+            // decision 5).
+            sharePlane?.let { readings ->
+                SharePlaneSection(readings)
+                HorizontalDivider()
+            }
         }
 
         // ── Conflicts (only when present) ────────────────────────────────
-        if (conflicts.isNotEmpty()) {
+        if (conflicts.isNotEmpty() || groupReviewRows.isNotEmpty()) {
             SectionHeader(stringResource(R.string.devices_conflicts_title))
-            conflicts.forEach { conflict -> ConflictCard(conflict, conflictBadgeLabels[conflict.id], actions) }
+            conflicts.forEach { conflict ->
+                ConflictCard(conflict, conflictBadgeLabels[conflict.id]) { actions.onUseOtherVersion(conflict.id) }
+            }
+            // A group set's rows continue the same flat list, `conflict-file-info`
+            // naming the set (`folders.md` § Conflicts).
+            groupReviewRows.forEach { paint ->
+                ConflictCard(paint.row.conflict, paint.badgeLabel, retained = true) {
+                    actions.onUseRetainedVersion(paint.row.folderId, paint.row.conflict.id)
+                }
+            }
             HorizontalDivider()
         }
 
@@ -701,7 +766,13 @@ fun FoldersContent(
             }
             // A set a co-present ceremony landed lists as an ordinary set row —
             // a ceremony-born set IS a set (p2p.md § Offline share initiation).
-            if (BuildConfig.P2P_SHARE) groupScopes.forEach { scope -> GroupScopeRow(scope) }
+            if (BuildConfig.P2P_SHARE) {
+                groupScopes.forEach { scope ->
+                    GroupScopeRow(scope, groupOnDemand[scope.folderId]) { shown ->
+                        actions.onSetGroupOnDemand(scope.folderId, shown)
+                    }
+                }
+            }
         }
 
         // ── Folders you follow (always offered — the button is how a user gets
@@ -754,8 +825,24 @@ internal fun FollowOnBanner(text: String?, messages: AppMessages) {
     }
 }
 
+/**
+ * A group set's review row as the page paints it: the row and its badge text
+ * (`conflictBadgeLabel`, resolved at the Screen so the Content stays FFI-free).
+ */
+data class GroupReviewPaint(val row: GroupReviewRow, val badgeLabel: LocalizedText?)
+
+/**
+ * [retained] marks a group set's review row (`group-set.md` § Build design —
+ * the group set, decision 9): its button's gate is `hasOtherVersion` alone,
+ * because a winning delete has no head and still keeps the edit.
+ */
 @Composable
-private fun ConflictCard(conflict: ConflictSummary, badgeLabel: LocalizedText?, actions: FoldersActions) {
+private fun ConflictCard(
+    conflict: ConflictSummary,
+    badgeLabel: LocalizedText?,
+    retained: Boolean = false,
+    onUseOtherVersion: () -> Unit,
+) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
@@ -769,13 +856,13 @@ private fun ConflictCard(conflict: ConflictSummary, badgeLabel: LocalizedText?, 
                 modifier = Modifier.testTag(Ids.CONFLICT_FILE_INFO),
             )
             when {
-                conflict.winningManifestHash != null && conflict.hasOtherVersion -> {
+                conflict.hasOtherVersion && (retained || conflict.winningManifestHash != null) -> {
                     Button(
-                        onClick = { actions.onUseOtherVersion(conflict.id) },
+                        onClick = onUseOtherVersion,
                         modifier = Modifier.testTag(Ids.CONFLICT_RESOLVE_BUTTON),
                     ) { Text(stringResource(R.string.devices_conflicts_use_other_version)) }
                 }
-                conflict.winningManifestHash == null -> {
+                !retained && conflict.winningManifestHash == null -> {
                     Text(
                         stringResource(R.string.devices_conflicts_awaiting_device),
                         style = MaterialTheme.typography.bodySmall,
@@ -1043,7 +1130,7 @@ private fun FolderRow(
             // Per-set "Show in Files" (`folder-on-demand-toggle`) on every owner
             // row — a folder has no type (`ui/folders.md`); ON here is also the
             // enrol gesture (the VM's `ensure_place`).
-            onDemand?.let { FolderOnDemandToggle(folder, it, actions) }
+            onDemand?.let { FolderOnDemandToggle(it) { shown -> actions.onSetOnDemand(folder, shown) } }
 
             // Per-set "paywall to tier" control (`folder-paywall-tier-select`,
             // website-enabled rows only) — folders.md § Web paywall / monetization.md
@@ -2021,7 +2108,7 @@ private fun MemberFolderRow(
             // "Show in Files" on a folder shared with the account — hide-only: the
             // membership is the seat, so the flip writes no place
             // (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3).
-            onDemand?.let { FolderOnDemandToggle(folder, it, actions) }
+            onDemand?.let { FolderOnDemandToggle(it) { shown -> actions.onSetOnDemand(folder, shown) } }
         }
     }
 }
@@ -2054,7 +2141,7 @@ private fun LeaseStatusText(status: LocalizedText?) {
  * takes, like `folder-webdav-toggle`'s checked state.
  */
 @Composable
-private fun FolderOnDemandToggle(folder: FolderSummary, row: OnDemandRow, actions: FoldersActions) {
+private fun FolderOnDemandToggle(row: OnDemandRow, onSet: (Boolean) -> Unit) {
     if (row.stronger) {
         Text(
             stringResource(R.string.devices_on_demand_bound_hint),
@@ -2080,7 +2167,7 @@ private fun FolderOnDemandToggle(folder: FolderSummary, row: OnDemandRow, action
         }
         Switch(
             checked = row.shown,
-            onCheckedChange = { checked -> actions.onSetOnDemand(folder, checked) },
+            onCheckedChange = { checked -> onSet(checked) },
             modifier = Modifier
                 .testTag(Ids.FOLDER_ON_DEMAND_TOGGLE)
                 .semantics { stateDescription = if (row.shown) "on" else "off" },
@@ -2098,6 +2185,36 @@ private fun FolderOnDemandToggle(folder: FolderSummary, row: OnDemandRow, action
  * `OfflineShareSectionView`, linux's `render_offline_share` and windows'
  * `RenderOfflineShare`.
  */
+@Composable
+internal fun SharePlaneSection(readings: com.fauna.app.p2pshare.SharePlaneReadings) {
+    // `share-serve-status`: whether this device holds a contact-plane listener
+    // is never invisible (the wormability walk's rule 5).
+    Text(
+        readings.serveStatus,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier.testTag(Ids.SHARE_SERVE_STATUS),
+    )
+    // Render-only: severance stays the member remove / leave buttons.
+    Column(modifier = Modifier.testTag(Ids.SHARE_TRANSFER_LIST)) {
+        readings.transfers.forEach { row ->
+            Column(modifier = Modifier.testTag(Ids.SHARE_TRANSFER_ITEM).padding(vertical = 4.dp)) {
+                Text(row.name, modifier = Modifier.testTag(Ids.SHARE_TRANSFER_NAME))
+                Text(
+                    row.progress,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.SHARE_TRANSFER_PROGRESS),
+                )
+                Text(
+                    row.state,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(Ids.SHARE_TRANSFER_STATE),
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun OfflineShareSection(paint: OfflineSharePaint, actions: FoldersActions) {
     SectionHeader(stringResource(R.string.folders_offline_share_section))
@@ -2210,26 +2327,35 @@ private fun GroupInvitationRow(invitation: GroupInvitation, actions: FoldersActi
  * not a self-scoped drop — `account-data-taxonomy.md` § The recipient-set
  * scheme). Its `folder-shared-badge` carries the same two readings an M2 row's
  * does. The twin of apple's `GroupScopeRow` and linux's `build_group_scope_row`.
+ *
+ * Android binds no local folder (`folder-location-*` is desktop-only), so the
+ * row's device-local section is the hide-only `folder-on-demand-toggle`,
+ * default ON — the set's presence under the Fauna root of the system file
+ * browser IS its seat here (`group-set.md` § Build design — the group set,
+ * decision 11). [onDemand] absent (no session yet) renders no toggle.
  */
 @Composable
-private fun GroupScopeRow(scope: GroupScope) {
+private fun GroupScopeRow(scope: GroupScope, onDemand: OnDemandRow?, onSetOnDemand: (Boolean) -> Unit) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.FOLDER_ROW)) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-        ) {
-            Text(
-                stringResourceFmt(R.string.folders_offline_share_set, scope.shortId),
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                scope.sharedBy?.let { stringResourceFmt(R.string.devices_shared_by, it) }
-                    ?: stringResourceFmt(R.string.devices_shared_badge, scope.memberCount.toString()),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.testTag(Ids.FOLDER_SHARED_BADGE),
-            )
+        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    stringResourceFmt(R.string.folders_offline_share_set, scope.shortId),
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    scope.sharedBy?.let { stringResourceFmt(R.string.devices_shared_by, it) }
+                        ?: stringResourceFmt(R.string.devices_shared_badge, scope.memberCount.toString()),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.testTag(Ids.FOLDER_SHARED_BADGE),
+                )
+            }
+            onDemand?.let { FolderOnDemandToggle(it, onSetOnDemand) }
         }
     }
 }

@@ -179,7 +179,11 @@ func LicensesFactor(k *mailfauna.CapabilityScopeKey, factor string) bool {
 //
 //   - Master-key (a wrap with Epoch == nil): matches any timestamp, exactly
 //     KeyFor's shape — returned alone (a superset of any bounded key this
-//     holder might also wield from a different grant for the same owner).
+//     holder might also wield from a different grant for the same owner). It
+//     matches any timestamp only because its payload carries, per MSEK
+//     generation, the standing secret and the mail-epoch root, and the FFI
+//     opener (mailfauna.OpenMailRecordWithKey, handed the record's seal
+//     instant) derives the epoch keys from those roots.
 //   - Bounded (every wrap Epoch != nil): every held epoch <= target,
 //     **nearest first** (target, then target-1 — the boundary/clock-skew
 //     tolerance — then any older held epoch, the stale-published-schedule

@@ -636,6 +636,34 @@ def register_witness_tester(domain: str, *, platform: str | None = None,
 #: its complex connections without one.
 FRESH_BOX_HOSTS = ACCEPTANCE_NEST_HOSTS
 
+#: Every fleet box the re-creation takes by name: the channel
+#: it is re-created on and the box whose firewall rules are copied the one
+#: time it has no firewall of its own (`org-nests.md` § The three nests — the
+#: boxes are the fleet's, updated or re-created as the work needs; § fauna.build
+#: → *Disposable*). The acceptance nest and the two staging boxes, one row
+#: each, one code path for all three — never a flag a person types. The
+#: calendar (`recreation_verdict`, the trigger, the miss check) stays the
+#: acceptance nest's alone.
+RECREATABLE_BOXES = {
+    "fauna.build": {"channel": "test", "firewall_reference": "dev.fauna.build"},
+    "test.fauna.build": {"channel": "test", "firewall_reference": "dev.fauna.build"},
+    "dev.fauna.build": {"channel": "dev", "firewall_reference": "test.fauna.build"},
+}
+#: The box the re-creation takes when none is named.
+DEFAULT_RECREATE_BOX = "fauna.build"
+
+
+def recreatable_box(domain: str) -> dict:
+    """``{"host", "channel", "firewall_reference"}`` for a fleet box by name,
+    or :class:`StagingPlanError` naming the boxes there are."""
+    host = (domain or "").lower().rstrip(".")
+    row = RECREATABLE_BOXES.get(host)
+    if row is None:
+        raise StagingPlanError(
+            f"{domain!r} is not a fleet box: the re-creation takes only "
+            f"{', '.join(sorted(RECREATABLE_BOXES))} (org-nests.md § The three nests)")
+    return {"host": host, **row}
+
 #: The calendar half of the rule: a box re-created longer ago than this is
 #: overdue its weekly re-creation, and takes no complex connection until it has
 #: had one. A constant in the tree, never a setting (`org-nests.md` § fauna.build).
@@ -929,12 +957,7 @@ def begin_recreation(*, state: dict, servers: list[dict], rrsets: list[dict],
     already holds :data:`CERTIFICATE_BUDGET` buys (:func:`certificate_budget_refusal`):
     a re-creation buys a box, and a box bought past the budget serves its
     self-signed floor certificate."""
-    domain = (state.get("domain") or "").lower().rstrip(".")
-    if domain not in FRESH_BOX_HOSTS:
-        raise StagingPlanError(
-            f"{domain!r} is not the acceptance nest: the calendar re-creation is "
-            f"fauna.build's alone ({sorted(FRESH_BOX_HOSTS)})"
-        )
+    domain = recreatable_box(state.get("domain") or "")["host"]
     if refusal := certificate_budget_refusal(state, at=at):
         raise CertificateBudgetWait(f"refusing to re-create {domain}: {refusal}")
     recorded = state.get("server_id")
@@ -988,6 +1011,46 @@ def dns_clear_wait_s(state: dict, *, at: str) -> int:
         return 0
     left = (_instant(clear, "dns_clear_at") - _instant(at, "the time")).total_seconds()
     return max(0, int(left))
+
+
+#: The one box whose firewall may be lifted — the acceptance nest, on the
+#: owner's in-the-moment word; the dev and test nests stay firewalled
+#: (`org-nests.md` § fauna.build → *Exposure*, § The three nests).
+LIFTABLE_BOXES = ACCEPTANCE_NEST_HOSTS
+
+
+def lift_refusal(domain: str, word: str | None) -> str | None:
+    """Why the firewall of ``domain`` may not be lifted, or None when it may:
+    only a :data:`LIFTABLE_BOXES` box, and only citing the owner's word."""
+    host = (domain or "").lower().rstrip(".")
+    if host not in LIFTABLE_BOXES:
+        return (f"{host}'s firewall is not liftable: the dev and test nests stay behind "
+                f"their firewalls; only {sorted(LIFTABLE_BOXES)} opens, on the owner's word")
+    if not (word or "").strip():
+        return ("a lift cites the owner's word (--word: the row and the answer that "
+                "recorded it); no session lifts on its own judgement")
+    return None
+
+
+def record_lift(state: dict, *, word: str, at: str, by: str) -> dict:
+    """``state`` with its firewall lift recorded — or unchanged when one is
+    recorded already (the first word stands). The lift survives every
+    re-creation step, which spreads the state forward; the firewall ids stay,
+    so a later re-close knows what to re-apply."""
+    if refusal := lift_refusal(state.get("domain") or "", word):
+        raise StagingPlanError(refusal)
+    if firewall_lift(state):
+        return state
+    return {**state, "firewall_lifted": {"at": at, "word": word.strip(), "by": by}}
+
+
+def firewall_lift(state: dict | None) -> dict | None:
+    """The recorded lift of the box's firewall, or None — never for a box that
+    is not liftable, whatever its state file says."""
+    if not state or (state.get("domain") or "").lower() not in LIFTABLE_BOXES:
+        return None
+    lift = state.get("firewall_lifted")
+    return lift if isinstance(lift, dict) and lift.get("word") else None
 
 
 def recreation_record_refusal(state: dict) -> str | None:

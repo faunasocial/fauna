@@ -244,7 +244,7 @@ public class StatusVM {
         // the log by path and to the user by count, on the onboarding surface
         // this hands them (§ *the residue surface*).
         let outcome = await Task.detached {
-            SignOutResidueSurface.finish(ownLock: ownLock, dismissAgent: false, written: written)
+            SignOutResidueSurface.finish(ownLock: ownLock, caller: .gesture, written: written)
         }.value
         sessionState.signOutResidue = outcome.residue
         sessionState.clearAuthenticatedOverride()

@@ -47,6 +47,110 @@ fn expect_confirmed(attempt: SuccessionAttempt) -> SuccessionHandoff {
     }
 }
 
+// ── A succession's kit, owed by two seats of one install ───────────────────
+//
+// `succession-propagation.md` § Propagation → *Own device fleet*: the
+// adoption owes the kit only for a ceremony that never reached it. Two
+// `KitClaims` over one base are two processes of one install; the ceremony
+// seat claims before it persists the successor, so a sibling's adoption — which
+// needs that persisted seed — always meets the claim, whichever seat asks the
+// nest first.
+
+mod kit_seats {
+    use super::*;
+    use fauna_client_recovery::kit::create_kit_with_claims;
+    use fauna_client_recovery::kit_claim::KitClaims;
+
+    fn install() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fauna-kit-seats-row-4934-{}",
+            ActorKeypair::generate().actor_id_hex()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn mint(
+        client: &RecoveryClient<FakeNest>,
+        successor: &ActorKeypair,
+        seat: &KitClaims,
+    ) -> Result<fauna_client_recovery::kit::RecoveryKit, RecoveryError> {
+        create_kit_with_claims(client, successor, None, RecoveryKey::generate(), &[], seat).await
+    }
+
+    #[tokio::test]
+    async fn the_adopting_seat_asking_first_leaves_the_kit_to_the_ceremony_seat() {
+        let (successor, client) = signed_in();
+        let base = install();
+        let ceremony = KitClaims::at(&base);
+        let adopter = KitClaims::at(&base);
+        assert!(ceremony.claim(&successor.actor_id_hex()));
+
+        let refused = mint(&client, &successor, &adopter).await.unwrap_err();
+        assert!(
+            matches!(refused, RecoveryError::KitMintedElsewhere),
+            "the adoption must not mint over a live ceremony; got {refused:?}"
+        );
+        assert_eq!(client.transport().chain_len(&successor.actor_id()), 0);
+
+        let kit = mint(&client, &successor, &ceremony)
+            .await
+            .expect("the ceremony seat mints, and is the seat that shows it");
+        assert_eq!(kit.seq, 1);
+        assert_eq!(
+            client.transport().chain_len(&successor.actor_id()),
+            1,
+            "exactly one kit"
+        );
+        assert!(
+            !ceremony.holds(&successor.actor_id_hex()),
+            "its mint released the claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_ceremony_seat_minting_first_leaves_the_adoption_nothing_to_mint() {
+        let (successor, client) = signed_in();
+        let base = install();
+        let ceremony = KitClaims::at(&base);
+        let adopter = KitClaims::at(&base);
+        assert!(ceremony.claim(&successor.actor_id_hex()));
+
+        let kit = mint(&client, &successor, &ceremony).await.unwrap();
+        assert!(mint(&client, &successor, &adopter).await.is_err());
+
+        assert_eq!(
+            client.transport().chain_len(&successor.actor_id()),
+            1,
+            "exactly one kit"
+        );
+        assert_eq!(
+            client
+                .transport()
+                .head(&successor.actor_id())
+                .unwrap()
+                .recovery_pubkey,
+            kit.recovery_pubkey,
+            "the kit on the chain is the one the ceremony seat shows"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ceremony_that_gives_its_claim_back_leaves_the_kit_to_the_adoption() {
+        let (successor, client) = signed_in();
+        let base = install();
+        let ceremony = KitClaims::at(&base);
+        let adopter = KitClaims::at(&base);
+        assert!(ceremony.claim(&successor.actor_id_hex()));
+        ceremony.release(&successor.actor_id_hex()); // undecided: it will not mint
+
+        let kit = mint(&client, &successor, &adopter)
+            .await
+            .expect("a ceremony that never reached its kit leaves it owed to the adoption");
+        assert_eq!(kit.seq, 1);
+    }
+}
+
 // ── Kit creation (leg 2's logic half) ───────────────────────────────────────
 
 #[tokio::test]
@@ -2208,4 +2312,121 @@ async fn a_superseded_identity_is_refused_and_names_its_successor() {
         None,
         "a refused lock applies nothing"
     );
+}
+
+// ── The pre-submit replica flush ────────────────────────────────────────────
+//
+// `succession-aftermath.md` § Re-key scope → *The predecessor's replica is
+// flushed before the submit*: the submit revokes the retired identity's bearer,
+// so whatever its live MLS replica plane holds inside an autosave's debounce
+// must land BEFORE it. The flush sits in `succeed_with_held_kit`, the one
+// function every composition submits through (native, web, the FFI faces), and
+// it finds the plane by actor id — the entry linux and web register by hand
+// (`leave_flush::register_live_plane`), with no autosave of the crate's own.
+
+mod pre_submit_flush {
+    use super::*;
+    use fauna_client_mls_sync::{
+        MlsReplicaTransport, MlsStateSync, MlsTransportError, PutOutcome, ReplicaBase,
+        RestoreRetryEnd,
+    };
+    use fauna_conversations::ConversationsManager;
+    use fauna_conversations::backends::fauna_mls::FaunaMlsBackend;
+    use fauna_conversations::backends::mock::InertConversationsRpc;
+    use fauna_core::identity::ActorId;
+    use fauna_mls::engine::MlsEngine;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A replica that counts each upload against whether the nest had already
+    /// recorded the succession when it arrived.
+    struct OrderedReplica {
+        nest: Arc<FakeNest>,
+        old: ActorId,
+        before_submit: Arc<AtomicUsize>,
+        after_submit: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl MlsReplicaTransport for OrderedReplica {
+        async fn get(&self, _path: String) -> Result<Option<Vec<u8>>, MlsTransportError> {
+            Ok(None)
+        }
+        async fn put(
+            &self,
+            _path: String,
+            _blob: Vec<u8>,
+            _base: ReplicaBase,
+        ) -> Result<PutOutcome, MlsTransportError> {
+            if self.nest.succession_count(&self.old) == 0 {
+                self.before_submit.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.after_submit.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(PutOutcome::Stored)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_change_pending_in_the_replica_lands_before_the_submit() {
+        let seed = [0x61; 32];
+        let identity = ActorKeypair::from_secret(seed);
+        let nest = Arc::new(FakeNest::new().signed_in_as(&identity.actor_id()));
+        let client = RecoveryClient::new(Arc::clone(&nest));
+        let kit = create_kit(&client, &identity, None, &[]).await.unwrap();
+
+        let before_submit = Arc::new(AtomicUsize::new(0));
+        let after_submit = Arc::new(AtomicUsize::new(0));
+        let engine = Arc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret(seed)).unwrap());
+        let manager = ConversationsManager::new();
+        let backend = Arc::new(FaunaMlsBackend::new(
+            engine.clone(),
+            Arc::new(InertConversationsRpc),
+            "alice",
+            engine.identity_actor_id(),
+        ));
+        manager.register_backend(backend.clone());
+        let sync = Arc::new(MlsStateSync::new(
+            Box::new(OrderedReplica {
+                nest: Arc::clone(&nest),
+                old: identity.actor_id(),
+                before_submit: Arc::clone(&before_submit),
+                after_submit: Arc::clone(&after_submit),
+            }),
+            &identity,
+        ));
+        let wired = fauna_client_mls_sync::restore_and_wire_with_retry(
+            Arc::clone(&sync),
+            Arc::downgrade(&backend),
+            Arc::downgrade(&manager),
+        )
+        .await;
+        assert!(matches!(wired, RestoreRetryEnd::Wired(_)), "{wired:?}");
+        fauna_client_mls_sync::leave_flush::register_live_plane(
+            identity.actor_id(),
+            &manager,
+            &backend,
+            Arc::clone(&sync),
+        );
+
+        // A change the plane holds and nothing has uploaded — the state a
+        // debounce leaves it in. No autosave is attached, so the only upload
+        // that can carry it is the ceremony's flush.
+        let landed = before_submit.load(Ordering::SeqCst);
+        engine.generate_key_packages(1).unwrap();
+
+        expect_confirmed(
+            succeed_with_held_kit(&client, identity.actor_id(), kit.secret_hex(), None)
+                .await
+                .unwrap(),
+        );
+        assert!(
+            before_submit.load(Ordering::SeqCst) > landed,
+            "the pending change was not uploaded before the submit"
+        );
+        assert_eq!(
+            after_submit.load(Ordering::SeqCst),
+            0,
+            "an upload ran after the submit — under a revoked bearer"
+        );
+    }
 }

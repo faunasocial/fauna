@@ -12,6 +12,7 @@ postinstall scripts encode that shape + the app component's /Applications instal
 import glob
 import json
 import os
+import re
 import pwd
 import stat
 import plistlib
@@ -24,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.installed_nest_reach import lan_ipv4, pinned_health
 from helpers.root_build_guard import (
     refuse_root_build,
     root_droppings_message,
@@ -124,13 +126,24 @@ COMPONENT_BINARIES = {
         "fauna-uninstall",
     ],
     "fauna-tui.pkg": ["fauna-tui", "fauna-cli", "fauna-uninstall"],
+    # Not binaries: the licence texts and the notices file for every binary
+    # above, installed to /usr/local/share/doc/fauna by every tool choice
+    # (shipped-notices.md § Per channel, the macOS `.pkg` row).
+    "fauna-doc.pkg": ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES"],
 }
+
+# The three files every binary artifact carries (shipped-notices.md § The rule):
+# where the .pkg's tools set installs them, and where the app bundle holds its own.
+# Tests read that they are there and non-empty, and the two licence texts byte for
+# byte the repository's — never the generated notices file's text.
+SHIPPED_NOTICE_FILES = ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES"]
+DOC_INSTALL_PATH = "/usr/local/share/doc/fauna"
 
 # Components that ship NO Scripts archive by design: the terminal app only drops
 # `fauna-tui` and `fauna-cli` into /usr/local/bin — no service to bootstrap, no
 # user to create — so `pkgbuild` runs without `--scripts` (installers/tui.md
 # § The ratified channel).
-SCRIPTLESS_COMPONENTS = {"fauna-tui.pkg"}
+SCRIPTLESS_COMPONENTS = {"fauna-tui.pkg", "fauna-doc.pkg"}
 
 SOURCE_PATTERNS = [
     "installer/macos/**/*",
@@ -683,6 +696,16 @@ class TestDryRun:
         assert APP_MIN_OS in script.text, \
             f"the app-floor predicate must compare against {APP_MIN_OS}: {script.text!r}"
 
+        # Bridge requires Nest (Windows parity, windows.md § Feature Tree): the
+        # shipped package carries the gate whose behaviour the tier_1
+        # test_distribution_choice_gate.py proves through `installer` itself.
+        bridge_choice = choice_by_id["social.fauna.bridge"]
+        for attr in ("enabled", "selected"):
+            assert "social.fauna.nest" in (bridge_choice.get(attr) or ""), (
+                f"the bridge choice's {attr}= must depend on the nest choice so "
+                f"unticking Nest unticks Bridge; got {bridge_choice.get(attr)!r}"
+            )
+
         # Check os-version
         os_versions = root.findall(".//os-version")
         assert any(v.get("min") == "13.0" for v in os_versions), \
@@ -804,6 +827,40 @@ class TestDryRun:
         bundle_paths = [b.get("path") for b in root.findall("bundle")]
         assert any(p and p.endswith("Fauna.app") for p in bundle_paths), \
             f"app component must ship Fauna.app: {bundle_paths}"
+
+    def test_the_package_carries_the_licence_texts_and_notices(self, pkg_path, tmp_path):
+        """shipped-notices.md § Per channel: the doc component installs the tools'
+        three files at /usr/local/share/doc/fauna, and the app component's bundle
+        holds the app's own three in Contents/Resources. Each is present and
+        non-empty; the licence texts are the repository's, byte for byte. The
+        notices file's text is never read (dependency-authored)."""
+        subprocess.run(
+            ["xar", "-xf", pkg_path],
+            cwd=str(tmp_path), capture_output=True, check=True,
+        )
+        doc_info = ET.parse(tmp_path / "fauna-doc.pkg" / "PackageInfo").getroot()
+        assert doc_info.get("install-location") == DOC_INSTALL_PATH, \
+            f"doc install-location {doc_info.get('install-location')!r} != {DOC_INSTALL_PATH}"
+        repo = Path(_get_repo_root())
+        for component, inside in (("fauna-doc.pkg", "."), (APP_COMPONENT_PKG, "Fauna.app/Contents/Resources")):
+            out = tmp_path / f"{component}.payload"
+            out.mkdir()
+            subprocess.run(
+                ["cpio", "-idm"],
+                input=subprocess.run(
+                    ["gzip", "-dc"],
+                    input=(tmp_path / component / "Payload").read_bytes(),
+                    capture_output=True, check=True,
+                ).stdout,
+                capture_output=True, cwd=str(out), check=True,
+            )
+            for name in SHIPPED_NOTICE_FILES:
+                f = out / inside / name
+                assert f.is_file(), f"{component} payload lacks {inside}/{name}"
+                assert f.stat().st_size > 0, f"{component} payload's {inside}/{name} is empty"
+                if name.startswith("LICENSE-"):
+                    assert f.read_bytes() == (repo / name).read_bytes(), \
+                        f"{component}'s {name} differs from the repository's"
 
     def test_postinstall_scripts_are_executable(self, pkg_path, tmp_path):
         """Each component package has an executable postinstall script — except
@@ -1011,6 +1068,13 @@ class TestFullInstall:
         for binary in BINARIES + DYLIBS:
             path = f"/usr/local/bin/{binary}"
             assert os.path.exists(path), f"{binary} not found at {path}"
+        for name in SHIPPED_NOTICE_FILES:
+            path = os.path.join(DOC_INSTALL_PATH, name)
+            assert os.path.isfile(path) and os.path.getsize(path) > 0, \
+                f"{name} not installed (or empty) at {path}"
+            bundled = os.path.join(APP_INSTALL_PATH, "Contents", "Resources", name)
+            assert os.path.isfile(bundled) and os.path.getsize(bundled) > 0, \
+                f"{name} not in the installed app (or empty) at {bundled}"
 
     def test_app_installed_to_applications(self, pkg_path):
         """The desktop app component installs Fauna.app to /Applications as a valid
@@ -1396,6 +1460,8 @@ class TestFullInstall:
         # ~/Library + the Keychain, never inside the bundle).
         assert not os.path.exists(APP_INSTALL_PATH), \
             f"{APP_INSTALL_PATH} still exists after uninstall"
+        assert not os.path.exists(DOC_INSTALL_PATH), \
+            f"{DOC_INSTALL_PATH} still exists after uninstall"
 
         # System daemon plists + the per-user sync agent should be gone.
         for label in DAEMON_LABELS:
@@ -1434,65 +1500,6 @@ INSTALLED_NEST_EXTERNAL_PORT = 443
 INSTALLED_NEST_READY_TIMEOUT = 120.0
 
 
-def _lan_ipv4():
-    """This Mac's own LAN IPv4 address — the source address the kernel picks for
-    an off-box route (a UDP connect sends no packet). ``None`` when the box has
-    no off-box route, or only a loopback / link-local one."""
-    import ipaddress
-    import socket
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("192.0.2.1", 9))  # TEST-NET-1: routed, never answered
-        addr = s.getsockname()[0]
-    except OSError:
-        return None
-    finally:
-        s.close()
-    ip = ipaddress.ip_address(addr)
-    if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
-        return None
-    return addr
-
-
-def _pinned_health(base_url, timeout=5.0):
-    """``GET /api/v1/health`` over a TLS session whose leaf SPKI equals the pin
-    recorded for ``base_url``'s authority (``common.auth.open_pinned_tls``) —
-    no verification-off path to the nest. Returns ``(status_code, body_json)``."""
-    from urllib.parse import urlsplit
-
-    from common.auth import open_pinned_tls
-
-    tls = open_pinned_tls(base_url, timeout)
-    assert tls is not None, f"no SPKI pin recorded for {base_url}"
-    host = urlsplit(base_url).netloc
-    try:
-        tls.sendall(
-            f"GET /api/v1/health HTTP/1.1\r\nHost: {host}\r\n"
-            "Accept: application/json\r\nConnection: close\r\n\r\n".encode())
-        chunks = []
-        while True:
-            chunk = tls.recv(65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    finally:
-        tls.close()
-    raw = b"".join(chunks)
-    head, _, body = raw.partition(b"\r\n\r\n")
-    status = int(head.split(b" ", 2)[1])
-    if b"transfer-encoding: chunked" in head.lower():
-        decoded, rest = b"", body
-        while rest:
-            size_line, _, rest = rest.partition(b"\r\n")
-            size = int(size_line.split(b";")[0], 16)
-            if size == 0:
-                break
-            decoded, rest = decoded + rest[:size], rest[size + 2:]
-        body = decoded
-    return status, json.loads(body) if body.strip() else None
-
-
 def _installed_nest_diagnosis():
     """What a failure quotes (convention 6): launchd's view of the job and the
     tail of the daemon's own size-capped log under the system data dir."""
@@ -1510,6 +1517,95 @@ def _installed_nest_diagnosis():
     )
 
 
+def _lsof_listens_on(pid, port):
+    """True iff process ``pid`` holds a TCP LISTEN socket on ``port``."""
+    out = subprocess.run(
+        ["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), f"-iTCP:{port}", "-sTCP:LISTEN"],
+        capture_output=True, text=True,
+    )
+    return out.returncode == 0 and "LISTEN" in out.stdout
+
+
+def _assert_nest_served_from_launchd_socket():
+    """The :443 a client just reached is launchd's socket, handed to the `_fauna`
+    daemon — the live half of socket activation (installers/macos.md § launchd jobs;
+    `fauna-nest-daemon`'s `launch_activate_socket("FaunaNest")`).
+
+    Three observables, each from a different witness: launchd's own record of the
+    job (the `FaunaNest` socket with service name 443), the process table (the
+    job's pid runs as `_fauna`), and the kernel's socket table (launchd — pid 1 —
+    AND the daemon both hold a LISTEN socket on 443: the inherited fd. A daemon
+    that ignored activation and bound 443 itself would leave launchd's socket
+    unshared, and one that never got it would listen on its 3000 seed alone)."""
+    printed = subprocess.run(
+        ["launchctl", "print", "system/social.fauna.nest"],
+        capture_output=True, text=True,
+    )
+    out = printed.stdout
+    assert printed.returncode == 0, f"launchctl print failed:\n{printed.stderr}"
+    at = out.find('"FaunaNest"')
+    assert at >= 0, f"launchd holds no FaunaNest socket for the nest job:\n{out[-3000:]}"
+    assert re.search(r"service name = 443\b", out[at:at + 600]), (
+        f"launchd's FaunaNest socket is not on 443:\n{out[at:at + 600]}")
+    pid_match = re.search(r"^\s*pid = (\d+)\s*$", out, re.M)
+    assert pid_match, f"the nest job has no running pid:\n{_installed_nest_diagnosis()}"
+    pid = int(pid_match.group(1))
+    user = subprocess.run(["ps", "-o", "user=", "-p", str(pid)],
+                          capture_output=True, text=True).stdout.strip()
+    assert user == "_fauna", f"the serving nest (pid {pid}) runs as {user!r}, not _fauna"
+    assert _lsof_listens_on(1, INSTALLED_NEST_EXTERNAL_PORT), (
+        "launchd (pid 1) holds no LISTEN socket on 443 — no socket activation")
+    assert _lsof_listens_on(pid, INSTALLED_NEST_EXTERNAL_PORT), (
+        f"the nest daemon (pid {pid}) holds no LISTEN socket on 443 — it never "
+        f"took launchd's fd\n{_installed_nest_diagnosis()}")
+
+
+#: The installed MDA's listeners: the supervisor pins CalDAV to `0.0.0.0:8443`
+#: (`fauna_mda_supervisor::CALDAV_LISTEN`); IMAP keeps its implicit-TLS default.
+INSTALLED_CALDAV_PORT = 8443
+INSTALLED_IMAPS_PORT = 993
+#: The supervisor's 15 s reconcile poll + the MDA's enrollment and first config.
+INSTALLED_MDA_READY_TIMEOUT = 180.0
+#: Where `just seal-helper-build` leaves the test-only seal-helper. A root run
+#: must never build (the root-build guard above), so it is built beforehand.
+SEAL_HELPER_REL = Path("bins") / "fauna-bridges" / "seal-helper-testonly"
+
+
+def _installed_bridge_diagnosis():
+    """launchd's view of the bridge job + the tail of the supervisor's own log
+    (`<support>/bridge/logs/fauna.log.*`, which carries the MDA child's lines)."""
+    printed = subprocess.run(
+        ["launchctl", "print", "system/social.fauna.bridge"],
+        capture_output=True, text=True,
+    )
+    logs = sorted(glob.glob(os.path.join(SYSTEM_DATA_DIR, "bridge", "logs", "fauna.log*")))
+    tail = "(no bridge log)"
+    if logs:
+        with open(logs[-1], errors="replace") as f:
+            tail = f.read()[-4000:]
+    return (
+        f"launchctl print system/social.fauna.bridge (rc={printed.returncode}):\n"
+        f"{(printed.stdout or printed.stderr)[-2000:]}\n"
+        f"bridge log ({logs[-1] if logs else 'none'}):\n{tail}\n"
+        f"{_installed_nest_diagnosis()}"
+    )
+
+
+def _port_refuses(port, timeout):
+    """True once nothing accepts on 127.0.0.1:``port`` (deadline-polled)."""
+    import socket
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=2):
+                pass
+        except OSError:
+            return True
+        time.sleep(1)  # sleep-ok: poll interval of a deadline loop
+    return False
+
+
 @pytest.mark.skipif(not _is_root(), reason="Requires sudo")
 class TestInstallThenReach:
     """The .pkg-installed nest is a network-reachable server: claimed and healthy
@@ -1524,7 +1620,7 @@ class TestInstallThenReach:
         from common.auth import claim_admin, pin_nest_spki, unpin_nest_spki
         from helpers.windows_caldav_nest import floor_cert_spki
 
-        lan = _lan_ipv4()
+        lan = lan_ipv4()
         if lan is None:
             pytest.skip("this Mac has no LAN IPv4 address to reach the nest at")
 
@@ -1566,7 +1662,7 @@ class TestInstallThenReach:
             healthy = None
             while time.monotonic() < deadline:
                 try:
-                    status, body = _pinned_health(base)
+                    status, body = pinned_health(base)
                     if status == 200 and (body or {}).get("status") == "ok":
                         healthy = body
                         break
@@ -1578,13 +1674,15 @@ class TestInstallThenReach:
                 f"the installed nest never answered health at {base} (the LAN "
                 f"address on launchd's :443) within {INSTALLED_NEST_READY_TIMEOUT:.0f}s "
                 f"— last: {last}\n{_installed_nest_diagnosis()}")
+            # Reached on 443 — and it was launchd's socket that served it.
+            _assert_nest_served_from_launchd_socket()
 
             admin = claim_admin(
                 INSTALLED_NEST_EXTERNAL_PORT, claim_code, base_url=base, handle="test")
             claimed = True
             assert admin["token"], f"claim at {base} returned no bearer: {admin}"
 
-            status, body = _pinned_health(base)
+            status, body = pinned_health(base)
             assert status == 200 and (body or {}).get("status") == "ok", (
                 f"health at {base} after the claim: HTTP {status}: {body}\n"
                 f"{_installed_nest_diagnosis()}")
@@ -1603,3 +1701,143 @@ class TestInstallThenReach:
             # test's own claim, and a re-run needs a fresh claim code.
             if claimed:
                 shutil.rmtree(SYSTEM_DATA_DIR, ignore_errors=True)
+
+    def test_installed_bridge_enrolls_and_serves_caldav_and_imap(self, pkg_path):
+        """The installed MDA, end to end (installers/macos.md § Implementation
+        status today, the "Bridge supervisor + MDA" and "Worker auth (S2)" rows):
+        install nest + bridge, enable mail + CalDAV as the admin over the app API,
+        and the `_fauna-bridge` LaunchDaemon's supervisor starts the MDA, which
+        enrolls itself with the daemon's `127.0.0.1:3000` loopback — no harness
+        hand-poke of its keys — and serves a CalDAV round-trip and an IMAP login to
+        the suite's own scripted clients (Calendar.app and Mail.app are just
+        clients of the same wire). Then the LaunchDaemon twin of
+        `test_caldav_admin_port_rebind.py`: an admin port change moves the live
+        listener — here through the supervisor's own re-pin, not a test respawn."""
+        import imaplib
+        import shutil
+        import ssl
+
+        from clients.ws_rpc_admin_client import WsRpcAdminClient
+        from drivers.port_util import find_free_port
+        from helpers import windows_caldav_nest as eng
+        from helpers.caldav_client import CalDAVClient, build_vevent
+        from helpers.caldav_roundtrip import caldav_has, wait_caldav_serving
+
+        seal_helper = Path(_get_repo_root()) / SEAL_HELPER_REL
+        if not seal_helper.exists():
+            pytest.fail(
+                f"{seal_helper} is not built. A root run must not build; build it "
+                "unelevated first: just seal-helper-build")
+
+        data_dir = Path(SYSTEM_DATA_DIR)
+        if (data_dir / "nest.db").exists() and not (data_dir / "claim-code").exists():
+            pytest.fail(
+                f"{SYSTEM_DATA_DIR} holds an already-CLAIMED nest; this test claims "
+                "a fresh one and never touches a claimed nest's data. Remove it by "
+                f"hand on a test box (sudo rm -rf '{SYSTEM_DATA_DIR}') and re-run.")
+
+        result = _install_pkg(pkg_path, ["social.fauna.nest", "social.fauna.bridge"])
+        assert result.returncode == 0, \
+            f"installer failed (rc={result.returncode}):\n" \
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+
+        prov = None
+        try:
+            # Claim, enable mail + CalDAV and mint a known-password credential —
+            # the shared engine, against the installed TLS-only daemon on its
+            # fixed same-box loopback (nest/common.md § Same-box reach).
+            prov = eng.provision_caldav_on_running_nest(
+                port=3000, nest_data_dir=data_dir, serve_tls=True,
+                claim_timeout=INSTALLED_NEST_READY_TIMEOUT,
+                tcp_timeout=INSTALLED_NEST_READY_TIMEOUT,
+            )
+            admin_sk = prov.admin["signing_key"]
+            admin_ws = WsRpcAdminClient(
+                prov.nest_url, actor_id=bytes(admin_sk.verify_key),
+                signing_key=bytes(admin_sk))
+
+            # The MDA enrolled ITSELF: an approved mda row carrying its x25519
+            # (the floor-cert seal target), with no key written by this test.
+            mda_rows = []
+            deadline = time.monotonic() + INSTALLED_MDA_READY_TIMEOUT
+            with admin_ws:
+                while time.monotonic() < deadline:
+                    mda_rows = admin_ws.call(
+                        "fauna.bridges.list_service_users", {"role": "mda"},
+                    )["service_users"]
+                    if any(r["status"] == "approved" and r["has_x25519"] for r in mda_rows):
+                        break
+                    time.sleep(2)  # sleep-ok: poll interval of a deadline loop
+            assert any(r["status"] == "approved" and r["has_x25519"] for r in mda_rows), (
+                f"the installed MDA never enrolled approved with an x25519 within "
+                f"{INSTALLED_MDA_READY_TIMEOUT:.0f}s; rows: {mda_rows}\n"
+                f"{_installed_bridge_diagnosis()}")
+
+            base_a = f"https://127.0.0.1:{INSTALLED_CALDAV_PORT}"
+            try:
+                wait_caldav_serving(base_a, verify=False, timeout=INSTALLED_MDA_READY_TIMEOUT)
+            except Exception as e:
+                pytest.fail(f"the installed MDA never served CalDAV at {base_a}: {e}\n"
+                            f"{_installed_bridge_diagnosis()}")
+
+            # ── CalDAV both ways between two clients of the one calendar.
+            mua_a = CalDAVClient(base_a, prov.auth_username, prov.password, verify=False)
+            mua_b = CalDAVClient(base_a, prov.auth_username, prov.password, verify=False)
+            cal_a, cal_b = mua_a.personal_calendar(), mua_b.personal_calendar()
+            nonce = os.urandom(5).hex()
+            s_a, uid_a = f"{nonce}-from-a", f"{nonce}-uid-a"
+            mua_a.put_event(cal_a, uid_a, build_vevent(
+                uid_a, s_a, "20260620T120000Z", "20260620T130000Z"))
+            assert caldav_has(mua_b, cal_b, s_a, timeout=60.0), (
+                f"event {s_a!r} from client A never reached client B\n"
+                f"{_installed_bridge_diagnosis()}")
+            s_b, uid_b = f"{nonce}-from-b", f"{nonce}-uid-b"
+            mua_b.put_event(cal_b, uid_b, build_vevent(
+                uid_b, s_b, "20260620T140000Z", "20260620T150000Z"))
+            assert caldav_has(mua_a, cal_a, s_b, timeout=60.0), (
+                f"event {s_b!r} from client B never reached client A\n"
+                f"{_installed_bridge_diagnosis()}")
+
+            # ── IMAP: the same credential opens the mailbox (one MDA serves both).
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            imap = imaplib.IMAP4_SSL("127.0.0.1", INSTALLED_IMAPS_PORT, ssl_context=ctx)
+            try:
+                imap.login(prov.auth_username, prov.password)
+                typ, _ = imap.select("INBOX")
+                assert typ == "OK", f"IMAP SELECT INBOX failed: {typ}"
+            finally:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+
+            # ── The LaunchDaemon twin of test_caldav_admin_port_rebind.py: the
+            # admin moves the CalDAV port; the nest writes its caldav-port flag,
+            # the supervisor re-pins the hatch and restarts the MDA on it.
+            port_b = find_free_port()
+            with WsRpcAdminClient(prov.nest_url, actor_id=bytes(admin_sk.verify_key),
+                                  signing_key=bytes(admin_sk)) as ws:
+                ws.call("fauna.bridges.set_caldav_port", {"port": port_b})
+            base_b = f"https://127.0.0.1:{port_b}"
+            try:
+                wait_caldav_serving(base_b, verify=False, timeout=INSTALLED_MDA_READY_TIMEOUT)
+            except Exception as e:
+                pytest.fail(f"after set_caldav_port({port_b}) nothing served CalDAV at "
+                            f"{base_b}: {e}\n{_installed_bridge_diagnosis()}")
+            mua_c = CalDAVClient(base_b, prov.auth_username, prov.password, verify=False)
+            assert caldav_has(mua_c, mua_c.personal_calendar(), s_a, timeout=60.0), (
+                f"the calendar did not survive the move to {port_b}\n"
+                f"{_installed_bridge_diagnosis()}")
+            assert _port_refuses(INSTALLED_CALDAV_PORT, timeout=60.0), (
+                f"the old CalDAV port {INSTALLED_CALDAV_PORT} still accepts after the move")
+        finally:
+            if prov is not None:
+                prov.cleanup()  # drops the SPKI pin; the daemon is launchd's
+            username = _get_console_user()
+            if username:
+                _run_uninstall(username)
+            # The precondition above refused a claimed nest, so whatever the data
+            # dir holds now is this test's own install (claimed or half-claimed).
+            shutil.rmtree(SYSTEM_DATA_DIR, ignore_errors=True)

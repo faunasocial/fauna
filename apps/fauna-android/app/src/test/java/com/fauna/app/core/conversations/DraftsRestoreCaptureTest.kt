@@ -71,6 +71,12 @@ class DraftsRestoreCaptureTest {
         }
 
         override suspend fun `saveIfChanged`(`snapshot`: ByteArray): Boolean = false
+
+        override suspend fun `saveConversationsOnLeave`(
+            `manager`: uniffi.fauna_conversations.ConversationsManager,
+            `epoch`: ULong,
+            `captured`: ByteArray,
+        ): Boolean = false
     }
 
     @Test

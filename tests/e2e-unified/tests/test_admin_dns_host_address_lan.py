@@ -75,6 +75,11 @@ def lan_admin_app(request, app, spki_pinned_nest):
     return app
 
 
+# android (2026-11-14): the app is handed the
+# nest's LAN URL unrewritten — the `adb reverse` maps only loopback — so its
+# report classifies the private address it dialled, as every other app's does;
+# an emulator that cannot reach that address fails the login, never passes.
+@pytest.mark.android
 @pytest.mark.ios
 @pytest.mark.linux
 @pytest.mark.macos

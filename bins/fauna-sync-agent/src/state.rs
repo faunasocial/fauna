@@ -259,6 +259,17 @@ pub struct SyncServiceState {
     /// Wakes [`crate::content_keys::run`] to re-resolve now — fired by every
     /// reconcile and by an engine's refresh edge.
     pub content_keys_wake: tokio::sync::Notify,
+    /// The presence roots planned last (`crate::presence_roots`;
+    /// `on-demand-files-shared-sets.md` § Shared sets on a capability host,
+    /// decision 3d) — what the drain gate and the retire step compare the
+    /// next plan against. The lock also serializes the plan's passes and the
+    /// toggle store's writes (`RequestMethod::SetPresenceEnabled`).
+    pub presence_planned: Mutex<Vec<crate::engine_driver::EngineMapping>>,
+    /// The same plan as [`Self::presence_planned`], published at the end of each
+    /// pass for the engine reconcile to SERVE (`crate::engine_driver::reconcile_resolved`).
+    /// A copy behind a plain lock, never the plan's own: a pass holds that one
+    /// across its nest read, and an engine reconcile must not wait on the nest.
+    pub presence_serving: std::sync::Mutex<Vec<crate::engine_driver::EngineMapping>>,
     /// The apps attached over IPC right now (`RequestMethod::AttachApp`
     /// leases) — while any is, the push arm leaves banners to the app
     /// ([`crate::push_arm`]).
@@ -490,6 +501,8 @@ impl SyncServiceState {
             recover_job: Mutex::new(fauna_ipc::sync::CustodianRecoverState::Idle),
             content_keys: RwLock::new(None),
             content_keys_wake: tokio::sync::Notify::new(),
+            presence_planned: Mutex::new(Vec::new()),
+            presence_serving: std::sync::Mutex::new(Vec::new()),
             attached_apps: Arc::default(),
             notification_sink,
             push_tally: Arc::default(),

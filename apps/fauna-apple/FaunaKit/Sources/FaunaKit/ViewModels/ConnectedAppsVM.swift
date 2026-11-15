@@ -122,6 +122,11 @@ public final class ConnectedAppsVM {
         }
         guard generation == visitGeneration else { return }
         machine = built
+        // The fresh-visit reset of the trust facet's lenses, beside the page's
+        // other drafts (`connected-apps.md` § The trust facet and history lens
+        // → *Lens state*); a fresh machine starts on Now, and the reset keeps
+        // that true should the machine ever outlive a visit.
+        built.resetLenses()
         snapshot = built.snapshot()
         await built.refresh()
         guard generation == visitGeneration else { return }
@@ -190,6 +195,18 @@ public final class ConnectedAppsVM {
         await run { await $0.resolveRequest(consentIdHex: consentIdHex, approved: approved) }
     }
 
+    /// Choose the folder on a bare folder-plane request card
+    /// (`connected-apps-request-folder`; `authorization-server.md` § Consent →
+    /// *The card chooses the folder*). Local to this visit — the machine keeps
+    /// the choice and the card's Approve mints over it — so this is synchronous:
+    /// the card only exists once the machine has read, and a pick is painted in
+    /// the same frame the user made it.
+    public func setFolder(consentIdHex: String, id: Int64) {
+        guard let machine else { return }
+        machine.setFolder(consentIdHex: consentIdHex, id: id)
+        snapshot = machine.snapshot()
+    }
+
     public func blockRequest(consentIdHex: String) async {
         await run { await $0.blockRequest(consentIdHex: consentIdHex) }
     }
@@ -212,6 +229,26 @@ public final class ConnectedAppsVM {
         revokeArmed = nil
         revealed[key] = nil
         await run { await $0.revoke(key: key) }
+    }
+
+    /// Open the row's per-operation record, or close it if it is the one open
+    /// (`connected-apps.md` § Layout & flow, region 3 — at most one is open;
+    /// opening another row's closes this one). The open is the machine's read
+    /// of the custodians' record; the app keeps none of its own. A fresh visit
+    /// builds a fresh machine, so it always starts with the record closed.
+    public func toggleRecord(_ key: String) async {
+        if snapshot?.record?.key == key {
+            await run { $0.closeRecord() }
+        } else {
+            await run { await $0.openRecord(key: key) }
+        }
+    }
+
+    /// Show the Now or History lens of a keyed principal's trust facet
+    /// (`connected-apps.md` § The trust facet and history lens) — page-local
+    /// state on the machine, no nest call.
+    public func setLens(_ key: String, _ lens: TrustLens) async {
+        await run { $0.setLens(key: key, lens: lens) }
     }
 
     /// Show the row's mail secret, or hide it if shown.

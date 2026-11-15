@@ -2766,7 +2766,7 @@ mod tests {
     /// bridging commit. The rewind also covers any other un-processable hole.
     /// The heal:
     /// the poll meets the next commit as `FutureEpochCommit`, rewinds its
-    /// in-flight cursor to 0 (once per channel per session), re-walks the log,
+    /// in-flight cursor to 0 (the walk is unanchored: once per anchor), re-walks the log,
     /// and lands on the head epoch — after which the next provider save writes a
     /// consistent `{provider, cursor}` pair, retiring the torn state for good.
     #[test]

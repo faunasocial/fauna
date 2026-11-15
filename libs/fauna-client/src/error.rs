@@ -149,7 +149,62 @@ pub enum SessionEndingVerdict {
     NestOutdated,
 }
 
+/// What a failed nest read means for a caller deciding whether to stand on
+/// what it last read (`on-demand-files-shared-sets.md` § Shared sets on a
+/// capability host, decision 2″ (4)): the nest could not be reached, or it
+/// answered — and an answer is a read, whatever it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadFailure {
+    /// The transport failed or the request timed out: nothing came back from
+    /// the nest.
+    Unreachable,
+    /// The nest replied — a typed refusal, a refused bearer, an HTTP status,
+    /// a reply that would not decode, a refused subprotocol, a changed
+    /// deployment identity.
+    Answered,
+}
+
 impl NestClientError {
+    /// Classify this failure as [`ReadFailure::Unreachable`] or
+    /// [`ReadFailure::Answered`] — the one classification the engine builder
+    /// and the pre-seal row read share (decision 2″ (4)).
+    ///
+    /// An [`Self::Auth`] is the mint's flattened bucket: a bearer refusal and a
+    /// mint nobody answered both land there, so it reads as answered when it
+    /// carries an HTTP status (`(<code>) …`) or `auth`'s refusal latch holds a
+    /// refusal, and as unreachable otherwise. With no `auth` to read the latch
+    /// off, an unstatused `Auth` is unreachable.
+    pub fn read_failure(&self, auth: Option<&crate::AuthClient>) -> ReadFailure {
+        match self {
+            Self::Http(e) if e.status().is_some() => ReadFailure::Answered,
+            Self::Http(_)
+            | Self::WebSocket(_)
+            | Self::RpcDisconnected { .. }
+            | Self::RpcTimeout => ReadFailure::Unreachable,
+            Self::Auth(msg) => {
+                let statused = msg
+                    .strip_prefix('(')
+                    .and_then(|rest| rest.split_once(')'))
+                    .is_some_and(|(code, _)| {
+                        !code.is_empty() && code.bytes().all(|b| b.is_ascii_digit())
+                    });
+                let latched = auth.is_some_and(|a| {
+                    a.last_auth_refusal().is_some() || a.superseded_refusal().is_some()
+                });
+                if statused || latched {
+                    ReadFailure::Answered
+                } else {
+                    ReadFailure::Unreachable
+                }
+            }
+            Self::Api { .. }
+            | Self::Decode(_)
+            | Self::Rpc(_)
+            | Self::SubprotocolMismatch
+            | Self::NestIdentityChanged { .. } => ReadFailure::Answered,
+        }
+    }
+
     /// Which session-ending verdict this failure is, if any. The one shared
     /// reading of [`crate::NestClient::supervisor_stop`] the apps' routing
     /// keys on, so no app matches wire codes of its own.
@@ -191,6 +246,47 @@ impl From<RpcError> for NestClientError {
 mod tests {
     use super::*;
     use fauna_protocol::LocalizedText;
+
+    /// Decision 2″ (4): only a failure that never reached the nest reads as
+    /// unreachable; every reply, a refused bearer included, is an answer.
+    #[test]
+    fn read_failure_tells_an_unreachable_nest_from_an_answer() {
+        use ReadFailure::{Answered, Unreachable};
+        let rpc = RpcError::new("error.auth.not_registered", "fauna.auth.not_registered");
+        for (e, want) in [
+            (NestClientError::RpcTimeout, Unreachable),
+            (
+                NestClientError::RpcDisconnected {
+                    was_in_flight: false,
+                },
+                Unreachable,
+            ),
+            (
+                NestClientError::WebSocket("connect refused".into()),
+                Unreachable,
+            ),
+            (
+                NestClientError::Auth("ws bearer: connection refused".into()),
+                Unreachable,
+            ),
+            (
+                NestClientError::Auth("(401) fauna.auth.signature_failed".into()),
+                Answered,
+            ),
+            (NestClientError::Rpc(rpc), Answered),
+            (
+                NestClientError::Api {
+                    status: 403,
+                    message: "no".into(),
+                },
+                Answered,
+            ),
+            (NestClientError::Decode("bad".into()), Answered),
+            (NestClientError::SubprotocolMismatch, Answered),
+        ] {
+            assert_eq!(e.read_failure(None), want, "{e:?}");
+        }
+    }
 
     #[test]
     fn rpc_disconnected_display_is_localized_regardless_of_flag() {

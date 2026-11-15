@@ -3,7 +3,7 @@
 Authority: `docs/goal/architecture/e2e-automation-surface-gating.md` § The
 convention (android's automation surface is `BuildConfig.DEBUG`-gated; the
 launch-env seeds cross into the process through `MainActivity`'s `Os.setenv`
-door) and `testing.md` § Default app and nest mode → *Android's run venue*.
+door) and `testing.md` § Default app and nest mode → *Android's emulator placement*.
 
 WHY THIS FILE EXISTS. The routing smoke's case L (the wrong-clock launch
 witness, `connect-and-sign-in` outcome 9) runs through
@@ -165,10 +165,10 @@ def test_the_launch_names_the_test_apk_and_the_run_device(tmp_path, launches, mo
     # whichever device happened to be attached.
     from helpers import android_device
 
-    monkeypatch.setattr(android_device, "_DEVICE_SERIAL", "emulator-5554")
+    monkeypatch.setattr(android_device, "_DEVICE_SERIAL", "emulator-5580")
     _harness(tmp_path).launch(secret_hex=SECRET, node_url=NODE_URL, trust=None)
     (config,) = _launch_configs(launches)
-    assert config["device_serial"] == "emulator-5554"
+    assert config["device_serial"] == "emulator-5580"
     # `TEST_APK` is spelled with forward slashes; the config carries the host's
     # own spelling of the joined path, backslashes on Windows.
     assert Path(config["test_apk"]).as_posix().endswith(android_device.TEST_APK)
@@ -275,6 +275,9 @@ _CONFTEST = Path(__file__).resolve().parents[1] / "conftest.py"
 
 
 def _kotlin_key_list(source, name):
+    # Line comments go first: a `(` … `)` inside one would end the list early
+    # and silently drop every key after it.
+    source = re.sub(r"//[^\n]*", "", source)
     match = re.search(rf"\b{name} = listOf\(([^)]*)\)", source)
     assert match, f"no `{name} = listOf(...)` key list"
     return set(re.findall(r'"([A-Z0-9_]+)"', match.group(1)))
@@ -347,4 +350,58 @@ def test_the_android_launch_reverses_pebbles_directory_port():
         "conftest's android launch never hands the fake name server's port to the "
         "driver's reverse list, so the propagation probe's TCP retry and the "
         "managed mirror's UPDATE reach nothing"
+    )
+
+
+# ── 7. the real-conversations launch env crosses both Kotlin doors ─────────
+#
+# `_apply_real_conversations_env` sets the gate itself (its own boolean intent
+# extra, `FAUNA_E2E_REAL_CONVERSATIONS`) and the receive loop's 2 s backstop
+# cadence, `FAUNA_CONV_POLL_SECS`, which the shared `ConversationsSession`
+# reads through `std::env::var` in a test-capable build
+# (`fauna-conversations/src/session.rs` `poll_secs_override`). On android an
+# intent extra becomes process env only through MainActivity's Os.setenv door,
+# so every name besides the gate must ride the key list both doors carry —
+# without it a real-conversations run on the emulator waits out the 30 s
+# production poll on every fold-in (the cross-device sync proof's barrier).
+
+
+class _MarkedItem:
+    def get_closest_marker(self, name):
+        return object() if name == "real_conversations" else None
+
+
+class _Session:
+    items = [_MarkedItem()]
+
+
+class _Request:
+    session = _Session()
+
+
+def _real_conversations_names():
+    import conftest  # noqa: PLC0415 — the harness's own module, read for its writer
+
+    env: dict = {}
+    conftest._apply_real_conversations_env(env, _Request())
+    assert env, "the real_conversations gate set nothing for a marked selection"
+    return set(env) - {"FAUNA_E2E_REAL_CONVERSATIONS"}
+
+
+@pytest.mark.parametrize("path", [_BRIDGE_KT, _MAIN_ACTIVITY_KT], ids=lambda p: p.name)
+def test_the_real_conversations_env_rides_both_doors(path):
+    keys = _kotlin_key_list(path.read_text(encoding="utf-8"), "DNS_E2E_ENV_KEYS")
+    missing = _real_conversations_names() - keys
+    assert not missing, (
+        f"{path.name} drops {sorted(missing)}: the real-conversations launch env "
+        "never reaches the android app's process environment"
+    )
+
+
+def test_the_two_doors_carry_the_same_key_list():
+    bridge = _kotlin_key_list(_BRIDGE_KT.read_text(encoding="utf-8"), "DNS_E2E_ENV_KEYS")
+    main = _kotlin_key_list(_MAIN_ACTIVITY_KT.read_text(encoding="utf-8"), "DNS_E2E_ENV_KEYS")
+    assert bridge == main, (
+        "the bridge puts on the intent a different set than MainActivity re-exports: "
+        f"only bridge {sorted(bridge - main)}, only MainActivity {sorted(main - bridge)}"
     )

@@ -135,7 +135,7 @@ public sealed partial class ContactsPage : Page
         AppDataSnapshot.SetKnocks(_viewModel.Knocks);
 
         NoKnocksText.Visibility = _viewModel.Knocks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        NoMatchesText.Visibility = Visibility.Collapsed;
+        PaintNoMatches();
 
         // The shared store-change notice (account-runtime.md § A runtime's own pump
         // is a source of the notice too): the review roster's badges re-read while
@@ -288,27 +288,24 @@ public sealed partial class ContactsPage : Page
         // suggestion pick, never on a plain ValuePattern.SetValue, so a
         // submit-triggered filter here was structurally undrivable by the e2e harness
         // AND diverged from web/linux/apple's own live-substring contract).
-        var query = (sender.Text ?? string.Empty).Trim();
-        if (query.Length == 0)
-        {
-            ShowRoster(_viewModel.Sections);
-            NoMatchesText.Visibility = Visibility.Collapsed;
-            return;
-        }
         // The filter narrows within the status sections; a section it empties drops
-        // out with its heading (ContactsViewModel.FilterSections).
-        var filtered = _viewModel.FilterSections(query);
-        ShowRoster(filtered);
-        // case (c) search-no-results (contacts.md § Errors & edge cases): only when a
-        // NON-EMPTY roster narrowed to zero — never the true-empty-roster state.
-        NoMatchesText.Visibility = _viewModel.Rows.Count > 0 && filtered.Count == 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        // out with its heading. The VM narrows its LIVE sections, which the list stays
+        // bound to, so every later repaint (a name, an archive-link answer) reaches the
+        // narrowed rows too — a snapshot here kept an answered row's question up.
+        _viewModel.RosterQuery = sender.Text ?? string.Empty;
+        PaintNoMatches();
     }
 
+    /// <summary>case (c) search-no-results (contacts.md § Errors &amp; edge cases): only
+    /// when a NON-EMPTY roster narrowed to zero — never the true-empty-roster state.</summary>
+    private void PaintNoMatches() =>
+        NoMatchesText.Visibility = _viewModel?.RosterNarrowedToNothing == true
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
     /// <summary>Paint <paramref name="sections"/> as the grouped roster: the live
-    /// <see cref="ContactsViewModel.Sections"/> (rebuilt on every load and name
-    /// refresh), or a filtered snapshot while a query is typed.</summary>
+    /// <see cref="ContactsViewModel.Sections"/>, rebuilt on every load, name refresh and
+    /// query change.</summary>
     private void ShowRoster(object sections)
     {
         RosterSource.Source = sections;

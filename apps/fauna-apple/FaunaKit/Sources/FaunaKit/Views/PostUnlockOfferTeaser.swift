@@ -18,7 +18,10 @@ import SwiftUI
 /// `payment_url`. The payment link's https-only guard fires on click via the
 /// shared `isSafePaymentUrl` UniFFI export (F-CL2 anti-phishing-redirect class) — the same check `ProfileView.swift`'s
 /// `subscription-offer-payment-link` applies — not on visibility, matching the
-/// reference (a non-https url still shows the button).
+/// reference (a non-https url still shows the button). A safe link subscribes
+/// first and opens the checkout the shared rule binds to the buyer after
+/// (`FeedVM.payUnlockOffer`; `monetization.md` § Pillar 3 → *Buyer↔actor
+/// binding (Q4)*).
 public struct PostUnlockOfferTeaser: View {
     public let postId: String
     public let offer: UnlockOfferView?
@@ -26,6 +29,7 @@ public struct PostUnlockOfferTeaser: View {
     /// post that is not open (`!gatedUnlocked`).
     public let purchasePending: Bool
     public let vm: FeedVM
+    @Environment(\.openURL) private var openURL
 
     public init(postId: String, offer: UnlockOfferView?, purchasePending: Bool = false, vm: FeedVM) {
         self.postId = postId
@@ -51,6 +55,9 @@ public struct PostUnlockOfferTeaser: View {
                     .controlSize(.small)
                     .accessibilityIdentifier(Ids.gatedPostPaymentLink)
                     .automationActivate(Ids.gatedPostPaymentLink) { openPaymentLink(url) }
+                    // The link subscribes before it opens the checkout (Q13
+                    // rule (1)), so it is gated like the buy button.
+                    .faunaGate("fauna.subscriptions.subscribe")
             }
             Button(L.feed.post.buyButton) { Task { await buy() } }
                 .controlSize(.small)
@@ -74,10 +81,42 @@ public struct PostUnlockOfferTeaser: View {
     }
 
     private func openPaymentLink(_ url: String) {
-        // Synchronous — `openPaymentURL` calls `setError` inline, before any
-        // suspension, so there is no account-switch window to guard against
-        // (`FeedVM.setClientErrorMessage` doc comment).
-        openPaymentURL(url) { vm.setClientErrorMessage($0) }
+        let openURL = openURL
+        Task {
+            await Self.pay(
+                vm: vm, paymentUrl: url,
+                checkout: { [vm, postId] in try await vm.payUnlockOffer(postId: postId) },
+                open: { ExternalURLOpener.open($0, with: openURL) })
+        }
+    }
+
+    /// `openPaymentLink`'s body: a URL the shared `isSafePaymentUrl` refuses is
+    /// the page error and nothing is sent (a synchronous write — no await has
+    /// happened, so no account-switch window); otherwise `checkout` (the
+    /// manager's subscribe-then-compose) runs, and only the URL it returns is
+    /// handed to `open` — the app's one external opener, `ExternalURLOpener`.
+    /// `nil` opens nothing; a failure lands `feed.error_buy_unlock` the way
+    /// ``buy(vm:purchase:)`` does, behind the same generation captured before
+    /// the await — and an account switch mid-await opens nothing either.
+    @MainActor
+    static func pay(
+        vm: FeedVM, paymentUrl: String,
+        checkout: () async throws -> String?,
+        open: @MainActor (URL) -> Void
+    ) async {
+        guard isSafePaymentUrl(url: paymentUrl) else {
+            vm.setClientErrorMessage(L.subscriptions.unsafePaymentUrl)
+            return
+        }
+        let generation = vm.managerGeneration
+        do {
+            let url = try await checkout()
+            guard generation == vm.managerGeneration else { return }
+            if let url, let parsed = URL(string: url) { open(parsed) }
+        } catch {
+            guard let text = DisplayError.message(error) else { return }
+            vm.landClientErrorMessage(generation: generation, message: L.feed.errorBuyUnlock(message: text))
+        }
     }
 
     /// Buy the sold post's unlock tier off the resolved teaser offer — the existing

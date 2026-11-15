@@ -550,7 +550,10 @@ fn start_with_db(
                 Arc::clone(&grant_log),
             )
             .with_recording_device(crate::media::device_id_hex_for_secret(seed))
-            .with_predecessors(attested_predecessors.clone()),
+            .with_predecessors(attested_predecessors.clone())
+            // The projection walk's take-over for a set the agent binds no
+            // location to (`succession-cut.md` ruling (11)(l)).
+            .with_engine_bound_sets(fauna_client_folders::agent_bound_sets()),
         ) as Arc<dyn PostRestoreHook>
     });
     if let Some(launcher) = tokio_launcher(
