@@ -94,12 +94,7 @@ def _nest_rename(nest) -> dict | None:
 def _error_text(app) -> str | None:
     """The page's ``error-message`` text, read by count + text rather than
     visibility (a late-toggled error is not reliably re-marked visible)."""
-    if app.driver.count("error-message") == 0:
-        return None
-    try:
-        return app.driver.get_text("error-message") or None
-    except Exception:
-        return None
+    return app.error_text() or None
 
 
 def _diagnose(app, what: str) -> str:

@@ -765,16 +765,30 @@ class ConversationsActions:
         (`room_settings` sub-page) to present. The door is painted AND LIVE
         whenever the thread is a room (`ui/conversations.md` § Element IDs,
         widened 2026-09-20): leaving is a plain member's verb and lives inside
-        the editor, so every member opens it. The greying is per control
-        INSIDE — the selects and Save off `capabilities.can_set_policy`, the
-        walk-out off `can_leave_room` — so a member's editor opens read-only
-        with only `room-leave-button` live.
+        the editor, so every member opens it. Each control INSIDE answers
+        from the shared `ThreadControl` predicate (`ui/conversations.md`
+        § Errors & edge cases → *Controls this person can never use*): a
+        member's editor reads the policy as plain lines, with
+        `room-leave-button` live and no policy control or Save at all
+        (apps not yet on that ruling still paint them greyed).
 
-        Waits on `room-leave-button`, the one control every editor paints: a
-        policy-less room's (a bridged room, opened for its local remove —
-        `RoomSettingsDraft::seed`) carries no Save to wait on."""
+        Waits on the walk-out OR the local remove: a governed room always
+        paints `room-leave-button` (blocked for the owner), and a policy-less
+        bridged room, opened for its local remove (`RoomSettingsDraft::seed`),
+        paints `room-remove-button` and no walk-out."""
+        from helpers.budgets import UI_SETTLE_S
+        from helpers.waiting import wait_until
+
         self.driver.click("thread-room-settings-button")
-        self.driver.wait_for("room-leave-button", timeout=10.0)
+        wait_until(
+            lambda: any(
+                self.driver.is_visible(i) for i in ("room-leave-button", "room-remove-button")
+            ),
+            UI_SETTLE_S,
+            diagnose=lambda: "the room editor never presented: "
+            f"{self.driver.diagnose('room-leave-button')} "
+            f"{self.driver.diagnose('room-remove-button')}",
+        )
 
     def set_room_join_rule(self, rule: str) -> None:
         """Pick `rule` — `invite` (owner and admins) or `member-invite` (any

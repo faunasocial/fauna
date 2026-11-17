@@ -5,8 +5,10 @@ import {
   ensureWasm,
   logMessage,
   recoveryBoxesLocal,
+  releaseServingPresence,
   signOutRecordBegin,
   signOutWipeOwed,
+  takeServingPresence,
 } from './wasm';
 import {
   accountsBoot,
@@ -657,6 +659,36 @@ identity.subscribe((id) => {
   resetActorScopedState();
   if (!id) return;
   for (const handler of actorChangeHandlers) void handler(id);
+});
+
+// ── The serving-presence declaration ─────────────────────────────────────────
+//
+// This tab holds `fauna.accounts.serving/<actor>` SHARED for as long as its
+// in-memory identity is that account, so a sibling tab's erase (sign-out, the
+// load's sweep, remove-account) sees it whether or not this tab runs the
+// account's engine (account-scoping.md § Concurrent instances → *Web's
+// serving-presence lock*; the model is `fauna_client_accounts::
+// web_serving_presence`). Keyed on the identity's value alone — never the engine,
+// the runtime or the route — for the actor-scope pass's reason: every door onto
+// an identity change (sign-in, a sibling's sign-in adopted, the per-tab pin, a
+// switch, sign-out's `set(null)`) passes through here. The calls are chained so
+// a quick switch away and back releases and takes in the order it happened; the
+// browser releases the hold when the tab closes.
+let servingActor: string | null = null;
+let servingChain: Promise<void> = Promise.resolve();
+identity.subscribe((id) => {
+  const actor = id?.actorId ? id.actorId.trim().toLowerCase() : null;
+  if (actor === servingActor) return;
+  const departing = servingActor;
+  servingActor = actor;
+  servingChain = servingChain
+    .then(async () => {
+      if (departing) await releaseServingPresence(departing);
+      if (actor) await takeServingPresence(actor);
+    })
+    .catch((e) => {
+      logMessage('warn', 'fauna_web::store', `serving-presence declaration failed: ${e}`);
+    });
 });
 
 // --- Inbox ---

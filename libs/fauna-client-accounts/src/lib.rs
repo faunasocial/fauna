@@ -88,10 +88,11 @@ pub use mutation_lock::{MutationLock, MutationLockGuard, NoopMutationLock};
 mod instance_lock;
 #[cfg(not(target_arch = "wasm32"))]
 pub use instance_lock::{
-    AccountInstanceLock, FocusExistingOutcome, InstanceDegrade, InstanceLockOutcome,
-    InstanceRefusal, ServingBases, ServingMode, SessionInstanceHolder, SessionInstanceOutcome,
-    account_instance_token, become_process_session_instance, bind_session_launch_to,
-    choosable_accounts, process_session_account, rebind_session_launch_after_succession,
+    AccountInstanceLock, CHOOSER_WATCH_INTERVAL, ChooserWatchStep, FocusExistingOutcome,
+    InstanceDegrade, InstanceLockOutcome, InstanceRefusal, ServingBases, ServingMode,
+    SessionInstanceHolder, SessionInstanceOutcome, account_instance_token,
+    become_process_session_instance, bind_session_launch_to, choosable_accounts,
+    chooser_watch_step, process_session_account, rebind_session_launch_after_succession,
     refuse_if_bound_from_onboarding, release_process_session_instance, resolve_focus_existing,
     session_account, session_launch_binding, with_platform_serving_bases,
 };
@@ -162,6 +163,12 @@ pub use web_store::{LocalStorageSecretStore, TAB_PIN_KEY, WebIdentityStore, tab_
 mod web_mutation_lock;
 #[cfg(all(feature = "web-localstorage", target_arch = "wasm32"))]
 pub use web_mutation_lock::{WEB_MUTATION_LOCK_NAME, with_web_mutation_lock};
+
+/// Web's serving-presence lock — a SHARED Web Lock every tab holds for the
+/// account its identity is, which an erase probes beside the engine role
+/// (`apps/account-scoping.md` § Concurrent instances → *Web's serving-presence
+/// lock*). The name is pure; the holds are the `web-localstorage` wasm leg.
+pub mod web_serving_presence;
 
 /// The registry arms of the cross-app E2E bridge — the twin of
 /// `fauna_onboarding_machine::call_machine_free_method` for seams that need the

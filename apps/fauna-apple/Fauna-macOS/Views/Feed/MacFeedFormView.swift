@@ -174,14 +174,15 @@ struct MacFeedFormView: View {
                 Button(L.feed.create.title) {
                     submitCreateFeed()
                 }
-                .disabled(!form.canCreate || vm.creatingFeed)
+                .disabled(vm.creatingFeed)
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .accessibilityIdentifier(Ids.createFeed)
                 .automationActivate(
                     Ids.createFeed,
-                    isEnabled: { form.canCreate && !vm.creatingFeed }
+                    isEnabled: { !vm.creatingFeed }
                 ) { submitCreateFeed() }
+                .faunaPossible(form.createPossibility)
 
                 Button(L.common.cancel) {
                     vm.showCreateForm = false
@@ -190,6 +191,7 @@ struct MacFeedFormView: View {
                 .accessibilityIdentifier(Ids.feedCreateCancel)
                 .automationActivate(Ids.feedCreateCancel) { vm.showCreateForm = false }
             }
+            FaunaPossibilityReason(form.createPossibility)
         }
         .padding(.vertical, 4)
         // Grow the factor picker with the user's trained topics (the third
@@ -209,7 +211,9 @@ struct MacFeedFormView: View {
 
     /// The create-feed button's action, factored out so the automation sibling
     /// drives the exact same code path the Button does. Each rule is encoded via
-    /// the shared `encode_filter_rule` codec inside the manager.
+    /// the shared `encode_filter_rule` codec inside the manager. `createFeed`
+    /// asks the shared predicate again and closes this inline form only once
+    /// the feed is saved (it clears `vm.showCreateForm` on success alone).
     private func submitCreateFeed() {
         Task { await vm.createFeed(name: form.name, combination: form.combination,
                                    rules: form.filterRules, factors: form.factors) }

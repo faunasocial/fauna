@@ -129,6 +129,9 @@ public struct FeaturePolicyEditorView: View {
                         .automationActivate(Ids.featurePolicyEditorSaveButton) {
                             Task { await host.save() }
                         }
+                        // The draft's shared answer, outside the automation
+                        // modifier so the registry reads it too.
+                        .faunaPossible(host.savePossibility)
                         .authoringGate(tier: view.tier)
                     if view.canRemove {
                         Button(L.features.editorRemove) { Task { await host.remove() } }

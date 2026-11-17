@@ -1072,6 +1072,39 @@ def test_an_unmarked_test_is_scanned_as_speaking_for_every_column(tmp_path):
     assert features_scan.scan_file(src, repo=tmp_path)[0].apps == ()
 
 
+def test_a_module_local_mark_helper_decorator_narrows_like_its_marks(tmp_path):
+    """A bare module-local decorator whose body applies app and `host_platform`
+    marks (`test_sign_out_tui.py`'s `_desktop`) narrows its tests exactly as the
+    literal marks would. Read as unmarked, both residue-retry desktop journeys
+    counted as `unrun` on web, windows and android, columns no run could stamp."""
+    import features_scan
+
+    src = tmp_path / "test_helper_marks.py"
+    src.write_text((
+        "import pytest\n\n\n"
+        "def _desktop(test):\n"
+        "    for mark in (\n"
+        "        pytest.mark.tui,\n"
+        "        pytest.mark.linux,\n"
+        "        pytest.mark.macos,\n"
+        "        pytest.mark.host_platform(\"linux\", \"macos\"),\n"
+        "    ):\n"
+        "        test = mark(test)\n"
+        "    return test\n\n\n"
+        "@_desktop\n"
+        "@pytest.mark.feature(\"account\")\n"
+        "def test_desk(app):\n    pass\n\n\n"
+        "@pytest.mark.web\n"
+        "def test_web(app):\n    pass\n"
+    ), encoding="utf-8")
+    facts = {f.node_id.split("::", 1)[1]: f
+             for f in features_scan.scan_file(src, repo=tmp_path)}
+    assert facts["test_desk"].apps == ("linux", "macos", "tui")
+    assert facts["test_desk"].platforms == ("linux", "macos")
+    assert facts["test_desk"].features == ("account",)
+    assert facts["test_web"].apps == ("web",)
+
+
 def _scan_apps(tmp_path, source: str) -> dict:
     import features_scan
 

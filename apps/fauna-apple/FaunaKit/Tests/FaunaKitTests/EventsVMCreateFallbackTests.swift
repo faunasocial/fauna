@@ -20,6 +20,8 @@ import Foundation
 private final class RecordingEventsAPI: EventsAPI {
     var calendars: [FaunaCalendar] = []
     private(set) var createEventCalendarIds: [String] = []
+    /// When set, `createEvent` throws it (a failed save).
+    var createError: Error?
 
     func listCalendars() async throws -> [FaunaCalendar] { calendars }
     func createCalendar(name: String) async throws {}
@@ -28,6 +30,7 @@ private final class RecordingEventsAPI: EventsAPI {
     func queryMyEvents(filter: String) async throws -> [EventSummary] { [] }
 
     func createEvent(_ request: CreateEventRequest) async throws {
+        if let createError { throw createError }
         createEventCalendarIds.append(request.calendarId)
     }
 
@@ -74,17 +77,78 @@ func createWithNoSelectionFallsBackToFirstCalendar() async {
 }
 
 @MainActor
-@Test("creating with nothing selected and no calendars at all is a no-op")
-func createWithNoSelectionAndNoCalendarsDoesNothing() async {
+@Test("no calendar to hold an event: the submit is refused with the predicate's reason, never silent")
+func createWithNoSelectionAndNoCalendarsIsRefusedWithItsReason() async {
     let api = RecordingEventsAPI()
     let vm = EventsVM()
     vm.configure(api: api)
     await vm.loadCalendars()
     #expect(vm.calendars.isEmpty)
 
-    await vm.createEvent(CreateEventRequest(calendarId: "", summary: "Standup",
-                                             dtstart: "2026-08-07T14:00", dtend: "2026-08-07T15:00"))
+    let created = await vm.createEvent(CreateEventRequest(
+        calendarId: "", summary: "Standup",
+        dtstart: "2026-08-07T14:00", dtend: "2026-08-07T15:00"))
 
+    #expect(!created)
     #expect(api.createEventCalendarIds.isEmpty,
             "with no resolvable calendar, createEvent must not call the API at all")
+    #expect(!(vm.createFormError ?? "").isEmpty,
+            "the refusal is the form's own sentence, not a silent return")
+}
+
+@MainActor
+@Test("every door to the compose is shut while no calendar can hold an event")
+func composeDoorsAreGatedOnTheSharedPredicate() async {
+    let api = RecordingEventsAPI()
+    let vm = EventsVM()
+    vm.configure(api: api)
+    // Before the first read the answer is the loading reason, not possible.
+    #expect(vm.calendarsLoading)
+    vm.toggleNewEvent()
+    #expect(!vm.showNewEvent)
+
+    await vm.loadCalendars()
+    #expect(!vm.createPossibility.isPossible)
+    vm.toggleNewEvent()
+    vm.beginCompose(onDay: Date())
+    vm.beginCompose(atSlot: Date())
+    #expect(!vm.showNewEvent, "no door opens a compose that cannot succeed")
+    #expect(vm.createStep == .addCredential,
+            "a deployment that serves calendars points at the first credential")
+
+    api.calendars = [FaunaCalendar(id: "cal-1", name: "One")]
+    await vm.loadCalendars()
+    #expect(vm.createPossibility.isPossible)
+    vm.beginCompose(atSlot: Date())
+    #expect(vm.showNewEvent)
+}
+
+@MainActor
+@Test("a failed save keeps the compose open and puts the whole sentence in the form")
+func failedSaveStaysInTheForm() async {
+    struct Boom: Error, LocalizedError { var errorDescription: String? { "boom" } }
+    let api = RecordingEventsAPI()
+    api.calendars = [FaunaCalendar(id: "cal-1", name: "One")]
+    let vm = EventsVM()
+    vm.configure(api: api)
+    await vm.loadCalendars()
+    vm.toggleNewEvent()
+    #expect(vm.showNewEvent)
+
+    api.createError = Boom()
+    let created = await vm.createEvent(CreateEventRequest(
+        calendarId: "", summary: "Standup",
+        dtstart: "2026-08-07T14:00", dtend: "2026-08-07T15:00"))
+
+    #expect(!created)
+    #expect(vm.showNewEvent, "the form stays open with what was typed")
+    #expect(vm.createFormError?.contains("could not be saved") == true)
+    #expect(vm.errorMessage == nil, "the sentence is the form's, not the page banner's")
+
+    api.createError = nil
+    let retried = await vm.createEvent(CreateEventRequest(
+        calendarId: "", summary: "Standup",
+        dtstart: "2026-08-07T14:00", dtend: "2026-08-07T15:00"))
+    #expect(retried)
+    #expect(vm.createFormError == nil)
 }

@@ -52,20 +52,72 @@ public class NostrVM {
     public var zapSigners: [FfiZapSignerEntry] = []
     public var zapSignerPubkeyInput = ""
     public var zapSignerLabelInput = ""
-    /// Why `nostr-zap-signer-add-btn` is dead, or `nil` when it works. `nil`
-    /// until the gate fetch resolves, which is what keeps an un-hydrated read
-    /// from disabling the button eagerly (mirrors linux's
-    /// `zap_signer_add_gate_reason` exactly). `remove` is never gated.
-    public var zapSignerAddGateReason: String?
+    /// The `zaps` plane's answer over the Dim-3 features courtesy read (the
+    /// shared `features_gate_possibility`, tui's `designate_gate`, android's
+    /// `NostrVM.zapSignerGate`): blocked still loading until the read answers,
+    /// blocked load-failed when it threw, blocked with a `disabled` row's
+    /// restriction, absent — the designate row left out — when the nest has no
+    /// `zaps` row or hides it (`docs/goal/ui/README.md` § Offer only what is
+    /// possible, rules 2 and 5). `remove` is never gated — de-escalation.
+    public private(set) var zapSignerGate: Possibility = featureGateAnswer(rows: nil, feature: "zaps")
+
+    /// `nostr-zap-signer-add-btn`'s draft half — the shared
+    /// `zap_signer_add_possibility` (blank, or not 64 hex).
+    public var zapSignerAddPossibility: Possibility {
+        nostrZapSignerAddPossibility(pubkey: zapSignerPubkeyInput)
+    }
+
+    /// `nostr-zap-signer-add-btn`'s whole answer (tui's
+    /// `zap_signer_add_answer`): the plane's gate — the more specific reason —
+    /// ANDed with the draft's. ``addZapSigner()`` asks it again.
+    public var zapSignerAddAnswer: Possibility {
+        zapSignerGate.and(zapSignerAddPossibility)
+    }
     #endif
 
     /// The *Connected apps* section renders only for a linked account in a
     /// custodial signing mode — a `remote`/`nip07` account has no key on the
     /// box to sign with, so it can never itself be a bunker. Mirrors web's
     /// `showConnectedApps` / android's `CUSTODIAL_MODES` gate.
-    public var showConnectedApps: Bool {
-        guard status?.linked == true, let mode = status?.mode else { return false }
-        return mode == "generated" || mode == "imported"
+    public var showConnectedApps: Bool { connectedAppsPossibility.isShown }
+
+    /// The *Connected apps* section's answer — the shared
+    /// `connected_apps_possibility` over the stored signing mode (`nil` with no
+    /// linked account): absent for a `remote`/`nip07` account, never an
+    /// app-local mode check (`nostr.md` § Errors & edge cases).
+    public var connectedAppsPossibility: Possibility {
+        nostrConnectedAppsPossibility(signingMode: status?.linked == true ? status?.mode : nil)
+    }
+
+    // MARK: - Form validity (`docs/goal/ui/README.md` § Offer only what is
+    // possible, rule 4's form case; `nostr.md` § Errors & edge cases)
+    //
+    // Each submit paints from its shared draft-validity predicate through
+    // `faunaPossible`, and its action asks the same predicate first and refuses
+    // with the same reason on `error-message` (``refuse(_:)``).
+
+    /// `nostr-link-button`: the import mode needs its nsec, the remote mode its
+    /// bunker URL.
+    public var linkPossibility: Possibility {
+        nostrLinkPossibility(mode: linkMode.rawValue, nsec: importNsec, bunkerUrl: bunkerUrl)
+    }
+
+    /// `nostr-add-relay`: a URL, well formed, not already listed.
+    public var addRelayPossibility: Possibility {
+        nostrAddRelayPossibility(existing: relays, input: relayInput)
+    }
+
+    /// `nostr-add-follow`: the pubkey (the petname is optional).
+    public var addFollowPossibility: Possibility {
+        nostrAddFollowPossibility(pubkey: followPubkey)
+    }
+
+    /// Refuse a submit whose answer is not possible, with its reason on
+    /// `error-message`. `true` when refused.
+    func refuse(_ answer: Possibility) -> Bool {
+        guard let refusal = answer.refusal else { return false }
+        errorMessage = refusal
+        return true
     }
 
     public enum LinkMode: String, CaseIterable, Identifiable {
@@ -107,7 +159,7 @@ public class NostrVM {
                 npubConfirmationOwed = false
                 #if !FAUNA_EXCISE_PAYMENTS
                 zapSigners = []
-                zapSignerAddGateReason = nil
+                zapSignerGate = featureGateAnswer(rows: nil, feature: "zaps")
                 #endif
             }
             // Only a custodial account can be a bunker; a revealed invite does
@@ -121,6 +173,7 @@ public class NostrVM {
     }
 
     public func link() async {
+        if refuse(linkPossibility) { return }
         guard let api else { return }
         isLoading = true
         errorMessage = nil
@@ -130,17 +183,9 @@ public class NostrVM {
             case .generate:
                 _ = try await api.linkNostrGenerate()
             case .import:
-                guard !importNsec.isEmpty else {
-                    errorMessage = L.errors.nostrNsecRequired
-                    return
-                }
                 _ = try await api.linkNostrImport(nsec: importNsec)
                 importNsec = ""
             case .remote:
-                guard !bunkerUrl.isEmpty else {
-                    errorMessage = L.errors.nostrBunkerRequired
-                    return
-                }
                 _ = try await api.linkNostrRemote(bunkerUrl: bunkerUrl)
                 bunkerUrl = ""
             }
@@ -194,16 +239,12 @@ public class NostrVM {
     /// array and republishes NIP-65; a relay-only `set_settings` is a partial
     /// update (leaves the content toggles untouched — `db::update_settings`).
     public func addRelay() async {
-        guard let url = trimmedRelayInput(input: relayInput) else { return }
-        if let refusal = relayUrlError(url: url) {
-            errorMessage = renderLocalizedText(refusal)
-            return
-        }
+        // The shared predicate names a blank, malformed or duplicate draft;
+        // the helpers below only shape the list it already vouched for.
+        if refuse(addRelayPossibility) { return }
+        guard let url = trimmedRelayInput(input: relayInput),
+              let next = relayListAppending(existing: relays, url: url) else { return }
         errorMessage = nil
-        guard let next = relayListAppending(existing: relays, url: url) else {
-            relayInput = ""
-            return
-        }
         await writeRelays(next)
         relayInput = ""
     }
@@ -260,9 +301,9 @@ public class NostrVM {
     }
 
     public func addFollow() async {
+        if refuse(addFollowPossibility) { return }
         guard let api else { return }
         let pubkey = followPubkey.trimmingCharacters(in: .whitespaces)
-        guard !pubkey.isEmpty else { return }
         errorMessage = nil
         do {
             let petname = followPetname.trimmingCharacters(in: .whitespaces)
@@ -334,9 +375,9 @@ public class NostrVM {
     /// lowercased), so this re-lists rather than pushing the typed input
     /// locally — the same reason linux/tui re-list after `add`.
     public func addZapSigner() async {
+        if refuse(zapSignerAddAnswer) { return }
         guard let api else { return }
         let pubkey = zapSignerPubkeyInput.trimmingCharacters(in: .whitespaces)
-        guard !pubkey.isEmpty else { return }
         errorMessage = nil
         do {
             _ = try await api.nostrZapSignersAdd(
@@ -364,37 +405,24 @@ public class NostrVM {
         }
     }
 
-    /// Why `nostr-zap-signer-add-btn` is dead, or `nil` when it works.
-    /// Mirrors linux's `zap_signer_add_gate_reason` / tui's `designate_gate`
-    /// exactly: the decision is READ off the shared `FeaturesClient` rows
-    /// (already accounts for the `payments` subset edge, never re-composed),
-    /// and a `hidden` row still disables with its one-word status rather than
-    /// vanishing (the *excision* story is the orthogonal compile-time `zaps`
-    /// feature, not this render-time courtesy).
-    private static func zapSignerAddGateReason(_ rows: [FfiFeatureRow]) -> String? {
-        guard let row = rows.first(where: { $0.feature == "zaps" }) else { return nil }
-        if row.affordance == "available" { return nil }
-        if let restriction = row.restriction {
-            return renderLocalizedTextNested(restriction)
-        }
-        return renderLocalizedText(row.status)
-    }
-
-    /// Re-fetch the gated-feature plane and apply the `zaps` verdict to
-    /// `zapSignerAddGateReason` — called once from `refresh()`. Never
-    /// disables eagerly before the fetch resolves (an un-hydrated read
-    /// leaves the button live — the nest, not the app, is the enforcement
-    /// floor).
+    /// Re-fetch the gated-feature plane and answer ``zapSignerGate`` from the
+    /// `zaps` row — called once from `refresh()`. Unknown is not possible: a
+    /// fetch that threw blocks with load-failed (tui's `designate_gate`); the
+    /// nest stays the enforcement floor either way.
     public func refreshZapSignerGate() async {
         guard let api else { return }
         do {
-            let rows = try await api.featuresClient().rows()
-            zapSignerAddGateReason = NostrVM.zapSignerAddGateReason(rows)
+            let rows = try await api.featureRows()
+            applyZapSignerFeaturesRead(rows)
         } catch {
-            // Leave the prior verdict (or nil) rather than surfacing a
-            // page-level error over a courtesy affordance the nest itself
-            // still enforces.
+            applyZapSignerFeaturesRead(nil)
         }
+    }
+
+    /// The features read landed (`rows`) or threw (`nil`). Internal so the
+    /// unit tests drive it without a nest.
+    func applyZapSignerFeaturesRead(_ rows: [FfiFeatureRow]?) {
+        zapSignerGate = featureGateAnswer(rows: rows, failed: rows == nil, feature: "zaps")
     }
 
     #endif

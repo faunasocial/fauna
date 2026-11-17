@@ -119,9 +119,16 @@ public struct SubscriptionSettingsView: View {
     /// binding): paste a post-payment claim code → the entitlement binds to
     /// this actor and lands as a queued grant in the section above. Mirrors
     /// linux `apps/fauna-linux/src/settings/subscriptions.rs`'s claim section.
+    @ViewBuilder
     private var claimRedeemSection: some View {
-        Section(L.subscriptions.redeemClaimTitle) {
-            ClaimRedeemRow(code: $vm.claimCodeInput) { Task { await vm.redeemClaim() } }
+        // A nest without the `payments` plane leaves the section out whole,
+        // title included (`ui/README.md` § Offer only what is possible, rule 2).
+        if vm.redeemAnswer.isShown {
+            Section(L.subscriptions.redeemClaimTitle) {
+                ClaimRedeemRow(code: $vm.claimCodeInput, answer: vm.redeemAnswer) {
+                    Task { await vm.redeemClaim() }
+                }
+            }
         }
     }
     #endif

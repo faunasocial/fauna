@@ -1944,6 +1944,7 @@ def test_a_topics_saved_learning_that_cannot_be_opened_is_reported_and_never_res
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("trained-topics")
 def test_a_topic_trained_on_one_device_follows_you_to_your_other_device(
     request, logged_in_app, nest_instance, test_user

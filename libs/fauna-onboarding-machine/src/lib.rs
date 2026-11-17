@@ -17,6 +17,8 @@ pub mod nest_api;
 pub mod observer;
 pub mod outcome;
 pub mod poll;
+/// The choose-providers page (`behavior/onboarding-provisioning.md` § 3d).
+pub mod provider_choice;
 pub(crate) mod recovery_config;
 /// Retiring an app-provisioned nest (`behavior/nest-retirement.md`).
 pub mod retire;

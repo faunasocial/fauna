@@ -189,7 +189,7 @@ Stamped 2026-11-07 at b844c771f6.
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
 | linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | |
+| windows | ✅ full | 0.1.7-dev+bea44c4b standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
@@ -213,11 +213,11 @@ Stamped 2026-11-07 at b844c771f6.
 | 3 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_the_posting_permission_shows_and_stops_below_the_full_level` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_delete_presence_ceremony` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_retire_identity_opt_in_rides_the_delete_ceremony` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_consent_ceremony_end_to_end` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_declining_fails_the_browser_cleanly` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_the_nests_own_authorization_server_issues_and_revokes_a_grant` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_a_forged_seizure_alarms_but_is_never_signed` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_recovery_fork_contest_end_to_end` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_consent_ceremony_end_to_end` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_declining_fails_the_browser_cleanly` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_the_nests_own_authorization_server_issues_and_revokes_a_grant` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_a_forged_seizure_alarms_but_is_never_signed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_recovery_fork_contest_end_to_end` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_atproto_identity_mint.py::test_did_plc_mint_end_to_end` | nest (linux): passed, nest (macos): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_atproto_firehose_post.py::test_public_post_reaches_the_firehose` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_atproto_external_write.py::test_external_app_write_becomes_a_fauna_post` | nest (linux): passed, nest (macos): passed |
@@ -228,7 +228,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_hosted_enable_docker.py::test_atproto_hosted_enable_boots_docker_bridge` | nest (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_pds_sni_router.py::test_sni_router_routes_pds_to_the_atproto_bridge` | nest (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_pds_sni_router.py::test_createsession_rate_limit_carries_real_client_ip` | nest (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_bluesky_notifications_bridged.py::test_a_bridged_bluesky_notification_reaches_the_unified_list` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_bluesky_notifications_bridged.py::test_a_bridged_bluesky_notification_reaches_the_unified_list` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_bluesky_feed_ingest.py::test_a_followed_bluesky_post_arrives_in_the_feed_and_a_reply_threads_under_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 12 | nest | `tests/e2e-unified/tests/test_atproto_firehose_post.py::test_public_post_reaches_the_firehose` | nest (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_atproto_history_backfill.py::test_choosing_history_publishes_existing_public_posts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -249,7 +249,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 27 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_revoke_bites_at_the_very_next_write_and_each_session_is_ceilinged` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
 | 28 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_an_app_password_is_shown_again_on_another_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 29 | nest | `tests/e2e-unified/tests/test_atproto_pds_app_limits.py::test_an_app_signed_in_as_you_cannot_manage_app_passwords_or_delete_the_account` | nest (linux): passed, nest (macos): passed |
-| 30 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_a_permission_set_resolves_through_the_bridge_onto_the_card_and_into_the_token` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 30 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_a_permission_set_resolves_through_the_bridge_onto_the_card_and_into_the_token` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 31 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_connected_apps_row_names_the_permission_set_it_came_from` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 32 | nest | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_an_unresolvable_permission_set_is_refused_with_the_bridge_present` | nest (linux): passed, nest (macos): passed |
 | 33 | nest | `tests/e2e-unified/tests/test_atproto_pds_app_limits.py::test_an_approved_app_keeps_the_permissions_its_card_showed_after_the_set_changes` | nest (linux): passed, nest (macos): passed |
@@ -260,7 +260,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 38 | nest | `tests/e2e-unified/tests/test_bluesky_linked_account.py::test_on_manual_only_posts_tagged_for_it_are_published` | nest (linux): passed, nest (macos): passed |
 | 39 | nest | `tests/e2e-unified/tests/test_bluesky_linked_account.py::test_deleting_a_cross_posted_post_removes_its_copy` | nest (linux): passed, nest (macos): passed |
 | 40 | app | `tests/e2e-unified/tests/test_bluesky_feed_reference.py::test_a_quote_of_a_bluesky_post_is_published_on_bluesky_carrying_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 41 | app | `tests/e2e-unified/tests/test_bluesky_feed_interactions.py::test_a_bluesky_like_or_repost_and_its_undo_reach_bluesky` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 41 | app | `tests/e2e-unified/tests/test_bluesky_feed_interactions.py::test_a_bluesky_like_or_repost_and_its_undo_reach_bluesky` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 42 | app | `tests/e2e-unified/tests/test_bluesky_feed_reference.py::test_replying_or_quoting_with_no_bluesky_account_linked_is_refused_with_the_remedy` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 43 | app | `tests/e2e-unified/tests/test_bluesky_feed_ingest.py::test_posts_from_a_subscribed_bluesky_custom_feed_arrive_in_the_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 44 | nest | `tests/e2e-unified/tests/test_bluesky_feed_ingest_nest.py::test_a_bluesky_post_lands_in_the_feed_once_across_polls_and_linked_accounts` | nest (linux): passed, nest (macos): passed |
@@ -277,10 +277,10 @@ Stamped 2026-11-07 at b844c771f6.
 | 53 | nest | `tests/e2e-unified/tests/api/test_bluesky_crosspost_unlinked_mention.py::test_a_cross_post_carries_no_bluesky_mention_of_a_member_who_did_not_link` | nest (linux): passed, nest (macos): passed |
 | 54 | nest | `tests/e2e-unified/tests/api/test_bluesky_takedown_and_media_proxy.py::test_a_takedown_deletes_the_bluesky_cross_post_retrying_and_a_restore_reposts_nothing` | nest (linux): passed, nest (macos): passed |
 | 55 | nest | `tests/e2e-unified/tests/api/test_bluesky_takedown_and_media_proxy.py::test_bluesky_pictures_are_fetched_only_over_public_https_without_redirects_and_served_inert` | nest (linux): passed, nest (macos): passed |
-| 56 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_recovery_fork_contest_end_to_end` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 56 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_a_contest_press_that_fails_keeps_the_card_open_and_a_retry_succeeds` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 56 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_recovery_fork_contest_end_to_end` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 56 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_a_contest_press_that_fails_keeps_the_card_open_and_a_retry_succeeds` | windows (windows): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 57 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_after_a_contest_the_nest_keeps_publishing_but_never_writes_the_directory_again` | nest (linux): passed, nest (macos): passed |
-| 58 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_after_stepping_down_a_connected_app_reads_suspended_until_a_fresh_sign_in` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 58 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_after_stepping_down_a_connected_app_reads_suspended_until_a_fresh_sign_in` | web (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): passed |
 | 59 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_a_taken_down_post_is_never_published_to_the_hosted_account_and_a_published_one_is_withdrawn` | nest (linux): passed, nest (macos): passed |
 | 59 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_a_taken_down_post_is_never_published_to_the_fediverse` | nest (linux): passed, nest (macos): passed |
 | 60 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_a_handle_rename_withdraws_the_old_handle_txt` | nest (linux): passed, nest (macos): passed |

@@ -118,8 +118,12 @@ public struct FeedCreateForm {
     /// render (iOS's `.onDelete` swipe went with its `Form`, per rule 6).
     public mutating func removeRule(at index: Int) { rules.remove(at: index) }
 
-    /// Whether the feed can be created — a non-blank name. Callers `&&` in the
-    /// VM's in-flight flag (`vm.creatingFeed`).
+    /// Whether the feed can be created — the shared `create_feed_possibility`
+    /// (`fauna_feed::forms`, `feed.md` § Errors & edge cases): a non-blank
+    /// name, else blocked with its reason. `create-feed` is painted from it
+    /// through `faunaPossible`, and `FeedVM.createFeed` asks the same
+    /// predicate again; callers add the VM's in-flight flag
+    /// (`vm.creatingFeed`) beside it.
     ///
     /// **A staged rule is deliberately NOT required** (fixed 2026-08-03). This
     /// also demanded `!rules.isEmpty`, which made a *factor-only* feed — one
@@ -136,8 +140,8 @@ public struct FeedCreateForm {
     /// `test_create_feed_with_factor_weight_sets_local_composition` passed while
     /// doing something no user could do. The actuation gate
     /// (§ The actuation gate, `apple-e2e-automation.md`) is what surfaced it.
-    public var canCreate: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty
+    public var createPossibility: Possibility {
+        feedCreatePossibility(name: name)
     }
 
     /// The staged rules as the `[FilterRuleInput]` `FeedVM.createFeed` encodes

@@ -109,7 +109,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 12 | nest | `tests/e2e-unified/tests/api/test_snapshot_auto_capture.py::test_a_changed_then_quiet_folder_snapshots_itself` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_snapshot_diff.py::test_diff_reports_added_removed_and_modified` | nest (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_backups.py::test_a_mail_snapshot_taken_from_its_kind_entry_is_offered_for_restore` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 14 | app | `tests/e2e-unified/tests/test_backups_conversation_snapshot.py::test_a_conversation_snapshot_taken_from_its_kind_entry_is_offered_for_restore` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_backups_conversation_snapshot.py::test_a_conversation_snapshot_taken_from_its_kind_entry_is_offered_for_restore` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_snapshot_auto_capture.py::test_a_conversation_with_new_messages_snapshots_itself` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_dr_restore.py::test_a_posts_snapshot_restore_adds_its_posts_and_keeps_a_later_one` | nest (linux): passed |
 <!-- features-render:end -->

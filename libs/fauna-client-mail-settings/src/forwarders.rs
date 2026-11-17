@@ -169,6 +169,9 @@ fn decode_alias_id(alias_id_hex: &str) -> Result<Vec<u8>, DispatchError> {
 pub struct ForwarderMachine {
     nest: Arc<dyn ForwarderNest>,
     inner: Mutex<ForwardersSnapshot>,
+    /// Where the page's forwarder read stands (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 5).
+    read: Mutex<fauna_core::possibility::ReadState>,
 }
 
 // `new` takes `Arc<dyn ForwarderNest>` (not an FFI type), so it stays in a plain
@@ -180,6 +183,35 @@ impl ForwarderMachine {
         Self {
             nest,
             inner: Mutex::new(ForwardersSnapshot::empty()),
+            read: Mutex::new(fauna_core::possibility::ReadState::Pending),
+        }
+    }
+
+    /// Where the forwarder list read stands — the page paints its empty state
+    /// only once it resolved (an unread list is not an empty one).
+    pub fn read_state(&self) -> fauna_core::possibility::ReadState {
+        *self.read.lock().expect("read mutex")
+    }
+
+    /// Whether the forwarder add form and its submit are live: the list and
+    /// local-domain read resolved (the form's domain choice comes from it) and
+    /// no change is on its way. The submit asks the same answer.
+    pub fn add_possibility(&self) -> fauna_core::possibility::Possibility {
+        let idle = self.inner.lock().expect("snapshot mutex").status == ForwarderStatus::Idle;
+        crate::bool_toggle_policy::toggle_possibility(self.read_state(), idle)
+    }
+
+    async fn refresh(&self) -> Result<(), DispatchError> {
+        match self.read_forwarders().await {
+            Ok(()) => {
+                *self.read.lock().expect("read mutex") =
+                    fauna_core::possibility::ReadState::Resolved;
+                Ok(())
+            }
+            Err(e) => {
+                crate::bool_toggle_policy::note_read_failed(&self.read);
+                Err(e)
+            }
         }
     }
 
@@ -187,7 +219,7 @@ impl ForwarderMachine {
         self.inner.lock().expect("snapshot mutex").status = status;
     }
 
-    async fn refresh(&self) -> Result<(), DispatchError> {
+    async fn read_forwarders(&self) -> Result<(), DispatchError> {
         self.set_status(ForwarderStatus::Loading);
         // Both reads before taking the lock (no .await while holding it).
         let forwarders = self.nest.list_forwarders().await?;
@@ -341,6 +373,19 @@ mod tests {
             domains: StdMutex::new(domains.into_iter().map(String::from).collect()),
             next_id: StdMutex::new(0x10),
         }))
+    }
+
+    #[tokio::test]
+    async fn the_add_form_waits_for_the_read() {
+        let m = machine_with(vec![], vec![]);
+        assert_eq!(
+            m.add_possibility().reason().map(|r| r.key.clone()),
+            Some("common.still_loading".to_string())
+        );
+        assert_eq!(m.read_state(), fauna_core::possibility::ReadState::Pending);
+        m.hydrate().await.unwrap();
+        assert!(m.add_possibility().is_possible());
+        assert_eq!(m.read_state(), fauna_core::possibility::ReadState::Resolved);
     }
 
     #[tokio::test]

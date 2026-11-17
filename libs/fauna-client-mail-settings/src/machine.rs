@@ -2569,12 +2569,20 @@ impl MailSettingsMachine {
         // separately). The DAV lines are whatever the last hydrate's
         // `MuaInstructions::apply_dav_listener` made of the nest's listener —
         // or the for-node-URL default before the first.
-        let (serving_enabled, serves_webdav_set, mail_unavailable_here, deployment, prior_mua) = {
+        let (
+            serving_enabled,
+            serves_webdav_set,
+            mail_unavailable_here,
+            read,
+            deployment,
+            prior_mua,
+        ) = {
             let g = self.inner.lock().unwrap();
             (
                 g.snapshot.serving_enabled,
                 g.snapshot.serves_webdav_set,
                 g.snapshot.mail_unavailable_here,
+                g.snapshot.read,
                 g.deployment,
                 g.snapshot.mua.clone(),
             )
@@ -2607,6 +2615,9 @@ impl MailSettingsMachine {
                 || deployment.serves_dav_without_mail(),
             serving_enabled,
             mail_unavailable_here,
+            // Carried forward like the nest-sourced fields: only `hydrate`
+            // sets it (`MailSettingsSnapshot::mail_usable`).
+            read,
             // A credential of a kind this build does not name is kept in the
             // sealed config untouched and offered by no row here.
             credentials: mail
@@ -2778,6 +2789,9 @@ impl MailSettingsMachine {
             inner.snapshot.serves_webdav_set = serves_webdav_set;
             inner.snapshot.mail_unavailable_here = deployment.mail_unavailable_here;
             inner.deployment = deployment;
+            // Every read above resolved: the snapshot is the nest's answer
+            // from here on (`MailSettingsSnapshot::mail_usable`, rule 5).
+            inner.snapshot.read = true;
         }
         self.set_snapshot_from(&rows);
         if let Some(listener) = dav_listener {

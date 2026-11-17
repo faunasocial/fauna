@@ -716,6 +716,15 @@ class _StubConfig:
             # stub's hook call runs in. `None` would let an elevated run's hook
             # re-point the process's temp.
             return "stub-basetemp"
+        if name == "acme_venue_reach":
+            # Inert: the shared ACME venue's reach (`--acme-venue-reach`,
+            # helpers/acme_pebble.py) is not the subject of any pin here. The
+            # hook hands the answer to `set_reach_override`, so the reach the
+            # run already resolves is the one answer that moves nothing a later
+            # test reads; `None` would wipe a reach the run named.
+            from helpers import acme_pebble
+
+            return acme_pebble.venue_reach()
         raise AssertionError(
             f"_StubConfig was asked for an option it has no answer for: {name!r}. "
             f"`conftest.pytest_configure` grew a new option — decide what this "

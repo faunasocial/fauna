@@ -2144,6 +2144,13 @@ internal interface INestRpcClient
     /// tier definitions (the authenticated own-read powering §1 "My tiers").</summary>
     Task<IReadOnlyList<FfiTierItem>> SubscriptionTiersListAsync();
 
+    /// <summary>The sold post's <i>Change price…</i> save (monetization.md § The asking
+    /// price → <i>Re-pricing a sold post</i>): ONE shared call
+    /// (<c>FfiSubscriptionsClient.sale_price_save</c>) plans the edit against
+    /// <paramref name="tier"/>, sends only what changed and answers
+    /// Unchanged / Saved / Refused — no rule lives in the app.</summary>
+    Task<FfiSalePriceSave> SubscriptionSalePriceSaveAsync(FfiTierItem tier, string priceHint, string askingPrice);
+
     /// <summary>Create a tier via the author orchestration
     /// (<c>SubscriptionsAuthor::create_tier</c>): encrypted mode records a fresh
     /// period key in the owner's <c>fauna.state.subscriptions</c> custody then calls

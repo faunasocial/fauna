@@ -4,7 +4,8 @@ import SwiftUI
 /// of the box-recovery TRACK 1 fan-out. The launch glue (`MailEnableGlue.selfHealDeploymentSeedCustody`)
 /// sets `session.recoveryCustodyWarning` when custody is **not confirmed** (a BR-2
 /// `refusedMismatch`, an unavailable hand-off, or a thrown leg);
-/// this renders the shared `WarningBanner` — the `warning-message` cross-app
+/// a later run's cleared mark takes the warning down again (only while it still shows
+/// a custody warning); this renders the shared `WarningBanner` — the `warning-message` cross-app
 /// e2e contract — pinned at the top of each app's authed root, tap-to-dismiss.
 ///
 /// Shared FaunaKit (macOS + iOS), the apple idiom of linux's `ActionResult::Failed`

@@ -18,6 +18,8 @@ class _Common:
     enable = "Enable"
     disable = "Disable"
     load_failed = "Failed to load"
+    in_flight = "Still saving — wait for it to finish"
+    nothing_to_confirm = "Nothing is waiting to be confirmed"
     not_found = "Not found"
     search = "Search"
     clear_search = "Clear search"
@@ -525,6 +527,8 @@ class _OnboardingProvisionStep:
 class _OnboardingProvisionSubstep:
     domain_checking_availability = "Checking domain availability"
     domain_registering = "Registering domain"
+    domain_creating_zone = "Creating the DNS zone"
+    domain_setting_nameservers = "Pointing the domain at its DNS"
     domain_verifying_zone = "Verifying DNS zone"
     server_generating_dkim = "Generating DKIM keys"
     server_creating = "Creating server"
@@ -586,6 +590,71 @@ class _OnboardingHandle:
     examples_help = "Example: alice@example.com or alice@bsky.social. Format: user@domain."
     localhost_hint = "test@localhost is allowed for trying out the app."
     control_checkbox = "I control DNS for this domain"
+
+
+class _OnboardingProvider_choice:
+    title = "Choose providers"
+    description = "Connect the providers that will set up your nest. Nothing is bought or changed until you press Buy and set up on the next page."
+    @staticmethod
+    def goal_domain(*, domain: str) -> str:
+        return f"Register {domain}"
+    @staticmethod
+    def goal_dns(*, domain: str) -> str:
+        return f"DNS for {domain}"
+    goal_vps = "A server"
+    @staticmethod
+    def goal_covered_by(*, provider: str) -> str:
+        return f"Covered by {provider}"
+    goal_open = "Not covered yet — connect a provider below."
+    @staticmethod
+    def goal_price(*, price: str, renewal: str) -> str:
+        return f"{price} first year, then {renewal} a year"
+    @staticmethod
+    def goal_price_first_year(*, price: str) -> str:
+        return f"{price} first year"
+    cannot_cover_no_dns = "Doesn't run DNS."
+    cannot_cover_no_server = "Doesn't rent servers."
+    cannot_cover_no_registrar = "Doesn't register domains."
+    cannot_cover_not_registrable = "Can't register this domain."
+    @staticmethod
+    def cannot_cover_zone_missing(*, domain: str) -> str:
+        return f"This account doesn't hold {domain}."
+    cannot_cover_no_zone_door = "Can't set up DNS for a domain registered elsewhere."
+    @staticmethod
+    def cannot_cover_no_nameserver_door(*, provider: str) -> str:
+        return f"{provider} can't point a domain at another provider's DNS."
+    @staticmethod
+    def cannot_cover_pointed_elsewhere(*, provider: str) -> str:
+        return f"Your domain now points at {provider}'s DNS."
+    @staticmethod
+    def dns_not_pointed_yet(*, domain: str, provider: str) -> str:
+        return f"{domain} doesn't point at {provider} yet."
+    held_credential = "Connected with a sign-in this device already holds."
+    @staticmethod
+    def status_cover_domain(*, domain: str) -> str:
+        return f"Connect a provider that can register {domain} to continue."
+    status_cover_dns = "Connect a provider that can run DNS for your domain, or set DNS up later, to continue."
+    status_cover_vps = "Connect a provider that rents servers to continue."
+    @staticmethod
+    def status_contact_missing(*, provider: str) -> str:
+        return f"Open {provider} and fill in the registration contact to continue."
+    start_blocked_price = "Tick the box under the domain's price to agree to it."
+    start_blocked_server_type = "Choose a server type to continue."
+    manual_row_help = "Shows you the DNS records to add yourself once your nest is built."
+    providers_heading = "Providers"
+    capability_registrar = "registers domains"
+    capability_dns = "runs DNS"
+    capability_vps = "rents servers"
+    state_connected = "connected"
+    state_available = "not connected"
+    state_connecting = "connecting…"
+    manual_row = "I will set DNS up later"
+    goal_select = "Covered by"
+    connect = "Connect"
+    disconnect = "Disconnect"
+    close = "Close"
+    dialog_connected = "Connected."
+    dialog_connecting = "Connecting…"
 
 
 class _OnboardingDns_configContact_fields:
@@ -930,6 +999,7 @@ class _Onboarding:
     complete = _OnboardingComplete
     bridges = _OnboardingBridges
     handle = _OnboardingHandle
+    provider_choice = _OnboardingProvider_choice
     dns_config = _OnboardingDns_config
     vps_config = _OnboardingVps_config
     nest_provisioning = _OnboardingNest_provisioning
@@ -1057,11 +1127,14 @@ class _FeedBridge_form:
     kind = "Bridge"
     uri = "Feed URI"
     name = "Display Name"
+    kind_required = "Choose a bridge first."
+    uri_required = "Type the feed URI first."
 
 
 class _FeedCreate:
     title = "New Feed"
     name_placeholder = "My Feed"
+    name_required = "Name the feed first."
     add_rule = "Add Rule"
     mode_all = "All match"
     mode_any = "Any match"
@@ -1193,6 +1266,7 @@ class _FeedRule_chip:
 
 class _Feed:
     compose_empty = "Post cannot be empty"
+    reply_empty = "Write your reply first."
     @staticmethod
     def imported_notice(*, platform: str) -> str:
         return f"Showing the posts you imported from {platform}"
@@ -1304,6 +1378,10 @@ class _ConversationsCompose:
     body = "Body"
     resolve = "Resolve"
     write_message = "Write your message..."
+    needs_recipient = "Add who it goes to first."
+    recipient_unsupported = "This app cannot send to this recipient. Remove it and add another."
+    no_attachments_here = "Files cannot be sent to this recipient."
+    no_topic_here = "A topic cannot be set for this recipient."
     encrypted = "Encrypted"
 
 
@@ -1656,6 +1734,18 @@ class _EventsRefused_changes:
     reason = _EventsRefused_changesReason
 
 
+class _EventsCreate_blocked:
+    loading = "Your calendars are still loading."
+    @staticmethod
+    def provision_failed(*, error: str) -> str:
+        return f"Your first calendar could not be set up ({error}). It is tried again the next time Events loads."
+    add_credential = "To keep events, turn on calendar storage by adding a credential in Settings → Mail & Calendar."
+    admin_enable_calendar = "To keep events, turn on calendar for this nest in Nest Admin → Calendar first."
+    not_here = "Events cannot be kept on this account, because this nest does not serve calendars."
+    open_mail_settings = "Open Mail & Calendar settings"
+    open_admin_calendar = "Open Nest Admin → Calendar"
+
+
 class _EventsError:
     load_calendars = "Failed to load calendars"
     load_events = "Failed to load events"
@@ -1753,10 +1843,14 @@ class _Events:
     ics_unreadable = "The chosen .ics file could not be read. Choose it again."
     set_reminder = "Set Reminder"
     setting = "Setting..."
+    @staticmethod
+    def save_failed(*, error: str) -> str:
+        return f"The event could not be saved ({error}). What you typed is kept; press Save to try again."
     rsvp = _EventsRsvp
     invite = _EventsInvite
     reminder = _EventsReminder
     refused_changes = _EventsRefused_changes
+    create_blocked = _EventsCreate_blocked
     error = _EventsError
 
 
@@ -1967,6 +2061,7 @@ class _Atproto_settings:
     def error_deauthorize(*, message: str) -> str:
         return f"Failed to stop external apps posting as you: {message}"
     error_no_identity = "This app cannot authorize posting from external apps. Use another of your devices to turn it on."
+    page_unavailable = "Bluesky settings are not available in this session: this device could not read your identity key. Sign in again to try once more."
     @staticmethod
     def error_delegation_untrusted(*, message: str) -> str:
         return f"The stored authorization for external apps was not created by this account, so it is not being shown. ({message})"
@@ -2253,7 +2348,9 @@ class _Media:
     @staticmethod
     def error_delete(*, message: str) -> str:
         return f"Failed to delete: {message}"
-    error_no_set = "You don't have a folder to upload into yet. Create a folder under Settings → Folders first."
+    @staticmethod
+    def error_first_folder(*, message: str) -> str:
+        return f"Couldn't create your first folder, so nothing was uploaded: {message}. Try the upload again."
     @staticmethod
     def error_restore(*, message: str) -> str:
         return f"Failed to restore version: {message}"
@@ -2645,6 +2742,13 @@ class _Backups:
     backup_destination_kind_select_label = "Where should the copy live?"
     backup_destination_capacity_placeholder = "Storage limit, e.g. 50 GB"
     backup_destination_capacity_invalid = "Enter a storage limit like \"50 GB\" or \"500 MB\"."
+    backup_destination_url_required = "Type the address of the nest to back up to first."
+    snapshot_delete_already_pending = "Already scheduled for deletion."
+    snapshot_delete_already_deleted = "Already deleted — recover it to keep it."
+    snapshot_select_folder_first = "Choose a folder first."
+    restore_kind_unticked = "Tick this snapshot's kind to restore it."
+    snapshot_restore_destination_required = "Type the folder to restore into first."
+    snapshot_restore_running = "A restore is already running."
     @staticmethod
     def backup_destination_usage(*, held: str, cap: str) -> str:
         return f"{held} of {cap} used"
@@ -2820,11 +2924,14 @@ class _Backups:
 
 class _Folders:
     title = "Folders"
+    follow_handle_required = "Type the folder owner's handle first."
+    follow_name_required = "Type the folder's name first."
+    follow_not_ready = "Sign in first, then follow the folder."
+    share_recipient_required = "Type who to share with first."
+    share_not_ready = "Sharing needs your conversations to be ready — wait a moment, then try again."
     photo_library_section = "Photo Library"
     synced_locations = "Synced Locations"
     no_locations_bound = "No locations bound to this set."
-    location_path_placeholder = "Location path"
-    bind_location = "Bind Location"
     choose = "Choose…"
     @staticmethod
     def deletes_held(*, count: str) -> str:
@@ -2862,6 +2969,7 @@ class _Folders:
         return f"Shared folder {code}"
     offline_share_code_malformed = "That does not look like a code. It should be 64 letters and numbers."
     offline_share_code_own = "That is this device's own code — type the other person's."
+    offline_share_code_needed = "Type the other person's code first."
     @staticmethod
     def error_offline_share(*, message: str) -> str:
         return f"Sharing did not finish: {message}"
@@ -2925,6 +3033,7 @@ class _DevicesWizard:
     retention_days = "Keep days"
     review = "Review"
     creating_folder = "Creating folder..."
+    confirm_public_pending = "Answer the public-folder question above to create it."
     failed_create = "Failed to create folder."
     select_devices_roles = "Select devices and choose what each one does (optional — skip to just store files here):"
     review_name = "Name"
@@ -3000,13 +3109,7 @@ class _DevicesPeers:
 
 
 class _DevicesSync_locations:
-    title = "Sync Locations"
-    location_placeholder = "Location path (or use Browse...)"
     browse = "Browse..."
-    add_location = "Add Location"
-    no_locations = "No sync locations configured."
-    folder_placeholder = "Folder name"
-    unbound = "(unbound)"
     on_demand_label = "On-demand"
     on_demand_needs_fuse3 = "On-demand needs the fuse3 package. Install it, then restart Fauna."
     on_demand_no_fuse_device = "On-demand isn't available on this system."
@@ -3507,6 +3610,9 @@ class _SettingsRecovery_kit:
     def review_remove_unsynced_seats(*, seats: str) -> str:
         return f"They are also in {seats} group chat(s) not yet synced to this device. Choose Remove again after syncing completes, or from a device that has those chats."
     @staticmethod
+    def review_keep_failed(*, reason: str) -> str:
+        return f"Could not record your decision yet: {reason}. They stay listed until it succeeds."
+    @staticmethod
     def review_verdict_failed(*, who: str, reason: str) -> str:
         return f"Removed {who} from your group conversations, but your review list could not be updated yet: {reason}. They may still be listed here until it succeeds."
     backup_regrant_running = "Restarting your backups under your new identity…"
@@ -3954,6 +4060,12 @@ class _SettingsP2p_page:
     connection_group_description = "Network information for P2P connectivity"
     lan_addresses = "LAN Addresses"
     lan_none = "(no active interfaces detected)"
+    service_unavailable = "Peer connections did not start on this device. Restart Fauna to try again."
+    node_id_copy_needs_tunnel = "Start the tunnel to get a node ID to copy."
+    lan_copy_none = "No LAN address to copy."
+    @staticmethod
+    def contact_remove_failed(*, name: str, error: str) -> str:
+        return f"Could not remove {name}: {error}"
 
 
 class _SettingsErrors:
@@ -4237,6 +4349,9 @@ class _Mail_settings:
     unavailable_notice = "Mail can't be turned on for this server: it was set up without the virus scanner and spam filter that mail needs. To use mail, set up a server that includes them."
     keys_info = "Your mail is protected by an encryption key held on your Fauna devices. Each app password or token you add unlocks that same key for one email app (Thunderbird, Apple Mail, …). Rotate your keys if a password or token may have leaked, or if a device that had your mail set up was lost or stolen — rotating replaces the key so the exposed credential can no longer read your mail (messages you've already received stay readable). If you're just retiring an app you no longer use, revoke that one credential instead — you don't need to rotate."
     credentials_on_connected_apps = "Your app passwords are listed under Settings → Connected apps — copy, reveal or disconnect each one there."
+    usable_needs_mail_on = "Turn on mail on the Mail & Calendar page first."
+    usable_reading = "Checking whether mail is on for your account…"
+    usable_unbuilt = "Mail settings could not be loaded on this device. Signing out and back in rebuilds them."
     serve_here_label = "Serve my mail & calendar over IMAP/CalDAV on this nest"
     serve_here_subtitle = "When on, this nest answers IMAP and CalDAV for your mailbox so email and calendar apps can connect here. Turn it off if you read your mail on a different nest — your own Fauna apps are unaffected either way."
     forwarding_title = "Forwarding"
@@ -4785,6 +4900,7 @@ class _Search_page:
     def search_failed_reason(*, reason: str) -> str:
         return f"Search failed: {reason}"
     load_more_failed = "Load more failed"
+    query_required = "Type something to search for first."
     search_messages = "Search messages..."
     badge_post = "Post"
     badge_profile = "Profile"
@@ -4809,6 +4925,7 @@ class _NostrLink_account:
     nip07_prompt = "Your browser extension will be prompted for the public key."
     link_button = "Link Account"
     enter_nsec = "Please enter an nsec key"
+    enter_bunker_url = "Paste the bunker URL from your signer app first."
     no_nip07 = "No NIP-07 browser extension detected"
 
 
@@ -4858,6 +4975,8 @@ class _NostrRelays:
     add = "Add Relay"
     placeholder = "wss://relay.example.com"
     invalid_url = "Relay URL must start with wss:// or ws://"
+    url_required = "Type a relay address first."
+    already_added = "This relay is already in your list."
     private_address = "Relays on a private network or on this device can't be used. Use a public relay address."
 
 
@@ -4867,6 +4986,7 @@ class _NostrFollows:
     none = "No Nostr follows yet."
     pubkey_placeholder = "npub1... or hex pubkey"
     petname_placeholder = "Petname"
+    pubkey_required = "Type the npub or hex pubkey to follow first."
 
 
 class _NostrConnected_apps:
@@ -4899,6 +5019,7 @@ class _NostrZap_signers:
     none = "You have not designated any signer, so no zap is counted as paid. Add your wallet provider's signer key to start believing its receipts."
     unnamed = "Unnamed signer"
     invalid_pubkey = "A signer pubkey must be 64 hexadecimal characters."
+    pubkey_required = "Paste your wallet provider's signer pubkey first."
 
 
 class _Nostr:
@@ -5133,6 +5254,8 @@ class _AdminUsers_page:
     suspend_default_reason = "Suspended by admin"
     make_admin = "Make Admin"
     remove_admin = "Remove Admin"
+    remove_admin_last_superadmin = "This is the last admin with full rights. Make another user an admin first."
+    age_band_needs_guardian = "Pick a guardian first. An age band applies only to a supervised account."
     @staticmethod
     def supervised_by(*, guardian: str) -> str:
         return f"Supervised by {guardian}"
@@ -5995,6 +6118,7 @@ class _AdminDnsCert:
     @staticmethod
     def issuance_failed(*, date: str, error: str) -> str:
         return f"Certificate request failed ({date}): {error}"
+    issue_pending = "Finish or cancel the certificate request below first."
 
 
 class _AdminDnsRename:
@@ -6018,6 +6142,10 @@ class _AdminDnsRename:
     abort = "Abort rename"
     abort_confirm = "Confirm abort"
     abort_postflip_warning = "Aborting after the anchor flip re-flips the primary and rewrites every domain's DNS — expensive but safe."
+    needs_second_domain = "Add a second domain to rename onto."
+    in_progress = "A rename is already in progress."
+    target_required = "Pick the new primary domain."
+    days_invalid = "Type a whole number of days from 1 to 30, or leave it blank."
 
 
 class _AdminDns:
@@ -6071,6 +6199,15 @@ class _AdminDns:
     dmarc_policy_reject = "Reject (default)"
     dmarc_policy_quarantine = "Quarantine"
     dmarc_policy_none = "None — reports only"
+    mode_needs_credential = "Add a DNS-provider credential that covers this domain first."
+    manage_all_needs_domain = "Add a domain first."
+    manage_all_needs_credential = "Add a DNS-provider credential that covers every domain first."
+    domain_required = "Type a domain name."
+    domain_malformed = "Type a domain name such as example.com."
+    domain_duplicate = "That domain is already added."
+    remove_primary_blocked = "Rename the primary domain onto another domain to remove it."
+    credential_provider_required = "Pick a DNS provider."
+    credential_field_required = "Fill in every field."
     cert = _AdminDnsCert
     rename = _AdminDnsRename
 
@@ -6694,6 +6831,12 @@ class _Family:
     contact_add_placeholder = "Actor ID (hex)"
     contact_add_button = "Pre-approve contact"
     contact_add_invalid_actor_id = "Not a valid actor ID (expected hex)"
+    contact_add_required = "Type the actor ID to pre-approve first."
+    transfer_required = "Type the new guardian's actor ID first."
+    transfer_invalid_actor_id = "Not a valid actor ID for the new guardian (expected hex)"
+    @staticmethod
+    def policy_screen_time_invalid(*, reason: str) -> str:
+        return f"Screen time cannot be saved: {reason}"
     graduate_button = "Graduate to full account"
     @staticmethod
     def graduate_confirm_button(*, handle: str) -> str:
@@ -6796,6 +6939,7 @@ class _Notifications:
         return f"{sender} interacted with your content"
     dismiss = "Dismiss"
     clear_all = "Clear all"
+    nothing_to_clear = "No notifications to clear"
     @staticmethod
     def row_tip_sats(*, sender: str, value: str) -> str:
         return f"{sender} tipped {value} sats on your post"
@@ -6958,6 +7102,10 @@ class _Profile:
 
 class _Subscriptions:
     title = "Subscriptions"
+    tier_name_required = "Name the tier first."
+    redeem_code_required = "Type the claim code first."
+    claim_needs_tier = "Create a tier first — a claim code entitles one of your tiers."
+    provider_needs_tier = "Create a tier first — a payment provider sells one of your tiers."
     my_tiers = "My Tiers"
     my_subscriptions = "My Subscriptions"
     pending_requests = "Pending Requests"
@@ -7768,6 +7916,12 @@ class _Connected_apps:
     @staticmethod
     def trust_scope_ext_ro(*, publisher: str, kinds: str) -> str:
         return f"Keys to your records published by {publisher}: {kinds} — read only"
+    @staticmethod
+    def trust_scope_deposit(*, folder: str) -> str:
+        return f"Put files into your folder \"{folder}\""
+    trust_scope_deposit_deleted = "Put files into a folder you have since deleted"
+    trust_scope_deposit_unnamed = "Put files into one of your folders"
+    trust_scope_op_unknown = "An operation your nest does for this app"
     trust_status_expired = "Expired — the app will ask again if it needs them"
     trust_empty = "This app holds no keys to your records"
     trust_bound_note = "On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and does not yet block content arriving after you disconnect."

@@ -31,6 +31,13 @@
         <string>fetch</string>
         <string>processing</string>
     </array>
+    <!-- public-text: apple-permission-strings: every usage description from here to
+         the end marker is a public text, changed only in a public-texts round
+         (docs/goal/architecture/public-texts.md § The boundary). Info.plist holds
+         the same region, plus photo backup. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Fauna connects directly to your other devices on this network, so they stay in step even when your nest can't be reached.</string>
+    <!-- public-text-end: apple-permission-strings -->
     <!-- Export compliance: NO. Apple's rule ("Complying with Encryption Export
          Regulations"): set NO when the app uses only encryption that is exempt
          from export compliance documentation requirements. Fauna implements only

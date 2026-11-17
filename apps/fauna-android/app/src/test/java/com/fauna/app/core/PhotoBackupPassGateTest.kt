@@ -58,6 +58,26 @@ class PhotoBackupPassGateTest {
         assertFalse(gate.finish())
     }
 
+    /**
+     * Every refused claim is counted, burst or not — the mid-pass barrier the
+     * coalescing e2e reads (`requests_coalesced`): "the second request reached the
+     * gate while the first pass ran" is otherwise unobservable from outside.
+     * A winning claim counts nothing.
+     */
+    @Test
+    fun everyRefusedClaimIsCountedAndAWinningOneIsNot() {
+        val gate = PhotoBackupPassGate()
+        assertEquals(0, gate.coalescedRequests)
+        assertTrue(gate.claim())
+        assertEquals(0, gate.coalescedRequests)
+        repeat(3) { assertFalse(gate.claim()) }
+        assertEquals(3, gate.coalescedRequests)
+        assertTrue(gate.finish())
+        assertFalse(gate.finish())
+        assertTrue(gate.claim())
+        assertEquals(3, gate.coalescedRequests)
+    }
+
     @Test
     fun releaseDiscardsARememberedRequestAndOpensTheGate() {
         val gate = PhotoBackupPassGate()

@@ -136,10 +136,6 @@ def running_sync_agent_paths():
     kernel32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
     kernel32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
     kernel32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-    kernel32.OpenProcess.restype = wt.HANDLE
-    kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
-    kernel32.QueryFullProcessImageNameW.argtypes = [
-        wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
     kernel32.CloseHandle.argtypes = [wt.HANDLE]
 
     wanted = {name.lower() for name in _AGENT_IMAGE_NAMES}
@@ -158,19 +154,50 @@ def running_sync_agent_paths():
     finally:
         kernel32.CloseHandle(snap)
 
-    paths = []
-    for pid in pids:
-        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            continue
-        try:
-            buf = ctypes.create_unicode_buffer(32768)
-            size = wt.DWORD(len(buf))
-            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-                paths.append(buf.value)
-        finally:
-            kernel32.CloseHandle(handle)
-    return paths
+    return [path for path in map(process_image_path, pids) if path]
+
+
+def process_image_path(pid) -> str | None:
+    """The full Win32 path of process ``pid``'s image, or ``None`` when it cannot be
+    read (gone, or another user's). OBSERVE ONLY.
+
+    ``QueryFullProcessImageNameW`` in-process, for :func:`running_sync_agent_paths`'
+    reason. Compare it through :func:`same_file`: an agent started as
+    ``<exe-dir>\\..\\fauna-sync-agent.exe`` must equal the plain spelling."""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wt.HANDLE
+    kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+    kernel32.CloseHandle.argtypes = [wt.HANDLE]
+
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wt.DWORD(len(buf))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def stop_process_under(pid, root) -> None:
+    """Stop process ``pid`` only if its image lives under ``root`` — a process a test
+    started from its own scratch; a reused pid belongs to someone else and is left
+    alone. By pid, never by image name (a sibling's agent shares the name)."""
+    subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command",
+         f"$p = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue; "
+         f"if ($p -and $p.Path -and $p.Path.StartsWith('{root}', "
+         "[StringComparison]::OrdinalIgnoreCase)) { Stop-Process -Id $p.Id -Force }"],
+        capture_output=True, text=True, timeout=60,
+    )
 
 
 def describe_blocker(paths, install_dir):
@@ -267,6 +294,11 @@ def data_dir_of(command_line):
 def same_dir(a, b) -> bool:
     """Do two spellings of a directory name the same one? Pure."""
     return a is not None and b is not None and _norm(str(a)) == _norm(str(b))
+
+
+#: The same comparison for a file: ``_norm``'s ``abspath`` folds ``..``, and
+#: ``normcase`` the case and the separator spelling.
+same_file = same_dir
 
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000

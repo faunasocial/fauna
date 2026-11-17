@@ -32,8 +32,8 @@ shared drain loop natively, then android, whose outbox and drain live in
 which the conversations session borrows), and macos and ios, which reach the
 same ``fauna-ffi`` outbox through FaunaKit's ``ConnectionWordFeed``, and web,
 which runs it in ``fauna-wasm`` over the tab's outbox (its relaunch is a reload
-over the same origin's store); the other apps add their marker as their
-trickle-down batch reaches them.
+over the same origin's store), and windows, whose shell's connection handler
+hands the same ``fauna-ffi`` outbox its word.
 """
 from __future__ import annotations
 
@@ -55,6 +55,7 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
     pytest.mark.web,
+    pytest.mark.windows,
     pytest.mark.real_conversations,
 ]
 

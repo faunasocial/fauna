@@ -102,6 +102,7 @@ fn mail_read_scope() -> TrustScope {
         class: "content.read".into(),
         kind: Some("mail".into()),
         tier: None,
+        folder: None,
     }
 }
 

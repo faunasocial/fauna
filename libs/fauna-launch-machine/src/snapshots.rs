@@ -185,6 +185,34 @@ impl LaunchSnapshot {
             _ => self.locked_until_secs == Some(shown_locked_until_secs),
         }
     }
+
+    /// How a signed-in session reports a sign-in that did not mint, after
+    /// `consecutive_failures` attempts in a row (`transport-connection.md`
+    /// § Connection-status indicator). A failure the machine will retry —
+    /// `Offline { transient: true }`, not refused: the nest unresolvable,
+    /// refusing, timing out, or answering with a fault a retry can clear — is a
+    /// gap in reaching the nest, so it goes on the global `connection-status`
+    /// indicator as the wire word returned (`"connecting"`, then
+    /// `"unreachable"` once the count reaches the shared
+    /// [`CONNECTION_UNREACHABLE_AFTER_CONSECUTIVE_FAILURES`](fauna_core::format::CONNECTION_UNREACHABLE_AFTER_CONSECUTIVE_FAILURES),
+    /// the supervisor's own rule), and never on an error banner, which would
+    /// outlive the gap. `None` is a verdict a retry cannot change, which the
+    /// app shows as the error it is. One rule for every app that mints after
+    /// its main shell is up.
+    pub fn session_mint_gap_word(&self, consecutive_failures: u32) -> Option<&'static str> {
+        if self.phase != (LaunchPhase::Offline { transient: true }) || self.sign_in_refused {
+            return None;
+        }
+        Some(
+            if consecutive_failures
+                >= fauna_core::format::CONNECTION_UNREACHABLE_AFTER_CONSECUTIVE_FAILURES
+            {
+                "unreachable"
+            } else {
+                "connecting"
+            },
+        )
+    }
 }
 
 /// [`LaunchSnapshot::lock_notice_holds`] as a free function — the UniFFI face
@@ -324,6 +352,50 @@ pub enum RefreshReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sign-in the machine will retry is a gap in reaching the nest — the
+    /// indicator's "Connecting…", then "Cannot connect" at the shared threshold —
+    /// and a refusal or any terminal verdict is no gap at all.
+    #[test]
+    fn a_retried_session_mint_failure_is_a_connection_gap_and_a_verdict_is_not() {
+        use fauna_core::format::CONNECTION_UNREACHABLE_AFTER_CONSECUTIVE_FAILURES as AFTER;
+        let gap = LaunchSnapshot {
+            phase: LaunchPhase::Offline { transient: true },
+            last_error: Some(
+                "WebSocket error: ws connect: IO error: failed to lookup address information"
+                    .into(),
+            ),
+            ..LaunchSnapshot::initial()
+        };
+        assert_eq!(gap.session_mint_gap_word(1), Some("connecting"));
+        assert_eq!(gap.session_mint_gap_word(AFTER - 1), Some("connecting"));
+        assert_eq!(gap.session_mint_gap_word(AFTER), Some("unreachable"));
+        assert_eq!(gap.session_mint_gap_word(AFTER + 5), Some("unreachable"));
+
+        let refused = LaunchSnapshot {
+            sign_in_refused: true,
+            ..gap.clone()
+        };
+        assert_eq!(
+            refused.session_mint_gap_word(1),
+            None,
+            "a refusal is a verdict"
+        );
+        let terminal = LaunchSnapshot {
+            phase: LaunchPhase::Offline { transient: false },
+            ..gap.clone()
+        };
+        assert_eq!(
+            terminal.session_mint_gap_word(1),
+            None,
+            "a terminal failure"
+        );
+        let wizard = LaunchSnapshot {
+            phase: LaunchPhase::Boot,
+            ..gap
+        };
+        assert_eq!(wizard.session_mint_gap_word(1), None, "no failure at all");
+    }
 
     /// The locked notice holds while the machine is on this lock or mid-flight,
     /// and gives way to any settled snapshot that is not this lock.

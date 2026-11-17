@@ -657,109 +657,178 @@ public struct AdminUsersHubView: View {
         // `eviction`/`isAdmin` here — that dropped the `!is_admin` guard (Evict
         // rendered on admin rows the nest always refuses with `fauna.admin.conflict`)
         // and never offered Suspend at all (priority #2/#4).
-        let controls = adminUserRowControls(user: user)
-        HStack(spacing: 12) {
-            automationText(Ids.userActorId, shortHex(user.actorId))
-                .font(.caption.monospaced())
+        // The take-over offer keys on the viewer, which the VM holds.
+        let controls = vm.rowControls(user)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 12) {
+                automationText(Ids.userActorId, shortHex(user.actorId))
+                    .font(.caption.monospaced())
 
-            tierMenu(
-                id: "admin-users-tier-select",
-                // Read the tier LIVE from the vm list by the row's stable actorId,
-                // so the registry read reflects the post-update refetch (the row
-                // view persists, so a captured `user.tier` would stay stale).
-                current: { vm.users.first { $0.actorId == user.actorId }?.tier ?? user.tier }
-            ) { newTier in
-                Task { await vm.setUserTier(user, tier: newTier) }
-            }
-            // This picker COMMITS on pick (the tier is the quota, so the write is
-            // `users.update`) — unlike the mint form's `admin-settings-tier-select`,
-            // which only edits a local buffer and therefore stays live offline.
-            .faunaGate("fauna.admin.users.update")
+                tierMenu(
+                    id: "admin-users-tier-select",
+                    // Read the tier LIVE from the vm list by the row's stable actorId,
+                    // so the registry read reflects the post-update refetch (the row
+                    // view persists, so a captured `user.tier` would stay stale).
+                    current: { vm.users.first { $0.actorId == user.actorId }?.tier ?? user.tier }
+                ) { newTier in
+                    Task { await vm.setUserTier(user, tier: newTier) }
+                }
+                // This picker COMMITS on pick (the tier is the quota, so the write is
+                // `users.update`) — unlike the mint form's `admin-settings-tier-select`,
+                // which only edits a local buffer and therefore stays live offline.
+                .faunaGate("fauna.admin.users.update")
 
-            automationText(Ids.adminUsersMailServingStatus,
-                           // Read the serving flag LIVE from the vm list by stable
-                           // actorId (post-refetch), then resolve the enabled→label
-                           // choice through shared Rust (`mail_serving_status_label`)
-                           // so no client hard-codes the serving_here/disabled keys
-                           // (value-formatting.md; priority #2 — the deviceStatusLabel
-                           // pattern).
-                           renderLocalizedText(mailServingStatusLabel(
-                               enabled: vm.users.first { $0.actorId == user.actorId }?.mailServingEnabled
-                                   ?? user.mailServingEnabled)))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                automationText(Ids.adminUsersMailServingStatus,
+                               // Read the serving flag LIVE from the vm list by stable
+                               // actorId (post-refetch), then resolve the enabled→label
+                               // choice through shared Rust (`mail_serving_status_label`)
+                               // so no client hard-codes the serving_here/disabled keys
+                               // (value-formatting.md; priority #2 — the deviceStatusLabel
+                               // pattern).
+                               renderLocalizedText(mailServingStatusLabel(
+                                   enabled: vm.users.first { $0.actorId == user.actorId }?.mailServingEnabled
+                                       ?? user.mailServingEnabled)))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
-            Spacer()
+                Spacer()
 
-            // Suspend + Evict are independent (a non-admin Active row offers both;
-            // a `warning` row offers Suspend + Restore), so these are three separate
-            // `if`s off the shared booleans, not a mutually-exclusive branch.
-            if controls.suspend {
-                Button(L.admin.usersPage.suspend, role: .destructive) {
-                    Task { await vm.suspendUser(user) }
+                // Suspend + Evict are independent (a non-admin Active row offers both;
+                // a `warning` row offers Suspend + Restore), so these are three separate
+                // `if`s off the shared booleans, not a mutually-exclusive branch.
+                if controls.suspend {
+                    Button(L.admin.usersPage.suspend, role: .destructive) {
+                        Task { await vm.suspendUser(user) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersSuspendButton)
+                    .automationActivate(Ids.adminUsersSuspendButton) {
+                        Task { await vm.suspendUser(user) }
+                    }
+                    .faunaGate("fauna.admin.users.suspend")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityIdentifier(Ids.adminUsersSuspendButton)
-                .automationActivate(Ids.adminUsersSuspendButton) {
-                    Task { await vm.suspendUser(user) }
+                if controls.evict {
+                    Button(L.admin.usersPage.evict, role: .destructive) {
+                        Task { await vm.evictUser(user) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersEvictButton)
+                    .automationActivate(Ids.adminUsersEvictButton) {
+                        Task { await vm.evictUser(user) }
+                    }
+                    .faunaGate("fauna.admin.users.evict")
                 }
-                .faunaGate("fauna.admin.users.suspend")
+                if controls.restore {
+                    Button(L.admin.usersPage.cancelEviction) {
+                        Task { await vm.cancelEviction(user) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersCancelEvictionButton)
+                    .automationActivate(Ids.adminUsersCancelEvictionButton) {
+                        Task { await vm.cancelEviction(user) }
+                    }
+                    .faunaGate("fauna.admin.users.cancel_eviction")
+                }
+                // The roster surface's grant/revoke instrument (admin.md § Admin
+                // continuity and succession) — mutually exclusive per row like the
+                // cut-off trio: a plain row offers Make Admin, an is_admin row
+                // offers Remove Admin.
+                if controls.makeAdmin {
+                    Button(L.admin.usersPage.makeAdmin) {
+                        Task { await vm.makeAdmin(user) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersMakeAdminButton)
+                    .automationActivate(Ids.adminUsersMakeAdminButton) {
+                        Task { await vm.makeAdmin(user) }
+                    }
+                    .faunaGate("fauna.admin.admins.add")
+                }
+                if controls.removeAdmin {
+                    Button(L.admin.usersPage.removeAdmin, role: .destructive) {
+                        Task { await vm.removeAdmin(user) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersRemoveAdminButton)
+                    .automationActivate(Ids.adminUsersRemoveAdminButton) {
+                        Task { await vm.removeAdmin(user) }
+                    }
+                    .faunaGate("fauna.admin.admins.remove")
+                }
             }
-            if controls.evict {
-                Button(L.admin.usersPage.evict, role: .destructive) {
-                    Task { await vm.evictUser(user) }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityIdentifier(Ids.adminUsersEvictButton)
-                .automationActivate(Ids.adminUsersEvictButton) {
-                    Task { await vm.evictUser(user) }
-                }
-                .faunaGate("fauna.admin.users.evict")
-            }
-            if controls.restore {
-                Button(L.admin.usersPage.cancelEviction) {
-                    Task { await vm.cancelEviction(user) }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityIdentifier(Ids.adminUsersCancelEvictionButton)
-                .automationActivate(Ids.adminUsersCancelEvictionButton) {
-                    Task { await vm.cancelEviction(user) }
-                }
-                .faunaGate("fauna.admin.users.cancel_eviction")
-            }
-            // The roster surface's grant/revoke instrument (admin.md § Admin
-            // continuity and succession) — mutually exclusive per row like the
-            // cut-off trio: a plain row offers Make Admin, an is_admin row
-            // offers Remove Admin.
-            if controls.makeAdmin {
-                Button(L.admin.usersPage.makeAdmin) {
-                    Task { await vm.makeAdmin(user) }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityIdentifier(Ids.adminUsersMakeAdminButton)
-                .automationActivate(Ids.adminUsersMakeAdminButton) {
-                    Task { await vm.makeAdmin(user) }
-                }
-                .faunaGate("fauna.admin.admins.add")
-            }
-            if controls.removeAdmin {
-                Button(L.admin.usersPage.removeAdmin, role: .destructive) {
-                    Task { await vm.removeAdmin(user) }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityIdentifier(Ids.adminUsersRemoveAdminButton)
-                .automationActivate(Ids.adminUsersRemoveAdminButton) {
-                    Task { await vm.removeAdmin(user) }
-                }
-                .faunaGate("fauna.admin.admins.remove")
-            }
+            takeOverLine(user, offered: controls.takeOver)
         }
         .padding(.vertical, 4)
+    }
+
+    /// The supervised row's take-over line (`family-safety.md` § App surface →
+    /// *Admin take-over*): `admin-users-supervised-by` naming the guardian (the
+    /// shared label), the Take over button when the shared offer says so, and
+    /// the armed confirm triple in its place while armed — one row at a time,
+    /// held by actor id on the VM (linux `build_take_over_line`). Nothing on an
+    /// unsupervised row.
+    @ViewBuilder
+    private func takeOverLine(_ user: FfiAdminUser, offered: Bool) -> some View {
+        if let guardian = adminUserGuardianLabel(user: user) {
+            let armed = vm.isTakeOverArmed(user)
+            HStack(spacing: 8) {
+                automationText(Ids.adminUsersSupervisedBy,
+                               L.admin.usersPage.supervisedBy(guardian: guardian))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                if offered && !armed {
+                    Button(L.admin.usersPage.takeOver) {
+                        vm.armTakeOver(user)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersTakeOverButton)
+                    .automationActivate(Ids.adminUsersTakeOverButton) {
+                        vm.armTakeOver(user)
+                    }
+                }
+            }
+            if armed {
+                HStack(spacing: 8) {
+                    automationText(Ids.adminUsersTakeOverConfirmSummary,
+                                   L.admin.usersPage.takeOverConfirmSummary(
+                                       ward: adminPickerOption(user: user), guardian: guardian))
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer()
+
+                    Button(L.admin.usersPage.takeOverConfirm, role: .destructive) {
+                        Task { await vm.confirmTakeOver() }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersTakeOverConfirmButton)
+                    .automationActivate(Ids.adminUsersTakeOverConfirmButton) {
+                        Task { await vm.confirmTakeOver() }
+                    }
+                    .faunaGate("fauna.family.transfer")
+
+                    Button(L.admin.usersPage.takeOverCancel) {
+                        vm.cancelTakeOver()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersTakeOverCancelButton)
+                    .automationActivate(Ids.adminUsersTakeOverCancelButton) {
+                        vm.cancelTakeOver()
+                    }
+                }
+            }
+        }
     }
 
     // A control at its bound is disabled, not clickable-and-guarded (admin.md § 2

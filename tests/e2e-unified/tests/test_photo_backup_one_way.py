@@ -30,8 +30,14 @@ could, in a broken world, propagate the tombstone back into PhotoKit.
 honest read available: `PHAsset.fetchAssets` is what "the phone still has the
 photo" means, and the pass funnel publishes its count (`assets_seen`). A pass
 driven after the nest-side delete that still sees every photo is the assertion.
+**On android** the funnel has no `assets_seen` leg (convention 11: absent, never
+zero), and none is needed: the camera roll is MediaStore, which the harness reads
+directly (`AndroidDriver.photo_library_holds`, the same provider
+`PhotoBackupEngine.scanMediaStore` reads), so the assertion there is that the very
+photo this test backed up is still listed after the nest-side delete and a fresh
+pass.
 
-**Why this module is iOS-only** — macOS runs the same engine against the
+**Why macOS is not marked here** — macOS runs the same engine against the
 machine-global host Photos library, which convention 10 keeps every ordinary launch
 away from, and it would be a particularly poor idea to point *this* test at a real
 person's photo library. The macOS column runs this very function from
@@ -64,6 +70,7 @@ from helpers.waiting import describe_photo_backup_funnel, wait_until
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 
@@ -88,7 +95,8 @@ def test_deleting_the_backed_up_copy_leaves_the_camera_roll_alone(
 
     prepare_photos_access(app)
     tag = a_tag()
-    driver.add_photo_to_library(str(a_real_png(tmp_path, tag=tag)))
+    photo = str(a_real_png(tmp_path, tag=tag))
+    driver.add_photo_to_library(photo)
     enable_photo_backup(app)
     granted(app)
 
@@ -106,8 +114,11 @@ def test_deleting_the_backed_up_copy_leaves_the_camera_roll_alone(
 
     # How many assets the library holds, as the app sees it. Captured BEFORE the
     # delete, because it is the number the post-delete pass is compared against.
-    assets_before = funnel(driver)["assets_seen"]
-    assert assets_before > 0, (
+    # android reads the library itself instead (the module docstring), so it
+    # captures nothing here.
+    android = driver.is_android()
+    assets_before = None if android else funnel(driver)["assets_seen"]
+    assert android or assets_before > 0, (
         "the app's own pass reports an empty photo library, so there is no photo "
         f"for this test to protect. {describe_photo_backup_funnel(driver)}"
     )
@@ -151,6 +162,18 @@ def test_deleting_the_backed_up_copy_leaves_the_camera_roll_alone(
     _, completed_before = passes(driver)
     driver.click("photo-backup-sync-now-button")
     await_pass_after(driver, completed_before, what="the nest-side delete")
+
+    if android:
+        assert driver.photo_library_holds(photo), (
+            "DELETING THE BACKED-UP COPY REACHED BACK INTO THE CAMERA ROLL. "
+            f"MediaStore no longer lists the photo carrying {tag!r} after the "
+            "nest-side delete and a fresh pass. `folders.md:324` makes the photo "
+            "library backup-type (one-way) precisely so that a nest-side change "
+            "can never delete from or write into the camera roll, and "
+            "`principles.md`'s no-user-data-loss invariant makes a lost "
+            f"camera-roll photo irrecoverable. {describe_photo_backup_funnel(driver)}"
+        )
+        return
 
     after = funnel(driver)
     assert after["assets_seen"] == assets_before, (

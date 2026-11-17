@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.editorNoteText
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
@@ -21,6 +22,7 @@ import com.fauna.app.ui.viewmodel.FeatureAuthoringState
 import com.fauna.app.ui.viewmodel.FeatureEditorActions
 import com.fauna.ffi.FfiPolicyEditorView
 import social.fauna.generated.Ids
+import uniffi.fauna_core.Possibility
 
 /**
  * The shared `feature-policy-editor` family's paint — ONE composable for all
@@ -52,6 +54,7 @@ fun FeaturePolicyEditorPane(
     onRemove: () -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    saveAnswer: Possibility = Possibility.Possible,
 ) {
     val context = LocalContext.current
     // One declaration per tier, each a literal first argument (the checker
@@ -64,6 +67,10 @@ fun FeaturePolicyEditorPane(
         "guardian" -> guardianGate
         else -> selfGate
     }
+    // Save is painted from the draft's own validity (`ui/README.md` § Offer
+    // only what is possible, rule 4's form case) folded with the offline gate;
+    // the shared `save()` refuses with the same reason. Remove carries no draft.
+    val saveGate = faunaFormGate(saveAnswer, gate)
 
     Card(
         modifier = modifier.fillMaxWidth().testTag(Ids.FEATURE_POLICY_EDITOR),
@@ -143,7 +150,7 @@ fun FeaturePolicyEditorPane(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onSave,
-                    enabled = gate.enabled,
+                    enabled = saveGate.enabled,
                     modifier = Modifier.testTag(Ids.FEATURE_POLICY_EDITOR_SAVE_BUTTON),
                 ) { Text(stringResource(R.string.features_editor_save)) }
                 if (view.canRemove) {
@@ -158,7 +165,7 @@ fun FeaturePolicyEditorPane(
                     modifier = Modifier.testTag(Ids.FEATURE_POLICY_EDITOR_CANCEL_BUTTON),
                 ) { Text(stringResource(R.string.features_editor_cancel)) }
             }
-            DisabledControlReasonText(gate.reason)
+            DisabledControlReasonText(saveGate.reason ?: gate.reason)
 
             status?.let {
                 Text(it, modifier = Modifier.testTag(Ids.FEATURE_POLICY_EDITOR_STATUS))
@@ -252,6 +259,7 @@ fun FeatureLimitsGuardianSection(
                         onSave = editor.onSave,
                         onRemove = editor.onRemove,
                         onCancel = editor.onCancel,
+                        saveAnswer = authoring.saveAnswer,
                     )
                 }
             }
@@ -326,6 +334,7 @@ fun FeatureLimitsAdminSection(
                             onSave = editor.onSave,
                             onRemove = editor.onRemove,
                             onCancel = editor.onCancel,
+                            saveAnswer = authoring.saveAnswer,
                         )
                     }
                 }

@@ -32,6 +32,12 @@ built = ["android", "ios", "linux", "macos", "tui", "windows"]
 detail = "linux + macOS + iOS + tui + windows + android have it (android paints ClaimCodeScreen / NatModeChoiceScreen and the shared claim drive reaches them through the test agent; not yet run on a device). web is witnessed for this outcome by test_web_claim_pin_wasm_witness.py instead — its e2e origin is never TLS, so a native channel-binding pin has nothing to check against there. web's wizard reaches a nest only when that nest serves the SPA itself (test_onboarding_localhost.py), so its witness of encryption-settings outcome 10 is a nest-served twin too"
 tracked = "onboarding.md"
 
+[ward-contact-entry-gate]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "a supervised ward whose guardian decides new contacts is offered contact-request-guardian-button at the Find User result, with contacts-add-button blocked by the refusal's reason, and each contacts-accept-button blocked while knock-guardian-pending holds (fauna_client_family::knock_possibility / accept_possibility / guardian_decides_contact). tui leads; linux, web, android, macos and ios paint it from the same predicates; windows still offers the ask only after the typed refusal and keeps accept enabled, lifted in its trickle-down row"
+tracked = "contacts.md § Errors & edge cases"
+
 [feed-post-advertise-nostr]
 kind = "product"
 built = ["android", "ios", "linux", "macos", "tui", "web"]
@@ -58,7 +64,7 @@ tracked = "docs/goal/architecture/e2e-self-diagnosing-failures.md § The convent
 
 [author-drain-hold]
 kind = "harness"
-built = ["android", "ios", "linux", "macos", "tui", "web"]
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
 detail = "the `subscriptions_hold_author_drain` / `subscriptions_release_author_drain` agent commands over shared Rust's `hold_author_drain_for_test`, which keep a paid subscribe request standing in the author's requests while its badge is read; tui (lead) has them, the other apps' agents call the same shared seam through their FFI/wasm test flavor (the kids builds excise the author-side subscriptions plane, so they have none)"
 tracked = "monetization.md § Pillar 3"
 
@@ -82,8 +88,8 @@ tracked = "nests.md § Trust facet"
 
 [nest-trust-mint-materialize-note]
 kind = "product"
-built = ["android", "linux", "tui", "web"]
-detail = "the materialization option's mint-time note (nest-trust-mint-materialize-note) and the grant row's third honest-bound regime render on tui (the lead app), web, linux and android, each through the shared mint_option_note / grant_bound_note / mint_option_default_duration; macos, ios and windows receive the option label through shared Rust but render no note yet — their batched trickle-down lifts close it"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the materialization option's mint-time note (nest-trust-mint-materialize-note) and the grant row's third honest-bound regime render on tui (the lead app), web, linux, android, macos and ios (the shared FaunaKit mint flow), each through the shared mint_option_note / grant_bound_note / mint_option_default_duration; windows receives the option label through shared Rust but renders no note yet — its batched trickle-down lift closes it"
 tracked = "nests.md § Implementation status today, the materialization option"
 
 [bound-location-upload-witness]
@@ -113,8 +119,8 @@ tracked = "caldav-server.md"
 [calendar-after-reclaim-docker-drive]
 kind = "harness"
 built = ["linux", "tui", "web"]
-detail = "wired on linux, then tui (the lead app: the same shared HttpBridgeDriver set_state / reset / connection-status read the linux leg drives), then web (the same calls, its session pointed at the image through the CORS-adding SPA proxy whose two hops speak TLS to the image's listener); each app's Events page is the observation surface for this docker tier_4 factory-reset, re-claim, create-event cycle, and the other apps are the cross-app follow-on. What actually gates a leg is a FRESH keyed test image on a docker-capable box (only the primary Linux dev VM has a daemon), not the app surface"
-tracked = "nest/common.md § Factory reset (outcome 13's docker witness)"
+detail = "wired on linux, then tui (the lead app: the same shared HttpBridgeDriver set_state / reset / connection-status read the linux leg drives), then web (the same calls, its session pointed at the image through the CORS-adding SPA proxy whose two hops speak TLS to the image's listener); each app's Events page is the observation surface for this docker tier_4 factory-reset, re-claim, create-event cycle. The test is a tier_4 guard with no catalog marker: the image's half of the promise is factory-reset.md's [nest] outcome, witnessed app-less through the shared calendar code every app runs (test_factory_reset_calendar_reclaim_app_less_docker.py), so no other app owes this drive. What actually gates a leg is a FRESH keyed test image on a docker-capable box (only the primary Linux dev VM has a daemon), not the app surface"
+tracked = "nest/common.md § Factory reset (the tier_4 guard beside factory-reset.md's [nest] image outcome)"
 
 [community-room-relaunch-restore]
 kind = "product"
@@ -248,12 +254,6 @@ built = ["linux", "tui"]
 detail = "proven on linux and tui; the remaining NATIVE apps (windows, macos, ios) are ordinary cross-app trickle-down — they share trust.rs's TOFU model, so each one's leg is a driver swap, not new trust work. Every leg needs a fresh nest image on a docker-capable box, which is the actual gate here (web declares its absence in the test)"
 tracked = ""
 
-[folder-create-public]
-kind = "product"
-built = ["tui", "web", "linux", "android", "macos", "ios"]
-detail = "tui, web, linux and android (2026-11-08), macos and ios (2026-11-09, the shared FaunaKit sheet) create a folder born public through the wizard: wizard-audience-select / wizard-audience-hint on the Name step, Create arming the owner row's folder-audience-public-confirm, the confirm creating it public and attested (docs/goal/ui/folders.md § Audience and website serving → Born public). windows trails on the shared FolderWizardMachine and widens this list when it lands"
-tracked = ""
-
 [folder-location-free-space-button]
 kind = "product"
 built = ["linux", "tui", "windows"]
@@ -317,8 +317,8 @@ tracked = "docs/goal/behavior/account-age-band.md § Implementation status today
 [mail-client-ui-enable-docker-drive]
 kind = "harness"
 built = ["linux", "tui", "web"]
-detail = "wired on linux, then tui, then web (through the CORS-adding SPA proxy, whose two hops speak TLS to the image's listener); the other apps are the cross-app follow-on (same scope as test_mail_client_full_roundtrip.py). Every app here has the mail-settings enable toggle already, so the leg is a driver swap — what actually gates it is a FRESH nest image on a docker-capable box, and only the primary Linux dev VM has a docker daemon at all"
-tracked = "mail-settings.md"
+detail = "wired on linux, then tui, then web (through the CORS-adding SPA proxy, whose two hops speak TLS to the image's listener) — the apps that run beside a docker daemon, which only the primary Linux dev VM has. The test is the tier_4 guard of the app UI and the image joined, not a catalog witness: turn-on-mail.md outcome 6 is a [nest] outcome witnessed app-less by test_mail_deploy_lifecycle.py, and the enable firing set_mail_enabled is shared Rust every app runs, so no other app owes this drive"
+tracked = "mail-settings.md; turn-on-mail.md outcome 6"
 
 [mail-enable-ui-docker-drive]
 kind = "harness"
@@ -428,12 +428,6 @@ built = ["android", "ios", "linux", "macos", "tui", "web"]
 detail = "the bridge reports every option a picker paints (the `options` attr, `drivers/base.py::option_texts`), without which an option's absence cannot be observed; android's androidTest bridge opens the anchor's menu and lists its painted items (`ElementOps.kt`, rules pinned in `AutomationSemanticsTest`); windows does not serve it yet"
 tracked = "docs/goal/behavior/task-delegation.md § Implementation status today"
 
-[post-archive-comments]
-kind = "product"
-built = ["ios", "linux", "macos", "tui", "web", "windows"]
-detail = "the folded archive comments under the owner's imported post: the app registers the archive machine's comment source on its feed manager and paints post-archive-comments / post-archive-comment-item from PostSummary.archive_comments"
-tracked = "docs/goal/behavior/archive-import.md § Implementation status today, the slice-6 comments paragraph"
-
 [post-image-paint-state]
 kind = "harness"
 built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
@@ -524,16 +518,10 @@ built = ["ios", "linux", "macos", "tui", "web", "windows"]
 detail = "not built yet on android (settings.md § Sub-page heading conformance table)"
 tracked = "settings.md § Sub-page heading conformance"
 
-[share-cap-nest-hold]
-kind = "harness"
-built = ["android", "linux", "macos", "tui", "windows"]
-detail = "the per-file-cap journey holds every fauna.sync.changes.list so the nest path cannot race the peer pull; on an iOS member that hold also parks the File Provider extension's own cold engine build, so the ingest door times out and the pass reads a cut transfer before any cap is put to a file"
-tracked = "p2p-shared-set-build.md § Phone peers — design, decision 5"
-
 [share-offline-landing]
 kind = "product"
 built = ["android", "ios", "linux", "macos", "tui", "windows"]
-detail = "a member device lands a peer body with the nest unreachable; on iOS the File Provider extension the OS relaunched cold builds on the set's binding record (decision 2″) and lands the owner's offline row by the writer roster its host cached while the nest answered — the interrupted-transfer case passes; the offline-pull case is still red on iOS, Files not listing the landed item through the domain with the nest down; web has no share-plane leg"
+detail = "a member device lands a peer body with the nest unreachable; web has no share-plane leg"
 tracked = "p2p-shared-set-build.md § Built — iOS's leg → The live witness"
 
 [share-serve-tally]
@@ -575,7 +563,7 @@ tracked = "monetization.md § Implementation status today"
 [succession-witness-member-seat]
 kind = "harness"
 built = ["ios", "linux", "macos", "tui", "web", "windows"]
-detail = "the witness itself is no longer the gap on the native apps: linux and the four FFI apps (macOS, iOS, windows, android) all register one as of 2026-09-03, off the shared ChainWitness + NativeSuccessionChainSource + peer-anchor sweep in fauna-client-recovery. What is unbuilt here is a member seat this fixture can drive — only linux, tui, web, macOS, iOS and windows have one"
+detail = "the witness itself is no longer the gap on the native apps: linux and the four FFI apps (macOS, iOS, windows, android) all register one as of 2026-09-03, off the shared ChainWitness + NativeSuccessionChainSource + peer-anchor sweep in fauna-client-recovery. What is unbuilt here is a member seat this fixture can drive — linux, tui, web, macOS, iOS and windows have one; android's arm (the roles swap: the phone plays the member, alice signs in on a tui seat) has landed and joins built on its own green device run"
 tracked = "succession-propagation.md § Implementation status today — the witness/anchor entries"
 
 [trust-differential-drive]
@@ -619,3 +607,9 @@ kind = "harness"
 built = ["tui", "linux", "web", "android", "macos", "ios"]
 detail = "the pull-back confirm's per-set preflight lines are the modal's body (ui/backups.md § Restore after losing the nest, no id of their own); a driver reads them as backup-destination-reseed-confirm-modal's text, title and consequence first, one line each. tui registers them so (2026-11-11); linux, web and android declare the same text on the modal (2026-11-11: linux `testid::set_test_text`, web `data-test-text`, which the web bridge's text read honours first, android the Card's semantics text, macos and ios the shared FaunaKit modal's automation value, 2026-11-11), their witness runs being that lift's verify requests; windows draws the lines but no run has read them through the modal's text yet — it joins when its driver's get_text of the modal returns them"
 tracked = ""
+
+[provider-choice]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the choose-providers page (onboarding-provisioning.md § 3d): the handle check's Continue lands on provider_choice and Continue goes straight to nest_provisioning with its choices region, on an app that declares set_renders_provider_choice. tui leads; macos and ios joined 2026-11-16 together (one flag in the shared OnboardingVM, one FaunaKit ProviderChoiceView, their witness runs that lift's verify requests); web joined 2026-11-16 (the page, its dialog, the choices region and the add-account seeding of held credentials, all from the shared machine's wasm getters); linux joined 2026-11-16 (the GTK page with its dialog under the open row, the server choices split out of vps_config into one widget set both pages show, the add-account seeding); android joined 2026-11-17 (the Compose page with its dialog painted inline under the open row, the choices region lifted into one composable vps_config and nest_provisioning share, the add-account seeding through seed_held_provider_credentials_json); windows still walks dns_config → vps_config until its trickle-down"
+tracked = "onboarding-provisioning.md § 3d"

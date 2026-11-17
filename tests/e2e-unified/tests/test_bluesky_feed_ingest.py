@@ -35,7 +35,7 @@ address; the bytes-to-art half is pinned headlessly
 (``a_bridged_proxied_image_paints_in_post_image_through_the_nest``).
 
 **Two more journeys, tui first** (the lead app; the custom feed is on linux,
-web, the apple apps and windows too, android follows in its own queue; the
+web, the apple apps, windows and android too; the
 six-app lift of the label is its own row):
 
 * a post served only by a **custom feed generator** the user subscribed to in
@@ -329,6 +329,7 @@ def test_a_followed_bluesky_post_arrives_in_the_feed_and_a_reply_threads_under_i
 @pytest.mark.web
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_posts_from_a_subscribed_bluesky_custom_feed_arrive_in_the_feed(

@@ -48,6 +48,12 @@ struct MacEventFormView: View {
                 .accessibilityIdentifier(Ids.eventFormDescription)
                 .automationField(Ids.eventFormDescription, text: $form.description)
 
+            // The form's own `error-message` (ruling 4): a refused or failed
+            // save's whole sentence, the form staying open with what was typed.
+            if let error = vm.createFormError {
+                ErrorBanner(message: error)
+            }
+
             Button(L.events.createEvent) {
                 submitCreateEvent()
             }

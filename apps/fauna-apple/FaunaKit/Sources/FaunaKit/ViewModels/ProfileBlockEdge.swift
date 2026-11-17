@@ -1,4 +1,4 @@
-import Foundation
+import SwiftUI
 
 /// The viewed actor's block edge as `ProfileView`'s Block ⇄ Unblock toggle sees
 /// it (`profile.md` § User actions → `profile-block-button`). The edge is
@@ -18,6 +18,14 @@ struct ProfileBlockEdge: Equatable {
 
     /// The toggle is pressable only once the edge is known.
     var isToggleEnabled: Bool { isBlocked != nil }
+
+    /// `profile-block-button`'s answer (`profile.md` § Errors & edge cases,
+    /// *Unread state is not possible*; tui's `block_answer`,
+    /// `Possibility::once_read`): blocked `common.still_loading` until the
+    /// edge is known — a dead toggle that says why. The press asks it again.
+    var answer: Possibility {
+        readPossibility(read: isBlocked != nil ? .resolved : .pending)
+    }
 
     /// What the label paints: "Unblock" only on a known blocked edge.
     var labelBlocked: Bool { isBlocked ?? false }

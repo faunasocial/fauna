@@ -714,6 +714,29 @@ internal partial class ConversationsViewModel : ObservableObject
     public async Task DeleteMessageAsync(string threadId, string messageId) =>
         await Mutated(_manager.DeleteMessage(threadId, messageId));
 
+    // ── The queued own copy (devices.md § Offline compose; account-offline-mutation.md
+    //    § The unsent-changes surface, point 2). The manager projects each MLS send the
+    //    device outbox holds onto its own copy's MessageSnapshot.queued_send; these are
+    //    its re-read and its two menu actions. No ConfigureAwait(false) (WinUI
+    //    bound-state rule).
+
+    /// <summary>Re-read the outbox's MLS sends onto their own copies
+    /// (<c>manager.refresh_unsent_sends</c>) — the conversation page's two-second tick
+    /// (<c>UnsentRefresh</c>), since the drain tells the app nothing.</summary>
+    public async Task RefreshUnsentSendsAsync() => await Mutated(_manager.RefreshUnsentSends());
+
+    /// <summary><c>dm-message-retry-button</c> on an unsent own copy:
+    /// <c>manager.retry_queued_send</c> re-arms its intent, and the channel's held
+    /// remainder follows in order.</summary>
+    public async Task RetryQueuedSendAsync(string messageId) =>
+        await Mutated(_manager.RetryQueuedSend(messageId));
+
+    /// <summary><c>dm-message-discard-confirm-button</c> on an unsent own copy, behind its
+    /// confirm: <c>manager.discard_queued_send</c> deletes that one intent and takes the
+    /// copy out of the thread — never the channel's remainder.</summary>
+    public async Task DiscardQueuedSendAsync(string messageId) =>
+        await Mutated(_manager.DiscardQueuedSend(messageId));
+
     // ── Room search (room-search.md § The surface) ───────────────
     // The strip is view state on the detail (ThreadDetail.room.search), never a draft;
     // the shared manager owns open/close, the submit and every word a hit row paints,

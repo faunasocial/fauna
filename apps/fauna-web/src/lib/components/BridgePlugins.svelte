@@ -9,7 +9,7 @@
   // parent mounts this only while the account is the nest's admin.
   import { afterNavigate } from '$app/navigation';
   import { connectionStatus, identity } from '#lib/store';
-  import { offlineAffordance } from '#lib/wasm';
+  import { offlinePossibility } from '#lib/wasm';
   import { makeOfflineGate } from '#lib/offline-gate';
   import { resolveLocalized } from '#lib/i18n/localized';
   import {
@@ -25,7 +25,7 @@
   let { error = $bindable('') } = $props();
 
   // Install and Uninstall are `OnlineOnly`: the offline gate greys them.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // `null` until the read returned: nothing is painted, then rows or the empty line.
   let plugins = $state<InstalledPluginText[] | null>(null);

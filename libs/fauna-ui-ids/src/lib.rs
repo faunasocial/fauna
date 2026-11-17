@@ -9,7 +9,7 @@
 //! one (scripts/ui-ids-generate.py § GATED_EMISSION).
 
 /// Number of element ids ui.yaml declares.
-pub const COUNT: usize = 2335;
+pub const COUNT: usize = 2352;
 
 pub const ACCOUNT_ACTIVATE_REAUTH_CANCEL_BUTTON: &str = "account-activate-reauth-cancel-button";
 pub const ACCOUNT_ACTIVATE_REAUTH_CONFIRM_BUTTON: &str = "account-activate-reauth-confirm-button";
@@ -623,6 +623,8 @@ pub const CALENDAR_EXPORT_BUTTON: &str = "calendar-export-button";
 pub const CALENDAR_IMPORT_BUTTON: &str = "calendar-import-button";
 pub const CALENDAR_IMPORT_FILE: &str = "calendar-import-file";
 pub const CALENDAR_ITEM: &str = "calendar-item";
+pub const CALENDAR_LIST_EMPTY_STATE: &str = "calendar-list-empty-state";
+pub const CALENDAR_LIST_EMPTY_STATE_STEP: &str = "calendar-list-empty-state-step";
 pub const CALENDAR_NAME: &str = "calendar-name";
 pub const CALENDAR_VIEW_AGENDA: &str = "calendar-view-agenda";
 pub const CALENDAR_VIEW_CONTROLS: &str = "calendar-view-controls";
@@ -1833,6 +1835,21 @@ pub const PROFILE_TIERS_TAB: &str = "profile-tiers-tab";
 pub const PROFILE_VIEW: &str = "profile-view";
 pub const PROTOCOL_BADGE: &str = "protocol-badge";
 pub const PROTOCOL_ICON: &str = "protocol-icon";
+pub const PROVIDER_CHOICE_BACK_BUTTON: &str = "provider-choice-back-button";
+pub const PROVIDER_CHOICE_CONTINUE_BUTTON: &str = "provider-choice-continue-button";
+pub const PROVIDER_CHOICE_STATUS_TEXT: &str = "provider-choice-status-text";
+pub const PROVIDER_CONNECT_BUTTON: &str = "provider-connect-button";
+pub const PROVIDER_CREDENTIALS_FORM: &str = "provider-credentials-form";
+pub const PROVIDER_DIALOG: &str = "provider-dialog";
+pub const PROVIDER_DIALOG_CLOSE_BUTTON: &str = "provider-dialog-close-button";
+pub const PROVIDER_DIALOG_HELP_TEXT: &str = "provider-dialog-help-text";
+pub const PROVIDER_DIALOG_LINK: &str = "provider-dialog-link";
+pub const PROVIDER_DIALOG_OPEN_BROWSER_BUTTON: &str = "provider-dialog-open-browser-button";
+pub const PROVIDER_DIALOG_STATUS_TEXT: &str = "provider-dialog-status-text";
+pub const PROVIDER_DISCONNECT_BUTTON: &str = "provider-disconnect-button";
+pub const PROVIDER_GOAL_ROW: &str = "provider-goal-row";
+pub const PROVIDER_GOAL_SELECT: &str = "provider-goal-select";
+pub const PROVIDER_ROW: &str = "provider-row";
 pub const PROVISIONING_BACK_BUTTON: &str = "provisioning-back-button";
 pub const PROVISIONING_BOM_DOMAIN_LINE: &str = "provisioning-bom-domain-line";
 pub const PROVISIONING_BOM_VPS_LINE: &str = "provisioning-bom-vps-line";

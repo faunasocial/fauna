@@ -5,7 +5,9 @@
  * `docs/goal/architecture/account-data-plane.md` § The offline-mutation
  * contract → *How a surface asks*) as one seam. The *decision* is not ours: it
  * is the shared `fauna_protocol::offline_class::affordance`, reached through
- * the `offlineAffordance` wasm face, which all seven apps read so that none
+ * the `offlinePossibility` wasm face — its answer in the shared
+ * `Possibility` type (`docs/goal/ui/README.md` § Offer only what is possible,
+ * rule 6) — which all seven apps read so that none
  * keeps a per-app list of widgets-to-grey (priority #2). Web must never test a
  * class in TypeScript — the rule makes three rulings that are easy to get
  * backwards (only class 3 desensitizes; an *unregistered* kind stays
@@ -36,7 +38,7 @@
  * composition made explicit instead of reverse-engineered:
  *
  * ```svelte
- * const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+ * const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
  * ...
  * <button use:offlineGate={{ kind: 'fauna.pair.add', disabled: busy }}>
  * ```
@@ -55,7 +57,7 @@
  * `the call site's own intent OR the gate's verdict`, and a reconnect restores
  * exactly the call site's intent, never more.
  *
- * It never gates on a verdict it could not reach. `offlineAffordance` runs in
+ * It never gates on a verdict it could not reach. `offlinePossibility` runs in
  * wasm, which the root layout initializes asynchronously; a control rendered
  * before `ensureWasm()` resolves would otherwise be greyed for a reason that
  * has nothing to do with the user's connection. On any throw the gate **fails
@@ -79,17 +81,12 @@
  * (`offline-gate.test.ts`) — the same seam `family-approvals.ts` documents for
  * the same reason. The production binding is two names at each call site.
  */
-import { resolveLocalized, type LocalizedText } from './i18n/localized.ts';
+import { resolveLocalized } from './i18n/localized.ts';
+import type { Possibility } from './possibility.ts';
 
-/** `fauna_protocol::offline_class::Affordance` as the wasm face serializes it:
- *  `reason` is present exactly when `available` is false. */
-export interface Affordance {
-  available: boolean;
-  reason?: LocalizedText;
-}
-
-/** The `offlineAffordance` wasm face's shape (`#lib/wasm`). */
-export type AffordanceFn = (kind: string, connectionState: string) => Affordance;
+/** The `offlinePossibility` wasm face's shape (`#lib/wasm`):
+ *  `fauna_protocol::offline_class::affordance(..).possibility()`. */
+export type PossibilityFn = (kind: string, connectionState: string) => Possibility;
 
 /** `connectionStatus.subscribe` (`#lib/store`) — the ONE place web learns the
  *  transport state, so the `connection-status` indicator and this gate cannot
@@ -134,11 +131,11 @@ export const GATE_DECLARED_ATTR = 'data-offline-gate-declared';
  * Build the `use:offlineGate` action, bound to the shared verdict and to web's
  * live connection state.
  *
- * @param affordance the `offlineAffordance` wasm face — never a class test
+ * @param possibility the `offlinePossibility` wasm face — never a class test
  *        written here (see the module docs).
  * @param subscribe `connectionStatus.subscribe`.
  */
-export function makeOfflineGate(affordance: AffordanceFn, subscribe: StateSubscribe) {
+export function makeOfflineGate(possibility: PossibilityFn, subscribe: StateSubscribe) {
   return function offlineGate(node: GateableNode, params: OfflineGateParams) {
     let current = params;
     let state = 'disconnected';
@@ -157,9 +154,9 @@ export function makeOfflineGate(affordance: AffordanceFn, subscribe: StateSubscr
 
       if (current.kind) {
         try {
-          const verdict = affordance(current.kind, state);
-          gated = !verdict.available;
-          if (gated && verdict.reason) reason = resolveLocalized(verdict.reason);
+          const answer = possibility(current.kind, state);
+          gated = answer.state !== 'possible';
+          if (answer.state === 'blocked') reason = resolveLocalized(answer.reason);
         } catch {
           gated = false; // fail open — see the module docs.
         }

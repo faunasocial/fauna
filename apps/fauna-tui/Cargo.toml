@@ -317,6 +317,9 @@ fauna-peer-share = { workspace = true, optional = true }
 # The share-plane host's shared half (`p2p.md` § Cross-user shared-set transfer
 # → *What a leg still writes*): `ShareHostSeams` + the durable sink. Same gate.
 fauna-client-share-host = { path = "../../libs/fauna-client-share-host", optional = true }
+# The share-link gate's typed answer (`share_link_possibility`), declared on
+# the media detail's "Share a link" element.
+fauna-client-share = { path = "../../libs/fauna-client-share" }
 # The `ShareIngestDoor` seam's error contract (share_pump's Result); the
 # agent adapter in sync_agent.rs implements it.
 anyhow = { workspace = true }

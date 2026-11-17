@@ -343,6 +343,8 @@ all — only for records it creates itself. Revoking the app on Settings →
 **Connected apps** cuts its access at once, and the records it wrote stay in
 your account.
 
+An app can also ask to put files into one of your folders, or to read one. If it asks without naming which, its approval card shows a **Folder** choice listing only the folders it can use — to put files in, a folder that keeps its files on your nest; to read, one you serve over WebDAV — and approving gives it the folder you picked and no other. Until you pick one the card cannot be approved, and if none of your folders fits, the card says why.
+
 If an app you already connected asks again with a **new key** — after a
 reinstall, say — the card says so under its list: approving ends the access the
 old key was given (or, when only its signing key changed, the old key's
@@ -373,7 +375,7 @@ have an explanation months later. An app you allowed to ask your nest for
 short-lived Bluesky service tokens — signed with your account's key, which never
 leaves your nest — also shows how many your nest issued for it in the current
 window and which service the most recent one was for, and when; an app asking
-far more often than you expect is easy to spot, and to disconnect. The time your nest last saw the app is when it last noticed it — when it renews its access, and whenever your nest or a Fauna app of yours does something for it — so a recent time means it is still in use, while an older one only means neither has happened lately. Revoking it there
+far more often than you expect is easy to spot, and to disconnect. An app given keys or permissions in your account — keys to records it keeps there or to a folder of yours it may read, or permission to put files into one of your folders, to post or edit your profile as you, to get short-lived Bluesky service tokens, to sign with a key your nest keeps for you, or to read or send in your conversations, among others — also shows, under its row, what it was given: **Now** lists each one — what it opens or what it lets the app do, until when, and whether it is still active — and **History** lists when each was given and when it was taken back. On the row of an app your nest has acted for — those service tokens, say, or posts and profile edits it made for the app — **Show what Fauna did for this app** lists the most recent of those acts, newest first: when it happened, what Fauna did in the approval card's words, and exactly what it was. **Hide what Fauna did for this app** closes the list again. The list is read from your nest each time you open it, and says **Nothing recorded for this app yet** when there is nothing to show. The time your nest last saw the app is when it last noticed it — when it renews its access, and whenever your nest or a Fauna app of yours does something for it — so a recent time means it is still in use, while an older one only means neither has happened lately. Revoking it there
 ends the connection: the app stops being able to refresh, and drops off within
 about fifteen minutes. The **Allow external apps** switch on Settings → **Connected apps** pauses every app it affects at once — immediately rather than at its next renewal, including apps that talk to your nest directly rather than through Bluesky — and is reversible: flip it back and the apps you kept are usable again, with nothing to set up afresh. The note under the switch says as much. While it is off, every app it affects stays on the list marked **Paused**,
 with a reminder of how to turn it back on, so you can still see what you

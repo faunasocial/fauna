@@ -3,6 +3,8 @@ import { registerIdentityStoreChunk } from './identity-store';
 import type { WasmContactOverlays, WsRpcClient, WasmUploadPayload } from '../../static/fauna_wasm.js';
 import type { LocalizedText } from '#lib/i18n/localized';
 import type { ImportTotals } from '#lib/mail-import-confirm';
+import type { Possibility } from '#lib/possibility';
+import type { WizardSnapshot } from '#lib/devices-machine';
 // Type-only (erased at build, so no runtime cycle with rpc.ts, which imports this
 // module): `ObligationAction` is the `fauna.moderation.actions` wire row and stays
 // owned by its rpc module — the merge below takes it as the queue's server half.
@@ -16,6 +18,7 @@ import type {
   MutedKeywordLevel,
   NodeLeg,
   FamilyApprovalEntry,
+  FeatureRow,
 } from '#lib/rpc';
 import type {
   IssuerForcedArm,
@@ -24,7 +27,6 @@ import type {
   IssuerKeyView,
 } from '#lib/admin-oauth-keys';
 import type { MdDecoration, MdRevealRange, ComposeMarkerPlan } from '#lib/markdown-decorations';
-import type { Affordance } from '#lib/offline-gate';
 import type { OverlayFace } from '#lib/contact-overlay';
 import type { AskRules, FeedRequestState } from '#lib/ward-asks';
 import type { DeadGenerations, LetGoOutcome } from '#lib/recovery-let-go';
@@ -173,11 +175,27 @@ export async function signOutFinishRecorded(eraseRefused: boolean): Promise<Sign
  *  `conversationsManager` takes before any engine exists, whose model and two
  *  postures `fauna_mls::engine_role` owns (`#lib/conversations` and
  *  `#lib/accounts` are their callers). The accounts among `actorIds` whose
- *  role ANOTHER tab of this browser holds right now: the erase's question,
- *  this tab's own hold consulted, never probed; degrades open. */
+ *  role ANOTHER tab of this browser holds — or whose serving-presence lock
+ *  another tab declares — right now: the erase's question, this tab's own
+ *  holds never counted; degrades open. */
 export async function actorsServedByAnotherTab(actorIds: readonly string[]): Promise<string[]> {
   await ensureWasm();
   return await wasm().actorsServedByAnotherTab([...actorIds]);
+}
+/** The serving-presence lock's faces over `fauna-wasm` (model:
+ *  `fauna_client_accounts::web_serving_presence`): this tab declares the
+ *  account its identity is — a queued SHARED Web Lock, skipped without a lock
+ *  manager — so an erase in a sibling tab sees it whether or not this tab runs
+ *  the account's engine. `store.ts`'s one identity subscription is the caller. */
+export async function takeServingPresence(actorId: string): Promise<void> {
+  await ensureWasm();
+  await wasm().takeServingPresence(actorId);
+}
+/** Withdraw this tab's serving declaration for `actorId` (every account with
+ *  none). */
+export async function releaseServingPresence(actorId?: string): Promise<void> {
+  await ensureWasm();
+  await wasm().releaseServingPresence(actorId);
 }
 /** Why a remove-account refuses, or `null` when it may proceed. */
 export type RemoveAccountBlock = 'this_tab' | 'other_tab' | 'carry_owed' | null;
@@ -726,6 +744,21 @@ export function paintedTextAreaForTest(): unknown {
   return fn ? JSON.parse((fn as () => string)()) : null;
 }
 
+/** Record what one painted frame showed at the root (`null` for nothing) in the
+ *  shared journal — see `#lib/e2e-root-surface`. A no-op where the bundle has
+ *  no leg (the observable then reads `null`). */
+export function rootSurfaceObserveForTest(showing: string | null): void {
+  const fn = coreTestExport('rootSurfaceObserveForTest');
+  if (fn) (fn as (showing: string | undefined) => void)(showing ?? undefined);
+}
+
+/** The `root_surface` observable (`fauna_e2e_agent::ROOT_SURFACE_KEY`), or
+ *  `null` where this bundle has no leg. */
+export function rootSurfaceForTest(): unknown {
+  const fn = coreTestExport('rootSurfaceForTest');
+  return fn ? JSON.parse((fn as () => string)()) : null;
+}
+
 export function actorIdFromSecret(secretHex: string): string {
   return wasm().actor_id_from_secret(secretHex);
 }
@@ -1071,6 +1104,11 @@ export const wardAskRules: AskRules = {
     (wasm().wardFeedRequestState(asks, bridgeId, operation, target) as FeedRequestState | undefined) ??
       null,
   knocksAwaitGuardian: (policy) => wasm().wardKnocksAwaitGuardian(policy),
+  knockPossibility: (statusRead, policy, peerStatus) =>
+    wasm().wardKnockPossibility(statusRead, policy, peerStatus ?? undefined) as Possibility,
+  acceptPossibility: (statusRead, policy) => wasm().wardAcceptPossibility(statusRead, policy) as Possibility,
+  guardianDecidesContact: (statusRead, policy, peerStatus) =>
+    wasm().wardGuardianDecidesContact(statusRead, policy, peerStatus ?? undefined),
 };
 
 /** The feed-source operations' wire names, from the shared
@@ -3768,6 +3806,9 @@ export interface PolicyEditorVerdict {
 /** The open editor — `WasmPolicyEditor`. */
 export interface PolicyEditorHandle {
   view(): PolicyEditorView;
+  /** Save's paint — the draft's own validity (a `Possibility`, the form
+   *  predicates' serde form); the shared `save` refuses with the same reason. */
+  savePossibility(): Possibility;
   setOn(on: boolean): void;
   setCell(index: number, text: string): void;
   save(client: WsRpcClient): Promise<PolicyEditorVerdict>;
@@ -4477,17 +4518,18 @@ export function mediaSortDirectionLabel(descending: boolean): LocalizedText {
 // The SPA must NEVER test a class itself: the rule makes three rulings that are
 // easy to get backwards (only class 3 desensitizes; an *unregistered* kind stays
 // available; only the *known* offline words count as offline), and re-deriving
-// them here is the per-app copy priority #2 exists to prevent. `reason` is
-// `undefined` exactly when `available` is true.
+// them here is the per-app copy priority #2 exists to prevent. The answer is
+// the shared `Possibility` (`docs/goal/ui/README.md` § Offer only what is
+// possible, rule 6): `possible`, or `blocked` with the reason to paint.
 //
 // Consumers do not call this directly — they bind it into the `use:offlineGate`
 // action (`#lib/offline-gate`), which owns how a reactive tree obeys the verdict.
-export function offlineAffordance(kind: string, connectionState: string): Affordance {
-  return wasm().offlineAffordance(kind, connectionState) as Affordance;
+export function offlinePossibility(kind: string, connectionState: string): Possibility {
+  return wasm().offlinePossibility(kind, connectionState) as Possibility;
 }
 
 // `fauna_protocol::offline_class::is_online` — the same rule as
-// `offlineAffordance` above, for a caller holding a connection state but no
+// `offlinePossibility` above, for a caller holding a connection state but no
 // kind: is this transport word one the gate treats as ONLINE?
 //
 // ⚠ Never replace a call to this with `state === 'connected'`. The gate's
@@ -4804,6 +4846,215 @@ export function credentialKindBadge(kind: string): LocalizedText {
 // `resolveLocalized`. See `docs/goal/ui/mail-settings.md` § the status indicator.
 export function settingsStatusLabel(status: unknown, enabled: boolean): LocalizedText {
   return wasm().settingsStatusLabel(status, enabled) as LocalizedText;
+}
+
+// `fauna_client_mail_settings::mail_usable_unbuilt` (over wasm): the mail-usable
+// answer for an SPA whose mail machine failed to build — blocked with its own
+// reason (`docs/goal/ui/mail-settings.md` § Errors & edge cases, the
+// mail-usable gate; `mail-usable.ts`).
+export function mailUsableUnbuilt(): Possibility {
+  return wasm().mailUsableUnbuilt() as Possibility;
+}
+
+// `fauna_client_mail_settings::mail_usable_unread` (over wasm): the answer
+// while the session's mail machine is still being built — blocked with the
+// shared "checking" reason (`mail-usable.ts`).
+export function mailUsableUnread(): Possibility {
+  return wasm().mailUsableUnread() as Possibility;
+}
+
+// The read-state answers (`docs/goal/ui/README.md` § Offer only what is
+// possible, rule 5: unknown is not possible). The read word is the one the
+// page tracks its read with (`#lib/read-gate`'s `ReadWord`); the reasons
+// (`common.still_loading`, `common.load_failed`, …) are the shared crates', so
+// the SPA never spells them. Painted and asked again through `#lib/form-gate`.
+
+/** `fauna_core::possibility::Possibility::from_read` — the answer a read alone
+ *  gives (profile follow and block). */
+export function readPossibility(read: 'pending' | 'failed' | 'resolved'): Possibility {
+  return wasm().readPossibility(read) as Possibility;
+}
+
+/** `fauna_client_features::gate_possibility` over the `featuresStatus` rows the
+ *  page holds (`null` until that read answered) — the zap-signer designate and
+ *  the claim redeem. A blocked reason carries a nested i18n key: paint it with
+ *  `resolveLocalizedNested`. */
+export function featuresGatePossibility(rows: FeatureRow[] | null, feature: string): Possibility {
+  return wasm().featuresGatePossibility(rows, feature) as Possibility;
+}
+
+/** `notification-mark-read`: `fauna_client_notifications::mark_all_read_possibility`. */
+export function notificationsMarkAllReadPossibility(read: 'pending' | 'failed' | 'resolved'): Possibility {
+  return wasm().notificationsMarkAllReadPossibility(read) as Possibility;
+}
+
+/** `notification-clear`: `fauna_client_notifications::clear_all_possibility`
+ *  over the first read and the rows the page shows. */
+export function notificationsClearAllPossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  rows: number,
+): Possibility {
+  return wasm().notificationsClearAllPossibility(read, rows) as Possibility;
+}
+
+// The form-validity predicates (`docs/goal/ui/README.md` § Offer only what is
+// possible, rule 4's form case; `feed.md`, `search.md`, `nostr.md` § Errors &
+// edge cases): one shared predicate per form submit, painted and asked again
+// on submit through `#lib/form-gate`. The native twins are
+// `libs/fauna-ffi/src/forms.rs`.
+
+/** `post-submit-button`: `fauna_feed::forms::post_submit_possibility`. */
+export function feedPostSubmitPossibility(text: string): Possibility {
+  return wasm().feedPostSubmitPossibility(text) as Possibility;
+}
+
+/** `feed-reply-submit-button`: `fauna_feed::forms::reply_submit_possibility`. */
+export function feedReplySubmitPossibility(text: string): Possibility {
+  return wasm().feedReplySubmitPossibility(text) as Possibility;
+}
+
+/** `create-feed`: `fauna_feed::forms::create_feed_possibility`. */
+export function feedCreatePossibility(name: string): Possibility {
+  return wasm().feedCreatePossibility(name) as Possibility;
+}
+
+/** `bridge-form-subscribe-button`: `fauna_feed::forms::bridge_subscribe_possibility`. */
+export function feedBridgeSubscribePossibility(kind: string, uri: string): Possibility {
+  return wasm().feedBridgeSubscribePossibility(kind, uri) as Possibility;
+}
+
+/** `search-submit-button`: `fauna_client_search::query_possibility`. */
+export function searchQueryPossibility(query: string): Possibility {
+  return wasm().searchQueryPossibility(query) as Possibility;
+}
+
+/** `nostr-link-button`: `fauna_client_bridges::link_possibility` over the
+ *  picker's link-request mode and the typed fields. */
+export function nostrLinkPossibility(mode: string, nsec: string, bunkerUrl: string): Possibility {
+  return wasm().nostrLinkPossibility(mode, nsec, bunkerUrl) as Possibility;
+}
+
+/** `nostr-add-follow`: `fauna_client_bridges::add_follow_possibility`. */
+export function nostrAddFollowPossibility(pubkey: string): Possibility {
+  return wasm().nostrAddFollowPossibility(pubkey) as Possibility;
+}
+
+/** `nostr-zap-signer-add-btn`'s draft half:
+ *  `fauna_client_bridges::zap_signer_add_possibility`. */
+export function nostrZapSignerAddPossibility(pubkey: string): Possibility {
+  return wasm().nostrZapSignerAddPossibility(pubkey) as Possibility;
+}
+
+/** The Nostr page's *Connected apps* (NIP-46 bunker) section, over the stored
+ *  signing mode (`undefined` with no linked account):
+ *  `fauna_client_bridges::connected_apps_possibility`. */
+export function nostrConnectedAppsPossibility(signingMode?: string): Possibility {
+  return wasm().nostrConnectedAppsPossibility(signingMode) as Possibility;
+}
+
+/** `nostr-add-relay`: `fauna_protocol::nostr_relay::add_relay_possibility`
+ *  over the relays already listed and the typed draft. */
+export function nostrAddRelayPossibility(existing: string[], input: string): Possibility {
+  return wasm().nostrAddRelayPossibility(existing, input) as Possibility;
+}
+
+// The family, folders and profile form predicates (`family-safety.md`,
+// `folders.md`, `profile.md` § Errors & edge cases) — the same rule-4 form case,
+// painted and asked again on submit through `#lib/form-gate`.
+
+/** `family-contact-add-button`: `fauna_client_family::forms::contact_add_possibility`. */
+export function familyContactAddPossibility(input: string): Possibility {
+  return wasm().familyContactAddPossibility(input) as Possibility;
+}
+
+/** `family-transfer-button`: `fauna_client_family::forms::transfer_possibility`
+ *  (its own reason keys, never the contact-add string). */
+export function familyTransferPossibility(input: string): Possibility {
+  return wasm().familyTransferPossibility(input) as Possibility;
+}
+
+/** `family-policy-save-button`: `fauna_client_family::forms::policy_save_possibility`
+ *  over the three screen-time cells (an empty cell is "unset"). */
+export function familyPolicySavePossibility(windowStart: string, windowEnd: string, daily: string): Possibility {
+  return wasm().familyPolicySavePossibility(windowStart, windowEnd, daily) as Possibility;
+}
+
+/** The Family tab gate: `fauna_client_family::forms::has_family_surface` —
+ *  supervised, guarding a ward, or named on an incoming transfer. */
+export function familyHasSurface(supervised: boolean, wards: number, incomingTransfers: number): boolean {
+  return wasm().familyHasSurface(supervised, wards, incomingTransfers) as boolean;
+}
+
+/** `folder-follow-confirm`: `fauna_client_folders::forms::follow_possibility`
+ *  (`ready` = the devices machine and the identity secret held). */
+export function folderFollowPossibility(handle: string, name: string, ready: boolean): Possibility {
+  return wasm().folderFollowPossibility(handle, name, ready) as Possibility;
+}
+
+/** `folder-share-confirm`: `fauna_client_folders::forms::share_possibility`
+ *  (`ready` = those AND the live conversations session). */
+export function folderSharePossibility(recipient: string, ready: boolean): Possibility {
+  return wasm().folderSharePossibility(recipient, ready) as Possibility;
+}
+
+/** `subscription-tier-form-save`: `fauna_client_subscriptions::forms::tier_form_possibility`. */
+export function subscriptionTierFormPossibility(name: string): Possibility {
+  return wasm().subscriptionTierFormPossibility(name) as Possibility;
+}
+
+/** `subscription-claim-redeem-button`'s draft half:
+ *  `fauna_client_subscriptions::forms::redeem_code_possibility`. */
+export function subscriptionRedeemCodePossibility(code: string): Possibility {
+  return wasm().subscriptionRedeemCodePossibility(code) as Possibility;
+}
+
+// The own-tier and mail gates (`docs/goal/ui/folders.md` § Errors & edge
+// cases, *Own-tier and mail gates*; `docs/goal/ui/profile.md` § Errors & edge
+// cases, *A tier before what sells it*): the read crosses as the page's
+// `ReadWord`, so a pending or failed read answers still loading / the failure,
+// never "no tier" / "no mail key". The native twins are
+// `libs/fauna-ffi/src/forms.rs`.
+
+/** `folder-paywall-tier-select`: `own_tiers_possibility`, use `Paywall`. */
+export function folderPaywallPossibility(read: 'pending' | 'failed' | 'resolved', ownTiers: number): Possibility {
+  return wasm().folderPaywallPossibility(read, ownTiers) as Possibility;
+}
+
+/** `subscription-claim-mint-button`: `own_tiers_possibility`, use `ClaimCode`. */
+export function subscriptionClaimMintPossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  ownTiers: number,
+): Possibility {
+  return wasm().subscriptionClaimMintPossibility(read, ownTiers) as Possibility;
+}
+
+/** `subscription-provider-add-button`: `own_tiers_possibility`, use
+ *  `PaymentProvider` — the provider form never opens unless possible. */
+export function subscriptionProviderAddPossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  ownTiers: number,
+): Possibility {
+  return wasm().subscriptionProviderAddPossibility(read, ownTiers) as Possibility;
+}
+
+/** `folder-webdav-toggle`: `fauna_client_folders::webdav_provision::webdav_serve_possibility`
+ *  over the mail-custody read (`holdsMsek` is read only once it resolved). */
+export function folderWebdavServePossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  holdsMsek: boolean,
+): Possibility {
+  return wasm().folderWebdavServePossibility(read, holdsMsek) as Possibility;
+}
+
+/** `wizard-next-button`: the folders machine's `wizard_next_possibility` over
+ *  the wizard snapshot the Devices machine handed the page. */
+export function folderWizardNextPossibility(wizard: WizardSnapshot): Possibility {
+  return wasm().folderWizardNextPossibility(wizard) as Possibility;
+}
+
+/** `wizard-create-button`: the folders machine's `wizard_create_possibility`. */
+export function folderWizardCreatePossibility(wizard: WizardSnapshot): Possibility {
+  return wasm().folderWizardCreatePossibility(wizard) as Possibility;
 }
 
 // Web-content authoring view projections — `fauna_client_web::subdomain_view` +
@@ -5181,6 +5432,33 @@ export function roomRoleAttrToken(role: string): string {
 // owner/admin mark on a governed room. `null` role → the bare display name.
 export function roomMemberChipText(display: string, role: string | null): string {
   return wasm().roomMemberChipText(display, role) as string;
+}
+
+// The `fauna_conversations::ThreadControl` set: every thread and room control
+// a role or the rail decides (`ui/conversations.md` § Errors & edge cases →
+// *Controls this person can never use*).
+export type ThreadControl =
+  | 'invite'
+  | 'remove_member'
+  | 'set_policy'
+  | 'appoint_admins'
+  | 'transfer_ownership'
+  | 'leave_room'
+  | 'local_remove'
+  | 'subject';
+
+// `ThreadCapabilities::possibility(control, my_role)`: the one answer the
+// paint and the handler both ask for a role- or rail-gated control.
+// `capabilities` is the thread detail's `capabilities`, `myRole` the room's
+// `my_role` (`null`/`undefined` on a policy-less thread). No capabilities (no
+// detail read yet) → absent: nothing is offered on a guess.
+export function threadControlPossibility(
+  capabilities: unknown,
+  control: ThreadControl,
+  myRole: string | null | undefined,
+): Possibility {
+  if (!capabilities) return { state: 'absent' };
+  return wasm().threadControlPossibility(capabilities, control, myRole ?? null) as Possibility;
 }
 
 // `room-join-rule-select`'s options, in the one order all seven editors offer.

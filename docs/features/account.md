@@ -60,7 +60,7 @@ Stamped 2026-11-07 at 6a0ded1015.
    - `tests/e2e-unified/tests/test_delete_account.py::test_web_an_account_the_nest_stops_accepting_erases_nothing_on_the_device`
    - `tests/e2e-unified/tests/test_delete_account.py::test_android_an_account_the_nest_stops_accepting_erases_nothing_on_the_device`
 13. [app] Signing out while another Fauna window on this device is using one of your accounts is refused: nothing is erased, you stay signed in, and you are told to close the other window and sign out again — `docs/goal/architecture/apps/account-scoping.md` § Concurrent instances
-   - `tests/e2e-unified/tests/test_sign_out_refused_other_tab_web.py::test_web_sign_out_refuses_while_another_tab_holds_the_engine`
+   - `tests/e2e-unified/tests/test_sign_out_refused_other_tab_web.py::test_web_sign_out_refuses_while_another_tab_serves_the_account`
    - `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_another_instance_serves_the_account`
    - `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_a_sibling_app_serves_the_account`
 14. [app] What a sign-out could not remove can be removed again from the sign-in screen, and the notice goes away only once nothing is left — `docs/goal/architecture/apps/account-scoping.md` § The scoping taxonomy (iron-clad for new app state)
@@ -87,15 +87,15 @@ Stamped 2026-11-07 at 6a0ded1015.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.6-dev+7df68063 standalone |
+| web | ✅ full | 0.1.6-dev+7df68063 standalone |
 | linux | ✅ full | 0.1.5-dev+74897c5d standalone |
-| windows | ⚠ partial | 0.1.6 docker |
+| windows | ⚠ partial | 0.1.7-dev+00c1f744 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6 docker |
+| ios | ✅ full | 0.1.7-dev+00c1f744 standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.5-dev+74897c5d standalone |
-| android-kids | 🚧 unbuilt | 0.1.6 docker |
-| ios-kids | 🚧 unbuilt | 0.1.6 docker |
+| android-kids | 🚧 unbuilt | 0.1.7-dev+00c1f744 standalone |
+| ios-kids | 🚧 unbuilt | 0.1.7-dev+00c1f744 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -127,14 +127,14 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_apple_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | macos (macos): passed, ios (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_web_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | web (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_android_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | — |
-| 13 | app | `tests/e2e-unified/tests/test_sign_out_refused_other_tab_web.py::test_web_sign_out_refuses_while_another_tab_holds_the_engine` | web (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_sign_out_refused_other_tab_web.py::test_web_sign_out_refuses_while_another_tab_serves_the_account` | web (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_another_instance_serves_the_account` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 13 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_a_sibling_app_serves_the_account` | linux (linux): passed, tui (linux): passed |
 | 13 | app | absent by design on ios, ios-kids | — |
 | 14 | app | `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_retry_finishes_the_erase` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 14 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_residue_retry_refuses_beside_another_tab_and_finishes_the_erase` | web (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_outlives_the_app` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 15 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_residue_outlives_a_reload_and_a_clean_reload_says_nothing` | web (linux): failed |
+| 15 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_residue_outlives_a_reload_and_a_clean_reload_says_nothing` | web (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_launch_identity_cache.py::test_launch_paints_the_cached_handle_and_tier_and_keeps_them_while_the_nest_is_down` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 17 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_retires_the_enrollment_and_erases_the_account_store` | web (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_load_after_a_tab_closed_mid_sign_out_finishes_the_sign_out` | web (linux): passed |
@@ -143,6 +143,6 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 18 | app | `tests/e2e-unified/tests/test_sign_out_tui.py::test_a_residue_retry_leaves_an_actor_scope_a_later_sign_in_wrote_below` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 | 18 | app | `tests/e2e-unified/tests/test_sign_out_tui.py::test_android_a_launch_never_re_sweeps_a_base_a_later_sign_in_adopted` | — |
 | 18 | app | `tests/e2e-unified/tests/test_sign_out_tui.py::test_android_a_launch_never_re_sweeps_an_actor_scope_a_later_sign_in_wrote_below` | — |
-| 18 | app | `tests/e2e-unified/tests/test_sign_out_tui.py::test_a_residue_retry_leaves_a_store_another_tab_signed_back_into` | — |
+| 18 | app | `tests/e2e-unified/tests/test_sign_out_tui.py::test_a_residue_retry_leaves_a_store_another_tab_signed_back_into` | web (linux): passed |
 | 18 | app | absent by design on ios, ios-kids | — |
 <!-- features-render:end -->

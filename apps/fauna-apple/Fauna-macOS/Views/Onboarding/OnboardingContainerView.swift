@@ -18,6 +18,12 @@ struct OnboardingContainerView: View {
                 MacIdentityImportView(vm: vm)
             case .handleEntry:
                 MacHandleEntryView(vm: vm)
+            // The choose-providers page (onboarding-provisioning.md § 3d) — shared
+            // FaunaKit view; `setRendersProviderChoice(true)` declared at
+            // `OnboardingVM.init`, so the handle check lands here in place of
+            // dnsConfig → vpsConfig (which stay for the cloud-recovery path).
+            case .providerChoice:
+                ProviderChoiceView(vm: vm)
             case .dnsConfig:
                 MacDnsConfigView(vm: vm)
             case .vpsConfig:

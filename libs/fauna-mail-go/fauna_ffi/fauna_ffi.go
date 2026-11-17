@@ -1001,6 +1001,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_kids_app_eligibility()
+		})
+		if checksum != 35316 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_kids_app_eligibility: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_kids_app_eligible()
 		})
 		if checksum != 29003 {
@@ -1042,6 +1051,15 @@ func uniffiCheckChecksums() {
 		if checksum != 26950 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_ward_feed_request_state: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_ward_guardian_decides_contact()
+		})
+		if checksum != 25294 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_ward_guardian_decides_contact: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1714,7 +1732,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_notification_text_for()
 		})
-		if checksum != 24625 {
+		if checksum != 58029 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_notification_text_for: UniFFI API checksum mismatch")
 		}
@@ -3571,6 +3589,15 @@ func uniffiCheckChecksums() {
 		if checksum != 54883 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_conversations: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_deployment_serves_dav_or_mail()
+		})
+		if checksum != 5267 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_deployment_serves_dav_or_mail: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -12336,6 +12363,12 @@ type FfiNestClientInterface interface {
 	// calls directly, replacing the `POST|GET /api/v1/keypackage/{actor}` HTTP
 	// twins (deleted at T8).
 	Conversations() *FfiConversationsClient
+	// Whether the deployment serves calendar storage a person can add a first
+	// credential to — [`SetupStatusReply::serves_dav_or_mail`], the
+	// `deployment_serves_dav_or_mail` input of `event_create_possibility`.
+	// An unreadable status takes the deployment as serving (the page then
+	// points at the person's own first step rather than hiding it).
+	DeploymentServesDavOrMail() bool
 	// Stop the reconnect supervisor and drop the connection. Pending RPCs
 	// see a disconnect error. The auth token is not cleared.
 	Disconnect()
@@ -12614,6 +12647,40 @@ func (_self *FfiNestClient) Conversations() *FfiConversationsClient {
 		return C.uniffi_fauna_ffi_fn_method_ffinestclient_conversations(
 			_pointer, _uniffiStatus)
 	}))
+}
+
+// Whether the deployment serves calendar storage a person can add a first
+// credential to — [`SetupStatusReply::serves_dav_or_mail`], the
+// `deployment_serves_dav_or_mail` input of `event_create_possibility`.
+// An unreadable status takes the deployment as serving (the page then
+// points at the person's own first step rather than hiding it).
+func (_self *FfiNestClient) DeploymentServesDavOrMail() bool {
+	_pointer := _self.ffiObject.incrementPointer("*FfiNestClient")
+	defer _self.ffiObject.decrementPointer()
+	res, _ := uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffinestclient_deployment_serves_dav_or_mail(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
+		},
+	)
+
+	return res
 }
 
 // Stop the reconnect supervisor and drop the connection. Pending RPCs
@@ -30744,6 +30811,48 @@ type FfiDestroyerFfiFeedSourceOperation struct{}
 func (_ FfiDestroyerFfiFeedSourceOperation) Destroy(value FfiFeedSourceOperation) {
 }
 
+// The three-way kids-app answer — the native face of
+// `fauna_client_family::KidsAppEligibility` (`account-age-band.md` § The
+// account age band → *Kids-app eligibility while it is unknown*).
+// `Eligible` mounts the kids shell, `Ineligible` the not-supervised surface
+// with its message, `Unknown` that surface's frame without the message.
+type FfiKidsAppEligibility uint
+
+const (
+	FfiKidsAppEligibilityEligible   FfiKidsAppEligibility = 1
+	FfiKidsAppEligibilityIneligible FfiKidsAppEligibility = 2
+	FfiKidsAppEligibilityUnknown    FfiKidsAppEligibility = 3
+)
+
+type FfiConverterFfiKidsAppEligibility struct{}
+
+var FfiConverterFfiKidsAppEligibilityINSTANCE = FfiConverterFfiKidsAppEligibility{}
+
+func (c FfiConverterFfiKidsAppEligibility) Lift(rb RustBufferI) FfiKidsAppEligibility {
+	return LiftFromRustBuffer[FfiKidsAppEligibility](c, rb)
+}
+
+func (c FfiConverterFfiKidsAppEligibility) Lower(value FfiKidsAppEligibility) C.RustBuffer {
+	return LowerIntoRustBuffer[FfiKidsAppEligibility](c, value)
+}
+
+func (c FfiConverterFfiKidsAppEligibility) LowerExternal(value FfiKidsAppEligibility) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FfiKidsAppEligibility](c, value))
+}
+func (FfiConverterFfiKidsAppEligibility) Read(reader io.Reader) FfiKidsAppEligibility {
+	id := readInt32(reader)
+	return FfiKidsAppEligibility(id)
+}
+
+func (FfiConverterFfiKidsAppEligibility) Write(writer io.Writer, value FfiKidsAppEligibility) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerFfiKidsAppEligibility struct{}
+
+func (_ FfiDestroyerFfiKidsAppEligibility) Destroy(value FfiKidsAppEligibility) {
+}
+
 // UniFFI face of [`fauna_client_bridges::LinkBlock`] — why a bridge's Link
 // control is not actionable.
 type FfiLinkBlock interface {
@@ -33055,6 +33164,47 @@ type FfiDestroyerOptionalFfiFamilyPendingTransfer struct{}
 func (_ FfiDestroyerOptionalFfiFamilyPendingTransfer) Destroy(value *FfiFamilyPendingTransfer) {
 	if value != nil {
 		FfiDestroyerFfiFamilyPendingTransfer{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalFfiFamilyStatus struct{}
+
+var FfiConverterOptionalFfiFamilyStatusINSTANCE = FfiConverterOptionalFfiFamilyStatus{}
+
+func (c FfiConverterOptionalFfiFamilyStatus) Lift(rb RustBufferI) *FfiFamilyStatus {
+	return LiftFromRustBuffer[*FfiFamilyStatus](c, rb)
+}
+
+func (_ FfiConverterOptionalFfiFamilyStatus) Read(reader io.Reader) *FfiFamilyStatus {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterFfiFamilyStatusINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalFfiFamilyStatus) Lower(value *FfiFamilyStatus) C.RustBuffer {
+	return LowerIntoRustBuffer[*FfiFamilyStatus](c, value)
+}
+
+func (c FfiConverterOptionalFfiFamilyStatus) LowerExternal(value *FfiFamilyStatus) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*FfiFamilyStatus](c, value))
+}
+
+func (_ FfiConverterOptionalFfiFamilyStatus) Write(writer io.Writer, value *FfiFamilyStatus) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterFfiFamilyStatusINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalFfiFamilyStatus struct{}
+
+func (_ FfiDestroyerOptionalFfiFamilyStatus) Destroy(value *FfiFamilyStatus) {
+	if value != nil {
+		FfiDestroyerFfiFamilyStatus{}.Destroy(*value)
 	}
 }
 
@@ -40245,6 +40395,20 @@ func IosAgeAttestationAppId() *string {
 	}))
 }
 
+// Decide the kids-app answer from the run's latest **successful**
+// `familyStatus` read (`None` until one has succeeded — never a failed one)
+// and the account's persisted snapshot
+// ([`crate::FfiAccountRegistry::supervision_snapshot`], `None` when absent or
+// guardian-less). The rule itself lives in
+// `fauna_client_family::kids_app_eligibility`.
+func KidsAppEligibility(latestRead *FfiFamilyStatus, snapshot *FfiSupervisionSnapshot) FfiKidsAppEligibility {
+	return FfiConverterFfiKidsAppEligibilityINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_kids_app_eligibility(FfiConverterOptionalFfiFamilyStatusINSTANCE.Lower(latestRead), FfiConverterOptionalFfiSupervisionSnapshotINSTANCE.Lower(snapshot), _uniffiStatus),
+		}
+	}))
+}
+
 // May this account use the kids app? The native face of the shared
 // `fauna_client_family::kids_app_eligible` verdict (`family-safety.md` § The
 // account age band → the kids-app bullet, item (3)): `true` exactly when the
@@ -40306,6 +40470,16 @@ func WardFeedRequestState(asks []FfiFamilyFeedRequest, bridgeId string, operatio
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_ffi_fn_func_ward_feed_request_state(FfiConverterSequenceFfiFamilyFeedRequestINSTANCE.Lower(asks), FfiConverterStringINSTANCE.Lower(bridgeId), FfiConverterStringINSTANCE.Lower(operation), FfiConverterStringINSTANCE.Lower(target), _uniffiStatus),
 		}
+	}))
+}
+
+// Whether the guardian decides contact with this peer — when
+// `contact-request-guardian-button` is the Find User result's one step,
+// offered before anything is refused. Over the shared
+// [`fauna_client_family::guardian_decides_contact`].
+func WardGuardianDecidesContact(statusRead bool, ownPolicy *FfiReachPolicy, peerStatus *string) bool {
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_ffi_fn_func_ward_guardian_decides_contact(FfiConverterBoolINSTANCE.Lower(statusRead), FfiConverterOptionalFfiReachPolicyINSTANCE.Lower(ownPolicy), FfiConverterOptionalStringINSTANCE.Lower(peerStatus), _uniffiStatus)
 	}))
 }
 
@@ -42015,18 +42189,6 @@ func NotificationRetainedFor(item FfiNotifItem, nowMicros int64) bool {
 	}))
 }
 
-// What this row says — the localized body, the English `summary`, or the
-// default — decided once in shared Rust.
-//
-// A **pure** function over one row, the twin of
-// [`notification_destination_for`]: an app calls it while painting the list,
-// exactly as the Rust-native apps call
-// `fauna_client_notifications::notification_text`.
-//
-// ⚠ An app must not paint `body` or `summary` on its own judgement. A body
-// whose key this build's catalog lacks (a newer nest's) must lose to
-// `summary` — resolving it would paint `notifications.some_future_key` at the
-// user — and "is the key known" is exactly the part an app cannot see.
 func NotificationTextFor(item FfiNotifItem) FfiNotificationText {
 	return FfiConverterFfiNotificationTextINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{

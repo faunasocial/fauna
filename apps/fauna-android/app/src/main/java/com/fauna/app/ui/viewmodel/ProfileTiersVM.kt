@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import uniffi.fauna_core.ReadState
 import javax.inject.Inject
 
 /**
@@ -69,6 +71,18 @@ class ProfileTiersVM @Inject constructor(
 
     private val _tiers = MutableStateFlow<List<FfiTierItem>>(emptyList())
     val tiers: StateFlow<List<FfiTierItem>> = _tiers.asStateFlow()
+
+    /**
+     * Where the §1 tier read stands — `PENDING` until the tab's first read
+     * answers, `FAILED` when it failed before ever answering. A later failure
+     * (a mutation's, or a re-read's) leaves an answered list standing. The
+     * controls that need a tier (`subscription-claim-mint-button`,
+     * `subscription-provider-add-button`) are painted from the shared own-tier
+     * answer over it, so an unanswered read never reads as "you have no tier"
+     * (`profile.md` § Errors & edge cases, *A tier before what sells it*).
+     */
+    private val _tiersRead = MutableStateFlow(ReadState.PENDING)
+    val tiersRead: StateFlow<ReadState> = _tiersRead.asStateFlow()
 
     private val _requests = MutableStateFlow<List<FfiPendingRequest>>(emptyList())
     val requests: StateFlow<List<FfiPendingRequest>> = _requests.asStateFlow()
@@ -213,12 +227,22 @@ class ProfileTiersVM @Inject constructor(
     /** Read tiers + requests + providers + claims, preserve the §3 selection by
      *  name, read its roster. */
     private suspend fun reload() {
-        val tiers = api.subscriptionTiersList()
-        val requests = api.subscriptionRequestsList()
-        _providers.value = api.paymentsProvidersList()
-        _claims.value = api.paymentsClaimsList()
+        val (tiers, requests) = try {
+            val tiers = api.subscriptionTiersList()
+            val requests = api.subscriptionRequestsList()
+            _providers.value = api.paymentsProvidersList()
+            _claims.value = api.paymentsClaimsList()
+            tiers to requests
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Failed before ever answering: say so. An answered list stands.
+            if (_tiersRead.value == ReadState.PENDING) _tiersRead.value = ReadState.FAILED
+            throw e
+        }
         val prevName = _tiers.value.getOrNull(_selectedTier.value)?.name
         _tiers.value = tiers
+        _tiersRead.value = ReadState.RESOLVED
         _requests.value = requests
         val restored = tiers.indexOfFirst { it.name == prevName }.takeIf { it >= 0 } ?: 0
         _selectedTier.value = restored

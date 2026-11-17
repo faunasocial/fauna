@@ -52,6 +52,7 @@
 
 use fauna_core::identity::ActorId;
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -388,6 +389,37 @@ impl OfflineShareView {
     /// mirror of [`Self::can_begin`].
     pub fn can_expect(&self) -> bool {
         self.panel == OfflineSharePanel::Receive && !self.status.in_flight() && self.peer_ok()
+    }
+
+    /// [`Self::can_begin`] as the typed answer every gated affordance gives
+    /// (`ui/README.md` § Offer only what is possible, rule 6): possible,
+    /// *blocked* by the reason the person can act on (a ceremony in flight, an
+    /// empty or refused code), or *absent* off the initiator panel. The bool
+    /// stays for the callers that read it through FFI.
+    pub fn begin_possibility(&self) -> Possibility {
+        self.act_possibility(OfflineSharePanel::Initiate)
+    }
+
+    /// [`Self::can_expect`] as the typed answer — the recipient's mirror of
+    /// [`Self::begin_possibility`].
+    pub fn expect_possibility(&self) -> Possibility {
+        self.act_possibility(OfflineSharePanel::Receive)
+    }
+
+    fn act_possibility(&self, panel: OfflineSharePanel) -> Possibility {
+        if self.panel != panel {
+            return Possibility::Absent;
+        }
+        if self.status.in_flight() {
+            return Possibility::blocked(status_label(self.status));
+        }
+        match self.peer_actor() {
+            Ok(_) => Possibility::Possible,
+            Err(why) => Possibility::blocked(
+                code_error_label(why)
+                    .unwrap_or_else(|| LocalizedText::key("folders.offline_share_code_needed")),
+            ),
+        }
     }
 
     /// Whether `offline-share-cancel-button` renders: any open panel can be

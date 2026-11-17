@@ -64,8 +64,10 @@ from helpers.waiting import wait_until
 pytestmark = [
     pytest.mark.tier_3,
     # tui is the lead app, macOS, linux and windows followed (web, ios and
-    # android are the page's declared absences). Each arrives with its marker
-    # AND a `built` entry on the `folder-place-accepts-hold` surface. macOS'
+    # android are the page's declared absences). Each arrives with its marker,
+    # a `built` entry on the `folder-place-accepts-hold` surface, AND a call to
+    # `conftest._apply_place_accepts_log_env` in its launch branch (the held
+    # line `_held_passes` counts is debug on a target of its own). macOS'
     # production spawner is launchd, so its seats run an agent only under
     # `real_sync_agent`. windows spawns its agent detached: `real_sync_agent`
     # runs one, and `isolated_sync_agent` puts it on this run's own pipe rather
@@ -105,6 +107,32 @@ def _held_passes(app) -> int:
     return sum(
         1 for line in app.driver.app_stderr_text().splitlines() if PLACE_ACCEPTS_HELD_LINE in line
     )
+
+
+#: The engine's info line when a seat read moves the gate
+#: (`install_authoritative_posture`, "place accepts-remote-changes").
+_POSTURE_LINE = "place accepts-remote-changes (re)resolved from the nest rows"
+
+
+def _no_held_line_cause(app) -> str:
+    """Why no held line showed up. There are two causes, and they look the same
+    from the test. Either the flag never reached the running seat, or the seat
+    did install the hold but its held line is not logged, because it is a debug
+    line on a target of its own. Each app branch must turn that target on
+    (`conftest._apply_place_accepts_log_env`). The info line the seat logs when
+    the gate moves tells the two apart."""
+    installed = [
+        line
+        for line in app.driver.app_stderr_text().splitlines()
+        if _POSTURE_LINE in line and "now=false" in line
+    ]
+    if installed:
+        return (
+            "the seat DID install the hold (" + installed[-1].strip() + "), but logged no "
+            "held line — is `fauna_sync_engine::place_accepts=debug` on in this app's "
+            "launch RUST_LOG (`conftest._apply_place_accepts_log_env`)?"
+        )
+    return "the seat never logged the gate moving to false — the flag never reached it"
 
 
 @pytest.mark.real_conversations
@@ -234,7 +262,7 @@ def test_a_device_told_not_to_take_changes_resumes_exactly_where_it_stopped(
         interval=2.0,
         diagnose=lambda: (
             "[device B] its engine never declined a pull after its place stopped "
-            "accepting — the flag never reached the running seat.\n"
+            f"accepting: {_no_held_line_cause(device_b)}.\n"
             + _agent_diagnosis(device_b, "device B")
         ),
     )

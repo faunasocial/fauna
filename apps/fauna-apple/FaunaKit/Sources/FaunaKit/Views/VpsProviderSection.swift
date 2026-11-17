@@ -57,6 +57,30 @@ public func vpsProviderSection(vm: OnboardingVM, provider: ProviderMeta) -> some
     }
 }
 
+/// The server choices — location, mail mode, SSH door, update channel and
+/// server type — as `nest_provisioning`'s choices region paints them on a run
+/// entered from the choose-providers page (`onboarding-provisioning.md` § 3d
+/// *The choices on the setting-things-up page*: "§ 5's rules ... apply wherever
+/// those controls are shown"). Built from the same pieces `vpsProviderSection`
+/// paints, so the two pages cannot drift apart; the order is tui's
+/// `vps_config::choices`. Free `@ViewBuilder` for the same reason as
+/// `vpsProviderSection`.
+@ViewBuilder
+public func vpsChoicesSection(vm: OnboardingVM) -> some View {
+    let cfg = vm.machine.vpsConfig()
+    VStack(alignment: .leading, spacing: 8) {
+        if !cfg.locations.isEmpty {
+            vpsLocationPicker(vm: vm, cfg: cfg)
+        }
+        vpsMailModeToggle(vm: vm)
+        vpsSshDoorToggle(vm: vm)
+        vpsUpdateChannelSection(vm: vm)
+        if !cfg.serverTypes.isEmpty {
+            vpsServerTypePicker(vm: vm, cfg: cfg)
+        }
+    }
+}
+
 /// The provider's signup link, open-in-browser button and help text — the head of
 /// the provider-specific section, shared with the `nest_retire` page's credential
 /// state (which reuses these controls by id).
@@ -240,7 +264,10 @@ private func vpsServerTypePicker(vm: OnboardingVM, cfg: VpsConfigState) -> some 
             // registration: a second `.automationValue` on this id is a second
             // slot, and the read lands on the first.
             .automationActivate("vps-server-type-radio[\(idx)]",
-                                text: { serverTypeLabel(st: st) }) {
+                                text: { serverTypeLabel(st: st) },
+                                attributes: {
+                                    ["state": vm.machine.vpsConfig().selectedServerTypeId == st.id ? "on" : "off"]
+                                }) {
                 vm.machine.selectVpsServerType(id: st.id)
             }
             .id("vps-server-type-radio[\(idx)]:\(st.id):\(serverTypeLabel(st: st))")
@@ -259,7 +286,10 @@ private func vpsServerTypePicker(vm: OnboardingVM, cfg: VpsConfigState) -> some 
             .accessibilityIdentifier("vps-server-type-radio[\(idx)]")
             // A radio "click" selects this server type (single-select set).
             .automationActivate("vps-server-type-radio[\(idx)]",
-                                text: { serverTypeLabel(st: st) }) {
+                                text: { serverTypeLabel(st: st) },
+                                attributes: {
+                                    ["state": vm.machine.vpsConfig().selectedServerTypeId == st.id ? "on" : "off"]
+                                }) {
                 vm.machine.selectVpsServerType(id: st.id)
             }
             .id("vps-server-type-radio[\(idx)]:\(st.id):\(serverTypeLabel(st: st))")

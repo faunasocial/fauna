@@ -52,7 +52,9 @@ struct DohResponse {
 struct DohAnswer {
     #[serde(rename = "type")]
     record_type: u32,
-    // ignoring data, name, TTL — we only need presence.
+    /// The rdata — for an `NS` answer, the nameserver's name.
+    #[serde(default)]
+    data: String,
 }
 
 /// An Authority-section record: on a name with no delegation the resolver
@@ -371,6 +373,18 @@ pub struct NsProbe {
     /// probe that host instead of offering the name as available
     /// (`docs/goal/behavior/onboarding-provisioning.md` § 4).
     pub in_zone_address: bool,
+    /// The name's delegation: the nameservers its `NS` answer names, lowercased,
+    /// no trailing dot, sorted; empty when it has none. The choose-providers
+    /// page prefers a DNS provider whose zone of the domain's name these name
+    /// (`docs/goal/behavior/onboarding-provisioning.md` § 3d → *A zone the
+    /// domain does not point at*).
+    pub nameservers: Vec<String>,
+}
+
+/// A nameserver's name in the one spelling every comparison uses: lowercased,
+/// no trailing dot.
+pub fn normalize_nameserver(ns: &str) -> String {
+    ns.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 pub async fn dns_ns_probe(client: &Client, domain: &str) -> Result<NsProbe, ProvisionError> {
@@ -392,6 +406,7 @@ pub async fn dns_ns_probe_with_base_url(
             },
             enclosing_zone: None,
             in_zone_address: false,
+            nameservers: vec![],
         });
     }
     let resp = client
@@ -409,6 +424,17 @@ pub async fn dns_ns_probe_with_base_url(
     }
     let data: DohResponse = resp.json().await?;
     let has_ns = data.status != 3 && data.answer.iter().any(|a| a.record_type == NS_RECORD_TYPE);
+    let mut nameservers: Vec<String> = if has_ns {
+        data.answer
+            .iter()
+            .filter(|a| a.record_type == NS_RECORD_TYPE && !a.data.trim().is_empty())
+            .map(|a| normalize_nameserver(&a.data))
+            .collect()
+    } else {
+        vec![]
+    };
+    nameservers.sort();
+    nameservers.dedup();
     let enclosing_zone = if has_ns {
         None
     } else {
@@ -428,6 +454,7 @@ pub async fn dns_ns_probe_with_base_url(
         },
         enclosing_zone,
         in_zone_address,
+        nameservers,
     })
 }
 
@@ -819,6 +846,28 @@ mod tests {
         .await;
         assert!(delegated.lookup.has_ns);
         assert_eq!(delegated.enclosing_zone, None);
+    }
+
+    #[tokio::test]
+    async fn ns_probe_carries_the_delegations_nameservers() {
+        let p = ns_probe_against(
+            "example.com",
+            r#"{"Status":0,"Answer":[{"name":"example.com.","type":2,"TTL":1,"data":"Oxygen.NS.zone-host.example."},{"name":"example.com.","type":2,"TTL":1,"data":"hydrogen.ns.zone-host.example."}]}"#,
+        )
+        .await;
+        assert_eq!(
+            p.nameservers,
+            vec![
+                "hydrogen.ns.zone-host.example",
+                "oxygen.ns.zone-host.example"
+            ]
+        );
+        let none = ns_probe_against(
+            "foo.com",
+            r#"{"Status":3,"Authority":[{"name":"com","type":6,"TTL":900,"data":"a. b. 1 1 1 1 1"}]}"#,
+        )
+        .await;
+        assert!(none.nameservers.is_empty());
     }
 
     /// A resolver that answers the NS query with `ns_body` and the A query with

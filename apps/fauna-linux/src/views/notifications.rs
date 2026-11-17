@@ -2,6 +2,7 @@ use crate::client::FaunaClient;
 use crate::i18n::strings::common;
 use adw::prelude::*;
 use fauna_client_notifications::NotificationDestination;
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_ui_ids as ids;
 use gtk::glib;
 use std::cell::{Cell, RefCell};
@@ -23,12 +24,115 @@ pub struct NotificationHandles {
     pub count_badge: gtk::Label,
     pub list_box: gtk::ListBox,
     pub destinations: Destinations,
-    /// `notification-clear` — live only while a row is shown.
+    /// The page-wide actions, *Mark all read* and *Clear all*.
+    pub actions: PageActions,
+}
+
+/// The page-wide actions and what they wait on (`notifications.md` § Errors &
+/// edge cases, *The page-wide actions wait on the first read*): both are
+/// painted from the shared `fauna_client_notifications::mark_all_read_
+/// possibility` / `clear_all_possibility` over the page's read state (and,
+/// for *Clear all*, the rows it shows), through [`crate::possible::paint`]
+/// (reason on the tooltip), and each press asks the same answer again and
+/// refuses with its reason on `error-message` (`ui/README.md` § Offer only
+/// what is possible, rules 5 and 6). tui's `mark_read_answer` / `clear_answer`.
+#[derive(Clone)]
+pub struct PageActions {
+    /// `notification-mark-read`.
+    pub mark_read_button: gtk::Button,
+    /// `notification-clear`.
     pub clear_button: gtk::Button,
+    /// Where the page's list read stands: `Pending` until it first answers,
+    /// `Failed` after a first read that came back with an error (until a later
+    /// one succeeds); a failure after a resolved read keeps it resolved.
+    read: Rc<Cell<ReadState>>,
+    /// How many rows the page shows (a collapsed muted row counts).
+    rows: Rc<Cell<usize>>,
     /// The newest `created_at` the page has painted — the bound a clear-all
     /// sends, so a row that arrived after the user looked survives
     /// (`notifications.md` § Retention rule 2). `None` on an empty page.
     pub clear_up_to: Rc<Cell<Option<i64>>>,
+}
+
+impl PageActions {
+    fn new(mark_read_button: gtk::Button, clear_button: gtk::Button) -> Self {
+        let this = Self {
+            mark_read_button,
+            clear_button,
+            read: Rc::new(Cell::new(ReadState::Pending)),
+            rows: Rc::new(Cell::new(0)),
+            clear_up_to: Rc::new(Cell::new(None)),
+        };
+        this.repaint();
+        this
+    }
+
+    /// *Mark all read*'s answer.
+    pub fn mark_read_answer(&self) -> Possibility {
+        fauna_client_notifications::mark_all_read_possibility(self.read.get())
+    }
+
+    /// *Clear all*'s answer.
+    pub fn clear_answer(&self) -> Possibility {
+        fauna_client_notifications::clear_all_possibility(self.read.get(), self.rows.get())
+    }
+
+    fn repaint(&self) {
+        crate::possible::paint(&self.mark_read_button, None, self.mark_read_answer());
+        crate::possible::paint(&self.clear_button, None, self.clear_answer());
+    }
+
+    /// The page's list read answered with `rows`, the newest at `newest`.
+    fn loaded(&self, rows: usize, newest: Option<i64>) {
+        self.read.set(ReadState::Resolved);
+        self.rows.set(rows);
+        self.clear_up_to.set(newest);
+        self.repaint();
+    }
+
+    /// The page's list read came back with an error. Rows already shown stay
+    /// actionable; before any resolved read the actions are blocked with the
+    /// failure.
+    pub fn read_failed(&self) {
+        if self.read.get() != ReadState::Resolved {
+            self.read.set(ReadState::Failed);
+            self.repaint();
+        }
+    }
+
+    /// Wire both presses: each asks its answer and refuses onto
+    /// `error_label` (the page's `error-message`) before doing anything.
+    /// *Mark all read* then runs `on_mark_read`; *Clear all* sends `on_clear`
+    /// the bound.
+    pub fn connect(
+        &self,
+        error_label: &gtk::Label,
+        on_mark_read: impl Fn() + 'static,
+        on_clear: impl Fn(i64) + 'static,
+    ) {
+        {
+            let this = self.clone();
+            let error_label = error_label.clone();
+            self.mark_read_button.connect_clicked(move |_| {
+                if crate::form_gate::refuse(&this.mark_read_answer(), &error_label) {
+                    return;
+                }
+                on_mark_read();
+            });
+        }
+        {
+            let this = self.clone();
+            let error_label = error_label.clone();
+            self.clear_button.connect_clicked(move |_| {
+                if crate::form_gate::refuse(&this.clear_answer(), &error_label) {
+                    return;
+                }
+                if let Some(bound) = this.clear_up_to.get() {
+                    on_clear(bound);
+                }
+            });
+        }
+    }
 }
 
 /// Whether a row with this destination is offered as a control. The shared
@@ -129,7 +233,6 @@ pub fn build_notifications_view() -> (gtk::Box, NotificationHandles) {
 
     let clear_btn = gtk::Button::with_label(crate::i18n::strings::notifications::CLEAR_ALL);
     clear_btn.add_css_class("flat");
-    clear_btn.set_sensitive(false);
     crate::testid::set_test_id(&clear_btn, ids::NOTIFICATION_CLEAR);
     header.pack_end(&clear_btn);
 
@@ -138,13 +241,10 @@ pub fn build_notifications_view() -> (gtk::Box, NotificationHandles) {
     crate::testid::set_test_id(&count_badge, ids::NOTIFICATION_COUNT_BADGE);
     header.pack_start(&count_badge);
 
-    // Wire the mark-read button to reset the badge text.
-    {
-        let badge = count_badge.clone();
-        mark_read_btn.connect_clicked(move |_| {
-            badge.set_text(&common::unread_count("0"));
-        });
-    }
+    // Both page-wide actions are painted blocked still loading until the
+    // page's first list read answers; `PageActions::connect` wires the
+    // presses once the window's `error-message` exists.
+    let actions = PageActions::new(mark_read_btn, clear_btn);
 
     outer.append(&header);
 
@@ -168,8 +268,7 @@ pub fn build_notifications_view() -> (gtk::Box, NotificationHandles) {
         count_badge,
         list_box,
         destinations: Rc::new(RefCell::new(Vec::new())),
-        clear_button: clear_btn,
-        clear_up_to: Rc::new(Cell::new(None)),
+        actions,
     };
     (outer, handles)
 }
@@ -201,8 +300,7 @@ pub fn update_notifications_list(
     destinations: &Destinations,
     family_gated_in: bool,
     items: &[fauna_client_notifications::notifications::NotifItem],
-    clear_button: &gtk::Button,
-    clear_up_to: &Cell<Option<i64>>,
+    actions: &PageActions,
     client: &Rc<FaunaClient>,
 ) -> u32 {
     crate::views::layout::clear_list_box_rows(list_box);
@@ -239,9 +337,9 @@ pub fn update_notifications_list(
     *destinations.borrow_mut() = painted;
 
     // Every loaded row counts toward the clear bound, a collapsed one too
-    // (§ Muted words rule 4).
-    clear_up_to.set(items.iter().map(|i| i.created_at).max());
-    clear_button.set_sensitive(!items.is_empty());
+    // (§ Muted words rule 4). The read has answered: the page-wide actions
+    // repaint from their shared answers.
+    actions.loaded(items.len(), items.iter().map(|i| i.created_at).max());
 
     count_badge.set_text(&common::unread_count(&unread.to_string()));
     unread
@@ -406,4 +504,89 @@ pub fn build_notification_row(
     row.set_child(Some(&vbox));
     crate::testid::set_test_id(&row, ids::NOTIFICATION_ITEM);
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reason(key: &str) -> String {
+        fauna_core::localized::LocalizedText::key(key).resolve(crate::i18n::strings::lookup)
+    }
+
+    fn actions() -> PageActions {
+        PageActions::new(gtk::Button::new(), gtk::Button::new())
+    }
+
+    /// Unknown is not possible (`notifications.md` § Errors & edge cases):
+    /// before the first list read answers, *Mark all read* and *Clear all*
+    /// are blocked still loading (reason beside them) and their presses
+    /// refuse onto `error-message` without running; once read, an empty page
+    /// blocks *Clear all* with its reason and a row enables it.
+    #[test]
+    fn the_page_wide_actions_wait_for_the_first_read() {
+        crate::testid::run_on_gtk_thread(|| {
+            let a = actions();
+            let error = gtk::Label::new(None);
+            let marked = Rc::new(Cell::new(false));
+            let cleared = Rc::new(Cell::new(None::<i64>));
+            {
+                let marked = Rc::clone(&marked);
+                let cleared = Rc::clone(&cleared);
+                a.connect(
+                    &error,
+                    move || marked.set(true),
+                    move |b| cleared.set(Some(b)),
+                );
+            }
+            let loading = reason("common.still_loading");
+            for btn in [&a.mark_read_button, &a.clear_button] {
+                assert!(btn.is_visible() && !btn.is_sensitive());
+                assert_eq!(btn.tooltip_text().as_deref(), Some(loading.as_str()));
+            }
+            a.mark_read_button.emit_clicked();
+            assert_eq!(error.text().as_str(), loading);
+            assert!(!marked.get(), "a refused press runs nothing");
+            a.clear_button.emit_clicked();
+            assert_eq!(cleared.get(), None);
+
+            a.loaded(0, None);
+            assert!(a.mark_read_button.is_sensitive());
+            assert!(!a.clear_button.is_sensitive());
+            let nothing = reason("notifications.nothing_to_clear");
+            assert_eq!(
+                a.clear_button.tooltip_text().as_deref(),
+                Some(nothing.as_str())
+            );
+            a.clear_button.emit_clicked();
+            assert_eq!(error.text().as_str(), nothing);
+            a.mark_read_button.emit_clicked();
+            assert!(marked.get());
+
+            a.loaded(1, Some(42));
+            assert!(a.clear_button.is_sensitive());
+            a.clear_button.emit_clicked();
+            assert_eq!(cleared.get(), Some(42));
+        });
+    }
+
+    /// A failed first read blocks both with load-failed; a failure after a
+    /// resolved read keeps the rows already shown actionable.
+    #[test]
+    fn a_failed_read_blocks_until_a_read_resolves() {
+        crate::testid::run_on_gtk_thread(|| {
+            let a = actions();
+            a.read_failed();
+            let failed = reason("common.load_failed");
+            assert!(!a.mark_read_button.is_sensitive());
+            assert_eq!(
+                a.mark_read_button.tooltip_text().as_deref(),
+                Some(failed.as_str())
+            );
+            a.loaded(2, Some(7));
+            a.read_failed();
+            assert!(a.mark_read_button.is_sensitive());
+            assert!(a.clear_button.is_sensitive());
+        });
+    }
 }

@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use fauna_e2e_contract::{
     ConnectionReports, KnockNotices, LaidOutText, PaintedErrorTally, PaintedTextArea,
+    RootSurfaceJournal,
 };
 
 use crate::nest_client::FfiConnectionState;
@@ -279,6 +280,44 @@ impl FfiPaintedErrorTallyForTest {
     }
 }
 
+/// The journal behind `fauna_e2e_agent::ROOT_SURFACE_KEY`. An app holds ONE,
+/// fed once per painted frame with what its root showed — one of the
+/// `fauna_e2e_contract::ROOT_SURFACE_*` names, another launch surface's ui.yaml
+/// page name, or `None` when the frame painted nothing — and publishes
+/// [`Self::json`] under that key (`onboarding.md` § Wizard exit handling → *The
+/// wizard becomes the app in place*).
+#[derive(uniffi::Object)]
+pub struct FfiRootSurfaceJournalForTest {
+    inner: Mutex<RootSurfaceJournal>,
+}
+
+#[uniffi::export]
+impl FfiRootSurfaceJournalForTest {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(RootSurfaceJournal::default()),
+        })
+    }
+
+    /// Record one painted frame.
+    pub fn observe(&self, showing: Option<String>) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(showing.as_deref());
+    }
+
+    /// The `root_surface` state value, as JSON text.
+    pub fn json(&self) -> String {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .json()
+            .to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +351,24 @@ mod tests {
         tally.observe(frame());
         let json: serde_json::Value = serde_json::from_str(&tally.json()).unwrap();
         assert_eq!(json["count"], 1, "a standing error counts once");
+
+        let surfaces = FfiRootSurfaceJournalForTest::new();
+        for showing in [Some("wizard"), Some("wizard"), None, Some("app")] {
+            surfaces.observe(showing.map(str::to_string));
+        }
+        let json: serde_json::Value = serde_json::from_str(&surfaces.json()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "journal": [
+                    { "seq": 0, "showing": "wizard" },
+                    { "seq": 1, "showing": null },
+                    { "seq": 2, "showing": "app" },
+                ],
+                "now": "app",
+            }),
+            "one entry per change, a frame that painted nothing included"
+        );
 
         let knocks = FfiKnockNoticesForTest::new();
         knocks.observe();

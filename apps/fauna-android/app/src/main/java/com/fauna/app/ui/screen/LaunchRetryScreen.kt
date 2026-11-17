@@ -97,20 +97,27 @@ fun LaunchRetryScreen(
 }
 
 /**
- * `launch_progress` — the in-flight launch: blank but for
- * `launch-identity-label`, the bound account's cached `handle@domain · tier`
- * (`onboarding.md` § App-launch routing → *The cached identity on the launch
- * surfaces*); nothing at all while the cache holds no handle.
+ * `launch_progress` — the in-flight launch: the "Signing you in…" line (tui's
+ * and windows' `launch.signing_in`) and `launch-identity-label`, the bound
+ * account's cached `handle@domain · tier` (`onboarding.md` § App-launch routing
+ * → *The cached identity on the launch surfaces*), absent while the cache holds
+ * no handle. Never nothing: from the wizard's exit to the app this is what the
+ * activity shows (`onboarding.md` § Wizard exit handling → *The wizard becomes
+ * the app in place*), and a first sign-in has no cached handle.
  */
 @Composable
 fun LaunchProgressScreen(identityLine: String?) {
-    if (identityLine == null) return
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        LaunchIdentityLabel(identityLine)
+        Text(
+            stringResource(R.string.launch_signing_in),
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+        )
+        if (identityLine != null) LaunchIdentityLabel(identityLine)
     }
 }
 

@@ -16,7 +16,8 @@ reading a real nest after a real ceremony.
 ``test_identity_succession_shared_folder_rekey.py``, outcome 35 of
 take-your-account-back, whose share gesture this file reuses):
 
-- **A** — the owner (``succeedable_app``): creates a set, binds a folder, adds
+- **A** — the owner (``succeedable_app``, driven on the member fixture's
+  ``owner_app`` — a tui seat on android): creates a set, binds a folder, adds
   a file, shares the set to M, then takes the account back.
 - **M** — a member's real-engine seat (``succession_member_app``).
 - **S** — a second seat of A's OLD seed, bound to the set before the ceremony
@@ -98,17 +99,19 @@ from tests.test_identity_succession_shared_folder_rekey import (
 pytestmark = [
     pytest.mark.tier_3,
     # The cast — the member seat and (for the stolen writer) a second seat of
-    # the app under test, each adding and reading files through its own door
+    # A's app, each adding and reading files through its own door
     # (`helpers/succession_file_door.py`: a bound local folder on tui, linux
     # and macos, the Media page's upload and download on web and ios) — runs on
-    # tui, linux, web, macos and ios. android's member seat is not built yet
-    # (`surfaces.toml`'s `succession-witness-member-seat`); it joins with a
-    # marker of its own.
+    # tui, linux, web, macos, ios and android. On android the phone is the
+    # member (its Media page door) and alice and the stolen writer run on tui
+    # seats beside it (`succession_member_app`'s `owner_app`); the column runs
+    # once `surfaces.toml`'s `succession-witness-member-seat` lists android built.
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.web,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.android,
     pytest.mark.real_conversations,
 ]
 
@@ -129,8 +132,12 @@ def test_after_the_owner_takes_the_account_back_a_member_keeps_the_old_files_and
     """A holds a recovery kit, adds a file and shares the set to M → S (A's old
     seed) is bound and writes → A takes the account back → M still opens A's earlier file → S's
     later file is refused while the successor's later file arrives."""
-    alice_app, alice = succeedable_app
+    # alice is the member fixture's `owner_app`, not `succeedable_app`'s app:
+    # on android the phone plays bob (the member) and alice signs in on a tui
+    # seat of her own identity — and the stolen seat follows her app there.
+    _, alice = succeedable_app
     bob_app, bob = succession_member_app
+    alice_app = succession_member_app.owner_app
     ab = alice_app.backups
 
     # ── 0. A holds a recovery kit before anyone joins (the module doc's ⚠) ──
@@ -359,8 +366,12 @@ def test_a_member_whose_copy_could_not_follow_the_owners_new_identity_is_re_shar
     kit minted after it is, to M, exactly what a thief's kit looks like: the
     statement is refused and the successor's remove-old forks M's seat.
     """
-    alice_app, alice = succeedable_app
+    # alice is the member fixture's `owner_app`, not `succeedable_app`'s app:
+    # on android the phone plays bob (the member) and alice signs in on a tui
+    # seat of her own identity — and the stolen seat follows her app there.
+    _, alice = succeedable_app
     bob_app, bob = succession_member_app
+    alice_app = succession_member_app.owner_app
     ab = alice_app.backups
 
     old_actor = settled_actor_id(alice_app)

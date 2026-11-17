@@ -1749,6 +1749,24 @@ impl Affordance {
             )),
         }
     }
+
+    /// The same verdict as a [`fauna_core::possibility::Possibility`], the one
+    /// answer type every gated affordance's predicate gives
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6). An
+    /// app's element seam folds it with the page's own predicate
+    /// ([`Possibility::and`](fauna_core::possibility::Possibility::and)), so
+    /// the offline gate is one more reason in the same answer, never a second
+    /// mechanism. `NeedsNest` is `Blocked`, never `Absent`: the connection
+    /// can come back.
+    pub fn possibility(self) -> fauna_core::possibility::Possibility {
+        fauna_core::possibility::Possibility::from_blocked_reason(self.reason())
+    }
+}
+
+impl From<Affordance> for fauna_core::possibility::Possibility {
+    fn from(verdict: Affordance) -> Self {
+        verdict.possibility()
+    }
 }
 
 /// The connection-state words that mean **no live nest**.
@@ -1818,9 +1836,36 @@ pub fn affordance(kind: &str, connection_state: &str) -> Affordance {
     }
 }
 
+/// May a surface offer a fetch that has **no RPC kind** but still needs the
+/// nest, given the app's current `connection_state`?
+///
+/// The bulk-binary carve-out (`GET /api/v1/{manifests,chunks}/{hash}`) is the
+/// case: a snapshot file's download and the whole-snapshot restore read their
+/// bytes from the nest over it, so there is no `kind` for [`affordance`] to
+/// classify — and passing a made-up one would be the typo ruling 2 refuses to
+/// grey on. The verdict is [`Affordance::NeedsNest`] exactly when
+/// [`is_online`] is false: the same offline words, the same reason, one rule.
+pub fn carve_out_affordance(connection_state: &str) -> Affordance {
+    if is_online(connection_state) {
+        Affordance::Available
+    } else {
+        Affordance::NeedsNest
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_carve_out_fetch_needs_a_live_nest_and_nothing_else() {
+        assert_eq!(carve_out_affordance("connected"), Affordance::Available);
+        // An unknown future word reads as online (ruling 3's polarity).
+        assert_eq!(carve_out_affordance("resuming"), Affordance::Available);
+        for word in OFFLINE_STATE_WORDS {
+            assert_eq!(carve_out_affordance(word), Affordance::NeedsNest, "{word}");
+        }
+    }
 
     /// One registered kind of each class, taken from the table itself rather
     /// than hard-coded: a later reclassification (phase 2 moved 16 entries)
@@ -1831,6 +1876,18 @@ mod tests {
             .find(|(_, c)| **c == class)
             .map(|(k, _)| *k)
             .unwrap_or_else(|| panic!("no registered kind is classified {class:?}"))
+    }
+
+    /// The offline verdict in the shared possibility answer: available is
+    /// possible, `NeedsNest` is blocked with the same reason (never absent:
+    /// the connection can come back).
+    #[test]
+    fn the_offline_verdict_is_a_possibility_with_the_same_reason() {
+        use fauna_core::possibility::Possibility;
+        assert_eq!(Affordance::Available.possibility(), Possibility::Possible);
+        let offline = Possibility::from(Affordance::NeedsNest);
+        assert!(offline.is_shown() && !offline.is_possible());
+        assert_eq!(offline.reason().cloned(), Affordance::NeedsNest.reason());
     }
 
     /// The whole rule, in both directions, over every class.

@@ -27,6 +27,7 @@ Stamped 2026-11-07 at ac836c937b.
    - `tests/e2e-unified/tests/test_events.py::test_switch_to_day_view`
    - `tests/e2e-unified/tests/test_events.py::test_month_navigation`
    - `tests/e2e-unified/tests/test_events.py::test_pan_moves_one_visible_range_per_view`
+   - `tests/e2e-unified/tests/test_events_layout_macos.py::test_macos_events_grid_fills_the_window`
    - `tests/e2e-unified/tests/test_events.py::test_pan_is_inert_in_the_date_unfiltered_agenda`
 3. [app] Clicking a day or an empty slot starts a new event at that date and time — `docs/goal/ui/events.md` § Layout & flow
    - `tests/e2e-unified/tests/test_events.py::test_month_day_cell_click_opens_day_view`
@@ -73,19 +74,21 @@ Stamped 2026-11-07 at ac836c937b.
    - `tests/e2e-unified/tests/test_events_imip_outbound.py::test_answering_an_outside_organizers_invitation_mails_the_reply_back`
 19. [nest] Only the organizer can rewrite an event by mail, and a mailed reply counts only for the attendee who sent it: anyone else's rewrite or reply is refused and leaves the event untouched — `docs/goal/behavior/inbound-scheduling-authority.md` § Scheduling & invitations
    - `tests/e2e-unified/tests/api/test_scheduling_client_authority.py::test_only_the_organizer_can_rewrite_an_event_and_a_reply_counts_only_for_its_sender`
+20. [app] On a new account that has no calendar yet, the page never opens an event it could not save; it names the step that sets your calendar up, and once you take it your Personal calendar is there and takes your first event — `docs/goal/ui/events.md` § Errors & edge cases
+   - `tests/e2e-unified/tests/test_events_fresh_account.py::test_a_fresh_account_cannot_compose_until_the_named_step_then_creates_an_event`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
-| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| web | ⚠ partial | 0.1.5-dev+1c9a6a26 standalone |
+| linux | ✅ full | 0.1.7-dev+00c1f744 standalone |
 | windows | ⚠ partial | 0.1.5-dev+ea6766b3 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+17b5832c standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+17b5832c standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6 docker |
+| tui | ✅ full | 0.1.7-dev+00c1f744 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -99,6 +102,7 @@ Stamped 2026-11-07 at ac836c937b.
 | 2 | app | `tests/e2e-unified/tests/test_events.py::test_switch_to_day_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_events.py::test_month_navigation` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_moves_one_visible_range_per_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_events_layout_macos.py::test_macos_events_grid_fills_the_window` | — |
 | 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_is_inert_in_the_date_unfiltered_agenda` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_day_cell_click_opens_day_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_double_click_day_cell_opens_new_event_prefilled` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -128,4 +132,5 @@ Stamped 2026-11-07 at ac836c937b.
 | 18 | app | `tests/e2e-unified/tests/test_events_imip_outbound.py::test_inviting_someone_by_email_mails_them_the_invitation` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 18 | app | `tests/e2e-unified/tests/test_events_imip_outbound.py::test_answering_an_outside_organizers_invitation_mails_the_reply_back` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 19 | nest | `tests/e2e-unified/tests/api/test_scheduling_client_authority.py::test_only_the_organizer_can_rewrite_an_event_and_a_reply_counts_only_for_its_sender` | nest (linux): passed, nest (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_events_fresh_account.py::test_a_fresh_account_cannot_compose_until_the_named_step_then_creates_an_event` | linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

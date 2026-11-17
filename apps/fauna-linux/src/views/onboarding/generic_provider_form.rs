@@ -41,11 +41,87 @@ pub struct HostedAuthHandle {
     pub button: gtk::Button,
 }
 
-fn credential_form(kind: &str) -> CredentialForm {
-    match kind {
-        "dns" => CredentialForm::Dns,
-        "vps" => CredentialForm::Vps,
-        _ => unreachable!("generic_provider_form kind is always \"dns\" or \"vps\""),
+/// Which credential set a form writes: the `dns_config` / `vps_config` forms,
+/// or one provider's dialog on the choose-providers page
+/// (`onboarding-provisioning.md` § 3d). The target names the field-id prefix
+/// (`{dns,vps,provider}-credentials-form-{field.id}`, ui.yaml) and routes every
+/// write and every hosted sign-in to the matching machine method — one
+/// renderer serves all three forms, so they cannot drift apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CredTarget {
+    Dns,
+    Vps,
+    Provider(String),
+}
+
+impl CredTarget {
+    fn prefix(&self) -> &'static str {
+        match self {
+            CredTarget::Dns => "dns",
+            CredTarget::Vps => "vps",
+            CredTarget::Provider(_) => "provider",
+        }
+    }
+
+    /// The built forms' hosted-auth slot; `None` for a provider dialog.
+    fn form(&self) -> Option<CredentialForm> {
+        match self {
+            CredTarget::Dns => Some(CredentialForm::Dns),
+            CredTarget::Vps => Some(CredentialForm::Vps),
+            CredTarget::Provider(_) => None,
+        }
+    }
+
+    fn set(&self, m: &OnboardingMachine, field_id: String, value: String) {
+        match self {
+            CredTarget::Dns => m.set_dns_cred(field_id, value),
+            CredTarget::Vps => m.set_vps_cred(field_id, value),
+            CredTarget::Provider(id) => m.set_provider_cred(id.clone(), field_id, value),
+        }
+    }
+
+    fn button_text(&self, m: &OnboardingMachine, field_id: &str) -> String {
+        match (self, self.form()) {
+            (CredTarget::Provider(id), _) => {
+                m.provider_hosted_auth_button_text(id.clone(), field_id.into())
+            }
+            (_, Some(form)) => m.hosted_auth_button_text(form, field_id.into()),
+            (_, None) => unreachable!("only a provider target has no built form"),
+        }
+    }
+
+    fn can_begin(&self, m: &OnboardingMachine, field_id: &str) -> bool {
+        match (self, self.form()) {
+            (CredTarget::Provider(id), _) => {
+                m.provider_hosted_auth_can_begin(id.clone(), field_id.into())
+            }
+            (_, Some(form)) => m.hosted_auth_can_begin(form, field_id.into()),
+            (_, None) => unreachable!("only a provider target has no built form"),
+        }
+    }
+
+    /// Begin the hosted sign-in, open its page, wait for it. Errors are
+    /// already in the field's `HostedAuthState::Failed` (painted as the button
+    /// label on the next tick) — nothing to re-derive here.
+    async fn sign_in(&self, m: &OnboardingMachine, field_id: String) {
+        match (self, self.form()) {
+            (CredTarget::Provider(id), _) => {
+                if let Ok(prompt) = m
+                    .provider_hosted_auth_begin(id.clone(), field_id.clone())
+                    .await
+                {
+                    crate::url_opener::open(&prompt.verification_url);
+                    let _ = m.provider_hosted_auth_wait(id.clone(), field_id).await;
+                }
+            }
+            (_, Some(form)) => {
+                if let Ok(prompt) = m.hosted_auth_begin(form, field_id.clone()).await {
+                    crate::url_opener::open(&prompt.verification_url);
+                    let _ = m.hosted_auth_wait(form, field_id).await;
+                }
+            }
+            (_, None) => {}
+        }
     }
 }
 
@@ -55,31 +131,31 @@ fn credential_form(kind: &str) -> CredentialForm {
 fn paint_hosted_auth_button(
     button: &gtk::Button,
     m: &OnboardingMachine,
-    form: CredentialForm,
+    target: &CredTarget,
     field_id: &str,
 ) {
-    button.set_label(&m.hosted_auth_button_text(form, field_id.to_string()));
-    button.set_sensitive(m.hosted_auth_can_begin(form, field_id.to_string()));
+    button.set_label(&target.button_text(m, field_id));
+    button.set_sensitive(target.can_begin(m, field_id));
 }
 
 /// Per-tick repaint for every hosted-auth button a form is currently
 /// showing. Called from the page's own refresh closure — the generic
 /// renderer here owns no tick of its own (`dns_config.rs`'s
-/// `update_provider_section_state` / `vps_config.rs`'s twin).
+/// `update_provider_section_state`, `vps_config.rs`'s twin and
+/// `provider_choice.rs`'s dialog).
 pub fn refresh_hosted_auth_buttons(
     handles: &[HostedAuthHandle],
     m: &OnboardingMachine,
-    kind: &str,
+    target: &CredTarget,
 ) {
-    let form = credential_form(kind);
     for h in handles {
-        paint_hosted_auth_button(&h.button, m, form, &h.field_id);
+        paint_hosted_auth_button(&h.button, m, target, &h.field_id);
     }
 }
 
 /// Build a fresh credentials Box from a `visible_*_fields()` snapshot.
-/// `kind` is `"dns"` or `"vps"`; field-change handlers route to
-/// `m.set_dns_cred(...)` or `m.set_vps_cred(...)` accordingly.
+/// `target` routes field-change handlers to `m.set_dns_cred(...)`,
+/// `m.set_vps_cred(...)` or `m.set_provider_cred(...)`.
 ///
 /// The returned Box uses `accessible_role(Group)` so AT-SPI exposes it
 /// to test bridges. Callers that need a stable container across provider
@@ -90,14 +166,14 @@ pub fn refresh_hosted_auth_buttons(
 pub fn build_creds_only(
     fields: &[FieldMetaPlain],
     m: Arc<OnboardingMachine>,
-    kind: &str,
+    target: &CredTarget,
 ) -> (gtk::Box, Vec<HostedAuthHandle>) {
     let container = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
         .accessible_role(gtk::AccessibleRole::Group)
         .build();
-    let handles = populate_creds_into(&container, fields, m, kind);
+    let handles = populate_creds_into(&container, fields, m, target);
     (container, handles)
 }
 
@@ -115,10 +191,9 @@ pub fn populate_creds_into(
     container: &gtk::Box,
     fields: &[FieldMetaPlain],
     m: Arc<OnboardingMachine>,
-    kind: &str,
+    target: &CredTarget,
 ) -> Vec<HostedAuthHandle> {
     let mut handles = Vec::new();
-    let form = credential_form(kind);
     for field in fields {
         // accessible_role(Group) on the row Box so AT-SPI walks into
         // it. Plain gtk::Box::new defaults to role Generic, which some
@@ -134,8 +209,8 @@ pub fn populate_creds_into(
         row.append(&label);
 
         // Canonical cross-app field test ID: `{kind}-credentials-form-
-        // {field.id}` (matches web/apple/android + ui.yaml).
-        let test_id = format!("{kind}-credentials-form-{}", field.id);
+        // {field.id}` (matches web/apple/android/tui + ui.yaml).
+        let test_id = format!("{}-credentials-form-{}", target.prefix(), field.id);
 
         if field.field_type == FieldTypePlain::HostedAuth {
             // A `hosted-auth` field is a button, not an input — the bundled
@@ -145,24 +220,17 @@ pub fn populate_creds_into(
             // repainted every tick by `refresh_hosted_auth_buttons`.
             let button = gtk::Button::new();
             crate::testid::set_test_id(&button, &test_id);
-            paint_hosted_auth_button(&button, &m, form, &field.id);
+            paint_hosted_auth_button(&button, &m, target, &field.id);
             {
                 let m = m.clone();
                 let field_id = field.id.clone();
+                let target = target.clone();
                 button.connect_clicked(move |_| {
                     let m = m.clone();
                     let field_id = field_id.clone();
+                    let target = target.clone();
                     crate::async_helper::run_on_tokio(
-                        async move {
-                            // Errors are already in the field's
-                            // `HostedAuthState::Failed` (painted as the
-                            // button label on the next tick) — nothing to
-                            // re-derive here.
-                            if let Ok(prompt) = m.hosted_auth_begin(form, field_id.clone()).await {
-                                crate::url_opener::open(&prompt.verification_url);
-                                let _ = m.hosted_auth_wait(form, field_id).await;
-                            }
-                        },
+                        async move { target.sign_in(&m, field_id).await },
                         |_| {},
                     );
                 });
@@ -182,20 +250,15 @@ pub fn populate_creds_into(
         if field.field_type == FieldTypePlain::Secret {
             entry.set_visibility(false);
         }
-        // The cred *key* passed to set_dns_cred/set_vps_cred below stays the
-        // raw field.id.
+        // The cred *key* passed to the target's setter below stays the raw
+        // field.id.
         crate::testid::set_test_id(&entry, &test_id);
         {
             let m = m.clone();
             let field_id = field.id.clone();
-            let kind_owned = kind.to_string();
+            let target = target.clone();
             entry.connect_changed(move |e| {
-                let v = e.text().to_string();
-                match kind_owned.as_str() {
-                    "dns" => m.set_dns_cred(field_id.clone(), v),
-                    "vps" => m.set_vps_cred(field_id.clone(), v),
-                    _ => {}
-                }
+                target.set(&m, field_id.clone(), e.text().to_string());
             });
         }
         row.append(&entry);
@@ -251,7 +314,7 @@ mod tests {
             let visible: Vec<FieldMetaPlain> =
                 porkbun.fields.iter().map(FieldMetaPlain::from).collect();
             let m = OnboardingMachine::new(Arc::new(NullObserver));
-            let (form, _handles) = build_creds_only(&visible, m, "dns");
+            let (form, _handles) = build_creds_only(&visible, m, &CredTarget::Dns);
             let entries = collect_entries(&form);
             assert_eq!(entries.len(), porkbun.fields.len(), "one Entry per field");
             for field in porkbun.fields.iter() {

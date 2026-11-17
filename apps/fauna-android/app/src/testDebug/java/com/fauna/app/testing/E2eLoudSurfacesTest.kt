@@ -232,4 +232,61 @@ class E2eLoudSurfacesTest {
         assertNotNull(shown)
         assertTrue(shown!!, shown.contains("reconnect_backoff") && shown.contains("no fauna client"))
     }
+
+    /**
+     * The `root_surface` journal (`fauna_e2e_agent::ROOT_SURFACE_KEY`): each
+     * frame journals the name the root branch wrote through [RootSurface], or
+     * `null` when it painted nothing — and the launch progress view with no
+     * cached handle (a first sign-in) paints something, so it is never `null`
+     * (`onboarding.md` § Wizard exit handling → *The wizard becomes the app in
+     * place*).
+     */
+    @Test
+    fun theRootSurfaceJournalNamesEachFrameAndABlankOneIsNothing() {
+        val surface = mutableStateOf("wizard")
+        composeRule.setContent {
+            com.fauna.app.ui.navigation.RootSurface(surface.value)
+            when (surface.value) {
+                "wizard" -> Text("Welcome", Modifier.testTag("page-heading"))
+                "launch_progress" -> com.fauna.app.ui.screen.LaunchProgressScreen(identityLine = null)
+                "blank" -> Box(Modifier)
+                else -> Text("posts", Modifier.testTag("feed-view"))
+            }
+        }
+        val root = composeRule.activity.window.decorView
+        for (name in listOf("wizard", "launch_progress", "blank", "app")) {
+            surface.value = name
+            composeRule.waitForIdle()
+            composeRule.runOnUiThread { E2eLoudSurfaces.observeFrameForTest(root) }
+        }
+        val journal = state().getJSONObject("root_surface").getJSONArray("journal")
+        val shown = (0 until journal.length()).map { journal.getJSONObject(it).opt("showing") }
+        assertEquals(listOf("wizard", "launch_progress", JSONObject.NULL, "app"), shown)
+    }
+
+    /** Every launch target names the surface tui names for it; the session
+     *  start after the challenge is the progress view, never the app. */
+    @Test
+    fun everyLaunchTargetCarriesTuisRootSurfaceName() {
+        assertEquals("launch_progress", com.fauna.app.ui.navigation.rootSurfaceName(null))
+        assertEquals(
+            "launch_progress",
+            com.fauna.app.ui.navigation.rootSurfaceName(com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.Authenticated),
+        )
+        assertEquals(
+            "wizard",
+            com.fauna.app.ui.navigation.rootSurfaceName(
+                com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.Wizard("onboarding/identity-choice"),
+            ),
+        )
+        val locked = com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.AccountLocked(1u)
+        assertEquals("launch_account_locked", com.fauna.app.ui.navigation.rootSurfaceName(locked))
+        assertEquals(
+            "identity_stolen_entry",
+            com.fauna.app.ui.navigation.rootSurfaceName(locked, stolenEntry = true),
+        )
+        val retry = com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.TransientError
+        assertEquals("launch_retry", com.fauna.app.ui.navigation.rootSurfaceName(retry))
+        assertEquals("nest_retire", com.fauna.app.ui.navigation.rootSurfaceName(retry, retiring = true))
+    }
 }

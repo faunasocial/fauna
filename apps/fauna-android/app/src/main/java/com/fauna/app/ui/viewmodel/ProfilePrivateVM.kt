@@ -5,6 +5,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.conversations.ConversationsManagerHost
+import com.fauna.app.ui.util.answerRefusal
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.FfiOverlayEditor
 import com.fauna.ffi.FfiOverlaySave
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_core.OverlayForm
+import uniffi.fauna_core.Possibility
 import javax.inject.Inject
 
 /**
@@ -51,12 +53,28 @@ class ProfilePrivateVM @Inject constructor(
     private val _saving = MutableStateFlow(false)
     val saving: StateFlow<Boolean> = _saving.asStateFlow()
 
+    private val _saveAnswer = MutableStateFlow(saveAnswerNow())
+
+    /**
+     * `profile-private-save-button`'s answer — the shared
+     * `contact_overlays::save_possibility` (`FfiOverlayEditor.savePossibility`):
+     * blocked still loading until the account store has assembled, so Save is
+     * never offered on a guess and refused only at the submit. Re-asked at
+     * every [reload]; [save] asks it again (`docs/goal/ui/README.md` § Offer
+     * only what is possible, rule 6). Absent with no editor (SELF, where the
+     * section is not painted).
+     */
+    val saveAnswer: StateFlow<Possibility> = _saveAnswer.asStateFlow()
+
+    private fun saveAnswerNow(): Possibility = editor?.savePossibility() ?: Possibility.Absent
+
     /** Moves with the overlay projection — the screen re-reads the form on it. */
     val epoch: StateFlow<Long> = host.overlayEpoch
 
     /** Re-read the form: an untouched section follows a sibling device's edit. */
     fun reload() {
         editor?.let { _form.value = it.form() }
+        _saveAnswer.value = saveAnswerNow()
     }
 
     fun setNickname(value: String) {
@@ -94,6 +112,12 @@ class ProfilePrivateVM @Inject constructor(
     fun save() {
         val editor = editor ?: return
         if (_saving.value) return
+        val answer = saveAnswerNow()
+        _saveAnswer.value = answer
+        answerRefusal(context, answer)?.let {
+            error.value = it.reason
+            return
+        }
         _saving.value = true
         viewModelScope.launch {
             try {

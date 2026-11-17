@@ -102,6 +102,7 @@ use fauna_ui_ids as ids;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use fauna_backups_machine::possibility::{DestinationForm, RestoreSelection};
 use fauna_backups_machine::{
     BackupOp, BackupsMachine, BackupsObserver, BackupsSnapshot, NullObserver, PolicyState,
     SnapshotState,
@@ -119,6 +120,7 @@ use fauna_client_snapshots::filesync::{
 };
 use fauna_core::data::{BackupDestination, DestinationUnattestedMark};
 use fauna_core::identity::ActorKeypair;
+use fauna_core::possibility::Possibility;
 use fauna_core::secret::SecretArray32;
 use fauna_i18n::strings::backups as t;
 use fauna_protocol::backup::BackupDestinationStatusItem;
@@ -586,16 +588,89 @@ impl BackupsState {
             .is_none_or(|index| self.restore_kinds.checked(index))
     }
 
-    /// Whether `restore-confirm-button` is armed: the typed text must equal the
-    /// **selected** snapshot's id, no restore may already be in flight (both
-    /// halves of `backups.md:63`), and the user must not have unticked that
-    /// snapshot's kind.
-    fn restore_armed(&self) -> bool {
-        self.restore_progress != RestoreProgress::Running
-            && self.selected_kind_ticked()
-            && self
-                .selected_snapshot_id()
-                .is_some_and(|id| id == self.restore_confirm)
+    /// `restore-confirm-button`'s shared answer
+    /// ([`fauna_backups_machine::possibility::restore_possibility`]): the
+    /// paint and [`Action::SubmitRestore`] both ask it.
+    fn restore_possibility(&self) -> Possibility {
+        let id = self.selected_snapshot_id();
+        let selection = id.as_deref().map(|snapshot_id| RestoreSelection {
+            snapshot_id,
+            kind_ticked: self.selected_kind_ticked(),
+        });
+        fauna_backups_machine::possibility::restore_possibility(
+            self.restore_progress == RestoreProgress::Running,
+            selection.as_ref(),
+            &self.restore_confirm,
+        )
+    }
+
+    /// The restore section's inputs (kind checkboxes, confirm input): live
+    /// only once a snapshot exists to restore.
+    fn restore_inputs_possibility(&self) -> Possibility {
+        let id = self.selected_snapshot_id();
+        let selection = id.as_deref().map(|snapshot_id| RestoreSelection {
+            snapshot_id,
+            kind_ticked: true,
+        });
+        fauna_backups_machine::possibility::restore_inputs_possibility(selection.as_ref())
+    }
+
+    /// Which ceremony the open destination dialog runs, `None` when none is
+    /// open. Edit reads the row's kind from `kind_input`, which the edit form
+    /// prefills from the row and never lets the user change.
+    fn destination_form(&self) -> Option<DestinationForm> {
+        let device = self.kind_input == DestinationKindChoice::ClientDevice;
+        Some(match (self.form.as_ref()?, device) {
+            (FormMode::Add, false) => DestinationForm::AddNest,
+            (FormMode::Add, true) => DestinationForm::AddClientDevice,
+            (FormMode::Edit(_), false) => DestinationForm::EditNest,
+            (FormMode::Edit(_), true) => DestinationForm::EditClientDevice,
+        })
+    }
+
+    /// The destination dialog's confirm: the shared draft predicate over what
+    /// has been typed. The paint and [`Action::SubmitForm`] both ask it.
+    fn destination_form_possibility(&self) -> Possibility {
+        match self.destination_form() {
+            Some(form) => fauna_backups_machine::possibility::destination_form_possibility(
+                form,
+                &self.url_input,
+                &self.capacity_input,
+            ),
+            None => Possibility::Absent,
+        }
+    }
+
+    /// `snapshot-restore-button`'s shared answer, asked by the paint and by
+    /// [`Action::RestoreSnapshot`] (the carve-out's offline half is folded in
+    /// by the caller, which holds the connection word).
+    fn snapshot_restore_possibility(&self) -> Possibility {
+        fauna_backups_machine::possibility::snapshot_restore_possibility(
+            self.snapshot_restore.is_running(),
+            &self.snapshot_restore_dest,
+        )
+    }
+}
+
+/// The offline half of a carve-out fetch (a file's download, the whole-snapshot
+/// restore): their bytes ride `/api/v1/{manifests,chunks}`, which has no wire
+/// kind for [`Action::wire_kind`] to declare, so the page asks the shared
+/// answer with the connection word itself.
+fn carve_out_possibility(connection_state: &str) -> Possibility {
+    fauna_protocol::offline_class::carve_out_affordance(connection_state).possibility()
+}
+
+/// Refuse a gesture with its possibility's reason on the page's
+/// `error-message` (rule 7: never silent). `true` when the action may run.
+fn allowed(app: &mut App, answer: &Possibility) -> bool {
+    match answer {
+        Possibility::Possible => true,
+        Possibility::Blocked { reason } => {
+            app.errors
+                .insert(Page::Backups, reason.resolve(fauna_i18n::strings::lookup));
+            false
+        }
+        Possibility::Absent => false,
     }
 }
 
@@ -955,7 +1030,11 @@ impl Action {
     /// Two `None`s here are worth naming because they are *not* "unswept":
     /// [`Self::DownloadFile`] is network-shaped with no kind at all — its bytes
     /// ride the bulk-binary `/api/v1/{manifests,chunks}` carve-out, the media
-    /// page's finding from the same direction — and [`Self::SelectFolder`]
+    /// page's finding from the same direction; it still needs a live nest, so
+    /// its control and its handler ask the shared carve-out answer
+    /// (`fauna_protocol::offline_class::carve_out_affordance`, through
+    /// [`carve_out_possibility`]) rather than borrowing a kind it does not
+    /// issue — and [`Self::SelectFolder`]
     /// fires a whole read set (`list_folders` + `list_snapshots`), so there
     /// is no single kind to name and desensitizing a selector would strand the
     /// user on whichever set was showing when the link dropped.
@@ -1069,6 +1148,40 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     // Taken before the page borrow, because it reads a *different* field of the
     // same `App` and the ops that carry it are built while `st` is live.
     let custodian_handle = app.sync_agent.custodian_store();
+    let connection = app.connection_state_word();
+    // A snapshot gesture asks the machine's own answer for it — the one its
+    // control painted from (rule 6) — and is refused with that reason when a
+    // press got past the paint (rule 7). Before the machine's first snapshot
+    // the answer is the unresolved read's.
+    let snapshot_answer = |app: &App, ask: &dyn Fn(&BackupsSnapshot) -> Possibility| {
+        app.backups
+            .snap
+            .as_ref()
+            .map_or_else(|| Possibility::once_read(false), ask)
+    };
+    let gate = match &action {
+        Action::CreateSnapshot | Action::PrunePreview | Action::CheckIntegrity => {
+            Some(snapshot_answer(app, &|p| p.set_action_possibility()))
+        }
+        Action::DeleteSnapshot { index } => {
+            Some(snapshot_answer(app, &|p| p.delete_possibility(*index)))
+        }
+        Action::OpenImmediateDelete { index } => Some(snapshot_answer(app, &|p| {
+            p.immediate_delete_possibility(*index)
+        })),
+        Action::DownloadFile { .. } => Some(carve_out_possibility(connection)),
+        Action::RestoreSnapshot => Some(
+            app.backups
+                .snapshot_restore_possibility()
+                .and(carve_out_possibility(connection)),
+        ),
+        _ => None,
+    };
+    if let Some(answer) = gate
+        && !allowed(app, &answer)
+    {
+        return None;
+    }
     let st = &mut app.backups;
     match action {
         Action::OpenAddForm => {
@@ -1141,28 +1254,23 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // running the other ceremony's call, the same posture a stale row
             // index takes on this page.
             let form = st.form.clone()?;
+            // The confirm's own answer, asked again at the press (rule 4): a
+            // blank URL or a malformed cap is refused with the reason the
+            // confirm painted, never dropped and never guessed.
+            let answer = st.destination_form_possibility();
+            if !answer.is_possible() {
+                allowed(app, &answer);
+                return None;
+            }
             match target {
                 SubmitTarget::AddCustodian if matches!(form, FormMode::Add) => {
-                    // The cap is the kind's only knob, and a blank one is a real
-                    // choice: `CustodianEnrollment::capacity_cap_bytes: None` is
-                    // documented as uncapped. A non-blank one that cannot be read
-                    // is a refusal the user sees, never a substituted default —
-                    // guessing a cap is how a device's disk fills.
-                    let typed = st.capacity_input.trim();
-                    let cap = if typed.is_empty() {
-                        None
-                    } else {
-                        match fauna_core::format::parse_byte_size(typed) {
-                            Some(bytes) => Some(bytes),
-                            None => {
-                                app.errors.insert(
-                                    Page::Backups,
-                                    t::BACKUP_DESTINATION_CAPACITY_INVALID.to_string(),
-                                );
-                                return None;
-                            }
-                        }
-                    };
+                    // A blank cap is a real choice (uncapped,
+                    // `CustodianEnrollment::capacity_cap_bytes: None`); the
+                    // answer above already refused one that cannot be read.
+                    let cap = fauna_backups_machine::possibility::parse_destination_capacity(
+                        &st.capacity_input,
+                    )
+                    .ok()?;
                     Some(Op::EnrollCustodian {
                         nest,
                         secret,
@@ -1172,28 +1280,20 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                         custodian: custodian_handle,
                     })
                 }
-                // A blank URL is not an error to surface — the confirm button is
-                // painted disabled in that state, so this is only reachable via a
-                // keyboard actuation of a disabled control.
-                SubmitTarget::AddNest if matches!(form, FormMode::Add) => {
-                    if url.is_empty() {
-                        return None;
-                    }
-                    Some(Op::Add {
-                        nest,
-                        secret,
-                        store,
-                        url,
-                        name,
-                    })
-                }
+                SubmitTarget::AddNest if matches!(form, FormMode::Add) => Some(Op::Add {
+                    nest,
+                    secret,
+                    store,
+                    url,
+                    name,
+                }),
                 SubmitTarget::Edit => {
                     let FormMode::Edit(id) = form else {
                         return None;
                     };
-                    if url.is_empty() {
-                        return None;
-                    }
+                    // A this-device row has no URL: its blank one is carried
+                    // unchanged, and the shared edit re-resolves only a URL
+                    // that changed, so the save is the rename alone.
                     Some(Op::Edit {
                         nest,
                         secret,
@@ -1435,17 +1535,24 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::ToggleRestoreKind { index } => {
+            let answer = st.restore_inputs_possibility();
+            if !answer.is_possible() {
+                allowed(app, &answer);
+                return None;
+            }
             st.restore_kinds.toggle(index);
             None
         }
         Action::SubmitRestore => {
             let (nest, secret, store) = st.dest_session()?;
-            // The button is painted disabled unless armed; this is the
-            // keyboard-actuation backstop behind that guard (the `SubmitForm`
-            // posture). The nest re-checks the same bar regardless — a mismatch
-            // is `fauna.filesync.snapshot.confirm_mismatch`, refused without
+            // The paint and this gesture ask the one shared answer; a press
+            // past a disabled button is refused with the same reason. The nest
+            // re-checks the friction bar regardless — a mismatch is
+            // `fauna.filesync.snapshot.confirm_mismatch`, refused without
             // mutating state.
-            if !st.restore_armed() {
+            let answer = st.restore_possibility();
+            if !answer.is_possible() {
+                allowed(app, &answer);
                 return None;
             }
             let snapshot_id = st.snapshots.get(st.selected_snapshot)?.id;
@@ -1625,10 +1732,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::RestoreSnapshot => {
-            // The button's disabled state, re-checked at actuation.
-            if st.snapshot_restore.is_running() || st.snapshot_restore_dest.trim().is_empty() {
-                return None;
-            }
+            // The button's answer was asked again above, before the borrow.
             let (nest, secret) = st.session()?;
             let folder_keys = st.folder_keys.clone()?;
             let snapshot_id = st.snap.as_ref()?.detail.as_ref()?.snapshot_id;
@@ -3639,7 +3743,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         }
         Outcome::Failed(msg) => {
             // A failed restore must not leave the progress line claiming one is
-            // running: `restore_armed` reads it, so a stuck `Running` would
+            // running: the restore answer reads it, so a stuck `Running` would
             // disarm the friction bar permanently with no way back.
             if app.backups.restore_progress == RestoreProgress::Running {
                 app.backups.restore_progress = RestoreProgress::Idle;
@@ -3895,7 +3999,7 @@ pub fn elements(app: &App) -> Vec<Element> {
 
     // The snapshot half sits between the two ratified halves that shipped first,
     // exactly where this module's docs said it would land.
-    snapshot_elements(st, &mut out);
+    snapshot_elements(st, app.connection_state_word(), &mut out);
 
     // Deliberately NOT inside the `else`: the restore half's local path works
     // with zero destinations configured, which is the state all three
@@ -3926,7 +4030,7 @@ fn folder_row_label(row: &fauna_backups_machine::BackupFolderRow) -> String {
     }
 }
 
-fn snapshot_elements(st: &BackupsState, out: &mut Vec<Element>) {
+fn snapshot_elements(st: &BackupsState, connection: &str, out: &mut Vec<Element>) {
     let page = st.snap();
     // Single-flight: while an op runs, EVERY mutating control is disabled
     // (§ *Create* ruling). Painted as one predicate so no control can drift off it.
@@ -3980,27 +4084,32 @@ fn snapshot_elements(st: &BackupsState, out: &mut Vec<Element>) {
         },
     ));
 
-    // The action row. Create/prune/check are set-scoped, so all three need a
-    // selection as well as an idle machine.
-    let armed = !busy && page.selected_folder.is_some();
-    out.push(Element::gesture_button(
-        ids::SNAPSHOT_CREATE_BUTTON,
-        t::CREATE_SNAPSHOT,
-        armed,
-        Gesture::Backups(Action::CreateSnapshot),
-    ));
-    out.push(Element::gesture_button(
-        ids::SNAPSHOT_PRUNE_BUTTON,
-        t::PRUNE_BUTTON,
-        armed,
-        Gesture::Backups(Action::PrunePreview),
-    ));
-    out.push(Element::gesture_button(
-        ids::SNAPSHOT_CHECK_BUTTON,
-        t::CHECK_BUTTON,
-        armed,
-        Gesture::Backups(Action::CheckIntegrity),
-    ));
+    // The action row. Create/prune/check are set-scoped, so all three paint
+    // from the machine's set answer: a selection as well as an idle machine,
+    // each refusal with its reason (the busy line below, or where to choose).
+    let set_answer = page.set_action_possibility();
+    for (id, text, action) in [
+        (
+            ids::SNAPSHOT_CREATE_BUTTON,
+            t::CREATE_SNAPSHOT,
+            Action::CreateSnapshot,
+        ),
+        (
+            ids::SNAPSHOT_PRUNE_BUTTON,
+            t::PRUNE_BUTTON,
+            Action::PrunePreview,
+        ),
+        (
+            ids::SNAPSHOT_CHECK_BUTTON,
+            t::CHECK_BUTTON,
+            Action::CheckIntegrity,
+        ),
+    ] {
+        out.push(
+            Element::gesture_button(id, text, true, Gesture::Backups(action))
+                .possible(set_answer.clone()),
+        );
+    }
     // The busy line names WHICH op is running, so the disabled row above is not
     // left unexplained.
     if let Some(op) = page.in_progress_op {
@@ -4016,13 +4125,13 @@ fn snapshot_elements(st: &BackupsState, out: &mut Vec<Element>) {
         out.push(Element::chrome(t::NO_SNAPSHOTS));
     }
     for (index, row) in page.snapshots.iter().enumerate() {
-        snapshot_row_elements(index, row, busy, out);
+        snapshot_row_elements(&page, index, row, busy, out);
     }
 
     if let Some(id) = st.immediate_delete {
         immediate_delete_elements(st, id, out);
     }
-    detail_elements(st, &page, out);
+    detail_elements(st, &page, connection, out);
 }
 
 /// The `in_progress_op` line's text — the shared
@@ -4041,6 +4150,7 @@ fn busy_text(op: BackupOp) -> String {
 /// shape, and it is what lets the immediate-delete friction bar read back the id
 /// it must re-type.
 fn snapshot_row_elements(
+    page: &BackupsSnapshot,
     index: usize,
     row: &fauna_backups_machine::SnapshotRow,
     busy: bool,
@@ -4089,19 +4199,21 @@ fn snapshot_row_elements(
         Element::gesture_button(
             ids::SNAPSHOT_DELETE_BUTTON,
             t::SNAPSHOT_DELETE_BUTTON,
-            !busy,
+            true,
             Gesture::Backups(Action::DeleteSnapshot { index }),
         )
-        .within(ids::SNAPSHOT_ITEM, index),
+        .within(ids::SNAPSHOT_ITEM, index)
+        .possible(page.delete_possibility(index)),
     );
     out.push(
         Element::gesture_button(
             ids::SNAPSHOT_IMMEDIATE_DELETE_BUTTON,
             t::IMMEDIATE_DELETE_BUTTON,
-            !busy,
+            true,
             Gesture::Backups(Action::OpenImmediateDelete { index }),
         )
-        .within(ids::SNAPSHOT_ITEM, index),
+        .within(ids::SNAPSHOT_ITEM, index)
+        .possible(page.immediate_delete_possibility(index)),
     );
     // Recovery is offered ONLY out of `SoftDeleted` (§ *Soft-deleted rows*), so
     // the button's PRESENCE is the row-state observable — the same "present only
@@ -4281,7 +4393,12 @@ fn immediate_delete_elements(st: &BackupsState, id: i64, out: &mut Vec<Element>)
 /// Painted only while a snapshot is open — `snapshot-detail-files` is a
 /// "present only while open" scope, and the machine drops the detail whenever
 /// its snapshot stops being listed, so this cannot outlive its rows.
-fn detail_elements(st: &BackupsState, page: &BackupsSnapshot, out: &mut Vec<Element>) {
+fn detail_elements(
+    st: &BackupsState,
+    page: &BackupsSnapshot,
+    connection: &str,
+    out: &mut Vec<Element>,
+) {
     let Some(detail) = &page.detail else {
         return;
     };
@@ -4326,11 +4443,12 @@ fn detail_elements(st: &BackupsState, page: &BackupsSnapshot, out: &mut Vec<Elem
                     true,
                     Gesture::Backups(Action::DownloadFile { index }),
                 )
-                .within(ids::SNAPSHOT_DETAIL_FILES, 0),
+                .within(ids::SNAPSHOT_DETAIL_FILES, 0)
+                .possible(carve_out_possibility(connection)),
             );
         }
     }
-    snapshot_restore_elements(st, out);
+    snapshot_restore_elements(st, connection, out);
     // ui.yaml scopes no id to the close control, so it paints untagged — the
     // same call the divergence modal's close makes.
     out.push(Element::gesture_button(
@@ -4342,10 +4460,11 @@ fn detail_elements(st: &BackupsState, page: &BackupsSnapshot, out: &mut Vec<Elem
 }
 
 /// The whole-snapshot restore, beside `snapshot-detail-files` (`ui/backups.md`
-/// § Whole-snapshot restore): the typed destination, the button — disabled
-/// with no destination and while a restore runs — then the progress line while
+/// § Whole-snapshot restore): the typed destination, the button — painted from
+/// the shared answer (a destination typed, no restore running, a live nest for
+/// the carve-out bytes) — then the progress line while
 /// it runs, or the outcome line after.
-fn snapshot_restore_elements(st: &BackupsState, out: &mut Vec<Element>) {
+fn snapshot_restore_elements(st: &BackupsState, connection: &str, out: &mut Vec<Element>) {
     out.push(
         Element::input(
             ids::SNAPSHOT_RESTORE_DESTINATION_INPUT,
@@ -4354,12 +4473,18 @@ fn snapshot_restore_elements(st: &BackupsState, out: &mut Vec<Element>) {
         )
         .labelled(t::SNAPSHOT_RESTORE_DESTINATION_PLACEHOLDER),
     );
-    out.push(Element::gesture_button(
-        ids::SNAPSHOT_RESTORE_BUTTON,
-        t::SNAPSHOT_RESTORE_BUTTON,
-        !st.snapshot_restore.is_running() && !st.snapshot_restore_dest.trim().is_empty(),
-        Gesture::Backups(Action::RestoreSnapshot),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::SNAPSHOT_RESTORE_BUTTON,
+            t::SNAPSHOT_RESTORE_BUTTON,
+            true,
+            Gesture::Backups(Action::RestoreSnapshot),
+        )
+        .possible(
+            st.snapshot_restore_possibility()
+                .and(carve_out_possibility(connection)),
+        ),
+    );
     match &st.snapshot_restore {
         SnapshotRestoreView::Idle => {}
         SnapshotRestoreView::Running { snapshot_id, path } => out.push(Element::label(
@@ -4452,12 +4577,11 @@ fn form_elements(st: &BackupsState, mode: &FormMode, out: &mut Vec<Element>) {
         // discover it. Untagged — it is glue copy, not a new automatable id.
         out.push(Element::chrome(t::BACKUP_DESTINATION_CUSTODIAN_EXPOSURE));
     }
-    // Disabled on a blank URL for the nest kind: a destination with no URL has
-    // nothing to resolve, and the enroll's first step would fail with a transport
-    // error that reads like a network problem. The custodian kind has no URL to
-    // require, so its confirm is always live — a blank cap is a real choice
-    // (uncapped) and a malformed one is refused at submit with its own message.
-    // Which ceremony this press runs is decided HERE, where both halves of the
+    // Painted from the shared draft answer: a nest form needs its URL (with
+    // none there is nothing to resolve, and the enroll would fail with a
+    // transport error that reads like a network problem); the add-device form
+    // needs a readable cap if one is typed (blank is uncapped); the this-device
+    // rename needs nothing. Which ceremony this press runs is decided HERE, where both halves of the
     // discriminant are already in hand, and carried on the gesture — so the
     // offline gate can answer the exact kind (`SubmitTarget`).
     let target = match (adding, custodian) {
@@ -4469,10 +4593,11 @@ fn form_elements(st: &BackupsState, mode: &FormMode, out: &mut Vec<Element>) {
         Element::gesture_button(
             ids::BACKUP_DESTINATION_ADD_CONFIRM_BUTTON,
             t::BACKUP_DESTINATION_ADD_CONFIRM,
-            custodian || !st.url_input.trim().is_empty(),
+            true,
             Gesture::Backups(Action::SubmitForm(target)),
         )
-        .within(ids::BACKUP_DESTINATION_ADD_MODAL, 0),
+        .within(ids::BACKUP_DESTINATION_ADD_MODAL, 0)
+        .possible(st.destination_form_possibility()),
     );
     out.push(
         Element::gesture_button(
@@ -5073,6 +5198,10 @@ fn restore_elements(st: &BackupsState, out: &mut Vec<Element>) {
     // text of its own — it is a pure grouping node, so its children carry
     // the labels and it registers with an empty string rather than an invented
     // heading.
+    // Nothing to choose or re-type until a snapshot exists: the kinds and the
+    // friction bar paint from the shared inputs answer, whose reason is the
+    // empty line above.
+    let inputs = st.restore_inputs_possibility();
     out.push(Element::label(ids::RESTORE_KINDS_CHECKBOXES, String::new()));
     for (index, (_kind, label)) in RESTORE_KINDS.iter().enumerate() {
         out.push(
@@ -5082,7 +5211,8 @@ fn restore_elements(st: &BackupsState, out: &mut Vec<Element>) {
                 st.restore_kinds.checked(index),
                 Gesture::Backups(Action::ToggleRestoreKind { index }),
             )
-            .within(ids::RESTORE_KINDS_CHECKBOXES, 0),
+            .within(ids::RESTORE_KINDS_CHECKBOXES, 0)
+            .possible(inputs.clone()),
         );
     }
 
@@ -5094,14 +5224,18 @@ fn restore_elements(st: &BackupsState, out: &mut Vec<Element>) {
             st.restore_confirm.clone(),
             Field::Backups(BackupsField::RestoreConfirm),
         )
-        .labelled(t::RESTORE_CONFIRM_PLACEHOLDER),
+        .labelled(t::RESTORE_CONFIRM_PLACEHOLDER)
+        .possible(inputs),
     );
-    out.push(Element::gesture_button(
-        ids::RESTORE_CONFIRM_BUTTON,
-        t::RESTORE_CONFIRM_BUTTON,
-        st.restore_armed(),
-        Gesture::Backups(Action::SubmitRestore),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::RESTORE_CONFIRM_BUTTON,
+            t::RESTORE_CONFIRM_BUTTON,
+            true,
+            Gesture::Backups(Action::SubmitRestore),
+        )
+        .possible(st.restore_possibility()),
+    );
     out.push(Element::label(
         ids::RESTORE_PROGRESS,
         st.restore_progress.text(),
@@ -5300,6 +5434,9 @@ mod tests {
     fn backups_app() -> App {
         let mut app = authed_app();
         app.page = Page::Backups;
+        // Online, so a control reads its page's own answer; a test of the
+        // offline gate sets the connection itself.
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Connected;
         app.backups = init(
             dummy_nest(),
             [7u8; 32],
@@ -7043,21 +7180,16 @@ mod tests {
             t::BACKUP_DESTINATION_FORM_ADD_TITLE
         );
         assert_eq!(text_of(&app, "backup-destination-url-input"), "");
-        let confirm = elements(&app)
-            .into_iter()
-            .find(|e| e.id == "backup-destination-add-confirm-button")
-            .expect("confirm button");
-        assert!(!confirm.enabled, "blank URL must not arm the enroll");
+        assert!(
+            !enabled_of(&app, "backup-destination-add-confirm-button"),
+            "blank URL must not arm the enroll"
+        );
 
         let _ = app.set_field(
             Field::Backups(BackupsField::Url),
             "https://nas.example.com".to_string(),
         );
-        let confirm = elements(&app)
-            .into_iter()
-            .find(|e| e.id == "backup-destination-add-confirm-button")
-            .expect("confirm button");
-        assert!(confirm.enabled);
+        assert!(enabled_of(&app, "backup-destination-add-confirm-button"));
     }
 
     /// A blank-URL submit produces no op at all — the disabled confirm is the
@@ -8271,6 +8403,12 @@ mod tests {
         );
         assert!(text_of(&app, "snapshot-restore-progress").contains("/srv/restored"));
         assert!(apply_local(&mut app, Action::RestoreSnapshot).is_none());
+        // A press past the disabled button is refused with its reason (rule 7).
+        assert_eq!(
+            app.errors.get(&Page::Backups).map(String::as_str),
+            Some(t::SNAPSHOT_RESTORE_RUNNING)
+        );
+        app.errors.remove(&Page::Backups);
 
         apply_outcome(
             &mut app,
@@ -8555,12 +8693,223 @@ mod tests {
         ));
     }
 
+    /// `id`'s enabled state after the element seam — the page's own answer
+    /// folded with the offline gate, as paint and a driver read it.
     fn enabled_of(app: &App, id: &str) -> bool {
-        elements(app)
+        app.page_elements()
             .into_iter()
             .find(|e| e.id == id)
             .map(|e| e.enabled)
             .unwrap_or_else(|| panic!("{id} not painted"))
+    }
+
+    // ── Offer only what is possible (`ui/README.md` § Offer only what is
+    // possible; `ui/backups.md` § Errors & edge cases → *What the page
+    // offers*) — each control read through the element seam, as a driver
+    // reads it.
+
+    /// `id`'s element after the seam (the page's own answer folded with the
+    /// offline gate), as paint and automation see it.
+    fn gated(app: &App, id: &str) -> Element {
+        app.page_elements()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("{id} not painted"))
+    }
+
+    fn page_error(app: &App) -> Option<String> {
+        app.errors.get(&Page::Backups).cloned()
+    }
+
+    fn device_destination(id: &str, name: &str) -> BackupDestination {
+        BackupDestination {
+            kind: fauna_core::data::DESTINATION_KIND_CLIENT_DEVICE.to_string(),
+            custodian_device_id: Some("dev-1".to_string()),
+            ..destination(id, "", Some(name))
+        }
+    }
+
+    #[test]
+    fn a_this_device_destination_renames_with_no_url() {
+        let mut app = backups_app();
+        app.backups.destinations = vec![device_destination("d1", "Laptop")];
+        apply_local(&mut app, Action::OpenEditForm { index: 0 });
+        assert_eq!(count_id(&app, "backup-destination-url-input"), 0);
+        assert!(gated(&app, "backup-destination-add-confirm-button").enabled);
+
+        let _ = app.set_field(Field::Backups(BackupsField::Name), "Old laptop".to_string());
+        match apply_local(&mut app, Action::SubmitForm(SubmitTarget::Edit)) {
+            Some(Op::Edit { id, url, name, .. }) => {
+                assert_eq!(
+                    (id.as_str(), url.as_str(), name.as_str()),
+                    ("d1", "", "Old laptop")
+                );
+            }
+            _ => panic!("the rename must dispatch an edit"),
+        }
+    }
+
+    #[test]
+    fn a_blank_url_disables_the_confirm_with_its_reason_and_refuses_the_press() {
+        let mut app = backups_app();
+        apply_local(&mut app, Action::OpenAddForm);
+        let confirm = gated(&app, "backup-destination-add-confirm-button");
+        assert!(!confirm.enabled);
+        assert_eq!(
+            confirm.label.as_deref(),
+            Some(t::BACKUP_DESTINATION_URL_REQUIRED)
+        );
+        assert!(apply_local(&mut app, Action::SubmitForm(SubmitTarget::AddNest)).is_none());
+        assert_eq!(
+            page_error(&app).as_deref(),
+            Some(t::BACKUP_DESTINATION_URL_REQUIRED)
+        );
+        assert!(app.backups.form.is_some(), "a refused form stays open");
+    }
+
+    #[test]
+    fn a_nest_edit_emptied_of_its_url_says_why_instead_of_dropping_the_save() {
+        let mut app = backups_app();
+        app.backups.destinations = vec![destination("d1", "https://a.example", Some("A"))];
+        apply_local(&mut app, Action::OpenEditForm { index: 0 });
+        let _ = app.set_field(Field::Backups(BackupsField::Url), String::new());
+        assert!(!gated(&app, "backup-destination-add-confirm-button").enabled);
+        assert!(apply_local(&mut app, Action::SubmitForm(SubmitTarget::Edit)).is_none());
+        assert_eq!(
+            page_error(&app).as_deref(),
+            Some(t::BACKUP_DESTINATION_URL_REQUIRED)
+        );
+    }
+
+    #[test]
+    fn a_malformed_capacity_disables_the_add_device_confirm_before_the_submit() {
+        let mut app = backups_app();
+        apply_local(&mut app, Action::OpenAddForm);
+        apply_local(
+            &mut app,
+            Action::SelectDestinationKind(
+                fauna_core::data::DESTINATION_KIND_CLIENT_DEVICE.to_string(),
+            ),
+        );
+        assert!(gated(&app, "backup-destination-add-confirm-button").enabled);
+        let _ = app.set_field(Field::Backups(BackupsField::Capacity), "lots".to_string());
+        let confirm = gated(&app, "backup-destination-add-confirm-button");
+        assert!(!confirm.enabled);
+        assert_eq!(
+            confirm.label.as_deref(),
+            Some(t::BACKUP_DESTINATION_CAPACITY_INVALID)
+        );
+    }
+
+    #[test]
+    fn only_an_active_row_offers_the_soft_delete_and_a_press_past_it_says_why() {
+        let pending = fauna_backups_machine::SnapshotRow {
+            state: SnapshotState::DeletionPending {
+                execute_after: None,
+            },
+            ..snap_row(8)
+        };
+        let mut app = app_with_page(loaded_page(vec![pending]));
+        let delete = gated(&app, "snapshot-delete-button");
+        assert!(!delete.enabled);
+        assert_eq!(
+            delete.label.as_deref(),
+            Some(t::SNAPSHOT_DELETE_ALREADY_PENDING)
+        );
+        // The hard delete ends a pending row now: still a real choice.
+        assert!(gated(&app, "snapshot-immediate-delete-button").enabled);
+
+        assert!(apply_local(&mut app, Action::DeleteSnapshot { index: 0 }).is_none());
+        assert_eq!(
+            page_error(&app).as_deref(),
+            Some(t::SNAPSHOT_DELETE_ALREADY_PENDING)
+        );
+    }
+
+    #[test]
+    fn set_actions_with_no_selection_name_the_step() {
+        let mut page = loaded_page(vec![]);
+        page.folders.push(fs_row("beta"));
+        page.selected_folder = None;
+        let mut app = app_with_page(page);
+        for id in [
+            "snapshot-create-button",
+            "snapshot-prune-button",
+            "snapshot-check-button",
+        ] {
+            let el = gated(&app, id);
+            assert!(!el.enabled, "{id}");
+            assert_eq!(
+                el.label.as_deref(),
+                Some(t::SNAPSHOT_SELECT_FOLDER_FIRST),
+                "{id}"
+            );
+        }
+        assert!(apply_local(&mut app, Action::CreateSnapshot).is_none());
+        assert_eq!(
+            page_error(&app).as_deref(),
+            Some(t::SNAPSHOT_SELECT_FOLDER_FIRST)
+        );
+    }
+
+    #[test]
+    fn the_restore_inputs_wait_for_a_snapshot() {
+        let mut app = backups_app();
+        assert!(app.backups.snapshots.is_empty());
+        assert!(!gated(&app, "restore-confirm-input").enabled);
+        assert!(!gated(&app, "restore-kind-checkbox").enabled);
+        assert!(!gated(&app, "restore-confirm-button").enabled);
+        assert!(apply_local(&mut app, Action::ToggleRestoreKind { index: 0 }).is_none());
+        assert!(
+            app.backups.restore_kinds.checked(0),
+            "no snapshot: the tick is refused"
+        );
+        assert_eq!(page_error(&app).as_deref(), Some(t::RESTORE_NO_SNAPSHOTS));
+    }
+
+    #[test]
+    fn an_unticked_kind_disarms_the_restore_with_its_reason() {
+        let mut app = backups_app();
+        app.backups.snapshots = vec![snapshot(7, "mail")];
+        app.backups.restore_confirm = "7".to_string();
+        assert!(gated(&app, "restore-confirm-button").enabled);
+        apply_local(&mut app, Action::ToggleRestoreKind { index: 0 });
+        let button = gated(&app, "restore-confirm-button");
+        assert!(!button.enabled);
+        assert_eq!(button.label.as_deref(), Some(t::RESTORE_KIND_UNTICKED));
+        assert!(apply_local(&mut app, Action::SubmitRestore).is_none());
+        assert_eq!(page_error(&app).as_deref(), Some(t::RESTORE_KIND_UNTICKED));
+    }
+
+    #[test]
+    fn the_carve_out_fetches_need_a_live_nest() {
+        let mut app = app_with_page(one_file_detail());
+        app.backups.snapshot_restore_dest = "/tmp/restored".to_string();
+        assert!(gated(&app, "snapshot-file-download-button").enabled);
+        assert!(gated(&app, "snapshot-restore-button").enabled);
+
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Disconnected;
+        let needs_nest = fauna_i18n::strings::common::NEEDS_NEST;
+        for id in ["snapshot-file-download-button", "snapshot-restore-button"] {
+            let el = gated(&app, id);
+            assert!(!el.enabled, "{id}");
+            assert_eq!(el.label.as_deref(), Some(needs_nest), "{id}");
+        }
+        assert!(apply_local(&mut app, Action::DownloadFile { index: 0 }).is_none());
+        assert_eq!(page_error(&app).as_deref(), Some(needs_nest));
+        assert!(apply_local(&mut app, Action::RestoreSnapshot).is_none());
+        assert!(!app.backups.snapshot_restore.is_running());
+    }
+
+    #[test]
+    fn a_blank_restore_destination_says_why() {
+        let app = app_with_page(one_file_detail());
+        let button = gated(&app, "snapshot-restore-button");
+        assert!(!button.enabled);
+        assert_eq!(
+            button.label.as_deref(),
+            Some(t::SNAPSHOT_RESTORE_DESTINATION_REQUIRED)
+        );
     }
 
     /// The whole restore section paints with **zero** destinations configured.
@@ -8882,6 +9231,8 @@ mod tests {
     #[test]
     fn every_restore_kind_starts_checked_and_toggles_independently() {
         let mut app = backups_app();
+        // The kinds are live only once a snapshot exists to restore.
+        app.backups.snapshots = vec![snapshot(7, "mail")];
         for index in 0..RESTORE_KINDS.len() {
             assert!(app.backups.restore_kinds.checked(index));
         }
@@ -9279,11 +9630,12 @@ mod tests {
     /// `OnlineOnly` affordance exists, and pins both halves of the gate's
     /// contract on it: desensitized, and saying why per affordance.
     ///
-    /// It red-verifies by construction: unplug `App::apply_offline_gate` and
+    /// It red-verifies by construction: unplug `App::apply_possibility` and
     /// this fails naming `backup-destination-add-confirm-button`.
     #[test]
     fn the_add_destination_confirm_is_desensitized_offline_and_says_why() {
         let mut app = backups_app();
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Disconnected;
         apply_local(&mut app, Action::OpenAddForm);
         // A blank URL paints the confirm disabled on the page's own account,
         // and the gate deliberately leaves an already-disabled element alone —

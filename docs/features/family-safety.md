@@ -282,21 +282,21 @@ Stamped 2026-11-07 at b844c771f6.
 | 57 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_a_guardians_keyword_rule_withholds_the_matching_post_on_the_wards_device` | web (linux): passed, tui (linux): passed, tui (macos): passed |
 | 57 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_a_guardians_labeler_rule_withholds_what_the_labeler_flags_on_the_wards_device` | web (linux): passed, tui (linux): passed, tui (macos): passed |
 | 58 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_a_guardian_document_this_build_cannot_read_withholds_rather_than_shows` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 59 | nest | `tests/e2e-unified/tests/api/test_family_guardian_only_policy.py::test_only_the_guardian_changes_the_childs_policy` | nest (linux): passed |
-| 59 | nest | `tests/e2e-unified/tests/api/test_family_guardian_only_policy.py::test_a_supervised_account_cannot_be_named_anyones_guardian` | nest (linux): passed |
-| 60 | app | `tests/e2e-unified/tests/test_family_reach_preapproval.py::test_family_guardian_pre_approves_a_contact_and_the_child_cannot_dismiss_a_held_knock` | macos (macos): passed, tui (linux): passed |
-| 61 | nest | `tests/e2e-unified/tests/api/test_family_mail_gate.py::test_a_hold_outranks_the_childs_filter_rule_and_the_spam_verdict` | nest (linux): passed |
-| 61 | nest | `tests/e2e-unified/tests/api/test_family_mail_gate.py::test_held_mail_stays_held_after_relaxing_and_sub_addresses_are_gated` | nest (linux): passed |
-| 61 | nest | `tests/e2e-unified/tests/api/test_family_mail_gate.py::test_system_mail_is_never_held` | nest (linux): passed |
-| 62 | app | `tests/e2e-unified/tests/test_family_policy_fail_closed.py::test_family_unreadable_knob_values_render_strictest_and_a_save_never_weakens_them` | tui (linux): passed |
-| 63 | app | `tests/e2e-unified/tests/test_family_transfer_lapse.py::test_family_a_proposed_hand_over_lapses_after_seven_days` | tui (linux): passed |
-| 63 | app | `tests/e2e-unified/tests/test_family.py::test_family_admin_takes_over_guardianship` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 64 | nest | `tests/e2e-unified/tests/api/test_family_marked_devices.py::test_graduation_revokes_every_guardian_marked_device` | nest (linux): passed |
-| 64 | nest | `tests/e2e-unified/tests/api/test_family_marked_devices.py::test_the_child_can_neither_remove_a_marked_device_nor_revoke_its_grant_until_unmarked` | nest (linux): passed |
-| 64 | nest | `tests/e2e-unified/tests/api/test_family_marked_devices.py::test_a_removed_marked_device_returns_as_its_successor_with_the_mark` | nest (linux): passed |
+| 59 | nest | `tests/e2e-unified/tests/api/test_family_guardian_only_policy.py::test_only_the_guardian_changes_the_childs_policy` | nest (linux): passed, nest (macos): passed |
+| 59 | nest | `tests/e2e-unified/tests/api/test_family_guardian_only_policy.py::test_a_supervised_account_cannot_be_named_anyones_guardian` | nest (linux): passed, nest (macos): passed |
+| 60 | app | `tests/e2e-unified/tests/test_family_reach_preapproval.py::test_family_guardian_pre_approves_a_contact_and_the_child_cannot_dismiss_a_held_knock` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 61 | nest | `tests/e2e-unified/tests/api/test_family_mail_gate.py::test_a_hold_outranks_the_childs_filter_rule_and_the_spam_verdict` | nest (linux): passed, nest (macos): passed |
+| 61 | nest | `tests/e2e-unified/tests/api/test_family_mail_gate.py::test_held_mail_stays_held_after_relaxing_and_sub_addresses_are_gated` | nest (linux): passed, nest (macos): passed |
+| 61 | nest | `tests/e2e-unified/tests/api/test_family_mail_gate.py::test_system_mail_is_never_held` | nest (linux): passed, nest (macos): passed |
+| 62 | app | `tests/e2e-unified/tests/test_family_policy_fail_closed.py::test_family_unreadable_knob_values_render_strictest_and_a_save_never_weakens_them` | tui (linux): passed, tui (macos): passed |
+| 63 | app | `tests/e2e-unified/tests/test_family_transfer_lapse.py::test_family_a_proposed_hand_over_lapses_after_seven_days` | tui (linux): passed, tui (macos): passed |
+| 63 | app | `tests/e2e-unified/tests/test_family.py::test_family_admin_takes_over_guardianship` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 64 | nest | `tests/e2e-unified/tests/api/test_family_marked_devices.py::test_graduation_revokes_every_guardian_marked_device` | nest (linux): passed, nest (macos): passed |
+| 64 | nest | `tests/e2e-unified/tests/api/test_family_marked_devices.py::test_the_child_can_neither_remove_a_marked_device_nor_revoke_its_grant_until_unmarked` | nest (linux): passed, nest (macos): passed |
+| 64 | nest | `tests/e2e-unified/tests/api/test_family_marked_devices.py::test_a_removed_marked_device_returns_as_its_successor_with_the_mark` | nest (linux): passed, nest (macos): passed |
 | 65 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_relaxing_the_bridge_dm_setting_releases_held_rooms_but_a_guardian_block_holds` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 66 | app | `tests/e2e-unified/tests/test_family_offline_controls.py::test_family_guardian_writes_grey_out_offline_and_a_save_for_an_ex_ward_sends_nothing` | tui (linux): passed |
-| 67 | app | `tests/e2e-unified/tests/test_family_screen_time_binding.py::test_family_a_guardians_screen_time_edit_binds_the_running_app_without_a_restart` | macos (macos): passed, tui (linux): passed |
-| 67 | app | `tests/e2e-unified/tests/test_family.py::test_family_screen_time_bills_only_time_in_front_and_a_failed_report_is_not_lost` — requires `screen-time-heartbeat-unfocused` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 68 | app | `tests/e2e-unified/tests/test_family_graduation_enforcement.py::test_family_graduation_stops_leftover_enforcement_and_a_switch_never_carries_limits` | tui (linux): passed |
+| 66 | app | `tests/e2e-unified/tests/test_family_offline_controls.py::test_family_guardian_writes_grey_out_offline_and_a_save_for_an_ex_ward_sends_nothing` | tui (linux): passed, tui (macos): passed |
+| 67 | app | `tests/e2e-unified/tests/test_family_screen_time_binding.py::test_family_a_guardians_screen_time_edit_binds_the_running_app_without_a_restart` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 67 | app | `tests/e2e-unified/tests/test_family.py::test_family_screen_time_bills_only_time_in_front_and_a_failed_report_is_not_lost` — requires `screen-time-heartbeat-unfocused` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 68 | app | `tests/e2e-unified/tests/test_family_graduation_enforcement.py::test_family_graduation_stops_leftover_enforcement_and_a_switch_never_carries_limits` | tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

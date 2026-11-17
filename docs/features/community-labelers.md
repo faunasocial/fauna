@@ -85,7 +85,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+8755c14e standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.5-dev+8755c14e standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

@@ -727,8 +727,13 @@ async fn an_unwired_machine_reads_the_roster_only_row() {
 // ── The trust facet and history lens (connected-apps.md § The trust facet) ──
 
 /// The owner's folder set names as the consent seam lists them — no folder
-/// read is answered here; only the names a principal's grant resolves by.
+/// read is answered here; only the names a principal's grant resolves by,
+/// and the folder list (row id 17 for the first set, 18 for the next, …)
+/// a deposit grant's folder is named from.
 struct NamedSets(Vec<String>);
+
+/// The row id [`NamedSets`] lists its first set under.
+const FIRST_FOLDER_ID: i64 = 17;
 
 #[async_trait::async_trait]
 impl fauna_atproto_settings_machine::consent_grant::ConsentFolderSeam for NamedSets {
@@ -742,7 +747,20 @@ impl fauna_atproto_settings_machine::consent_grant::ConsentFolderSeam for NamedS
     async fn folders_for_consent(
         &self,
     ) -> Option<Vec<fauna_atproto_settings_machine::ConsentFolderOption>> {
-        None
+        Some(
+            self.0
+                .iter()
+                .zip(FIRST_FOLDER_ID..)
+                .map(
+                    |(name, id)| fauna_atproto_settings_machine::ConsentFolderOption {
+                        id,
+                        name: name.clone(),
+                        metadata_only: false,
+                        served_by_custody: false,
+                    },
+                )
+                .collect(),
+        )
     }
 }
 
@@ -979,6 +997,64 @@ async fn a_principals_folder_grant_names_its_folder() {
     m.refresh().await;
     let trust = m.snapshot().principals[0].trust.clone().unwrap();
     assert!(trust.grants.iter().all(|g| g.folder.is_none()));
+}
+
+/// A principal's keyless `deposit` grant names the folder it puts files
+/// into, on the Now row and its History line — one over a folder the owner no
+/// longer has reads as deleted; with the owner's folders unreadable, neither
+/// is guessed (`connected-apps.md` § The trust facet and history lens → *The
+/// words rule*).
+#[tokio::test]
+async fn a_principals_deposit_grant_names_its_folder() {
+    // The event scope a consent's deposit tuple records: the folder token in
+    // the kind slot, the writer factor folded in after it.
+    let deposit = |folder_id: i64| {
+        use fauna_core::grant_event::{
+            CLASS_DEPOSIT, GrantEventScope, deposit_folder_token, writer_factor,
+        };
+        vec![
+            GrantEventScope {
+                class: CLASS_DEPOSIT.into(),
+                kind: Some(deposit_folder_token(folder_id)),
+                tier: None,
+            }
+            .with_factor(&writer_factor(&[3; 32])),
+        ]
+    };
+    let events = move |_: &fauna_core::identity::ActorKeypair| {
+        vec![
+            mint(5, deposit(FIRST_FOLDER_ID), 1),
+            mint(6, deposit(99), 2),
+        ]
+    };
+    let (m, api) = machine_with_events(events, Some(vec!["inbox".into()])).await;
+    api.set_principals(vec![keyed_principal(1, CID)]);
+    m.refresh().await;
+    let trust = m.snapshot().principals[0].trust.clone().unwrap();
+    let named = Some(fauna_client_pair::TrustFolder::Named {
+        name: "inbox".into(),
+    });
+    let grant_folders: Vec<_> = trust
+        .grants
+        .iter()
+        .map(|g| g.scope[0].folder.clone())
+        .collect();
+    assert!(grant_folders.contains(&named), "{grant_folders:?}");
+    assert!(grant_folders.contains(&Some(fauna_client_pair::TrustFolder::Deleted)));
+    assert!(trust.history.iter().any(|h| h.scope[0].folder == named));
+    let labels = fauna_client_pair::principal_scope_labels(trust.grants[0].scope.clone(), None);
+    assert!(
+        labels[0]
+            .key
+            .starts_with("connected_apps.trust_scope_deposit"),
+        "{labels:?}"
+    );
+
+    let (m, api) = machine_with_events(events, None).await;
+    api.set_principals(vec![keyed_principal(1, CID)]);
+    m.refresh().await;
+    let trust = m.snapshot().principals[0].trust.clone().unwrap();
+    assert!(trust.grants.iter().all(|g| g.scope[0].folder.is_none()));
 }
 
 /// Without the seams the tray refuses a records approve and resolves nothing.

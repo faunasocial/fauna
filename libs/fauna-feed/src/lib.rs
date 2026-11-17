@@ -27,6 +27,7 @@ pub mod compose;
 pub mod cue_tracker;
 pub mod cues;
 pub mod drafts;
+pub mod forms;
 pub mod manager;
 pub mod observer;
 pub mod personalization;

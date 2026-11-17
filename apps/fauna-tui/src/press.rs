@@ -181,6 +181,9 @@ mod journey {
             "alice@example.com",
             std::sync::Arc::new(fauna_client_config::test_helpers::FakeMailStore::empty()),
         );
+        // A working account's loaded read, so the compose's doors are live
+        // (`ui/events.md` § *No calendar to hold an event*, ruling 3).
+        app.events.calendars_read = fauna_client_caldav::CalendarsReadState::Loaded;
         app.page = Page::Events;
         app.events.view_mode = ViewMode::Month;
         app.events.focus_year = 2026;

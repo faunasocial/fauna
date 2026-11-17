@@ -102,8 +102,8 @@ private final class CountingDevicesAPI: APIClient {
 /// session it no longer dies with the view, so a visit clears it — else the
 /// last visit's refusal greets the next one, and an answer read after a new
 /// follow may be a leftover (the macOS follow witness caught exactly that).
-/// Also pins that the refusal is the boundary's own sentence, never the
-/// `General(msg: …)` debug shape.
+/// The stub's machine build fails, so the follow is refused up front by the
+/// shared `follow_possibility` (not ready) — still that visit's gesture error.
 @Test @MainActor func aRevisitClearsTheLastVisitsGestureError() async {
     let api = CountingDevicesAPI()
     let vm = DevicesMachineVM()
@@ -114,7 +114,8 @@ private final class CountingDevicesAPI: APIClient {
 
     let followed = await vm.followFolder(owner: "someone", folderName: "misspelt")
     #expect(followed == false)
-    #expect(vm.sharingError == api.followRefusal)
+    #expect(vm.sharingError != nil)
+    #expect(vm.sharingError == vm.folderFollowPossibility(handle: "someone", name: "misspelt").refusal)
 
     async let revisit: Void = vm.configure(api: api)
     await waitUntil { api.buildIsWaiting }

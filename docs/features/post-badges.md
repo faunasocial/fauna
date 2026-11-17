@@ -46,9 +46,9 @@ Stamped 2026-09-19 at 3ac2cf0c74.
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.6-dev+8cbc32a3 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6 docker |
+| ios | ✅ full | 0.1.7 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6 docker |
+| tui | ✅ full | 0.1.7 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

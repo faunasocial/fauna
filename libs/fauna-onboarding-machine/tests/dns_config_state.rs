@@ -216,6 +216,7 @@ fn provider_status_provider_has_domain() {
         d.current_zones = vec![DnsZone {
             id: "zone-1".into(),
             name: "example.com".into(),
+            nameservers: Vec::new(),
         }];
     });
     assert_eq!(m.provider_status(), ProviderStatus::ProviderHasDomain);
@@ -233,6 +234,7 @@ fn provider_status_registered_elsewhere() {
         d.current_zones = vec![DnsZone {
             id: "zone-other".into(),
             name: "other.com".into(),
+            nameservers: Vec::new(),
         }];
     });
     m.set_handle_check_outcome_for_test(HandleCheckOutcome::RegisteredNoNest);
@@ -418,6 +420,7 @@ fn select_dns_provider_clears_caches() {
         d.current_zones = vec![DnsZone {
             id: "z".into(),
             name: "example.com".into(),
+            nameservers: Vec::new(),
         }];
         d.current_availability = Some(RegistrarAvailability::Unavailable);
         d.contact = Some(ContactInfo::default());
@@ -779,6 +782,7 @@ fn captured_dns_credential_some_when_verified() {
         d.current_zones = vec![DnsZone {
             id: "z1".into(),
             name: "example.com".into(),
+            nameservers: Vec::new(),
         }];
     });
 
@@ -817,6 +821,7 @@ fn captured_dns_credential_secret_serializes_transparently() {
         d.current_zones = vec![DnsZone {
             id: "z1".into(),
             name: "example.com".into(),
+            nameservers: Vec::new(),
         }];
     });
 

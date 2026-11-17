@@ -24,6 +24,7 @@ use std::rc::Rc;
 use fauna_backups_machine::{
     BackupOp, BackupsMachine, BackupsSnapshot, PolicyState, SnapshotRow, SnapshotState,
 };
+use fauna_core::possibility::Possibility;
 
 use crate::client::FaunaClient;
 use crate::i18n::strings::backups as backups_strings;
@@ -63,6 +64,9 @@ pub struct SnapshotPaneHandles {
     /// (`hard_floor_breach`) leaves the row, the modal, and the typed inputs
     /// exactly where the user left them, with the reason on `error-message`.
     immediate_delete_target: Rc<Cell<Option<i64>>>,
+    /// The page's one `error-message`, where a press refused past the paint
+    /// says why (`ui/README.md` § Offer only what is possible, rule 7).
+    error_label: gtk::Label,
 }
 
 /// Build the snapshot list pane: header (selector + the three set-scoped
@@ -75,6 +79,7 @@ pub struct SnapshotPaneHandles {
 pub fn build_snapshot_list(
     client: &Rc<FaunaClient>,
     machine: &std::sync::Arc<BackupsMachine>,
+    error_label: &gtk::Label,
 ) -> (gtk::Box, SnapshotPaneHandles) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let suppress = Rc::new(Cell::new(false));
@@ -129,11 +134,16 @@ pub fn build_snapshot_list(
     // ── Gesture wiring ──────────────────────────────────────────────────
     // Each is a machine gesture spawned on the client's runtime; the observer
     // tick that follows repaints. No client-side re-fetch, no local busy flag —
-    // `in_progress_op` is the single-flight gate for all of them.
+    // `in_progress_op` is the single-flight gate for all of them. Each press
+    // first asks the machine's set answer its button was painted from.
     {
         let m = std::sync::Arc::clone(machine);
         let spawn = MutatingGesture::new(client);
+        let error_label = error_label.clone();
         create_btn.connect_clicked(move |_| {
+            if !super::allowed(&error_label, &m.snapshot().set_action_possibility()) {
+                return;
+            }
             let m = std::sync::Arc::clone(&m);
             spawn.run(async move { m.create_snapshot().await });
         });
@@ -145,7 +155,11 @@ pub fn build_snapshot_list(
         // along with the `keep_last` policy it confirmed.
         let m = std::sync::Arc::clone(machine);
         let rt = client.runtime_handle();
+        let error_label = error_label.clone();
         prune_btn.connect_clicked(move |_| {
+            if !super::allowed(&error_label, &m.snapshot().set_action_possibility()) {
+                return;
+            }
             let m = std::sync::Arc::clone(&m);
             rt.spawn(async move { m.prune_preview().await });
         });
@@ -156,7 +170,11 @@ pub fn build_snapshot_list(
         // actuation-contract violation being reconciled).
         let m = std::sync::Arc::clone(machine);
         let rt = client.runtime_handle();
+        let error_label = error_label.clone();
         check_btn.connect_clicked(move |_| {
+            if !super::allowed(&error_label, &m.snapshot().set_action_possibility()) {
+                return;
+            }
             let m = std::sync::Arc::clone(&m);
             rt.spawn(async move { m.check().await });
         });
@@ -251,6 +269,7 @@ pub fn build_snapshot_list(
         snapshot_list_box: list_box,
         suppress_selection_notify: suppress,
         immediate_delete_target,
+        error_label: error_label.clone(),
     };
     (outer, handles)
 }
@@ -335,7 +354,6 @@ pub fn render_snapshot_pane(
     // Single-flight: while an op runs, EVERY mutating control is disabled
     // (§ *Create* ruling). One predicate so no control can drift off it.
     let busy = page.in_progress_op.is_some();
-    let armed = !busy && page.selected_folder.is_some();
 
     render_selector(handles, page, busy);
 
@@ -346,9 +364,7 @@ pub fn render_snapshot_pane(
         None => backups_strings::LAST_BACKED_UP_NEVER.to_string(),
     });
 
-    handles.create_button.set_sensitive(armed);
-    handles.prune_button.set_sensitive(armed);
-    handles.check_button.set_sensitive(armed);
+    paint_set_actions(handles, page);
 
     match page.in_progress_op {
         Some(op) => {
@@ -362,6 +378,24 @@ pub fn render_snapshot_pane(
     render_prune_preview(handles, machine, page, busy, client);
     render_rows(handles, machine, page, busy, client);
     close_immediate_delete_modal_if_landed(handles, page);
+}
+
+/// The three set-scoped actions paint from the machine's set answer: a
+/// selected folder (with none at all, the reason names where one is made) and
+/// an idle machine (the busy line's own text).
+fn paint_set_actions(handles: &SnapshotPaneHandles, page: &BackupsSnapshot) {
+    let answer = page.set_action_possibility();
+    crate::possible::paint(&handles.create_button, None, answer.clone());
+    super::paint_icon(
+        &handles.prune_button,
+        backups_strings::PRUNE_SNAPSHOTS,
+        answer.clone(),
+    );
+    super::paint_icon(
+        &handles.check_button,
+        backups_strings::CHECK_INTEGRITY,
+        answer,
+    );
 }
 
 /// Close the friction-bar modal once the row it targets has actually left the
@@ -591,13 +625,15 @@ fn render_rows(
     client: &Rc<FaunaClient>,
 ) {
     crate::views::layout::clear_list_box_rows(&handles.snapshot_list_box);
-    for snap in &page.snapshots {
+    for (index, snap) in page.snapshots.iter().enumerate() {
         let row = build_snapshot_row(
-            snap,
+            page,
+            index,
             busy,
             machine,
             client,
             &handles.immediate_delete_target,
+            &handles.error_label,
         );
         row.set_widget_name(&snap.id.to_string());
         handles.snapshot_list_box.append(&row);
@@ -641,15 +677,54 @@ fn snapshot_row_text(snap: &SnapshotRow) -> String {
     text
 }
 
+/// The machine's answer for a row's gesture, asked at the press against the
+/// machine's state *now*: the row is found by its id, so a list that moved
+/// since the paint answers for the right row, and a row gone since answers
+/// absent (a stale press, nothing to do).
+fn row_answer(
+    page: &BackupsSnapshot,
+    snapshot_id: i64,
+    ask: impl Fn(&BackupsSnapshot, usize) -> Possibility,
+) -> Possibility {
+    match page.snapshots.iter().position(|row| row.id == snapshot_id) {
+        Some(index) => ask(page, index),
+        None => Possibility::Absent,
+    }
+}
+
+/// Paint a row's two delete affordances from the machine's answers: the soft
+/// delete only on an active row (a pending or soft-deleted one says why), the
+/// immediate delete in every state but a running op.
+fn paint_row_deletes(
+    delete: &gtk::Button,
+    immediate_delete: &gtk::Button,
+    page: &BackupsSnapshot,
+    index: usize,
+) {
+    super::paint_icon(
+        delete,
+        backups_strings::DELETE_SNAPSHOT,
+        page.delete_possibility(index),
+    );
+    super::paint_icon(
+        immediate_delete,
+        backups_strings::IMMEDIATE_DELETE_BUTTON,
+        page.immediate_delete_possibility(index),
+    );
+}
+
 /// Build one `snapshot-item[i]` row: the clickable summary plus its two per-row
 /// delete affordances.
 fn build_snapshot_row(
-    snap: &SnapshotRow,
+    page: &BackupsSnapshot,
+    index: usize,
     busy: bool,
     machine: &std::sync::Arc<BackupsMachine>,
     client: &Rc<FaunaClient>,
     immediate_delete_target: &Rc<Cell<Option<i64>>>,
+    error_label: &gtk::Label,
 ) -> gtk::ListBoxRow {
+    let snap = &page.snapshots[index];
     let snapshot_id = snap.id;
 
     let row_text = snapshot_row_text(snap);
@@ -660,10 +735,8 @@ fn build_snapshot_row(
 
     let delete_btn = gtk::Button::new();
     delete_btn.set_icon_name("user-trash-symbolic");
-    delete_btn.set_tooltip_text(Some(backups_strings::DELETE_SNAPSHOT));
     delete_btn.add_css_class("flat");
     delete_btn.add_css_class("destructive-action");
-    delete_btn.set_sensitive(!busy);
     crate::testid::set_test_id(&delete_btn, ids::SNAPSHOT_DELETE_BUTTON);
     crate::offline_gate::declare_wire_kind(&delete_btn, "fauna.filesync.snapshot.delete");
 
@@ -673,7 +746,12 @@ fn build_snapshot_row(
     {
         let m = std::sync::Arc::clone(machine);
         let spawn = MutatingGesture::new(client);
+        let error_label = error_label.clone();
         delete_btn.connect_clicked(move |btn| {
+            let answer = row_answer(&m.snapshot(), snapshot_id, |p, i| p.delete_possibility(i));
+            if !super::allowed(&error_label, &answer) {
+                return;
+            }
             let m = std::sync::Arc::clone(&m);
             let spawn = spawn.clone();
             // No wire kind here — it is declared on the ENTRY button above, the
@@ -705,16 +783,22 @@ fn build_snapshot_row(
     // only when both inputs match exactly.
     let immediate_delete_btn = gtk::Button::new();
     immediate_delete_btn.set_icon_name("user-trash-full-symbolic");
-    immediate_delete_btn.set_tooltip_text(Some(backups_strings::IMMEDIATE_DELETE_BUTTON));
     immediate_delete_btn.add_css_class("flat");
     immediate_delete_btn.add_css_class("destructive-action");
-    immediate_delete_btn.set_sensitive(!busy);
     crate::testid::set_test_id(&immediate_delete_btn, ids::SNAPSHOT_IMMEDIATE_DELETE_BUTTON);
+    paint_row_deletes(&delete_btn, &immediate_delete_btn, page, index);
     {
         let m = std::sync::Arc::clone(machine);
         let client = Rc::clone(client);
         let target = Rc::clone(immediate_delete_target);
+        let error_label = error_label.clone();
         immediate_delete_btn.connect_clicked(move |btn| {
+            let answer = row_answer(&m.snapshot(), snapshot_id, |p, i| {
+                p.immediate_delete_possibility(i)
+            });
+            if !super::allowed(&error_label, &answer) {
+                return;
+            }
             let parent = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             target.set(Some(snapshot_id));
             open_immediate_delete_modal(parent.as_ref(), snapshot_id, &m, &client, &target);
@@ -1072,6 +1156,80 @@ mod tests {
         assert!(
             snapshot_row_text(&soft).contains(backups_strings::SNAPSHOT_STATE_SOFT_DELETED_UNDATED)
         );
+    }
+
+    fn page_of(states: Vec<SnapshotState>) -> BackupsSnapshot {
+        BackupsSnapshot {
+            folders: vec![fauna_backups_machine::BackupFolderRow::default()],
+            selected_folder: Some("f".into()),
+            snapshots: states
+                .into_iter()
+                .enumerate()
+                .map(|(i, state)| SnapshotRow {
+                    state,
+                    ..row(i as i64 + 1)
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn resolved(answer: &Possibility) -> String {
+        answer
+            .reason()
+            .expect("a blocked answer")
+            .resolve(crate::i18n::strings::lookup)
+    }
+
+    /// A row already pending deletion is not offered the soft delete — it
+    /// paints disabled with the machine's reason — while its immediate delete
+    /// stays live; a press that got past the paint is refused with that same
+    /// reason on `error-message`, by the row's id.
+    #[test]
+    fn a_pending_rows_soft_delete_is_refused_with_its_reason() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("connected");
+            let page = page_of(vec![
+                SnapshotState::Active,
+                SnapshotState::DeletionPending {
+                    execute_after: None,
+                },
+            ]);
+            let (delete, immediate) = (gtk::Button::new(), gtk::Button::new());
+            paint_row_deletes(&delete, &immediate, &page, 1);
+            let pending = page.delete_possibility(1);
+            assert_eq!(
+                pending.reason().map(|r| r.key.as_str()),
+                Some("backups.snapshot_delete_already_pending")
+            );
+            assert!(!delete.is_sensitive());
+            assert_eq!(
+                delete.tooltip_text().as_deref(),
+                Some(resolved(&pending).as_str())
+            );
+            assert!(
+                immediate.is_sensitive(),
+                "the hard delete stays a real choice"
+            );
+
+            let answer = row_answer(&page, 2, |p, i| p.delete_possibility(i));
+            let error_label = gtk::Label::new(None);
+            assert!(!super::super::allowed(&error_label, &answer));
+            assert_eq!(error_label.text().as_str(), resolved(&pending));
+
+            paint_row_deletes(&delete, &immediate, &page, 0);
+            assert!(delete.is_sensitive());
+            assert_eq!(
+                delete.tooltip_text().as_deref(),
+                Some(backups_strings::DELETE_SNAPSHOT)
+            );
+            assert_eq!(
+                row_answer(&page, 99, |p, i| p.delete_possibility(i)),
+                Possibility::Absent,
+                "a row gone since the paint is a stale press"
+            );
+            crate::offline_gate::reset_for_test("disconnected");
+        });
     }
 
     /// Every `BackupOp` names itself on the busy line. A missing arm would leave

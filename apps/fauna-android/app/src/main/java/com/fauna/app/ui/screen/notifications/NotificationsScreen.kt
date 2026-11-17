@@ -26,6 +26,10 @@ import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.core.UrlOpener
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.ContactOverlaysVM
 import com.fauna.app.ui.viewmodel.NotificationsVM
@@ -42,6 +46,7 @@ import com.fauna.ffi.notificationTextNamingFor
 import java.net.URLEncoder
 import social.fauna.generated.Ids
 import uniffi.fauna_core.MutedKeyword
+import uniffi.fauna_core.Possibility
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,6 +64,8 @@ fun NotificationsScreen(
     val unreadCount by vm.unreadCount.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
     val error by vm.errorMessage.collectAsState()
+    val markAllReadAnswer by vm.markAllReadAnswer.collectAsState()
+    val clearAllAnswer by vm.clearAllAnswer.collectAsState()
     val mutedKeywords by vm.mutedKeywords.collectAsState()
     val overlayEpoch by overlaysVm.epoch.collectAsState()
     // Session-local reveal of muted-collapsed rows (notifications.md § Muted
@@ -102,25 +109,16 @@ fun NotificationsScreen(
             }
         }
 
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedButton(
-                onClick = { vm.markAllRead() },
-                enabled = unreadCount > 0,
-                modifier = Modifier.testTag(Ids.NOTIFICATION_MARK_READ)
-            ) {
-                Text(stringResource(R.string.bridges_mark_all_read))
-            }
-            OutlinedButton(
-                onClick = { vm.clearAll() },
-                enabled = notifications.isNotEmpty(),
-                modifier = Modifier.testTag(Ids.NOTIFICATION_CLEAR)
-            ) {
-                Text(stringResource(R.string.notifications_clear_all))
-            }
-        }
+        // The page-wide actions wait on the first list read (`notifications.md`
+        // § Errors & edge cases; the VM's shared answers), each reason under
+        // its own button (`docs/goal/ui/README.md` § Offer only what is
+        // possible, rule 2).
+        NotificationsPageActions(
+            markAllReadAnswer = markAllReadAnswer,
+            clearAllAnswer = clearAllAnswer,
+            onMarkAllRead = { vm.markAllRead() },
+            onClearAll = { vm.clearAll() },
+        )
 
         Spacer(Modifier.height(16.dp))
 
@@ -387,4 +385,48 @@ private fun typeToIcon(type: String): Pair<ImageVector, String> = when (type) {
     "reply" -> Icons.Default.Reply to "Reply"
     "quote" -> Icons.Default.FormatQuote to "Quote"
     else -> Icons.Default.Notifications to "Notification"
+}
+
+/**
+ * `notification-mark-read` + `notification-clear`, painted from the VM's
+ * shared answers ([NotificationsVM.markAllReadAnswer],
+ * [NotificationsVM.clearAllAnswer]). Stateless and FFI-free for the
+ * Robolectric harness.
+ */
+@Composable
+fun NotificationsPageActions(
+    markAllReadAnswer: Possibility,
+    clearAllAnswer: Possibility,
+    onMarkAllRead: () -> Unit,
+    onClearAll: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (markAllReadAnswer.isShown) {
+            Column {
+                OutlinedButton(
+                    onClick = onMarkAllRead,
+                    enabled = markAllReadAnswer.isPossible,
+                    modifier = Modifier.testTag(Ids.NOTIFICATION_MARK_READ)
+                ) {
+                    Text(stringResource(R.string.bridges_mark_all_read))
+                }
+                DisabledControlReasonText(localized(markAllReadAnswer.blockedReason))
+            }
+        }
+        if (clearAllAnswer.isShown) {
+            Column {
+                OutlinedButton(
+                    onClick = onClearAll,
+                    enabled = clearAllAnswer.isPossible,
+                    modifier = Modifier.testTag(Ids.NOTIFICATION_CLEAR)
+                ) {
+                    Text(stringResource(R.string.notifications_clear_all))
+                }
+                DisabledControlReasonText(localized(clearAllAnswer.blockedReason))
+            }
+        }
+    }
 }

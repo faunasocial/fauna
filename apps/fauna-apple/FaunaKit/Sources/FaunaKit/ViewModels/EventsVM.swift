@@ -3,7 +3,39 @@ import SwiftUI
 @MainActor @Observable
 public class EventsVM {
     public var calendars: [FaunaCalendar] = []
+    /// The calendar read's shared four answers (events.md § Errors & edge cases
+    /// → *No calendar to hold an event*, ruling 2). `.unresolved` until the
+    /// first read lands: the page paints loading, never the empty state.
+    public var calendarsRead: FfiCalendarsRead = .unresolved
+    /// Read only on a *no key* answer (`deploymentServesDavOrMail`); until then
+    /// the deployment is taken as serving.
+    public var deploymentServes = true
+    /// This person's admin bit, read with the no-key answer's inputs.
+    public var viewerIsAdmin = false
+    /// The compose form's own `error-message`: the whole sentence of a refused
+    /// create or failed save (ruling 4). The form stays open with what was typed.
+    public var createFormError: String?
     public var selectedCalendar: FaunaCalendar?
+
+    /// Can an event compose open (and a create be sent) now? The shared
+    /// predicate; every door asks it and `createEvent` asks it again.
+    public var createPossibility: Possibility {
+        eventCreatePossibility(read: calendarsRead, isAdmin: viewerIsAdmin,
+                               deploymentServesDavOrMail: deploymentServes)
+    }
+
+    /// The unblocking step the blocked answer names (`calendar-list-empty-state-step`).
+    public var createStep: FfiEventCreateStep? {
+        eventCreateStep(read: calendarsRead, isAdmin: viewerIsAdmin,
+                        deploymentServesDavOrMail: deploymentServes)
+    }
+
+    /// The calendar list's empty state is the reason, only while no calendar can
+    /// hold an event and the read is resolved (loading is its own state).
+    public var calendarsLoading: Bool {
+        if case .unresolved = calendarsRead { return true }
+        return false
+    }
     /// The `calendar-visibility` display filter's checked set (events.md §
     /// Where logic lives → *Which calendars display*) — client-side only,
     /// never persisted server-side. An **empty** set means "no filter" (the
@@ -218,6 +250,10 @@ public class EventsVM {
         attachEventDrafts(nil)
         api = nil
         calendars = []
+        calendarsRead = .unresolved
+        deploymentServes = true
+        viewerIsAdmin = false
+        createFormError = nil
         selectedCalendar = nil
         visibleCalendarIds = []
         events = []
@@ -521,11 +557,22 @@ public class EventsVM {
         await loadRefusedChanges()
         do {
             let previous = calendars
-            let loaded = try await api.listCalendars()
+            let load = try await api.readCalendars()
+            let loaded = load.calendars
+            // The no-key answer's inputs are read only then (tui's shape).
+            var serves = true
+            var admin = false
+            if case .noKey = load.read {
+                serves = await api.deploymentServesDavOrMail()
+                admin = (try? await api.amIAdmin()) ?? false
+            }
             // The in-flight clause (`account-scoping.md` § The scoping taxonomy): a
             // read already suspended for the outgoing account is not cancelled
             // mid-call, so it returns after the drop and would still assign.
             guard self.api === api else { return }
+            calendarsRead = load.read
+            deploymentServes = serves
+            viewerIsAdmin = admin
             calendars = loaded
             seedVisibleCalendarIds(previous: previous, next: calendars)
             let generation = beginEventsQuery()
@@ -653,8 +700,13 @@ public class EventsVM {
         }
     }
 
-    public func createEvent(_ request: CreateEventRequest) async {
-        guard let api else { return }
+    /// Returns whether the event was created — the iOS sheet dismisses on
+    /// success only; a refusal or failed save is `createFormError`, painted in
+    /// the form's own `error-message`, the form still open with its text.
+    @discardableResult
+    public func createEvent(_ request: CreateEventRequest) async -> Bool {
+        guard let api else { return false }
+        createFormError = nil
         // Fall back to the first available calendar when none is explicitly
         // selected — the cross-app create-without-select contract (matches
         // linux/windows; the week/day/month grids create without a prior select).
@@ -663,13 +715,24 @@ public class EventsVM {
         // the union-of-all-calendars browsing state (selectedCalendar == nil)
         // stays in that state afterwards instead of silently narrowing the page
         // to a single calendar.
-        guard let cal = selectedCalendar ?? calendars.first else { return }
+        // The submit asks the shared predicate again (ruling 3): refused with
+        // its reason — never a silent return, never an empty calendar id.
+        let target = eventCreateTarget(
+            read: calendarsRead, isAdmin: viewerIsAdmin,
+            deploymentServesDavOrMail: deploymentServes, selected: selectedCalendar?.id)
+        let calId: String
+        switch target {
+        case .calendar(let id): calId = id
+        case .refused(let reason):
+            createFormError = renderLocalizedText(reason)
+            return false
+        }
         creatingEvent = true
         defer { creatingEvent = false }
         // Honor the resolved calendar even when the form built the request with an
         // empty calendarId (no selection at submit time).
         let req = request.calendarId.isEmpty
-            ? CreateEventRequest(calendarId: cal.id, summary: request.summary,
+            ? CreateEventRequest(calendarId: calId, summary: request.summary,
                                  dtstart: request.dtstart, dtend: request.dtend,
                                  description: request.description, location: request.location)
             : request
@@ -688,9 +751,20 @@ public class EventsVM {
             // create above leaves the compose open and the draft intact so
             // the user can retry.
             clearDraftsRail()
+            return true
         } catch {
-            errorMessage = DisplayError.http(error)
+            createFormError = L.events.saveFailed(error: DisplayError.http(error) ?? error.localizedDescription)
+            return false
         }
+    }
+
+    /// The `new-event-btn` door: closes an open compose, else opens one only
+    /// when the shared predicate says an event can be held (ruling 3).
+    public func toggleNewEvent() {
+        if showNewEvent { showNewEvent = false; return }
+        guard createPossibility.isPossible else { return }
+        createFormError = nil
+        showNewEvent = true
     }
 
     /// Open the new-event compose for a **whole day** — the month grid's
@@ -727,6 +801,10 @@ public class EventsVM {
 
     /// The form seeds its start from `composePrefillDate` on appear.
     private func beginCompose(prefill date: Date) {
+        // Every door asks the shared predicate; none opens a compose that
+        // cannot succeed (events.md § *No calendar to hold an event*, ruling 3).
+        guard createPossibility.isPossible else { return }
+        createFormError = nil
         // A day-cell gesture starts fresh (events.md § Persistence) — clear
         // the rail before the form opens, so its `.onAppear` resume check
         // (`resumableDraft == nil`) never fires for this open.
@@ -989,6 +1067,13 @@ public class EventsVM {
     /// `RefreshIfChangedAsync`).
     private func refreshIfChanged() async {
         guard let api else { return }
+        // Until a calendar can hold an event the poll re-runs the whole read
+        // (the credential may have been added elsewhere); once loaded it keeps
+        // the cheap id-set diff below.
+        if case .loaded = calendarsRead {} else {
+            await loadCalendars()
+            return
+        }
         if let fetched = try? await api.listCalendars(),
             // The in-flight clause, and the poll is where it bites hardest: this loop
             // lives in the page's `.task`, so before the session-keyed re-key it kept

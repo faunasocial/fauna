@@ -18,6 +18,7 @@ use fauna_ui_ids as ids;
 use std::sync::Arc;
 
 use fauna_client::NestClient;
+use fauna_core::possibility::Possibility;
 use fauna_i18n::strings::media as t;
 use fauna_i18n::strings::share_link as sl;
 use fauna_media_machine::{
@@ -397,13 +398,21 @@ pub fn init(
     // folder-key custody; the same shared `NestFolderKeyResolver` the FFI +
     // linux Media glue construct.
     let resolver: Arc<dyn fauna_media_machine::FolderKeyResolver> = Arc::new(
-        fauna_client_folders::NestFolderKeyResolver::new(Arc::clone(&nest), folder_keys),
+        fauna_client_folders::NestFolderKeyResolver::new(Arc::clone(&nest), folder_keys.clone()),
     );
     let machine = fauna_media_machine::build_media_machine_with_folder_keys(
         Arc::clone(&nest),
         observer,
         Some(resolver),
     );
+    // The first folder's maker (`media.md` § Errors & edge cases → *No folder
+    // to upload into*): a folderless account's first upload makes `Personal`
+    // through the ordinary folder create, writing its custody where the
+    // Folders page's wizard writes it.
+    machine.set_folder_maker(fauna_folders_machine::build_first_folder_maker(
+        Arc::clone(&nest),
+        Some(folder_keys),
+    ));
     // The followed browse-scope source (`media.md` § Followed public folders):
     // the same account-store-backed source type the Folders page reads follows
     // through (`follows` — `settings::follows_door`), here feeding `media-folder-filter`'s followed options and the
@@ -1680,10 +1689,19 @@ pub fn elements(app: &App) -> Vec<Element> {
     );
 
     // Upload affordance: a staged path + the submit that runs the shared
-    // gesture. Absent entirely while a followed browse scope is active — the
-    // scope is structurally read-only (`media.md` § Followed public folders),
-    // and the machine refuses too, so a stale driver click still answers.
-    if snapshot.followed_scope.is_none() {
+    // gesture, both painted from the machine's one answer
+    // (`MediaMachine::upload_possibility`; `ui/media.md` § Errors & edge cases
+    // → *What this person may write*): absent inside a followed browse scope
+    // (structurally read-only), disabled with its reason before the first read
+    // resolves and when the target is a reader's or a metadata-only set. The
+    // machine refuses on the same readings, so a stale driver click still
+    // answers.
+    let upload = app
+        .media
+        .machine
+        .as_ref()
+        .map_or(Possibility::Absent, |m| m.upload_possibility());
+    if upload.is_shown() {
         els.push(
             Element::input(
                 ids::FILE_UPLOAD,
@@ -1696,14 +1714,18 @@ pub fn elements(app: &App) -> Vec<Element> {
             // — they reported no way to upload at all. `ui/media.md`'s matrix
             // already records tui's `file-upload` as a typed PATH; this is the
             // label catching up to the ratified reality.
-            .labelled(t::TYPE_FILE_PATH),
+            .labelled(t::TYPE_FILE_PATH)
+            .possible(upload.clone()),
         );
-        els.push(Element::gesture_button(
-            ids::UPLOAD_BUTTON,
-            t::UPLOAD,
-            true,
-            Gesture::Media(Action::Upload),
-        ));
+        els.push(
+            Element::gesture_button(
+                ids::UPLOAD_BUTTON,
+                t::UPLOAD,
+                true,
+                Gesture::Media(Action::Upload),
+            )
+            .possible(upload),
+        );
     }
 
     // "Shared links" — the page-level entry to the caller's share links
@@ -1866,35 +1888,56 @@ fn detail_elements(app: &App, snapshot: &MediaPageSnapshot, detail: &DetailState
     // entirely, never painted-but-inert (the `testing.md` point-10 shape).
     let followed = detail.followed_scope_value.is_some();
 
+    // Whether this person may write into the item's set — the machine's one
+    // answer for delete and restore (`MediaMachine::write_possibility`;
+    // `ui/media.md` § Errors & edge cases → *What this person may write*):
+    // absent in a set they may only read, so a reader never sees either.
+    let write = if followed {
+        Possibility::Absent
+    } else {
+        app.media.machine.as_ref().map_or(Possibility::Absent, |m| {
+            m.write_possibility(detail.set_value.clone())
+        })
+    };
+
     // Delete the opened file (`media.md` § Element IDs, user-approved
-    // 2026-07-16). Painted on every OWN-item detail — the ui.yaml component
-    // order puts it right after the close button — and always armed-gated, so
-    // pressing it can never delete anything by itself.
-    if !followed {
-        els.push(Element::gesture_button(
-            ids::MEDIA_DELETE_BUTTON,
-            t::file_detail::DELETE_FILE,
-            true,
-            Gesture::Media(Action::ArmDelete),
-        ));
+    // 2026-07-16). Painted on every item detail this person may write — the
+    // ui.yaml component order puts it right after the close button — and
+    // always armed-gated, so pressing it can never delete anything by itself.
+    if write.is_shown() {
+        els.push(
+            Element::gesture_button(
+                ids::MEDIA_DELETE_BUTTON,
+                t::file_detail::DELETE_FILE,
+                true,
+                Gesture::Media(Action::ArmDelete),
+            )
+            .possible(write.clone()),
+        );
     }
 
     // "Share a link" — present ONLY on an eligible file (the shared
     // `share_link_eligible` verdict the machine stamped on the item), absent
     // elsewhere, never painted-but-inert (`share-links.md` § Which files can be
     // linked). Its create surface, once open, paints right below.
+    // Declared on the element seam as the shared `share_link_possibility`
+    // answer (absent where the file is not eligible), so the walk's I8 holds it.
     let eligible = !followed
         && snapshot
             .items
             .iter()
             .any(|i| i.folder == detail.folder && i.path == detail.path && i.share_link_eligible);
-    if eligible {
-        els.push(Element::gesture_button(
-            ids::SHARE_LINK_BUTTON,
-            sl::BUTTON,
-            true,
-            Gesture::Media(Action::OpenShareCreate),
-        ));
+    let share_link = fauna_client_share::share_link_possibility(eligible);
+    if share_link.is_shown() {
+        els.push(
+            Element::gesture_button(
+                ids::SHARE_LINK_BUTTON,
+                sl::BUTTON,
+                true,
+                Gesture::Media(Action::OpenShareCreate),
+            )
+            .possible(share_link),
+        );
         if let Some(create) = &snapshot.share_create {
             els.extend(share_create_elements(snapshot, create));
         }
@@ -2011,15 +2054,18 @@ fn detail_elements(app: &App, snapshot: &MediaPageSnapshot, detail: &DetailState
                 .within(ids::FILE_VERSION_ITEM, index),
             );
         }
-        els.push(
-            Element::gesture_button(
-                ids::FILE_VERSION_RESTORE_BUTTON,
-                t::VERSION_RESTORE,
-                true,
-                Gesture::Media(Action::ArmRestore(index)),
-            )
-            .within(ids::FILE_VERSION_ITEM, index),
-        );
+        if write.is_shown() {
+            els.push(
+                Element::gesture_button(
+                    ids::FILE_VERSION_RESTORE_BUTTON,
+                    t::VERSION_RESTORE,
+                    true,
+                    Gesture::Media(Action::ArmRestore(index)),
+                )
+                .within(ids::FILE_VERSION_ITEM, index)
+                .possible(write.clone()),
+            );
+        }
     }
 
     // The lightweight confirm — painted only while armed.
@@ -2355,6 +2401,120 @@ mod tests {
 
     fn ids(app: &App) -> Vec<String> {
         elements(app).iter().map(|e| e.id.clone()).collect()
+    }
+
+    /// The answer `id`'s element declares on the seam.
+    fn declared(app: &App, id: &str) -> Option<Possibility> {
+        elements(app)
+            .into_iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.possibility)
+    }
+
+    /// Every shared set is joined — so a member row is admitted to the page.
+    struct JoinedAll;
+
+    impl fauna_media_machine::FolderChannelOwners for JoinedAll {
+        fn folder_channel_owner(&self, _: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+            None
+        }
+    }
+
+    impl fauna_media_machine::MlsQuery for JoinedAll {
+        fn is_joined_shared_set(&self, _: &str) -> bool {
+            true
+        }
+    }
+
+    /// Rule 5 of `ui/README.md` § Offer only what is possible: before the
+    /// first read the upload is declared blocked "still loading" on both of
+    /// its controls; once read, possible — on a folderless account too
+    /// (`ui/media.md` § *No folder to upload into*, ruling 5).
+    #[tokio::test]
+    async fn the_upload_paints_from_the_machines_answer() {
+        let mut app = crate::app::tests::test_app();
+        let api = Arc::new(FakeMediaNestApi::new());
+        let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None);
+        app.media.machine = Some(machine.clone());
+        for id in ["upload-button", "file-upload"] {
+            let answer = declared(&app, id).expect("declared on the seam");
+            assert_eq!(
+                answer.reason().map(|r| r.key.as_str()),
+                Some("common.still_loading"),
+                "{id}"
+            );
+        }
+        machine.refresh(Some(vec![0u8; 32])).await;
+        assert_eq!(declared(&app, "upload-button"), Some(Possibility::Possible));
+    }
+
+    /// A reader member never sees delete or restore on an item of the set
+    /// shared with them; the owner of a set sees both, declared possible.
+    #[tokio::test]
+    async fn a_readers_detail_offers_no_delete_and_no_restore() {
+        let mut app = crate::app::tests::test_app();
+        let api = Arc::new(FakeMediaNestApi::new());
+        api.set_folders(vec![
+            fauna_media_machine::MediaFolder {
+                id: 1,
+                name: "mine".into(),
+                ..Default::default()
+            },
+            fauna_media_machine::MediaFolder {
+                id: 9,
+                name: "theirs".into(),
+                member: true,
+                writer: false,
+                mls_group_id: Some("g9".into()),
+                ..Default::default()
+            },
+        ]);
+        api.set_snapshot(MediaSnapshot {
+            items: vec![
+                MediaItem {
+                    folder_id: Some(1),
+                    ..item("mine", "mine/a.jpg", 10)
+                },
+                MediaItem {
+                    folder_id: Some(9),
+                    ..item("theirs", "theirs/b.jpg", 10)
+                },
+            ],
+            ..Default::default()
+        });
+        let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None);
+        machine.set_mls_query(Arc::new(JoinedAll));
+        machine.refresh(Some(vec![0u8; 32])).await;
+        app.media.machine = Some(machine.clone());
+        app.media.device_id = Some("de".repeat(32));
+
+        let index_of = |folder: &str| {
+            machine
+                .snapshot()
+                .items
+                .iter()
+                .position(|i| i.folder == folder)
+                .expect("listed")
+        };
+
+        apply_local(&mut app, Action::OpenDetail(index_of("theirs")));
+        apply_outcome(&mut app, Outcome::Versions(vec![version(1, 10)]));
+        let seen = ids(&app);
+        assert!(seen.contains(&"file-version-item".to_string()));
+        assert!(!seen.contains(&"media-delete-button".to_string()));
+        assert!(!seen.contains(&"file-version-restore-button".to_string()));
+
+        apply_local(&mut app, Action::CloseDetail);
+        apply_local(&mut app, Action::OpenDetail(index_of("mine")));
+        apply_outcome(&mut app, Outcome::Versions(vec![version(1, 10)]));
+        assert_eq!(
+            declared(&app, "media-delete-button"),
+            Some(Possibility::Possible)
+        );
+        assert_eq!(
+            declared(&app, "file-version-restore-button"),
+            Some(Possibility::Possible)
+        );
     }
 
     /// An item carrying a `thumbnail_hash` — the shape `fauna.media.list`
@@ -2874,24 +3034,34 @@ mod tests {
         );
     }
 
-    /// An upload with a file staged but NO folder to target surfaces the
-    /// machine's `media.error_no_set` policy on the page's `error-message`.
+    /// An upload with a file staged on a folderless account whose first folder
+    /// cannot be made surfaces the machine's `media.error_first_folder`
+    /// answer on the page's `error-message` (`media.md` § Errors & edge cases
+    /// → *No folder to upload into*, ruling 6).
     ///
     /// Regression, caught by e2e before this test existed: the machine owns the
     /// page error and reports it on its *snapshot*, but tui's `error-message` is
     /// registered off `App::errors` — with no bridge the gesture ran, set the
     /// machine's error, and the page showed **nothing**. No error and no effect
-    /// is indistinguishable from a dropped command (`testing.md` point 10), and
-    /// it is the exact shape `test_media_upload_no_set_error` asserts on every
-    /// app. Costs milliseconds here; cost a 9.5-minute e2e round trip to find.
+    /// is indistinguishable from a dropped command (`testing.md` point 10).
+    /// Costs milliseconds here; cost a 9.5-minute e2e round trip to find.
     #[tokio::test]
-    async fn an_upload_with_no_target_set_surfaces_the_machines_no_set_error() {
+    async fn a_first_folder_that_cannot_be_made_surfaces_the_machines_error() {
         let dir = tempfile::tempdir().unwrap();
         let picked = dir.path().join("snapshot.jpg");
         std::fs::write(&picked, b"bytes").unwrap();
 
-        // No items => no readable set to default the upload target to.
-        let mut app = app_with(vec![]).await;
+        let mut app = crate::app::tests::test_app();
+        let api = Arc::new(FakeMediaNestApi::new());
+        let machine = MediaMachine::new(Arc::new(NullObserver), api.clone(), None, None, None);
+        let maker = Arc::new(fauna_media_machine::FakeFolderMaker::new(api));
+        maker.set_outcome(fauna_media_machine::FakeMakeOutcome::Fails(
+            "nest unreachable".into(),
+        ));
+        machine.set_folder_maker(maker);
+        machine.refresh(Some(vec![0u8; 32])).await;
+        app.media.machine = Some(machine);
+        app.media.device_id = Some("de".repeat(32));
         app.media.file_input = picked.to_string_lossy().into_owned();
 
         let op = apply_local(&mut app, Action::Upload).expect("an upload op");
@@ -2902,8 +3072,8 @@ mod tests {
             app.errors
                 .get(&crate::pages::Page::Media)
                 .map(String::as_str),
-            Some(t::ERROR_NO_SET),
-            "the machine's no-set policy must reach error-message"
+            Some(t::error_first_folder("nest unreachable").as_str()),
+            "the machine's first-folder answer must reach error-message"
         );
     }
 

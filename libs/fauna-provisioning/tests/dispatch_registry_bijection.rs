@@ -87,6 +87,8 @@ fn actual_variant(id: ProviderId, cap: Capability) -> Option<&'static str> {
         Capability::Dns => dns_provider(id, creds, None).map(|d| d.variant_name()),
         Capability::Vps => vps_provider(id, creds, None).map(|d| d.variant_name()),
         Capability::Registrar => registrar(id, creds).map(|d| d.variant_name()),
+        // A field kind, never a capability: there is no adapter to build.
+        Capability::Zone => None,
     }
 }
 
@@ -167,6 +169,7 @@ fn no_capability_dispatches_without_credentials() {
                 Capability::Dns => dns_provider(meta.id, empty, None).map(|d| d.variant_name()),
                 Capability::Vps => vps_provider(meta.id, empty, None).map(|d| d.variant_name()),
                 Capability::Registrar => registrar(meta.id, empty).map(|d| d.variant_name()),
+                Capability::Zone => None,
             };
             assert!(
                 built.is_none(),

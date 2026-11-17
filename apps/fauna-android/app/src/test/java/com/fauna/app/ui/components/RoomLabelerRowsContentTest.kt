@@ -3,10 +3,10 @@ package com.fauna.app.ui.components
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
-import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.app.testing.LabelerCatalogEntryFixture
@@ -20,6 +20,7 @@ import social.fauna.generated.Ids
 import uniffi.fauna_conversations.HistoryPolicy
 import uniffi.fauna_conversations.JoinRule
 import uniffi.fauna_conversations.RoomSettingsDraft
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogSnapshot
 
 /**
@@ -67,7 +68,7 @@ class RoomLabelerRowsContentTest {
     private fun render(
         snapshot: LabelerCatalogSnapshot?,
         draft: RoomSettingsDraft,
-        canSetPolicy: Boolean = true,
+        setPolicy: Possibility = Possibility.Possible,
         onDraftChange: (RoomSettingsDraft) -> Unit = {},
         onInspect: (Int) -> Unit = {},
     ) {
@@ -75,7 +76,7 @@ class RoomLabelerRowsContentTest {
             RoomLabelerRowsContent(
                 snapshot = snapshot,
                 draft = draft,
-                canSetPolicy = canSetPolicy,
+                setPolicy = setPolicy,
                 onDraftChange = onDraftChange,
                 onInspect = onInspect,
                 onCloseInspect = {},
@@ -118,9 +119,10 @@ class RoomLabelerRowsContentTest {
     }
 
     @Test
-    fun toggleIsGreyedWithoutThePolicyCapability() {
-        render(snapshot("aa" to "wasm"), draft(labelers = emptyList()), canSetPolicy = false)
-        composeTestRule.onNodeWithTag(Ids.ROOM_LABELER_TOGGLE).assertIsNotEnabled()
+    fun aViewerThePolicyIsAbsentForReadsEachRowAsALine() {
+        render(snapshot("aa" to "wasm"), draft(labelers = emptyList()), setPolicy = Possibility.Absent)
+        composeTestRule.onAllNodesWithTag(Ids.ROOM_LABELER_TOGGLE).assertCountEquals(0)
+        composeTestRule.onNodeWithText("wasm · aa", substring = true).assertExists()
         composeTestRule.onNodeWithTag(Ids.ROOM_LABELER_INSPECT_BUTTON).assertIsEnabled()
     }
 

@@ -1336,31 +1336,35 @@ private struct FollowedFoldersSection: View {
 
             HStack {
                 Button(L.devices.followConfirm) { submitFollow() }
-                    .disabled(!canSubmit)
+                    .disabled(following)
                     .accessibilityIdentifier(Ids.folderFollowConfirm)
-                    // `isEnabled` mirrors the `.disabled(...)` predicate so a
-                    // synthesized activate cannot reach the write while the
-                    // form is incomplete or a follow is already in flight.
-                    .automationActivate(Ids.folderFollowConfirm, isEnabled: { canSubmit }) {
+                    // `isEnabled` keeps a synthesized activate from reaching
+                    // the write while a follow is already in flight.
+                    .automationActivate(Ids.folderFollowConfirm, isEnabled: { !following }) {
                         submitFollow()
                     }
+                    // The draft's shared answer (`fauna_client_folders::forms`),
+                    // outside the automation modifier so the registry reads it.
+                    .faunaPossible(followPossibility)
                 Button(L.common.cancel) { cancelFollow() }
             }
+            FaunaPossibilityReason(followPossibility)
         }
         .padding(.leading, 8)
     }
 
-    private var canSubmit: Bool {
-        !following
-            && !ownerInput.trimmingCharacters(in: .whitespaces).isEmpty
-            && !nameInput.trimmingCharacters(in: .whitespaces).isEmpty
+    private var followPossibility: Possibility {
+        vm.folderFollowPossibility(handle: ownerInput, name: nameInput)
     }
 
     /// The typed owner goes through UNRESOLVED — the shared recipe classifies it.
     /// The form closes only on success, so a not-found leaves the user's input in
     /// place to correct beside the error rather than making them retype it.
+    ///
+    /// The verb asks ``followPossibility`` again and refuses with its reason on
+    /// `error-message` — never a silent return.
     private func submitFollow() {
-        guard canSubmit else { return }
+        guard !following else { return }
         following = true
         Task {
             let ok = await vm.followFolder(owner: ownerInput, folderName: nameInput)

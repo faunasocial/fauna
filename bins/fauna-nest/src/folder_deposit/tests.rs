@@ -1281,6 +1281,49 @@ async fn the_http_door_binds_the_signature_to_the_streamed_body() {
     );
 }
 
+/// A refusal mid-body (here a part the folder refuses) still reads the rest of
+/// the body before the door answers, so the client is told the refusal
+/// instead of meeting a closed connection while it writes (RFC 9112 § 9.6):
+/// every frame is pulled, and nothing past the first refusal is dispatched.
+#[tokio::test]
+async fn the_http_door_reads_the_whole_body_before_it_answers_a_refusal() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let f = fixture(true).await;
+    let door = super::HttpDoor {
+        state: f.state.clone(),
+        binding: f.binding.clone(),
+        // A folder the grant does not reach: the first part is refused.
+        folder_id: f.folder + 9_999,
+    };
+    let frames: Vec<Bytes> = (0..6)
+        .map(|_| Bytes::from(vec![7u8; MAX_DEPOSIT_PART_BYTES / 2 + 1]))
+        .collect();
+    let total = frames.len();
+    let pulled = Arc::new(AtomicUsize::new(0));
+    let counter = pulled.clone();
+    let stream = futures_util::stream::iter(frames.into_iter().map(move |b| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, std::io::Error>(b)
+    }));
+    let refused = door
+        .deposit(
+            "scan.bin".into(),
+            "image/png".into(),
+            [0; 64],
+            axum::body::Body::from_stream(stream),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(super::DoorError::Rpc(_))),
+        "a part the folder refuses is answered with the kind's refusal"
+    );
+    assert_eq!(
+        pulled.load(Ordering::SeqCst),
+        total,
+        "the door reads the rest of the body before it answers"
+    );
+}
+
 /// The signature header is 64 bytes of unpadded base64url, or absent.
 #[test]
 fn the_signature_header_is_sixty_four_bytes_of_base64url() {

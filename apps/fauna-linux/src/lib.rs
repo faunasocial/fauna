@@ -40,6 +40,7 @@ mod drafts_autosave;
 mod feature_editor;
 mod feed;
 mod file_manager_share;
+mod form_gate;
 mod i18n;
 mod instance_remote;
 mod launch_currency;
@@ -61,6 +62,7 @@ mod offline_share;
 mod p2p;
 #[cfg(test)]
 mod packaging_identity_test;
+mod possible;
 mod push;
 mod qr_widget;
 mod region;
@@ -779,6 +781,51 @@ fn show_launch_instance_chooser(application: &adw::Application) -> bool {
     );
     show_window(&view.window);
     *view_holder.borrow_mut() = Some(view);
+
+    // The chooser's watch (`account-scoping.md` § Concurrent instances → the
+    // colliding instance's surface): while shown, it re-reads the facts it
+    // rests on through the shared `chooser_watch_step`. Freed — the serving
+    // instance quit — continues as the plain launch, the same continuation as
+    // focus-existing's no-longer-served arm, with no input; Choices replaces
+    // the list. Every exit takes the view out of the holder, which is what
+    // stops the source on its next tick.
+    let holder_for_watch = view_holder.clone();
+    let app_for_watch = application.clone();
+    let mut shown = choices;
+    gtk::glib::timeout_add_local(fauna_client_accounts::CHOOSER_WATCH_INTERVAL, move || {
+        if holder_for_watch.borrow().is_none() {
+            return gtk::glib::ControlFlow::Break;
+        }
+        let Some(base) = account_scope::install_state_base() else {
+            return gtk::glib::ControlFlow::Continue;
+        };
+        let entries: Vec<(String, Option<String>)> = account_registry()
+            .list()
+            .into_iter()
+            .map(|e| (e.actor_id, e.handle))
+            .collect();
+        match fauna_client_accounts::chooser_watch_step(&base, &served, &entries, &shown) {
+            fauna_client_accounts::ChooserWatchStep::Unchanged => gtk::glib::ControlFlow::Continue,
+            fauna_client_accounts::ChooserWatchStep::Freed => {
+                tracing::info!(
+                    "[launch-instance-chooser] {served} is no longer served — continuing as a plain launch"
+                );
+                if let Some(v) = holder_for_watch.borrow_mut().take() {
+                    v.window.destroy();
+                }
+                LAUNCH_COLLIDED.store(false, Ordering::SeqCst);
+                build_ui(&app_for_watch);
+                gtk::glib::ControlFlow::Break
+            }
+            fauna_client_accounts::ChooserWatchStep::Choices(now) => {
+                if let Some(v) = holder_for_watch.borrow().as_ref() {
+                    (v.set_choices)(&now);
+                }
+                shown = now;
+                gtk::glib::ControlFlow::Continue
+            }
+        }
+    });
     true
 }
 
@@ -3062,6 +3109,10 @@ fn start_element_agent_once(application: &adw::Application) {
     if STARTED.set(()).is_err() {
         return; // already started on an earlier call
     }
+    // The visible-window journal (`fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY`),
+    // installed before the first window is shown so the witness of
+    // `onboarding.md` § Wizard exit handling sees every transition.
+    automation::toplevel_windows::install();
 
     let (op_tx, op_rx) = async_channel::unbounded::<automation::agent::ElementOp>();
 
@@ -7302,6 +7353,12 @@ fn update_shared_state(
     // (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`), observed above.
     state_json[fauna_e2e_agent::PAINTED_TEXT_AREA_KEY] = painted_text_area;
     state_json[fauna_e2e_agent::LAUNCH_VERDICTS_KEY] = launch_currency::verdicts_json();
+    //
+    // The visible top-level windows and every change of that set — the witness
+    // of `onboarding.md` § Wizard exit handling's one-surface rule
+    // (`fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY` owns the contract).
+    state_json[fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY] =
+        automation::toplevel_windows::toplevel_windows_json();
     //
     // The knock toasts this process raised — the witness for `notifications`
     // outcome 15 (`fauna_e2e_agent::KNOCK_NOTICES_KEY`, which owns the

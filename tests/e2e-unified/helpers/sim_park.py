@@ -29,9 +29,18 @@ as before. A leased device is renamed after its new process at once.
 The File Provider seats (`fp_device`, `conftest.create_ios_fp_device`) are never
 parked: each test needs a device whose domain was never registered.
 
+The park's grant: a parked device sits booted between two processes, after
+its last process's own `sim_idle` grant went and before the next process leases
+it. `open` starts a holder (`hold`, a process of its own) that takes ONE
+`sim_idle` grant at the first parked device and holds it to the park's close,
+its note naming every device the park holds (`sims`); `close` deletes the
+devices under it, then ends the owner and waits for the holder to release
+(mac-simulator-hold.md § Per-core tokens, *A booted device is always under a
+grant*).
+
 Usage from the drain (`delayed_e2e_drain`):
 
-    python sim_park.py open <dir> --owner-pid <pid>
+    python sim_park.py open <dir> --owner-pid <pid>   # starts `hold <dir>`
     python sim_park.py close <dir>
 
 Stdlib only; every `simctl` call goes through an injectable `run` so the tier_1
@@ -57,8 +66,17 @@ PARK_ENV = "FAUNA_E2E_SIM_PARK"
 DEVICE_PREFIX = "fauna-e2e-ios-"
 
 _OWNER_FILE = "owner"
+_HOLDER_FILE = "holder"
 _RECORD_SUFFIX = ".json"
 _LEASING = ".leasing-"
+
+#: How often the park's grant holder (`hold`) re-reads the park, and the
+#: step of `close`'s wait for it to end.
+HOLD_POLL_S = 1.0
+#: One pass's bounded wait for the `sim_idle` grant; the next pass asks again.
+HOLD_ACQUIRE_WAIT_S = 60.0
+#: How long `close` waits for the holder to release before removing the park.
+HOLDER_EXIT_WAIT_S = 30.0
 
 Run = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -205,10 +223,163 @@ def lease(
     return None
 
 
-def close(directory: Path, run: Run = _run) -> list[str]:
+def parked_udids(directory: Path) -> list[str]:
+    """The UDIDs of every device the park holds booted: parked, or mid-lease
+    (its record claimed by a process, live or not, that has not yet taken it
+    — a live lessee's own grant names it from its registration, and until
+    then the park's still does)."""
+    out: list[str] = []
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError:
+        return out
+    for p in entries:
+        base = p.name.split(_LEASING, 1)[0]
+        if not base.endswith(_RECORD_SUFFIX) or base.startswith("."):
+            continue
+        try:
+            udid = str(json.loads(p.read_text()).get("udid", ""))
+        except (OSError, ValueError):
+            continue
+        if udid:
+            out.append(udid)
+    return out
+
+
+def _holder_pid(directory: Path) -> int | None:
+    try:
+        return int((directory / _HOLDER_FILE).read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _take_grant(slots, log: Callable[..., None]):
+    """One `sim_idle` grant for the park → its fd; None when this pass got
+    none (the next pass asks again); `False` when none will ever come here
+    (no such pool on this machine, or an ancestor's grant already holds this
+    tree's devices)."""
+    pool = getattr(slots, "SIM_IDLE_POOL", None)
+    enabled = getattr(slots, "sim_idle_enabled", None)
+    if pool is None or enabled is None or not enabled():
+        return False
+    try:
+        fd = slots.acquire_slot(pool, cmd=["xcrun", "simctl", "(the verify drain's parked devices)"],
+                                timeout_s=HOLD_ACQUIRE_WAIT_S)
+    except TimeoutError as exc:
+        log(f"sim-park: no room for a '{pool}' grant after {HOLD_ACQUIRE_WAIT_S:.0f}s — "
+            f"the parked devices stay unnamed until the next pass asks again ({exc})")
+        return None
+    return False if fd is None else fd
+
+
+def _held(fd) -> bool:
+    return fd is not None and fd is not False
+
+
+def hold(
+    directory: Path, slots, *, step: Callable[[float], None] = time.sleep,
+    log: Callable[..., None] = print,
+) -> int:
+    """The park's grant (mac-simulator-hold.md § Per-core tokens, *A booted
+    device is always under a grant*): from the first parked device to the
+    park's close, ONE `sim_idle` grant whose note names every device the park
+    holds (`sims`, `parked_udids`), re-noted each pass when the set changes.
+
+    A device the park holds sits booted between two pytest processes of a
+    drain turn, after its last process's own grant went at that process's
+    exit and before the next process leases it — under no grant, its load
+    read as unslotted, until this. The same one-grant shape as the conftest's
+    kept devices (`_hold_simulators_idle`): a leased device is named by its
+    lessee's grant as well while the record lasts, the figures summing.
+
+    Ends when the owner has closed the park or exited (`owner_pid` None) or
+    another holder has replaced this one (the holder file names another
+    pid), releasing the grant last — `close` deletes the devices first, so
+    their shutdown runs under it."""
+    fd = None
+    noted: list[str] | None = None
+    pool = getattr(slots, "SIM_IDLE_POOL", None)
+    try:
+        # A holder file not yet written (the opener writes it once this
+        # process is started) is not another holder's.
+        while owner_pid(directory) is not None and _holder_pid(directory) in (None, os.getpid()):
+            sims = sorted(parked_udids(directory))
+            if fd is None and sims:
+                fd = _take_grant(slots, log)
+            if _held(fd) and sims != noted:
+                annotate = getattr(slots, "annotate_note", None)
+                if annotate is not None:
+                    annotate(fd, {"sims": sims})
+                noted = sims
+            step(HOLD_POLL_S)
+    finally:
+        if _held(fd):
+            slots.release_slot(fd, pool)
+    return 0
+
+
+def _load_slots():
+    """The machine's build-slot library, resolved as the conftest resolves it
+    (`conftest._build_slot_module`: this checkout's copy asks which copy the
+    machine runs) → None when the script is absent (a solo checkout)."""
+    local = Path(__file__).resolve().parents[3] / "scripts" / "build-slot.py"
+    if not local.exists():
+        return None
+    import importlib.util
+
+    def _load(path):
+        spec = importlib.util.spec_from_file_location("fauna_build_slot", str(path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    mod = _load(local)
+    target = mod._machine_policy_script()
+    return _load(target) if target else mod
+
+
+def _spawn_holder(directory: Path) -> int | None:
+    """Start `hold` for `directory` in a session of its own (so the drain's
+    command substitution never waits on it and its stops never reach it);
+    its output goes to `<park>.holder.log` beside the park → its pid."""
+    try:
+        logf = open(directory.parent / f"{directory.name}.holder.log", "a")
+    except OSError:
+        return None
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "hold", str(directory)],
+            stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
+            start_new_session=True, close_fds=True,
+        )
+    except OSError:
+        return None
+    finally:
+        logf.close()
+    return proc.pid
+
+
+def _end_holder(
+    directory: Path, holder_alive: Callable[[int], bool], step: Callable[[float], None],
+) -> None:
+    pid = _holder_pid(directory)
+    if pid is not None:
+        waited = 0.0
+        while holder_alive(pid) and waited < HOLDER_EXIT_WAIT_S:
+            step(HOLD_POLL_S)
+            waited += HOLD_POLL_S
+    (directory / _HOLDER_FILE).unlink(missing_ok=True)
+
+
+def close(
+    directory: Path, run: Run = _run, *,
+    holder_alive: Callable[[int], bool] = _pid_alive,
+    step: Callable[[float], None] = time.sleep,
+) -> list[str]:
     """Shut down and delete every device the park holds (parked or
-    mid-lease by a process that has exited), and remove the directory →
-    the deleted UDIDs."""
+    mid-lease by a process that has exited), end the owner, wait for the
+    holder to release the park's grant (`hold` — the deletes ran under it),
+    and remove the directory → the deleted UDIDs."""
     deleted: list[str] = []
     try:
         entries = list(directory.iterdir())
@@ -234,6 +405,7 @@ def close(directory: Path, run: Run = _run) -> list[str]:
     for p in directory.glob(".*.tmp"):
         p.unlink(missing_ok=True)
     (directory / _OWNER_FILE).unlink(missing_ok=True)
+    _end_holder(directory, holder_alive, step)
     try:
         directory.rmdir()
     except OSError:
@@ -241,12 +413,21 @@ def close(directory: Path, run: Run = _run) -> list[str]:
     return deleted
 
 
-def open_park(directory: Path, owner: int, run: Run = _run) -> list[str]:
+def open_park(
+    directory: Path, owner: int, run: Run = _run,
+    spawn: Callable[[Path], int | None] | None = None,
+) -> list[str]:
     """Open the park for `owner`: what an earlier, unclosed park left there is
-    deleted first (→ those UDIDs), then the owner is written."""
+    deleted first (→ those UDIDs), then the owner is written and, given a
+    `spawn` (the CLI's `_spawn_holder`), the park's grant holder (`hold`) is
+    started and its pid written."""
     stale = close(directory, run)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / _OWNER_FILE).write_text(f"{owner}\n")
+    if spawn is not None:
+        pid = spawn(directory)
+        if pid:
+            (directory / _HOLDER_FILE).write_text(f"{pid}\n")
     return stale
 
 
@@ -258,9 +439,13 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--owner-pid", type=int, required=True)
     c = sub.add_parser("close", help="delete every parked device and the park")
     c.add_argument("dir", type=Path)
+    h = sub.add_parser("hold", help="hold the park's sim_idle grant until it closes (open starts it)")
+    h.add_argument("dir", type=Path)
     args = ap.parse_args(argv)
+    if args.cmd == "hold":
+        return hold(args.dir, _load_slots(), log=lambda m: print(m, flush=True))
     if args.cmd == "open":
-        stale = open_park(args.dir, args.owner_pid)
+        stale = open_park(args.dir, args.owner_pid, spawn=_spawn_holder)
         print(f"sim-park: open at {args.dir} for pid {args.owner_pid}"
               + (f"; deleted {len(stale)} left by an unclosed park" if stale else ""))
     else:

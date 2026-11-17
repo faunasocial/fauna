@@ -49,6 +49,12 @@ pub fn make_machine(tx: Sender<()>) -> Arc<OnboardingMachine> {
     // the declaration and `mod.rs`'s `STEP_RECOVERY_KIT` registration land
     // together, or the wizard strands on a step with no stack child.
     machine.set_renders_recovery_kit(true);
+    // linux renders the choose-providers page (`onboarding-provisioning.md`
+    // § 3d; tui led), so the handle check lands on `provider_choice` in place
+    // of `dns_config` / `vps_config`, and Back from `nest_provisioning` returns
+    // there. Same pairing rule: the declaration and `mod.rs`'s
+    // `STEP_PROVIDER_CHOICE` registration land together.
+    machine.set_renders_provider_choice(true);
     // A desktop app keeps a door key where SSH keys live: a door run writes it
     // to `~/.ssh` with a `Host` entry (`installers/vps.md` § The SSH door →
     // *The key*), as tui does.

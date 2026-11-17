@@ -357,17 +357,25 @@ fn hex_array_32(hex_str: &str) -> Result<[u8; 32], JsValue> {
 /// carddav-server.md § Persistence — the encrypted path is msek-gated;
 /// localhost/IP/mail-off ⇒ empty).
 pub(crate) async fn dav_ctx(secret_hex: &str) -> Result<Option<DavStoreContext>, JsValue> {
+    Ok(dav_custody(secret_hex).await?.into_context())
+}
+
+/// The custody answer behind [`dav_ctx`], its three answers kept apart
+/// ([`fauna_client_config::DavCustody`]) for the calendar read
+/// (`caldavReadCalendars`).
+pub(crate) async fn dav_custody(
+    secret_hex: &str,
+) -> Result<fauna_client_config::DavCustody, JsValue> {
     let secret = hex_bytes(secret_hex)?;
     let arr: [u8; 32] = secret
         .as_slice()
         .try_into()
         .map_err(|_| JsValue::from_str("actor secret must be 32 bytes"))?;
     let actor_id = ActorKeypair::from_secret(arr).actor_id().0;
-    Ok(fauna_client_config::dav_store_context(
-        crate::account_runtime::mail_store().as_ref(),
-        actor_id,
+    Ok(
+        fauna_client_config::dav_custody(crate::account_runtime::mail_store().as_ref(), actor_id)
+            .await,
     )
-    .await)
 }
 
 /// Find one stored event by `uid_hash` in `calendar_id` and return its unsealed
@@ -1595,6 +1603,67 @@ pub fn ward_knocks_await_guardian(own_policy: JsValue) -> Result<bool, JsValue> 
     let own_policy: Option<fauna_protocol::family::ReachPolicy> = from_js(own_policy)?;
     Ok(fauna_client_family::ward_asks::knocks_await_guardian(
         own_policy.as_ref(),
+    ))
+}
+
+/// The caller's own supervision as the Contacts page's predicates take it:
+/// unread until this run's first successful status read, then its policy.
+fn ward_own_supervision(
+    status_read: bool,
+    own_policy: Option<&fauna_protocol::family::ReachPolicy>,
+) -> fauna_client_family::OwnSupervision<'_> {
+    if status_read {
+        fauna_client_family::OwnSupervision::Read(own_policy)
+    } else {
+        fauna_client_family::OwnSupervision::Unread
+    }
+}
+
+/// Whether the caller may knock a resolved peer now — what
+/// `contacts-add-button` paints from, and what the knock asks before it sends
+/// (`contacts.md` § Errors & edge cases). `status_read` is whether this run's
+/// `familyStatus` read has succeeded; `own_policy` is that reply's own `policy`
+/// (null/undefined when there is none); `peer_status` is the caller's roster
+/// edge to the peer (undefined with none). Returns the serde form of
+/// `fauna_core::possibility::Possibility` (`offlinePossibility`'s shape). Over
+/// the shared `fauna_client_family::knock_possibility`.
+#[wasm_bindgen(js_name = wardKnockPossibility)]
+pub fn ward_knock_possibility(
+    status_read: bool,
+    own_policy: JsValue,
+    peer_status: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let own_policy: Option<fauna_protocol::family::ReachPolicy> = from_js(own_policy)?;
+    to_js(&fauna_client_family::knock_possibility(
+        ward_own_supervision(status_read, own_policy.as_ref()),
+        peer_status.as_deref(),
+    ))
+}
+
+/// Whether the caller may accept an incoming knock now — what each
+/// `contacts-accept-button[i]` paints from. Over the shared
+/// `fauna_client_family::accept_possibility`.
+#[wasm_bindgen(js_name = wardAcceptPossibility)]
+pub fn ward_accept_possibility(status_read: bool, own_policy: JsValue) -> Result<JsValue, JsValue> {
+    let own_policy: Option<fauna_protocol::family::ReachPolicy> = from_js(own_policy)?;
+    to_js(&fauna_client_family::accept_possibility(
+        ward_own_supervision(status_read, own_policy.as_ref()),
+    ))
+}
+
+/// Whether the guardian decides contact with this peer — when
+/// `contact-request-guardian-button` is the Find User result's one step. Over
+/// the shared `fauna_client_family::guardian_decides_contact`.
+#[wasm_bindgen(js_name = wardGuardianDecidesContact)]
+pub fn ward_guardian_decides_contact(
+    status_read: bool,
+    own_policy: JsValue,
+    peer_status: Option<String>,
+) -> Result<bool, JsValue> {
+    let own_policy: Option<fauna_protocol::family::ReachPolicy> = from_js(own_policy)?;
+    Ok(fauna_client_family::guardian_decides_contact(
+        ward_own_supervision(status_read, own_policy.as_ref()),
+        peer_status.as_deref(),
     ))
 }
 
@@ -5202,6 +5271,54 @@ impl WsRpcClient {
         })
     }
 
+    /// The Events page's calendar load in its four answers
+    /// (`fauna_client_caldav::CalDavClient::read_calendars`, events.md § Errors &
+    /// edge cases → *No calendar to hold an event*, ruling 2) →
+    /// `{ state: "unresolved" | "no_key" }`, `{ state: "provision_failed", error }`
+    /// or `{ state: "loaded", calendars: [{ id, name, color, visibility,
+    /// event_count }] }` — `caldavListCalendars`'s rows, beside the state. Hand
+    /// the whole value to `eventCreatePossibility` / `eventCreateTarget`.
+    #[wasm_bindgen(js_name = caldavReadCalendars)]
+    pub fn caldav_read_calendars(&self, secret_hex: String) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let custody = dav_custody(&secret_hex).await?;
+            let read = caldav::CalDavClient::new(client)
+                .read_calendars(&custody)
+                .await
+                .map_err(err_to_js)?;
+            let mut out = serde_json::to_value(read.state())
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            if let (
+                caldav::CalendarsRead::Loaded { calendars },
+                fauna_client_config::DavCustody::Ready(ctx),
+            ) = (&read, &custody)
+            {
+                let keys = caldav::DavRecipientKeys::from_mseks(
+                    caldav::DavKind::Calendar,
+                    &ctx.msek,
+                    &ctx.prior_mseks,
+                );
+                let rows: Vec<serde_json::Value> = calendars
+                    .iter()
+                    .map(|c| {
+                        let meta = caldav::unseal_calendar_metadata(&c.encrypted_metadata, &keys)
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "id": hex::encode(&c.calendar_id),
+                            "name": meta.displayname,
+                            "color": meta.color,
+                            "visibility": "private",
+                            "event_count": c.event_count,
+                        })
+                    })
+                    .collect();
+                out["calendars"] = serde_json::Value::Array(rows);
+            }
+            to_js(&out)
+        })
+    }
+
     /// `fauna.bridges.provision_calendar` (MKCOL) → `{ id: hex }`. `calendar_id_hex`
     /// is a client-assigned 32-byte id (the web generates it via
     /// `crypto.getRandomValues`, mirroring the linux client-side id). Seals the
@@ -8685,9 +8802,13 @@ impl WsRpcClient {
     /// `fauna.admin.deployment_seed.get`, refuses one that does not derive to
     /// the bound id, and merges the entry — the seed never crosses into JS.
     ///
-    /// `onWarning` is a JS `(warning: LocalizedText) => void`, called with the
-    /// shared `fauna_client_config::custody_leg_warning` when a run (on either
-    /// edge) ends with custody unconfirmed for an admin of the bound nest. Resolves a token for the console ring:
+    /// `onWarning` is a JS `(warning: LocalizedText | null, custodyWarnings?:
+    /// LocalizedText[]) => void`, handed every run's (on either edge)
+    /// `fauna_client_config::CustodyLegSignal`: the shared
+    /// `custody_leg_warning` when the run ends with custody unconfirmed for an
+    /// admin of the bound nest, else `null` — the cleared mark — with the
+    /// custody warnings the SPA takes down if its banner still shows one
+    /// (`is_custody_leg_warning`). Resolves a token for the console ring:
     /// `"already_custodied"`, `"captured"`, `"not_admin"`,
     /// `"handoff_unavailable"`, `"nest_holds_no_seed"`, `"refused_mismatch"`,
     /// `"store_refused"`, `"bound_unresolved"`, or `"store_not_ready"` (the
@@ -8709,9 +8830,7 @@ impl WsRpcClient {
                 return Ok(JsValue::from_str("store_not_ready"));
             };
             let run = crate::deployment_seed_custody::run_leg(&client, &handle).await;
-            if let Some(warning) = run.warning {
-                crate::deployment_seed_custody::emit_warning(&on_warning, &warning);
-            }
+            crate::deployment_seed_custody::emit_signal(&on_warning, &run.signal);
             Ok(JsValue::from_str(run.token))
         })
     }
@@ -11007,4 +11126,59 @@ pub fn subscriptions_hold_author_drain_for_test() {
 #[wasm_bindgen(js_name = subscriptionsReleaseAuthorDrainForTest)]
 pub fn subscriptions_release_author_drain_for_test() {
     fauna_client_subscriptions::orchestration::release_author_drain_for_test();
+}
+
+/// `fauna_client_caldav::event_create_possibility` → can this person open an
+/// event compose now? `read` is `caldavReadCalendars`'s value; the answer is
+/// `fauna_core::possibility::Possibility`'s serde form (`{state: "possible"}`,
+/// `{state: "blocked", reason}` or `{state: "absent"}`). The wasm twin of the
+/// native `event_create_possibility()` UniFFI free fn.
+#[wasm_bindgen(js_name = eventCreatePossibility)]
+pub fn event_create_possibility(
+    read: JsValue,
+    is_admin: bool,
+    deployment_serves_dav_or_mail: bool,
+) -> Result<JsValue, JsValue> {
+    let state: caldav::CalendarsReadState = from_js(read)?;
+    to_js(&caldav::event_create_possibility(
+        &state,
+        is_admin,
+        deployment_serves_dav_or_mail,
+    ))
+}
+
+/// `fauna_client_caldav::event_create_target` → the submit's side of the gate:
+/// `{ id }` (the hex calendar id the create goes to — the live selection, else
+/// the first loaded calendar) or `{ reason }` (a `LocalizedText` the create
+/// refuses with). `read` is `caldavReadCalendars`'s value. The wasm twin of the
+/// native `event_create_target()` UniFFI free fn.
+#[wasm_bindgen(js_name = eventCreateTarget)]
+pub fn event_create_target(
+    read: JsValue,
+    is_admin: bool,
+    deployment_serves_dav_or_mail: bool,
+    selected: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let value: serde_json::Value = from_js(read)?;
+    let state: caldav::CalendarsReadState =
+        serde_json::from_value(value.clone()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let ids: Vec<String> = value
+        .get("calendars")
+        .and_then(|c| c.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.get("id").and_then(|i| i.as_str()).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    match caldav::event_create_target(
+        &state,
+        is_admin,
+        deployment_serves_dav_or_mail,
+        selected.as_deref(),
+        ids,
+    ) {
+        Ok(id) => to_js(&serde_json::json!({ "id": id })),
+        Err(reason) => to_js(&serde_json::json!({ "reason": reason })),
+    }
 }

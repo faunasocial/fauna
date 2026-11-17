@@ -289,6 +289,20 @@ impl WasmOverlayEditor {
         self.editor.borrow_mut().reset();
     }
 
+    /// Whether Save (`profile-private-save-button`) can succeed now, in the
+    /// `Possibility` serde form:
+    /// `fauna_account_seams::contact_overlays::save_possibility` over this
+    /// tab — refused `profile.private_save_elsewhere` in a tab that hosts no
+    /// runtime, still loading while the account store assembles. [`Self::save`]
+    /// refuses with the same reason.
+    #[wasm_bindgen(js_name = savePossibility)]
+    pub fn save_possibility(&self) -> Result<JsValue, JsValue> {
+        crate::rpc::to_js(&fauna_account_seams::contact_overlays::save_possibility(
+            self.manager.is_some(),
+            crate::account_runtime::handle().is_some(),
+        ))
+    }
+
     /// One Save for everything staged, resolving to `{ kind, text }`. On
     /// `saved` the staging is dropped and the projection has already
     /// reloaded; on every other answer the staged edits stay.

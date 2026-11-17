@@ -17,7 +17,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 
 use fauna_conversations::{
-    Rail, ThreadCapabilities, TypedAddress,
+    Rail, ThreadCapabilities, ThreadControl, TypedAddress,
     compose::{AttachmentDraft, ComposeState},
 };
 
@@ -473,7 +473,15 @@ impl ComposeBar {
             self.text_view.set_editable(caps.can_send);
             self.send_btn.set_sensitive(caps.can_send);
             self.attach_btn.set_sensitive(caps.supports_attachments);
-            self.topic_btn.set_sensitive(caps.supports_subject);
+            // A rail with no subject has no topic toggle at all: the shared
+            // `Subject` answer is a rail absence, never a disabled control
+            // (`ui/conversations.md` § Errors & edge cases → *Controls this
+            // person can never use*).
+            crate::possible::paint(
+                &self.topic_btn,
+                None,
+                caps.possibility(ThreadControl::Subject, None),
+            );
             // Gate the markdown toolbar Box (so the whole row greys out and
             // the e2e `get_attr("markdown-toolbar", "disabled")` reads
             // "true"), and each markdown button individually (so

@@ -158,7 +158,14 @@ def docker_mail_nest(app):
         remove_network(network)
 
 
-@pytest.mark.feature("turn-on-mail")
+# No `feature` marker: the catalog's witness of what this test guards is split by
+# surface (feature-catalog.md § Cell semantics). The image half — mail turned on
+# boots the s6-supervised bridge — is `turn-on-mail.md`'s `[nest]` outcome,
+# witnessed app-less by `test_mail_deploy_lifecycle.py`, so it counts for every
+# column; the app half — the enable fires `set_mail_enabled(true)` — is the shared
+# `MailSettingsMachine::enable_mail` every app runs, pinned by
+# `libs/fauna-client-mail-settings/tests/state_machine.rs`. This test stays the
+# tier_4 guard of the two joined, on the apps its drive is built for.
 def test_linux_ui_enable_mail_boots_docker_bridge(app, docker_mail_nest, request):
     nest = docker_mail_nest
     name = nest["name"]

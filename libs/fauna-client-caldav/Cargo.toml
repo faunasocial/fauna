@@ -46,6 +46,11 @@ serde = { workspace = true, features = ["derive"] }
 # dials (`AnonDiscovery`), shared with the conversations cross-nest resolve.
 # wasm-clean with default features off (no network).
 fauna-provisioning = { path = "../fauna-provisioning", default-features = false }
+# `DavCustody` — the custody answer the calendar read (`calendars_read`) turns
+# into its four answers (events.md § Errors & edge cases → *No calendar to hold
+# an event*, ruling 2). The lean, wasm-clean store-seam crate; it does not
+# depend on this one, so the edge adds no cycle.
+fauna-client-config = { path = "../fauna-client-config" }
 
 # Native-only read-path parser. The `icalendar`/`rrule` crates behind
 # `fauna_mail::icalendar::{parse_icalendar, expand_recurrence}` are NOT WASM-safe
@@ -97,3 +102,5 @@ fauna-client-testkit = { path = "../fauna-client-testkit" }
 # Names the serde bounds `RpcRequester::request` needs, for the wire-contract
 # `RecordingRequester` mock (transport-free, runs on every target incl. wasm).
 serde = { workspace = true }
+# The `CalendarsReadState` serde-form test (the shape the web SPA reads).
+serde_json = { workspace = true }

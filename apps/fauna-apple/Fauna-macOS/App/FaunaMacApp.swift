@@ -543,7 +543,21 @@ public struct FaunaMacApp: App {
     /// `security.md` forbids). Do not re-derive either one here; grow the
     /// machine instead.
     @MainActor
-    private func runLaunch() {
+    private func runLaunch(resuming claim: UInt64? = nil) {
+        // Claimed FIRST — before the sign-out gate below, whose first call of every
+        // process defers this launch across a detached finish and re-enters through
+        // `relaunch` with the same claim — so a session patch landing in that window,
+        // or while the binding resolves, retires this launch
+        // (`LaunchMachineBox.claim(resuming:)`, `beginLaunch`).
+        // A re-entry superseded while the gate's finish ran drops before touching
+        // anything — above all before `launchGate = .launching`, which would hide
+        // the shell the patch just resolved to `.ready`.
+        guard let launch = launchMachineBox.claim(resuming: claim) else {
+            logMessage(
+                level: .info, target: "fauna.app",
+                message: "[launch] superseded while the sign-out gate's finish ran — dropping it")
+            return
+        }
         let keychain = KeychainStore()
 
         // Bring credential rows in line with the iCloud-backup preference (default:
@@ -560,16 +574,13 @@ public struct FaunaMacApp: App {
         // its record still owes the wipe fails closed — no launch machine, the
         // wizard's `identity_choice` painting the refusal line, until Remove
         // Again clears it and re-enters here.
-        guard onboardingVM.launchMayProceed(relaunch: { runLaunch() }) else {
+        guard onboardingVM.launchMayProceed(relaunch: { runLaunch(resuming: launch) }) else {
             if onboardingVM.launchFailedClosed {
                 appState.isOnboarded = false
                 appState.launchGate = .ready
             }
             return
         }
-        // Claimed before the first `await` below, so a session patch landing while
-        // the binding resolves retires this launch (`LaunchMachineBox.beginLaunch`).
-        let launch = launchMachineBox.beginLaunch()
 
         Task { @MainActor in
             // Primary or bound? (`account-scoping.md` § Concurrent instances.)
@@ -1744,6 +1755,7 @@ public struct FaunaMacApp: App {
             "pending": photoBackupEngine.pendingCount,
             "passes_started": photoBackupEngine.passesStarted,
             "passes_completed": photoBackupEngine.passesCompleted,
+            "requests_coalesced": photoBackupEngine.requestsCoalesced,
             "completed_total": photoBackupEngine.completedCount,
             "last_backup_at": photoBackupEngine.lastBackupDate?.timeIntervalSince1970 as Any,
             "enabled": AppDefaults.store.bool(forKey: PhotoBackupControlsView.enabledKey),
@@ -2231,6 +2243,16 @@ public struct FaunaMacApp: App {
                 FeedInjectPostsTestCommand.apply(command, feedVM: feedVM, client: appState.liveClient, session: appState.session)
             case "feed_inject_error":
                 FeedInjectErrorTestCommand.apply(command, feedVM: feedVM, client: appState.liveClient, session: appState.session)
+            case "sidebar_set_visible":
+                // Collapse (`visible: false`) or restore the main window's
+                // sidebar column — `MainWindowView` owns `columnVisibility` as
+                // view state and answers this notice (its DEBUG `.onReceive`).
+                // Convention 11: a malformed payload is LOUD.
+                guard let visible = command["visible"] as? Bool else {
+                    testAgentFailure("sidebar_set_visible needs a boolean `visible`")
+                    break
+                }
+                NotificationCenter.default.post(name: .faunaE2ESidebarVisibility, object: visible)
             case "auto_renew_wake":
                 // The certificate auto-renew tick's poke
                 // (`fauna_e2e_agent::AUTO_RENEW_WAKE`): end the shared FaunaKit
@@ -2947,6 +2969,15 @@ public struct FaunaMacApp: App {
                     // and every subscriber-side assertion times out
                     // (`test_subscriptions.py::test_follow_auto_grants_in_encrypted_mode`).
                     SubscriptionsAuthorCadence.shared.start(api: faunaClient.api)
+                    // Same reasoning for the TLS-cert auto-renew cadence
+                    // (tls-certificates.md § C.3): only the production launch
+                    // arms it, so an e2e-logged-in admin had no loop and the
+                    // `auto_renew_wake` seam was refused "no authenticated
+                    // session" (`test_admin_dns_cert_auto_renew_tick.py`).
+                    // Latched, and its first tick waits the full interval, so
+                    // no other walk is disturbed. Twin of iOS's and of
+                    // windows's start at its e2e login `session` seam.
+                    DnsAutoRenewCadence.shared.start(api: faunaClient.api)
                 } else {
                     Task {
                         await faunaClient.start()
@@ -3653,7 +3684,7 @@ public struct FaunaMacApp: App {
     /// new identity instead of booting a first one.
     @MainActor
     private func beginAddAccount() {
-        onboardingVM.machine.reset()
+        onboardingVM.beginAddAccount()
         appState.isAddingAccount = true
     }
 
@@ -3951,3 +3982,11 @@ public struct FaunaMacApp: App {
         appState.isOnboarded = false
     }
 }
+
+#if DEBUG
+extension Notification.Name {
+    /// The e2e `sidebar_set_visible` command's notice to `MainWindowView`
+    /// (object: `Bool`, the sidebar column visible or collapsed).
+    static let faunaE2ESidebarVisibility = Notification.Name("faunaE2ESidebarVisibility")
+}
+#endif

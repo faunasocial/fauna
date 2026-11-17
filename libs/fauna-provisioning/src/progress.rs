@@ -206,6 +206,12 @@ pub enum StepStatus {
 pub enum SubstepKey {
     DomainCheckingAvailability,
     DomainRegistering,
+    /// DNS runs at another provider: creating the domain's zone there
+    /// (`onboarding-provisioning.md` § 6).
+    DomainCreatingZone,
+    /// DNS runs at another provider: setting the domain's nameservers at its
+    /// registrar to that zone's.
+    DomainSettingNameservers,
     DomainVerifyingZone,
     ServerGeneratingDkim,
     ServerCreating,
@@ -233,6 +239,9 @@ pub enum SkipReason {
     DnsRecordAlreadyExists,
     PtrAlreadySet,
     NestAlreadyOnline,
+    /// This wizard already registered the domain (a Retry of a run that
+    /// registers and publishes nothing).
+    DomainAlreadyRegistered,
 }
 
 /// One step's slot in the snapshot.
@@ -525,6 +534,10 @@ pub fn substep_label(key: SubstepKey, cause: Option<String>) -> LocalizedText {
             "onboarding.provision.substep.domain_checking_availability"
         }
         SubstepKey::DomainRegistering => "onboarding.provision.substep.domain_registering",
+        SubstepKey::DomainCreatingZone => "onboarding.provision.substep.domain_creating_zone",
+        SubstepKey::DomainSettingNameservers => {
+            "onboarding.provision.substep.domain_setting_nameservers"
+        }
         SubstepKey::DomainVerifyingZone => "onboarding.provision.substep.domain_verifying_zone",
         SubstepKey::ServerGeneratingDkim => "onboarding.provision.substep.server_generating_dkim",
         SubstepKey::ServerCreating => "onboarding.provision.substep.server_creating",
@@ -1368,6 +1381,14 @@ mod tests {
             (
                 SubstepKey::DomainRegistering,
                 "onboarding.provision.substep.domain_registering",
+            ),
+            (
+                SubstepKey::DomainCreatingZone,
+                "onboarding.provision.substep.domain_creating_zone",
+            ),
+            (
+                SubstepKey::DomainSettingNameservers,
+                "onboarding.provision.substep.domain_setting_nameservers",
             ),
             (
                 SubstepKey::DomainVerifyingZone,

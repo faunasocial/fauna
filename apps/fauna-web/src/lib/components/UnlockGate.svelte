@@ -166,7 +166,8 @@
 {#if gate === 'open'}
   {@render children?.()}
 {:else if gate !== 'pending'}
-  <main class="unlock">
+  <!-- `data-root-surface`: test builds only — `#lib/e2e-root-surface`. -->
+  <main class="unlock" data-root-surface={__FAUNA_E2E_AUTOMATION__ ? 'unlock' : undefined}>
     <h1>
       {gate === 'create' ? t.unlock.create_title : t.unlock.unlock_title}
     </h1>

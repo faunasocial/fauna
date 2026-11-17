@@ -43,6 +43,7 @@ pub use audit::{
 };
 
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use fauna_protocol::ByteBuf;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::admin::{
@@ -1519,9 +1520,11 @@ pub struct AdminUserRowControls {
     /// already-suspended user is deliberate (their own restore control still
     /// stands, so this can't strand them).
     pub make_admin: bool,
-    /// `admin-users-remove-admin-button` — revoke the admin role. Offered on any
-    /// `is_admin` row; the nest, not the client, refuses the last-superadmin
-    /// case (`fauna.admin.conflict`, surfaced on `admin-users-action-error`).
+    /// `admin-users-remove-admin-button` — revoke the admin role. Shown on any
+    /// `is_admin` row; on the nest's last superadmin it is shown *disabled*
+    /// with its reason — [`remove_admin_possibility`] is the full answer this
+    /// bool is the "shown" half of. The nest stays the enforcer
+    /// (`fauna.admin.conflict`).
     pub remove_admin: bool,
     /// `admin-users-take-over-button` — the admin's one family act on a
     /// supervised account: become its guardian at once (`fauna.family.transfer`
@@ -1600,6 +1603,76 @@ pub fn admin_user_row_controls(user: &AdminUser, viewer: &[u8]) -> AdminUserRowC
             .guardian
             .as_ref()
             .is_some_and(|g| g.actor_id.as_ref() != viewer),
+    }
+}
+
+/// Whether `admin-users-remove-admin-button` can succeed on `user` now
+/// (`docs/goal/ui/README.md` § Offer only what is possible; `admin.md` § 2 →
+/// *What a row offers*): absent on a row that holds no admin role; blocked on
+/// the nest's last superadmin (the floor the nest refuses with
+/// `fauna.admin.conflict`), with the reason naming the unblocking step — make
+/// another user an admin first; possible otherwise. The row's `remove_admin`
+/// bool in [`admin_user_row_controls`] is this answer's `is_shown()`. The nest
+/// re-refuses at the door and at the writer whatever this says.
+pub fn remove_admin_possibility(user: &AdminUser) -> Possibility {
+    if !user.is_admin {
+        Possibility::Absent
+    } else if user.last_superadmin {
+        Possibility::blocked(LocalizedText::key(
+            "admin.users_page.remove_admin_last_superadmin",
+        ))
+    } else {
+        Possibility::Possible
+    }
+}
+
+/// Whether `admin-pending-action-approve-button` can succeed for `viewer` on
+/// `action` (`admin.md` § Pending admin actions): absent on the viewer's own
+/// scheduled action (the nest refuses self-approval — an admin can never
+/// approve what they scheduled) and on an action no longer pending; possible
+/// otherwise. A repeat approval is accepted by the nest as a no-op, so it is
+/// not refused here.
+pub fn pending_approve_possibility(
+    action: &admin::AdminPendingActionSummary,
+    viewer: &[u8],
+) -> Possibility {
+    if !action.is_pending() || action.actor_id.as_ref() == viewer {
+        Possibility::Absent
+    } else {
+        Possibility::Possible
+    }
+}
+
+/// Whether an age-band select on the admit or invite form can be set
+/// (`family-safety.md` § App surface → *Age-band surfaces*): the nest refuses
+/// a band without a guardian designation, so the select is blocked — with
+/// that reason — until a guardian is picked.
+pub fn age_band_possibility(guardian_selected: bool) -> Possibility {
+    if guardian_selected {
+        Possibility::Possible
+    } else {
+        Possibility::blocked(LocalizedText::key(
+            "admin.users_page.age_band_needs_guardian",
+        ))
+    }
+}
+
+/// The tier every nest keeps — the default an account falls back to, which
+/// `fauna.admin.tiers.delete` always refuses (`admin.md` § 3 → *Removing a
+/// tier*).
+pub const UNDELETABLE_TIER: &str = "free";
+
+/// Whether `admin-settings-tier-delete-button` can succeed on the tier named
+/// `tier` (`admin.md` § 3 → *Removing a tier*): absent on `free`, which the
+/// nest always refuses; possible otherwise. A tier still referenced by a
+/// member, invite code or membership link is refused by the nest, and that
+/// refusal is shown on the page's error line: the client cannot see the
+/// references (the user list is paginated), so it never guesses.
+pub fn tier_delete_possibility(tier: &str) -> Possibility {
+    if tier == UNDELETABLE_TIER {
+        Possibility::Absent
+    } else {
+        Possibility::Possible
     }
 }
 
@@ -3835,6 +3908,87 @@ mod tests {
             is_admin,
             ..Default::default()
         }
+    }
+
+    // ── Offer only what is possible (docs/goal/ui/README.md) ─────────────────
+
+    #[test]
+    fn remove_admin_is_absent_on_a_plain_row() {
+        assert_eq!(
+            remove_admin_possibility(&row(None, false)),
+            Possibility::Absent
+        );
+    }
+
+    #[test]
+    fn remove_admin_is_blocked_on_the_last_superadmin_with_its_reason() {
+        let last = AdminUser {
+            is_admin: true,
+            last_superadmin: true,
+            ..Default::default()
+        };
+        let answer = remove_admin_possibility(&last);
+        assert_eq!(
+            answer.reason().map(|r| r.key.as_str()),
+            Some("admin.users_page.remove_admin_last_superadmin")
+        );
+        // Shown (disabled), so the row's bool still offers the control.
+        assert!(admin_user_row_controls(&last, &[]).remove_admin);
+    }
+
+    #[test]
+    fn remove_admin_is_possible_on_a_co_admin() {
+        assert_eq!(
+            remove_admin_possibility(&row(None, true)),
+            Possibility::Possible
+        );
+    }
+
+    fn pending(by: u8, status: &str) -> admin::AdminPendingActionSummary {
+        admin::AdminPendingActionSummary {
+            actor_id: ByteBuf::from(vec![by; 32]),
+            status: status.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn approve_is_absent_on_the_viewers_own_action() {
+        assert_eq!(
+            pending_approve_possibility(&pending(0xAA, "pending"), &[0xAA; 32]),
+            Possibility::Absent
+        );
+    }
+
+    #[test]
+    fn approve_is_possible_on_a_co_admins_pending_action() {
+        assert_eq!(
+            pending_approve_possibility(&pending(0xBB, "pending"), &[0xAA; 32]),
+            Possibility::Possible
+        );
+    }
+
+    #[test]
+    fn approve_is_absent_once_the_action_is_no_longer_pending() {
+        assert_eq!(
+            pending_approve_possibility(&pending(0xBB, "executed"), &[0xAA; 32]),
+            Possibility::Absent
+        );
+    }
+
+    #[test]
+    fn age_band_is_blocked_until_a_guardian_is_picked() {
+        assert_eq!(
+            age_band_possibility(false).reason().map(|r| r.key.as_str()),
+            Some("admin.users_page.age_band_needs_guardian")
+        );
+        assert_eq!(age_band_possibility(true), Possibility::Possible);
+    }
+
+    #[test]
+    fn tier_delete_is_absent_on_free_and_possible_elsewhere() {
+        assert_eq!(tier_delete_possibility("free"), Possibility::Absent);
+        assert_eq!(tier_delete_possibility("plus"), Possibility::Possible);
     }
 
     #[test]

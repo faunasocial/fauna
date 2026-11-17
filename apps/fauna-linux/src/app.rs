@@ -60,6 +60,10 @@ pub enum UiMessage {
     /// the same surface and words as tui's `AppEvent::RecoveryCustodyWarning`,
     /// so every app warns in the one shared wording.
     RecoveryCustodyWarning(String),
+    /// A later custody-leg run owes no warning: the banner is hidden when it
+    /// still shows a custody warning (`fauna_client_config::
+    /// is_custody_leg_warning`), and anything painted since stands.
+    RecoveryCustodyCleared,
     /// No-op message — used when a callback handles UI inline on the GTK
     /// thread and does not need to route through the normal message handler.
     #[allow(dead_code)]
@@ -166,7 +170,12 @@ pub enum DataMessage {
     ArchiveLinkViews {
         views: Vec<fauna_archive_import_machine::link::ArchiveLinkView>,
     },
+    /// The Events page's calendar read (`ui/events.md` § *No calendar to hold
+    /// an event*, ruling 2): its four-answer state, what the deployment
+    /// serves (read only on *no key*), and the rows of a loaded read.
     CalendarsLoaded {
+        read: fauna_client_caldav::CalendarsReadState,
+        serves_dav_or_mail: Option<bool>,
         calendars: Vec<crate::rows::CalendarRow>,
     },
     /// The Events page's open refused changes (`ui/events.md` § Refused
@@ -1068,9 +1077,9 @@ pub struct WidgetHandles {
     pub notifications_count_badge: gtk::Label,
     /// Per-row destinations of the painted list (the shared decision's answer).
     pub notifications_destinations: views::notifications::Destinations,
-    /// `notification-clear` and the bound it sends (the newest painted row).
-    pub notifications_clear_button: gtk::Button,
-    pub notifications_clear_up_to: Rc<std::cell::Cell<Option<i64>>>,
+    /// `notification-mark-read` / `notification-clear`, their read state and
+    /// the bound a clear sends (the newest painted row).
+    pub notifications_actions: views::notifications::PageActions,
 
     // Contacts / knocks lists
     pub knocks_list_box: gtk::ListBox,
@@ -1336,6 +1345,23 @@ mod transport_loss_banner_tests {
             "fauna.spam.get_preferences: {TIMEOUT}"
         )));
         assert!(!is_transport_loss("fauna.profile.handle.change: taken"));
+    }
+}
+
+#[cfg(test)]
+mod custody_warning_tests {
+    //! A later custody-leg run that confirms custody takes down the custody
+    //! warning a warned run painted, in linux's words, and nothing else
+    //! (`box-recovery.md` § The plane-era recovery floor, *(c)*).
+    use super::custody_warning_retires;
+
+    #[test]
+    fn the_cleared_mark_retires_only_a_shown_custody_warning() {
+        let warning = fauna_client_config::custody_leg_unattempted_warning()
+            .resolve(crate::i18n::strings::lookup);
+        assert!(custody_warning_retires(true, &warning));
+        assert!(!custody_warning_retires(false, &warning));
+        assert!(!custody_warning_retires(true, "an unrelated warning"));
     }
 }
 
@@ -1844,20 +1870,6 @@ pub fn build_main_window(
             sidebar_list_box: sidebar_list.clone(),
         },
     );
-    // `notification-clear`: delete every row up to the newest one painted.
-    {
-        let (client, up_to) = (
-            Rc::clone(fauna_client),
-            Rc::clone(&notifications_handles.clear_up_to),
-        );
-        notifications_handles
-            .clear_button
-            .connect_clicked(move |_| {
-                if let Some(bound) = up_to.get() {
-                    client.clear_notifications(bound);
-                }
-            });
-    }
     // `fauna.family.status` can open the Family gate after the first paint:
     // re-derive which rows are controls the moment the row appears.
     if let Some(family_row) = sidebar_list.row_at_index(SidebarItem::ALL.len() as i32 + 1) {
@@ -2176,6 +2188,20 @@ pub fn build_main_window(
     error_label.set_visible(false);
     crate::testid::set_test_id(&error_label, ids::ERROR_MESSAGE);
 
+    // `notification-mark-read` resets the badge; `notification-clear` deletes
+    // every row up to the newest one painted. Each press first asks its shared
+    // answer and refuses onto `error-message` (`notifications.md` § Errors &
+    // edge cases, *The page-wide actions wait on the first read*).
+    {
+        let badge = notifications_handles.count_badge.clone();
+        let client = Rc::clone(fauna_client);
+        notifications_handles.actions.connect(
+            &error_label,
+            move || badge.set_text(&crate::i18n::strings::common::unread_count("0")),
+            move |bound| client.clear_notifications(bound),
+        );
+    }
+
     let warning_label = gtk::Label::new(None);
     warning_label.set_halign(gtk::Align::Fill);
     warning_label.set_xalign(0.0);
@@ -2449,8 +2475,7 @@ pub fn build_main_window(
         notifications_list_box: notifications_handles.list_box,
         notifications_count_badge: notifications_handles.count_badge,
         notifications_destinations: notifications_handles.destinations,
-        notifications_clear_button: notifications_handles.clear_button,
-        notifications_clear_up_to: notifications_handles.clear_up_to,
+        notifications_actions: notifications_handles.actions,
         knocks_list_box,
         contacts_list_box,
         find_results_list_box,
@@ -2891,6 +2916,20 @@ pub fn handle_ui_message(
                     .status_connection_row
                     .set_subtitle(common::CONNECTED);
 
+                // An `AuthFailed` before this success left its line on the
+                // sticky banner; the session it described is signed in now, so
+                // the line is stale. Retire only that line — any other writer's
+                // text stays standing (seen on a manual walk at 0.1.7: the
+                // "Authentication error: …" banner outlived the sign-in by a
+                // day).
+                if widgets
+                    .error_label
+                    .text()
+                    .starts_with(errors::auth_error("").as_str())
+                {
+                    clear_error_message(widgets);
+                }
+
                 // Start WS-RPC: connects the shared NestClient and spawns
                 // the connection-state + push pumps. Replaces the legacy
                 // raw `?token=` push socket (WS-RPC adoption, tracked internally).
@@ -3308,8 +3347,25 @@ pub fn handle_ui_message(
                 );
             }
 
-            DataMessage::CalendarsLoaded { calendars } => {
-                tracing::debug!("CalendarsLoaded: {} calendars", calendars.len());
+            DataMessage::CalendarsLoaded {
+                read,
+                serves_dav_or_mail,
+                calendars,
+            } => {
+                tracing::debug!("CalendarsLoaded: {:?}, {} calendars", read, calendars.len());
+                // The gate is repainted on every read, whether or not the
+                // calendar set changed (ruling 3): `new-event-btn` and the
+                // list's empty state follow the read's answer.
+                {
+                    let cal_handles = &widgets.events_handles.calendar;
+                    {
+                        let mut s = cal_handles.state.borrow_mut();
+                        s.create_gate.read = read.clone();
+                        if serves_dav_or_mail.is_some() {
+                            s.create_gate.serves_dav_or_mail = *serves_dav_or_mail;
+                        }
+                    }
+                }
                 // Fetch events for each calendar so grids can display them. The
                 // EventsLoaded handler skips the grid rebuild when a calendar's
                 // events are unchanged, so the Events-page poll stays a UI no-op
@@ -3413,6 +3469,9 @@ pub fn handle_ui_message(
                         crate::views::events::calendar_view::ViewMode::Agenda => {}
                     }
                 }
+                crate::views::events::calendar_view::paint_create_gate(
+                    &widgets.events_handles.calendar,
+                );
             }
 
             DataMessage::EventsLoaded {
@@ -3721,6 +3780,7 @@ pub fn handle_ui_message(
                 crate::ward_asks::note_feed_refusal(bridge_id, operation, target);
                 set_error_message(widgets, crate::i18n::strings::bridges::SOURCE_BLOCKED);
                 views::bridges::detail::repaint_source_asks();
+                views::contacts::list::repaint_entry_gate();
             }
 
             DataMessage::NotificationsLoaded { notifications } => {
@@ -3750,8 +3810,7 @@ pub fn handle_ui_message(
                     &widgets.notifications_destinations,
                     views::sidebar::family_sidebar_row_shown(&widgets.sidebar_list_box),
                     notifications,
-                    &widgets.notifications_clear_button,
-                    &widgets.notifications_clear_up_to,
+                    &widgets.notifications_actions,
                     fauna_client,
                 );
                 state.borrow_mut().notifications_unread_count = unread;
@@ -3770,8 +3829,7 @@ pub fn handle_ui_message(
                     &widgets.notifications_destinations,
                     views::sidebar::family_sidebar_row_shown(&widgets.sidebar_list_box),
                     notifications,
-                    &widgets.notifications_clear_button,
-                    &widgets.notifications_clear_up_to,
+                    &widgets.notifications_actions,
                     fauna_client,
                 );
                 state.borrow_mut().notifications_unread_count = unread;
@@ -3989,8 +4047,27 @@ pub fn handle_ui_message(
                     // status; the snapshot half reads nest state.
                     Some(StoreSurface::Backups) => (widgets.backups_destinations_refresh)(),
                     // The refused-change list only — the calendars beside it
-                    // are the nest's, not the store's.
-                    Some(StoreSurface::Events) => fauna_client.fetch_refused_changes(),
+                    // are the nest's, not the store's — unless the calendar
+                    // read is still unresolved: custody's first listing lands
+                    // as a store walk, which is this notice, so the whole load
+                    // re-runs then (`ui/events.md` § *No calendar to hold an
+                    // event*, ruling 2; tui's `store_resync_op`). A settled
+                    // read is left to the page's poll.
+                    Some(StoreSurface::Events) => {
+                        let unresolved = widgets
+                            .events_handles
+                            .calendar
+                            .state
+                            .borrow()
+                            .create_gate
+                            .read
+                            == fauna_client_caldav::CalendarsReadState::Unresolved;
+                        if unresolved {
+                            fauna_client.fetch_calendars();
+                        } else {
+                            fauna_client.fetch_refused_changes();
+                        }
+                    }
                     Some(surface) => (widgets.settings_store_resync)(surface),
                     None => {}
                 }
@@ -4412,6 +4489,14 @@ pub fn handle_ui_message(
 
             DataMessage::AdminStatusLoaded { is_admin } => {
                 tracing::debug!("AdminStatusLoaded: is_admin={}", is_admin);
+                // The Events gate's admin input (`ui/events.md` § *No calendar
+                // to hold an event*, ruling 3: a no-key admin on a deployment
+                // that serves none is sent to the admin Calendar page).
+                {
+                    let cal_handles = &widgets.events_handles.calendar;
+                    cal_handles.state.borrow_mut().create_gate.is_admin = *is_admin;
+                    crate::views::events::calendar_view::paint_create_gate(cal_handles);
+                }
                 widgets.bridges_plugins.set_admin(*is_admin);
                 if *is_admin {
                     fauna_client.fetch_plugins();
@@ -4531,8 +4616,13 @@ pub fn handle_ui_message(
                 // transfer (family-safety.md § Graduation & transfer →
                 // Visibility: a proposed guardian with no other family
                 // relationship must still reach the prompt; an outgoing pending
-                // proposal implies wards > 0, already covered).
-                if *ward_count > 0 || supervised_by.is_some() || *incoming_transfer_count > 0 {
+                // proposal implies wards > 0, already covered). The one rule is
+                // the shared `has_family_surface`, never re-derived here.
+                if fauna_client_family::forms::has_family_surface(
+                    supervised_by.is_some(),
+                    *ward_count,
+                    *incoming_transfer_count,
+                ) {
                     views::sidebar::show_family_sidebar_row(&widgets.sidebar_list_box);
                 }
                 // The global `supervised-indicator` is for the SUPERVISED side
@@ -4974,6 +5064,11 @@ pub fn handle_ui_message(
             ActionResult::Failed { context, error } => {
                 let fail_msg = format!("{}: {}", context, error);
                 show_toast(widgets, &fail_msg);
+                // A failed notifications list read: before any read resolved,
+                // the page-wide actions are blocked with load-failed.
+                if context == "fauna.notifications.list" {
+                    widgets.notifications_actions.read_failed();
+                }
                 // A restore that failed is not still running: hand
                 // `restore-progress` back to its idle prompt so the banner is
                 // the only thing reporting the failure. Leaving "Restoring…"
@@ -5021,6 +5116,10 @@ pub fn handle_ui_message(
 
         UiMessage::RecoveryCustodyWarning(message) => {
             set_warning_message(widgets, message);
+        }
+
+        UiMessage::RecoveryCustodyCleared => {
+            retire_custody_warning(widgets);
         }
 
         UiMessage::Noop => {}
@@ -5268,6 +5367,26 @@ pub fn set_warning_message(widgets: &WidgetHandles, message: &str) {
     tracing::warn!("{message}");
     widgets.warning_label.set_text(message);
     widgets.warning_label.set_visible(true);
+}
+
+/// A later custody-leg run confirmed custody: hide the `warning-message`
+/// banner when it still shows a custody warning, and leave any other warning
+/// standing.
+fn retire_custody_warning(widgets: &WidgetHandles) {
+    let shown = widgets.warning_label.text();
+    if custody_warning_retires(widgets.warning_label.is_visible(), shown.as_str()) {
+        widgets.warning_label.set_text("");
+        widgets.warning_label.set_visible(false);
+    }
+}
+
+/// Whether the banner showing `shown` (visible or not) is the custody
+/// warning a cleared mark takes down, in linux's own words.
+fn custody_warning_retires(visible: bool, shown: &str) -> bool {
+    visible
+        && fauna_client_config::is_custody_leg_warning(shown, |text| {
+            text.resolve(crate::i18n::strings::lookup)
+        })
 }
 
 /// Hide the persistent error banner and clear its text.
@@ -6197,6 +6316,27 @@ pub fn navigate_to_settings_subpage(widget: &impl IsA<gtk::Widget>, sub_id: &str
     {
         stack.set_visible_child_name("settings");
         navigate_shell_subpage(&stack, "settings", sub_id);
+    }
+}
+
+/// Navigate the main window to the admin shell's `sub_id` sub-page — the
+/// admin twin of [`navigate_to_settings_subpage`], for a gesture outside the
+/// admin shell that deep-links INTO one of its sub-pages (the Events page's
+/// empty-state jump to `admin-calendar`, `ui/events.md` § *No calendar to
+/// hold an event*, ruling 3).
+pub fn navigate_to_admin_subpage(widget: &impl IsA<gtk::Widget>, sub_id: &str) {
+    let Some(window) = widget
+        .root()
+        .and_then(|r| r.downcast::<adw::ApplicationWindow>().ok())
+    else {
+        return;
+    };
+    activate_quick_switcher_item("admin", &window);
+    if let Some(stack) = split_view_of_window(&window)
+        .and_then(|split| split.content())
+        .and_then(|content| first_descendant::<gtk::Stack>(&content))
+    {
+        navigate_shell_subpage(&stack, "admin", sub_id);
     }
 }
 

@@ -5101,13 +5101,15 @@ export type DeploymentSeedCustodyOutcome =
   | 'bound_unresolved'
   | 'store_not_ready';
 
-/** `onWarning` receives the warning a run owes the admin when custody ends
- *  unconfirmed — the shared `fauna_client_config::custody_leg_warning`, which
- *  the caller only renders (`resolveLocalized`); the choice between the
- *  warnings is made in Rust. */
+/** `onWarning` receives every run's custody signal: the warning a run owes
+ *  the admin when custody ends unconfirmed — the shared
+ *  `fauna_client_config::custody_leg_warning`, which the caller only renders
+ *  (`resolveLocalized`) — or `null`, the cleared mark, with the custody
+ *  warnings to take down if one still shows (`is_custody_leg_warning`). The
+ *  choice between the warnings is made in Rust. */
 export function selfHealDeploymentSeedCustody(
   secretHex: string,
-  onWarning: (warning: LocalizedText) => void,
+  onWarning: (warning: LocalizedText | null, custodyWarnings?: LocalizedText[]) => void,
 ): Promise<DeploymentSeedCustodyOutcome> {
   return call(secretHex, (c) =>
     c.selfHealDeploymentSeedCustody(secretHex, onWarning),

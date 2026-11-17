@@ -1,6 +1,8 @@
 package com.fauna.app.ui.screen.onboarding
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -22,6 +24,8 @@ import com.fauna.app.core.downloadsDir
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.shareFileBytes
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.ffi.provisioningStepLabel
 import com.fauna.ffi.provisioningSubstepLabel
@@ -70,6 +74,15 @@ class NestProvisioningVM @Inject constructor(
 
     fun continueAction(): OnboardingStep = host.machine.continueFromProvisioning()
 
+    /** `dns-price-confirm-checkbox` on a run entered from the choose-providers
+     *  page (onboarding-provisioning.md § 3d): the price is agreed here, at the
+     *  purchase. */
+    fun confirmPrice() = host.machine.confirmPrice()
+
+    /** `provisioning-back-button`: the machine's Back — to the choose-providers
+     *  page on its path, to `vps_config` on cloud recovery and the old path. */
+    fun back() = host.machine.back()
+
     /** `provisioning-ssh-door-save-key-button`: the door's private key, handed
      * over ONCE (a phone has no `~/.ssh`) — the machine drops its copy. */
     fun takeSshDoorPrivateKey(): String? = host.machine.takeSshDoorPrivateKey()
@@ -83,12 +96,21 @@ fun NestProvisioningScreen(
 ) {
     val tick by vm.host.tick.collectAsState()
     val snap = remember(tick) { vm.host.machine.provisioningSnapshot() }
-    // Why the wizard-exit Continue is dead when it is — `ui/README.md` rule 5.
-    // `OnboardingMachine.provisioningContinueBlockedReason()` is already
-    // UniFFI-visible (same exported impl block as `vpsContinueBlockedReason`,
-    // libs/fauna-onboarding-machine/src/machine.rs) — no FFI wrapper needed.
-    val continueBlockedReason = remember(tick) { vm.host.machine.provisioningContinueBlockedReason() }
+    // The wizard-exit Continue paints from the machine's one answer
+    // (`ui/README.md` § Offer only what is possible, rule 6) — enabled while
+    // possible, the blocked reason beside it (rule 5), never this screen's own
+    // `overall == SUCCEEDED` test.
+    val continuePossibility = remember(tick) { vm.host.machine.provisioningContinuePossibility() }
     val coroutineScope = rememberCoroutineScope()
+    // The choose-providers path (onboarding-provisioning.md § 3d *The choices
+    // on the setting-things-up page*): the choices region and the price
+    // confirm show while the run has not started, and *Buy and set up* is dead
+    // while the machine names a reason — every one of them the machine's.
+    val choicesVisible = remember(tick) { vm.host.machine.provisioningChoicesVisible() }
+    val dnsCfg = remember(tick) { vm.host.machine.dnsConfig() }
+    val startBlocked = remember(tick) {
+        if (vm.host.machine.provisioningBackToProviders()) vm.host.machine.provisioningStartBlockedReason() else null
+    }
     // The SSH door after a door run (onboarding-provisioning.md § 5): the
     // command, and the key file handed over once through the share sheet.
     val sshDoor = remember(tick) { vm.host.machine.sshDoorReadout() }
@@ -117,7 +139,7 @@ fun NestProvisioningScreen(
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
     ) {
         Spacer(Modifier.height(8.dp))
         Text(
@@ -126,7 +148,27 @@ fun NestProvisioningScreen(
         )
         Spacer(Modifier.height(8.dp))
 
-        ProvisioningPriceBom(remember(tick) { vm.host.machine.billOfMaterials() })
+        ProvisioningPriceBom(remember(tick) { vm.host.machine.billOfMaterials() }) {
+            // Directly under the domain line, § 4's label unchanged: it says
+            // registration begins on *Buy and set up*, and this is that page.
+            if (choicesVisible && dnsCfg.buyDomain && !dnsCfg.setUpLater) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = dnsCfg.priceAgreed,
+                        onCheckedChange = { if (it && !dnsCfg.priceAgreed) vm.confirmPrice() },
+                        enabled = !dnsCfg.priceAgreed,
+                        modifier = Modifier.testTag(Ids.DNS_PRICE_CONFIRM_CHECKBOX),
+                    )
+                    Text(stringResource(R.string.registrar_price_confirm))
+                }
+            }
+        }
+        // The choices region — location, server type, mail mode, update
+        // channel, SSH door — between the price summary and the start, every
+        // one with a default; the same composable `vps_config` paints.
+        if (choicesVisible) {
+            ProvisioningChoices(vm.host.machine, serverControls = true, tick = tick)
+        }
         Spacer(Modifier.height(8.dp))
 
         // By-continuing notice: below the price recap, before the charge
@@ -138,8 +180,11 @@ fun NestProvisioningScreen(
             OverallStatus.IDLE -> {
                 Button(
                     onClick = { vm.start() },
+                    enabled = startBlocked == null,
                     modifier = Modifier.testTag(Ids.PROVISIONING_START_BUTTON),
                 ) { Text(stringResource(R.string.onboarding_nest_provisioning_start_button)) }
+                // The reason on an un-id'd line beneath the button (rule 5).
+                DisabledControlReasonText(localized(startBlocked))
             }
             OverallStatus.RUNNING, OverallStatus.SUCCEEDED, OverallStatus.FAILED, OverallStatus.CANCELLED -> {
                 // Elapsed compute + format is single-sourced in shared Rust
@@ -205,14 +250,17 @@ fun NestProvisioningScreen(
             )
         }
 
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(24.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             OutlinedButton(
-                onClick = { navController.popBackStack() },
+                onClick = {
+                    vm.back()
+                    navController.popBackStack()
+                },
                 modifier = Modifier.testTag(Ids.PROVISIONING_BACK_BUTTON),
             ) { Text(stringResource(R.string.common_back)) }
 
@@ -246,10 +294,10 @@ fun NestProvisioningScreen(
                                 }
                             }
                         },
-                        enabled = snap.overall == OverallStatus.SUCCEEDED,
+                        enabled = continuePossibility.isPossible,
                         modifier = Modifier.testTag(Ids.PROVISIONING_CONTINUE_BUTTON),
                     ) { Text(stringResource(R.string.common_continue)) }
-                    DisabledControlReasonText(localized(continueBlockedReason))
+                    DisabledControlReasonText(localized(continuePossibility.blockedReason))
                 }
             }
         }
@@ -269,7 +317,10 @@ fun NestProvisioningScreen(
  * tui, web's +page.svelte, and Apple's ProvisioningPriceBom.
  */
 @Composable
-private fun ProvisioningPriceBom(items: List<BillOfMaterialsItem>) {
+private fun ProvisioningPriceBom(
+    items: List<BillOfMaterialsItem>,
+    underDomainLine: @Composable () -> Unit = {},
+) {
     Column(
         modifier = Modifier.testTag(Ids.PROVISIONING_PRICE_BOM),
         verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -298,6 +349,7 @@ private fun ProvisioningPriceBom(items: List<BillOfMaterialsItem>) {
                 modifier = Modifier.testTag(Ids.PROVISIONING_BOM_DOMAIN_LINE),
                 style = MaterialTheme.typography.bodyMedium,
             )
+            underDomainLine()
         }
         items.firstOrNull { it.recurring }?.let { vps ->
             Text(

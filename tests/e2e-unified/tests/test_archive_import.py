@@ -1521,7 +1521,6 @@ def _archive_comments_on(app, index: int) -> list[str]:
 
 
 @pytest.mark.feature("import-your-social-archive")
-@pytest.mark.requires_surface("post-archive-comments")
 def test_a_comment_on_the_owners_post_is_folded_under_it_for_the_owner_alone(
     app, request, archive_nest, tmp_path,
 ):

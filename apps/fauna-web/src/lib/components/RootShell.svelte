@@ -41,7 +41,7 @@
   import { rearmPush } from '#lib/push';
   // The post-succession aftermath pass — see its registration below.
   import { runSuccessionAftermath } from '#lib/rpc';
-  import { successionKitOwed, staleSurfacesForPushKind } from '#lib/wasm';
+  import { successionKitOwed, staleSurfacesForPushKind, familyHasSurface } from '#lib/wasm';
   import { onPushEvent } from '#lib/rpc';
   import { subscribeKnockToasts } from '#lib/knock-toast';
   import { clearMutedWords, loadMutedWords } from '#lib/muted-words';
@@ -366,11 +366,16 @@
   // restored-supervision fallback keeps the tab reachable for a supervised
   // ward before/without a successful read — the ward must always be able to
   // see who supervises them (the same gate tui's snapshot restore drives).
+  // The live arm is the shared rule (`fauna_client_family::forms::
+  // has_family_surface`), never an SPA-local re-derivation; a status read only
+  // lands once the wasm core is up, so the face is callable whenever it runs.
   let hasFamilyRelationship = $derived(
     (!!famStatus &&
-      ((famStatus.wards?.length ?? 0) > 0 ||
-        !!famStatus.supervised_by ||
-        (famStatus.incoming_transfers?.length ?? 0) > 0)) ||
+      familyHasSurface(
+        !!famStatus.supervised_by,
+        famStatus.wards?.length ?? 0,
+        famStatus.incoming_transfers?.length ?? 0,
+      )) ||
       restoredGuardian() !== null,
   );
   // Published for the Notifications tap-through, which routes into the Family
@@ -467,10 +472,19 @@
   // transient failure is retried at the next one. The steady state (the plane
   // already holds this box) makes no round trip. A run that ends with custody
   // unconfirmed for an admin of this nest warns on the shell's message banner —
-  // from either edge, through the sink handed over here.
-  function surfaceRecoveryCustodyWarning(warning: LocalizedText): void {
-    const message = resolveLocalized(warning);
-    window.dispatchEvent(new CustomEvent('fauna-message-update', { detail: { warning: message } }));
+  // from either edge, through the sink handed over here. A later run that leaves
+  // nothing owed hands the cleared mark (`null`) with the custody warnings, and
+  // the banner takes its warning down only while it still shows one of them
+  // (`fauna_client_config::is_custody_leg_warning`; `#lib/message-update`).
+  function surfaceRecoveryCustodyWarning(
+    warning: LocalizedText | null,
+    custodyWarnings?: LocalizedText[],
+  ): void {
+    const detail =
+      warning === null
+        ? { withdrawWarning: (custodyWarnings ?? []).map((w) => resolveLocalized(w)) }
+        : { warning: resolveLocalized(warning) };
+    window.dispatchEvent(new CustomEvent('fauna-message-update', { detail }));
   }
   let seedCustodyEdgeFor: string | null = null;
   $effect(() => {

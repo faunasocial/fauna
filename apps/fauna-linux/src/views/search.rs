@@ -262,19 +262,32 @@ pub fn build_search_view(
 
     outer.append(&scrolled);
 
+    wire_query_paint(&search_entry, &submit_btn);
+
     // Helper closure: fire the manager using the live entry text + selected
-    // type — the manager owns query/filter/paging/merge from here.
+    // type — the manager owns query/filter/paging/merge from here. `submit`
+    // is a person's submit (the button, Enter), which asks the shared
+    // predicate and refuses a blank query with its reason on `error-message`;
+    // a filter change re-fires a query only when there is one.
     let fire_search = {
         let manager = Arc::clone(&manager);
         let entry = search_entry.clone();
         let dropdown = type_dropdown.clone();
         let rt = rt.clone();
-        Rc::new(move || {
-            let query = entry.text().to_string();
-            let query = query.trim().to_string();
-            if query.is_empty() {
-                return;
-            }
+        let error_label = error_label.clone();
+        Rc::new(move |submit: bool| {
+            let query = if submit {
+                match submitted_query(&entry, &error_label) {
+                    Some(q) => q,
+                    None => return,
+                }
+            } else {
+                let query = entry.text().trim().to_string();
+                if query.is_empty() {
+                    return;
+                }
+                query
+            };
             let idx = dropdown.selected() as usize;
             let token = TYPE_FILTER_OPTIONS
                 .get(idx)
@@ -304,7 +317,7 @@ pub fn build_search_view(
     {
         let fire = Rc::clone(&fire_search);
         search_entry.connect_activate(move |_| {
-            fire();
+            fire(true);
         });
     }
 
@@ -312,7 +325,7 @@ pub fn build_search_view(
     {
         let fire = Rc::clone(&fire_search);
         submit_btn.connect_clicked(move |_| {
-            fire();
+            fire(true);
         });
     }
 
@@ -320,7 +333,7 @@ pub fn build_search_view(
     {
         let fire = Rc::clone(&fire_search);
         type_dropdown.connect_selected_notify(move |_| {
-            fire();
+            fire(false);
         });
     }
 
@@ -377,6 +390,33 @@ pub fn build_search_view(
     let handles = SearchHandles { search_entry };
 
     (outer, handles)
+}
+
+/// Paint `search-submit-button` from the shared
+/// `fauna_client_search::query_possibility` now and as the query is typed
+/// (`ui/search.md` § Errors & edge cases: a blank query is not offered). The
+/// icon button keeps its "Search" name as its tooltip while possible.
+fn wire_query_paint(entry: &gtk::SearchEntry, submit: &gtk::Button) {
+    let paint = |submit: &gtk::Button, text: &str| {
+        crate::form_gate::paint_submit(
+            submit,
+            &fauna_client_search::query_possibility(text),
+            Some(common::SEARCH),
+        );
+    };
+    paint(submit, &entry.text());
+    let submit = submit.clone();
+    entry.connect_changed(move |e| paint(&submit, &e.text()));
+}
+
+/// A person's submit: the trimmed query when the shared predicate answers
+/// possible, else `None` with its reason on `error-message`.
+fn submitted_query(entry: &gtk::SearchEntry, error_label: &gtk::Label) -> Option<String> {
+    let query = entry.text().trim().to_string();
+    if crate::form_gate::refuse(&fauna_client_search::query_possibility(&query), error_label) {
+        return None;
+    }
+    Some(query)
 }
 
 /// Route an activated `search-result-item`'s typed [`SearchNav`] target into
@@ -965,5 +1005,35 @@ mod tests {
     #[test]
     fn an_unknown_token_does_not_masquerade_as_all() {
         assert_eq!(type_filter_label("widget"), "widget");
+    }
+
+    /// `search-submit-button` is painted from the shared `query_possibility`:
+    /// blank → disabled with `search_page.query_required` (its "Search" name
+    /// back once a query is typed), and a person's submit of a blank query
+    /// refuses with that reason on `error-message` instead of doing nothing
+    /// (`ui/search.md` § Errors & edge cases).
+    #[test]
+    fn form_gate_search_submit_is_painted_and_a_blank_submit_refuses() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("connected");
+            let entry = gtk::SearchEntry::new();
+            let submit = gtk::Button::new();
+            let error = gtk::Label::new(None);
+            wire_query_paint(&entry, &submit);
+            let reason = fauna_core::localized::LocalizedText::key("search_page.query_required")
+                .resolve(crate::i18n::strings::lookup);
+
+            assert!(!submit.is_sensitive());
+            assert_eq!(submit.tooltip_text().as_deref(), Some(reason.as_str()));
+            assert_eq!(submitted_query(&entry, &error), None);
+            assert!(error.is_visible());
+            assert_eq!(error.text().as_str(), reason);
+
+            entry.set_text("  hello ");
+            assert!(submit.is_sensitive());
+            assert_eq!(submit.tooltip_text().as_deref(), Some(common::SEARCH));
+            assert_eq!(submitted_query(&entry, &error).as_deref(), Some("hello"));
+            crate::offline_gate::reset_for_test("disconnected");
+        });
     }
 }

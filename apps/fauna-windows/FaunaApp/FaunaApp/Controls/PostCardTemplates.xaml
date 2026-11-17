@@ -803,14 +803,19 @@
                  ROW (IsRepostRow — its own counters are structurally dark; feed.md
                  § Interaction bar → Repost, ratified 2026-08-10) — see repost-attribution above, the only affordance such a
                  row's card carries. Each button's Name says what it paints (verb +
-                 the count only while shown — FeedPostItem.LikeButtonName). -->
+                 the count only while shown — FeedPostItem.LikeButtonName). The like
+                 button's HelpText is its `state` word (on | off | queued | unsent,
+                 FeedPostItem.LikeStateWord from the shared like_state_word —
+                 account-offline-mutation.md § The unsent-changes surface, point 2);
+                 tapping an `unsent` heart retries, which the shared manager decides. -->
             <StackPanel Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
                         Orientation="Horizontal" Spacing="12" Margin="0,4,0,0"
                         Visibility="{x:Bind feed:PostCardBind.HideOnRepostRow(IsRepostRow), Mode=OneWay}">
                 <Button Tag="{x:Bind PostId}" Click="LikeButton_Click" Padding="4,2"
                         Style="{x:Bind feed:PostCardBind.LikedToButtonStyle(ViewerLiked)}"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedLikeButton}"
-                        AutomationProperties.Name="{x:Bind LikeButtonName}">
+                        AutomationProperties.Name="{x:Bind LikeButtonName}"
+                        AutomationProperties.HelpText="{x:Bind LikeStateWord}">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <TextBlock Text="&#xEB51;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
                         <TextBlock Text="{x:Bind LikeCount}" FontSize="12"

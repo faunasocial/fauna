@@ -308,12 +308,25 @@ public final class SubscriptionsVM {
         showForm = false
     }
 
+    /// `subscription-tier-form-save`: the shared draft-validity predicate
+    /// (`fauna_client_subscriptions::forms::tier_form_possibility`, rule 4's
+    /// form case of `docs/goal/ui/README.md` § Offer only what is possible) —
+    /// blocked with `subscriptions.tier_name_required` while the name is blank.
+    public var tierFormPossibility: Possibility {
+        subscriptionTierFormPossibility(name: formName)
+    }
+
 #if !FAUNA_KIDS
     /// Create or update the tier depending on `editingTier`, then refresh.
+    /// Asks ``tierFormPossibility`` first and refuses with its reason on
+    /// `error-message` — never a silent return.
     public func saveForm() async {
+        if let refusal = tierFormPossibility.refusal {
+            errorMessage = refusal
+            return
+        }
         guard let api else { return }
         let name = formName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
         let rank = UInt32(formRank.trimmingCharacters(in: .whitespaces)) ?? 0
         let description = optTrim(formDescription)
         let priceHint = optTrim(formPriceHint)

@@ -36,8 +36,6 @@ public struct RoomSettingsSheet: View {
     /// sat open cannot be written into the room's signed policy.
     private let participants: [TypedAddress]
     private let displays: [String]
-    private let canAppointAdmins: Bool
-    private let canTransferOwnership: Bool
 
     @Environment(ConversationsVM.self) private var vm
     @State private var draft: RoomSettingsDraft
@@ -57,7 +55,9 @@ public struct RoomSettingsSheet: View {
     /// editor only when there is one (a non-room, or a policy-less room with no
     /// local remove, has nothing to show, so that is the belt; a policy-less
     /// room that supports the remove seeds an empty draft for it). The door is live for any member;
-    /// each policy control greys off `canSetPolicy` inside.
+    /// each control inside paints the shared `ThreadControl` answer
+    /// (`ThreadControlAnswers`): a member reads the policy as plain lines, with
+    /// no policy control, no per-participant control and no Save.
     public init(detail: ThreadDetail, seed: RoomSettingsDraft, onClose: @escaping () -> Void) {
         self.threadId = detail.threadId
         self.onClose = onClose
@@ -67,8 +67,6 @@ public struct RoomSettingsSheet: View {
                 ? detail.participantDisplays[i]
                 : ConversationsUI.display(addr)
         }
-        self.canAppointAdmins = detail.capabilities.canAppointAdmins
-        self.canTransferOwnership = detail.capabilities.canTransferOwnership
         self.hasPolicy = detail.room?.policy != nil
         self._draft = State(initialValue: seed)
     }
@@ -103,12 +101,15 @@ public struct RoomSettingsSheet: View {
                 Spacer()
                 Button(L.common.cancel) { onClose() }
                     .keyboardShortcut(.cancelAction)
+                // Absent for a member, who opens this editor to read it and to
+                // leave: every staged edit behind Save is owner-or-admin work.
                 if hasPolicy {
                     Button(L.common.save) { save() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(saving || !canSetPolicy)
+                        .disabled(saving)
                         .accessibilityIdentifier(Ids.roomSettingsSaveButton)
-                        .automationActivate(Ids.roomSettingsSaveButton, isEnabled: { !saving && canSetPolicy }) { save() }
+                        .automationActivate(Ids.roomSettingsSaveButton, isEnabled: { !saving }) { save() }
+                        .faunaPossible(answer(.setPolicy))
                 }
             }
 
@@ -126,55 +127,72 @@ public struct RoomSettingsSheet: View {
             // selection is the driver-facing TOKEN (so `select`/`get_text`
             // round-trip it, the cross-app contract) and each row paints the
             // localized label over it.
-            LabeledContent(L.conversations.unified.roomJoinRuleLabel) {
-                Picker(L.conversations.unified.roomJoinRuleLabel, selection: joinRuleBinding) {
-                    ForEach(roomJoinRuleEditorChoices(), id: \.self) { rule in
-                        Text(roomJoinRuleLabel(rule: rule)).tag(roomJoinRuleToken(rule: rule))
+            // A viewer who can never edit the policy reads it: the two values
+            // as plain lines where the pickers would sit (`ui/conversations.md`
+            // § Errors & edge cases → *Controls this person can never use*).
+            if answer(.setPolicy).isShown {
+                LabeledContent(L.conversations.unified.roomJoinRuleLabel) {
+                    Picker(L.conversations.unified.roomJoinRuleLabel, selection: joinRuleBinding) {
+                        ForEach(roomJoinRuleEditorChoices(), id: \.self) { rule in
+                            Text(roomJoinRuleLabel(rule: rule)).tag(roomJoinRuleToken(rule: rule))
+                        }
                     }
+                    .labelsHidden()
+                    .accessibilityIdentifier(Ids.roomJoinRuleSelect)
+                    .automationSelect(
+                        Ids.roomJoinRuleSelect,
+                        value: { joinRuleToken },
+                        options: { joinRuleTokens },
+                        set: { setJoinRule($0) })
+                    .faunaPossible(answer(.setPolicy))
                 }
-                .labelsHidden()
-                .disabled(!canSetPolicy)
-                .accessibilityIdentifier(Ids.roomJoinRuleSelect)
-                .automationSelect(
-                    Ids.roomJoinRuleSelect,
-                    value: { joinRuleToken },
-                    options: { joinRuleTokens },
-                    isEnabled: { canSetPolicy },
-                    set: { setJoinRule($0) })
-            }
 
-            LabeledContent(L.conversations.unified.roomHistoryPolicyLabel) {
-                Picker(L.conversations.unified.roomHistoryPolicyLabel, selection: historyPolicyBinding) {
-                    ForEach(roomHistoryPolicyEditorChoices(), id: \.self) { policy in
-                        Text(roomHistoryPolicyLabel(policy: policy)).tag(roomHistoryPolicyToken(policy: policy))
+                LabeledContent(L.conversations.unified.roomHistoryPolicyLabel) {
+                    Picker(L.conversations.unified.roomHistoryPolicyLabel, selection: historyPolicyBinding) {
+                        ForEach(roomHistoryPolicyEditorChoices(), id: \.self) { policy in
+                            Text(roomHistoryPolicyLabel(policy: policy)).tag(roomHistoryPolicyToken(policy: policy))
+                        }
                     }
+                    .labelsHidden()
+                    .accessibilityIdentifier(Ids.roomHistoryPolicySelect)
+                    .automationSelect(
+                        Ids.roomHistoryPolicySelect,
+                        value: { historyPolicyToken },
+                        options: { historyPolicyTokens },
+                        set: { setHistoryPolicy($0) })
+                    .faunaPossible(answer(.setPolicy))
                 }
-                .labelsHidden()
-                .disabled(!canSetPolicy)
-                .accessibilityIdentifier(Ids.roomHistoryPolicySelect)
-                .automationSelect(
-                    Ids.roomHistoryPolicySelect,
-                    value: { historyPolicyToken },
-                    options: { historyPolicyTokens },
-                    isEnabled: { canSetPolicy },
-                    set: { setHistoryPolicy($0) })
+            } else {
+                LabeledContent(L.conversations.unified.roomJoinRuleLabel) {
+                    Text(roomJoinRuleLabel(rule: draft.joinRule))
+                }
+                LabeledContent(L.conversations.unified.roomHistoryPolicyLabel) {
+                    Text(roomHistoryPolicyLabel(policy: draft.historyPolicy))
+                }
             }
 
             // One row per member, indexed like the chips: the admin switch and
-            // the hand-over control, painted for every member and merely GREYED
-            // where the viewer's capability or the row's own eligibility says
-            // no — never hidden, and never live on the owner's own row
-            // (`ui/conversations.md` § Architectural rules 5).
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(displays.enumerated()), id: \.offset) { i, display in
-                    memberRow(index: i, display: display)
+            // the hand-over control, each painting its shared answer — absent
+            // for a viewer without the role behind it, greyed only where the
+            // row's own eligibility says no (never live on the owner's own
+            // row). A section shown keeps one row per participant, so `[i]`
+            // stays the chip's index; a member sees no section at all.
+            if participantRowsShown {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(displays.enumerated()), id: \.offset) { i, display in
+                        memberRow(index: i, display: display)
+                    }
                 }
             }
 
             // The home nest's read, only where there is one to stage (a
             // community room whose answer this device has read).
             if draft.nestRead != nil {
-                nestReadToggle
+                if answer(.setPolicy).isShown {
+                    nestReadToggle
+                } else {
+                    Text(nestReadText)
+                }
             }
 
             pendingInvitesSection
@@ -184,32 +202,37 @@ public struct RoomSettingsSheet: View {
             // compiles the catalog plane out, so the rows are a declared kids
             // absence (`account-age-band.md`, the kids-app bullet).
             if draft.labelers != nil {
-                RoomLabelerRows(draft: $draft, canSetPolicy: canSetPolicy)
+                RoomLabelerRows(draft: $draft, setPolicy: answer(.setPolicy))
             }
             #endif
         }
     }
 
-    private var canSetPolicy: Bool { vm.detail(threadId)?.capabilities.canSetPolicy ?? false }
-    /// The live `can_leave_room` (owner ✗) — read again when the confirm opens,
-    /// not only at paint, so a role that changed under the open editor is
-    /// honoured.
-    private var canLeaveRoom: Bool { vm.detail(threadId)?.capabilities.canLeaveRoom ?? false }
+    /// The shared answer of every role- or rail-gated control here, read off
+    /// the LIVE detail — at paint and again in each handler — so a role that
+    /// changed under the open editor is honoured (`ui/README.md` rule 6). No
+    /// live detail (the thread left the manager) → every control absent.
+    private var controls: ThreadControlAnswers? { vm.detail(threadId)?.controlAnswers }
+    private func answer(_ control: ThreadControl) -> Possibility { controls.map { $0(control) } ?? .absent }
+    private var participantRowsShown: Bool { controls?.participantRowsShown ?? false }
 
     /// `room-leave-button` + `room-leave-confirm` — the walk-out
     /// (`ui/conversations.md` § Element IDs → *The walk-out*). Below Save and
     /// OUTSIDE its staged set: leaving acts at once, it is not a policy edit.
-    /// Greyed — never hidden — off `can_leave_room`, so the owner sees it dead
-    /// and hands the room over first. The confirm is the `thread-rename-confirm`
-    /// shape; the whole control is online-only, so the confirm carries the gate.
+    /// Paints the shared `ThreadControl.leaveRoom` answer: blocked for the owner
+    /// — shown disabled with the hand-over as its visible reason, the hand-over
+    /// controls standing above it — and absent where there is no room to walk
+    /// out of. The confirm is the `thread-rename-confirm` shape; the whole
+    /// control is online-only, so the confirm carries the gate.
     @ViewBuilder
     private var leaveSection: some View {
         VStack(alignment: .trailing, spacing: 8) {
             Button(L.conversations.unified.roomLeave) { openLeaveConfirm() }
                 .buttonStyle(.bordered)
-                .disabled(!canLeaveRoom)
                 .accessibilityIdentifier(Ids.roomLeaveButton)
-                .automationActivate(Ids.roomLeaveButton, isEnabled: { canLeaveRoom }) { openLeaveConfirm() }
+                .automationActivate(Ids.roomLeaveButton) { openLeaveConfirm() }
+                .faunaPossible(answer(.leaveRoom))
+            FaunaPossibilityReason(answer(.leaveRoom))
             if confirmingLeave {
                 HStack(spacing: 8) {
                     Button(L.common.cancel) { confirmingLeave = false }
@@ -218,6 +241,7 @@ public struct RoomSettingsSheet: View {
                         .accessibilityIdentifier(Ids.roomLeaveConfirm)
                         .automationActivate(Ids.roomLeaveConfirm) { confirmLeave() }
                         .faunaGate("fauna.conversations.room.leave")
+                        .faunaPossible(answer(.leaveRoom))
                 }
             }
         }
@@ -225,45 +249,45 @@ public struct RoomSettingsSheet: View {
     }
 
     private func openLeaveConfirm() {
-        guard canLeaveRoom else { return }
+        guard answer(.leaveRoom).isPossible else { return }
         confirmingLeave = true
     }
 
-    /// Re-checks `can_leave_room` (the open is not the commit), closes the
+    /// Re-asks the shared answer (the open is not the commit), closes the
     /// editor, then makes the one manager call; a refusal rides the page's
     /// `error-message`.
     private func confirmLeave() {
         confirmingLeave = false
-        guard canLeaveRoom else { return }
+        guard answer(.leaveRoom).isPossible else { return }
         onClose()
         Task { await vm.leaveRoom(threadId) }
     }
 
-    /// The live `supports_local_remove` (a bridged room today) — read again
-    /// when the confirm opens and at the confirm, not only at paint.
-    private var canRemoveRoom: Bool { vm.detail(threadId)?.capabilities.supportsLocalRemove ?? false }
+    /// The live `ThreadControl.localRemove` answer (a bridged room today) —
+    /// asked again when the confirm opens and at the confirm, not only at paint.
+    private var removeAnswer: Possibility { answer(.localRemove) }
 
     /// `room-remove-button` + `room-remove-confirm` — the nest's local remove
     /// of the whole conversation (`bridged-adapter.md` § Removing bridged
     /// rows, rule 6). Beside the walk-out and OUTSIDE Save's staged set: an
-    /// immediate act. Greyed — never hidden — unless `supports_local_remove`.
+    /// immediate act. Absent off a rail that has no local remove.
     @ViewBuilder
     private var removeSection: some View {
         VStack(alignment: .trailing, spacing: 8) {
             Button(L.conversations.unified.roomRemove) { openRemoveConfirm() }
                 .buttonStyle(.bordered)
-                .disabled(!canRemoveRoom)
                 .accessibilityIdentifier(Ids.roomRemoveButton)
-                .automationActivate(Ids.roomRemoveButton, isEnabled: { canRemoveRoom }) { openRemoveConfirm() }
+                .automationActivate(Ids.roomRemoveButton) { openRemoveConfirm() }
+                .faunaPossible(removeAnswer)
             if confirmingRemove {
                 HStack(spacing: 8) {
                     Button(L.common.cancel) { confirmingRemove = false }
                     Button(L.conversations.unified.roomRemoveConfirm, role: .destructive) { confirmRemove() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!canRemoveRoom)
                         .accessibilityIdentifier(Ids.roomRemoveConfirm)
-                        .automationActivate(Ids.roomRemoveConfirm, isEnabled: { canRemoveRoom }) { confirmRemove() }
+                        .automationActivate(Ids.roomRemoveConfirm) { confirmRemove() }
                         .faunaGate("fauna.bridges.conversation.rooms.remove")
+                        .faunaPossible(removeAnswer)
                 }
             }
         }
@@ -271,7 +295,7 @@ public struct RoomSettingsSheet: View {
     }
 
     private func openRemoveConfirm() {
-        guard canRemoveRoom else { return }
+        guard removeAnswer.isPossible else { return }
         confirmingRemove = true
     }
 
@@ -281,28 +305,32 @@ public struct RoomSettingsSheet: View {
     /// `error-message` and the thread stays open.
     private func confirmRemove() {
         confirmingRemove = false
-        guard canRemoveRoom else { return }
+        guard removeAnswer.isPossible else { return }
         onClose()
         Task { await vm.removeThread(threadId) }
     }
 
+    private var nestReadText: String {
+        (draft.nestRead ?? false) ? L.conversations.unified.roomNestReadYes : L.conversations.unified.roomNestReadNo
+    }
+
     /// `room-nest-read-toggle` — whether the home nest reads the room. Staged
-    /// through the draft; greyed unless the viewer may set policy.
+    /// through the draft; painted from the `setPolicy` answer (a viewer it is
+    /// absent for reads `nestReadText` as a plain line instead).
     private var nestReadToggle: some View {
         let reads = draft.nestRead ?? false
-        return Button(reads ? L.conversations.unified.roomNestReadYes : L.conversations.unified.roomNestReadNo) {
+        return Button(nestReadText) {
             toggleNestRead()
         }
         .buttonStyle(.bordered)
         .tint(reads ? Color.accentColor : nil)
-        .disabled(!canSetPolicy)
         .accessibilityIdentifier(Ids.roomNestReadToggle)
         .automationActivate(
             Ids.roomNestReadToggle,
-            isEnabled: { canSetPolicy },
-            text: { (draft.nestRead ?? false) ? L.conversations.unified.roomNestReadYes : L.conversations.unified.roomNestReadNo },
+            text: { nestReadText },
             attributes: { ["checked": (draft.nestRead ?? false) ? "true" : "false"] }
         ) { toggleNestRead() }
+        .faunaPossible(answer(.setPolicy))
     }
 
     /// What stands pending on the room, only once the home nest has served this
@@ -340,6 +368,7 @@ public struct RoomSettingsSheet: View {
     }
 
     private func toggleNestRead() {
+        guard answer(.setPolicy).isPossible else { return }
         draft = roomSettingsToggleNestRead(draft: draft)
     }
 
@@ -361,8 +390,6 @@ public struct RoomSettingsSheet: View {
     private func stagedOwner(_ i: Int) -> Bool {
         roomSettingsTransferStagedAt(draft: draft, participants: participants, index: UInt32(i))
     }
-    private func adminLive(_ i: Int) -> Bool { canAppointAdmins && eligible(i) }
-    private func transferLive(_ i: Int) -> Bool { canTransferOwnership && eligible(i) }
     private func adminLabel(_ i: Int) -> String {
         stagedAdmin(i) ? L.conversations.unified.roomAdminYes : L.conversations.unified.roomAdminNo
     }
@@ -379,27 +406,29 @@ public struct RoomSettingsSheet: View {
             Button(adminLabel(i)) { toggleAdmin(i) }
                 .buttonStyle(.bordered)
                 .tint(stagedAdmin(i) ? Color.accentColor : nil)
-                .disabled(!adminLive(i))
+                .disabled(!eligible(i))
                 .accessibilityIdentifier(Ids.roomAdminToggle)
                 // `checked` is a NAMED attribute (the server maps a bare value
                 // only for "on"/"off"); the text is the painted label.
                 .automationActivate(
                     Ids.roomAdminToggle,
-                    isEnabled: { adminLive(i) },
+                    isEnabled: { eligible(i) },
                     text: { adminLabel(i) },
                     attributes: { ["checked": stagedAdmin(i) ? "true" : "false"] }
                 ) { toggleAdmin(i) }
+                .faunaPossible(answer(.appointAdmins))
             Button(transferLabel(i)) { toggleTransfer(i) }
                 .buttonStyle(.bordered)
                 .tint(stagedOwner(i) ? Color.accentColor : nil)
-                .disabled(!transferLive(i))
+                .disabled(!eligible(i))
                 .accessibilityIdentifier(Ids.roomOwnerTransferButton)
                 .automationActivate(
                     Ids.roomOwnerTransferButton,
-                    isEnabled: { transferLive(i) },
+                    isEnabled: { eligible(i) },
                     text: { transferLabel(i) },
                     attributes: { ["checked": stagedOwner(i) ? "true" : "false"] }
                 ) { toggleTransfer(i) }
+                .faunaPossible(answer(.transferOwnership))
         }
     }
 
@@ -411,26 +440,32 @@ public struct RoomSettingsSheet: View {
         Binding(get: { historyPolicyToken }, set: { setHistoryPolicy($0) })
     }
 
+    // Each staged edit asks the answer its control painted (rule 6): a
+    // control that is not offered must not act, whoever raced it.
     private func setJoinRule(_ token: String) {
+        guard answer(.setPolicy).isPossible else { return }
         draft = roomSettingsSetJoinRule(draft: draft, token: token)
     }
 
     private func setHistoryPolicy(_ token: String) {
+        guard answer(.setPolicy).isPossible else { return }
         draft = roomSettingsSetHistoryPolicy(draft: draft, token: token)
     }
 
     private func toggleAdmin(_ i: Int) {
+        guard answer(.appointAdmins).isPossible else { return }
         draft = roomSettingsToggleAdmin(draft: draft, participants: participants, index: UInt32(i))
     }
 
     private func toggleTransfer(_ i: Int) {
+        guard answer(.transferOwnership).isPossible else { return }
         draft = roomSettingsToggleTransfer(draft: draft, participants: participants, index: UInt32(i))
     }
 
     /// Diff the staged draft against the LIVE roster and hand the edits to the
     /// manager in one call. Nothing staged → Save is a close, not a commit.
     private func save() {
-        guard !saving else { return }
+        guard !saving, answer(.setPolicy).isPossible else { return }
         let live = vm.detail(threadId)?.participants ?? participants
         let edits = roomSettingsEdits(draft: draft, participants: live)
         if edits.isEmpty {
@@ -467,15 +502,15 @@ public struct RoomSettingsSheet: View {
 /// **Every decision is shared Rust**: which kinds a room may name
 /// (`roomMayNameLabelerKind`), the `checked` mark (`roomSettingsLabelerStaged`)
 /// and whether a row may act (`roomSettingsLabelerToggleLive`: a full set greys
-/// only the rows it does not name). This paints them and adds the one capability
-/// term. The catalog is the page's own `LabelerCatalogVM` — the same machine the
+/// only the rows it does not name). This paints them through the `setPolicy`
+/// answer: a viewer it is absent for reads each row as a plain line. The catalog is the page's own `LabelerCatalogVM` — the same machine the
 /// Community labelers page drives — and its inspect view opens IN PLACE through
 /// the shared `LabelerInspectPanel`, so the staged draft survives an inspect.
 /// The kids flavor compiles the catalog plane out, so this whole view is a
 /// declared kids absence (android's `kids/RoomLabelerRows.kt` twin).
 private struct RoomLabelerRows: View {
     @Binding var draft: RoomSettingsDraft
-    let canSetPolicy: Bool
+    let setPolicy: Possibility
 
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var catalog = LabelerCatalogVM()
@@ -504,7 +539,7 @@ private struct RoomLabelerRows: View {
     // click does not see the frame before it.
     private func staged(_ id: String) -> Bool { roomSettingsLabelerStaged(draft: draft, labeler: id) }
     private func live(_ id: String) -> Bool {
-        canSetPolicy && roomSettingsLabelerToggleLive(draft: draft, labeler: id)
+        roomSettingsLabelerToggleLive(draft: draft, labeler: id)
     }
     private func label(_ entry: LabelerCatalogEntry) -> String {
         // The kind and a prefix of the id: the catalog row carries no name, and
@@ -518,17 +553,22 @@ private struct RoomLabelerRows: View {
     private func row(index: Int, entry: LabelerCatalogEntry) -> some View {
         let id = entry.labelerId
         HStack(spacing: 8) {
-            Button(label(entry)) { toggle(id) }
-                .buttonStyle(.bordered)
-                .tint(staged(id) ? Color.accentColor : nil)
-                .disabled(!live(id))
-                .accessibilityIdentifier(Ids.roomLabelerToggle)
-                .automationActivate(
-                    Ids.roomLabelerToggle,
-                    isEnabled: { live(id) },
-                    text: { label(entry) },
-                    attributes: { ["checked": staged(id) ? "true" : "false"] }
-                ) { toggle(id) }
+            if setPolicy.isShown {
+                Button(label(entry)) { toggle(id) }
+                    .buttonStyle(.bordered)
+                    .tint(staged(id) ? Color.accentColor : nil)
+                    .disabled(!live(id))
+                    .accessibilityIdentifier(Ids.roomLabelerToggle)
+                    .automationActivate(
+                        Ids.roomLabelerToggle,
+                        isEnabled: { live(id) },
+                        text: { label(entry) },
+                        attributes: { ["checked": staged(id) ? "true" : "false"] }
+                    ) { toggle(id) }
+                    .faunaPossible(setPolicy)
+            } else {
+                Text(label(entry))
+            }
             // Inspecting is a read any member may make; the index is the catalog
             // SNAPSHOT index the machine's `inspect` is addressed by.
             Button(L.labelerCatalog.inspect) { Task { await catalog.inspect(index: index) } }
@@ -541,6 +581,7 @@ private struct RoomLabelerRows: View {
     }
 
     private func toggle(_ id: String) {
+        guard setPolicy.isPossible else { return }
         draft = roomSettingsToggleLabeler(draft: draft, labeler: id)
     }
 }

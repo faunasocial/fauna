@@ -126,6 +126,27 @@ def _source_newest(path: Path, excludes: list[str]) -> float:
 WARMTH_ENV = "FAUNA_BUILD_WARMTH"
 
 
+#: The rebuild-reason log (e2e-warm-pass.md, *The warm pass names every
+#: rebuild*): when set, every stamp gate that decides to BUILD appends one
+#: `<gate label>\t<reason>` line to the file it names, the reason in the gate's
+#: own words. A warm gate, and a `--check` probe, write nothing. The e2e
+#: prebuild sets it around each job and prints `[prebuild] rebuilt …` from it.
+REASON_LOG_ENV = "FAUNA_BUILD_REASON_LOG"
+
+
+def note_rebuild(label: str, reason: str, env=None) -> None:
+    """Append one rebuild reason to the `REASON_LOG_ENV` file, if one is named.
+    Never fails the gate: an unwritable log loses the line, not the build."""
+    path = (os.environ if env is None else env).get(REASON_LOG_ENV)
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{label}\t{' '.join(reason.split())}\n")
+    except OSError:
+        pass
+
+
 #: build-slot.py writes the instant it granted the slot into the file this
 #: variable names (build-slot.py's module docstring § Grant instant).
 GRANT_FILE_ENV = "FAUNA_SLOT_GRANT_FILE"
@@ -332,6 +353,7 @@ def main() -> int:
                 print(f"[build-if-stale] {label}: missing {missing[0]} → stale", flush=True)
             return 1
         print(f"[build-if-stale] {label}: missing {missing[0]} → building", flush=True)
+        note_rebuild(label, f"missing {missing[0]}")
         return run_and_commit(warmth)
 
     if args.stamp is not None:
@@ -357,6 +379,7 @@ def main() -> int:
                 print(f"[build-if-stale] {label}: stale (content key changed)", flush=True)
             return 1
         print(f"[build-if-stale] {label}: stale (content key changed) → building", flush=True)
+        note_rebuild(label, "stale (content key changed)")
         return run_and_commit("warm")
 
     if source_newest > target_freshness:
@@ -365,6 +388,7 @@ def main() -> int:
                 print(f"[build-if-stale] {label}: stale", flush=True)
             return 1
         print(f"[build-if-stale] {label}: stale → building", flush=True)
+        note_rebuild(label, "stale (a source newer than the stamp)")
         return run_and_commit("warm")
 
     if not args.quiet:

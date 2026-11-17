@@ -3328,6 +3328,21 @@ impl SyncDb {
         self.meta_del("binding_record")
     }
 
+    /// The replicated File Provider's change-feed state — the last few trees
+    /// the feed reported, by generation, serialized by
+    /// `fauna_sync_engine::provider_face` (`on-demand-files-apple.md` § Apple
+    /// File Provider binding, *the change feed*). Derived and recreatable: a
+    /// lost row costs one full re-report, never data. `None` = none rests.
+    pub fn provider_change_feed(&self) -> Result<Option<String>> {
+        self.meta_get("provider_change_feed")
+    }
+
+    /// Replace the change-feed state (the write half of
+    /// [`Self::provider_change_feed`]).
+    pub fn set_provider_change_feed(&self, state: &str) -> Result<()> {
+        self.meta_put("provider_change_feed", state)
+    }
+
     /// The website-serving shape this device last CONVERGED this folder's
     /// corpus to — `"served"` | `"off"` — the steady-state gate of
     /// `SyncEngine::converge_corpus_to_website` (`web-content-hosting.md`

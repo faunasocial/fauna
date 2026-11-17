@@ -199,6 +199,7 @@ public sealed partial class SettingsAccountPage : Page
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         base.OnNavigatedFrom(e);
+        StopUnsentRefresh();
         FaunaApp.Core.Helpers.AftermathProgress.Changed -= AftermathProgress_Changed;
         FaunaApp.Core.Helpers.InheritedFilterMarks.Changed -= AftermathProgress_Changed;
         if (_switcherViewModel is not null)
@@ -265,6 +266,7 @@ public sealed partial class SettingsAccountPage : Page
         // mount-count note above): drop the pass's re-read subscriptions too, so
         // the static aftermath notice never holds an unloaded page. A re-Loaded
         // page re-arms from its own hydrate.
+        StopUnsentRefresh();
         DisarmMemberReviewPass();
         LeaveAccountMount();
     }
@@ -324,6 +326,12 @@ public sealed partial class SettingsAccountPage : Page
         }
 
         if (_viewModel is null) return;
+
+        // The unsent-changes section's first read, then one every two seconds while
+        // the page shows. Started BEFORE the nest-backed load below: it reads the
+        // device outbox, so it must answer when that load is stuck on a nest that is
+        // down — the very moment a user looks for a change that never went out.
+        StartUnsentRefresh();
 
         await _viewModel.LoadCommand.ExecuteAsync(null);
         FaunaApp.Core.Logs.E2eTrace.Write("[account-page] after LoadCommand");
@@ -979,7 +987,65 @@ public sealed partial class SettingsAccountPage : Page
             case nameof(SettingsViewModel.PendingActions):
                 RenderPendingActions();
                 break;
+            case nameof(SettingsViewModel.UnsentChanges):
+                RenderUnsentChanges();
+                break;
         }
+    }
+
+    // --- Unsent changes (account-offline-mutation.md § The offline-mutation
+    //     contract → The unsent-changes surface, point 1) ---
+    //
+    // STANDING, in pending actions' three-state shape: the VM's UnsentChanges is
+    // null before the first read (bare title), empty once read with nothing unsent,
+    // or the counted rows. The VM assigns a new list only when a row changed, so
+    // the two-second re-read repaints nothing while nothing moves.
+
+    private void RenderUnsentChanges()
+    {
+        var rows = _viewModel?.UnsentChanges;
+        UnsentChangesTitleText.Text = rows switch
+        {
+            null => S.Get("settings/unsent_changes/title"),
+            { Count: 0 } => S.Get("settings/unsent_changes/none"),
+            _ => S.Format("settings/unsent_changes/title_count", rows.Count),
+        };
+        UnsentChangesList.ItemsSource = rows;
+    }
+
+    /// The re-read while the page shows (<see cref="FaunaApp.Core.Helpers.UnsentRefresh"/>):
+    /// started on load, stopped on unload and on leaving the page.
+    private FaunaApp.Core.Helpers.UnsentRefresh? _unsentRefresh;
+
+    private void StartUnsentRefresh()
+    {
+        StopUnsentRefresh();
+        if (_viewModel is not { } vm) return;
+        _unsentRefresh = FaunaApp.Core.Helpers.UnsentRefresh.Start("account", vm.LoadUnsentChangesAsync);
+    }
+
+    private void StopUnsentRefresh()
+    {
+        _unsentRefresh?.Dispose();
+        _unsentRefresh = null;
+    }
+
+    private async void RetryUnsentChange_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || sender is not FrameworkElement { Tag: string id }) return;
+        await _viewModel.RetryUnsentChangeAsync(id);
+    }
+
+    private void DiscardUnsentChange_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || sender is not FrameworkElement { Tag: string id }) return;
+        _viewModel.ArmUnsentDiscard(id);
+    }
+
+    private async void ConfirmDiscardUnsentChange_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || sender is not FrameworkElement { Tag: string id }) return;
+        await _viewModel.ConfirmUnsentDiscardAsync(id);
     }
 
     // --- Pending actions (settings.md § Pending actions) ---

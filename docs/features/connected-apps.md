@@ -87,6 +87,7 @@ Stamped 2026-11-07 at ac836c937b.
    - `tests/e2e-unified/tests/test_folder_deposit_adoption.py::test_an_owner_seat_adopts_a_deposit_larger_than_one_message`
    - `tests/e2e-unified/tests/test_folder_deposit_adoption_on_demand_linux.py::test_an_on_demand_seat_adopts_a_parked_deposit`
    - `tests/e2e-unified/tests/platform/ios/test_folder_deposit_adoption_file_provider_ios.py::test_a_deposit_is_adopted_by_the_ios_file_provider_refresh`
+   - `tests/e2e-unified/tests/test_folder_deposit_adoption_documents_provider_android.py::test_a_deposit_is_adopted_by_the_android_documents_provider_refresh`
 27. [nest] An app you allowed to hear about changes is told when its own records in your account change — only that something changed, never what — over its connection, by asking the web, or at an address of its own it gave when you connected it, and never hears about anything else of yours — `docs/goal/architecture/transport.md` § Push events
    - `tests/e2e-unified/tests/api/test_third_party_events.py::test_a_connected_app_hears_only_its_own_scopes_change`
 28. [app] Turning off Allow external apps pauses every app it affects at once — every app on the external-app plane, apps using Fauna directly and AT Protocol app-password sessions alike, never a mail app password or a Nostr signer client — including one already connected, and its row stays listed, marked paused; turning it back on lets it work again with nothing to redo — `docs/goal/behavior/atproto-pds-full.md` § Detailed design
@@ -111,6 +112,7 @@ Stamped 2026-11-07 at ac836c937b.
 37. [app] A file an app put into a folder you share with someone shows up for them too, after their next sync, sealed like the folder's other files — only your devices ever open what the app dropped in — `docs/goal/behavior/folder-deposit.md` § The deposit
    - `tests/e2e-unified/tests/test_folder_deposit_adoption.py::test_an_owner_seat_adopts_into_a_bound_folder_and_a_member_receives_it`
    - `tests/e2e-unified/tests/platform/ios/test_folder_deposit_adoption_file_provider_ios.py::test_the_ios_file_provider_adopts_into_a_shared_folder_and_a_member_receives_it`
+   - `tests/e2e-unified/tests/test_folder_deposit_adoption_documents_provider_android.py::test_the_android_documents_provider_adopts_into_a_shared_folder_and_a_member_receives_it`
 38. [nest] An app you allowed to read one of your folders reads its files over WebDAV exactly as you saved them, and nothing else: no other folder of yours, nothing without the keys your approval gave it, and nothing from the moment you stop serving that folder — `docs/goal/behavior/webdav-server.md` § Key model
    - `tests/e2e-unified/tests/api/test_folder_read_principal.py::test_a_device_principal_reads_a_served_folder_over_dav_through_the_consent_path`
    - `tests/e2e-unified/tests/api/test_folder_read_principal.py::test_a_qualified_request_against_the_bare_declaration_reads_without_a_choice`
@@ -214,6 +216,7 @@ Stamped 2026-11-07 at ac836c937b.
 | 26 | app | `tests/e2e-unified/tests/test_folder_deposit_adoption.py::test_an_owner_seat_adopts_a_deposit_larger_than_one_message` | windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 26 | app | `tests/e2e-unified/tests/test_folder_deposit_adoption_on_demand_linux.py::test_an_on_demand_seat_adopts_a_parked_deposit` | linux (linux): passed |
 | 26 | app | `tests/e2e-unified/tests/platform/ios/test_folder_deposit_adoption_file_provider_ios.py::test_a_deposit_is_adopted_by_the_ios_file_provider_refresh` | ios (macos): passed |
+| 26 | app | `tests/e2e-unified/tests/test_folder_deposit_adoption_documents_provider_android.py::test_a_deposit_is_adopted_by_the_android_documents_provider_refresh` | — |
 | 26 | app | absent by design on web | — |
 | 27 | nest | `tests/e2e-unified/tests/api/test_third_party_events.py::test_a_connected_app_hears_only_its_own_scopes_change` | nest (linux): passed, nest (macos): passed |
 | 28 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -228,6 +231,7 @@ Stamped 2026-11-07 at ac836c937b.
 | 36 | nest | `tests/e2e-unified/tests/api/test_post_author_principal.py::test_a_principal_authors_and_retracts_public_posts_until_the_delegation_is_revoked` | nest (linux): passed, nest (macos): passed |
 | 37 | app | `tests/e2e-unified/tests/test_folder_deposit_adoption.py::test_an_owner_seat_adopts_into_a_bound_folder_and_a_member_receives_it` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 37 | app | `tests/e2e-unified/tests/platform/ios/test_folder_deposit_adoption_file_provider_ios.py::test_the_ios_file_provider_adopts_into_a_shared_folder_and_a_member_receives_it` | ios (macos): passed, tui (macos): passed |
+| 37 | app | `tests/e2e-unified/tests/test_folder_deposit_adoption_documents_provider_android.py::test_the_android_documents_provider_adopts_into_a_shared_folder_and_a_member_receives_it` | — |
 | 37 | app | absent by design on web | — |
 | 38 | nest | `tests/e2e-unified/tests/api/test_folder_read_principal.py::test_a_device_principal_reads_a_served_folder_over_dav_through_the_consent_path` | nest (linux): passed, nest (macos): passed |
 | 38 | nest | `tests/e2e-unified/tests/api/test_folder_read_principal.py::test_a_qualified_request_against_the_bare_declaration_reads_without_a_choice` | nest (linux): passed, nest (macos): passed |
@@ -249,15 +253,15 @@ Stamped 2026-11-07 at ac836c937b.
 | 50 | nest | `tests/e2e-unified/tests/api/test_ext_kinds.py::test_a_remote_principal_cannot_ask_to_read_or_send_conversations` | nest (linux): passed, nest (macos): passed |
 | 51 | app | `tests/e2e-unified/tests/test_cli_conversations_send_gates.py::test_the_cli_send_is_gated_as_the_page_is_and_its_ceiling_outlives_a_restart` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 | 51 | app | absent by design on web, ios, android | — |
-| 52 | nest | `tests/e2e-unified/tests/api/test_oauth_issuer.py::test_an_openid_sign_in_mints_an_id_token_the_jwks_verifies` | nest (linux): passed |
-| 52 | nest | `tests/e2e-unified/tests/api/test_oauth_issuer.py::test_userinfo_answers_under_the_dpop_bound_access_token_and_refuses_a_bearer` | nest (linux): passed |
-| 53 | nest | `tests/e2e-unified/tests/api/test_third_party_admin_scope.py::test_an_admin_approved_app_reads_and_acts_on_the_admin_pages_never_a_sovereign_act` | nest (linux): passed |
-| 54 | nest | `tests/e2e-unified/tests/api/test_oauth_refresh_replay.py::test_a_refresh_token_used_twice_ends_the_apps_whole_session_family` | nest (linux): passed |
+| 52 | nest | `tests/e2e-unified/tests/api/test_oauth_issuer.py::test_an_openid_sign_in_mints_an_id_token_the_jwks_verifies` | nest (linux): passed, nest (macos): passed |
+| 52 | nest | `tests/e2e-unified/tests/api/test_oauth_issuer.py::test_userinfo_answers_under_the_dpop_bound_access_token_and_refuses_a_bearer` | nest (linux): passed, nest (macos): passed |
+| 53 | nest | `tests/e2e-unified/tests/api/test_third_party_admin_scope.py::test_an_admin_approved_app_reads_and_acts_on_the_admin_pages_never_a_sovereign_act` | nest (linux): passed, nest (macos): passed |
+| 54 | nest | `tests/e2e-unified/tests/api/test_oauth_refresh_replay.py::test_a_refresh_token_used_twice_ends_the_apps_whole_session_family` | nest (linux): passed, nest (macos): passed |
 | 55 | nest | `tests/e2e-unified/tests/api/test_folder_deposit.py::test_a_connected_app_deposits_into_a_folder_blind_over_both_doors` | nest (linux): passed, nest (macos): passed |
 | 56 | app | `tests/e2e-unified/tests/test_folder_deposit_signature.py::test_the_card_says_files_are_signed_and_the_version_names_the_app` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 57 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_an_assistants_card_names_it_and_says_its_grant_reaches_the_assistant` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 58 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_served_principal_s_row_opens_its_record_newest_first` — requires `connected-apps-oracle-record` (not built: windows, android-kids, ios-kids) | tui (linux): passed, tui (macos): passed |
-| 59 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_bare_folder_request_lets_the_user_choose_the_folder_on_the_card` | linux (linux): failed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 59 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_bare_folder_request_lets_the_user_choose_the_folder_on_the_card` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 | 59 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_bare_folder_card_no_folder_can_take_says_why_and_offers_no_approve` | linux (linux): passed, tui (linux): passed, tui (macos): passed |
 | 60 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_connected_app_holding_keys_shows_them_now_and_in_its_history` | tui (linux): passed |
 <!-- features-render:end -->

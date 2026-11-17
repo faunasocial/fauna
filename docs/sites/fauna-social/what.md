@@ -32,7 +32,7 @@ Served over CalDAV and CardDAV, so Apple Calendar, Thunderbird and your phone sy
 
 *Illustration: mouse*
 
-A photo library and folder sync across your machines — at home in Finder, in Explorer, and in the Files app on your phone.
+A photo library and folder sync across your machines — at home in Explorer and in the Files app on your phone.
 
 ## Backups that answer to you
 

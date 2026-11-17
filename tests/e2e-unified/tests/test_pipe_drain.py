@@ -487,6 +487,39 @@ def test_a_build_slot_wait_timeout_is_not_retried(monkeypatch, tmp_path):
     assert "just tui-debug" in msg
 
 
+def test_a_refused_build_slot_is_not_retried(monkeypatch, tmp_path):
+    """A `build` acquire the slot REFUSED (exit 75 — refuse mode under a held
+    lane, or the preflight's plan probe) is not contention: the same acquire is
+    refused again on the spot. Retrying it doubled every stale job's recipe calls
+    in a `--plan` run — measured on Windows 2026-11-16, five jobs each run twice,
+    the probe 7.4 minutes against the warmth read's 10-minute ceiling."""
+    import conftest
+
+    invocations = tmp_path / "invocations"
+    invocations.mkdir()
+    _fake_just(
+        tmp_path,
+        f': > "{invocations}/$$"\n'  # unconditional: proves this run happened
+        "echo \"[build-slot] REFUSED: refused a 'build' slot (the preflight's plan "
+        "probe, FAUNA_SLOT_PLAN_PROBE set): this job would compile — cargo build. "
+        "Nothing was built.\" >&2\n"
+        "exit 75\n",
+    )
+    monkeypatch.setenv("PATH", str(tmp_path), prepend=False)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        conftest._build_app_via_just("tui")
+
+    msg = str(excinfo.value)
+    assert len(list(invocations.iterdir())) == 1, (
+        "a refused acquire must be raised on the FIRST failure — the retry is "
+        "refused the same way"
+    )
+    assert "NOT retried" in msg
+    assert "refused" in msg
+    assert "just tui-debug" in msg
+
+
 def test_a_disk_quota_failure_is_classified_as_infra_not_a_real_break(monkeypatch, tmp_path):
     """A `debug/incremental` cache eating
     a dev checkout's ZFS quota fails a build with a bare

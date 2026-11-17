@@ -13,11 +13,32 @@
   import { relativeTime } from '#lib/value-format';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { IDS } from '#lib/generated/uiIds';
+  import { ensureWasm, notificationsClearAllPossibility, notificationsMarkAllReadPossibility } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import { readFailed, type ReadWord } from '#lib/read-gate';
 
   let error = $state('');
   let notifications: UnifiedNotification[] = $state([]);
   let loading = $state(true);
   let unreadCount = $derived(notifications.filter(n => !n.is_read).length);
+
+  // Where the page's list read stands (`notifications.md` § Errors & edge
+  // cases, *The page-wide actions wait on the first read*): *Mark all read*
+  // and *Clear all* are blocked still loading before the first read answers,
+  // with its failure after a failed one; once read, *Clear all* is blocked
+  // while the page shows no row. The answers are shared Rust
+  // (`fauna_client_notifications::{mark_all_read_possibility,
+  // clear_all_possibility}`), painted here and asked again by each handler.
+  let listRead = $state<ReadWord>('pending');
+  let wasmUp = $state(false);
+  function markReadAnswer() {
+    return notificationsMarkAllReadPossibility(listRead);
+  }
+  function clearAnswer() {
+    return notificationsClearAllPossibility(listRead, notifications.length);
+  }
+  const markReadGate = $derived(formGate(wasmUp ? askPossibility(() => markReadAnswer()) : null));
+  const clearGate = $derived(formGate(wasmUp ? askPossibility(() => clearAnswer()) : null));
 
   // The muted-word collapse (`notifications.md` § Muted words): the shared
   // decision at render, over the list the conversation collapse reads — loaded
@@ -66,7 +87,10 @@
     try {
       const resp = await getNotifications(id.secretHex);
       notifications = resp.notifications;
+      listRead = 'resolved';
     } catch (e: any) {
+      // A failure after an answered read keeps the rows shown actionable.
+      listRead = readFailed(listRead);
       error = e.message || t.common.load_failed;
     } finally {
       loading = false;
@@ -74,6 +98,10 @@
   }
 
   onMount(async () => {
+    void ensureWasm().then(
+      () => { wasmUp = true; },
+      (e: any) => { error = e?.message ?? String(e); },
+    );
     await Promise.all([loadMutedKeywords(), load()]);
 
     // Live refresh — the web twin of linux's central push dispatch
@@ -128,6 +156,8 @@
   async function markAllRead() {
     const id = $identity;
     if (!id) return;
+    const refusal = formRefusal(askPossibility(() => markReadAnswer()));
+    if (refusal !== null) { error = refusal; return; }
     try {
       await markNotificationsRead(id.secretHex);
       notifications = notifications.map(n => ({ ...n, is_read: true }));
@@ -153,8 +183,11 @@
    *  row that arrived after the user looked survives; then refetch. */
   async function clearAll() {
     const id = $identity;
+    if (!id) return;
+    const refusal = formRefusal(askPossibility(() => clearAnswer()));
+    if (refusal !== null) { error = refusal; return; }
     const upTo = clearUpTo(notifications);
-    if (!id || upTo === null) return;
+    if (upTo === null) return;
     try {
       await clearNotifications(id.secretHex, upTo);
       await load();
@@ -171,14 +204,26 @@
 
 {#if !$identity}
   <p class="muted">{t.common.sign_in_required}</p>
-{:else if loading}
-  <p class="muted">{t.common.loading}</p>
 {:else}
+  <!-- The page-wide actions are on screen from the first paint, blocked with
+       their reason (on `title`) until the first list read answers. -->
   <div class="notifications-header">
-    <span data-testid={IDS.NOTIFICATION_COUNT_BADGE} class="badge">{unreadCount} unread</span>
-    <button data-testid={IDS.NOTIFICATION_MARK_READ} class="btn" onclick={markAllRead}>{t.bridges.mark_all_read}</button>
-    <button data-testid={IDS.NOTIFICATION_CLEAR} class="btn" disabled={notifications.length === 0} onclick={clearAll}>{t.notifications.clear_all}</button>
+    {#if !loading}
+      <span data-testid={IDS.NOTIFICATION_COUNT_BADGE} class="badge">{unreadCount} unread</span>
+    {/if}
+    <button
+      data-testid={IDS.NOTIFICATION_MARK_READ} class="btn" onclick={markAllRead}
+      disabled={markReadGate.disabled} title={markReadGate.reason || undefined}
+    >{t.bridges.mark_all_read}</button>
+    <button
+      data-testid={IDS.NOTIFICATION_CLEAR} class="btn" onclick={clearAll}
+      disabled={clearGate.disabled} title={clearGate.reason || undefined}
+    >{t.notifications.clear_all}</button>
   </div>
+
+  {#if loading}
+  <p class="muted">{t.common.loading}</p>
+  {:else}
 
   {#if notifications.length === 0}
     <p class="muted">No notifications yet.</p>
@@ -233,6 +278,7 @@
       {/if}
       <button data-testid={IDS.NOTIFICATION_DISMISS} class="btn" disabled={notif.retained} onclick={() => dismiss(notif.id)}>{t.notifications.dismiss}</button>
     {/each}
+  {/if}
   {/if}
 {/if}
 

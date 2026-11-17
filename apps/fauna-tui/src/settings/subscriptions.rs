@@ -286,8 +286,11 @@ pub(super) fn subscriptions_elements(app: &crate::app::App) -> Vec<Element> {
     // policy says no), while this `#[cfg]` is COMPILE-TIME excision (an app
     // artifact that carries no money plane at all). A disabled button is still
     // a painted id, and criterion 1 is a `strings`-grep for ids.
+    //
+    // A nest without the payments plane answers `Absent`, and then the whole
+    // redeem block is left out, its title and code field with it (rule 2).
     #[cfg(feature = "payments")]
-    {
+    if redeem_gate(state).is_shown() {
         els.push(Element::chrome(s::REDEEM_CLAIM_TITLE));
         els.push(
             Element::input(
@@ -309,39 +312,36 @@ pub(super) fn subscriptions_elements(app: &crate::app::App) -> Vec<Element> {
         // does NOT disable, because a redemption toward a creator already in the
         // records is still admitted). A page that decided this itself would get
         // both wrong in the direction that disables working buttons.
-        let claim_gate = redeem_gate(state);
-        els.push(Element::gesture_button(
-            ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON,
-            s::REDEEM,
-            claim_gate.is_none(),
-            Gesture::Settings(Action::RedeemClaim),
-        ));
-        // Rule 5 — a disabled control states its reason within eyeshot, and here the
-        // reason is the honest why-line the shared crate already composed. Nothing
-        // is painted while the read is un-hydrated: a settled claim with no basis is
-        // worse than a blank (the un-hydrated-paint finding), and the button stays
-        // live in that window because the nest, not the app, is the enforcement floor.
-        if let Some(reason) = claim_gate {
-            els.push(Element::chrome(reason));
-        }
+        els.push(
+            Element::gesture_button(
+                ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON,
+                s::REDEEM,
+                true,
+                Gesture::Settings(Action::RedeemClaim),
+            )
+            .possible(redeem_gate(state)),
+        );
+        // The element seam paints a blocked answer's reason as the button's own
+        // label (rule 2: within eyeshot).
     }
     els
 }
 
-/// Why `subscription-claim-redeem-button` is dead, or `None` when it works.
+/// Whether `subscription-claim-redeem-button` can succeed now — the shared
+/// `fauna_client_features::gate_possibility` over the features read.
 ///
-/// `payments` is the member that gates claim redemption. A `hidden` affordance
-/// means the nest build carries no payments plane at all — the button is
-/// disabled with the same honest line rather than vanishing, because the page
-/// is reachable and a button that silently disappears is the silent gate
-/// boundary 4 forbids; the *excision* story is the orthogonal COMPILE-TIME
-/// axis, landed 2026-08-14 as this crate's `payments` feature — that one makes
-/// the whole section (this gate included) absent from the artifact, where this
-/// one only greys the button in a build that HAS the plane.
+/// `payments` is the member that gates claim redemption. Before the read has
+/// answered it is blocked, still loading (`ui/README.md` § Offer only what is
+/// possible, rule 5). A `hidden` affordance means the nest build carries no
+/// payments plane at all, and the answer is absent (rule 2); the COMPILE-TIME
+/// excision is the orthogonal axis, this crate's `payments` feature, which
+/// makes the whole section absent from the artifact. Both pages that paint the
+/// button (Settings → Subscriptions and another's profile) read this one
+/// answer, and both actions ask it again.
 #[cfg(feature = "payments")]
-pub(crate) fn redeem_gate(state: &SettingsState) -> Option<String> {
-    fauna_client_features::gate_reason(
-        state.features.as_deref().unwrap_or(&[]),
+pub(crate) fn redeem_gate(state: &SettingsState) -> fauna_core::possibility::Possibility {
+    fauna_client_features::gate_possibility(
+        state.features.as_deref(),
         "payments",
         fauna_i18n::strings::lookup,
     )
@@ -430,11 +430,21 @@ mod tests {
         let els = subscriptions_elements(&app);
 
         let button = redeem_button(&els);
-        assert!(!button.enabled, "a guaranteed refusal must not look live");
+        let answer = button
+            .possibility
+            .clone()
+            .expect("the button declares its answer");
         assert!(
-            els.iter()
-                .any(|e| e.text == "Turned off by your nest admin."),
-            "rule 5: the disabled control states its reason within eyeshot"
+            !answer.is_possible(),
+            "a guaranteed refusal must not look live"
+        );
+        assert_eq!(
+            answer
+                .reason()
+                .map(|r| r.resolve(fauna_i18n::strings::lookup))
+                .as_deref(),
+            Some("Turned off by your nest admin."),
+            "rule 2: the disabled control states its reason within eyeshot"
         );
     }
 
@@ -452,22 +462,37 @@ mod tests {
 
         let row = &app.settings.features.as_ref().unwrap()[0];
         assert_eq!(row.availability, "limit", "tier 1 bounds it");
-        assert!(
-            redeem_button(&els).enabled,
+        assert_eq!(
+            redeem_button(&els).possibility,
+            Some(fauna_core::possibility::Possibility::Possible),
             "bounded is not blocked — the button works"
         );
     }
 
-    /// Before the read lands there is no basis for a verdict, and the nest is
-    /// the enforcement floor regardless — so the button stays live rather than
-    /// being disabled on a guess.
+    /// Unknown is not possible (`profile.md` § Errors & edge cases): before the
+    /// read lands the button is blocked still loading — never offered on a
+    /// guess — and a nest without the payments plane (a `hidden` row) leaves
+    /// the whole redeem block out.
     #[test]
-    fn an_unhydrated_read_leaves_redeem_live_and_says_nothing() {
+    fn redeem_waits_for_the_read_and_is_absent_without_the_plane() {
         let els = subscriptions_elements(&subscriptions_with(None));
-        assert!(redeem_button(&els).enabled);
+        assert_eq!(
+            redeem_button(&els).possibility,
+            Some(fauna_core::possibility::Possibility::blocked(
+                fauna_core::localized::LocalizedText::key("common.still_loading")
+            ))
+        );
         assert!(
             !els.iter().any(|e| e.text.contains("Turned off")),
             "no verdict may be painted before its data lands"
+        );
+
+        let els = subscriptions_elements(&subscriptions_with(Some(vec![payments_row(&[], &[])])));
+        assert!(
+            !ids(&els)
+                .iter()
+                .any(|id| id.starts_with("subscription-claim-redeem")),
+            "a nest without the plane offers no redeem at all"
         );
     }
 

@@ -180,6 +180,39 @@ pub fn custody_leg_unattempted_warning() -> LocalizedText {
     LocalizedText::key(CUSTODY_UNCONFIRMED_KEY)
 }
 
+/// What one custody-leg run tells the host's warning surface — every run's,
+/// the first and each later retry's alike (`box-recovery.md` § The
+/// plane-era recovery floor, *(c)*: the warning shows while custody is
+/// unconfirmed, and a later run that confirms it takes the warning down).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustodyLegSignal {
+    /// Custody is unconfirmed: paint this warning ([`custody_leg_warning`]).
+    Warning(LocalizedText),
+    /// Nothing is owed: a custody warning an earlier run painted is
+    /// withdrawn — and only that warning ([`is_custody_leg_warning`]), never
+    /// whatever else the shared surface shows by then.
+    Cleared,
+}
+
+impl CustodyLegSignal {
+    /// The signal a run ending in `custody` owes.
+    #[must_use]
+    pub fn of(custody: &DeploymentSeedCustody) -> Self {
+        custody_leg_warning(custody).map_or(Self::Cleared, Self::Warning)
+    }
+}
+
+/// Whether `shown` — the text on the host's warning surface now — is a
+/// custody-leg warning, as the host's own resolver `render` words each one.
+/// A [`CustodyLegSignal::Cleared`] takes the surface down only when this
+/// holds, so a later, unrelated warning is never wiped by a custody retry.
+pub fn is_custody_leg_warning(shown: &str, render: impl Fn(&LocalizedText) -> String) -> bool {
+    !shown.is_empty()
+        && [CUSTODY_MISMATCH_KEY, CUSTODY_UNCONFIRMED_KEY]
+            .iter()
+            .any(|key| render(&LocalizedText::key(*key)) == shown)
+}
+
 /// How the mark half of [`run_deployment_seed_custody_leg`] ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupersessionMarks {
@@ -311,6 +344,73 @@ where
     S: DeploymentSeedStore + ?Sized,
 {
     run_deployment_seed_custody_leg_over(nest, bound_nest_id, &StoreFold(store)).await
+}
+
+/// How long a host edge's run of the leg ([`run_deployment_seed_custody_leg_settling`])
+/// waits out the account store's refusal before it ends unconfirmed. The
+/// first connection after provisioning meets a store that is installed but
+/// not yet settled — the door refuses while no generation tip resolves — and
+/// on the owner's 2026-11-15 walk it settled some three and a half minutes
+/// later; ten minutes covers that with room, and a store still refusing after
+/// it is a fault worth the warning.
+pub const CUSTODY_STORE_SETTLE_WAIT: Duration = Duration::from_secs(600);
+
+/// The first pause of [`CUSTODY_STORE_SETTLE_WAIT`]'s backoff; it doubles up
+/// to [`CUSTODY_STORE_RETRY_CAP`].
+const CUSTODY_STORE_RETRY_FIRST: Duration = Duration::from_secs(2);
+
+/// The longest pause between two runs inside [`CUSTODY_STORE_SETTLE_WAIT`].
+const CUSTODY_STORE_RETRY_CAP: Duration = Duration::from_secs(30);
+
+/// **The custody leg as a host edge runs it** — [`run_deployment_seed_custody_leg`],
+/// re-run with a backoff while the account store refuses
+/// ([`DeploymentSeedCustody::StoreRefused`]) for up to
+/// [`CUSTODY_STORE_SETTLE_WAIT`]. Every other outcome returns at once: the
+/// fetch already carries its bounded transport retry, and the rest are
+/// verdicts the box will repeat.
+///
+/// So the post-auth edge that lands while the store is installed but not
+/// yet settled (`box-recovery.md` § The plane-era recovery floor, *(c)*)
+/// confirms custody once the store takes the write, and warns only when it
+/// never does. Host edges only: the account runtime's own pass runs the
+/// linked arm on the store thread and must never sleep there.
+pub async fn run_deployment_seed_custody_leg_settling<R, S>(
+    nest: &R,
+    bound_nest_id: ActorId,
+    store: &S,
+) -> CustodyLegReport
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+    S: DeploymentSeedStore + ?Sized,
+{
+    let mut waited = Duration::ZERO;
+    let mut pause = CUSTODY_STORE_RETRY_FIRST;
+    loop {
+        let report = run_deployment_seed_custody_leg(nest, bound_nest_id, store).await;
+        let DeploymentSeedCustody::StoreRefused(why) = &report.custody else {
+            if waited > Duration::ZERO {
+                tracing::info!(
+                    waited_s = waited.as_secs(),
+                    outcome = ?report.custody,
+                    "deployment-seed custody leg: the account store settled"
+                );
+            }
+            return report;
+        };
+        if waited >= CUSTODY_STORE_SETTLE_WAIT {
+            return report;
+        }
+        let step = pause.min(CUSTODY_STORE_SETTLE_WAIT - waited);
+        tracing::info!(
+            waited_s = waited.as_secs(),
+            retry_in_s = step.as_secs(),
+            "deployment-seed custody leg: the account store refused ({why}); retrying once it settles"
+        );
+        fauna_sleep::sleep(step).await;
+        waited += step;
+        pause = (pause * 2).min(CUSTODY_STORE_RETRY_CAP);
+    }
 }
 
 /// [`run_deployment_seed_custody_leg`] over the [`CustodySeedFold`] seam.
@@ -702,7 +802,7 @@ mod tests {
             DeploymentSeedCustody::Captured,
             DeploymentSeedCustody::StoreRefused("no tip".into()),
         ];
-        for outcome in every {
+        for outcome in every.clone() {
             assert_eq!(
                 custody_leg_warning(&outcome).is_some(),
                 outcome.unconfirmed(),
@@ -730,6 +830,36 @@ mod tests {
             custody_leg_unattempted_warning(),
             LocalizedText::key(CUSTODY_UNCONFIRMED_KEY)
         );
+        // The signal agrees with the warning: a warning exactly where one is
+        // owed, the cleared mark everywhere else.
+        for outcome in every {
+            match CustodyLegSignal::of(&outcome) {
+                CustodyLegSignal::Warning(w) => {
+                    assert_eq!(Some(w), custody_leg_warning(&outcome), "{outcome:?}");
+                }
+                CustodyLegSignal::Cleared => assert!(!outcome.unconfirmed(), "{outcome:?}"),
+            }
+        }
+    }
+
+    /// The cleared mark takes down a custody warning, in either wording, and
+    /// nothing else: an unrelated warning on the shared surface stands.
+    #[test]
+    fn only_a_custody_warning_is_withdrawn() {
+        let render = |t: &LocalizedText| format!("<{}>", t.key);
+        assert!(is_custody_leg_warning(
+            &format!("<{CUSTODY_UNCONFIRMED_KEY}>"),
+            render
+        ));
+        assert!(is_custody_leg_warning(
+            &format!("<{CUSTODY_MISMATCH_KEY}>"),
+            render
+        ));
+        assert!(!is_custody_leg_warning("<some.other_warning>", render));
+        assert!(!is_custody_leg_warning(
+            "",
+            |_: &LocalizedText| String::new()
+        ));
     }
 
     /// A host that builds its machines before the store is up holds the
@@ -956,6 +1086,72 @@ mod tests {
         ));
         assert_eq!(second.custody, DeploymentSeedCustody::Captured);
         assert!(held(&store, &bound).is_some());
+    }
+
+    // ── A host edge's run waits out a store still settling ────────────────
+
+    /// The first connection after provisioning: the door refuses the merge
+    /// while no generation tip resolves, for several attempts. A host edge's
+    /// run waits it out and confirms custody with nobody doing anything —
+    /// no warning left standing (the owner's walk of 2026-11-15, where the
+    /// refusal warned and nothing ever retried).
+    #[tokio::test(start_paused = true)]
+    async fn a_host_edge_run_waits_out_a_store_still_settling_and_captures() {
+        let bound = kp(40);
+        let nest = admin_nest(&bound);
+        let store = FakeDeploymentSeedStore::empty();
+        store.refuse_next_merges(5);
+
+        let report =
+            run_deployment_seed_custody_leg_settling(&nest, bound.actor_id(), &store).await;
+
+        assert_eq!(
+            report.custody,
+            DeploymentSeedCustody::Captured,
+            "{report:?}"
+        );
+        assert!(custody_leg_warning(&report.custody).is_none());
+        assert!(held(&store, &bound).is_some());
+    }
+
+    /// A store that never takes the write: the wait is bounded by
+    /// [`CUSTODY_STORE_SETTLE_WAIT`], and the run then ends unconfirmed,
+    /// retryable and warned — the next edge's to land.
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_never_settles_ends_warned_after_the_bounded_wait() {
+        let bound = kp(41);
+        let nest = admin_nest(&bound);
+        let store = FakeDeploymentSeedStore::empty();
+        store.refuse_after(0);
+
+        let started = tokio::time::Instant::now();
+        let report =
+            run_deployment_seed_custody_leg_settling(&nest, bound.actor_id(), &store).await;
+
+        assert!(
+            matches!(report.custody, DeploymentSeedCustody::StoreRefused(_)),
+            "{report:?}"
+        );
+        assert!(report.custody.retryable());
+        assert!(custody_leg_warning(&report.custody).is_some());
+        assert!(started.elapsed() >= CUSTODY_STORE_SETTLE_WAIT);
+        assert!(started.elapsed() < CUSTODY_STORE_SETTLE_WAIT + Duration::from_secs(60));
+    }
+
+    /// Only the store's refusal is waited on: a verdict the box will repeat
+    /// (not an admin, a mismatched seed) returns at once, with no sleep.
+    #[tokio::test(start_paused = true)]
+    async fn a_verdict_the_box_repeats_is_not_waited_on() {
+        let bound = kp(42);
+        let nest = admin_nest(&kp(43));
+        let store = FakeDeploymentSeedStore::empty();
+
+        let started = tokio::time::Instant::now();
+        let report =
+            run_deployment_seed_custody_leg_settling(&nest, bound.actor_id(), &store).await;
+
+        assert_eq!(report.custody, DeploymentSeedCustody::RefusedMismatch);
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 
     // ── The linked arm ─────────────────────────────────────────────────────

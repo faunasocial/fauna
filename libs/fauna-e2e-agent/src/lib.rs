@@ -1026,6 +1026,13 @@ pub use fauna_e2e_contract::custody_ceremony_ingest_json;
 /// wait for `passes_completed` to pass the baseline. `pending` is the in-flight
 /// countdown behind `photo-backup-sync-progress`; it is 0 whenever no pass is in
 /// flight, so it is a progress readout and never a pass barrier.
+///
+/// `requests_coalesced` counts every request the single-flight gate refused
+/// because a pass was already in flight (each folded into one trailing pass) —
+/// monotonic, so a coalescing witness reads it rising with `passes_started`
+/// unchanged as the positive statement "the second request reached the gate
+/// mid-pass" before it releases the parked pass. android and apple (iOS and
+/// macOS) both publish it.
 pub const PHOTO_BACKUP_KEY: &str = "photo_backup";
 
 /// Photo backup's **scheduled-pass poke** — convention 14's `run_now` for the one
@@ -1409,6 +1416,25 @@ pub const CONNECTION_KEY: &str = "connection";
 /// FFI build the same shape) over its held bearer.
 pub const LAUNCH_TOKEN_KEY: &str = "launch_token";
 
+/// The state key carrying the **journal of the app's visible top-level
+/// windows** — `{"journal": [{"seq": N, "visible": [{"id": K, "name": "…"}]}],
+/// "now": [{"id": K, "name": "…"}]}`, one entry appended each time the set of
+/// visible windows (or a visible window's widget name) changes, `id` a
+/// process-local serial that names one window object for its whole life.
+///
+/// **What it is for.** `onboarding.md` § Wizard exit handling → *The wizard
+/// becomes the app in place*: at `LoggedIn` the surface on screen stays and
+/// its content changes, and an append-mode switch never leaves the person with
+/// no window. Neither is visible in any element tree — a close and a reopen
+/// lands the same widgets in a new window — so the witness reads this journal
+/// across the exit: the visible set never empties after its first entry, and
+/// the window that showed the wizard is the one that shows the app. Recorded
+/// from the windows' own `visible`/`name` notifications, never sampled, so a
+/// sub-frame gap is an entry too (convention 14). Published by the apps whose
+/// shell has more than one top-level window (linux); an app that does not
+/// publish it is refused by the consumer (convention 11).
+pub const TOPLEVEL_WINDOWS_KEY: &str = "toplevel_windows";
+
 /// The agent command forcing the held session bearer's refresh NOW, through
 /// the production refresh path, awaited so the ack lands after the outcome —
 /// the wrong-clock refresh witness's ceremony leg (case M). The bearer is the
@@ -1552,6 +1578,28 @@ pub use fauna_e2e_contract::{
 pub const PAINTED_TEXT_AREA_KEY: &str = "painted_text_area";
 
 pub use fauna_e2e_contract::{LaidOutText, MIN_READABLE_LAYOUT_UNIT, PaintedTextArea};
+
+/// State key: the **journal of what the app's root surface showed**, one entry
+/// per change across its painted frames — `{"journal": [{"seq": N, "showing":
+/// "wizard"|"launch_progress"|"app"|<another launch surface's ui.yaml
+/// page>|null}], "now": …}`, built by [`RootSurfaceJournal::json`]
+/// (`fauna-e2e-contract`); `null` is a frame that painted nothing.
+///
+/// **What it is for.** `onboarding.md` § Wizard exit handling → *The wizard
+/// becomes the app in place*: from the wizard's `LoggedIn` exit to the
+/// signed-in page the one surface (a terminal, a tab, an activity, a window)
+/// shows the launch progress view or the app, never nothing — the same for an
+/// append-mode switch. A read of the element tree samples; a blank frame
+/// shorter than a poll would pass. This journal is fed by the app's paint path
+/// itself, once per painted frame (convention 14), so such a frame is an entry.
+/// The apps with one surface publish this; linux, whose shell has several
+/// windows, publishes [`TOPLEVEL_WINDOWS_KEY`] for the same rule. An app that
+/// publishes neither is refused by the consumer (convention 11).
+pub const ROOT_SURFACE_KEY: &str = "root_surface";
+
+pub use fauna_e2e_contract::{
+    ROOT_SURFACE_APP, ROOT_SURFACE_LAUNCH_PROGRESS, ROOT_SURFACE_WIZARD, RootSurfaceJournal,
+};
 
 /// A request forwarded to the client's UI thread, with the one-shot reply
 /// channel the (blocking) server thread waits on.

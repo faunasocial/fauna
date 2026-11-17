@@ -5,7 +5,7 @@
 <WixLocalization Culture="en-US" xmlns="http://wixtoolset.org/schemas/v4/wxl">
 
   <!-- public-text: windows-installer-descriptions -->
-  <String Id="WelcomeDlgDescription" Value="The Setup Wizard will install Fauna on your computer. Fauna is free, open-source social software; your data lives on your own devices. Click Next to continue, or Cancel to exit." />
+  <String Id="WelcomeDlgDescription" Value="The Setup Wizard will install [ProductName] on your computer. Fauna is free, open-source social software; your data lives on your own devices. Click Next to continue, or Cancel to exit." />
   <!-- public-text-end: windows-installer-descriptions -->
 
 </WixLocalization>

@@ -8,6 +8,17 @@ use std::sync::Arc;
 use fauna_onboarding_machine::observer::CountingObserver;
 use fauna_onboarding_machine::observer::NullObserver;
 
+/// The handle check found the domain unregistered — the one verdict under
+/// which the buy box may be ticked (`onboarding-provisioning.md` § 3d).
+fn domain_available(m: &OnboardingMachine) {
+    m.set_handle_check_outcome_for_test(
+        fauna_onboarding_machine::snapshots::HandleCheckOutcome::DomainAvailable {
+            buyable_via_provider: true,
+            price: None,
+        },
+    );
+}
+
 fn test_machine() -> Arc<OnboardingMachine> {
     let observer: Arc<dyn OnboardingObserver> = Arc::new(NullObserver);
     OnboardingMachine::new(observer)
@@ -222,6 +233,7 @@ fn buy_domain_toggle_disables_non_registrar_providers() {
     let m = test_machine();
     m.set_step_for_test(OnboardingStep::DnsConfig);
     m.select_dns_provider(NO_REGISTRAR.into());
+    domain_available(&m);
     m.toggle_buy_domain(true);
     // Auto-deselected: buying a domain in the wizard needs a provider that can
     // actually register one.
@@ -249,6 +261,7 @@ fn buy_domain_toggle_keeps_registrar_capable_providers() {
     let m = test_machine();
     m.set_step_for_test(OnboardingStep::DnsConfig);
     m.select_dns_provider(REGISTRAR.into());
+    domain_available(&m);
     m.toggle_buy_domain(true);
     let dns = m.dns_config();
     assert_eq!(

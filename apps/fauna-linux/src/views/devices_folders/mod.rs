@@ -18,6 +18,7 @@
 //! / the device-local folder map; the machine refreshes on auth + when either
 //! sub-page becomes visible (wired in `app.rs`).
 
+use fauna_core::possibility::ReadState;
 use fauna_ui_ids as ids;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -347,15 +348,20 @@ struct RenderCtx {
     /// It gates each owner row's `folder-webdav-toggle` — disabled + hinted
     /// for an MSEK-less actor rather than clicking into a `NoMsek` that has already
     /// committed the nest flag (`webdav-server.md` § Independent enablement pt 2).
-    /// Starts `false` (fail-safe: a control that cannot succeed is not offered).
-    can_serve_webdav: Cell<bool>,
+    /// Carries where the read stands beside its answer, so the toggle is painted
+    /// from the shared `webdav_serve_possibility` (`folders.md` § Errors & edge
+    /// cases, *Own-tier and mail gates*): starts `Pending` — "still loading",
+    /// never "set up mail" — and a failed read is said as such.
+    can_serve_webdav: Cell<(ReadState, bool)>,
     /// The creator's own subscription tier names — the option set each web-type
     /// row's `folder-paywall-tier-select` offers. Like `can_serve_webdav`, a
     /// page-level read the keyless `DevicesMachine` can't own: fetched off the
     /// key-bearing `FaunaClient` (`fetch_own_tier_names`) on page-map and cached
-    /// here. Empty ⇒ the select renders disabled with a "create a tier first" hint
-    /// (nothing to paywall to). `docs/goal/ui/folders.md` § Web paywall.
-    own_tiers: RefCell<Vec<String>>,
+    /// here, with where the read stands: the select is painted from the shared
+    /// `own_tiers_possibility` (use `Paywall`), so only an ANSWERED read with no
+    /// tier says "create a tier first". `docs/goal/ui/folders.md` § Web paywall,
+    /// § Errors & edge cases.
+    own_tiers: RefCell<(ReadState, Vec<String>)>,
     /// The co-present ceremony's own shared-set listing — sets this device
     /// holds the machinery for, appended as `folder-row`s after the M2 sets
     /// (`p2p.md` § Offline share initiation). Painted through
@@ -717,8 +723,8 @@ pub fn build_devices_and_folders_pages(
         folders_error_label: fshell.error_label,
         gesture_error: gesture_error.clone(),
         location_map: Rc::clone(&location_map),
-        can_serve_webdav: Cell::new(false),
-        own_tiers: RefCell::new(Vec::new()),
+        can_serve_webdav: Cell::new((ReadState::Pending, false)),
+        own_tiers: RefCell::new((ReadState::Pending, Vec::new())),
         #[cfg(feature = "p2p-share")]
         group_scopes: RefCell::new(Vec::new()),
         wizard_parent: fshell.content.upcast::<gtk::Widget>(),

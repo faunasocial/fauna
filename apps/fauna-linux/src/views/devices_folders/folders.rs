@@ -8,6 +8,7 @@ use fauna_client_folders::engine_binding::folder_ref_for_row;
 use fauna_client_folders::folders::{
     self as folders_wire, FolderActorMember, FolderMember, PlaceRow,
 };
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_devices_machine::{DeviceSummary, DevicesMachine, FolderSummary};
 
 use super::location_binding;
@@ -242,8 +243,8 @@ pub fn update_folder_list(
     machine: &Arc<DevicesMachine>,
     fauna_client: &Rc<FaunaClient>,
     location_map: &Rc<RefCell<Vec<LocationBinding>>>,
-    can_serve_webdav: bool,
-    own_tiers: &[String],
+    can_serve_webdav: (ReadState, bool),
+    own_tiers: &(ReadState, Vec<String>),
     website_address_enabled: Option<bool>,
     lease: LeaseCtx,
     #[cfg(feature = "p2p-share")] group_scopes: &[crate::offline_share::GroupScopeView],
@@ -656,20 +657,48 @@ fn foreign_bind_for(fs: &FolderSummary) -> Option<location_binding::ForeignBind>
     })
 }
 
+/// `folder-webdav-toggle`'s answer — the shared `webdav_serve_possibility`
+/// over the page's custody read (`folders.md` § Errors & edge cases, *Own-tier
+/// and mail gates*).
+pub(crate) fn webdav_possibility(read: (ReadState, bool)) -> Possibility {
+    fauna_client_folders::webdav_provision::webdav_serve_possibility(read.0, read.1)
+}
+
+/// `folder-paywall-tier-select`'s answer — the shared own-tier answer (use
+/// `Paywall`) over the page's tier read.
+pub(crate) fn paywall_possibility(own_tiers: &(ReadState, Vec<String>)) -> Possibility {
+    use fauna_client_subscriptions::own_tiers::{OwnTierUse, own_tiers_possibility};
+    own_tiers_possibility(own_tiers.0, own_tiers.1.len(), OwnTierUse::Paywall)
+}
+
+/// The dim caption a painted control's reason goes on (hidden until the paint
+/// gives it a reason).
+fn reason_label() -> gtk::Label {
+    gtk::Label::builder()
+        .halign(gtk::Align::Start)
+        .xalign(0.0)
+        .wrap(true)
+        .visible(false)
+        .css_classes(["dim-label", "caption"])
+        .build()
+}
+
 /// One `adw::ExpanderRow` for a folder, with its revealed body. `machine`
 /// backs the save-paths / delete gestures; `fauna_client` backs the lazy
 /// member-roster read (a row-detail WS-RPC call outside the machine's surface).
-/// `can_serve_webdav` is the per-actor MSEK capability the page cached (it is not
-/// a snapshot field — the `DevicesMachine` holds no key material); it gates the
-/// `folder-webdav-toggle`.
+/// `can_serve_webdav` is the per-actor MSEK capability the page cached with
+/// where its read stands (it is not a snapshot field — the `DevicesMachine`
+/// holds no key material); `folder-webdav-toggle` is painted from
+/// [`webdav_possibility`] over it, `folder-paywall-tier-select` from
+/// [`paywall_possibility`] over `own_tiers`.
 #[allow(clippy::too_many_arguments)]
 fn build_folder_row(
     fs: &FolderSummary,
     machine: &Arc<DevicesMachine>,
     fauna_client: &Rc<FaunaClient>,
     location_map: &Rc<RefCell<Vec<LocationBinding>>>,
-    can_serve_webdav: bool,
-    own_tiers: &[String],
+    can_serve_webdav: (ReadState, bool),
+    own_tiers: &(ReadState, Vec<String>),
     website_address_enabled: Option<bool>,
     lease: LeaseCtx,
 ) -> adw::ExpanderRow {
@@ -1101,23 +1130,29 @@ fn build_folder_row(
     // only then fail `NoMsek`, leaving the set served-but-blobless until the next
     // reconcile heals it. Any *other* failure still surfaces on the shared
     // `error-message` banner.
+    //
+    // Painted from the shared `webdav_serve_possibility` over the page's custody
+    // read (`folders.md` § Errors & edge cases, *Own-tier and mail gates*): a
+    // pending read says "still loading", a failed one "failed to load", and only
+    // an answered read with no MSEK says "set up mail first".
+    let webdav_answer = webdav_possibility(can_serve_webdav);
     let webdav_switch = gtk::Switch::builder()
         .valign(gtk::Align::Center)
         .active(fs.webdav_enabled)
-        .sensitive(can_serve_webdav)
-        .tooltip_text(if can_serve_webdav {
-            strings::devices::SERVE_WEBDAV_HINT
-        } else {
-            strings::devices::SERVE_WEBDAV_NEEDS_MAIL
-        })
         .build();
     set_test_id(&webdav_switch, ids::FOLDER_WEBDAV_TOGGLE);
+    // The reason line under the toggle; the hint rides the tooltip when live.
+    let webdav_reason = reason_label();
+    crate::possible::paint(&webdav_switch, Some(&webdav_reason), webdav_answer.clone());
+    if webdav_answer.is_possible() {
+        webdav_switch.set_tooltip_text(Some(strings::devices::SERVE_WEBDAV_HINT));
+    }
     // The composite's BINDING leg, not the cheap flag: `serve_set` flips the
     // nest flag and then re-provisions the MSEK-sealed `WebdavKeysBlob`, and
     // the provision is the half that genuinely needs a nest (an unfinished
     // flip is what `serve_set`'s own doc warns about). Declared AFTER the
-    // builder's `.sensitive(can_serve_webdav)`, so the "set up mail first"
-    // intent is what a reconnect restores — never a blanket enable.
+    // paint, so the answer's sensitivity is what a reconnect restores — never a
+    // blanket enable.
     crate::offline_gate::declare_wire_kind(
         &webdav_switch,
         "fauna.bridges.provision_webdav_keys_blob",
@@ -1128,6 +1163,14 @@ fn build_folder_row(
         let name = fs.name.clone();
         let mls_group_id = fs.mls_group_id.clone();
         webdav_switch.connect_active_notify(move |sw| {
+            // The press asks the same answer and refuses with its reason.
+            let answer = webdav_possibility(can_serve_webdav);
+            if !answer.is_possible() {
+                if let Some(text) = crate::form_gate::reason_text(&answer) {
+                    fauna_client.refuse_gesture("serve_webdav", text);
+                }
+                return;
+            }
             fauna_client.serve_set_folder(
                 Arc::clone(&machine),
                 &name,
@@ -1137,20 +1180,10 @@ fn build_folder_row(
         });
     }
     let webdav_row = entry_row(strings::devices::SERVE_WEBDAV, &webdav_switch);
-    if !can_serve_webdav {
-        // Say *why* it is insensitive, inline — the tooltip alone is not
-        // discoverable on a control the user cannot focus. Same string, same
-        // placement intent as the web hint span / android hint Text.
-        webdav_row.append(
-            &gtk::Label::builder()
-                .label(strings::devices::SERVE_WEBDAV_NEEDS_MAIL)
-                .halign(gtk::Align::Start)
-                .xalign(0.0)
-                .wrap(true)
-                .css_classes(["dim-label", "caption"])
-                .build(),
-        );
-    }
+    // Say *why* it is insensitive, inline — the tooltip alone is not
+    // discoverable on a control the user cannot focus (the paint shows the
+    // line only while the answer carries a reason).
+    webdav_row.append(&webdav_reason);
     row.add_row(&webdav_row);
 
     // Per-set "paywall to tier" control (`folder-paywall-tier-select`,
@@ -1174,7 +1207,8 @@ fn build_folder_row(
     // `mode = "web"` spelling.
     if fs.website_enabled {
         let current = fs.web_paywall_tier.clone();
-        let has_tiers = !own_tiers.is_empty();
+        let paywall_answer = paywall_possibility(own_tiers);
+        let own_tiers = &own_tiers.1;
 
         // Model = wire values. The empty sentinel (placeholder) rides only while
         // public. A tier the set is already paywalled to is always present even if
@@ -1218,18 +1252,25 @@ fn build_folder_row(
         };
         paywall_dropdown.set_selected(selected_idx as u32);
 
-        paywall_dropdown.set_sensitive(has_tiers);
-        paywall_dropdown.set_tooltip_text(Some(if has_tiers {
-            strings::devices::PAYWALL_TIER_HINT
-        } else {
-            strings::devices::PAYWALL_TIER_NEEDS_TIER
-        }));
+        // Painted from the shared own-tier answer (use `Paywall`): loading and a
+        // failed read are said as such; only an answered read with no tier says
+        // "create a tier first", on the cross-app `folder-paywall-hint` line.
+        let paywall_reason = reason_label();
+        set_test_id(&paywall_reason, ids::FOLDER_PAYWALL_HINT);
+        crate::possible::paint(
+            &paywall_dropdown,
+            Some(&paywall_reason),
+            paywall_answer.clone(),
+        );
+        if paywall_answer.is_possible() {
+            paywall_dropdown.set_tooltip_text(Some(strings::devices::PAYWALL_TIER_HINT));
+        }
         // Same composite rule as the webdav toggle: `paywall_set` keys the set,
         // flips `folders.set_web_paywall`, then mints the web-serve holder's
         // `content.read{folder:set}` grant — the mint is what makes an entitled
         // visitor able to open the seal, so it is the declared leg. Declared
-        // AFTER `set_sensitive(has_tiers)` so the "create a tier first" intent
-        // survives an offline→online cycle.
+        // AFTER the paint so the answer's sensitivity survives an offline→online
+        // cycle.
         crate::offline_gate::declare_wire_kind(&paywall_dropdown, "fauna.capabilities.mint");
         {
             let machine = Arc::clone(machine);
@@ -1237,10 +1278,18 @@ fn build_folder_row(
             let name = fs.name.clone();
             let mls_group_id = fs.mls_group_id.clone();
             let values = values.clone();
+            let paywall_answer = paywall_answer.clone();
             paywall_dropdown.connect_selected_notify(move |dd| {
                 let Some(value) = values.get(dd.selected() as usize) else {
                     return;
                 };
+                // The press asks the same answer and refuses with its reason.
+                if !paywall_answer.is_possible() {
+                    if let Some(text) = crate::form_gate::reason_text(&paywall_answer) {
+                        fauna_client.refuse_gesture("paywall_set", text);
+                    }
+                    return;
+                }
                 // The empty placeholder is not a write — v1 is set-only, there is
                 // no "clear the paywall" path yet. Only a real tier dispatches.
                 if value.is_empty() {
@@ -1255,20 +1304,9 @@ fn build_folder_row(
             });
         }
         let paywall_row = entry_row(strings::devices::PAYWALL_TIER, &paywall_dropdown);
-        if !has_tiers {
-            // Say *why* it is insensitive, inline — the tooltip alone is not
-            // discoverable on a control the user cannot focus (same intent as the
-            // webdav "set up mail first" hint).
-            let paywall_hint_label = gtk::Label::builder()
-                .label(strings::devices::PAYWALL_TIER_NEEDS_TIER)
-                .halign(gtk::Align::Start)
-                .xalign(0.0)
-                .wrap(true)
-                .css_classes(["dim-label", "caption"])
-                .build();
-            set_test_id(&paywall_hint_label, ids::FOLDER_PAYWALL_HINT);
-            paywall_row.append(&paywall_hint_label);
-        }
+        // Say *why* it is insensitive, inline — the tooltip alone is not
+        // discoverable on a control the user cannot focus.
+        paywall_row.append(&paywall_reason);
         row.add_row(&paywall_row);
     }
 
@@ -2421,7 +2459,15 @@ fn build_shared_with_section(
         let name = name.to_string();
         let machine = Arc::clone(machine);
         let client = Rc::clone(fauna_client);
-        share_btn.connect_clicked(move |btn| open_share_dialog(btn, &name, &machine, &client));
+        share_btn.connect_clicked(move |btn| {
+            let dialog = build_share_dialog(&name, &machine, &client);
+            if let Some(root) = btn.root()
+                && let Some(win) = root.downcast_ref::<gtk::Window>()
+            {
+                dialog.set_transient_for(Some(win));
+            }
+            dialog.present();
+        });
     }
     header.append(&share_btn);
     section.append(&header);
@@ -2437,22 +2483,31 @@ fn build_shared_with_section(
     section
 }
 
-/// Open the share dialog: the REUSED `RecipientPicker` (priority #2 — no new picker
-/// IDs) inside a confirm dialog whose Share button is `folder-share-confirm`. On
-/// confirm, resolve the typed bare handle + share the set
+/// Build the share dialog: the REUSED `RecipientPicker` (priority #2 — no new
+/// picker IDs) inside a modal form whose Share button is `folder-share-confirm`.
+/// On confirm, resolve the typed bare handle + share the set
 /// (`FaunaClient::share_folder`).
-fn open_share_dialog(
-    btn: &gtk::Button,
+///
+/// The confirm is painted from the shared `share_possibility` over the typed
+/// recipient and whether the app can run the share (identity secret + live
+/// conversations session — `FaunaClient::folder_share_ready`), asks it again on
+/// press, and the dialog closes only once the share is ISSUED: a blank picker
+/// or a missing session keeps it open with what was typed and the reason on
+/// its own `error-message` (`ui/folders.md` § Errors & edge cases; `ui/README.md`
+/// § Offer only what is possible, rule 7). A plain window rather than a message
+/// dialog, because a message dialog closes on every response.
+fn build_share_dialog(
     name: &str,
     machine: &Arc<DevicesMachine>,
     client: &Rc<FaunaClient>,
-) {
-    let parent = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+) -> adw::Window {
     let picker = RecipientPicker::new(|_text| {}, || {});
 
-    #[allow(deprecated)]
-    let dialog =
-        adw::MessageDialog::new(parent.as_ref(), Some(strings::devices::SHARE_BUTTON), None);
+    let dialog = adw::Window::builder()
+        .title(strings::devices::SHARE_BUTTON)
+        .modal(true)
+        .default_width(400)
+        .build();
 
     // Recipient picker + the share-time access grant (multi-writer Phase 1;
     // folders.md § Sharing): `folder-share-role-select` (Reader default)
@@ -2514,59 +2569,86 @@ fn open_share_dialog(
             reach.refresh(&published_lbl, access);
         });
     }
-    dialog.set_extra_child(Some(&container));
-    #[allow(deprecated)]
+    let error_label = crate::form_gate::dialog_error_label();
+    container.append(&error_label);
+
+    let cancel_btn = gtk::Button::with_label(strings::common::CANCEL);
+    let confirm = gtk::Button::with_label(strings::devices::SHARE_BUTTON);
+    confirm.add_css_class("suggested-action");
+    set_test_id(&confirm, ids::FOLDER_SHARE_CONFIRM);
+    // The share ceremony's declared leg is the roster write it exists to make
+    // (`share_set` → `fauna.folders.share`), and it is the CONFIRM's gesture:
+    // `folder-share-button` opens this dialog, and `folder-share-role-select`
+    // inside it only stages the access value.
+    crate::offline_gate::declare_wire_kind(&confirm, "fauna.folders.share");
+    let button_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    button_row.set_halign(gtk::Align::End);
+    button_row.append(&cancel_btn);
+    button_row.append(&confirm);
+    container.append(&button_row);
+
+    container.set_margin_top(16);
+    container.set_margin_bottom(16);
+    container.set_margin_start(16);
+    container.set_margin_end(16);
+    dialog.set_content(Some(&container));
+
     {
-        dialog.add_response("cancel", strings::common::CANCEL);
-        dialog.add_response("share", strings::devices::SHARE_BUTTON);
-        dialog.set_response_appearance("share", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("share"));
-        dialog.set_close_response("cancel");
+        let d = dialog.clone();
+        cancel_btn.connect_clicked(move |_| d.close());
     }
 
-    // Tag the Share response button with the e2e id once the button tree is
-    // materialised (same idiom as `confirm_delete`'s `folder-delete-confirm`).
-    let dialog_for_id = dialog.clone();
-    glib::idle_add_local_once(move || {
-        crate::testid::tag_response_button(
-            dialog_for_id.upcast_ref::<gtk::Widget>(),
-            strings::devices::SHARE_BUTTON,
-            ids::FOLDER_SHARE_CONFIRM,
-        );
-        // The share ceremony's declared leg is the roster write it exists to
-        // make (`share_set` → `fauna.folders.share`), and it is the CONFIRM's
-        // gesture: `folder-share-button` opens this dialog, and
-        // `folder-share-role-select` inside it only stages the access value.
-        if let Some(confirm) = crate::testid::find_by_test_id(
-            dialog_for_id.upcast_ref::<gtk::Widget>(),
-            ids::FOLDER_SHARE_CONFIRM,
-        )
-        .and_then(|w| w.downcast::<gtk::Button>().ok())
-        {
-            crate::offline_gate::declare_wire_kind(&confirm, "fauna.folders.share");
-        }
-    });
+    let answer: Rc<dyn Fn() -> fauna_core::possibility::Possibility> = {
+        let client = Rc::clone(client);
+        let input = picker.input.clone();
+        Rc::new(move || {
+            fauna_client_folders::forms::share_possibility(
+                &input.text(),
+                client.folder_share_ready(),
+            )
+        })
+    };
+    let repaint: Rc<dyn Fn()> = {
+        let answer = Rc::clone(&answer);
+        let confirm = confirm.clone();
+        Rc::new(move || crate::form_gate::paint_submit(&confirm, &answer(), None))
+    };
+    repaint();
+    {
+        let repaint = Rc::clone(&repaint);
+        picker.input.connect_changed(move |_| repaint());
+    }
+    {
+        // The session can come up while the dialog is open: re-ask on map too.
+        let repaint = Rc::clone(&repaint);
+        dialog.connect_map(move |_| repaint());
+    }
 
     let client = Rc::clone(client);
     let machine = Arc::clone(machine);
     let name = name.to_string();
-    #[allow(deprecated)]
-    dialog.connect_response(None, move |_dialog, response| {
-        if response == "share" {
-            let handle = picker.input.text().trim().to_string();
-            if !handle.is_empty() {
-                // The picked share-time grant: `None` for the Reader default
-                // (absent role row = reader), `Some("writer")` for read-write.
-                let access = access_values
-                    .get(role_dd.selected() as usize)
-                    .filter(|v| v.as_str() == "writer")
-                    .cloned();
-                client.share_folder(Arc::clone(&machine), &name, &handle, access);
-            }
+    let d = dialog.clone();
+    let input = picker.input.clone();
+    // The picker owns its widget tree's handlers; keep it alive with the dialog.
+    let _picker = picker;
+    confirm.connect_clicked(move |_| {
+        let _ = &_picker;
+        if crate::form_gate::refuse(&answer(), &error_label) {
+            return;
         }
+        crate::form_gate::show_error(&error_label, None);
+        let handle = input.text().trim().to_string();
+        // The picked share-time grant: `None` for the Reader default (absent
+        // role row = reader), `Some("writer")` for read-write.
+        let access = access_values
+            .get(role_dd.selected() as usize)
+            .filter(|v| v.as_str() == "writer")
+            .cloned();
+        client.share_folder(Arc::clone(&machine), &name, &handle, access);
+        d.close();
     });
 
-    dialog.present();
+    dialog
 }
 
 /// Fill the cross-user "Shared with" roster for the expander row titled `name`
@@ -3196,6 +3278,31 @@ pub fn wire_followed_section(
         });
     }
 
+    // `folder-follow-confirm` is painted from the shared form predicate as the
+    // boxes are typed (`ui/folders.md` § Errors & edge cases).
+    let answer: Rc<dyn Fn() -> fauna_core::possibility::Possibility> = {
+        let client = Rc::clone(client);
+        let handle_entry = section.handle_entry.clone();
+        let name_entry = section.name_entry.clone();
+        Rc::new(move || {
+            fauna_client_folders::forms::follow_possibility(
+                &handle_entry.text(),
+                &name_entry.text(),
+                client.folder_ops_ready(),
+            )
+        })
+    };
+    let repaint: Rc<dyn Fn()> = {
+        let answer = Rc::clone(&answer);
+        let btn = section.confirm_btn.clone();
+        Rc::new(move || crate::form_gate::paint_submit(&btn, &answer(), None))
+    };
+    repaint();
+    for entry in [&section.handle_entry, &section.name_entry] {
+        let repaint = Rc::clone(&repaint);
+        entry.connect_changed(move |_| repaint());
+    }
+
     let machine = Arc::clone(machine);
     let nest = Arc::clone(client.nest_rpc());
     let error_slot = error_slot.clone();
@@ -3209,7 +3316,13 @@ pub fn wire_followed_section(
         // the nest's one-answer refusal meaningful: an empty query would come
         // back "not found" and read as "no such folder" rather than "you left a
         // box empty". (`follow_ops` refuses it again — this is the UX half.)
-        if owner.is_empty() || folder_name.is_empty() {
+        // The refusal is the shared predicate's reason, held on the page's
+        // `error-message` — never a silent return.
+        let refused = answer();
+        if !refused.is_possible() {
+            if let Some(text) = crate::form_gate::reason_text(&refused) {
+                error_slot.hold(text);
+            }
             return;
         }
         let nest = Arc::clone(&nest);
@@ -4382,6 +4495,59 @@ fn find_tagged_widget(list_box: &gtk::ListBox, name: &str, tag: &str) -> Option<
 mod tests {
     use super::*;
 
+    /// `folder-webdav-toggle` and `folder-paywall-tier-select` are painted
+    /// from the shared answers over their reads (`folders.md` § Errors & edge
+    /// cases, *Own-tier and mail gates*): an unanswered or failed read is
+    /// never told "set up mail" / "create a tier"; an answered empty one is.
+    #[test]
+    fn webdav_and_paywall_tell_an_unanswered_read_from_a_missing_one() {
+        let key = |p: Possibility| p.reason().map(|r| r.key.clone());
+        assert_eq!(
+            key(webdav_possibility((ReadState::Pending, false))).as_deref(),
+            Some("common.still_loading")
+        );
+        assert_eq!(
+            key(webdav_possibility((ReadState::Failed, false))).as_deref(),
+            Some("common.load_failed")
+        );
+        assert_eq!(
+            key(webdav_possibility((ReadState::Resolved, false))).as_deref(),
+            Some("devices.serve_webdav_needs_mail")
+        );
+        assert!(webdav_possibility((ReadState::Resolved, true)).is_possible());
+        assert_eq!(
+            key(paywall_possibility(&(ReadState::Failed, Vec::new()))).as_deref(),
+            Some("common.load_failed")
+        );
+        assert_eq!(
+            key(paywall_possibility(&(ReadState::Resolved, Vec::new()))).as_deref(),
+            Some("devices.paywall_tier_needs_tier")
+        );
+        assert!(paywall_possibility(&(ReadState::Resolved, vec!["gold".into()])).is_possible());
+        // The paint puts the answered-no-tier sentence on the reason line the
+        // cross-app `folder-paywall-hint` test reads, and hides it when live.
+        crate::testid::run_on_gtk_thread(|| {
+            let select = gtk::DropDown::from_strings(&[]);
+            let line = reason_label();
+            crate::possible::paint(
+                &select,
+                Some(&line),
+                paywall_possibility(&(ReadState::Resolved, Vec::new())),
+            );
+            assert!(!select.is_sensitive() && line.is_visible());
+            assert_eq!(
+                line.text().as_str(),
+                strings::devices::PAYWALL_TIER_NEEDS_TIER
+            );
+            crate::possible::paint(
+                &select,
+                Some(&line),
+                paywall_possibility(&(ReadState::Resolved, vec!["gold".into()])),
+            );
+            assert!(select.is_sensitive() && !line.is_visible());
+        });
+    }
+
     // ── The `folder-share` route's landing (apps/linux.md § The file
     //    manager's Share entry (GNOME Files), link 4) ──
 
@@ -4797,6 +4963,129 @@ mod tests {
             release_nest_place(&row);
             let (_, shown) = rebuild(&row, &nest_form("240"));
             assert_eq!(shown.policy.quiet_secs, "240");
+        });
+    }
+
+    // ── Form validity (`ui/folders.md` § Errors & edge cases; `ui/README.md`
+    //    § Offer only what is possible, rules 4 and 7) ──
+
+    /// A client whose nest is a closed port and whose identity secret is
+    /// well-formed (the `feed_list` form tests' fixture).
+    fn form_client() -> Rc<FaunaClient> {
+        let (tx, _rx) = crate::client::ui_channel();
+        let machine = fauna_launch_machine::LaunchMachine::new(
+            Arc::new(fauna_launch_machine::NullObserver),
+            Arc::new(fauna_launch_machine::InMemoryPersistence::new()),
+        );
+        Rc::new(FaunaClient::new(
+            "http://127.0.0.1:1".to_string(),
+            "11".repeat(32),
+            tx,
+            machine,
+        ))
+    }
+
+    fn form_machine() -> Arc<DevicesMachine> {
+        DevicesMachine::new(
+            Arc::new(fauna_devices_machine::observer::NullObserver)
+                as Arc<dyn fauna_devices_machine::DevicesObserver>,
+            Arc::new(fauna_devices_machine::FakeDevicesNestApi::new()),
+            Arc::new(fauna_devices_machine::FakeWizardFactory::new()),
+        )
+    }
+
+    fn form_reason(key: &str) -> String {
+        fauna_core::localized::LocalizedText::key(key).resolve(crate::i18n::strings::lookup)
+    }
+
+    fn form_found<T: IsA<gtk::Widget>>(root: &impl IsA<gtk::Widget>, id: &str) -> T {
+        crate::testid::find_by_test_id(root, id)
+            .unwrap_or_else(|| panic!("{id} not built"))
+            .downcast::<T>()
+            .unwrap_or_else(|_| panic!("{id} has another widget type"))
+    }
+
+    /// The share form: blank → blocked with `folders.share_recipient_required`;
+    /// a typed recipient with no live conversations session → blocked with
+    /// `folders.share_not_ready`, and a press anyway refuses with that reason on
+    /// the dialog's `error-message` while the dialog STAYS OPEN with what was
+    /// typed — it closes only once the share is issued.
+    #[test]
+    fn share_form_paints_refuses_and_stays_open_when_not_ready() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("connected");
+            let client = form_client();
+            assert!(
+                !client.folder_share_ready(),
+                "no conversations session runs in a unit test"
+            );
+            let dialog = build_share_dialog("docs", &form_machine(), &client);
+            dialog.present();
+            let closes = Rc::new(Cell::new(0));
+            {
+                let closes = Rc::clone(&closes);
+                dialog.connect_close_request(move |_| {
+                    closes.set(closes.get() + 1);
+                    gtk::glib::Propagation::Stop
+                });
+            }
+            let confirm: gtk::Button = form_found(&dialog, ids::FOLDER_SHARE_CONFIRM);
+            let input: gtk::Entry = form_found(&dialog, ids::RECIPIENT_PICKER_INPUT);
+            let error: gtk::Label = form_found(&dialog, ids::ERROR_MESSAGE);
+
+            assert!(!confirm.is_sensitive());
+            assert_eq!(
+                confirm.tooltip_text().as_deref(),
+                Some(form_reason("folders.share_recipient_required").as_str())
+            );
+
+            input.set_text("bob");
+            let not_ready = form_reason("folders.share_not_ready");
+            assert!(!confirm.is_sensitive());
+            assert_eq!(confirm.tooltip_text().as_deref(), Some(not_ready.as_str()));
+
+            confirm.emit_clicked();
+            assert!(error.is_visible());
+            assert_eq!(error.text().as_str(), not_ready);
+            assert_eq!(closes.get(), 0, "the form stays open");
+            assert_eq!(input.text().as_str(), "bob", "what was typed is kept");
+            crate::offline_gate::reset_for_test("disconnected");
+        });
+    }
+
+    /// The follow form: each blank box blocks the confirm with its own reason,
+    /// a press refuses with it on the page's `error-message` (never silently),
+    /// and both boxes typed on a signed-in client make the confirm live.
+    #[test]
+    fn follow_form_paints_from_the_shared_predicate_and_refuses_with_the_reason() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("connected");
+            let client = form_client();
+            let section = build_followed_section();
+            let page_error = gtk::Label::new(None);
+            page_error.set_visible(false);
+            let slot = GestureErrorSlot::new(&page_error);
+            wire_followed_section(&section, &form_machine(), &client, &slot);
+
+            let handle_required = form_reason("folders.follow_handle_required");
+            assert!(!section.confirm_btn.is_sensitive());
+            assert_eq!(
+                section.confirm_btn.tooltip_text().as_deref(),
+                Some(handle_required.as_str())
+            );
+            section.confirm_btn.emit_clicked();
+            assert!(page_error.is_visible());
+            assert_eq!(page_error.text().as_str(), handle_required);
+            assert_eq!(slot.held().as_deref(), Some(handle_required.as_str()));
+
+            section.handle_entry.set_text("alice");
+            assert_eq!(
+                section.confirm_btn.tooltip_text().as_deref(),
+                Some(form_reason("folders.follow_name_required").as_str())
+            );
+            section.name_entry.set_text("Pictures");
+            assert!(section.confirm_btn.is_sensitive());
+            crate::offline_gate::reset_for_test("disconnected");
         });
     }
 }

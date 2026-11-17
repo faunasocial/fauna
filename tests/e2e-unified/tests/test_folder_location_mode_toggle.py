@@ -118,6 +118,35 @@ def _assert_served(app, src, mode: str) -> None:
     )
 
 
+def _row_scope(app, name: str) -> str:
+    """The `folder-row[i]` scope of ``name``'s row, read afresh at every use.
+
+    The list re-renders as sets arrive, and a set an earlier test on this account
+    made can paint after this one's row was found (its custody lands under the
+    open page), shifting every row below it: an index taken once then names the
+    neighbour, and a nested read scoped to it finds nothing while the row it
+    meant renders fine. Seen on windows: the verify run that ran
+    `test_folder_location_on_demand_enrol` first read this test's set at
+    `folder-row[0]` — where it cannot sort once the enrol test's set has
+    painted — and waited 20 s for a binding row under that index.
+    """
+    return f"folder-row[{app.backups.wait_for_folder_row(name)}]"
+
+
+def _wait_mode_toggle(app, name: str, timeout: float = 20.0) -> str | None:
+    """Poll until ``name``'s row shows its bound location's mode toggle, the
+    row's scope re-read on every poll (:func:`_row_scope`); return that scope,
+    or ``None`` once ``timeout`` passes without it."""
+    deadline = time.monotonic() + timeout
+    while True:
+        scope = _row_scope(app, name)
+        if app.sync_locations.mode_toggle_visible(scope=scope):
+            return scope
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.3)  # sleep-ok: bounded poll cadence inside the deadline, not a settle guess
+
+
 def _bind_fresh_folder(app, request, tmp_path) -> tuple[str, str, object]:
     """A fresh owner folder with one local folder bound under it,
     through the page's own add flow. Returns ``(name, scope, src)`` where ``scope``
@@ -137,8 +166,7 @@ def _bind_fresh_folder(app, request, tmp_path) -> tuple[str, str, object]:
     b.create_folder_via_wizard(name)
     # The retrying expand: a fresh set's row re-mounts as its roster loads, which
     # discards an expand that arrived first (`BackupActions.bind_location`'s reason).
-    idx = b.find_and_expand_folder_until(name, "folder-location-path-input")
-    scope = f"folder-row[{idx}]"
+    b.find_and_expand_folder_until(name, "folder-location-path-input")
 
     # Somewhere an on-demand root can be served over (linux: under /tmp).
     src = mountable_location(request, tmp_path, "mode-src")
@@ -147,12 +175,14 @@ def _bind_fresh_folder(app, request, tmp_path) -> tuple[str, str, object]:
     app.driver.click("folder-location-add-button")
 
     # Generous ceiling (not an expectation): on tui the add goes to a freshly
-    # direct-spawned real agent.
+    # direct-spawned real agent. The row's index is re-read on every poll
+    # (`_row_scope`): a set painting late above it moves it.
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        if app.driver.count("folder-location-row", scope=scope) >= 1:
+        if app.driver.count("folder-location-row", scope=_row_scope(app, name)) >= 1:
             break
         time.sleep(0.2)  # sleep-ok: bounded poll cadence inside the deadline, not a settle guess
+    scope = _row_scope(app, name)
     assert app.driver.count("folder-location-row", scope=scope) >= 1, (
         f"the bound folder did not render nested under {name!r}; error={app.error_text()!r}"
     )
@@ -206,7 +236,8 @@ def test_folder_location_mode_toggle_flip_survives_re_entry(logged_in_app, reque
 
     name, scope, src = _bind_fresh_folder(app, request, tmp_path)
 
-    assert loc.mode_toggle_visible(scope=scope), (
+    scope = _wait_mode_toggle(app, name)
+    assert scope is not None, (
         "a bound row must render folder-location-mode-toggle on a placeholder host; "
         f"{app.driver.diagnose('folder-location-mode-toggle')} error={app.error_text()!r}"
     )
@@ -231,8 +262,9 @@ def test_folder_location_mode_toggle_flip_survives_re_entry(logged_in_app, reque
 
     # VERIFICATION: leave the page and come back — the mode must now be re-read
     # from the binding model's reconcile, not from a surviving ToggleSwitch.
-    scope = _re_enter_folder(app, name)
-    assert loc.mode_toggle_visible(scope=scope), (
+    _re_enter_folder(app, name)
+    scope = _wait_mode_toggle(app, name)
+    assert scope is not None, (
         "the bound row must still render the toggle after re-entry; "
         f"{app.driver.diagnose('folder-location-mode-toggle')}"
     )
@@ -245,7 +277,12 @@ def test_folder_location_mode_toggle_flip_survives_re_entry(logged_in_app, reque
     # And back, so the channel is proven to move in both directions (a
     # write-once bug passes the first half alone).
     assert loc.toggle_mode(scope=scope) == before
-    scope = _re_enter_folder(app, name)
+    _re_enter_folder(app, name)
+    scope = _wait_mode_toggle(app, name)
+    assert scope is not None, (
+        "the bound row must render the toggle after the second re-entry; "
+        f"{app.driver.diagnose('folder-location-mode-toggle')}"
+    )
     assert loc.mode_toggle_state(scope=scope) == before, (
         "flipping back must also survive re-entry (the channel must take the "
         f"second write, not only the first); got {loc.mode_toggle_state(scope=scope)!r}"

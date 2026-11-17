@@ -15,7 +15,7 @@ use super::{
     ContactInfo, DomainAvailability, Registrar, RegistrarAvailability, RegistrationResult,
 };
 use crate::error::ProvisionError;
-use crate::namecheap_api::{NamecheapApi, attr, elements};
+use crate::namecheap_api::{NamecheapApi, attr, elements, split_domain};
 use crate::proxy::BuildEnv;
 
 /// The four WHOIS contact roles Namecheap requires on `domains.create`. Every
@@ -277,6 +277,45 @@ impl Registrar for NamecheapRegistrar {
         self.api
             .call(client, "namecheap.users.getBalances", &[])
             .await?;
+        Ok(())
+    }
+
+    /// `namecheap.domains.dns.setCustom` (`SLD`, `TLD`, comma-separated
+    /// `Nameservers`) — registry.md § Delegation doors. The transport turns a
+    /// `Status="ERROR"` envelope into an error; an OK envelope whose
+    /// `<DomainDNSSetCustomResult>` reports the update as `false` is one too.
+    async fn set_nameservers(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), ProvisionError> {
+        let (sld, tld) = split_domain(domain)?;
+        let xml = self
+            .api
+            .call(
+                client,
+                "namecheap.domains.dns.setCustom",
+                &[
+                    ("SLD".to_string(), sld),
+                    ("TLD".to_string(), tld),
+                    ("Nameservers".to_string(), nameservers.join(",")),
+                ],
+            )
+            .await?;
+        let refused = elements(&xml, "DomainDNSSetCustomResult")
+            .into_iter()
+            .any(|el| {
+                // The published example spells the attribute `Update`; read
+                // `Updated` too until a live witness settles which it is.
+                attr(el, "Update").as_deref() == Some("false")
+                    || attr(el, "Updated").as_deref() == Some("false")
+            });
+        if refused {
+            return Err(ProvisionError::Other(format!(
+                "Namecheap did not update the nameservers of {domain}"
+            )));
+        }
         Ok(())
     }
 

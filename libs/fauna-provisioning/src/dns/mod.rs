@@ -15,6 +15,13 @@ use crate::error::ProvisionError;
 pub struct DnsZone {
     pub id: String,
     pub name: String,
+    /// The nameservers the provider assigned the zone — filled by a provider
+    /// with the zone door (`dns_creates_zones`), from `verify()` and
+    /// `create_zone()` alike, so a zone the domain is not yet delegated to can
+    /// be told from one it is; empty from every other adapter
+    /// (`docs/goal/architecture/provisioning/registry.md` § Delegation doors).
+    #[serde(default)]
+    pub nameservers: Vec<String>,
 }
 
 /// A DNS record to create.
@@ -34,6 +41,24 @@ pub struct DnsRecord {
 pub trait DnsProvider: Send + Sync {
     /// Verify credentials and return available zones.
     async fn verify(&self, client: &reqwest::Client) -> Result<Vec<DnsZone>, ProvisionError>;
+
+    /// The zone door: create a primary zone for `domain` — registered at any
+    /// registrar — and answer it with the nameservers the provider assigned.
+    /// Declared per provider as `dns_creates_zones` in `i18n/providers.yaml`;
+    /// the default answers [`ProvisionError::Unsupported`] before any request,
+    /// and `tests/delegation_doors.rs` holds the declaration and the override
+    /// together (`docs/goal/architecture/provisioning/registry.md`
+    /// § Delegation doors).
+    async fn create_zone(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+    ) -> Result<DnsZone, ProvisionError> {
+        let _ = (client, domain);
+        Err(ProvisionError::Unsupported {
+            operation: "creating a zone",
+        })
+    }
 
     /// Create a DNS record in the given zone.
     async fn create_record(

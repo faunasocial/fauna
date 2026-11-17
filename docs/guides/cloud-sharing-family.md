@@ -110,8 +110,7 @@ Two things are worth knowing about a folder shared this way:
 
 **Putting files in it.** Once the folder is listed, each of you picks where it
 lives on your own device: open its row in **Folders**, type a path into
-**Location path** and press **Add location** (**Bind Location** in the Windows
-and Mac apps). From then on, a file either of
+**Location path** and press **Add location**. From then on, a file either of
 you adds there reaches the other person's copy straight from your device. Your
 nest plays no part in this, so it does not need to be running or reachable. In
 turn, nothing moves unless both apps are open, **Peer transfers** is on for
@@ -137,7 +136,7 @@ document exists only on your co-author's machine in the same room.
 
 There is nothing to set up, and one thing to turn off if you want: each device
 has a **Peer transfers** switch on the **Devices** page. Off means that device
-opens no connection for other devices to reach — it neither hands files out nor fetches them directly, for a shared folder or between your own devices, and everything simply goes through your nest. You can turn
+opens no connection for other devices to reach — it neither hands files out nor fetches them directly, for a shared folder or between your own devices, and everything simply goes through your nest — except a folder shared in person, which has no nest to go through: nothing in it moves to or from a device while **Peer transfers** is off on that device. You can turn
 any of your devices off from any other; only the device itself turns back on.
 The **Folders** page shows a **Peer transfers**
 section: one line saying whether this device is currently serving your shared
@@ -348,6 +347,7 @@ A separate app for children under 13, limited to contacts their guardian approve
 | Multi-user nest: invite codes/requests, tiers-as-quotas (enforced), eviction | **Available** on all seven apps |
 | Per-member privacy from the admin (files stored encrypted with each member's own keys, apart from a member's profile and what they make public) | **Available** |
 | Parental controls (supervised accounts: guardian link, reach policy, guardian device, graduation) | **Available** — guardian link at admission, who-can-reach-the-child enforcement, guardianship transfer, graduation |
+| Parental controls: an admin taking over a child's guardianship | **Available** — **Take over**, then **Confirm take-over**, on the child's row on the admin **Users** page makes you the guardian at once, and the child's account then appears on your own Family page |
 | Parental controls: content rules (by category, keywords or labeler; block flagged posts and messages or hide them behind a warning) | **Available** — set from the Family page and enforced on the child's own feed and conversations |
 | Parental controls: direct messages from unknown senders on connected outside accounts | **Available** — the "Unknown message senders" control on the Family page holds a stranger's first message for guardian review, on every app |
 | Parental controls: undoing a denied message sender | **Available** — "Denied message senders" lists everyone you denied for a child, each with a one-click **Allow again** |

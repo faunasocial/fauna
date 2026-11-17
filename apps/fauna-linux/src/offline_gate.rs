@@ -143,6 +143,11 @@ thread_local! {
     /// constant: a page that builds N controls pays O(N) upgrades in total
     /// across all its prunes, not O(N) per control.
     static PRUNE_AT: Cell<usize> = const { Cell::new(PRUNE_FLOOR) };
+
+    /// Repaints owed on every change of the state word, for the controls whose
+    /// answer reads it without a wire kind to declare ([`carve_out_possibility`]).
+    /// Cleared with the window's declarations ([`retire_outgoing_window`]).
+    static ON_CHANGE: RefCell<Vec<Rc<dyn Fn()>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The smallest table worth scanning — below it, pruning costs more than the
@@ -273,6 +278,28 @@ pub fn set_connection_state(state: &'static str) {
     for declaration in &live {
         apply(declaration, state);
     }
+    let hooks: Vec<Rc<dyn Fn()>> = ON_CHANGE.with_borrow(|hooks| hooks.clone());
+    for hook in hooks {
+        hook();
+    }
+}
+
+/// The offline half of a **carve-out** fetch — a snapshot file's download and
+/// the whole-snapshot restore read their bytes over the bulk-binary
+/// `/api/v1/{manifests,chunks}` route, so there is no wire kind for
+/// [`declare_wire_kind`] to gate them by, and borrowing one would be the typo
+/// the shared rule refuses to grey on. The page asks the shared
+/// [`fauna_protocol::offline_class::carve_out_affordance`] with the same word
+/// this gate decides against, paints from it, and asks it again at the press.
+pub fn carve_out_possibility() -> fauna_core::possibility::Possibility {
+    fauna_protocol::offline_class::carve_out_affordance(STATE.get()).possibility()
+}
+
+/// Run `repaint` after every change of the state word, for a page painting a
+/// carve-out answer ([`carve_out_possibility`]): the word moved, so its answer
+/// may have. Held until the window that registered it is retired.
+pub fn on_connection_change(repaint: Rc<dyn Fn()>) {
+    ON_CHANGE.with_borrow_mut(|hooks| hooks.push(repaint));
 }
 
 /// The state word the gate is currently deciding against — the walk invariant's,
@@ -306,8 +333,10 @@ fn apply(declaration: &Declaration, state: &'static str) {
     let Some(widget) = upgrade(&declaration.widget) else {
         return;
     };
-    let verdict = fauna_protocol::offline_class::affordance(declaration.kind, state);
-    let allowed = declaration.page_sensitive.get() && verdict.is_available();
+    // The shared answer (`ui/README.md` § Offer only what is possible, rule
+    // 6): the gate paints from it and never re-derives a class itself.
+    let answer = fauna_protocol::offline_class::affordance(declaration.kind, state).possibility();
+    let allowed = declaration.page_sensitive.get() && answer.is_possible();
 
     if own_sensitive(&widget) != allowed {
         declaration.gate_wrote.set(Some(allowed));
@@ -316,15 +345,38 @@ fn apply(declaration: &Declaration, state: &'static str) {
     // The reason belongs beside the affordance the gate itself withheld. A
     // control the page disabled keeps the page's reason; a control the page
     // never gave a tooltip gets ours, and gets it taken back on reconnect.
-    if !verdict.is_available() && declaration.page_sensitive.get() {
+    if !answer.is_possible() && declaration.page_sensitive.get() {
         if widget.tooltip_text().is_none()
-            && let Some(reason) = verdict.reason()
+            && let Some(reason) = answer.reason()
         {
             widget.set_tooltip_text(Some(&reason.resolve(crate::i18n::strings::lookup)));
             declaration.tooltip_is_ours.set(true);
         }
     } else if declaration.tooltip_is_ours.replace(false) {
         widget.set_tooltip_text(None);
+    }
+}
+
+/// The PAGE writes `widget`'s tooltip — its own reason for the control's
+/// state, e.g. a form submit's blocked reason (`crate::form_gate`).
+///
+/// A plain `set_tooltip_text` would leave this gate believing the tooltip is
+/// still its own, and the next reconnect would clear the page's reason. So the
+/// page's write takes the tooltip over, and the gate re-decides at once: a
+/// page clearing its reason while the link is down gets the gate's reason
+/// back, rather than an empty tooltip until the next state change.
+pub fn set_page_tooltip(widget: &impl IsA<gtk::Widget>, text: Option<&str>) {
+    let widget: &gtk::Widget = widget.upcast_ref();
+    widget.set_tooltip_text(text);
+    let declaration = DECLARED.with_borrow(|declared| {
+        declared
+            .get(&(widget.as_ptr() as usize))
+            .filter(|d| upgrade(&d.widget).is_some_and(|live| &live == widget))
+            .cloned()
+    });
+    if let Some(declaration) = declaration {
+        declaration.tooltip_is_ours.set(false);
+        apply(&declaration, STATE.get());
     }
 }
 
@@ -357,6 +409,7 @@ pub fn retire_outgoing_window() {
         }
         declared.clear();
     });
+    ON_CHANGE.with_borrow_mut(Vec::clear);
     PRUNE_AT.set(PRUNE_FLOOR);
 }
 
@@ -413,7 +466,7 @@ pub fn declarations() -> Vec<(String, &'static str, bool)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::testid::run_on_gtk_thread;
 
@@ -433,7 +486,7 @@ mod tests {
             .0
     }
 
-    fn online_only() -> &'static str {
+    pub(crate) fn online_only() -> &'static str {
         a_kind_of(fauna_protocol::offline_class::OfflineClass::OnlineOnly)
     }
 

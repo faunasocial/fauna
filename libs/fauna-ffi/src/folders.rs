@@ -37,7 +37,7 @@ pub fn build_folder_wizard_machine(
 
 /// The seat's folder-key custody for a folder create/delete helper — `None` on
 /// a build with no account runtime, where the machines refuse both.
-fn folder_custody() -> Option<Arc<dyn fauna_client_folders::FolderKeyStore>> {
+pub(crate) fn folder_custody() -> Option<Arc<dyn fauna_client_folders::FolderKeyStore>> {
     #[cfg(feature = "account-runtime")]
     {
         Some(crate::account_runtime::folder_key_store())
@@ -58,6 +58,29 @@ fn folder_custody() -> Option<Arc<dyn fauna_client_folders::FolderKeyStore>> {
 #[uniffi::export]
 pub fn conflict_policy_options() -> Vec<ConflictPolicyOption> {
     fauna_folders_machine::conflict_policy_options()
+}
+
+/// `wizard-next-button` on the wizard's current step:
+/// [`fauna_folders_machine::possibility::wizard_next_possibility`] — absent on
+/// Review and Done (`docs/goal/ui/folders.md` § Errors & edge cases,
+/// *Own-tier and mail gates*). `value-format`-gated like the form faces
+/// (`src/forms.rs`): `Possibility` is a bare `fauna_core` type.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn folder_wizard_next_possibility(
+    wizard: FolderWizardSnapshot,
+) -> fauna_core::possibility::Possibility {
+    fauna_folders_machine::possibility::wizard_next_possibility(&wizard)
+}
+
+/// `wizard-create-button`:
+/// [`fauna_folders_machine::possibility::wizard_create_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn folder_wizard_create_possibility(
+    wizard: FolderWizardSnapshot,
+) -> fauna_core::possibility::Possibility {
+    fauna_folders_machine::possibility::wizard_create_possibility(&wizard)
 }
 
 /// Resolve a *stored* conflict-policy wire value (`"auto"` /

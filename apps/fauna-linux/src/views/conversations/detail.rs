@@ -399,7 +399,14 @@ impl ConversationDetail {
             let m = manager.clone();
             let id = detail_thread_id.clone();
             detail_compose.on_topic_toggle(move || {
-                if let Some(tid) = id.borrow().clone() {
+                // The same answer the toggle was painted from: a rail with no
+                // subject toggles nothing, whoever raced the paint.
+                if let Some(tid) = id.borrow().clone()
+                    && m.thread_detail(tid.clone()).is_some_and(|d| {
+                        super::thread_control(&d, fauna_conversations::ThreadControl::Subject)
+                            .is_possible()
+                    })
+                {
                     m.toggle_topic(tid);
                 }
             });

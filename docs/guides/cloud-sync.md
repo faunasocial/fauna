@@ -233,12 +233,10 @@ files you add to the folder through its Fauna location in the Files app. An
 Android phone holds the files you add to the folder through **Fauna** in its
 file browser, and the ones you open there until Android clears them to free up
 space. A phone or iPad passes the files it holds on only while the Fauna app is
-open on screen; on an Android phone, open the folder under **Fauna** in its file
-browser after you open the app, then come back to the app. Photos a phone backs
-up from its library, and the files of a phone folder an Android phone keeps in
-sync, aren't passed on. Keep a folder on **Full** if its files start out in
-photo backup or a phone folder, or on a phone or iPad you seldom have Fauna open
-on.
+open on screen. Photos a phone backs up from its library, and the files of a
+phone folder an Android phone keeps in sync, aren't passed on. Keep a folder on
+**Full** if its files start out in photo backup or a phone folder, or on a
+phone or iPad you seldom have Fauna open on.
 
 It's the strongest privacy setting for a folder — the contents touch the nest's
 disk in no form at all — in exchange for needing one of your own devices awake
@@ -273,7 +271,7 @@ them; Fauna will tell you to turn serving off first.)
 | Per-folder device participation + read-only devices | **Available** |
 | Device list, removal, session revocation, emergency lockout | **Available** |
 | A NAS or server as a sync device, set up from the terminal app over SSH | **Available** — it keeps syncing after you log out once you turn that on |
-| Keep a folder's contents off the nest ("Metadata only") | **Available** on every app. Contents are relayed through the nest without resting there, to any app that opens them, from a computer that holds them, or, while the Fauna app is open on screen, from an iPhone, iPad or Android phone that holds them (on Android, after you open the folder under **Fauna** in its file browser); photos a phone backs up from its library, and the files of a phone folder an Android phone keeps in sync, aren't passed on |
+| Keep a folder's contents off the nest ("Metadata only") | **Available** on every app. Contents are relayed through the nest without resting there, to any app that opens them, from a computer that holds them, or, while the Fauna app is open on screen, from an iPhone, iPad or Android phone that holds them; photos a phone backs up from its library, and the files of a phone folder an Android phone keeps in sync, aren't passed on |
 | Per-file status badges | **Available** — on Windows also as File Explorer's own cloud-status icons |
 | One device at a time (exclusive editing) for unmergeable files | **Available** — switched on per folder; the folder's row names the device editing it |
 | Conflict detection + automatic resolution | **Available** — text merge or latest-wins, with a per-folder review list to override the automatic choice |

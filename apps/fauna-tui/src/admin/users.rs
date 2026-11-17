@@ -71,7 +71,7 @@ pub(super) fn users_elements(state: &AdminState) -> Vec<Element> {
     els.extend(admit_section(users, snapshot));
     els.extend(invite_section(users, snapshot));
     els.extend(user_list_section(users, snapshot));
-    els.extend(pending_section(snapshot));
+    els.extend(pending_section(snapshot, &users.viewer_actor));
     els
 }
 
@@ -84,7 +84,7 @@ pub(super) fn users_elements(state: &AdminState) -> Vec<Element> {
 /// and its approvals readout; approve and cancel are one click each. Row
 /// children ride the `.within(row, i)` idiom of the settings section so both
 /// flat and scoped queries resolve.
-fn pending_section(snapshot: &UsersSnapshot) -> Vec<Element> {
+fn pending_section(snapshot: &UsersSnapshot, viewer: &[u8]) -> Vec<Element> {
     let rows: Vec<_> = snapshot
         .pending_actions
         .iter()
@@ -136,6 +136,8 @@ fn pending_section(snapshot: &UsersSnapshot) -> Vec<Element> {
             )
             .within(ids::ADMIN_PENDING_ACTION_ITEM, i),
         );
+        // Approve from the shared answer: absent on the viewer's own
+        // scheduled action, which the nest refuses as self-approval.
         els.push(
             Element::gesture_button(
                 ids::ADMIN_PENDING_ACTION_APPROVE_BUTTON,
@@ -143,6 +145,9 @@ fn pending_section(snapshot: &UsersSnapshot) -> Vec<Element> {
                 true,
                 Gesture::Admin(Action::ApprovePending { id: action.id }),
             )
+            .possible(fauna_client_admin::pending_approve_possibility(
+                action, viewer,
+            ))
             .within(ids::ADMIN_PENDING_ACTION_ITEM, i),
         );
         els.push(
@@ -511,10 +516,11 @@ fn guardian_picker(
 /// An age-band picker (`family-safety.md` § App surface → *Age-band surfaces*)
 /// — the shared `age_band_options` catalog by VALUE (`not-set` + the four wire
 /// tokens, `AgeBand::ORDER`), so no app spells the vocabulary or its order;
-/// `actions/admin.py` drives it with the value. **Enabled only while a guardian
-/// is selected** (`guardian_selected`): the nest refuses a band without a
-/// guardian designation, and the picker gates the same way client-side — a
-/// disabled select still paints its (not-set) value, so the driver can read it.
+/// `actions/admin.py` drives it with the value. **Blocked, with its reason,
+/// until a guardian is selected** (`guardian_selected`; the shared
+/// `age_band_possibility`): the nest refuses a band without a guardian
+/// designation — a disabled select still paints its (not-set) value, so the
+/// driver can read it.
 fn age_band_picker(
     id: &str,
     draft: &str,
@@ -525,6 +531,7 @@ fn age_band_picker(
     Element::select(id, draft.to_string(), target, options)
         .labelled(fauna_i18n::strings::family::age_band::LABEL)
         .enabled(guardian_selected)
+        .possible(fauna_client_admin::age_band_possibility(guardian_selected))
 }
 
 /// Section 4 — the user list (`admin.md` § 2 → Section 4): one row per user with a
@@ -635,13 +642,16 @@ fn user_list_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Elemen
             );
         }
         if controls.remove_admin {
+            // Disabled with its reason on the nest's last superadmin.
+            let answer = fauna_client_admin::remove_admin_possibility(user);
             els.push(
                 Element::gesture_button(
                     ids::ADMIN_USERS_REMOVE_ADMIN_BUTTON,
                     t::users_page::REMOVE_ADMIN,
-                    true,
+                    answer.is_possible(),
                     Gesture::Admin(Action::RemoveAdmin { row: i }),
                 )
+                .possible(answer)
                 .within(ids::USER_ROW, i),
             );
         }

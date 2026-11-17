@@ -28,12 +28,22 @@
 # The feature-tree constraints (Sync non-deselectable, Bridge requires Nest)
 # are UI-interactive and verified at the MSI-table level, not here.
 #
+# -Package nest smokes the nest MSI (installer/nest/Package.wxs; installers/
+# windows.md § Direct download (MSIX app + nest MSI), 1) with the same asserts
+# read for what it carries: its own "Fauna Nest" Add/Remove Programs entry, the
+# services, the terminal app and the mail bridge installed and built for -Arch,
+# and NO app, NO sync agent and NO shell-extension CLSID -- the client half
+# reaches users through the MSIX bundle, never through this package.
+#
 # Usage: pwsh -File ci-smoke.ps1 -Msi Fauna-Setup-arm64.msi -Arch arm64
-# msiexec logs land in the working directory as <arch>-*.log.
+#        pwsh -File ci-smoke.ps1 -Msi Fauna-Nest-Setup-arm64.msi -Arch arm64 -Package nest
+# msiexec logs land in the working directory as <arch>-*.log (<arch>-nest-*.log
+# for the nest MSI).
 
 param(
   [Parameter(Mandatory)] [string] $Msi,
-  [Parameter(Mandatory)] [ValidateSet('x64', 'arm64')] [string] $Arch
+  [Parameter(Mandatory)] [ValidateSet('x64', 'arm64')] [string] $Arch,
+  [ValidateSet('full', 'nest')] [string] $Package = 'full'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,17 +55,27 @@ $services = @('FaunaNest', 'FaunaBridge')
 $expectedMachine = @{ x64 = 0x8664; arm64 = 0xAA64 }[$Arch]
 # The shell extension's CLSIDs share this prefix (ShellExt.wxs).
 $clsidPrefix = '{4a7b8c'
+# What each package carries (Package.wxs, nest/Package.wxs): its Add/Remove
+# Programs name, the native binaries it must install, the ones it must NOT, and
+# its shell-extension CLSID count.
+$isNest = $Package -eq 'nest'
+$arpName = if ($isNest) { 'Fauna Nest' } else { 'Fauna' }
+$requiredBins = @('fauna-tui.exe', 'fauna-cli.exe', 'fauna-nest-svc.exe', 'fauna-bridge-svc.exe', 'fauna-mail-bridge.exe')
+$absentBins = @()
+if ($isNest) { $absentBins = @('fauna-sync-agent.exe', 'fauna_shell.dll') } else { $requiredBins += 'fauna-sync-agent.exe' }
+$expectedClsids = if ($isNest) { 0 } else { 8 }
+$logPrefix = if ($isNest) { "$Arch-nest" } else { $Arch }
 
 function Invoke-Msi {
   param([string]$Op, [string]$Log, [string]$What, [string[]]$Props = @())
   # Properties go LAST on the msiexec command line, after the switches.
-  $argv = @($Op, "`"$Msi`"", '/qn', '/norestart', '/l*v', "$Arch-$Log") + $Props
+  $argv = @($Op, "`"$Msi`"", '/qn', '/norestart', '/l*v', "$logPrefix-$Log") + $Props
   Write-Host "==> msiexec $($argv -join ' ')"
   $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $argv -Wait -PassThru
   # 0 = success; 3010 = success, reboot required (services).
   if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-    Write-Host "----- $Arch-$Log (tail) -----"
-    if (Test-Path "$Arch-$Log") { Get-Content "$Arch-$Log" -Tail 100 }
+    Write-Host "----- $logPrefix-$Log (tail) -----"
+    if (Test-Path "$logPrefix-$Log") { Get-Content "$logPrefix-$Log" -Tail 100 }
     throw "$What FAILED: msiexec exit $($p.ExitCode)"
   }
   Write-Host "$What OK (exit $($p.ExitCode))"
@@ -65,7 +85,7 @@ function Get-ArpEntries {
   $roots = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
   @(Get-ItemProperty -Path $roots -ErrorAction SilentlyContinue |
-    Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq 'Fauna' })
+    Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq $arpName })
 }
 
 function Get-PeMachine([string]$Path) {
@@ -121,17 +141,23 @@ function Get-ShellClsids {
 function Assert-Installed {
   # Add/Remove Programs.
   $arp = Get-ArpEntries
-  if ($arp.Count -ne 1) { throw "expected exactly one 'Fauna' Add/Remove Programs entry, found $($arp.Count)" }
-  Write-Host "ARP entry OK: Fauna $($arp[0].DisplayVersion)"
+  if ($arp.Count -ne 1) { throw "expected exactly one '$arpName' Add/Remove Programs entry, found $($arp.Count)" }
+  Write-Host "ARP entry OK: $arpName $($arp[0].DisplayVersion)"
 
   # Every native binary is built for the MSI's own arch. App\ also holds the
   # self-contained .NET runtime's IL assemblies (AnyCPU, PE machine i386), so
-  # only its apphost is checked there.
-  $natives = @(Get-ChildItem -Path (Join-Path $installDir '*') -File -Include '*.exe', '*.dll') +
-             @(Get-Item -LiteralPath (Join-Path $installDir 'App\FaunaApp.exe'))
-  foreach ($required in 'fauna-sync-agent.exe', 'fauna-tui.exe', 'fauna-cli.exe', 'fauna-nest-svc.exe',
-                        'fauna-bridge-svc.exe', 'fauna-mail-bridge.exe') {
+  # only its apphost is checked there. The nest MSI carries no App\ at all.
+  $natives = @(Get-ChildItem -Path (Join-Path $installDir '*') -File -Include '*.exe', '*.dll')
+  if ($isNest) {
+    if (Test-Path -LiteralPath (Join-Path $installDir 'App')) { throw "the nest MSI installed an App directory under $installDir" }
+  } else {
+    $natives += @(Get-Item -LiteralPath (Join-Path $installDir 'App\FaunaApp.exe'))
+  }
+  foreach ($required in $requiredBins) {
     if (-not ($natives | Where-Object Name -eq $required)) { throw "$required is not installed under $installDir" }
+  }
+  foreach ($absent in $absentBins) {
+    if ($natives | Where-Object Name -eq $absent) { throw "$absent is installed under $installDir; the $Package MSI must not carry it" }
   }
   foreach ($f in $natives) {
     $m = Get-PeMachine $f.FullName
@@ -160,7 +186,11 @@ function Assert-Installed {
   # pwsh (the same native arch as this one) that exits afterwards, so the DLL
   # is not held loaded into the uninstall that follows.
   $clsids = Get-ShellClsids
-  if ($clsids.Count -ne 8) { throw "expected 8 shell-extension CLSIDs, found $($clsids.Count): $($clsids -join ', ')" }
+  if ($clsids.Count -ne $expectedClsids) { throw "expected $expectedClsids shell-extension CLSIDs, found $($clsids.Count): $($clsids -join ', ')" }
+  if ($isNest) {
+    Write-Host "Shell extension OK: the nest MSI registers no CLSID"
+    return
+  }
   foreach ($c in $clsids) {
     $dll = (Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Classes\CLSID\$c\InprocServer32").'(default)'
     if (-not $dll -or -not (Test-Path -LiteralPath $dll)) { throw "CLSID $c InprocServer32 names a missing DLL: '$dll'" }
@@ -181,7 +211,7 @@ function Assert-Installed {
 
 function Assert-Uninstalled {
   $arp = Get-ArpEntries
-  if ($arp.Count -ne 0) { throw "uninstall left $($arp.Count) 'Fauna' Add/Remove Programs entries behind" }
+  if ($arp.Count -ne 0) { throw "uninstall left $($arp.Count) '$arpName' Add/Remove Programs entries behind" }
   foreach ($name in $services) {
     if (Get-Service -Name $name -ErrorAction SilentlyContinue) { throw "uninstall left service $name behind" }
   }
@@ -222,4 +252,4 @@ if (Test-Path $data) {
   throw "REGRESSION: REMOVE_USER_DATA=1 left $data behind; it must be deleted"
 }
 Write-Host "Case 2 PASS: REMOVE_USER_DATA=1 deleted $data"
-Write-Host "Installer install/uninstall smoke test PASSED ($Arch)."
+Write-Host "Installer install/uninstall smoke test PASSED ($Package, $Arch)."

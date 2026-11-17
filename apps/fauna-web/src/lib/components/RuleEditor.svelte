@@ -15,7 +15,7 @@
   import { connectionStatus } from '#lib/store';
   import { ruleLabelers, ruleModule } from '#lib/rpc';
   import {
-    offlineAffordance,
+    offlinePossibility,
     ruleKeywordsInline,
     type LabelerChoice,
     type RuleEditorHandle,
@@ -50,7 +50,7 @@
     onchange?: () => void;
   } = $props();
 
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   let view = $state(editor.view());
   // The keywords inputs as typed. A single-line input re-painted from the stored

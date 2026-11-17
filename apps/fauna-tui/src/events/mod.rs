@@ -52,7 +52,8 @@ use fauna_client_caldav::{
     project_attendee_rsvp, seal_calendar_metadata, set_reminder, uid_hash,
     unseal_calendar_metadata,
 };
-use fauna_client_config::{DavStoreContext, dav_store_context};
+use fauna_client_caldav::{CalendarsRead, CalendarsReadState, EventCreateStep};
+use fauna_client_config::{DavCustody, DavStoreContext, dav_custody, dav_store_context};
 use fauna_client_conversations::NestImipDispatch;
 use fauna_client_email::EmailClient;
 use fauna_conversations::ConversationsSession;
@@ -166,6 +167,17 @@ pub struct EventsState {
     pub focus_month: u32,
     pub focus_day: u32,
     pub calendars: Vec<CalendarRow>,
+    /// What the last calendar read answered — the four answers of
+    /// `ui/events.md` § Errors & edge cases → *No calendar to hold an event*,
+    /// ruling 2 (`fauna_client_caldav::CalendarsRead`, payload-free). Every
+    /// door to the compose asks [`create_possibility`] over it. The default is
+    /// *unresolved*: a page that has not read yet is loading, never empty.
+    pub calendars_read: CalendarsReadState,
+    /// Whether the deployment serves CalDAV, CardDAV or mail — read
+    /// (`fauna.setup.status`) only with a *no key* answer, the one answer whose
+    /// reason depends on it. `None` until then, taken as served: the common
+    /// deployment, whose step is Add credential.
+    pub serves_dav_or_mail: Option<bool>,
     pub selected_calendar: Option<String>,
     /// The `calendar-visibility` display filter's checked set — client-side
     /// display state, **never persisted server-side and never a privacy or
@@ -341,8 +353,19 @@ pub fn nav_enter_op(
 /// repaints the same rows. `None` while the account store is not assembled:
 /// nothing could have changed there, and an empty read would blank the list.
 pub fn store_resync_op(
+    state: &EventsState,
     account_store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
 ) -> Option<Op> {
+    // An unresolved read re-runs whole: custody's first listing lands as a
+    // store walk, which is this notice (ruling 2: *unresolved* is a wait,
+    // re-run when custody lists). Only that answer — a settled one is
+    // re-read at the next page entry, and a re-run on every notice would
+    // race the page's own mutations for no new answer.
+    if state.calendars_read == CalendarsReadState::Unresolved
+        && let Some(op) = nav_enter_op(state, account_store.clone())
+    {
+        return Some(op);
+    }
     Some(Op::LoadRefusedChanges {
         account_store: Some(account_store?),
     })
@@ -483,6 +506,53 @@ impl EventsState {
 /// existing calendar keeps whatever the user chose. Unchecking every box empties
 /// the set, which the shared predicate reads as the union — so the next load
 /// re-seeds it, exactly as linux behaves.
+/// Can an event compose open (and a create be sent) now? The shared
+/// predicate over the page's read, this person's admin bit and what the
+/// deployment serves — the one answer `new-event-btn`, the day-cell
+/// double-press, the time-slot press, their key bindings and `create-event`
+/// all ask (`ui/events.md` § *No calendar to hold an event*, ruling 3).
+pub(crate) fn create_possibility(app: &App) -> fauna_core::possibility::Possibility {
+    fauna_client_caldav::event_create_possibility(
+        &app.events.calendars_read,
+        app.am_i_admin,
+        app.events.serves_dav_or_mail.unwrap_or(true),
+    )
+}
+
+/// The step [`create_possibility`]'s reason names, for the empty state's jump.
+fn create_step(app: &App) -> Option<EventCreateStep> {
+    fauna_client_caldav::event_create_step(
+        &app.events.calendars_read,
+        app.am_i_admin,
+        app.events.serves_dav_or_mail.unwrap_or(true),
+    )
+}
+
+/// `calendar-list-empty-state-step`: go to the place the reason's step is
+/// taken — Settings → Mail & Calendar (its rail-row entry, so the sub-page
+/// hydrates as a click on the row would), or the admin area's Calendar page.
+/// The pages' own nav-edge reads are superseded by the sub-page's.
+pub fn go_to_create_step(app: &mut App, step: EventCreateStep) -> Option<crate::app::PageOp> {
+    match step {
+        EventCreateStep::AddCredential => {
+            let _ = app.apply(Page::Settings);
+            crate::settings::apply_local(app, crate::settings::Action::OpenMail)
+                .map(crate::app::PageOp::Settings)
+        }
+        EventCreateStep::AdminEnableCalendar => {
+            let _ = app.apply(Page::Admin);
+            crate::admin::route_subpage(&mut app.admin, Some("admin-calendar"))
+                .map(crate::app::PageOp::Admin)
+        }
+    }
+}
+
+/// The compose's whole-sentence report of a create refused after the gate
+/// (ruling 4): the form stays open with what was typed.
+fn save_failed(cause: &str) -> String {
+    et::SAVE_FAILED.replace("{error}", cause)
+}
+
 fn seed_visible_calendars(
     visible: &mut std::collections::HashSet<String>,
     previous: &[CalendarRow],
@@ -716,6 +786,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             name: app.events.new_calendar_name.clone(),
         }),
         Action::ShowCreateEvent => {
+            // The gate (ruling 3): the seam has already desensitized the
+            // button; a key binding reaching here refuses with the reason.
+            if app.errors.refuse(Page::Events, &create_possibility(app)) {
+                return None;
+            }
             // Deliberately does NOT clear: this opener RESUMES the persisted
             // draft (`events.md` § Persistence — "opening the compose resumes
             // the draft; a day-cell gesture starts fresh"). Clearing here is
@@ -740,6 +815,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::ComposeOnDay { y, m, d, at } => {
+            // A positional door is simply not live while no calendar can hold
+            // the event (ruling 3); the reason is on the page's empty state
+            // and, here, on error-message, never a silent drop.
+            if app.errors.refuse(Page::Events, &create_possibility(app)) {
+                return None;
+            }
             // Focus follows the cell, so a Back out of the compose returns to
             // the month the user was actually looking at rather than to
             // wherever focus happened to be.
@@ -761,30 +842,44 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.events.notify_drafts();
             None
         }
-        Action::CreateEventSubmit => Some(Op::CreateEvent {
-            nest,
-            secret_hex,
-            mail: mail.clone(),
-            // Fall back to the first calendar when none is explicitly selected
-            // (linux parity — the grid views create without a prior
-            // `select_calendar`); `EventCreated` then selects it for display.
-            calendar_id: app
-                .events
-                .selected_calendar
-                .clone()
-                .or_else(|| app.events.calendars.first().map(|c| c.id.clone()))
-                .unwrap_or_default(),
-            organizer_email: app.events.organizer_email.clone(),
-            summary: app.events.new_event_summary.clone(),
-            // The A2 rule (events.md § Where logic lives): pad a bare
-            // `…THH:MM` to `…THH:MM:00`, unify a space-separated date+time to
-            // `T` — the other 6 clients already normalize this text-field
-            // input before it reaches the nest.
-            dtstart: normalize_event_datetime_input(&app.events.new_event_dtstart),
-            dtend: normalize_event_datetime_input(&app.events.new_event_dtend),
-            description: app.events.new_event_description.clone(),
-            location: app.events.new_event_location.clone(),
-        }),
+        Action::CreateEventSubmit => {
+            // The submit asks the predicate again (ruling 3) through the
+            // shared target: the live selection, else the first calendar (linux
+            // parity — the grid views create without a prior
+            // `select_calendar`), else the predicate's reason in words — never
+            // an empty calendar id. `EventCreated` then selects it for display.
+            let target = fauna_client_caldav::event_create_target(
+                &app.events.calendars_read,
+                app.am_i_admin,
+                app.events.serves_dav_or_mail.unwrap_or(true),
+                app.events.selected_calendar.as_deref(),
+                app.events.calendars.iter().map(|c| c.id.as_str()),
+            );
+            let calendar_id = match target {
+                Ok(id) => id,
+                Err(reason) => {
+                    app.errors
+                        .insert(Page::Events, crate::wizard::localized(&reason));
+                    return None;
+                }
+            };
+            Some(Op::CreateEvent {
+                nest,
+                secret_hex,
+                mail: mail.clone(),
+                calendar_id,
+                organizer_email: app.events.organizer_email.clone(),
+                summary: app.events.new_event_summary.clone(),
+                // The A2 rule (events.md § Where logic lives): pad a bare
+                // `…THH:MM` to `…THH:MM:00`, unify a space-separated date+time to
+                // `T` — the other 6 clients already normalize this text-field
+                // input before it reaches the nest.
+                dtstart: normalize_event_datetime_input(&app.events.new_event_dtstart),
+                dtend: normalize_event_datetime_input(&app.events.new_event_dtend),
+                description: app.events.new_event_description.clone(),
+                location: app.events.new_event_location.clone(),
+            })
+        }
         Action::BackFromDetail => {
             app.events.mode = Mode::List;
             None
@@ -1247,6 +1342,10 @@ pub enum Outcome {
     /// The [`Op::RefreshCalendars`] reply — the calendar list plus the
     /// scoped-or-unioned events (§ Where logic lives above).
     CalendarsAndEventsLoaded {
+        /// The read's answer ([`EventsState::calendars_read`]).
+        read: CalendarsReadState,
+        /// Read only with a *no key* answer ([`EventsState::serves_dav_or_mail`]).
+        serves_dav_or_mail: Option<bool>,
         calendars: Vec<CalendarRow>,
         events: Vec<EventRow>,
         /// The open refused-change rows, fetched in the same pass — see
@@ -1374,24 +1473,44 @@ impl Op {
                     account_store.as_ref(),
                 )
                 .await;
-                let Some(DavStoreContext {
-                    actor_id,
-                    msek,
-                    prior_mseks,
-                }) = caldav_context(mail.as_ref(), &secret_hex).await
+                // The four-answer read (ruling 2): custody decides *unresolved*
+                // and *no key* without a call; with the key the shared load
+                // (the lazy `Personal` included) answers *loaded* or *provision
+                // failed*.
+                let custody = caldav_custody(mail.as_ref(), &secret_hex).await;
+                let read = match CalDavClient::new(Arc::clone(&nest))
+                    .read_calendars(&custody)
+                    .await
+                {
+                    Ok(read) => read,
+                    Err(e) => return Outcome::Failed(format!("list_calendars: {e}")),
+                };
+                if let CalendarsRead::ProvisionFailed { error } = &read {
+                    tracing::error!("events: lazy Personal: {error}");
+                }
+                let serves_dav_or_mail = match read {
+                    CalendarsRead::NoKey => Some(deployment_serves_dav_or_mail(&nest).await),
+                    _ => None,
+                };
+                let (
+                    DavCustody::Ready(DavStoreContext {
+                        actor_id,
+                        msek,
+                        prior_mseks,
+                    }),
+                    CalendarsRead::Loaded { calendars: entries },
+                ) = (custody, &read)
                 else {
                     return Outcome::CalendarsAndEventsLoaded {
+                        read: read.state(),
+                        serves_dav_or_mail,
                         calendars: vec![],
                         events: vec![],
                         refused_changes,
                         query_gen,
                     };
                 };
-                let calendars =
-                    match list_calendars_rows(&nest, &actor_id, &msek, &prior_mseks).await {
-                        Ok(rows) => rows,
-                        Err(e) => return Outcome::Failed(e),
-                    };
+                let calendars = calendar_rows(entries, &msek, &prior_mseks);
                 let mut events = Vec::new();
                 for cal in calendars_in_scope(&calendars, &selected_calendar) {
                     match fetch_events_rows(
@@ -1409,6 +1528,8 @@ impl Op {
                     }
                 }
                 Outcome::CalendarsAndEventsLoaded {
+                    read: read.state(),
+                    serves_dav_or_mail,
                     calendars,
                     events,
                     refused_changes,
@@ -1585,7 +1706,7 @@ impl Op {
                     prior_mseks,
                 }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
-                    return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
+                    return Outcome::Failed(save_failed(errors::CALENDAR_REQUIRES_MAIL));
                 };
                 let uid = format!("{}@fauna-tui", uuid::Uuid::new_v4());
                 let fields = EventFields {
@@ -1618,7 +1739,7 @@ impl Op {
                     )
                     .await
                 {
-                    return Outcome::Failed(format!("put_event_ciphertext: {e}"));
+                    return Outcome::Failed(save_failed(&e.to_string()));
                 }
                 match fetch_events_rows(
                     &nest,
@@ -1924,6 +2045,20 @@ impl Op {
 /// a load/mutate clears it (the page shows fresh truth), matching
 /// `notifications::apply_outcome`.
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
+    // A landed mutation carries the freshest list there is, so it claims the
+    // next `events_gen`: a load already in flight (a nav-entry or a
+    // store-change re-run, read before the write) is then dropped at its
+    // fold instead of putting the pre-mutation roster back.
+    if matches!(
+        outcome,
+        Outcome::CalendarCreated(_)
+            | Outcome::EventCreated { .. }
+            | Outcome::EventDeleted { .. }
+            | Outcome::EventMutated { .. }
+            | Outcome::IcsImported { .. }
+    ) {
+        app.events.events_gen.set(app.events.events_gen.get() + 1);
+    }
     match outcome {
         Outcome::CalendarCreated(rows) => {
             // Seed here too, not just on the load path: a calendar the user
@@ -1936,6 +2071,9 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 &app.events.calendars,
                 &rows,
             );
+            if !rows.is_empty() {
+                app.events.calendars_read = CalendarsReadState::Loaded;
+            }
             app.events.calendars = rows;
             app.events.mode = Mode::List;
             app.errors.remove(&Page::Events);
@@ -1947,12 +2085,18 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // (events.md § Implementation status today, the no-selection-union
         // race apple/android/web already guard against the same way).
         Outcome::CalendarsAndEventsLoaded {
+            read,
+            serves_dav_or_mail,
             calendars,
             events,
             refused_changes,
             query_gen,
         } => {
             if query_gen == app.events.events_gen.get() {
+                app.events.calendars_read = read;
+                if serves_dav_or_mail.is_some() {
+                    app.events.serves_dav_or_mail = serves_dav_or_mail;
+                }
                 seed_visible_calendars(
                     &mut app.events.visible_calendars,
                     &app.events.calendars,
@@ -2148,6 +2292,60 @@ async fn caldav_context(
     dav_store_context(mail, actor_id).await
 }
 
+/// [`caldav_context`]'s custody answer, kept whole for the calendar read
+/// (ruling 2). A malformed connection secret is no answer about custody, so
+/// it reads as *unresolved* (logged), never as *no key*.
+async fn caldav_custody(mail: &dyn fauna_client_config::MailStore, secret_hex: &str) -> DavCustody {
+    match ActorKeypair::from_secret_hex(secret_hex) {
+        Ok(kp) => dav_custody(mail, kp.actor_id().0).await,
+        Err(e) => {
+            tracing::error!("events: the connection secret does not parse: {e}");
+            DavCustody::Unreadable(e.to_string())
+        }
+    }
+}
+
+/// Does the deployment serve CalDAV, CardDAV or mail (`fauna.setup.status`)?
+/// Mail counts while this box can turn it on (`mail_unavailable_here` false),
+/// not only once it is on: a person's own enable in Mail & Calendar is then
+/// the step that mints the key, which is what the reason names. It decides
+/// only which step a *no key* reason names; a failed read takes the common
+/// deployment's answer (served — the step is Add credential).
+async fn deployment_serves_dav_or_mail(nest: &Arc<NestClient>) -> bool {
+    match nest
+        .request::<_, fauna_client::SetupStatusReply>(
+            "fauna.setup.status",
+            fauna_client::SetupStatusRequest::default(),
+        )
+        .await
+    {
+        Ok(status) => status.serves_dav_or_mail(),
+        Err(e) => {
+            tracing::warn!(
+                "events: setup status unreadable, taking the deployment as serving: {e}"
+            );
+            true
+        }
+    }
+}
+
+/// Unseal each listed calendar's metadata into a row; a row that will not
+/// unseal is left out (logged).
+fn calendar_rows(
+    entries: &[fauna_client_caldav::bridge_routing::CalendarEntry],
+    msek: &[u8; 32],
+    prior_mseks: &[[u8; 32]],
+) -> Vec<CalendarRow> {
+    // Derived once for the whole list — every row's metadata reuses it instead
+    // of paying its own X-Wing keygen .
+    let keys =
+        DavRecipientKeys::from_mseks(fauna_client_caldav::DavKind::Calendar, msek, prior_mseks);
+    entries
+        .iter()
+        .filter_map(|e| calendar_row_from_entry(e, &keys))
+        .collect()
+}
+
 async fn list_calendars_rows(
     nest: &Arc<NestClient>,
     actor_id: &[u8; 32],
@@ -2164,15 +2362,7 @@ async fn list_calendars_rows(
     if let Some(e) = &reply.personal_provision_error {
         tracing::error!("events::list_calendars_rows: lazy Personal: {e}");
     }
-    // Derived once for the whole list — every row's metadata reuses it instead
-    // of paying its own X-Wing keygen .
-    let keys =
-        DavRecipientKeys::from_mseks(fauna_client_caldav::DavKind::Calendar, msek, prior_mseks);
-    Ok(reply
-        .calendars
-        .iter()
-        .filter_map(|e| calendar_row_from_entry(e, &keys))
-        .collect())
+    Ok(calendar_rows(&reply.calendars, msek, prior_mseks))
 }
 
 fn calendar_row_from_entry(
@@ -2536,6 +2726,42 @@ pub fn elements(app: &App) -> Vec<Element> {
             .inline(),
         );
     }
+    // The calendar list's empty state (ruling 3): while the read is
+    // unresolved, the loading line and never the empty state; on *no key* or
+    // *provision failed*, the predicate's reason and — when it names a step
+    // taken on another page — the one-press jump there. A loaded read with no
+    // row painted (every row failed to unseal) adds nothing: "No calendars
+    // yet." is never said of a list that is not real.
+    if st.calendars.is_empty() {
+        match &st.calendars_read {
+            CalendarsReadState::Loaded => {}
+            CalendarsReadState::Unresolved => {
+                out.push(Element::chrome(et::create_blocked::LOADING));
+            }
+            CalendarsReadState::NoKey | CalendarsReadState::ProvisionFailed { .. } => {
+                let reason = create_possibility(app)
+                    .reason()
+                    .map(crate::wizard::localized)
+                    .unwrap_or_else(|| et::create_blocked::NOT_HERE.to_string());
+                out.push(Element::label(ids::CALENDAR_LIST_EMPTY_STATE, reason));
+                if let Some(step) = create_step(app) {
+                    out.push(Element::gesture_button(
+                        ids::CALENDAR_LIST_EMPTY_STATE_STEP,
+                        match step {
+                            EventCreateStep::AddCredential => {
+                                et::create_blocked::OPEN_MAIL_SETTINGS
+                            }
+                            EventCreateStep::AdminEnableCalendar => {
+                                et::create_blocked::OPEN_ADMIN_CALENDAR
+                            }
+                        },
+                        true,
+                        Gesture::EventsCreateStep(step),
+                    ));
+                }
+            }
+        }
+    }
     // Calendar-level `.ics` import/export, beside the calendar list and only
     // while a calendar is selected — both act on THAT calendar (events.md
     // § Import / Export). The path is typed: a terminal has no picker, so the
@@ -2571,12 +2797,18 @@ pub fn elements(app: &App) -> Vec<Element> {
             out.push(Element::chrome(st.ics_notice.clone()));
         }
     }
-    out.push(Element::gesture_button(
-        ids::NEW_EVENT_BTN,
-        et::NEW_EVENT,
-        true,
-        Gesture::Events(Action::ShowCreateEvent),
-    ));
+    // The gate (ruling 3): declared here, applied by the one seam
+    // (`App::page_elements`) — desensitized with its reason while blocked,
+    // not painted while absent.
+    out.push(
+        Element::gesture_button(
+            ids::NEW_EVENT_BTN,
+            et::NEW_EVENT,
+            true,
+            Gesture::Events(Action::ShowCreateEvent),
+        )
+        .possible(create_possibility(app)),
+    );
 
     match &st.mode {
         // The page's calendar scope, resolved ONCE here and handed to whichever
@@ -2744,6 +2976,9 @@ mod tests {
                 "calendar-date-label",
                 "events-next-month",
                 "new-calendar-btn",
+                // The loading line: a page that has not read yet is loading,
+                // never empty (ruling 2 of *No calendar to hold an event*).
+                "",
                 "new-event-btn",
             ]
         );
@@ -2937,14 +3172,18 @@ mod tests {
         );
     }
 
-    /// The store-change notice re-reads the refused-change list only — the
-    /// page's one store-backed source — and only once the account store is
-    /// assembled (before that nothing could have changed there, and an empty
-    /// read would blank the list).
+    /// With the calendar read loaded, the store-change notice re-reads the
+    /// refused-change list only — the page's one store-backed source — and
+    /// only once the account store is assembled (before that nothing could
+    /// have changed there, and an empty read would blank the list).
     #[test]
     fn the_store_change_resync_reads_the_refused_list_only_once_the_store_is_up() {
+        let loaded = EventsState {
+            calendars_read: CalendarsReadState::Loaded,
+            ..Default::default()
+        };
         assert!(
-            store_resync_op(None).is_none(),
+            store_resync_op(&loaded, None).is_none(),
             "no account store: nothing to re-read, nothing to blank"
         );
         let mut app = events_test_app();
@@ -3930,6 +4169,9 @@ mod tests {
             fauna_core::identity::ActorKeypair::generate(),
         );
         app.events = init(nest, "aa", "alice@example.com", fake_mail());
+        // A working account's read: loaded, so the doors open (the tests of
+        // the other answers set theirs — *No calendar to hold an event*).
+        app.events.calendars_read = CalendarsReadState::Loaded;
         app
     }
 
@@ -4936,6 +5178,8 @@ mod tests {
         apply_outcome(
             &mut app,
             Outcome::CalendarsAndEventsLoaded {
+                read: CalendarsReadState::Loaded,
+                serves_dav_or_mail: None,
                 calendars: vec![cal("aa", "Work"), cal("bb", "Home")],
                 events: vec![
                     ev_at("1", "A", "2026-07-15T10:00", "2026-07-15T11:00"),
@@ -4979,6 +5223,8 @@ mod tests {
         apply_outcome(
             &mut app,
             Outcome::CalendarsAndEventsLoaded {
+                read: CalendarsReadState::Loaded,
+                serves_dav_or_mail: None,
                 calendars: vec![cal("aa", "Work"), cal("bb", "Home")],
                 events: vec![
                     ev_at("1", "Fresh", "2026-07-15T10:00", "2026-07-15T11:00"),
@@ -5011,6 +5257,8 @@ mod tests {
         apply_outcome(
             &mut app,
             Outcome::CalendarsAndEventsLoaded {
+                read: CalendarsReadState::Loaded,
+                serves_dav_or_mail: None,
                 calendars: vec![cal("aa", "Work"), cal("bb", "Home")],
                 events: vec![
                     ev_at("1", "A", "2026-07-15T10:00", "2026-07-15T11:00"),
@@ -5056,5 +5304,319 @@ mod tests {
             panic!("expected Op::RefreshCalendars");
         };
         assert_eq!(selected_calendar, Some("bb".to_string()));
+    }
+
+    // --- `ui/events.md` § Errors & edge cases → *No calendar to hold an
+    // event*, rulings 3 and 4: the doors, the submit and the empty state on
+    // each of the read's answers. ---
+
+    /// The page with each element's answer applied as the one seam applies
+    /// it (`App::page_elements`, which a signed-out test app does not reach):
+    /// absent dropped, not-possible disabled.
+    fn painted(app: &mut crate::app::App) -> Vec<Element> {
+        let mut els = elements(app);
+        els.retain(|e| e.possibility.as_ref().is_none_or(|p| p.is_shown()));
+        for e in &mut els {
+            if !app.element_possibility(e).is_possible() {
+                e.enabled = false;
+            }
+        }
+        els
+    }
+
+    fn find<'a>(elements: &'a [Element], id: &str) -> Option<&'a Element> {
+        elements.iter().find(|e| e.id == id)
+    }
+
+    fn with_read(read: CalendarsReadState) -> crate::app::App {
+        let mut app = events_test_app();
+        app.events.calendars_read = read;
+        app
+    }
+
+    fn reason_text(key: &str) -> String {
+        crate::wizard::localized(&fauna_core::localized::LocalizedText::key(key))
+    }
+
+    #[test]
+    fn an_unresolved_read_paints_loading_never_the_empty_state_and_shuts_the_opener() {
+        let mut app = with_read(CalendarsReadState::Unresolved);
+        let els = painted(&mut app);
+        assert!(find(&els, ids::CALENDAR_LIST_EMPTY_STATE).is_none());
+        assert!(
+            els.iter().any(|e| e.text == et::create_blocked::LOADING),
+            "the loading line is painted"
+        );
+        let btn = find(&els, ids::NEW_EVENT_BTN).expect("the opener is shown");
+        assert!(!btn.enabled, "blocked while loading");
+    }
+
+    #[test]
+    fn no_key_paints_the_add_credential_reason_and_its_jump() {
+        let mut app = with_read(CalendarsReadState::NoKey);
+        let els = painted(&mut app);
+        let empty = find(&els, ids::CALENDAR_LIST_EMPTY_STATE).expect("the empty state");
+        assert_eq!(
+            empty.text,
+            reason_text(fauna_client_caldav::calendars_read::reason_keys::ADD_CREDENTIAL)
+        );
+        assert_ne!(empty.text, et::NO_CALENDARS);
+        let step = find(&els, ids::CALENDAR_LIST_EMPTY_STATE_STEP).expect("the jump");
+        assert!(step.enabled);
+        assert_eq!(step.text, et::create_blocked::OPEN_MAIL_SETTINGS);
+        assert!(!find(&els, ids::NEW_EVENT_BTN).unwrap().enabled);
+    }
+
+    #[test]
+    fn no_key_on_a_deployment_serving_nothing_sends_an_admin_to_the_calendar_page() {
+        let mut app = with_read(CalendarsReadState::NoKey);
+        app.events.serves_dav_or_mail = Some(false);
+        app.am_i_admin = true;
+        let els = painted(&mut app);
+        assert_eq!(
+            find(&els, ids::CALENDAR_LIST_EMPTY_STATE).unwrap().text,
+            reason_text(fauna_client_caldav::calendars_read::reason_keys::ADMIN_ENABLE_CALENDAR)
+        );
+        assert_eq!(
+            find(&els, ids::CALENDAR_LIST_EMPTY_STATE_STEP)
+                .unwrap()
+                .text,
+            et::create_blocked::OPEN_ADMIN_CALENDAR
+        );
+    }
+
+    #[test]
+    fn no_key_for_a_non_admin_on_a_deployment_serving_nothing_offers_no_opener() {
+        let mut app = with_read(CalendarsReadState::NoKey);
+        app.events.serves_dav_or_mail = Some(false);
+        let els = painted(&mut app);
+        assert!(
+            find(&els, ids::NEW_EVENT_BTN).is_none(),
+            "absent: not painted"
+        );
+        assert!(find(&els, ids::CALENDAR_LIST_EMPTY_STATE_STEP).is_none());
+        assert_eq!(
+            find(&els, ids::CALENDAR_LIST_EMPTY_STATE).unwrap().text,
+            et::create_blocked::NOT_HERE
+        );
+    }
+
+    #[test]
+    fn a_refused_provision_paints_its_error_and_no_jump() {
+        let mut app = with_read(CalendarsReadState::ProvisionFailed {
+            error: "provision_calendar: refused".into(),
+        });
+        let els = painted(&mut app);
+        let empty = find(&els, ids::CALENDAR_LIST_EMPTY_STATE).unwrap();
+        assert!(
+            empty.text.contains("provision_calendar: refused"),
+            "{}",
+            empty.text
+        );
+        assert!(find(&els, ids::CALENDAR_LIST_EMPTY_STATE_STEP).is_none());
+    }
+
+    #[test]
+    fn a_loaded_read_opens_every_door_and_paints_no_empty_state() {
+        let mut app = with_read(CalendarsReadState::Loaded);
+        app.events.calendars = vec![cal("aa", "Personal")];
+        let els = painted(&mut app);
+        assert!(find(&els, ids::CALENDAR_LIST_EMPTY_STATE).is_none());
+        assert!(find(&els, ids::NEW_EVENT_BTN).unwrap().enabled);
+        assert!(apply_local(&mut app, Action::ShowCreateEvent).is_none());
+        assert_eq!(app.events.mode, Mode::CreateEvent);
+        app.events.mode = Mode::List;
+        apply_local(
+            &mut app,
+            Action::ComposeOnDay {
+                y: 2026,
+                m: 11,
+                d: 16,
+                at: None,
+            },
+        );
+        assert_eq!(app.events.mode, Mode::CreateEvent);
+    }
+
+    /// Every door refuses on each answer that is not *loaded* — the opener's
+    /// key binding, the day-cell double-press and the time-slot press — and
+    /// says why on error-message, never a silent drop.
+    #[test]
+    fn every_door_stays_shut_on_each_answer_that_is_not_loaded() {
+        for read in [
+            CalendarsReadState::Unresolved,
+            CalendarsReadState::NoKey,
+            CalendarsReadState::ProvisionFailed { error: "x".into() },
+        ] {
+            for action in [
+                Action::ShowCreateEvent,
+                Action::ComposeOnDay {
+                    y: 2026,
+                    m: 11,
+                    d: 16,
+                    at: None,
+                },
+                Action::ComposeOnDay {
+                    y: 2026,
+                    m: 11,
+                    d: 16,
+                    at: Some((9, 30)),
+                },
+            ] {
+                let mut app = with_read(read.clone());
+                assert!(apply_local(&mut app, action.clone()).is_none());
+                assert_eq!(app.events.mode, Mode::List, "{read:?} {action:?}");
+                assert!(
+                    app.errors.get(&Page::Events).is_some(),
+                    "{read:?} {action:?}: the reason is said"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_submit_refuses_with_the_predicate_reason_on_each_answer_not_loaded() {
+        for (read, key) in [
+            (
+                CalendarsReadState::Unresolved,
+                fauna_client_caldav::calendars_read::reason_keys::LOADING,
+            ),
+            (
+                CalendarsReadState::NoKey,
+                fauna_client_caldav::calendars_read::reason_keys::ADD_CREDENTIAL,
+            ),
+        ] {
+            let mut app = with_read(read);
+            app.events.mode = Mode::CreateEvent;
+            app.events.new_event_summary = "Lunch".into();
+            assert!(apply_local(&mut app, Action::CreateEventSubmit).is_none());
+            assert_eq!(app.errors.get(&Page::Events), Some(&reason_text(key)));
+            assert_eq!(app.events.mode, Mode::CreateEvent, "the form stays open");
+            assert_eq!(app.events.new_event_summary, "Lunch");
+        }
+    }
+
+    /// Ruling 4: a create refused after the gate keeps the form open with
+    /// what was typed and says so in a whole sentence.
+    #[test]
+    fn a_failed_save_keeps_the_compose_open_with_its_fields() {
+        let mut app = with_read(CalendarsReadState::Loaded);
+        app.events.calendars = vec![cal("aa", "Personal")];
+        app.events.mode = Mode::CreateEvent;
+        app.events.new_event_summary = "Lunch".into();
+        apply_outcome(&mut app, Outcome::Failed(save_failed("nest said no")));
+        assert_eq!(app.events.mode, Mode::CreateEvent);
+        assert_eq!(app.events.new_event_summary, "Lunch");
+        let message = app.errors.get(&Page::Events).unwrap();
+        assert!(
+            message.starts_with("The event could not be saved"),
+            "{message}"
+        );
+        assert!(message.contains("nest said no"), "{message}");
+    }
+
+    /// The read's answer rides the load's outcome; a *no key* load carries
+    /// what the deployment serves, and a later loaded one keeps it.
+    #[test]
+    fn the_load_folds_the_read_and_what_the_deployment_serves() {
+        let mut app = events_test_app();
+        let query_gen = app.events.events_gen.get();
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarsAndEventsLoaded {
+                read: CalendarsReadState::NoKey,
+                serves_dav_or_mail: Some(false),
+                calendars: vec![],
+                events: vec![],
+                refused_changes: vec![],
+                query_gen,
+            },
+        );
+        assert_eq!(app.events.calendars_read, CalendarsReadState::NoKey);
+        assert_eq!(app.events.serves_dav_or_mail, Some(false));
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarsAndEventsLoaded {
+                read: CalendarsReadState::Loaded,
+                serves_dav_or_mail: None,
+                calendars: vec![cal("aa", "Personal")],
+                events: vec![],
+                refused_changes: vec![],
+                query_gen,
+            },
+        );
+        assert_eq!(app.events.calendars_read, CalendarsReadState::Loaded);
+        assert_eq!(app.events.serves_dav_or_mail, Some(false));
+    }
+
+    /// Until the read loads, the store-change notice (custody's first
+    /// listing lands as a store walk) re-runs the whole calendar load.
+    #[test]
+    fn the_store_change_re_runs_the_load_until_the_read_is_loaded() {
+        let app = with_read(CalendarsReadState::Unresolved);
+        assert!(matches!(
+            store_resync_op(&app.events, None),
+            Some(Op::RefreshCalendars { .. })
+        ));
+        for settled in [CalendarsReadState::NoKey, CalendarsReadState::Loaded] {
+            let app = with_read(settled.clone());
+            assert!(
+                store_resync_op(&app.events, None).is_none(),
+                "{settled:?}: settled, re-read at the next entry"
+            );
+        }
+    }
+
+    /// A load in flight when a mutation lands is dropped at its fold, so the
+    /// mutation's fresher roster stays (an RSVP raced by a re-run load).
+    #[test]
+    fn a_landed_mutation_drops_a_load_already_in_flight() {
+        let mut app = with_read(CalendarsReadState::Loaded);
+        app.events.calendars = vec![cal("aa", "Work")];
+        let in_flight = app.events.events_gen.get() + 1;
+        app.events.events_gen.set(in_flight);
+        let mut fresh = ev("e1", "aa", "Lunch");
+        fresh.self_rsvp = "accepted".into();
+        apply_outcome(
+            &mut app,
+            Outcome::EventMutated {
+                calendar_id: "aa".into(),
+                events: vec![fresh],
+                error: None,
+            },
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarsAndEventsLoaded {
+                read: CalendarsReadState::Unresolved,
+                serves_dav_or_mail: None,
+                calendars: vec![],
+                events: vec![ev("e1", "aa", "Lunch")],
+                refused_changes: vec![],
+                query_gen: in_flight,
+            },
+        );
+        assert_eq!(app.events.events_cache[0].self_rsvp, "accepted");
+        assert_eq!(app.events.calendars_read, CalendarsReadState::Loaded);
+        assert_eq!(app.events.calendars.len(), 1);
+    }
+
+    #[test]
+    fn the_jump_opens_mail_and_calendar_settings() {
+        let mut app = with_read(CalendarsReadState::NoKey);
+        app.page = Page::Events;
+        crate::app::gesture_work(
+            &mut app,
+            Gesture::EventsCreateStep(EventCreateStep::AddCredential),
+        );
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings.sub, crate::settings::SubPage::Mail);
+    }
+
+    #[test]
+    fn a_created_calendar_loads_the_read() {
+        let mut app = with_read(CalendarsReadState::ProvisionFailed { error: "x".into() });
+        apply_outcome(&mut app, Outcome::CalendarCreated(vec![cal("aa", "Work")]));
+        assert_eq!(app.events.calendars_read, CalendarsReadState::Loaded);
     }
 }

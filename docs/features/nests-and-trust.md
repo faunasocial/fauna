@@ -107,8 +107,8 @@ Stamped 2026-11-07 at ac836c937b.
 | web | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
 | linux | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
 | windows | 🚧 unbuilt | 0.1.5-dev+3ef45f1b standalone |
-| macos | 🚧 unbuilt | 0.1.5-dev+3ef45f1b standalone |
-| ios | 🚧 unbuilt | 0.1.5-dev+3ef45f1b standalone |
+| macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| ios | ✅ full | 0.1.5-dev+3ef45f1b standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+3ef45f1b standalone |
 | android-kids | — absent | |
@@ -155,10 +155,10 @@ Stamped 2026-11-07 at ac836c937b.
 | 26 | nest | `tests/e2e-unified/tests/api/test_nest_trust_content_keys.py::test_a_calendar_trust_opens_only_calendar_records_and_a_mail_trust_no_event_or_card` | nest (linux): passed |
 | 27 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_a_live_grant_stays_listed_with_revoke_when_the_roster_omits_or_fails` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 28 | app | `tests/e2e-unified/tests/test_custody_custodian_nest_fallback.py::test_devices_fall_back_to_a_custodian_nest_only_while_the_home_nest_is_down` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 29 | app | `tests/e2e-unified/tests/test_nests_page_sibling_repaint.py::test_a_grant_minted_on_a_sibling_paints_on_an_open_nests_page` | tui (linux): passed |
-| 29 | app | `tests/e2e-unified/tests/test_nests_page_sibling_repaint.py::test_a_nest_linked_on_a_sibling_paints_on_an_open_nests_page` | tui (linux): passed |
+| 29 | app | `tests/e2e-unified/tests/test_nests_page_sibling_repaint.py::test_a_grant_minted_on_a_sibling_paints_on_an_open_nests_page` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 29 | app | `tests/e2e-unified/tests/test_nests_page_sibling_repaint.py::test_a_nest_linked_on_a_sibling_paints_on_an_open_nests_page` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 30 | app | `tests/e2e-unified/tests/test_linked_nests.py::test_the_account_copy_capability_is_named_carried_on_relink_and_its_wraps_swept_on_unlink` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 31 | app | `tests/e2e-unified/tests/test_nest_trust_grants.py::test_keeping_your_mail_searchable_on_your_nest_states_its_bound_and_revoking_deletes_the_copy` — requires `nest-trust-mint-materialize-note` (not built: windows, macos, ios, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, macos (macos): skipped, ios (macos): skipped, tui (linux): passed |
-| 32 | app | `tests/e2e-unified/tests/test_nest_trust_grants.py::test_keeping_your_calendar_searchable_on_your_nest_states_its_bound_and_revoking_deletes_that_copy_alone` — requires `nest-trust-mint-materialize-note` (not built: windows, macos, ios, android-kids, ios-kids) | web (linux): passed, macos (macos): skipped, ios (macos): skipped, tui (linux): passed |
-| 33 | app | `tests/e2e-unified/tests/test_nest_trust_grants.py::test_keeping_your_contacts_searchable_on_your_nest_states_its_bound_and_revoking_deletes_that_copy_alone` — requires `nest-trust-mint-materialize-note` (not built: windows, macos, ios, android-kids, ios-kids) | web (linux): passed, macos (macos): skipped, ios (macos): skipped, tui (linux): passed |
+| 31 | app | `tests/e2e-unified/tests/test_nest_trust_grants.py::test_keeping_your_mail_searchable_on_your_nest_states_its_bound_and_revoking_deletes_the_copy` — requires `nest-trust-mint-materialize-note` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 32 | app | `tests/e2e-unified/tests/test_nest_trust_grants.py::test_keeping_your_calendar_searchable_on_your_nest_states_its_bound_and_revoking_deletes_that_copy_alone` — requires `nest-trust-mint-materialize-note` (not built: windows, android-kids, ios-kids) | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 33 | app | `tests/e2e-unified/tests/test_nest_trust_grants.py::test_keeping_your_contacts_searchable_on_your_nest_states_its_bound_and_revoking_deletes_that_copy_alone` — requires `nest-trust-mint-materialize-note` (not built: windows, android-kids, ios-kids) | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

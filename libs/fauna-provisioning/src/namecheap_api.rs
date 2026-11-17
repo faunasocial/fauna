@@ -122,6 +122,21 @@ pub(crate) fn to_provision_error(err: &ApiError) -> ProvisionError {
 // precedent, and the obvious crate (`quick-xml`) carries two live CVSS-7.5
 // advisories with no compatible upgrade.
 
+/// Split a domain like "example.com" into ("example", "com"),
+/// or "example.co.uk" into ("example", "co.uk") — the `SLD`/`TLD` pair every
+/// per-domain Namecheap command takes (the DNS half's host calls, the
+/// registrar's `domains.dns.setCustom`).
+pub(crate) fn split_domain(domain: &str) -> Result<(String, String), ProvisionError> {
+    let parts: Vec<&str> = domain.splitn(2, '.').collect();
+    if parts.len() != 2 {
+        return Err(ProvisionError::Parse(format!("Invalid domain: {domain}")));
+    }
+    if parts[0].is_empty() || parts[1].is_empty() {
+        return Err(ProvisionError::Parse(format!("Invalid domain: {domain}")));
+    }
+    Ok((parts[0].to_string(), parts[1].to_string()))
+}
+
 /// The opening-tag fragment of every `<Tag …>` element in `xml`, in document
 /// order — the bytes between `<Tag` and the closing `>`.
 ///

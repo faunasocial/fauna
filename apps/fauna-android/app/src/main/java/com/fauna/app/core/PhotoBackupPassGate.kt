@@ -20,6 +20,7 @@ class PhotoBackupPassGate {
     private val lock = Any()
     private var running = false
     private var wanted = false
+    private var coalesced = 0
 
     /**
      * Claim the right to run a pass. `false` ⇒ a pass is already in flight and has
@@ -29,6 +30,7 @@ class PhotoBackupPassGate {
     fun claim(): Boolean = synchronized(lock) {
         if (running) {
             wanted = true
+            coalesced += 1
             return false
         }
         running = true
@@ -64,4 +66,12 @@ class PhotoBackupPassGate {
 
     /** Whether a pass is in flight, for tests and diagnostics only — never as a gate. */
     val isRunning: Boolean get() = synchronized(lock) { running }
+
+    /**
+     * How many claims this gate has refused since it was made — each one a request
+     * that arrived mid-pass and was folded into a trailing pass. Monotonic, for the
+     * e2e `photo_backup` state key's `requests_coalesced` (the mid-pass barrier a
+     * coalescing witness needs) and diagnostics only — never as a gate.
+     */
+    val coalescedRequests: Int get() = synchronized(lock) { coalesced }
 }

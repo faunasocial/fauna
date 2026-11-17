@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.navigation.NavHostController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * Shared message state for the persistent banner — and the **category-1 display
@@ -86,6 +87,16 @@ class AppMessages {
 
     fun clearWarning() {
         _warning.value = null
+    }
+
+    /**
+     * Take the warning banner down only while [shows] holds for its text —
+     * atomic against a producer that paints another warning meanwhile, which
+     * then stands. The custody leg's cleared mark uses it
+     * ([com.fauna.app.ui.viewmodel.CustodyWarningSink]).
+     */
+    fun clearWarningIf(shows: (String) -> Boolean) {
+        _warning.update { if (it != null && shows(it)) null else it }
     }
 
     fun clearInfo() {

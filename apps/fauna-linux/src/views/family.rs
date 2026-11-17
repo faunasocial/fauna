@@ -49,6 +49,7 @@ use std::sync::Arc;
 use adw::prelude::*;
 
 use fauna_core::data::{FeedSources, UnknownPeerDm, UnknownSenderMail};
+use fauna_core::possibility::Possibility;
 
 use fauna_client_family::FamilyClient;
 use fauna_client_family::family::{
@@ -833,7 +834,92 @@ fn build_page_widgets() -> (adw::PreferencesPage, Widgets) {
         incoming_list,
         incoming_rows: RefCell::new(Vec::new()),
     };
+    bind_form_paint(&widgets);
     (page, widgets)
+}
+
+// ── Form validity (`family-safety.md` § Errors & edge cases; `ui/README.md`
+// § Offer only what is possible, rule 4's form case) ──────────────────────
+
+/// `family-policy-save-button`'s answer — the shared screen-time predicate over
+/// the editor's three cells (`fauna_client_family::forms`).
+fn policy_save_answer(w: &Widgets) -> Possibility {
+    fauna_client_family::forms::policy_save_possibility(
+        &w.screen_window_start.text(),
+        &w.screen_window_end.text(),
+        &w.screen_daily_minutes.text(),
+    )
+}
+
+/// `family-contact-add-button`'s answer over the typed actor id.
+fn contact_add_answer(w: &Widgets) -> Possibility {
+    fauna_client_family::forms::contact_add_possibility(&w.contact_input.text())
+}
+
+/// `family-transfer-button`'s answer over the typed actor id — its own reason
+/// keys, never the contact-add string.
+fn transfer_answer(w: &Widgets) -> Possibility {
+    fauna_client_family::forms::transfer_possibility(&w.transfer_input.text())
+}
+
+fn paint_policy_save(w: &Widgets) {
+    crate::form_gate::paint_submit(&w.save_button, &policy_save_answer(w), None);
+}
+
+/// Paint the page's three form submits from their shared predicates.
+fn paint_forms(w: &Widgets) {
+    paint_policy_save(w);
+    crate::form_gate::paint_submit(&w.contact_add_button, &contact_add_answer(w), None);
+    crate::form_gate::paint_submit(&w.transfer_button, &transfer_answer(w), None);
+}
+
+/// Repaint each submit as its boxes are typed in. Client-free, so the page's
+/// widget tree carries the painting before (and without) `wire`.
+fn bind_form_paint(w: &Widgets) {
+    paint_forms(w);
+    for cell in [
+        &w.screen_window_start,
+        &w.screen_window_end,
+        &w.screen_daily_minutes,
+    ] {
+        let (start, end, daily, save) = (
+            w.screen_window_start.clone(),
+            w.screen_window_end.clone(),
+            w.screen_daily_minutes.clone(),
+            w.save_button.clone(),
+        );
+        cell.connect_changed(move |_| {
+            crate::form_gate::paint_submit(
+                &save,
+                &fauna_client_family::forms::policy_save_possibility(
+                    &start.text(),
+                    &end.text(),
+                    &daily.text(),
+                ),
+                None,
+            );
+        });
+    }
+    {
+        let btn = w.contact_add_button.clone();
+        w.contact_input.connect_changed(move |e| {
+            crate::form_gate::paint_submit(
+                &btn,
+                &fauna_client_family::forms::contact_add_possibility(&e.text()),
+                None,
+            );
+        });
+    }
+    {
+        let btn = w.transfer_button.clone();
+        w.transfer_input.connect_changed(move |e| {
+            crate::form_gate::paint_submit(
+                &btn,
+                &fauna_client_family::forms::transfer_possibility(&e.text()),
+                None,
+            );
+        });
+    }
 }
 
 /// Wire the page to the shared `FamilyClient` seam, load on mount, and connect
@@ -1082,37 +1168,37 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets, page: &adw::PreferencesPage)
 /// Persist the editor's knobs for the selected ward, then fully refresh
 /// (never optimistic — the reload is the round-trip proof).
 ///
-/// A screen-time entry the policy cannot hold is refused *here*, on the shared
-/// rule the nest would refuse it by, and surfaced on `error-message` with no
-/// round trip — so the guardian reads the reason instead of a generic RPC
-/// failure, and the rest of the editor is left untouched.
+/// A screen-time entry the policy cannot hold is refused *here*, by the shared
+/// predicate the button is painted from (the rule the nest would refuse it
+/// by), and surfaced on `error-message` with no round trip — so the guardian
+/// reads the reason instead of a generic RPC failure, and the rest of the
+/// editor is left untouched.
 fn submit_policy(ctx: &Rc<Ctx>) {
     let Some(ward) = ctx.selected_ward.borrow().clone() else {
         return;
     };
-    let policy = match editor_policy(&ctx.w, ctx.unknown_peer_dm_edited.get()) {
-        Ok(policy) => policy,
-        Err(reason) => {
-            show_error(ctx, reason);
-            return;
-        }
+    if crate::form_gate::refuse(&policy_save_answer(&ctx.w), &ctx.w.error_label) {
+        return;
+    }
+    let Ok(policy) = editor_policy(&ctx.w, ctx.unknown_peer_dm_edited.get()) else {
+        return;
     };
     dispatch(ctx, Mutation::SavePolicy { ward, policy }, false);
 }
 
 /// `fauna.family.contact.add` for the selected ward. v1 takes a **hex actor id**
-/// (no handle resolution — the windows seam's rule); a parse failure surfaces in
-/// `error-message` without a round trip.
+/// (no handle resolution); a blank or malformed box is refused by the shared
+/// predicate the button is painted from, its reason on `error-message`
+/// without a round trip — never a silent return.
 fn submit_contact_add(ctx: &Rc<Ctx>) {
     let Some(ward) = ctx.selected_ward.borrow().clone() else {
         return;
     };
-    let input = ctx.w.contact_input.text().trim().to_string();
-    if input.is_empty() {
+    if crate::form_gate::refuse(&contact_add_answer(&ctx.w), &ctx.w.error_label) {
         return;
     }
+    let input = ctx.w.contact_input.text().trim().to_string();
     let Ok(peer) = fauna_core::identity::ActorId::from_hex(&input).map(|a| a.0.to_vec()) else {
-        show_error(ctx, S::CONTACT_ADD_INVALID_ACTOR_ID);
         return;
     };
     dispatch(ctx, Mutation::ContactAdd { ward, peer }, true);
@@ -1120,17 +1206,17 @@ fn submit_contact_add(ctx: &Rc<Ctx>) {
 
 /// `fauna.family.transfer` — propose a new guardian for the selected ward
 /// (pending until the target accepts, § Graduation & transfer). Same hex
-/// actor-id convention (and error) as contact-add.
+/// actor-id convention as contact-add, refused by its own shared predicate
+/// with its own reason (`family.transfer_*`).
 fn submit_transfer(ctx: &Rc<Ctx>) {
     let Some(ward) = ctx.selected_ward.borrow().clone() else {
         return;
     };
-    let input = ctx.w.transfer_input.text().trim().to_string();
-    if input.is_empty() {
+    if crate::form_gate::refuse(&transfer_answer(&ctx.w), &ctx.w.error_label) {
         return;
     }
+    let input = ctx.w.transfer_input.text().trim().to_string();
     let Ok(target) = fauna_core::identity::ActorId::from_hex(&input).map(|a| a.0.to_vec()) else {
-        show_error(ctx, S::CONTACT_ADD_INVALID_ACTOR_ID);
         return;
     };
     dispatch(ctx, Mutation::Transfer { ward, target }, false);
@@ -1393,7 +1479,7 @@ async fn load(nest: Nest) -> LoadResult {
 /// Render a load/mutation outcome (GTK main thread). On error the message shows
 /// and the rendered state is untouched.
 fn apply(ctx: &Rc<Ctx>, result: LoadResult, clear_contact_input: bool) {
-    ctx.w.save_button.set_sensitive(true);
+    paint_policy_save(&ctx.w);
     match result {
         Ok(view) => {
             crate::settings::render_error_label(&ctx.w.error_label, None);
@@ -1414,7 +1500,7 @@ fn apply_mutation(ctx: &Rc<Ctx>, result: MutationResult, clear_contact_input: bo
         Ok(Settled::Loaded(view)) => apply(ctx, Ok(*view), clear_contact_input),
         Err(msg) => apply(ctx, Err(msg), clear_contact_input),
         Ok(Settled::Queued { decided }) => {
-            ctx.w.save_button.set_sensitive(true);
+            paint_policy_save(&ctx.w);
             crate::settings::render_error_label(&ctx.w.error_label, None);
             if clear_contact_input {
                 ctx.w.contact_input.set_text("");
@@ -1482,6 +1568,7 @@ fn render(ctx: &Rc<Ctx>, view: FamilyView) {
         view.contact_requests.clone(),
         view.feed_requests.clone(),
     );
+    crate::views::contacts::list::repaint_entry_gate();
 
     // ── Guardian section ──
     let is_guardian = !view.wards.is_empty();
@@ -2127,14 +2214,11 @@ pub fn paint_feature_limits() {
 /// `policy.update`, so a save that would be refused never leaves the client and
 /// the guardian sees why locally.
 fn editor_policy(w: &Widgets, unknown_peer_dm_edited: bool) -> Result<ReachPolicy, &'static str> {
-    let screen_time = fauna_core::screen_time::ScreenTimePolicy {
-        window_start: fauna_core::screen_time::parse_time_of_day(&w.screen_window_start.text())?,
-        window_end: fauna_core::screen_time::parse_time_of_day(&w.screen_window_end.text())?,
-        daily_minutes: fauna_core::screen_time::parse_daily_minutes(
-            &w.screen_daily_minutes.text(),
-        )?,
-    };
-    screen_time.validate()?;
+    let screen_time = fauna_client_family::forms::screen_time_policy(
+        &w.screen_window_start.text(),
+        &w.screen_window_end.text(),
+        &w.screen_daily_minutes.text(),
+    )?;
     Ok(ReachPolicy {
         contact_approval: w.contact_approval.is_active(),
         unknown_sender_mail: unknown_sender_at(w.unknown_sender.selected()),
@@ -2532,6 +2616,65 @@ mod tests {
     /// guardian actually touched the select — an always-send would echo a
     /// render-time value back on every unrelated save (`family-safety.md`
     /// § The bridge-DM gate).
+    /// The form case of `ui/README.md` § Offer only what is possible: each of
+    /// the page's three submits is painted from its shared predicate
+    /// (`fauna_client_family::forms`) — blank or malformed input disables it
+    /// with the reason on its tooltip, a valid draft makes it live — and the
+    /// press refuses by the same answer on `error-message`.
+    #[test]
+    fn family_forms_paint_from_the_shared_predicates_and_refuse_with_the_reason() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            crate::offline_gate::reset_for_test("connected");
+            let (_page, w) = build_page_widgets();
+            let reason = |key: &str| {
+                fauna_core::localized::LocalizedText::key(key).resolve(crate::i18n::strings::lookup)
+            };
+
+            // Blank boxes: blocked with each form's own reason.
+            assert!(!w.contact_add_button.is_sensitive());
+            assert_eq!(
+                w.contact_add_button.tooltip_text().as_deref(),
+                Some(reason("family.contact_add_required").as_str())
+            );
+            assert!(!w.transfer_button.is_sensitive());
+            assert_eq!(
+                w.transfer_button.tooltip_text().as_deref(),
+                Some(reason("family.transfer_required").as_str())
+            );
+            // Empty screen-time cells mean "unset": the policy save is live.
+            assert!(w.save_button.is_sensitive());
+
+            // Malformed transfer box: its OWN reason, not the contact-add one.
+            w.transfer_input.set_text("not-hex");
+            assert_eq!(
+                w.transfer_button.tooltip_text().as_deref(),
+                Some(reason("family.transfer_invalid_actor_id").as_str())
+            );
+            w.contact_input.set_text(&"07".repeat(32));
+            assert!(w.contact_add_button.is_sensitive());
+
+            // A half-set window blocks the save; the press refuses on
+            // `error-message` with the same answer.
+            w.screen_window_start.set_text("22:00");
+            assert!(!w.save_button.is_sensitive());
+            let answer = policy_save_answer(&w);
+            assert_eq!(
+                answer.reason().map(|r| r.key.as_str()),
+                Some("family.policy_screen_time_invalid")
+            );
+            assert!(crate::form_gate::refuse(&answer, &w.error_label));
+            assert!(w.error_label.is_visible());
+            assert_eq!(
+                w.save_button.tooltip_text().as_deref(),
+                Some(w.error_label.text().as_str())
+            );
+            w.screen_window_end.set_text("07:00");
+            assert!(w.save_button.is_sensitive());
+            crate::offline_gate::reset_for_test("disconnected");
+        });
+    }
+
     #[test]
     fn editor_policy_sends_unknown_peer_dm_only_when_edited() {
         crate::testid::run_on_gtk_thread(|| {

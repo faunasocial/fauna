@@ -72,8 +72,8 @@ def opened_app(launch_client, tui_app_path, nest_instance, tmp_path, request):
     """A logged-in tui launch with the opener seam + an isolated handoff dir.
 
     Logged in as a DEDICATED seeded actor (the ``seeded_media_app`` rationale):
-    the page upload needs a readable owned folder to target
-    (``media.error_no_set`` otherwise), and a dedicated actor can't pollute the
+    the page upload targets a readable owned folder
+    (a folderless actor's would make ``Personal``), and a dedicated actor can't pollute the
     shared ``test_user``'s empty-state assertions. The recording device
     self-heals its write registration (``ui/media.md`` § Implementation status,
     self-healing registration), so no explicit device step is needed.
@@ -172,7 +172,7 @@ def _upload_and_open_detail(driver, tmp_path, name: str, data: bytes) -> None:
     # sign-in the folder's rows cannot be verified until the account runtime's
     # custody reads, so the first listing can come back empty, and that empty
     # page already reads as loaded. An upload pressed then is refused with
-    # `media.error_no_set` (no folder listed to upload into), and a `before`
+    # the since-retired `media.error_no_set` (no folder listed), and a `before`
     # read then counts 0, so the seed turning up later satisfies `before + 1`
     # (the race `test_tui_media_graphics_protocol.py` lost on Windows).
     media.ensure_loaded()

@@ -812,6 +812,20 @@ impl SetupStatusReply {
             ContentScanners::from_wire(&self.content_scanners),
         )
     }
+
+    /// Whether this deployment serves calendar storage a person can add a
+    /// first credential to — the `deployment_serves_dav_or_mail` input of
+    /// `fauna_client_caldav::event_create_possibility` (events.md § Errors &
+    /// edge cases → *No calendar to hold an event*). Mail counts while the box
+    /// can turn it on (`email_enabled`, or not [`Self::mail_unavailable_here`]):
+    /// a nest that reports `email_enabled: false` still lets a person enable
+    /// mail, which mints the calendar key. One home for every app's read.
+    pub fn serves_dav_or_mail(&self) -> bool {
+        self.email_enabled
+            || !self.mail_unavailable_here()
+            || self.caldav_enabled
+            || self.carddav_enabled
+    }
 }
 
 /// Serde default for [`SetupStatusReply::mail_subsystem_ok`] — a missing field

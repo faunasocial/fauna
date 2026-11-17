@@ -220,6 +220,24 @@ def test_absent_groups_are_created_without_testers(tmp_path):
     assert all("betaTesters" not in json.dumps(c) for c in created)
 
 
+def test_an_all_builds_group_is_never_posted_a_build(tmp_path):
+    # The owner makes the internal group by hand with automatic distribution on
+    # (hasAccessToAllBuilds true): it holds every build by definition, so the
+    # leg writes nothing to it, whatever its builds relationship reads, and the
+    # external group is attached as before.
+    replies = _replies(**{"/v1/betaGroups": {"data": [
+        {"type": "betaGroups", "id": INTERNAL,
+         "attributes": {"name": "Fauna internal", "isInternalGroup": True, "hasAccessToAllBuilds": True}},
+        {"type": "betaGroups", "id": EXTERNAL,
+         "attributes": {"name": "Fauna testers", "isInternalGroup": False, "hasAccessToAllBuilds": False}},
+    ]}})
+    proc, writes, _ = _run(tmp_path, replies)
+    assert proc.returncode == 0, proc.stderr
+    assert not [w for w in writes if f"/v1/betaGroups/{INTERNAL}" in w], writes
+    assert any(w.startswith(f"POST /v1/betaGroups/{EXTERNAL}/relationships/builds") for w in writes), writes
+    assert "has access to all builds" in proc.stdout + proc.stderr
+
+
 def test_processing_is_waited_for_then_the_leg_goes_on(tmp_path):
     replies = _replies(**{"/v1/builds": [_builds("PROCESSING"), _builds("PROCESSING"), _builds("VALID")]})
     proc, _, legs = _run(tmp_path, replies)

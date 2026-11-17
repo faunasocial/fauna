@@ -5,7 +5,10 @@
 //!
 //! All WS-RPC calls go through the shared `fauna-client-snapshots`
 //! crate (priority #1/#2) — the per-app glue here is purely render
-//! rules + the friction-bar enable logic.
+//! rules. The friction bar's answers are the shared
+//! `fauna_backups_machine::possibility::{restore_inputs_possibility,
+//! restore_possibility}`, painted through `crate::possible::paint` and asked
+//! again at each press.
 //!
 //! AT-SPI discoverability follows the proven `post-card` row pattern
 //! (`views/feed/post_list.rs`): a row carries its searchable text on the
@@ -16,8 +19,10 @@
 //! scoped query `restore-history-item[i]` → `restore-divergence-banner`
 //! resolves.
 
+use fauna_backups_machine::possibility::RestoreSelection;
+use fauna_core::possibility::Possibility;
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -66,7 +71,10 @@ pub struct RestoreHandles {
 /// Build the restore section: the local-restore action card + the
 /// collapsible restore-history section. Returns the outer box and the
 /// live handles.
-pub fn build_restore_section(client: &Rc<FaunaClient>) -> (gtk::Box, RestoreHandles) {
+pub fn build_restore_section(
+    client: &Rc<FaunaClient>,
+    error_label: &gtk::Label,
+) -> (gtk::Box, RestoreHandles) {
     let outer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
@@ -84,7 +92,7 @@ pub fn build_restore_section(client: &Rc<FaunaClient>) -> (gtk::Box, RestoreHand
         snapshot_kinds,
         progress,
         warning,
-    } = build_local_restore_action(client);
+    } = build_local_restore_action(client, error_label);
     outer.append(&action_box);
 
     // -- Restore history (collapsible) ---------------------------------------
@@ -140,7 +148,10 @@ struct LocalRestoreAction {
 
 /// Build the local-restore action card: snapshot picker + per-kind
 /// checkboxes + the re-type friction bar + progress label.
-fn build_local_restore_action(client: &Rc<FaunaClient>) -> LocalRestoreAction {
+fn build_local_restore_action(
+    client: &Rc<FaunaClient>,
+    error_label: &gtk::Label,
+) -> LocalRestoreAction {
     let group = adw::PreferencesGroup::builder()
         .title(s::RESTORE_LOCAL_TITLE)
         .build();
@@ -189,7 +200,6 @@ fn build_local_restore_action(client: &Rc<FaunaClient>) -> LocalRestoreAction {
 
     let confirm_button = gtk::Button::with_label(s::RESTORE_CONFIRM_BUTTON);
     confirm_button.add_css_class("suggested-action");
-    confirm_button.set_sensitive(false);
     set_test_id(&confirm_button, ids::RESTORE_CONFIRM_BUTTON);
     crate::offline_gate::declare_wire_kind(
         &confirm_button,
@@ -229,44 +239,78 @@ fn build_local_restore_action(client: &Rc<FaunaClient>) -> LocalRestoreAction {
     let snapshot_ids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let snapshot_kinds: Rc<RefCell<Vec<Option<usize>>>> = Rc::new(RefCell::new(Vec::new()));
 
-    // -- Friction-bar enable logic -------------------------------------------
-    // The button is sensitive iff the typed text exactly equals the
-    // SELECTED snapshot's id and that snapshot's kind is ticked.
-    let recompute_enabled = {
+    // -- The friction bar's answers ----------------------------------------
+    // One read of the section's live state, handed to the shared answers: the
+    // paint below and every press ask exactly this.
+    let answers = {
         let confirm_input = confirm_input.clone();
-        let confirm_button = confirm_button.clone();
         let snapshot_select = snapshot_select.clone();
         let snapshot_ids = Rc::clone(&snapshot_ids);
         let snapshot_kinds = Rc::clone(&snapshot_kinds);
         let kind_checks = Rc::clone(&kind_checks);
+        let progress = progress.clone();
         move || {
-            let typed = confirm_input.text().to_string();
-            let selected = snapshot_select.selected() as usize;
-            let ids = snapshot_ids.borrow();
-            let matches = ids.get(selected).map(|id| *id == typed).unwrap_or(false);
-            let ticked = snapshot_kinds
-                .borrow()
-                .get(selected)
-                .copied()
-                .flatten()
-                .and_then(|i| kind_checks.get(i))
-                .is_none_or(|check| check.is_active());
-            confirm_button.set_sensitive(matches && !typed.is_empty() && ticked);
+            restore_answers(
+                &snapshot_ids.borrow(),
+                &snapshot_kinds.borrow(),
+                snapshot_select.selected() as usize,
+                |i| kind_checks.get(i).is_none_or(|check| check.is_active()),
+                progress.text() == s::RESTORE_PROGRESS_RUNNING,
+                &confirm_input.text(),
+            )
         }
     };
+    let repaint = {
+        let answers = answers.clone();
+        let kind_checks = Rc::clone(&kind_checks);
+        let confirm_input = confirm_input.clone();
+        let confirm_button = confirm_button.clone();
+        move || {
+            let RestoreAnswers { inputs, confirm } = answers();
+            for check in kind_checks.iter() {
+                crate::possible::paint(check, None, inputs.clone());
+            }
+            crate::possible::paint(&confirm_input, None, inputs);
+            crate::possible::paint(&confirm_button, None, confirm);
+        }
+    };
+    repaint();
 
+    // A tick needs a snapshot to restore: a toggle that got past the paint is
+    // put back and refused with the reason (there is nothing to choose yet).
+    let reverting = Rc::new(Cell::new(false));
     for check in kind_checks.iter() {
-        let recompute = recompute_enabled.clone();
-        check.connect_toggled(move |_| recompute());
+        let repaint = repaint.clone();
+        let answers = answers.clone();
+        let reverting = Rc::clone(&reverting);
+        let error_label = error_label.clone();
+        check.connect_toggled(move |check| {
+            if reverting.get() {
+                return;
+            }
+            if !super::allowed(&error_label, &answers().inputs) {
+                reverting.set(true);
+                check.set_active(!check.is_active());
+                reverting.set(false);
+                return;
+            }
+            repaint();
+        });
     }
 
     {
-        let recompute = recompute_enabled.clone();
-        confirm_input.connect_changed(move |_| recompute());
+        let repaint = repaint.clone();
+        confirm_input.connect_changed(move |_| repaint());
     }
     {
-        let recompute = recompute_enabled.clone();
-        snapshot_select.connect_selected_notify(move |_| recompute());
+        let repaint = repaint.clone();
+        snapshot_select.connect_selected_notify(move |_| repaint());
+    }
+    // `restore-progress` is the running state (the click arms it, the message
+    // loop ends it either way), so the confirm repaints with it.
+    {
+        let repaint = repaint.clone();
+        progress.connect_label_notify(move |_| repaint());
     }
 
     // -- Restore dispatch ----------------------------------------------------
@@ -277,7 +321,11 @@ fn build_local_restore_action(client: &Rc<FaunaClient>) -> LocalRestoreAction {
         let confirm_input = confirm_input.clone();
         let progress = progress.clone();
         let warning = warning.clone();
+        let error_label = error_label.clone();
         confirm_button.connect_clicked(move |_| {
+            if !super::allowed(&error_label, &answers().confirm) {
+                return;
+            }
             let selected = snapshot_select.selected() as usize;
             let ids = snapshot_ids.borrow();
             let Some(id_str) = ids.get(selected) else {
@@ -300,6 +348,46 @@ fn build_local_restore_action(client: &Rc<FaunaClient>) -> LocalRestoreAction {
         snapshot_kinds,
         progress,
         warning,
+    }
+}
+
+/// The restore section's two answers, from one read of its state.
+struct RestoreAnswers {
+    /// `restore-kind-checkbox` and `restore-confirm-input`.
+    inputs: Possibility,
+    /// `restore-confirm-button`.
+    confirm: Possibility,
+}
+
+/// Hand the section's state to the shared answers: the selected picker row is
+/// the snapshot to restore (none while the picker is empty), its kind's box
+/// decides `kind_ticked` (a kind with no box never refuses), `running` is the
+/// progress line's running state, `typed` the friction bar's text.
+fn restore_answers(
+    snapshot_ids: &[String],
+    snapshot_kinds: &[Option<usize>],
+    selected: usize,
+    ticked: impl Fn(usize) -> bool,
+    running: bool,
+    typed: &str,
+) -> RestoreAnswers {
+    let selection = snapshot_ids
+        .get(selected)
+        .map(|snapshot_id| RestoreSelection {
+            snapshot_id,
+            kind_ticked: snapshot_kinds
+                .get(selected)
+                .copied()
+                .flatten()
+                .is_none_or(&ticked),
+        });
+    RestoreAnswers {
+        inputs: fauna_backups_machine::possibility::restore_inputs_possibility(selection.as_ref()),
+        confirm: fauna_backups_machine::possibility::restore_possibility(
+            running,
+            selection.as_ref(),
+            typed,
+        ),
     }
 }
 
@@ -594,4 +682,53 @@ fn find_banner(card: &gtk::Box) -> Option<gtk::Button> {
         child = w.next_sibling();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(answer: &Possibility) -> Option<&str> {
+        answer.reason().map(|r| r.key.as_str())
+    }
+
+    /// The section reads its state into the shared answers: nothing to choose
+    /// before a snapshot exists, then the kind ticked, the id re-typed and no
+    /// restore running.
+    #[test]
+    fn the_friction_bar_paints_from_the_shared_restore_answers() {
+        let none = restore_answers(&[], &[], u32::MAX as usize, |_| true, false, "");
+        assert_eq!(key(&none.inputs), Some("backups.restore_no_snapshots"));
+        assert_eq!(key(&none.confirm), Some("backups.restore_no_snapshots"));
+
+        let ids = vec!["7".to_string()];
+        let kinds = vec![Some(0)];
+        let typed_wrong = restore_answers(&ids, &kinds, 0, |_| true, false, "8");
+        assert!(typed_wrong.inputs.is_possible());
+        assert_eq!(
+            key(&typed_wrong.confirm),
+            Some("backups.restore_progress_idle")
+        );
+        let unticked = restore_answers(&ids, &kinds, 0, |_| false, false, "7");
+        assert_eq!(
+            key(&unticked.confirm),
+            Some("backups.restore_kind_unticked")
+        );
+        let running = restore_answers(&ids, &kinds, 0, |_| true, true, "7");
+        assert_eq!(
+            key(&running.confirm),
+            Some("backups.restore_progress_running")
+        );
+        assert!(
+            restore_answers(&ids, &kinds, 0, |_| true, false, "7")
+                .confirm
+                .is_possible()
+        );
+        // A kind with no checkbox is never the boxes' to refuse.
+        assert!(
+            restore_answers(&ids, &[None], 0, |_| false, false, "7")
+                .confirm
+                .is_possible()
+        );
+    }
 }

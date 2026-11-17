@@ -77,6 +77,11 @@ Stamped 2026-11-07 at b844c771f6.
    - `tests/e2e-unified/tests/api/test_sign_in_bound_to_its_nest.py::test_a_silent_challenge_answer_made_for_one_nest_is_refused_by_another`
    - `tests/e2e-unified/tests/api/test_sign_in_bound_to_its_nest.py::test_a_device_sign_in_made_for_one_nest_is_refused_by_another`
    - `tests/e2e-unified/tests/api/test_sign_in_bound_to_its_nest.py::test_a_custody_sign_in_made_for_one_nest_is_refused_by_another`
+19. [app] Finishing sign-in — the first time, or adding another account — never leaves you without Fauna on screen: the window you signed in from shows the app getting ready and then the app — `docs/goal/behavior/onboarding.md` § Wizard exit handling
+   - `tests/e2e-unified/tests/test_wizard_becomes_app_in_place_linux.py::test_linux_first_run_wizard_window_becomes_the_main_window`
+   - `tests/e2e-unified/tests/test_wizard_becomes_app_in_place_linux.py::test_linux_add_account_switch_never_leaves_no_window`
+   - `tests/e2e-unified/tests/test_wizard_becomes_app_in_place.py::test_first_run_sign_in_never_leaves_the_surface_showing_nothing`
+   - `tests/e2e-unified/tests/test_wizard_becomes_app_in_place.py::test_add_account_switch_never_leaves_the_surface_showing_nothing`
 
 ## Status
 
@@ -84,12 +89,12 @@ Stamped 2026-11-07 at b844c771f6.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.6-dev+e46418b8 standalone |
-| linux | ✅ full | 0.1.6-dev+3aeb19b0 standalone |
+| linux | ⚠ partial | 0.1.6-dev+3aeb19b0 standalone |
 | windows | ⚠ partial | 0.1.6-dev+e46418b8 standalone |
 | macos | ⚠ partial | 0.1.6-dev+e46418b8 standalone |
 | ios | ⚠ partial | 0.1.6-dev+e46418b8 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6-dev+59444f07 standalone |
+| tui | ⚠ partial | 0.1.6-dev+59444f07 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -117,7 +122,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_a_folders_gesture_lands_the_moment_the_app_reads_online_after_a_flip` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_api_helpers.py::test_auth_token` | nest (linux): passed, nest (macos): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_onboarding.py::test_alice_self_service_onboarding` | nest (linux): passed, nest (macos): passed |
-| 8 | app | `tests/e2e-unified/tests/test_reach_hint_dial_journey.py::test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it` — requires `registry-set-account-reach` (test harness) (not built: web) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_reach_hint_dial_journey.py::test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it` — requires `registry-set-account-reach` (test harness) (not built: web) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_l_wrong_clock_still_signs_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_m_wrong_clock_ahead_stays_signed_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_n_suspended_user_fallthrough_invite_submit_is_terminal` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -134,4 +139,8 @@ Stamped 2026-11-07 at b844c771f6.
 | 18 | nest | `tests/e2e-unified/tests/api/test_sign_in_bound_to_its_nest.py::test_a_silent_challenge_answer_made_for_one_nest_is_refused_by_another` | nest (linux): passed, nest (macos): passed |
 | 18 | nest | `tests/e2e-unified/tests/api/test_sign_in_bound_to_its_nest.py::test_a_device_sign_in_made_for_one_nest_is_refused_by_another` | nest (linux): passed, nest (macos): passed |
 | 18 | nest | `tests/e2e-unified/tests/api/test_sign_in_bound_to_its_nest.py::test_a_custody_sign_in_made_for_one_nest_is_refused_by_another` | nest (linux): passed, nest (macos): passed |
+| 19 | app | `tests/e2e-unified/tests/test_wizard_becomes_app_in_place_linux.py::test_linux_first_run_wizard_window_becomes_the_main_window` | — |
+| 19 | app | `tests/e2e-unified/tests/test_wizard_becomes_app_in_place_linux.py::test_linux_add_account_switch_never_leaves_no_window` | — |
+| 19 | app | `tests/e2e-unified/tests/test_wizard_becomes_app_in_place.py::test_first_run_sign_in_never_leaves_the_surface_showing_nothing` | web (linux): passed, tui (linux): passed |
+| 19 | app | `tests/e2e-unified/tests/test_wizard_becomes_app_in_place.py::test_add_account_switch_never_leaves_the_surface_showing_nothing` | web (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

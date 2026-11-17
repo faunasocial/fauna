@@ -16,6 +16,11 @@ import com.fauna.app.core.contactAskRender
 import com.fauna.app.core.foldContactAskFailed
 import com.fauna.app.core.foldContactAsked
 import com.fauna.app.core.foldKnockReply
+import com.fauna.app.core.rosterStatus
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.resolveLocalized
+import uniffi.fauna_core.Possibility
 import com.fauna.app.core.ResolveService
 import com.fauna.app.core.SecureStorage
 import com.fauna.app.core.SuccessionAftermathHost
@@ -46,6 +51,12 @@ class ContactsVM @Inject constructor(
 ) : ViewModel() {
 
     val contacts: Flow<List<Contact>> = contactDao.getAll()
+
+    /** The roster as `(peerId, status)` — the peer half of the knock predicate,
+     *  held so the knock asks the same answer its button paints from. */
+    private val rosterEdges: StateFlow<List<Pair<String, String>>> = contacts
+        .map { rows -> rows.map { it.peerId to it.status } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val knocks: Flow<List<Knock>> = knockDao.getAll()
     val findResult = MutableStateFlow<ResolveService.ResolvedRecipient?>(null)
     val findError = MutableStateFlow<String?>(null)
@@ -74,6 +85,24 @@ class ContactsVM @Inject constructor(
      *  own policy has contact approval on ([com.fauna.app.core.WardAsks]). */
     val knocksAwaitGuardian = api.wardAsks.knocksAwaitGuardian
 
+    /** The ward's own supervision — collected by the screen so the entry gate
+     *  repaints when a status read lands (`contacts.md` § Errors & edge cases). */
+    val wardSupervision = api.wardAsks.supervision
+
+    /** The knock's answer for [peerId] (`contacts-add-button`): the shared
+     *  `knock_possibility` over the ward's supervision and its roster edge. */
+    fun knockAnswerFor(peerId: String): Possibility =
+        api.wardAsks.knockPossibility(rosterStatus(rosterEdges.value, peerId))
+
+    /** The accept's answer (`contacts-accept-button`), the same for every row. */
+    fun acceptAnswer(): Possibility = api.wardAsks.acceptPossibility()
+
+    /** A refusal is never silent (`ui/README.md` § Offer only what is
+     *  possible, rule 7): the answer's own reason, on `error-message`. */
+    private fun refusalOf(answer: Possibility): String? =
+        if (answer.isPossible) null
+        else resolveLocalized(context, answer.blockedReason) ?: context.getString(R.string.common_error)
+
     /** What the knock / ask put on `error-message` — the guardian refusal stays
      *  a real error there (rule (b)); `null` clears it. */
     val knockError = MutableStateFlow<String?>(null)
@@ -81,7 +110,11 @@ class ContactsVM @Inject constructor(
     /** The pair's render for [state]'s peer — durable pending first (rule (c)). */
     fun contactAskRenderFor(state: KnockAskState): ContactAskRender? {
         val peer = state.peer ?: return null
-        return contactAskRender(api.wardAsks.contactAskPending(peer), state)
+        return contactAskRender(
+            api.wardAsks.contactAskPending(peer),
+            state,
+            guardianDecides = api.wardAsks.guardianDecides(rosterStatus(rosterEdges.value, peer)),
+        )
     }
 
     /** The open post-succession member-review roster (succession-aftermath.md
@@ -229,6 +262,8 @@ class ContactsVM @Inject constructor(
      * (tui's rule); sent, the knocks and roster are re-read.
      */
     fun acceptKnock(peerId: String) {
+        // The accept asks the predicate its button paints from first.
+        refusalOf(acceptAnswer())?.let { errorMessage.value = it; return }
         viewModelScope.launch {
             try {
                 val actorId = actorIdHex() ?: return@launch
@@ -283,6 +318,9 @@ class ContactsVM @Inject constructor(
     fun addContact(peerId: String, recipientNestUrl: String? = null) {
         val before = knockAsk.value
         if (before.peer == peerId && (before.knockSent || before.knockInFlight)) return
+        // The knock asks the predicate its button paints from before it sends
+        // (rules 6 and 7) — the ward's entry gate.
+        refusalOf(knockAnswerFor(peerId))?.let { knockError.value = it; return }
         val actorId = actorIdHex() ?: return
         if (before.peer == peerId) knockAsk.value = before.copy(knockInFlight = true)
         viewModelScope.launch {

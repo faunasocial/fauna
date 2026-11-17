@@ -74,9 +74,10 @@ pub(super) fn settings_elements(state: &AdminState) -> Vec<Element> {
             )
             .within(TIER_ITEM, i),
         );
-        // admin.md § 3 — *Removing a tier* (ID user-approved 2026-10-19): on
-        // every row, `free` included — which tier is removable is the nest's
-        // call, and its refusal reads on `error-message`. No confirm dialog.
+        // admin.md § 3 — *Removing a tier* (ID user-approved 2026-10-19): the
+        // shared answer leaves it off `free`, which the nest always refuses; a
+        // tier still in use is the nest's refusal, read on `error-message`.
+        // No confirm dialog.
         els.push(
             Element::gesture_button(
                 ids::ADMIN_SETTINGS_TIER_DELETE_BUTTON,
@@ -84,6 +85,7 @@ pub(super) fn settings_elements(state: &AdminState) -> Vec<Element> {
                 true,
                 Gesture::Admin(Action::DeleteTier { row: i }),
             )
+            .possible(fauna_client_admin::tier_delete_possibility(&tier.name))
             .within(TIER_ITEM, i),
         );
     }

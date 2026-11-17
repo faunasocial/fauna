@@ -52,8 +52,12 @@ struct AdminShellView: View {
                         .toolbar { adminNavBackItem(placement: .navigationBarTrailing) }
                 }
         }
-        .task(id: client != nil) {
-            if let api = client?.api { vm.configure(api: api) }
+        // Keyed on the signed-in actor too: it is the take-over offer's viewer.
+        .task(id: "\(client != nil)-\(appState.session.actorId ?? "")") {
+            if let api = client?.api {
+                vm.configure(api: api, viewerActorIdHex: appState.session.actorId,
+                             familyStatus: appState.familyStatus)
+            }
         }
     }
 

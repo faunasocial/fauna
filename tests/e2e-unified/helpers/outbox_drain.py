@@ -9,7 +9,7 @@ drain with :func:`hold_outbox_drain` and lifts it with
 ``outbox_drain_held``, compiled into debug and ``e2e-agent`` builds only
 (convention 15), and it reaches an app one of two ways:
 
-* **The hold file** (tui, linux, macos, ios): the file the launch's
+* **The hold file** (tui, linux, macos, ios, windows): the file the launch's
   ``FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`` names, created to hold and deleted to
   release. It is a file because the process that pumps inherits the
   launch's environment (on linux and tui the sync agent the app spawns).
@@ -56,7 +56,7 @@ def hold_outbox_drain(app) -> None:
         return
     raise RuntimeError(
         f"{type(app.driver).__name__} reaches no outbox drain hold: it sets no "
-        "FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE (the tui, linux, macos and ios "
+        "FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE (the tui, linux, macos, ios and windows "
         "drivers do, at launch) and has no set_outbox_drain_hold (the web and android drivers "
         "do); without one the hold would be a no-op and the journey would pass "
         "or fail for the wrong reason"

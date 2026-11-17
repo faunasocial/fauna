@@ -58,7 +58,7 @@ public static class NotificationService
 
     /// <summary>
     /// Where the registration <see cref="Initialize"/> made lives. With package identity
-    /// (the Store package, or the MSI's sparse identity) toasts post under the package
+    /// (the full MSIX: the Store package or the direct-download bundle) toasts post under the package
     /// app's AUMID. Without it, <c>AppNotificationManager.Register()</c> keeps a per-user
     /// registration under <c>HKCU\Software\Classes\AppUserModelId</c>: a key named for
     /// this exe's path (lowercased, <c>\</c> → <c>.</c>) whose <c>NotificationGUID</c>

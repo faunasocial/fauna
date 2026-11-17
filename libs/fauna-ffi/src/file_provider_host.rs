@@ -802,6 +802,32 @@ pub struct FfiFileProviderItem {
     pub share_link_eligible: bool,
 }
 
+/// One change enumeration's answer ([`FfiFileProviderHost::changes_since`]).
+#[derive(uniffi::Record)]
+pub struct FfiFileProviderChanges {
+    /// The items new or changed since the anchor (files and the directories
+    /// their paths imply).
+    pub updated: Vec<FfiFileProviderItem>,
+    /// The identifiers gone since the anchor.
+    pub deleted: Vec<String>,
+    /// The anchor to finish the enumeration at.
+    pub anchor: Vec<u8>,
+}
+
+impl From<provider_face::ChangeReport> for FfiFileProviderChanges {
+    fn from(r: provider_face::ChangeReport) -> Self {
+        FfiFileProviderChanges {
+            updated: r
+                .updated
+                .into_iter()
+                .map(FfiFileProviderItem::from)
+                .collect(),
+            deleted: r.deleted,
+            anchor: r.anchor,
+        }
+    }
+}
+
 impl From<provider_face::ProviderItem> for FfiFileProviderItem {
     fn from(i: provider_face::ProviderItem) -> Self {
         FfiFileProviderItem {
@@ -954,6 +980,13 @@ enum Request {
     },
     TakeKeptFlips {
         reply: oneshot::Sender<Result<Vec<FfiFileProviderItem>, String>>,
+    },
+    ChangesSince {
+        anchor: Vec<u8>,
+        reply: oneshot::Sender<Result<FfiFileProviderChanges, String>>,
+    },
+    CurrentChangeAnchor {
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
     ReadOnly {
         reply: oneshot::Sender<Result<bool, String>>,
@@ -1812,6 +1845,26 @@ impl FfiFileProviderHost {
     /// same way, so the OS re-reads the `userInfo` Finder's Share action gates on.
     pub async fn take_kept_flips(&self) -> Result<Vec<FfiFileProviderItem>, FfiError> {
         self.call(|reply| Request::TakeKeptFlips { reply }).await
+    }
+
+    /// `enumerateChanges(from: anchor)` → the items new or changed since
+    /// `anchor`, the identifiers gone since it, and the anchor to finish at
+    /// (`provider_face::serve_changes_since`). A replicated File Provider
+    /// learns of a change to a container it already lists ONLY from this
+    /// feed — a signal never makes it re-list one — so a pulled or
+    /// peer-landed row lists in Files through here (`on-demand-files-apple.md`
+    /// § Apple File Provider binding, *the change feed*). An anchor the feed
+    /// did not mint (or no longer holds) gets every item and no deletions.
+    pub async fn changes_since(&self, anchor: Vec<u8>) -> Result<FfiFileProviderChanges, FfiError> {
+        self.call(|reply| Request::ChangesSince { anchor, reply })
+            .await
+    }
+
+    /// `currentSyncAnchor` → the change feed's anchor for the tree as it
+    /// stands now (`provider_face::serve_current_change_anchor`).
+    pub async fn current_change_anchor(&self) -> Result<Vec<u8>, FfiError> {
+        self.call(|reply| Request::CurrentChangeAnchor { reply })
+            .await
     }
 
     /// Whether this host serves its set read-only — the account holds it as a
@@ -2955,6 +3008,19 @@ async fn serve(
             let out = engine.restore_retained_version(conflict_id).await;
             let _ = reply.send(out.map_err(|e| format!("{e:#}")));
         }
+        Request::ChangesSince { anchor, reply } => {
+            let out = provider_face::serve_changes_since(engine, &anchor)
+                .await
+                .map(FfiFileProviderChanges::from)
+                .map_err(|e| e.to_string());
+            let _ = reply.send(out);
+        }
+        Request::CurrentChangeAnchor { reply } => {
+            let out = provider_face::serve_current_change_anchor(engine)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = reply.send(out);
+        }
         Request::TakeKeptFlips { reply } => {
             let mut items = Vec::with_capacity(kept_flips.len());
             for rel in std::mem::take(kept_flips) {
@@ -3265,6 +3331,12 @@ impl Request {
                 let _ = reply.send(Err(msg));
             }
             Request::TakeKeptFlips { reply, .. } => {
+                let _ = reply.send(Err(msg));
+            }
+            Request::ChangesSince { reply, .. } => {
+                let _ = reply.send(Err(msg));
+            }
+            Request::CurrentChangeAnchor { reply, .. } => {
                 let _ = reply.send(Err(msg));
             }
             Request::ReadOnly { reply, .. } => {

@@ -11,8 +11,8 @@ belongs to, which only the real MLS backend makes — and the
 invocation, so the marker never reaches the backups page tests beside the mail
 one.
 
-tui first (``testing.md`` § Default app and nest mode), linux, android and
-web lifted; the other apps add their marker as their lift lands.
+tui first (``testing.md`` § Default app and nest mode); linux, android, web,
+ios, macos and windows lifted.
 """
 
 from __future__ import annotations
@@ -29,6 +29,9 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.android,
     pytest.mark.web,
+    pytest.mark.ios,
+    pytest.mark.macos,
+    pytest.mark.windows,
     pytest.mark.real_conversations,
 ]
 

@@ -24,6 +24,7 @@ import com.fauna.ffi.FfiTierItem
 import uniffi.fauna_core.OfferStatus
 import uniffi.fauna_core.isSafePaymentUrl
 import social.fauna.generated.Ids
+import uniffi.fauna_core.Possibility
 
 /**
  * The profile Tiers-tab **OTHER** (subscriber-browse) section — subscriptions
@@ -59,6 +60,7 @@ fun ProfileOffersSection(
     val working by vm.working.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val redeemInput by vm.redeemInput.collectAsState()
+    val redeemAnswer by vm.redeemAnswer.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
 
@@ -88,6 +90,8 @@ fun ProfileOffersSection(
         onRedeemCodeChange = vm::setRedeemInput,
         // The follow's home, as the Subscribe above carries it.
         onRedeem = { vm.redeemClaim(targetActorIdHex, home) },
+        onRedeemRefused = { vm.errorMessage.value = it },
+        redeemAnswer = redeemAnswer,
         // The payment link: the shared https-only guard refuses an unsafe link up
         // front (F-CL2 anti-phishing-redirect; the error shows, nothing is sent),
         // else the subscribe goes first and the composed checkout URL opens
@@ -115,8 +119,13 @@ fun ProfileOffersContent(
     redeemCode: String = "",
     onRedeemCodeChange: (String) -> Unit = {},
     onRedeem: () -> Unit = {},
+    /** The redeem's refusal reason (shared `redeem_code_possibility`), for the page's `error-message`. */
+    onRedeemRefused: (String) -> Unit = {},
     /** `subscription-offer-payment-link` pressed on the row for (tier, payment URL). */
     onPaymentLink: (String, String) -> Unit = { _, _ -> },
+    /** The redeem button's answer (`ProfileOffersVM.redeemAnswer`); the default
+     *  is for the stateless harness only. */
+    redeemAnswer: Possibility = Possibility.Possible,
 ) {
     Column(
         modifier = Modifier
@@ -164,6 +173,8 @@ fun ProfileOffersContent(
                 onCodeChange = onRedeemCodeChange,
                 working = working,
                 onRedeem = onRedeem,
+                onRefuse = onRedeemRefused,
+                answer = redeemAnswer,
             )
         }
     }

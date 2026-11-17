@@ -52,7 +52,7 @@ opening binary files). The Windows shell-extension's status icons
 
 Third-party content vendored wholesale: the AT Protocol Lexicon schema
 catalog, copied verbatim from `bluesky-social/atproto`'s `lexicons/`
-directory and embedded into the mail/calendar bridge binary at build time.
+directory and embedded into the AT Protocol bridge binary at build time.
 The PDS write path validates records against these schemas at runtime, so
 the tree is committed rather than fetched at boot, refreshed by a dedicated
 dev-fleet sync tool; the pinned commit is recorded in

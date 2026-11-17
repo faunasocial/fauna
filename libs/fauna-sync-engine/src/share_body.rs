@@ -59,19 +59,39 @@ async fn file_range(full_path: &Path, offset: u64, len: u64) -> Option<Vec<u8>> 
     Some(plain)
 }
 
-/// A bound local tree: `path` is read at `root/path`. On an on-demand root
-/// (cfapi today) a cloud-only placeholder stands at the path with its bytes
-/// elsewhere; it answers `None` — the provider's own read of its own
-/// placeholder would block for cfapi's full timeout, and serving must never
+/// A bound local tree: `path` is read at `root/path`. On an on-demand root a
+/// cloud-only placeholder stands at the path with its bytes elsewhere — a
+/// cfapi placeholder on windows, a *dataless* file (`SF_DATALESS`) on apple
+/// when the bound folder sits in another provider's tree (iCloud Drive, a
+/// `~/Library/CloudStorage` domain); it answers `None` — the provider's own
+/// read of its own cfapi placeholder would block for cfapi's full timeout,
+/// opening a dataless file makes the OS download it, and serving must never
 /// hydrate on an asker's behalf ([`crate::placeholder`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TreeBodySource {
     root: PathBuf,
+    /// The placeholder question, asked of `root/path` before any open:
+    /// [`crate::placeholder::path_is_cloud_placeholder`] outside tests. A
+    /// seam because userland cannot make a placeholder on apple (`chflags`
+    /// refuses `SF_DATALESS`), so a test answers for the OS.
+    is_placeholder: fn(&Path) -> bool,
 }
 
 impl TreeBodySource {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            is_placeholder: crate::placeholder::path_is_cloud_placeholder,
+        }
+    }
+
+    /// A source whose placeholder question `is_placeholder` answers.
+    #[cfg(test)]
+    fn with_placeholder_check(root: PathBuf, is_placeholder: fn(&Path) -> bool) -> Self {
+        Self {
+            root,
+            is_placeholder,
+        }
     }
 
     /// The source as a spec carries it.
@@ -95,7 +115,7 @@ impl TreeBodySource {
     /// `root/path`, or `None` when it is a cloud-only placeholder.
     fn local_body(&self, path: &str) -> Option<PathBuf> {
         let full = self.root.join(path);
-        (!crate::placeholder::path_is_cloud_placeholder(&full)).then_some(full)
+        (!(self.is_placeholder)(&full)).then_some(full)
     }
 }
 
@@ -184,6 +204,31 @@ mod tests {
         assert_eq!(source.body_len("missing.txt").await, None);
         assert_eq!(source.read_range("missing.txt", 0, 1).await, None);
         assert_eq!(source.body_len("sub").await, None, "a directory is no body");
+    }
+
+    /// A dataless file under the bound tree — an evicted file of the provider
+    /// whose tree holds the bound folder — is no body: the source answers
+    /// none for it before any open, while its local sibling is still served.
+    /// The OS's answer is stubbed (userland cannot set `SF_DATALESS`); the
+    /// predicate itself is pinned in [`crate::placeholder`]'s tests.
+    #[tokio::test]
+    async fn the_tree_source_answers_none_for_a_dataless_file() {
+        fn evicted_is_dataless(path: &Path) -> bool {
+            path.file_name().is_some_and(|n| n == "evicted.txt")
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("evicted.txt"), b"stand-in bytes").unwrap();
+        std::fs::write(dir.path().join("local.txt"), b"here").unwrap();
+        let source =
+            TreeBodySource::with_placeholder_check(dir.path().to_path_buf(), evicted_is_dataless);
+
+        assert_eq!(source.body_len("evicted.txt").await, None);
+        assert_eq!(source.read_range("evicted.txt", 0, 4).await, None);
+        assert_eq!(source.body_len("local.txt").await, Some(4));
+        assert_eq!(
+            source.read_range("local.txt", 0, 4).await.as_deref(),
+            Some(&b"here"[..])
+        );
     }
 
     fn row(db: &SyncDb, rel: &str, state: SyncState) {

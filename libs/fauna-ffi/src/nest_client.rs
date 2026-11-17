@@ -3173,6 +3173,22 @@ impl FfiNestClient {
             .map_err(|e| e.to_string())?;
         Ok(reply.into())
     }
+
+    /// Whether the deployment serves calendar storage a person can add a first
+    /// credential to — [`SetupStatusReply::serves_dav_or_mail`], the
+    /// `deployment_serves_dav_or_mail` input of `event_create_possibility`.
+    /// An unreadable status takes the deployment as serving (the page then
+    /// points at the person's own first step rather than hiding it).
+    pub async fn deployment_serves_dav_or_mail(&self) -> bool {
+        match self
+            .nest
+            .request::<_, SetupStatusReply>("fauna.setup.status", SetupStatusRequest::default())
+            .await
+        {
+            Ok(reply) => reply.serves_dav_or_mail(),
+            Err(_) => true,
+        }
+    }
 }
 
 // The W3 account-store runtime this app hosts (src/account_runtime.rs). Its own

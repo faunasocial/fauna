@@ -300,13 +300,15 @@ if let existing = localizations.first(where: { (attrs($0)["locale"] as? String) 
 }
 
 // --- the groups ---------------------------------------------------------------
-let groups = rows(get("/v1/betaGroups?filter%5Bapp%5D=\(query(app))&limit=200&fields%5BbetaGroups%5D=name,isInternalGroup"))
+let groups = rows(get("/v1/betaGroups?filter%5Bapp%5D=\(query(app))&limit=200&fields%5BbetaGroups%5D=name,isInternalGroup,hasAccessToAllBuilds"))
+var allBuildsGroups: Set<String> = []  // groups with automatic distribution: they hold every build by definition
 var createdGroups: Set<String> = []
 func group(_ name: String, isInternal: Bool) -> String {
     if let found = groups.first(where: { (attrs($0)["name"] as? String) == name }), let gid = found["id"] as? String {
         guard (attrs(found)["isInternalGroup"] as? Bool ?? false) == isInternal else {
             red(2, "groups", "the group '\(name)' exists but is \(isInternal ? "external" : "internal"); rename one of them in App Store Connect")
         }
+        if (attrs(found)["hasAccessToAllBuilds"] as? Bool ?? false) { allBuildsGroups.insert(gid) }
         return gid
     }
     // A group with no testers is harmless: who the testers are stays the owner's
@@ -324,6 +326,10 @@ func group(_ name: String, isInternal: Bool) -> String {
     return gid
 }
 func attach(_ gid: String, _ name: String) {
+    if allBuildsGroups.contains(gid) {  // the owner-made group with automatic distribution: nothing to write
+        say("groups OK — '\(name)' has access to all builds, so it holds this build with no attach")
+        return
+    }
     if !createdGroups.contains(gid) {  // a group made this run holds nothing yet
         let held = rows(get("/v1/betaGroups/\(query(gid))/relationships/builds?limit=200")).compactMap { $0["id"] as? String }
         if held.contains(buildID) { say("groups OK — '\(name)' already holds the build"); return }

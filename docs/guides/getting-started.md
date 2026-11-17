@@ -10,7 +10,7 @@
   not an authority: everything you publish is signed by your identity, and
   every app checks the signatures itself. Anyone can run a nest.
 - **Handle** — your name on the network, written like an e-mail address:
-  `you@somedomain.com`. The domain part is the nest you live on.
+  `you@example.com`. The domain part is the nest you live on.
 
 ## What you need
 
@@ -37,7 +37,7 @@ Next the app offers your **recovery kit**: a second key, kept only by you and on
 
 ## Step 2 — Enter your handle
 
-Type the handle you want, e.g. `alice@yourdomain.com`, and press **Check**.
+Type the handle you want, e.g. `alice@example.com`, and press **Check**.
 The app probes the domain and tells you exactly what it found and what happens
 next. The common cases:
 
@@ -99,7 +99,7 @@ internet — and drops you into the app as its signed-in owner. Your content is 
 
 Right at the end — of claiming a nest, and equally of joining one in Step 3a —
 you may be offered one optional extra: **trust this box?**
-Saying yes lets the nest read your mail after it has arrived, to run its virus and spam checks on it again when those checks are updated (mail from outside your nest is checked once as it arrives, whatever you answer), and read your calendar for itself — a community labeler that reads your mail gets its own trust when you subscribe to it, and a calendar or mail app you connect works with its own password either way — and that trust renews itself while you use Fauna, so it doesn't quietly run out. Saying no changes nothing you have now: mail from outside your nest is still checked as it arrives, and only those later re-checks wait until you say yes. Either
+Saying yes lets the nest read your mail after it has arrived, to run its virus and spam checks on it again when those checks are updated (mail from outside your nest is checked once as it arrives, whatever you answer), and read your calendar for itself, and show the paid posts you publish on the web to the people who pay for them, if you already have paid tiers — a community labeler that reads your mail gets its own trust when you subscribe to it, and a calendar or mail app you connect works with its own password either way — and that trust renews itself while you use Fauna, so it doesn't quietly run out. Saying no changes nothing you have now: mail from outside your nest is still checked as it arrives, and only those later re-checks wait until you say yes. Either
 way the answer is not final. Everything you have trusted a nest with is listed
 under **Settings → Nests**, where you can withdraw it at any time or grant it
 there later, one purpose at a time.

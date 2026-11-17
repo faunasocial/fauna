@@ -19,7 +19,7 @@ Your Fauna identity is a cryptographic key pair, created on your device the firs
 - **Nothing to reset.** No "forgot password" flow, no support desk that can be talked into handing over your account: nobody — not your nest's admin, not the people who make Fauna — can sign in as you or hand your identity to someone else. (An admin can still suspend or remove an account on their nest — see [What the nest admin can and can't do](#what-the-nest-admin-can-and-cant-do).)
 - **The flip side, stated plainly: whoever holds your secret can act as you.** Everything in this guide follows from that.
 
-Your **handle** (`you@yourdomain.com`) is your name on the network; it's
+Your **handle** (`you@example.com`) is your name on the network; it's
 attached to your account on the nest, not baked into the key, and it can be
 changed in settings without touching your identity.
 
@@ -81,7 +81,7 @@ visible, because **anyone who scans it gets your identity** — reveal it only
 when nobody can see your screen.
 
 Your **Devices** page in settings lists every device: name, online dot, a
-**Peer transfers** switch, and a remove button. The switch says whether that device passes files straight to and from other devices — your own other devices, and those of people you share a folder with — instead of only through your nest (see the sharing guide); turned off, it opens no connection for other devices to reach, and its files still come and go through your nest. On the device you are holding it is yours to flip either way, and on any other device you can only turn it off — that device turns itself back on, never anyone else. Your account's tier allows a certain number of devices; if you sign in on one more than that, the new device is not added and the Devices page tells you so, with the way out: remove a device you no longer use from that page, or ask your admin for a bigger tier. A few details show the design's care for your data:
+**Peer transfers** switch, and a remove button. The switch says whether that device passes files straight to and from other devices — your own other devices, and those of people you share a folder with — instead of only through your nest (see the sharing guide); turned off, it opens no connection for other devices to reach, and its files still come and go through your nest — except a folder shared in person, which has no nest to go through: nothing in it moves to or from a device while **Peer transfers** is off on that device. On the device you are holding it is yours to flip either way, and on any other device you can only turn it off — that device turns itself back on, never anyone else. Your account's tier allows a certain number of devices; if you sign in on one more than that, the new device is not added and the Devices page tells you so, with the way out: remove a device you no longer use from that page, or ask your admin for a bigger tier. A few details show the design's care for your data:
 
 - Removing a device never loses what your nest holds: your nest keeps every synced folder's files, except a folder whose **Content kept on the nest** is set to **Metadata only — content stays on my devices**, whose files live only on your devices.
 - The device you're holding can't be removed from this page — sign out on it
@@ -148,7 +148,7 @@ time it notices. **Your own choice always wins**: turn it off and it stays off o
 
 **Remove** appears on the identities you are not currently using. Read it as
 *remove from this device* — it deletes that identity's stored keys **here**.
-It does not delete the account, and it does not touch your other devices. Removing it also signs this device out of that account.
+It does not delete the account, and it does not touch your other devices. Removing it also signs this device out of that account. An identity you replaced when you took your account back can't be removed while it still has changes waiting to move to your new identity: nothing is removed, and Fauna asks you to send or discard them as your new identity first.
 
 > ⚠️ **Before removing an identity, make sure its key survives somewhere
 > else** — another signed-in device, an exported copy, or its recovery kit. A
@@ -622,7 +622,7 @@ it: your handle, your encrypted conversations, your files.
 If what you saved is the QR or the `fauna://recovery` link — what **Copy**
 gives you from Settings — that is all you type: it names your account, so the
 app knows which nest to ask. If it is the bare 64-character code you wrote down, or a kit from the setup-time screen (no handle is chosen yet at that point), it doesn't say where your account lives, so the screen asks: enter
-your handle including the domain, like `alice@fauna.social`. That handle is
+your handle including the domain, like `alice@example.com`. That handle is
 how your nest gets found in the first place.
 
 **If the domain itself is gone** — it lapsed, or someone took it — put your

@@ -56,6 +56,7 @@ pub mod conversation_seams;
 pub mod fleet_removal;
 pub mod folder_keys;
 pub mod group_reception;
+pub mod pairing_marks;
 pub mod peer_anchors;
 pub mod period_keys;
 pub mod port_wait;

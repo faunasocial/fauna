@@ -40,4 +40,22 @@ class KidsIneligibleScreenTest {
 
         composeTestRule.onNodeWithTag(Ids.ERROR_MESSAGE).assertExists()
     }
+
+    /**
+     * The UNKNOWN answer (`account-age-band.md` § *Kids-app eligibility while
+     * it is unknown*): the page's frame without `kids-ineligible-message` —
+     * never the refusal on a guess — with `sign-out-button` still live.
+     */
+    @Test
+    fun theUnknownStateHidesTheMessageAndKeepsSignOutLive() {
+        var signedOut = 0
+        composeTestRule.setContent {
+            KidsIneligibleScreen(onSignOut = { signedOut++ }, showMessage = false, error = "unreachable")
+        }
+
+        composeTestRule.onNodeWithTag(Ids.KIDS_INELIGIBLE_MESSAGE).assertDoesNotExist()
+        composeTestRule.onNodeWithTag(Ids.ERROR_MESSAGE).assertExists()
+        composeTestRule.onNodeWithTag(Ids.SIGN_OUT_BUTTON).performClick()
+        assertEquals(1, signedOut)
+    }
 }

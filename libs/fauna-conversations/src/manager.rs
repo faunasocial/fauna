@@ -4768,16 +4768,45 @@ impl ConversationsManager {
         let Some(compose) = self.drafts.new_thread() else {
             return Ok(None);
         };
+        // The same predicate `dm-send-button` paints from
+        // (`crate::new_thread_controls`, `ui/README.md` § Offer only what is
+        // possible, rule 6), asked after the flush: a typed recipient the probe
+        // could not resolve leaves no chip, and a chip of a kind this build does
+        // not name (one carried in from a newer device's drafts blob) has no
+        // rail to send on. Either refusal is stamped on the draft's
+        // `send_state`, so it reaches `error-message` and never reads as a
+        // dropped click (rule 7).
+        let flushed_without_chip = has_pending_recipient
+            && compose
+                .recipient_picker
+                .as_ref()
+                .is_some_and(|p| p.chips.is_empty());
+        let refusal = if flushed_without_chip {
+            Some(Self::unresolved_recipient_reason(&compose))
+        } else {
+            match crate::new_thread_controls::send_possibility(&compose) {
+                fauna_core::possibility::Possibility::Blocked { reason } => Some(reason),
+                _ => None,
+            }
+        };
+        if let Some(reason) = refusal {
+            let unsupported = reason.key == crate::new_thread_controls::RECIPIENT_UNSUPPORTED_KEY;
+            let mut stamped = compose.clone();
+            stamped.send_state = SendState::failed(reason.resolve(fauna_i18n::strings::lookup));
+            self.drafts.set_new_thread(Some(stamped));
+            self.notify();
+            // `None` keeps its meaning — nothing was sent because no one was
+            // named; a recipient this build cannot send to is an error.
+            return if unsupported {
+                Err(BackendError::NotSupported)
+            } else {
+                Ok(None)
+            };
+        }
         let Some(picker) = compose.recipient_picker.clone() else {
             return Ok(None);
         };
-        if picker.chips.is_empty() {
-            return Ok(None);
-        }
         let participants = picker.chips.clone();
-        // A chip of a kind this build does not name (one carried in from a
-        // newer device's drafts blob) has no rail to send on: refuse rather
-        // than guess one.
         let Some(rail) = participants[0].rail() else {
             return Err(BackendError::NotSupported);
         };
@@ -6813,6 +6842,20 @@ impl ConversationsManager {
     }
 
     // `refresh_list_send` lives in the exported block above, next to `send`.
+
+    /// Why Send's flush of a typed recipient committed no chip: the picker's
+    /// own resolve status, the same sentence `recipient-resolve-status` shows.
+    fn unresolved_recipient_reason(compose: &ComposeState) -> LocalizedText {
+        let state = compose.recipient_picker.as_ref().map(|p| p.resolve_state);
+        LocalizedText::key(match state {
+            Some(ResolveState::NotFound) => "conversations.unified.recipient_resolve_not_found",
+            Some(ResolveState::NotReachable) => {
+                "conversations.unified.recipient_resolve_not_reachable"
+            }
+            Some(ResolveState::Error) => "conversations.unified.recipient_resolve_error",
+            _ => crate::new_thread_controls::NEEDS_RECIPIENT_KEY,
+        })
+    }
 
     fn set_send_state(&self, id: &ThreadId, state: SendState) {
         let mut s = self.drafts.get(id);

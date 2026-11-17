@@ -16,8 +16,11 @@ the store already holds, so it uploads nothing twice):
      report re-graded against the tree's allowlist, the version's *What's new*
      text (`installer/store-texts/microsoft-store/whats-new.txt`) approved for
      this version, and how far the leg goes (`installer/store-legs.toml`).
-  2. With the credential (FAUNA_MSSTORE_TENANT_ID / _CLIENT_ID / _CLIENT_SECRET,
-     an Entra application in Partner Center's Manager role), reads the app:
+  2. With the credential (an Entra application in Partner Center's Manager role:
+     FAUNA_MSSTORE_TENANT_ID and _CLIENT_ID, and no secret — the job's GitHub
+     identity token, audience api://AzureADTokenExchange, is presented to Entra as
+     the client assertion; FAUNA_MSSTORE_CLIENT_SECRET, when the Environment holds
+     one, is used instead as the fallback key), reads the app:
      this version already published → records `serving`; a submission of this
      version already in flight → records where it is (a pending commit is
      finished); any other submission in flight → red, left as it is.
@@ -68,9 +71,14 @@ STORE = "microsoft-store"
 APP_ID = "9PLWNB0DJ0V7"
 ARCHES = ("x64", "arm64")
 TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/token"
+FED_TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+FED_AUDIENCE = "api://AzureADTokenExchange"
+FED_SCOPE = "https://manage.devcenter.microsoft.com/.default"
+ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 RESOURCE = "https://manage.devcenter.microsoft.com"
 API = "https://manage.devcenter.microsoft.com/v1.0/my/applications/" + APP_ID
-CREDENTIAL_ENV = ("FAUNA_MSSTORE_TENANT_ID", "FAUNA_MSSTORE_CLIENT_ID", "FAUNA_MSSTORE_CLIENT_SECRET")
+CREDENTIAL_ENV = ("FAUNA_MSSTORE_TENANT_ID", "FAUNA_MSSTORE_CLIENT_ID")
+SECRET_ENV = "FAUNA_MSSTORE_CLIENT_SECRET"
 ALLOWLIST = Path("apps/fauna-windows/installer/store/certification-allowlist.toml")
 
 IN_FLIGHT = ("CommitStarted", "PreProcessing", "Certification", "Release",
@@ -186,12 +194,38 @@ def check_inputs(version: str, packages: Path, certification: Path, repo: Path |
     return Inputs(version, build, found, text, furthest)
 
 
-def credential(env: dict[str, str]) -> tuple[str, str, str]:
+@dataclasses.dataclass
+class Credential:
+    tenant: str
+    client: str
+    secret: str  # empty: the federated exchange
+    request_url: str = ""
+    request_token: str = ""
+
+
+def credential(env: dict[str, str]) -> Credential:
     missing = [name for name in CREDENTIAL_ENV if not env.get(name)]
     if missing:
         raise LegError(f"the release Environment holds no {', '.join(missing)}: the Microsoft Store "
-                       "submission credential is the owner's to enter (store-review.md § The store legs)")
-    return tuple(env[name] for name in CREDENTIAL_ENV)  # type: ignore[return-value]
+                       "application's ids are the owner's to enter (store-review.md § The store legs)")
+    secret = env.get(SECRET_ENV) or ""
+    url, token = env.get("ACTIONS_ID_TOKEN_REQUEST_URL") or "", env.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN") or ""
+    if not secret and not (url and token):
+        raise LegError(f"no credential: the job has no GitHub identity token (the job needs `id-token: write`) "
+                       f"and the Environment holds no {SECRET_ENV}; supply either "
+                       "(store-review.md § The store legs, The Microsoft Store credential holds no secret)")
+    return Credential(env["FAUNA_MSSTORE_TENANT_ID"], env["FAUNA_MSSTORE_CLIENT_ID"], secret, url, token)
+
+
+def _subject(jwt: str) -> str:
+    """The `sub` claim of a JWT, for the refusal message; the token itself is never printed."""
+    try:
+        seg = jwt.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))
+        sub = claims["sub"]
+        return sub if isinstance(sub, str) else _data(sub)
+    except (IndexError, KeyError, ValueError, TypeError):
+        return ""
 
 
 # ---------------------------------------------------------------- the store
@@ -210,12 +244,22 @@ def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes
 
 
 class PartnerCenter:
-    def __init__(self, transport: Transport, tenant: str, client: str, secret: str):
+    def __init__(self, transport: Transport, cred: Credential):
         self._t = transport
-        form = urllib.parse.urlencode({"grant_type": "client_credentials", "client_id": client,
-                                       "client_secret": secret, "resource": RESOURCE}).encode()
-        status, body = self._t("POST", TOKEN_URL.format(tenant=urllib.parse.quote(tenant, safe="")),
-                               {"Content-Type": "application/x-www-form-urlencoded"}, form)
+        tenant = urllib.parse.quote(cred.tenant, safe="")
+        assertion = ""
+        if cred.secret:
+            form = urllib.parse.urlencode({"grant_type": "client_credentials", "client_id": cred.client,
+                                           "client_secret": cred.secret, "resource": RESOURCE}).encode()
+            url = TOKEN_URL.format(tenant=tenant)
+        else:
+            assertion = self._github_token(cred)
+            form = urllib.parse.urlencode({
+                "grant_type": "client_credentials", "client_id": cred.client,
+                "client_assertion_type": ASSERTION_TYPE, "client_assertion": assertion,
+                "scope": FED_SCOPE}).encode()
+            url = FED_TOKEN_URL.format(tenant=tenant)
+        status, body = self._t("POST", url, {"Content-Type": "application/x-www-form-urlencoded"}, form)
         token = None
         if status == 200:
             try:
@@ -223,9 +267,33 @@ class PartnerCenter:
             except ValueError:
                 token = None
         if not token:
-            raise LegError(f"Microsoft Entra refused the credential (HTTP {status}): check the "
-                           "application's key has not expired and that it holds the Manager role")
+            if not assertion:
+                raise LegError(f"Microsoft Entra refused the credential (HTTP {status}): check the "
+                               "application's key has not expired and that it holds the Manager role")
+            sub = _subject(assertion)
+            seen = f"the token's subject is {sub!r}" if sub else "the token's subject could not be read"
+            raise LegError(f"Microsoft Entra refused the federated exchange (HTTP {status}): check the "
+                           "application's federated credential — its issuer "
+                           "(https://token.actions.githubusercontent.com), its audience "
+                           f"({FED_AUDIENCE}) and its subject, which must equal what GitHub sent; "
+                           f"{seen}; also that the application holds the Manager role")
         self._auth = {"Authorization": f"Bearer {token}"}
+
+    def _github_token(self, cred: Credential) -> str:
+        sep = "&" if "?" in cred.request_url else "?"
+        url = f"{cred.request_url}{sep}audience={urllib.parse.quote(FED_AUDIENCE, safe='')}"
+        status, body = self._t("GET", url, {"Authorization": f"Bearer {cred.request_token}",
+                                            "Accept": "application/json"}, None)
+        token = None
+        if status == 200:
+            try:
+                token = json.loads(body).get("value")
+            except ValueError:
+                token = None
+        if not isinstance(token, str) or not token:
+            raise LegError(f"GitHub did not issue an identity token (HTTP {status}): the job needs "
+                           "`id-token: write`")
+        return token
 
     def call(self, method: str, path: str, payload: dict | None = None) -> dict:
         headers = dict(self._auth)
@@ -411,8 +479,8 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None,
         if a.dry_run:
             print("MICROSOFT STORE: dry run — no store call")
             return 0
-        tenant, client, secret = credential(os.environ if env is None else env)
-        submit(PartnerCenter(transport, tenant, client, secret), inputs, a.record, sleep)
+        cred = credential(os.environ if env is None else env)
+        submit(PartnerCenter(transport, cred), inputs, a.record, sleep)
     except LegError as exc:
         print(f"::error::Microsoft Store leg: {exc}")
         return 1

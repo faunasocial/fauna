@@ -518,12 +518,20 @@ window.__faunaTestAgent = {
       typeof window.__fauna_paintedErrors === "function"
         ? window.__fauna_paintedErrors()
         : null;
+    // What each painted frame showed at the tab's root
+    // (`fauna_e2e_agent::ROOT_SURFACE_KEY`, `#lib/e2e-root-surface`): null
+    // with no hook, which the in-place witness refuses loudly.
+    const rootSurface =
+      typeof window.__fauna_rootSurface === "function"
+        ? window.__fauna_rootSurface()
+        : null;
 
     return {
       session,
       nav,
       connection_reports: connectionReports,
       painted_errors: paintedErrors,
+      root_surface: rootSurface,
       barrier_probe: barrierProbe,
       barrier_ack_probe: barrierAckProbe,
       session_generation: sessionGeneration,

@@ -304,6 +304,85 @@ struct ContactsVMGuardianAskTests {
     }
 }
 
+// MARK: - ContactsVM (the ward's entry gate)
+
+private func approvalPolicy(_ on: Bool) -> FfiReachPolicy {
+    FfiReachPolicy(
+        contactApproval: on, unknownSenderMail: "allow", federationContact: true,
+        feedSources: "allow", contentPolicy: nil, screenTime: nil, contentNotify: nil,
+        unknownPeerDm: nil)
+}
+
+private func statusWithPolicy(_ policy: FfiReachPolicy?) -> FfiFamilyStatus {
+    FfiFamilyStatus(
+        supervisedBy: guardian(), policy: policy, wards: [], incomingTransfers: [],
+        usageTodayMinutes: nil, contactRequests: [], feedRequests: [],
+        ageBand: nil, supervision: nil)
+}
+
+@Suite("ContactsVM — the ward's knock and accept gate at the entry")
+@MainActor
+struct ContactsVMWardEntryGateTests {
+    private func makeVM(reading reply: FfiFamilyStatus?, api: AskAPI = AskAPI()) async -> (ContactsVM, AskAPI) {
+        let store: FamilyStatusStore
+        if let reply { store = await FaunaKitTests_store(reading: reply, api: api) } else { store = FamilyStatusStore() }
+        let vm = ContactsVM()
+        vm.configure(api: api, actorId: "me", familyStatus: store)
+        return (vm, api)
+    }
+
+    @Test("the knock and accept are blocked as loading until the status read resolves")
+    func blockedWhileLoading() async {
+        let (vm, api) = await makeVM(reading: nil)
+        #expect(!vm.knockPossibility(peerId: peerA).isPossible)
+        #expect(!vm.acceptPossibility().isPossible)
+        await vm.addContact(actorId: peerA)
+        #expect(api.knocks.isEmpty, "a blocked knock never reaches the nest")
+        #expect(vm.errorMessage != nil, "a refusal is never silent (rule 7)")
+    }
+
+    @Test("with contact approval on, the knock and accept are blocked and the ask is offered at once")
+    func approvalOnBlocksAndOffersTheAsk() async {
+        let (vm, api) = await makeVM(reading: statusWithPolicy(approvalPolicy(true)))
+        #expect(!vm.knockPossibility(peerId: peerA).isPossible)
+        #expect(!vm.acceptPossibility().isPossible)
+        #expect(vm.guardianDecides(peerId: peerA))
+        #expect(vm.askState(peerId: peerA) == .offered, "the ask is the one step, before any refusal")
+        await vm.addContact(actorId: peerA)
+        #expect(api.knocks.isEmpty)
+        #expect(vm.errorMessage == vm.knockPossibility(peerId: peerA).reasonText)
+        await vm.acceptKnock(peerId: peerA)
+        #expect(vm.errorMessage == vm.acceptPossibility().reasonText)
+    }
+
+    @Test("with contact approval off, the knock and accept are possible and no ask is offered")
+    func approvalOffIsPossible() async {
+        let (vm, api) = await makeVM(reading: statusWithPolicy(approvalPolicy(false)))
+        #expect(vm.knockPossibility(peerId: peerA).isPossible)
+        #expect(vm.acceptPossibility().isPossible)
+        #expect(vm.askState(peerId: peerA) == .none)
+        await vm.addContact(actorId: peerA)
+        #expect(api.knocks.map(\.peer) == [peerA])
+    }
+
+    @Test("a peer already on the roster is not the guardian's to decide")
+    func anAcceptedContactIsNotGated() async {
+        let (vm, _) = await makeVM(reading: statusWithPolicy(approvalPolicy(true)))
+        vm.contacts = [Contact(peerId: peerA, status: "accepted", updatedAt: nil, handle: nil, domain: nil)]
+        #expect(!vm.guardianDecides(peerId: peerA))
+        #expect(vm.knockPossibility(peerId: peerA).isPossible)
+    }
+}
+
+/// A store that has read `reply` off the given scripted API.
+@MainActor
+private func FaunaKitTests_store(reading reply: FfiFamilyStatus, api: AskAPI) async -> FamilyStatusStore {
+    api.status = reply
+    let store = FamilyStatusStore()
+    await store.refresh(api: api)
+    return store
+}
+
 // MARK: - ProfileKnockVM (rules (a), (b), (g) and the route)
 
 @Suite("ProfileKnockVM — the profile page's knock and its ask")

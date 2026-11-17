@@ -122,6 +122,20 @@ pub fn share_link_eligible(folder: &ShareFolderFacts) -> bool {
     folder.public_audience || (folder.unbound && folder.owner_root_held)
 }
 
+/// [`share_link_eligible`] as the typed answer every gated affordance gives
+/// (`ui/README.md` § Offer only what is possible, rule 6), from the verdict
+/// the media machine stamps on each item: *possible* where the nest will serve
+/// the link, *absent* elsewhere — a file this person can never link here is
+/// left out, never painted inert (`share-links.md` § Which files can be
+/// linked). The bool stays for the callers that read it off the item.
+pub fn share_link_possibility(eligible: bool) -> fauna_core::possibility::Possibility {
+    if eligible {
+        fauna_core::possibility::Possibility::Possible
+    } else {
+        fauna_core::possibility::Possibility::Absent
+    }
+}
+
 // ── States ──────────────────────────────────────────────────────────────────
 
 /// A listed link's state (`share-links.md` § Flows → List).

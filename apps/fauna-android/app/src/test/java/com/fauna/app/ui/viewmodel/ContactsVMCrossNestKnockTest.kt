@@ -55,7 +55,11 @@ class ContactsVMCrossNestKnockTest {
         val knockDao = mock(KnockDao::class.java)
         val aftermath = mock(SuccessionAftermathHost::class.java)
         whenever(storage.secretHex).thenReturn("11".repeat(32))
-        whenever(api.wardAsks).thenReturn(WardAsks())
+        // An unsupervised account's resolved status read: the entry gate
+        // (contacts.md § Errors & edge cases) lets the knock and accept through.
+        whenever(api.wardAsks).thenReturn(
+            WardAsks().apply { setFromStatus(false, null, emptyList(), emptyList()) },
+        )
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         whenever(api.knockTick).thenReturn(MutableSharedFlow())
         // The VM's init collects this; an unstubbed mock returns null and the

@@ -4,11 +4,13 @@ import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ShellLog
 import com.fauna.app.p2pshare.SharePlaneControl
 import com.fauna.app.provider.FfiOnDemandSource
+import com.fauna.app.provider.hostsThenAnnounce
 import com.fauna.ffi.FfiNestClient
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
@@ -23,9 +25,11 @@ import kotlinx.coroutines.launch
  *
  * Driven by the same edges as the share plane ([SharePlaneForeground]), but
  * main-source, never behind the `p2p-share` excision: relay serving is not an
- * excisable feature, so the store-safe and kids flavors serve too. Every
- * decision — the announce, the host rescan, the withdrawal — is shared Rust's
- * (`fauna_sync_engine::relay_seat`); this is the two calls.
+ * excisable feature, so the store-safe and kids flavors serve too. The seat
+ * builds the host of every set the plan places on this device before it
+ * announces ([hostsThenAnnounce]) — in those flavors nothing else builds them
+ * but the file browser. Every decision — the announce, the host rescan, the
+ * withdrawal — is shared Rust's (`fauna_sync_engine::relay_seat`).
  *
  * Every start and stop runs on one serial scope, in the order the edges send
  * them.
@@ -39,17 +43,34 @@ class RelayServingSeat @Inject constructor(
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val serial = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
 
+    private val side = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     /** The client the running seat was started on — the one to stop it on. */
     @Volatile private var running: FfiNestClient? = null
+    @Volatile private var hostWatch: Job? = null
 
     override fun start() {
         serial.launch {
             try {
                 val (actorId, deviceId) = onDemand.relaySeatInputs()
                     ?: return@launch ShellLog.w(TAG, "no signed-in account: relay serving not started")
-                val client = api.nestRpc()
-                client.startRelayServing(actorId, deviceId)
-                running = client
+                // The announce names the hosts this process holds; on the
+                // store-safe and kids flavors no share plane builds them, so
+                // the seat builds every placed set's host first.
+                hostsThenAnnounce(
+                    onDemand,
+                    onHostFailure = { id, e -> ShellLog.w(TAG, "host for $id not built: ${e.message}") },
+                ) {
+                    val client = api.nestRpc()
+                    client.startRelayServing(actorId, deviceId)
+                    running = client
+                }
+                // A set the plan adds while the seat runs gets its host too, so
+                // the seat's rescan finds it without a restart.
+                hostWatch?.cancel()
+                hostWatch = onDemand.watchPlacedHosts(side) { id, e ->
+                    ShellLog.w(TAG, "host for $id not built: ${e.message}")
+                }
                 ShellLog.i(TAG, STARTED_LINE)
             } catch (e: Exception) {
                 ShellLog.w(TAG, "start failed; this device serves no relay ask: ${e.message}")
@@ -58,6 +79,8 @@ class RelayServingSeat @Inject constructor(
     }
 
     override fun stop() {
+        hostWatch?.cancel()
+        hostWatch = null
         serial.launch {
             val client = running
             running = null

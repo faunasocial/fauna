@@ -115,13 +115,13 @@ Stamped 2026-11-07 at ac836c937b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
-| linux | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
-| windows | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| web | ⚠ partial | 0.1.7-dev+500226d2 standalone |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.7-dev+500226d2 standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| ios | ⚠ partial | 0.1.7-dev+500226d2 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.5-dev+7674275f.dirty standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

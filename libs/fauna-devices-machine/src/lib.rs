@@ -64,8 +64,10 @@ pub use row_read_errors::RowReadErrors;
 pub use snapshots::*;
 pub use this_device::this_device_row;
 
-// Re-export the wizard types clients render the embedded wizard from, so a
-// consumer reaches the whole Devices surface through this one crate.
+// Re-export the wizard types clients render the embedded wizard from — and
+// its Next / Create answers — so a consumer reaches the whole Devices surface
+// through this one crate.
+pub use fauna_folders_machine::possibility as folder_wizard_possibility;
 pub use fauna_folders_machine::{
     DeviceOption, FolderWizardMachine, FolderWizardObserver, FolderWizardSnapshot,
 };

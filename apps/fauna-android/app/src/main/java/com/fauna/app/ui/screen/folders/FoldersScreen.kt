@@ -38,7 +38,10 @@ import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.service.SyncService
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.DevicesVM
@@ -53,6 +56,12 @@ import com.fauna.app.p2pshare.GroupInvitation
 import com.fauna.app.p2pshare.GroupScope
 import com.fauna.app.p2pshare.OfflinePanel
 import com.fauna.ffi.FfiPendingShare
+import com.fauna.ffi.folderFollowPossibility
+import com.fauna.ffi.folderSharePossibility
+import com.fauna.ffi.folderWizardCreatePossibility
+import com.fauna.ffi.folderWizardNextPossibility
+import com.fauna.app.ui.util.blockedReason
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_devices_machine.ConflictSummary
 import uniffi.fauna_devices_machine.DevicesSnapshot
@@ -101,7 +110,15 @@ fun FoldersScreen(
     val folderDestinationPlaces by vm.folderDestinationPlaces.collectAsState()
     val sharingError by vm.sharingError.collectAsState()
     val canServeWebdav by vm.canServeWebdav.collectAsState()
+    val webdavRead by vm.webdavRead.collectAsState()
     val ownTiers by vm.ownTiers.collectAsState()
+    val ownTiersRead by vm.ownTiersRead.collectAsState()
+    // The two own-tier/mail gates' answers, from shared Rust over the reads the VM
+    // tracks — keyed on every input so a read's answer repaints them, and injected
+    // so the Content stays FFI-free (`ui/folders.md` § Errors & edge cases,
+    // *Own-tier and mail gates*).
+    val webdavAnswer = remember(webdavRead, canServeWebdav) { vm.webdavAnswer() }
+    val paywallAnswer = remember(ownTiersRead, ownTiers) { vm.paywallAnswer() }
     val defaultConflictPolicy by vm.defaultConflictPolicy.collectAsState()
     val pendingShares by vm.pendingShares.collectAsState()
     // Collected only so a ceremony write (panel, typed code, status, the seat
@@ -201,8 +218,9 @@ fun FoldersScreen(
             folderDeviceActivity = folderDeviceActivity,
             folderPlaces = folderPlaces,
             folderDestinationPlaces = folderDestinationPlaces,
-            canServeWebdav = canServeWebdav,
+            webdavAnswer = webdavAnswer,
             ownTiers = ownTiers,
+            paywallAnswer = paywallAnswer,
             // Each governed folder's `folder-lease-status` line, resolved in shared
             // Rust (FFI) here and injected so the Content stays FFI-free.
             folderLeaseStatuses = snapshot?.folders.orEmpty()
@@ -301,6 +319,8 @@ fun FoldersScreen(
                 onDeclineGroupShare = vm::declineGroupShare,
                 onFollowFolder = vm::followFolder,
                 onUnfollowFolder = vm::unfollowFolder,
+                isFollowReady = vm::folderFollowReady,
+                isShareReady = vm::folderShareReady,
             ),
             wizardActions = WizardActions(
                 onSetName = vm::wizardSetName,
@@ -499,6 +519,11 @@ data class FoldersActions(
         { _, _, cb -> cb(true) },
     /** `folder-unfollow-button` — by the follow's pinned `(home_nest_url, folder_id)`. */
     val onUnfollowFolder: (homeNestUrl: String, folderId: Long) -> Unit = { _, _ -> },
+    // ── The form predicates' `ready` halves (`fauna_client_folders::forms`) ──
+    /** `folder-follow-confirm`'s readiness: machine, nest and identity secret held. */
+    val isFollowReady: () -> Boolean = { true },
+    /** `folder-share-confirm`'s readiness: [isFollowReady]'s and the live conversations session. */
+    val isShareReady: () -> Boolean = { true },
 )
 
 /**
@@ -547,6 +572,11 @@ data class WizardActions(
     val onCancelPublic: () -> Unit = {},
 )
 
+/** What an injected gate answer reads before its read has answered — the
+ *  shared `Possibility::from_read(Pending)` reason, `common.still_loading`. */
+private val STILL_LOADING: Possibility =
+    Possibility.Blocked(LocalizedText(key = "common.still_loading", args = emptyMap()))
+
 @Composable
 fun FoldersContent(
     snapshot: DevicesSnapshot?,
@@ -569,16 +599,20 @@ fun FoldersContent(
     // Content stays FFI-free" shape as folderDeviceActivity. An absent/empty
     // list hides the whole section (no destination enrolled at all).
     folderDestinationPlaces: Map<String, List<com.fauna.ffi.FfiFolderDestinationPlace>> = emptyMap(),
-    // Whether this actor holds the MSEK that serving a set over WebDAV seals the
-    // WebdavKeysBlob under (minted when mail is first enabled). Not a DevicesSnapshot
-    // field — the shared machine is keyless — so it is injected like folderActors.
-    // Gates each owner row's folder-webdav-toggle; false ⇒ disabled + hinted.
-    canServeWebdav: Boolean = false,
+    // Each owner row's folder-webdav-toggle answer: the shared
+    // `webdav_serve_possibility` over the mail-custody read (the actor must hold the
+    // MSEK serving seals the WebdavKeysBlob under). Not a DevicesSnapshot field — the
+    // shared machine is keyless — so it is injected like folderActors. Blocked ⇒
+    // disabled with the answer's reason: still loading, failed, or "set up mail".
+    webdavAnswer: Possibility = STILL_LOADING,
     // The creator's own subscription tier names — the option set each website-enabled row's
     // folder-paywall-tier-select offers. Not a DevicesSnapshot field (the keyless
-    // machine can't own it) — injected like canServeWebdav. Empty ⇒ select disabled
-    // + "create a tier first" hint.
+    // machine can't own it) — injected like webdavAnswer.
     ownTiers: List<String> = emptyList(),
+    // The select's answer: the shared own-tier answer over the tier read. Blocked ⇒
+    // disabled with the reason on `folder-paywall-hint` (no tier, still loading, or
+    // the read failed — never "create a tier" for an unanswered read).
+    paywallAnswer: Possibility = STILL_LOADING,
     // Per-folder `folder-lease-status` line, keyed by folder name — present only
     // while the folder is lease-governed (`ui/folders.md` § Exclusive editing),
     // from the shared `devicesFolderLeaseStatus`. Never probed: asking takes the
@@ -752,8 +786,9 @@ fun FoldersContent(
                         deviceActivity = folderDeviceActivity[folder.name].orEmpty(),
                         devicePlaces = folderPlaces[folder.name].orEmpty(),
                         destinationPlaces = folderDestinationPlaces[folder.name].orEmpty(),
-                        canServeWebdav = canServeWebdav,
+                        webdavAnswer = webdavAnswer,
                         ownTiers = ownTiers,
+                        paywallAnswer = paywallAnswer,
                         nestSnapshotsOptions = nestSnapshotsOptions,
                         nestPlaceForm = nestPlaceForms[folder.name],
                         nestPlaceReseed = nestPlaceReseed,
@@ -887,8 +922,9 @@ private fun FolderRow(
     deviceActivity: List<FfiFolderDevice>,
     devicePlaces: List<com.fauna.ffi.FfiFolderMember> = emptyList(),
     destinationPlaces: List<com.fauna.ffi.FfiFolderDestinationPlace>,
-    canServeWebdav: Boolean,
+    webdavAnswer: Possibility,
     ownTiers: List<String>,
+    paywallAnswer: Possibility,
     nestSnapshotsOptions: List<NestSnapshotsOption> = emptyList(),
     nestPlaceForm: NestPlaceForm? = null,
     nestPlaceReseed: (NestPlaceForm?, NestPlaceForm, NestPlaceForm) -> NestPlaceForm?,
@@ -1051,7 +1087,8 @@ private fun FolderRow(
             //
             // Serving seals that blob under the actor's MSEK, so an actor who has not
             // set up mail cannot serve at all: the Switch is DISABLED and the hint says
-            // why. Not cosmetic — `serve_set` flips the nest flag before it
+            // why — painted from the shared answer, so a custody read still pending or
+            // failed says that, never "set up mail first". Not cosmetic — `serve_set` flips the nest flag before it
             // re-provisions, so a doomed enable would commit the flag and only then
             // fail `NoMsek`, leaving the set served-but-blobless until a later reconcile
             // heals it. Any *other* failure still surfaces on the error banner.
@@ -1060,12 +1097,12 @@ private fun FolderRow(
             // for. The issuer is `reconcile_webdav_keys_blob`, which reads
             // like a background job; tui's gesture is `ToggleFolderWebdav`
             // and this is exactly that toggle. Serving is what seals the
-            // blob, so the toggle IS the commit. Its own `canServeWebdav`
-            // predicate (no MSEK → cannot serve at all) composes with the
-            // gate rather than being replaced by it.
+            // blob, so the toggle IS the commit. Its own answer (no MSEK →
+            // cannot serve at all) composes with the gate rather than being
+            // replaced by it.
             val serveGate = faunaGate(
                 "fauna.bridges.provision_webdav_keys_blob",
-                enabled = canServeWebdav,
+                enabled = webdavAnswer.isPossible,
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1077,13 +1114,8 @@ private fun FolderRow(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
-                        stringResource(
-                            if (canServeWebdav) {
-                                R.string.devices_serve_webdav_hint
-                            } else {
-                                R.string.devices_serve_webdav_needs_mail
-                            },
-                        ),
+                        localized(webdavAnswer.blockedReason)
+                            ?: stringResource(R.string.devices_serve_webdav_hint),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1147,6 +1179,7 @@ private fun FolderRow(
                 PaywallTierSelect(
                     currentTier = folder.webPaywallTier,
                     ownTiers = ownTiers,
+                    answer = paywallAnswer,
                     onSelect = { tier -> actions.onPaywallSet(folder.name, folder.mlsGroupId, tier) },
                 )
             }
@@ -1739,6 +1772,7 @@ private fun SharedWithSection(
             folder = folder,
             onShare = { input, access, onResult -> actions.onShareSet(folder.name, input, access, onResult) },
             onDismiss = { showShareSheet = false },
+            isReady = actions.isShareReady,
         )
     }
 }
@@ -1908,8 +1942,14 @@ private fun MemberAccessSelect(
  * (which is coupled to the conversations manager; co-opting it would drag folder
  * concepts into that manager). Resolution runs on confirm in the VM (shared Rust
  * `classify_recipient` → `resolve_handle`), mirroring apple's `FolderShareSheet`.
- * The `folder-share-confirm` commit is disabled while the input is blank and shows
- * a resolve-status token while the share is in flight. Carries the share-time
+ * The `folder-share-confirm` commit is painted from the shared `share_possibility`
+ * (folders.md § Errors & edge cases; README § Offer only what is possible, rule
+ * 4): disabled with the reason beside it while the recipient is blank or the app
+ * cannot run the op ([isReady]: no machine, nest, secret or live conversations
+ * session); the VM asks the same predicate on press and refuses on
+ * `error-message`, and the sheet closes only once the share was issued and
+ * landed — a refused or failed one stays open with what was typed. It shows a
+ * resolve-status token while the share is in flight. Carries the share-time
  * `folder-share-role-select` access grant (Reader default) + the
  * `folder-writer-uncapped-warning` (a share-time writer grant always carries no
  * cap, so picking Writer always shows it — advisory, the owner can cap it on the
@@ -1921,6 +1961,7 @@ private fun ShareSheet(
     folder: FolderSummary,
     onShare: (recipientInput: String, access: String?, onResult: (Boolean) -> Unit) -> Unit,
     onDismiss: () -> Unit,
+    isReady: () -> Boolean = { true },
 ) {
     var input by remember { mutableStateOf("") }
     var access by remember { mutableStateOf("reader") }
@@ -1932,6 +1973,7 @@ private fun ShareSheet(
         "error" -> "error" to stringResource(R.string.conversations_unified_recipient_resolve_error)
         else -> "idle" to ""
     }
+    val shareSubmit = faunaFormGate(askForm { folderSharePossibility(input, isReady()) })
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1976,18 +2018,23 @@ private fun ShareSheet(
                         modifier = Modifier.testTag(Ids.FOLDER_WRITER_PUBLISHED_WARNING),
                     )
                 }
+                DisabledControlReasonText(shareSubmit.reason)
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    resolveState = "resolving"
+                    // Asked again on press; a refused draft goes to the VM,
+                    // which refuses with the reason on `error-message` and
+                    // answers `false` — the sheet stays open with the input.
+                    val goes = askForm { folderSharePossibility(input, isReady()) }.isPossible
+                    if (goes) resolveState = "resolving"
                     val grantedAccess = access.takeIf { it == "writer" }
                     onShare(input.trim(), grantedAccess) { ok ->
-                        if (ok) onDismiss() else resolveState = "error"
+                        if (ok) onDismiss() else if (goes) resolveState = "error"
                     }
                 },
-                enabled = input.isNotBlank(),
+                enabled = shareSubmit.enabled,
                 modifier = Modifier.testTag(Ids.FOLDER_SHARE_CONFIRM),
             ) { Text(stringResource(R.string.devices_share_button)) }
         },
@@ -2569,19 +2616,21 @@ private fun ResidencySelect(
  * Model values are the creator's own tier NAMES plus an empty-string sentinel for
  * the "Not paywalled (public)" placeholder, offered only while the set is still
  * public (v1 is set-only, ratified 2026-07-13 — no clear affordance, so picking
- * the placeholder is not a write). No tiers ⇒ nothing to paywall to: the select
- * is disabled with a "create a tier first" hint (mirrors the webdav "set up mail
- * first" gate above).
+ * the placeholder is not a write). Painted from [answer], the shared own-tier
+ * answer: blocked (no tier, the read still pending, or failed) ⇒ disabled with the
+ * answer's reason on `folder-paywall-hint` (mirrors the webdav gate above).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PaywallTierSelect(
     currentTier: String?,
     ownTiers: List<String>,
+    answer: Possibility,
     onSelect: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val hasTiers = ownTiers.isNotEmpty()
+    val possible = answer.isPossible
+    val reason = localized(answer.blockedReason)
 
     // Model = wire values. The empty sentinel (placeholder) rides only while public.
     // A tier the set is already paywalled to always stays present even if it was
@@ -2599,22 +2648,20 @@ private fun PaywallTierSelect(
         currentTier
     }
 
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { if (hasTiers) expanded = !expanded }) {
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { if (possible) expanded = !expanded }) {
         OutlinedTextField(
             value = currentLabel,
             onValueChange = {},
             readOnly = true,
-            enabled = hasTiers,
+            enabled = possible,
             label = { Text(stringResource(R.string.devices_paywall_tier)) },
             supportingText = {
                 Text(
-                    stringResource(
-                        if (hasTiers) R.string.devices_paywall_tier_hint else R.string.devices_paywall_tier_needs_tier
-                    ),
+                    reason ?: stringResource(R.string.devices_paywall_tier_hint),
                     // `folder-paywall-hint` is present exactly while the select is
-                    // disabled for want of a tier; the has-tiers line is the select's
-                    // ordinary caption and carries no id.
-                    modifier = if (hasTiers) Modifier else Modifier.testTag(Ids.FOLDER_PAYWALL_HINT),
+                    // blocked, carrying the answer's reason; the possible line is the
+                    // select's ordinary caption and carries no id.
+                    modifier = if (reason == null) Modifier else Modifier.testTag(Ids.FOLDER_PAYWALL_HINT),
                 )
             },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
@@ -2687,6 +2734,10 @@ private fun FolderWizardDialog(
     wizard: FolderWizardSnapshot,
     actions: WizardActions,
 ) {
+    // Next and Create are painted from the shared wizard answers
+    // (`fauna_folders_machine::possibility`); the VM's presses ask the same ones.
+    val next = askForm { folderWizardNextPossibility(wizard) }
+    val create = askForm { folderWizardCreatePossibility(wizard) }
     AlertDialog(
         onDismissRequest = actions.onCancel,
         title = { Text(stringResource(R.string.devices_wizard_new_folder)) },
@@ -2696,8 +2747,11 @@ private fun FolderWizardDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 when (wizard.step) {
-                    FolderWizardStep.NAME -> WizardName(wizard, actions)
-                    FolderWizardStep.DEVICES -> WizardDevicePlaces(wizard, actions)
+                    FolderWizardStep.NAME -> WizardName(wizard, actions, localized(next.blockedReason))
+                    FolderWizardStep.DEVICES -> {
+                        WizardDevicePlaces(wizard, actions)
+                        DisabledControlReasonText(localized(next.blockedReason))
+                    }
                     FolderWizardStep.REVIEW -> WizardReview(wizard)
                     FolderWizardStep.DONE -> {}
                 }
@@ -2705,19 +2759,29 @@ private fun FolderWizardDialog(
         },
         confirmButton = {
             if (wizard.step == FolderWizardStep.REVIEW) {
-                // While the declassify confirm asks, Create stays painted but dim:
-                // answering the dialog is the gesture that creates.
-                Button(
-                    onClick = actions.onCreate,
-                    enabled = wizard.review.createEnabled && !wizard.review.declassifyArmed,
-                    modifier = Modifier.testTag(Ids.WIZARD_CREATE_BUTTON),
-                ) { Text(stringResource(R.string.devices_wizard_create)) }
+                // While the declassify confirm asks, Create stays painted but dim
+                // (the answer says why): answering the dialog is the gesture that
+                // creates.
+                val gate = faunaFormGate(create)
+                if (gate.shown) {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Button(
+                            onClick = actions.onCreate,
+                            enabled = gate.enabled,
+                            modifier = Modifier.testTag(Ids.WIZARD_CREATE_BUTTON),
+                        ) { Text(stringResource(R.string.devices_wizard_create)) }
+                        DisabledControlReasonText(gate.reason)
+                    }
+                }
             } else {
-                Button(
-                    onClick = actions.onNext,
-                    enabled = wizardContinueEnabled(wizard),
-                    modifier = Modifier.testTag(Ids.WIZARD_NEXT_BUTTON),
-                ) { Text(stringResource(R.string.devices_wizard_next)) }
+                val gate = faunaFormGate(next)
+                if (gate.shown) {
+                    Button(
+                        onClick = actions.onNext,
+                        enabled = gate.enabled,
+                        modifier = Modifier.testTag(Ids.WIZARD_NEXT_BUTTON),
+                    ) { Text(stringResource(R.string.devices_wizard_next)) }
+                }
             }
         },
         dismissButton = {
@@ -2741,12 +2805,6 @@ private fun FolderWizardDialog(
     }
 }
 
-private fun wizardContinueEnabled(wizard: FolderWizardSnapshot): Boolean = when (wizard.step) {
-    FolderWizardStep.NAME -> wizard.name.continueEnabled
-    FolderWizardStep.DEVICES -> wizard.devicePlaces.continueEnabled
-    else -> true
-}
-
 // ── Step 1: name ────────────────────────────────────────────────────────────
 //
 // A folder has NO TYPE (folders re-model phase 2 slice e): the three
@@ -2760,7 +2818,7 @@ private fun wizardContinueEnabled(wizard: FolderWizardSnapshot): Boolean = when 
 // 2026-08-15 (the feature has no users); do NOT re-add a mode control to close
 // it — phase 4 owns the fix (`ui/folders.md` § Modes).
 @Composable
-private fun WizardName(wizard: FolderWizardSnapshot, actions: WizardActions) {
+private fun WizardName(wizard: FolderWizardSnapshot, actions: WizardActions, nextReason: String?) {
     OutlinedTextField(
         value = wizard.name.name,
         onValueChange = actions.onSetName,
@@ -2768,12 +2826,13 @@ private fun WizardName(wizard: FolderWizardSnapshot, actions: WizardActions) {
         singleLine = true,
         modifier = Modifier.fillMaxWidth().testTag(Ids.WIZARD_NAME_INPUT),
     )
-    // The disabled-Next explainer: `continueEnabled` gates on a non-empty name,
-    // and a greyed-out Next with no on-screen reason was a live-user "unknowable"
-    // report (tui and linux carry the same line).
-    if (!wizard.name.continueEnabled) {
+    // The disabled-Next explainer: the reason of the shared answer Next is
+    // painted from (`wizard_next_possibility` — a name typed), since a greyed-out
+    // Next with no on-screen reason was a live-user "unknowable" report (tui and
+    // linux carry the same line).
+    if (nextReason != null) {
         Text(
-            stringResource(R.string.devices_wizard_name_required),
+            nextReason,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -3187,7 +3246,14 @@ private fun FollowedFoldersSection(followed: List<FollowedFolderSummary>, action
     EmptyHint(stringResource(R.string.devices_follow_public_folder_hint))
 
     if (formOpen) {
-        val canSubmit = !following && ownerInput.isNotBlank() && nameInput.isNotBlank()
+        // Painted from the shared `follow_possibility` (folders.md § Errors &
+        // edge cases): a blank box or a not-ready app disables it with the
+        // reason beside it; the VM asks the same predicate on press and refuses
+        // on `error-message`, keeping what was typed.
+        val followSubmit = faunaFormGate(
+            askForm { folderFollowPossibility(ownerInput, nameInput, actions.isFollowReady()) },
+        )
+        val canSubmit = !following && followSubmit.enabled
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             OutlinedTextField(
                 value = ownerInput,
@@ -3223,6 +3289,7 @@ private fun FollowedFoldersSection(followed: List<FollowedFolderSummary>, action
                 ) { Text(stringResource(R.string.devices_follow_confirm)) }
                 TextButton(onClick = { closeForm() }) { Text(stringResource(R.string.common_cancel)) }
             }
+            DisabledControlReasonText(followSubmit.reason)
         }
     }
 

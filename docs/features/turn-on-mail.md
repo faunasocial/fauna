@@ -46,8 +46,8 @@ Stamped 2026-11-07 at 6a0ded1015.
    - `tests/e2e-unified/tests/test_mail_disable.py::test_disable_mail_keeps_every_credential_via_confirm_dialog`
 5. [app] A new member gets a mailbox at first sign-in when the admin allows it, with nothing to do — `docs/goal/behavior/mail-credentials.md` § Auto-enable for new users
    - `tests/e2e-unified/tests/test_mail_auto_enable_first_setup.py::test_non_admin_first_setup_auto_mints_and_imap_logs_in`
-6. [app] Turning mail on from the app starts the mail server on a nest running the released image — `docs/goal/behavior/mail-bridge-lifecycle.md` § Default-off on first claim
-   - `tests/e2e-unified/tests/platform/docker/test_mail_client_ui_enable_docker.py::test_linux_ui_enable_mail_boots_docker_bridge`
+6. [nest] Turning mail on starts the mail server on a nest running the released image — `docs/goal/behavior/mail-bridge-lifecycle.md` § Default-off on first claim
+   - `tests/e2e-unified/tests/platform/docker/test_mail_deploy_lifecycle.py::test_mail_deploy_lifecycle_to_serving`
 7. [app] Whether this nest serves your mailbox to mail apps is your switch, on by default — `docs/goal/ui/mail-settings.md` § Layout & flow
    - `tests/e2e-unified/tests/test_mail_serving_toggle.py::test_serve_here_toggle_defaults_on_and_writes_through_to_nest`
 8. [app] With only calendar on, the page shows the calendar settings and the shared password controls, and no mail rows — `docs/goal/ui/mail-settings.md` § Layout & flow
@@ -99,11 +99,11 @@ Stamped 2026-11-07 at 6a0ded1015.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | |
-| linux | ✅ full | |
-| windows | ⚠ partial | |
-| macos | ⚠ partial | |
-| ios | ⚠ partial | |
+| web | ✅ full | 0.1.7-dev+8f6c0a5a docker |
+| linux | ✅ full | 0.1.7-dev+8f6c0a5a docker |
+| windows | ✅ full | 0.1.7-dev+8f6c0a5a docker |
+| macos | ✅ full | 0.1.7-dev+8f6c0a5a docker |
+| ios | ✅ full | 0.1.7-dev+8f6c0a5a docker |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+b536197e standalone |
 | android-kids | — absent | |
@@ -114,7 +114,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 1 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_page_reachable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_enable_populates_mua_instructions` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_enable_renders_credential_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_top_elements_present` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_top_elements_present` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_reveal_credential_secret` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_add_then_revoke_credential` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_add_plain_credential_manual_stores_typed_secret` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -124,9 +124,9 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 3 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_keys_info_present` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_mail_relaunch_right_after_key_rotation.py::test_a_relaunch_right_after_a_key_rotation_keeps_imap_working` | tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_mail_stale_sibling_after_key_rotation.py::test_a_stale_sibling_reconnecting_after_a_rotation_keeps_imap_working` | tui (linux): passed, tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_mail_disable.py::test_disable_mail_keeps_every_credential_via_confirm_dialog` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_mail_auto_enable_first_setup.py::test_non_admin_first_setup_auto_mints_and_imap_logs_in` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/platform/docker/test_mail_client_ui_enable_docker.py::test_linux_ui_enable_mail_boots_docker_bridge` — requires `mail-client-ui-enable-docker-drive` (test harness) (not built: windows, macos, ios, android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_mail_disable.py::test_disable_mail_keeps_every_credential_via_confirm_dialog` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_mail_auto_enable_first_setup.py::test_non_admin_first_setup_auto_mints_and_imap_logs_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_lifecycle.py::test_mail_deploy_lifecycle_to_serving` | nest (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_mail_serving_toggle.py::test_serve_here_toggle_defaults_on_and_writes_through_to_nest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_caldav_only_mail_settings_render_gate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_status_line_reads_off_then_up_to_date_and_syncing_while_a_change_runs` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -147,7 +147,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 23 | app | `tests/e2e-unified/tests/test_mail_settings_over_quota.py::test_a_full_mailbox_shows_the_notice_and_the_used_size` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 24 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_refused_change_says_why_and_can_be_tried_again` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 25 | app | `tests/e2e-unified/tests/test_mail_submission_token_refresh.py::test_a_mail_app_keeps_sending_after_the_first_token_would_have_expired` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 26 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_calendar_written_before_a_key_rotation_still_opens` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 26 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_calendar_written_before_a_key_rotation_still_opens` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 27 | app | `tests/e2e-unified/tests/test_mail_unavailable_without_scanners_ui.py::test_both_mail_pages_render_a_box_that_cannot_enable_mail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 28 | app | `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_mail_app_password_suppresses_capture_until_hidden_or_left` | windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 28 | app | absent by design on web, linux, tui | — |

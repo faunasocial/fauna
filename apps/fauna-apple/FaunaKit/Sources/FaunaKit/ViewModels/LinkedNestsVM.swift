@@ -177,9 +177,25 @@ public final class LinkedNestsVM: MachineBackedVM {
     func resyncStore() async {
         guard let api = configuredApi else { return }
         if let machine, !isWorking {
-            _ = try? await machine.hydrate()
+            let hydrated: Bool
+            do {
+                try await machine.hydrate()
+                hydrated = true
+            } catch {
+                hydrated = false
+            }
             let snap = machine.snapshot()
+            // One line per notice-driven re-read: whether a sibling's change
+            // reached this open page is otherwise invisible (an e2e repaint
+            // failure must tell "no notice" from "the re-read read stale").
+            logMessage(level: .info, target: "fauna.nests.vm",
+                       message: "store-change re-read: hydrated=\(hydrated) "
+                           + "pairings=\(snap.pairings.count) "
+                           + "changed=\(snap != snapshot)")
             if snap != snapshot { snapshot = snap }
+        } else if machine != nil {
+            logMessage(level: .info, target: "fauna.nests.vm",
+                       message: "store-change re-read skipped: a gesture is in flight")
         }
         if let facet = try? await api.loadCustodyFacet() {
             let rows = Self.nestAnchored(facet.rows)

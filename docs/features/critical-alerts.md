@@ -64,7 +64,7 @@ Stamped 2026-11-07 at ac836c937b.
 | macos | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
 | ios | ⚠ partial | 0.1.5-dev+17b5832c standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+646e0070 standalone |
+| tui | ✅ full | 0.1.7-dev+ef6a45c3 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

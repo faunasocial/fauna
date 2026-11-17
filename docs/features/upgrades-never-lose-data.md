@@ -86,7 +86,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.5-dev+7bab2ad3 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+ab838565 standalone |
+| ios | ✅ full | 0.1.5-dev+ab838565 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+7186912b standalone |
 | android-kids |  no run recorded | |
@@ -95,10 +95,10 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 1 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): xfailed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 1 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 2 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): xfailed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 2 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): xfailed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_outdated_nest_launch_shows_non_retry_update_surface` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_outdated_nest_launch_shows_non_retry_update_surface_web` | web (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_restarts_degraded_shows_the_update_surface` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

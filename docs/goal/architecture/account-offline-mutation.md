@@ -377,16 +377,21 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   android's e2e stays behind the host emulator). macos and ios joined 2026-11-08: FaunaKit's
   `FeedVM` follows `ConnectionWordFeed` (the word `FaunaClient`'s connection
   observer publishes, the one the offline gate reads) from the manager's
-  build, the test carrying both markers. **Not built, stated:** the composer
-  on windows (the UniFFI door is there for it: one `set_connection_state`
-  call from its connection flow); every other
+  build, the test carrying both markers. windows joined 2026-11-15:
+  `MainViewModel.OnConnectionStateChanged` hands the word it gives its offline
+  gate to the process-level `set_device_connection_word` too (the outbox
+  follows the transport, not a feed manager, so an account change cannot leave
+  it on the outgoing client's last word), and `FeedManagerHost` hands a manager
+  it builds the gate's word once, which lends the outbox to a manager built
+  before the first word; the test carries the windows marker. **Not built,
+  stated:** every other
   `OfflineQueued` kind's gesture (the family kinds excepted — the next entry); ~~the MLS drainer~~ (built 2026-11-07, tui
   first: an MLS send with no nest queues as a plaintext intent and drains sealed
   at the then-current epoch — `devices.md` § Implementation status today); and
   the failed-sends surface — designed 2026-11-08 as the unsent-changes
   surface (the next entry), its ids in ui.yaml since 2026-11-14, built on
-  tui, macos and ios 2026-11-14; on the other apps a parked like stays
-  durable but is not yet shown to the user.
+  all seven apps — tui, macos and ios, then web, linux and android
+  2026-11-14, windows 2026-11-15.
 
 - **Designed (2026-11-08): the unsent-changes surface — the
   phase-4 failed-sends surface, ruled in § The offline-mutation contract (W4)
@@ -465,9 +470,20 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   glib timer, android a view-model coroutine). Proven by android's
   `UnsentChangesCardTest`, linux's unit test and the web unit suite; the
   three apps are marked on `test_unsent_changes.py`, their runs on verify
-  request. Not built, stated: the surface on windows (batched after its
-  offline composers); no e2e
-  drives an MLS send to a refusal. Its twelve ids and the two
+  request. **The windows surface is BUILT (2026-11-15)**, the last of seven,
+  once its like and MLS composers queued: the account page's
+  `unsent-changes-section` after `pending-actions-section`
+  (`SettingsViewModel` over the UniFFI `unsentChanges` / `retryUnsentChange` /
+  `discardUnsentChange`, each row's words through `unsentChangeStateText` /
+  `unsentChangeReasonText`), the heart's `state` (its `HelpText`) through
+  `likeStateWord` over `PostSummary.likeState`, and `DmMessageBubble`'s queued /
+  unsent lines and ⋯ menu actions over `MessageSnapshot.queuedSend`; each surface
+  re-reads the outbox every two seconds while its page shows (the Core
+  `UnsentRefresh`), the account page's first read made before its nest-backed
+  load. Proven by `SettingsUnsentChangesTests`, `FeedLikeStateTests` and
+  `ConversationsQueuedSendTests`; windows is marked on `test_unsent_changes.py`
+  (its driver gained the outbox drain hold file), its run on verify request.
+  Not built, stated: no e2e drives an MLS send to a refusal. Its twelve ids and the two
   `feed-like-button` state words are in ui.yaml (2026-11-14), DECLARED under
   rule A's additive carve-out — every one sits on an existing page or
   component and exposes what this section already designs, so the change is

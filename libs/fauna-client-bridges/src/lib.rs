@@ -170,6 +170,7 @@ pub mod credential_id;
 pub mod follow_requests;
 pub mod labels;
 pub mod link_block;
+pub mod nostr_forms;
 pub mod nostr_settings;
 pub mod plugins;
 pub mod settings;
@@ -182,6 +183,10 @@ pub use labels::{
     follow_display, nostr_key_source_label, nostr_link_mode_label,
 };
 pub use link_block::{LinkBlock, applicable_modes, link_block, link_block_of, mode_applies};
+pub use nostr_forms::{
+    add_follow_possibility, connected_apps_possibility, link_possibility,
+    zap_signer_add_possibility,
+};
 pub use nostr_settings::{BridgeToggleOption, nostr_content_toggle_options};
 pub use plugins::{
     InstalledPluginRow, InstalledPluginText, PluginCard, PluginCardAction, PluginCardText,

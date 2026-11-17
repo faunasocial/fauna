@@ -33,7 +33,6 @@ starts OFF needs no guard: enabling is the harmless direction.
 from __future__ import annotations
 
 import os
-import pwd
 import shutil
 import subprocess
 
@@ -58,6 +57,12 @@ _SETTLE_S = 20
 
 
 def _user() -> str:
+    # `pwd` is POSIX-only: imported here, never at module level, because every
+    # OS collects this module (a `--tier 1` run included) and on Windows a
+    # module-level import fails the whole collection. The test skips on a box
+    # without `loginctl` before it ever asks for the user.
+    import pwd
+
     return pwd.getpwuid(os.getuid()).pw_name
 
 

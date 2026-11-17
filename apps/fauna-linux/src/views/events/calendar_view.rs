@@ -112,9 +112,70 @@ pub struct CalendarViewState {
     /// the separate `calendar-visibility` toggle — see
     /// [`CalendarViewState::shows_calendar`] for how the two compose.
     pub selected_calendar: Option<String>,
+    /// What decides whether an event compose may open (`ui/events.md`
+    /// § Errors & edge cases → *No calendar to hold an event*): the
+    /// four-answer calendar read and the two inputs the shared predicate
+    /// takes besides it.
+    pub create_gate: CreateGate,
+}
+
+/// The inputs of `fauna_client_caldav::event_create_possibility` the page
+/// holds (ruling 3). Before the first read it is *unresolved*, so a page that
+/// has not read yet answers "loading", never an empty list.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CreateGate {
+    /// The read's answer (ruling 2), payload-free.
+    pub read: fauna_client_caldav::CalendarsReadState,
+    /// Whether the deployment serves CalDAV, CardDAV or mail — read
+    /// (`fauna.setup.status`) only with a *no key* answer, the one answer
+    /// whose reason it changes; `None` until then, taken as serving.
+    pub serves_dav_or_mail: Option<bool>,
+    /// This person is the nest's admin (`fauna.account.am_i_admin`).
+    pub is_admin: bool,
+}
+
+impl CreateGate {
+    /// Can an event compose open (and a create be sent) now? The one answer
+    /// `new-event-btn`, the day-cell double-click, the time-slot press and
+    /// `create-event` all ask.
+    pub fn possibility(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_caldav::event_create_possibility(
+            &self.read,
+            self.is_admin,
+            self.serves_dav_or_mail.unwrap_or(true),
+        )
+    }
+
+    /// The step the blocked reason names, for the empty state's jump.
+    pub fn step(&self) -> Option<fauna_client_caldav::EventCreateStep> {
+        fauna_client_caldav::event_create_step(
+            &self.read,
+            self.is_admin,
+            self.serves_dav_or_mail.unwrap_or(true),
+        )
+    }
 }
 
 impl CalendarViewState {
+    /// The submit's side of the gate (ruling 3): the calendar a create goes
+    /// to — `chosen` (the compose's own calendar pick) while it still names a
+    /// listed calendar, else the page's — or the predicate's reason, in
+    /// words, so no submit can put an empty calendar id on the wire.
+    pub fn create_target(&self, chosen: Option<&str>) -> Result<String, String> {
+        let selected = chosen
+            .filter(|id| self.displayed_calendars.iter().any(|c| c.id == *id))
+            .map(str::to_owned)
+            .or_else(|| self.authoring_target());
+        fauna_client_caldav::event_create_target(
+            &self.create_gate.read,
+            self.create_gate.is_admin,
+            self.create_gate.serves_dav_or_mail.unwrap_or(true),
+            selected.as_deref(),
+            self.displayed_calendars.iter().map(|c| c.id.as_str()),
+        )
+        .map_err(|reason| reason.resolve(crate::i18n::strings::lookup))
+    }
+
     /// The *live* calendar selection: `Some(id)` only while that calendar is
     /// still listed, else `None` (the union). The staleness rule is shared with
     /// tui — `fauna_client_caldav::resolve_calendar_selection` — so a calendar
@@ -215,6 +276,12 @@ pub struct CalendarViewHandles {
     /// The refused-change list's container (`refused_changes`); hidden while
     /// the list is empty, repainted by `RefusedChangesLoaded`.
     pub refused_panel: gtk::Box,
+    /// `new-event-btn`, painted from the page's [`CreateGate`] by
+    /// [`paint_create_gate`].
+    pub new_event_btn: gtk::Button,
+    /// The calendar list's empty state (`calendar-list-empty-state` and its
+    /// step), painted by [`paint_create_gate`].
+    pub empty_state: calendar_sidebar::EmptyState,
     /// The page callbacks `month_grid::refresh_month_grid` requires — its day
     /// cells wire them to the month→day drill-in and the double-click compose.
     pub month_hooks: MonthGridHooks,
@@ -274,6 +341,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         selected_event: None,
         displayed_calendars: Vec::new(),
         selected_calendar: None,
+        create_gate: CreateGate::default(),
     }));
 
     // -----------------------------------------------------------------------
@@ -297,6 +365,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
     // parameter instead, which is where the compile-time enforcement matters.
     let month_hooks_for_sidebar = Rc::new(RefCell::new(None::<MonthGridHooks>));
     let calendar_list_box;
+    let empty_state;
     {
         let st = Rc::clone(&state);
         let mgc = Rc::clone(&month_grid_container_for_sidebar);
@@ -306,7 +375,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         let cl = Rc::clone(client);
         let cl2 = Rc::clone(client);
         let sv = Rc::clone(&month_hooks_for_sidebar);
-        let (sidebar_widget, list_box) =
+        let (sidebar_widget, list_box, sidebar_empty_state) =
             calendar_sidebar::build_calendar_sidebar(&state, client, move || {
                 // Refresh all grids when visibility changes.
                 if let (Some(container), Some(hooks)) = (&*mgc.borrow(), &*sv.borrow()) {
@@ -323,6 +392,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
                 }
             });
         calendar_list_box = list_box;
+        empty_state = sidebar_empty_state;
         sidebar_box.append(&sidebar_widget);
     }
 
@@ -452,6 +522,12 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         let st = Rc::clone(&state);
         let cl = Rc::clone(client);
         new_event_btn.connect_clicked(move |btn| {
+            // The door asks the gate again (ruling 3): the paint keeps the
+            // button insensitive while blocked, and a press that races a
+            // repaint still opens nothing.
+            if !st.borrow().create_gate.possibility().is_possible() {
+                return;
+            }
             // Author into the calendar the page is currently targeting — the
             // live selection, else the first visible / first listed one
             // (events.md § Layout & flow).
@@ -479,7 +555,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
                 Some(draft) => data.with_draft(&draft),
                 None => data,
             };
-            let dialog = super::event_form::build_event_form_prefilled(&data, &cl);
+            let dialog = super::event_form::build_event_form_prefilled(&data, &st, &cl);
             if let Some(root) = btn.root()
                 && let Some(win) = root.downcast_ref::<gtk::Window>()
             {
@@ -787,10 +863,28 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         agenda_container,
         detail_panel,
         refused_panel,
+        new_event_btn,
+        empty_state,
         month_hooks,
     };
+    // Before the first read the page is loading, never empty (ruling 2).
+    paint_create_gate(&handles);
 
     (outer, handles)
+}
+
+/// Paint the page's create doors from its [`CreateGate`] (`ui/events.md`
+/// § Errors & edge cases → *No calendar to hold an event*, ruling 3):
+/// `new-event-btn` through the possibility seam (insensitive with the reason
+/// while blocked, hidden while absent), and the calendar list's empty state.
+/// Called after every calendar read and admin-status change.
+pub fn paint_create_gate(handles: &CalendarViewHandles) {
+    let (gate, listed) = {
+        let s = handles.state.borrow();
+        (s.create_gate.clone(), !s.displayed_calendars.is_empty())
+    };
+    crate::possible::paint(&handles.new_event_btn, None, gate.possibility());
+    handles.empty_state.paint(&gate, listed);
 }
 
 #[cfg(test)]
@@ -835,6 +929,10 @@ mod tests {
             selected_event: None,
             displayed_calendars: calendars,
             selected_calendar: None,
+            create_gate: CreateGate {
+                read: fauna_client_caldav::CalendarsReadState::Loaded,
+                ..CreateGate::default()
+            },
         }
     }
 
@@ -960,5 +1058,205 @@ mod tests {
             .expect("the day is still indexed");
         assert_eq!(day.len(), 1);
         assert_eq!(day[0].calendar_id, "bb");
+    }
+
+    // ── No calendar to hold an event (`ui/events.md` § Errors & edge cases,
+    //    rulings 2–4) ───────────────────────────────────────────────────────
+
+    use crate::i18n::strings::events as et;
+    use crate::testid::run_on_gtk_thread;
+    use fauna_client_caldav::{CalendarsReadState, EventCreateStep};
+
+    fn gate(read: CalendarsReadState, serves: Option<bool>, is_admin: bool) -> CreateGate {
+        CreateGate {
+            read,
+            serves_dav_or_mail: serves,
+            is_admin,
+        }
+    }
+
+    /// The submit's target goes through the shared gate: a read that is not
+    /// loaded refuses in words, so no empty calendar id is ever sent.
+    #[test]
+    fn create_target_refuses_with_the_reason_until_the_read_is_loaded() {
+        let mut s = state_with(vec![]);
+        s.create_gate = gate(CalendarsReadState::Unresolved, None, false);
+        assert_eq!(
+            s.create_target(None),
+            Err(et::create_blocked::LOADING.to_string())
+        );
+        s.create_gate = gate(CalendarsReadState::NoKey, Some(true), false);
+        assert_eq!(
+            s.create_target(None),
+            Err(et::create_blocked::ADD_CREDENTIAL.to_string())
+        );
+    }
+
+    /// Loaded: the compose's own pick while it is listed, else the page's
+    /// authoring target (a stale pick never reaches the wire).
+    #[test]
+    fn create_target_takes_the_listed_pick_else_the_pages_target() {
+        let s = state_with(vec![cal("aa", "Work"), cal("bb", "Home")]);
+        assert_eq!(s.create_target(Some("bb")), Ok("bb".to_string()));
+        assert_eq!(s.create_target(Some("gone")), Ok("aa".to_string()));
+        assert_eq!(s.create_target(Some("")), Ok("aa".to_string()));
+    }
+
+    /// Before the first read the page is loading: `new-event-btn` is shut
+    /// and the list paints the loading line, never the empty state.
+    #[test]
+    fn an_unread_page_paints_loading_and_shuts_new_event() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let (_root, h) = build_calendar_view(&client);
+            assert!(!h.new_event_btn.is_sensitive());
+            assert!(h.empty_state.loading.is_visible());
+            assert!(!h.empty_state.reason.is_visible());
+            assert!(!h.empty_state.step.is_visible());
+            assert!(!h.empty_state.none.is_visible());
+        });
+    }
+
+    /// No key on a deployment that serves mail: the reason names Add
+    /// credential and the jump goes there; an admin of a deployment that
+    /// serves none is sent to the admin Calendar page; a non-admin there is
+    /// offered nothing (the opener is not shown).
+    #[test]
+    fn no_key_paints_the_reason_and_its_step() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let (_root, h) = build_calendar_view(&client);
+
+            h.state.borrow_mut().create_gate = gate(CalendarsReadState::NoKey, Some(true), false);
+            paint_create_gate(&h);
+            assert!(!h.new_event_btn.is_sensitive());
+            assert!(h.new_event_btn.is_visible());
+            assert!(!h.empty_state.loading.is_visible());
+            assert_eq!(
+                h.empty_state.reason.text(),
+                et::create_blocked::ADD_CREDENTIAL
+            );
+            assert!(h.empty_state.step.is_visible());
+            assert_eq!(
+                h.empty_state.step_target(),
+                Some(EventCreateStep::AddCredential)
+            );
+
+            h.state.borrow_mut().create_gate = gate(CalendarsReadState::NoKey, Some(false), true);
+            paint_create_gate(&h);
+            assert_eq!(
+                h.empty_state.reason.text(),
+                et::create_blocked::ADMIN_ENABLE_CALENDAR
+            );
+            assert_eq!(
+                h.empty_state.step_target(),
+                Some(EventCreateStep::AdminEnableCalendar)
+            );
+
+            h.state.borrow_mut().create_gate = gate(CalendarsReadState::NoKey, Some(false), false);
+            paint_create_gate(&h);
+            assert!(!h.new_event_btn.is_visible());
+            assert_eq!(h.empty_state.reason.text(), et::create_blocked::NOT_HERE);
+            assert!(!h.empty_state.step.is_visible());
+        });
+    }
+
+    /// A refused provision says why, with no jump (the next read retries).
+    #[test]
+    fn a_refused_provision_paints_its_error_without_a_jump() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let (_root, h) = build_calendar_view(&client);
+            h.state.borrow_mut().create_gate = gate(
+                CalendarsReadState::ProvisionFailed {
+                    error: "boom".into(),
+                },
+                None,
+                false,
+            );
+            paint_create_gate(&h);
+            assert!(h.empty_state.reason.text().contains("boom"));
+            assert!(!h.empty_state.step.is_visible());
+            assert!(!h.new_event_btn.is_sensitive());
+        });
+    }
+
+    /// Loaded with a calendar listed: the opener is live and no empty state
+    /// paints anything.
+    #[test]
+    fn a_loaded_read_opens_new_event() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let (_root, h) = build_calendar_view(&client);
+            {
+                let mut s = h.state.borrow_mut();
+                s.create_gate = gate(CalendarsReadState::Loaded, None, false);
+                s.displayed_calendars = vec![cal("aa", "Personal")];
+            }
+            paint_create_gate(&h);
+            assert!(h.new_event_btn.is_sensitive());
+            assert!(!h.empty_state.reason.is_visible());
+            assert!(!h.empty_state.loading.is_visible());
+        });
+    }
+
+    fn has_popover(anchor: &gtk::Button) -> bool {
+        let mut child = anchor.first_child();
+        while let Some(c) = child {
+            if c.is::<gtk::Popover>() {
+                return true;
+            }
+            child = c.next_sibling();
+        }
+        false
+    }
+
+    /// Both positional doors (the month cell's double-click and the time-slot
+    /// press) go through `show_quick_create`: blocked, it opens nothing.
+    #[test]
+    fn the_positional_doors_open_no_compose_while_blocked() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let state = Rc::new(RefCell::new(state_with(vec![])));
+            for read in [
+                CalendarsReadState::Unresolved,
+                CalendarsReadState::NoKey,
+                CalendarsReadState::ProvisionFailed { error: "x".into() },
+            ] {
+                state.borrow_mut().create_gate = gate(read.clone(), None, false);
+                let anchor = gtk::Button::new();
+                event_popover::show_quick_create(
+                    &anchor,
+                    (2026, 11, 16),
+                    Some((9, 0)),
+                    &state,
+                    &client,
+                );
+                assert!(!has_popover(&anchor), "{read:?} opened the compose");
+            }
+            // The possible half pops a popover up, which needs a mapped
+            // anchor — the e2e `test_month_double_click_day_cell_opens_new_
+            // event_prefilled[linux]` drives it on a real window.
+        });
+    }
+
+    /// A refused save (ruling 4): the compose stays, its own `error-message`
+    /// carries the whole sentence (no raw context prefix); a success clears it.
+    #[test]
+    fn a_failed_save_is_said_in_the_compose_which_stays_open() {
+        run_on_gtk_thread(|| {
+            let client = FaunaClient::offline_for_test();
+            let compose = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let label = crate::form_gate::dialog_error_label();
+            event_popover::finish_compose(&compose, &label, &client, Err("nest said no".into()));
+            assert!(label.is_visible());
+            let text = label.text().to_string();
+            assert_eq!(text, et::SAVE_FAILED.replace("{error}", "nest said no"));
+            assert!(!text.starts_with("event_created"));
+            assert!(compose.is_visible());
+
+            event_popover::finish_compose(&compose, &label, &client, Ok(()));
+            assert!(!label.is_visible());
+        });
     }
 }

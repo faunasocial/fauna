@@ -781,6 +781,11 @@ class PlatformDriver(ABC):
         verbatim), ``enabled``, ``declares_enabled`` (an ``enabled`` that was
         *declared* versus one that merely *defaulted*), ``actuable`` (the driver
         can click it), ``editable`` (the driver can type into it) and ``scope``.
+        A record MAY also carry ``attrs`` — the element's automation attributes
+        (``state``, ``checked``, …) as a string-to-string map, what
+        :meth:`get_attr` reads one key of — so a whole-frame comparison sees a
+        state change that leaves the text alone (a toggle flipped, a choice
+        made current). An app that omits it is read as publishing none.
 
         ⚠ ``None`` and ``[]`` are OPPOSITE answers and callers must not collapse
         them: ``None`` is "this app publishes no such surface" — an ``n/a``, and

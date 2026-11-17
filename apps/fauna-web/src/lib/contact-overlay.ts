@@ -15,6 +15,8 @@
 // stated*).
 
 import { resolveLocalized, type LocalizedText } from './i18n/localized.ts';
+import { askPossibility, formRefusal } from './form-gate.ts';
+import type { Possibility } from './possibility.ts';
 
 /** `fauna_core::format::PeerLabel`: the one line every surface shows, and the
  *  public name it replaced when a nickname supplied it (`null` otherwise —
@@ -46,6 +48,10 @@ export interface OverlayEditorFace {
   addLabel(raw: string): LocalizedText | undefined;
   removeLabel(index: number): void;
   reset(): void;
+  /** Whether Save can succeed now — shared
+   *  `contact_overlays::save_possibility` over this tab (`profile-private-save-button`
+   *  is painted from it, `savePrivateSection` asks it again). */
+  savePossibility(): Possibility;
   save(): Promise<SaveAnswer>;
 }
 
@@ -92,6 +98,12 @@ export function overlayFaces<M>(
  *  empty one, so a refusal is always visible. The staged edits stay on any
  *  answer but `saved`. */
 export async function savePrivateSection(editor: OverlayEditorFace): Promise<string | null> {
+  // The answer the button is painted from, asked again before anything runs
+  // (`ui/README.md` § Offer only what is possible, rule 6).
+  const refusal = formRefusal(askPossibility(() => editor.savePossibility()));
+  if (refusal !== null) {
+    return refusal || resolveLocalized({ key: 'profile.private_save_failed', args: { reason: 'absent' } });
+  }
   let answer: SaveAnswer;
   try {
     answer = await editor.save();

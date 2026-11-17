@@ -25,15 +25,28 @@ public struct FeedReplyDialog: View {
         self.vm = vm
     }
 
-    private var canSubmit: Bool { !replyText.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// The submit's shared draft-validity answer (`fauna_feed::forms::
+    /// reply_submit_possibility`, `feed.md` § Errors & edge cases): disabled
+    /// with its reason on blank text; `FeedVM.replyToPost` asks it again.
+    private var submitPossibility: Possibility { vm.replySubmitPossibility(replyText) }
+
+    /// A send is in flight — the submit stays disabled until the save answers.
+    @State private var sending = false
 
     private func submit() {
+        guard !sending else { return }
+        sending = true
         Task {
             // The box exists (hence can be ticked) only under *public by
             // confirmation*; the send path lives in `FeedVM.replyToPost`.
-            await vm.replyToPost(postId: post.postId, body: replyText,
-                                 publicConfirmed: needsPublicConfirm && publicConfirmed)
-            dismiss()
+            let saved = await vm.replyToPost(postId: post.postId, body: replyText,
+                                             publicConfirmed: needsPublicConfirm && publicConfirmed)
+            sending = false
+            // Closes only on a saved reply: a refusal or a failed save keeps
+            // the dialog open with the reply typed and the reason on the
+            // page's `error-message` (`ui/README.md` § Offer only what is
+            // possible, rule 7).
+            if saved { dismiss() }
         }
     }
 
@@ -89,13 +102,16 @@ public struct FeedReplyDialog: View {
                     ) { publicConfirmed.toggle() }
             }
 
+            FaunaPossibilityReason(submitPossibility)
+
             HStack {
                 Button(L.common.cancel) { dismiss() }
                 Button(L.common.reply) { submit() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!canSubmit)
+                    .disabled(sending)
                     .accessibilityIdentifier(Ids.feedReplySubmitButton)
-                    .automationActivate(Ids.feedReplySubmitButton, isEnabled: { canSubmit }, perform: submit)
+                    .automationActivate(Ids.feedReplySubmitButton, isEnabled: { !sending }, perform: submit)
+                    .faunaPossible(submitPossibility)
             }
         }
         .padding(24)

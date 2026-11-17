@@ -89,12 +89,16 @@ pass through a relay of ours, which parses and keeps nothing it forwards); and
 when you link a Bluesky account, your browser signs in at the server that holds
 that account. And, from the desktop and terminal apps, to the site that
 publishes our releases — only to learn whether a newer version is out, when you
-ask. And, directly, from the Linux, Windows, Mac and terminal apps, and from the
+ask. And, from the Linux, Windows, Mac and terminal apps, and from the
 Android app while it is open, to your own other devices and to the devices of
 people you share a folder with; from the iPhone app, while it is open, to your
-own other devices and to no one else's; and, when you pair in person on the
-Android app, to the device in front of you only what the pairing itself
-exchanges, never a file. And, when you enter a handle or retire a nest — and, on the web app, when
+own other devices and to no one else's — directly from one device to the other
+or, while the two have no direct path, and only where your nest runs a relay
+and both devices belong to accounts on your nest, through that relay, which
+passes their traffic on encrypted from one device to the other, cannot read it
+and keeps none of it; and, when you pair in person on the Android app, directly
+to the device in front of you only what the pairing itself exchanges, never a
+file. And, when you enter a handle or retire a nest — and, on the web app, when
 it reconnects to your nest — to a public DNS service (Cloudflare's), only to
 look up that domain's records. And, when you load the pictures a message or mail
 links to from elsewhere, or open an article from someone you follow or a nest's

@@ -19,18 +19,35 @@
     type PaymentClaim,
   } from '#lib/payments';
   import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
+  import { subscriptionClaimMintPossibility } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import type { ReadWord } from '#lib/read-gate';
 
   interface Props {
     /** The logged-in actor's secret, or null before identity resolves. */
     secretHex: string | null;
     /** The author's own §1 tiers — a claim entitles exactly one of them. */
     tiers: { name: string }[];
+    /** Where the page's read of `tiers` stands — the mint's answer keeps a
+     *  pending or failed read apart from "no tier" (profile.md § Errors & edge
+     *  cases, *A tier before what sells it*). */
+    tiersRead: ReadWord;
     /** Bumped by the page wherever it reloads the SELF surfaces. */
     reloadTick: number;
     /** Surface a failure on the page's shared `error-message` element. */
     onerror: (message: string) => void;
   }
-  let { secretHex, tiers, reloadTick, onerror }: Props = $props();
+  let { secretHex, tiers, tiersRead, reloadTick, onerror }: Props = $props();
+
+  // `subscription-claim-mint-button`: the shared own-tier answer
+  // (`own_tiers_possibility`, use `ClaimCode`), painted here and asked again by
+  // `mint()`.
+  function mintAnswer() {
+    return subscriptionClaimMintPossibility(tiersRead, tiers.length);
+  }
+  const mintGate = $derived(
+    formGate(askPossibility(() => mintAnswer())),
+  );
 
   let claims = $state<PaymentClaim[]>([]);
   let claimTier = $state('');
@@ -64,6 +81,8 @@
   // No client-side validation — the nest rejects a tier that isn't one of the
   // author's own with its own typed error.
   async function mint(): Promise<void> {
+    const refusal = formRefusal(askPossibility(() => mintAnswer()));
+    if (refusal !== null) { onerror(refusal); return; }
     const s = secretHex;
     if (!s || !claimTier) return;
     try {
@@ -119,7 +138,8 @@
     </select>
     <button
       class="btn primary" data-testid={PAYMENTS_IDS.SUBSCRIPTION_CLAIM_MINT_BUTTON}
-      onclick={mint} disabled={!claimTier}
+      onclick={mint} disabled={mintGate.disabled || !claimTier}
+      title={mintGate.reason || undefined}
     >{t.subscriptions.mint_claim}</button>
   </div>
 

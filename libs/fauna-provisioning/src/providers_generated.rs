@@ -51,7 +51,9 @@ impl ProviderId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Capability { Dns, Vps, Registrar }
+/// A provider capability, and a field kind. `Zone` is a field kind only —
+/// a field the zone door needs; it never appears in `capabilities`.
+pub enum Capability { Dns, Vps, Registrar, Zone }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorsPolicy { Open, Proxy, Native }
@@ -175,6 +177,12 @@ pub struct ProviderMeta {
     /// Name of the `RegistrarDispatch` variant serving this provider,
     /// or `None` when it has no registrar capability.
     pub registrar_dispatch: Option<&'static str>,
+    /// The zone door: `DnsProvider::create_zone` is implemented
+    /// (registry.md § Delegation doors). Rust only — the rule that reads
+    /// it is shared Rust; pinned by `tests/delegation_doors.rs`.
+    pub dns_creates_zones: bool,
+    /// The nameserver door: `Registrar::set_nameservers` is implemented.
+    pub registrar_sets_nameservers: bool,
 }
 
 impl ProviderMeta {
@@ -190,6 +198,8 @@ impl ProviderMeta {
             Capability::Dns => self.dns_dispatch,
             Capability::Vps => self.vps_dispatch,
             Capability::Registrar => self.registrar_dispatch,
+            // A field kind, never a capability: no adapter of its own.
+            Capability::Zone => None,
         }
     }
 }
@@ -202,7 +212,7 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         signup_url: "https://dash.cloudflare.com/sign-up",
         capabilities: &[Capability::Dns, Capability::Registrar],
         cors_policy: CorsPolicy::Proxy,
-        fields: &[FieldMeta { id: "api-token", field_type: FieldType::Secret, label_key: "provisioning.cloudflare.api_token", required: true, kinds: &[Capability::Dns, Capability::Registrar] }, FieldMeta { id: "account-id", field_type: FieldType::Text, label_key: "provisioning.cloudflare.account_id", required: true, kinds: &[Capability::Registrar] }],
+        fields: &[FieldMeta { id: "api-token", field_type: FieldType::Secret, label_key: "provisioning.cloudflare.api_token", required: true, kinds: &[Capability::Dns, Capability::Registrar] }, FieldMeta { id: "account-id", field_type: FieldType::Text, label_key: "provisioning.cloudflare.account_id", required: true, kinds: &[Capability::Registrar, Capability::Zone] }],
         post_verify_select: Some(&PVS_CLOUDFLARE),
         registrar_requires_contact: Some(false),
         registrar_notes_key: Some("provisioning.cloudflare.registrar_account_contact_note"),
@@ -211,6 +221,8 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: Some("CloudflareDns"),
         vps_dispatch: None,
         registrar_dispatch: Some("CloudflareRegistrar"),
+        dns_creates_zones: true,
+        registrar_sets_nameservers: false,
     },
     ProviderMeta {
         id: ProviderId::Porkbun,
@@ -228,6 +240,8 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: Some("PorkbunDns"),
         vps_dispatch: None,
         registrar_dispatch: Some("PorkbunRegistrar"),
+        dns_creates_zones: false,
+        registrar_sets_nameservers: true,
     },
     ProviderMeta {
         id: ProviderId::Hetzner,
@@ -245,6 +259,8 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: Some("HetznerDns"),
         vps_dispatch: Some("HetznerVps"),
         registrar_dispatch: None,
+        dns_creates_zones: true,
+        registrar_sets_nameservers: false,
     },
     ProviderMeta {
         id: ProviderId::Namecheap,
@@ -262,6 +278,8 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: Some("NamecheapDns"),
         vps_dispatch: None,
         registrar_dispatch: Some("NamecheapRegistrar"),
+        dns_creates_zones: false,
+        registrar_sets_nameservers: true,
     },
     ProviderMeta {
         id: ProviderId::Gandi,
@@ -279,6 +297,8 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: Some("GandiDns"),
         vps_dispatch: None,
         registrar_dispatch: Some("GandiRegistrar"),
+        dns_creates_zones: false,
+        registrar_sets_nameservers: true,
     },
     ProviderMeta {
         id: ProviderId::Digitalocean,
@@ -296,6 +316,8 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: None,
         vps_dispatch: Some("DigitaloceanVps"),
         registrar_dispatch: None,
+        dns_creates_zones: false,
+        registrar_sets_nameservers: false,
     },
     ProviderMeta {
         id: ProviderId::Vultr,
@@ -313,6 +335,8 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: None,
         vps_dispatch: Some("VultrVps"),
         registrar_dispatch: None,
+        dns_creates_zones: false,
+        registrar_sets_nameservers: false,
     },
     ProviderMeta {
         id: ProviderId::Ovh,
@@ -330,6 +354,8 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: None,
         vps_dispatch: Some("OvhVps"),
         registrar_dispatch: None,
+        dns_creates_zones: false,
+        registrar_sets_nameservers: false,
     },
     ProviderMeta {
         id: ProviderId::Linode,
@@ -347,6 +373,8 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: None,
         vps_dispatch: Some("LinodeVps"),
         registrar_dispatch: None,
+        dns_creates_zones: false,
+        registrar_sets_nameservers: false,
     },
     ProviderMeta {
         id: ProviderId::Bundled,
@@ -364,5 +392,7 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         dns_dispatch: Some("BundledDns"),
         vps_dispatch: Some("BundledVps"),
         registrar_dispatch: Some("BundledRegistrar"),
+        dns_creates_zones: false,
+        registrar_sets_nameservers: false,
     },
 ];

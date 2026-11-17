@@ -11,7 +11,7 @@
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { byteSize } from '#lib/value-format';
-  import { defaultLapseTier, offlineAffordance, parseCap } from '#lib/wasm';
+  import { defaultLapseTier, offlinePossibility, parseCap } from '#lib/wasm';
   import { IDS } from '#lib/generated/uiIds';
 
   // admin-settings — renamed "Tiers" (admin.md § Admin IA redesign, 2026-06-04).
@@ -40,7 +40,7 @@
 
   // `fauna.admin.tiers.create` is OnlineOnly (`fauna_protocol::offline_class`):
   // the shared verdict greys the add button while the nest is unreachable.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // The add-a-tier form's drafts (admin.md § 3 → *Defining a new tier*): a name
   // plus the same five raw-i64 cap texts a row edits, empty until typed.

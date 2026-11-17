@@ -51,12 +51,20 @@ Details: [`apps/fauna-apple/README.md`](../../apps/fauna-apple/README.md).
 
 ### iOS (SwiftUI)
 
-Needs a Mac with Xcode; runs in the simulator or on your own device with your
-developer signing.
+Needs a Mac with Apple silicon and Xcode, and runs in the iOS simulator: the
+shared core is built for the simulator on Apple silicon only, not for the
+simulator on an Intel Mac. Building for your own iPhone is not covered here: the
+project signs device builds only for the App Store, with the project's own
+developer team, and the app's bundle identifiers and the app group it shares
+with its extensions are registered to that team, so a build under your own team
+first needs those identifiers and the signing changed in the project and in the
+source. From the repository root, build the shared core in the form a Debug
+build needs, then open the Xcode project and build and run its `Fauna-iOS`
+scheme on a simulator:
 
 ```sh
-just apple-ffi          # the shared-core XCFramework
-xcodebuild -scheme FaunaiOS   # then build/run from Xcode
+just apple-ffi-test                     # the shared core a Debug build links
+open apps/fauna-apple/Fauna.xcodeproj   # then build and run Fauna-iOS
 ```
 
 Details: [`apps/fauna-apple/README.md`](../../apps/fauna-apple/README.md).
@@ -128,4 +136,4 @@ The Windows installer can also set up a nest on the computer it installs on: tic
 
 - Expect rough edges, and expect to update often (the apps and server evolve together; during the 0.1 versions an update may need a fresh install of the app or the nest, and from 0.2.0 on, apps and servers within a major version stay compatible in both directions).
 - During the 0.1 versions an update may need a fresh start, so export anything you want to keep first; from 0.2.0 on, updates never require wiping the nest. Your data stays exportable from your own app: **Settings → Account → Export My Data** downloads what your nest holds for you, your mail included, and **Export mailbox**, among the mail pages in Settings, takes your mailbox out in standard formats to move it to another mail service.
-- Public releases arrive once a version passes acceptance, the first of them 0.1.6; until then a version's downloads are pre-releases.
+- A version becomes a public release once it passes acceptance, or once the project accepts what it did not pass as known issues of the release, as it did for the first of them, 0.1.6; until then a version's downloads are pre-releases.

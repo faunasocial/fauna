@@ -651,14 +651,50 @@ public final class DevicesMachineVM {
         ) { try await api.listFolderDevices(name: name) }
     }
 
+    // ── Form validity (`docs/goal/ui/README.md` § Offer only what is possible,
+    //    rule 4's form case; `folders.md` § Errors & edge cases) ─────────────
+    // The follow and share submits paint from the shared draft-validity
+    // predicates (`fauna_client_folders::forms`, over UniFFI) through
+    // `faunaPossible`; each verb asks the same predicate first.
+
+    /// `folder-follow-confirm`: a handle and a folder name typed, and the app
+    /// signed in (machine, nest and identity secret held).
+    public func folderFollowPossibility(handle: String, name: String) -> Possibility {
+        _ = _observerTick
+        let ready = machine != nil && (api?.folderFollowReady ?? false)
+        return FaunaFFISwift.folderFollowPossibility(handle: handle, name: name, ready: ready)
+    }
+
+    /// `folder-share-confirm`: a recipient typed, and a conversations session
+    /// to admit them through.
+    public func folderSharePossibility(recipient: String) -> Possibility {
+        _ = _observerTick
+        let ready = machine != nil && (api?.folderShareReady ?? false)
+        return FaunaFFISwift.folderSharePossibility(recipient: recipient, ready: ready)
+    }
+
+    /// Refuse a form submit whose answer is not possible, with its reason on
+    /// the page's `error-message` (through `sharingError`). `true` when refused.
+    func refuseForm(_ answer: Possibility) -> Bool {
+        guard let refusal = answer.refusal else { return false }
+        sharingError = refusal
+        return true
+    }
+
     /// Share a set with the picked recipient (`folder-share-confirm`). Resolves the
     /// handle + creates the MLS group + delivers the Welcome, then refreshes the
     /// snapshot (so `mlsGroupId` flips to shared) and re-reads the roster. Returns
     /// `true` on success so the sheet can dismiss; a failure surfaces on the page
     /// `error-message` and returns `false`. `access` is the share-time
     /// `folder-share-role-select` grant (`"writer"`, or `nil` = Reader).
+    ///
+    /// Asks ``folderSharePossibility(recipient:)`` first and refuses with its
+    /// reason on `error-message` (`folders.md` § Errors & edge cases): with no
+    /// session to admit the recipient through, the sheet stays open with what
+    /// was typed.
     @discardableResult
     public func shareFolder(name: String, recipientInput: String, access: String? = nil) async -> Bool {
+        if refuseForm(folderSharePossibility(recipient: recipientInput)) { return false }
         guard let api else { return false }
         sharingError = nil
         do {
@@ -1261,8 +1297,12 @@ public final class DevicesMachineVM {
     ///
     /// Returns `true` on success, so the caller can close its form only when
     /// something was actually stored.
+    ///
+    /// Asks ``folderFollowPossibility(handle:name:)`` first and refuses with
+    /// its reason on `error-message`.
     @discardableResult
     public func followFolder(owner: String, folderName: String) async -> Bool {
+        if refuseForm(folderFollowPossibility(handle: owner, name: folderName)) { return false }
         guard let api else { return false }
         sharingError = nil
         do {

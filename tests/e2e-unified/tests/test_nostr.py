@@ -259,15 +259,17 @@ def test_relay_invalid_url_rejected(logged_in_app):
     app.nostr.clear_relays()
     assert app.nostr.wait_for_relay_count(0)
 
-    app.nostr.add_relay(BAD_RELAY_URL)
-    # No row should be added for an invalid URL.
+    # Add is not offered for an invalid URL (disabled, its reason beside it);
+    # an app still refusing on the press must name the reason instead.
+    pressed = app.nostr.try_add_relay(BAD_RELAY_URL)
     assert not app.nostr.wait_for_relay_count(1, timeout=4.0), (
         "an invalid (non-wss/ws) relay URL must not add a row"
     )
     assert app.nostr.relay_count() == 0
-    assert app.nostr.page_error_text(timeout=6.0), (
-        "an invalid relay URL should surface an error message"
-    )
+    if pressed:
+        assert app.nostr.page_error_text(timeout=6.0), (
+            "an invalid relay URL pressed through should surface an error message"
+        )
 
 
 @pytest.mark.feature("nostr")
@@ -276,7 +278,11 @@ def test_relay_private_address_rejected(logged_in_app):
     refused client-side by the shared predicate — no row is added and the
     private-address message surfaces (`nostr.md` § Errors & edge cases; the
     rule is `nest/network-exposure.md` § Rulings F7). All seven apps render
-    the shared `relay_url_error` message."""
+    the shared `relay_url_error` message. An app on the shared
+    `add_relay_possibility` paints Add disabled with that message as its
+    reason, so nothing is pressed (the painted reason is pinned by the app's
+    unit tests); an app not yet lifted refuses on the press and the message
+    is read off `error-message`."""
     from i18n.strings import S
 
     app = logged_in_app
@@ -290,14 +296,15 @@ def test_relay_private_address_rejected(logged_in_app):
     app.nostr.clear_relays()
     assert app.nostr.wait_for_relay_count(0)
 
-    app.nostr.add_relay(PRIVATE_RELAY_URL)
+    pressed = app.nostr.try_add_relay(PRIVATE_RELAY_URL)
     assert not app.nostr.wait_for_relay_count(1, timeout=4.0), (
         "a private-network relay URL must not add a row"
     )
     assert app.nostr.relay_count() == 0
-    error = app.nostr.page_error_text(timeout=6.0)
-    assert error, "a private-network relay URL should surface an error message"
-    assert S.nostr.relays.private_address in error, error
+    if pressed:
+        error = app.nostr.page_error_text(timeout=6.0)
+        assert error, "a private-network relay URL should surface an error message"
+        assert S.nostr.relays.private_address in error, error
 
 
 @pytest.mark.feature("nostr")

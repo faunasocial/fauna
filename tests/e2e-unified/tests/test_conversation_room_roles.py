@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import pytest
 
+from helpers.inert_refusal import is_inert_refusal
 from helpers.room_seats import (  # noqa: F401 — room_app/room_seats are pytest fixtures adopted by import
     MEMBERSHIP_BUDGET_S,
     MESSAGE_BUDGET_S,
@@ -169,17 +170,31 @@ def test_a_room_is_born_governed_and_its_roles_govern_removal(room_seats, nest_i
         ),
     )
     assert leaver.app.driver.get_attr("thread-member-chip", "role", index=stayer_chip) == "member"
-    assert not leaver.app.driver.is_enabled("thread-member-chip"), (
-        "a plain member's remove chip is greyed, never hidden "
-        f"(`conversations.md` § Architectural rules 5): "
-        f"{leaver.app.driver.diagnose('thread-member-chip')}"
-    )
     envelopes_before = len(conv_api.channel_fetch(port, owner.actor, channel, after=0))
-    with pytest.raises(RuntimeError, match="disabled"):
-        # The automation gate's named 409 — the app refuses to drive a
-        # control the UI has disabled (convention 11), which is the client
-        # side of "a Remove from a plain member is never authored".
+    # A plain member's chips carry no remove: an app on the shared
+    # `ThreadControl::RemoveMember` answer paints them as the inert roster
+    # (each agent's inert refusal — `helpers/inert_refusal.py`: tui "not
+    # actuable", linux "not activatable"), one not yet on it greys the control
+    # (the named 409, "disabled") — `ui/conversations.md` § Errors & edge
+    # cases → *Controls this person can never use*.
+    # The automation gate refuses to drive a control the UI does not offer
+    # live (convention 11), which is the client side of "a Remove from a plain
+    # member is never authored". Web's bridge clicks an inert `<span>` chip
+    # as a no-op rather than refusing it; there the roster and channel reads
+    # below are the whole witness that nothing was authored, until web gets
+    # the structural refusal.
+    try:
         leaver.app.conversations.remove_member(stayer_chip)
+    except (RuntimeError, LookupError) as refused:
+        assert "disabled" in str(refused) or is_inert_refusal(refused), (
+            f"a plain member's remove is refused as greyed or inert, never another "
+            f"failure: {refused!r}"
+        )
+    else:
+        assert leaver.app.driver.is_web(), (
+            "a plain member's remove chip was actuated without a refusal: "
+            f"{leaver.app.driver.diagnose('thread-member-chip')}"
+        )
     assert not leaver.app.has_error(), (
         f"a refused actuation never reaches the manager, so no page error: "
         f"{leaver.app.error_text()!r}"
@@ -195,10 +210,11 @@ def test_a_room_is_born_governed_and_its_roles_govern_removal(room_seats, nest_i
     # The editor's door is painted AND LIVE on a plain member's seat: the
     # surface carries the walk-out, which is a member's own verb (widened
     # 2026-09-20, user-approved; `ui/conversations.md` § Element IDs). What a
-    # member may not do is greyed per control INSIDE it — witnessed by
-    # `test_conversation_room_leave.py`, whose member seat opens this editor
-    # and finds every policy control and Save dead and only the walk-out live.
-    # Here the role's reach is the capability assertions above.
+    # member may never do is not offered INSIDE it, per control (`ui/
+    # conversations.md` § Errors & edge cases → *Controls this person can
+    # never use*); the walk-out is live — witnessed by
+    # `test_conversation_room_leave.py`'s member seat. Here the role's reach
+    # is the capability assertions above.
     assert leaver.app.driver.is_visible("thread-room-settings-button"), (
         f"the editor's door is painted on every seat: "
         f"{leaver.app.driver.diagnose('thread-room-settings-button')}"

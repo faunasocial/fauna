@@ -38,6 +38,8 @@ import com.fauna.app.ui.components.RecordingVisualTransformation
 import com.fauna.app.ui.components.RevealSpan
 import com.fauna.app.ui.components.naiveMarkdownWrap
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.components.utf16IndexToUtf8Byte
 import com.fauna.app.ui.util.localized
 import uniffi.fauna_conversations.ComposeState
@@ -45,6 +47,8 @@ import uniffi.fauna_conversations.RecipientPickerState
 import uniffi.fauna_conversations.ReplyPreview
 import uniffi.fauna_conversations.SendState
 import uniffi.fauna_conversations.ThreadCapabilities
+import uniffi.fauna_conversations.ThreadControl
+import uniffi.fauna_conversations.threadControlPossibility
 import uniffi.fauna_conversations.TypedAddress
 import uniffi.fauna_conversations.recipientResolveStatus
 import uniffi.fauna_core.LocalizedText
@@ -491,12 +495,19 @@ fun ComposeBar(
 
         // Bottom action row: topic toggle | attach | spacer | send.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(
-                onClick = onTopicToggle,
-                enabled = capabilities?.supportsSubject ?: true,
-                modifier = Modifier.testTag(Ids.TOPIC_TOGGLE_BUTTON),
-            ) {
-                Text(stringResource(R.string.conversations_unified_topic_toggle_add))
+            // A rail with no subject has no topic toggle at all — the shared
+            // `Subject` answer is a rail absence, never a disabled control; the
+            // new-thread compose has no rail yet and keeps it.
+            val subject = capabilities?.let {
+                threadControlPossibility(it, ThreadControl.SUBJECT, null)
+            }
+            if (subject == null || subject.isShown) {
+                TextButton(
+                    onClick = { if (subject == null || subject.isPossible) onTopicToggle() },
+                    modifier = Modifier.testTag(Ids.TOPIC_TOGGLE_BUTTON),
+                ) {
+                    Text(stringResource(R.string.conversations_unified_topic_toggle_add))
+                }
             }
             IconButton(
                 onClick = onAttach,

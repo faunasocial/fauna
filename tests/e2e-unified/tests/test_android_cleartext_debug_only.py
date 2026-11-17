@@ -98,8 +98,14 @@ def _declared_build_types() -> set[str]:
     return types
 
 
+#: Debug-shaped build types that never ship: `kidsDebug` is `initWith(debug)` under
+#: the kids identity, the drivable `--app android-kids` build — it takes debug's
+#: cleartext overlay for the same reason debug does (a loopback nest).
+_NON_SHIPPING_DEBUG_TYPES = {_DEBUG, "kidsDebug"}
+
+
 def _shipping_build_types() -> set[str]:
-    return _declared_build_types() - {_DEBUG}
+    return _declared_build_types() - _NON_SHIPPING_DEBUG_TYPES
 
 
 def _source_set_extra_dirs() -> dict[str, list[str]]:

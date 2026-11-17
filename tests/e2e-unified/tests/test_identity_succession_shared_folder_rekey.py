@@ -15,7 +15,8 @@ What no Rust pin reaches is three real apps against one real nest.
 
 **The three parties.**
 
-- **A** — the app under test, a dedicated actor (``succeedable_app``): creates
+- **A** — a dedicated actor (``succeedable_app``) on the member fixture's
+  ``owner_app`` — the app under test, or a tui seat on android: creates
   a set, binds a folder, shares it to M as a writer, then takes the account
   back and becomes the successor.
 - **M** — a second actor's real-engine seat (``succession_member_app``), a
@@ -93,14 +94,17 @@ pytestmark = [
     # member seat; each seat adds and reads files through its own door
     # (`helpers/succession_file_door.py`): a bound local folder on tui, linux
     # and macos, the Media page's upload and download on web, which keeps no
-    # bound folder, and on ios, which runs no sync agent of its own. android's
-    # member seat is not built yet (`surfaces.toml`'s
-    # `succession-witness-member-seat`); it joins with a marker of its own.
+    # bound folder, and on ios and android, which run no sync agent of their
+    # own. On android the phone is the member and alice (with the stolen seat
+    # of her old seed) runs on tui seats beside it (`succession_member_app`'s
+    # `owner_app`); the column runs once `surfaces.toml`'s
+    # `succession-witness-member-seat` lists android built.
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.web,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.android,
     pytest.mark.real_conversations,
 ]
 
@@ -211,8 +215,12 @@ def test_a_file_added_after_the_recovery_does_not_open_under_the_stolen_key(
     """share a bound set A→M → S (A's old seed) holds its key → A takes the
     account back → the set's key rotates → M adds a file → A reads it, and no
     key S ever held is the one it was sealed under (outcome 35)."""
-    alice_app, alice = succeedable_app
+    # alice is the member fixture's `owner_app`, not `succeedable_app`'s app:
+    # on android the phone plays bob (the member) and alice signs in on a tui
+    # seat of her own identity — and the stolen seat follows her app there.
+    _, alice = succeedable_app
     bob_app, bob = succession_member_app
+    alice_app = succession_member_app.owner_app
     ab, mb = alice_app.backups, bob_app.backups
 
     # ── 0. A holds a recovery kit before anyone joins ───────────────────────
@@ -270,7 +278,7 @@ def test_a_file_added_after_the_recovery_does_not_open_under_the_stolen_key(
     gen_before = _current(a_before)
 
     # ── 2. S: a seat of A's OLD seed, holding the set's key before the ceremony ──
-    # S runs the app under test: the thief's device runs the same app the
+    # S runs A's app (tui on android): the thief's device runs the same app the
     # owner does.
     seat_gen = stolen_seat(
         alice_app, request, alice, nest_instance, screenshot_tag="succession-stolen-seat"

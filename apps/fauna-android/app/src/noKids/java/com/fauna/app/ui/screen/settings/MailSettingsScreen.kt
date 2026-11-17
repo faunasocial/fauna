@@ -30,6 +30,13 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.mailQuotaText
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.MailSettingsVM
+import com.fauna.app.ui.viewmodel.MailUsableVM
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
+import com.fauna.app.ui.util.localized
+import androidx.compose.ui.graphics.Color
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_client_mail_settings.CredentialKind
 import uniffi.fauna_client_mail_settings.MailCredentialSummary
 import uniffi.fauna_client_mail_settings.MuaInstructions
@@ -62,8 +69,10 @@ import social.fauna.generated.Ids
 fun MailSettingsScreen(
     navController: NavController,
     vm: MailSettingsVM = hiltViewModel(),
+    usableVm: MailUsableVM = hiltViewModel(),
 ) {
     val snapshot by vm.snapshot.collectAsState()
+    val mailUsable by usableVm.answer.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val nestEncrypted by vm.nestEncrypted.collectAsState()
     val generatedPassword by vm.generatedPassword.collectAsState()
@@ -82,6 +91,7 @@ fun MailSettingsScreen(
 
     MailSettingsContent(
         enabled = snapshot.enabled,
+        mailUsable = mailUsable,
         mailUnavailableHere = snapshot.mailUnavailableHere,
         caldavEnabled = snapshot.caldavEnabled,
         carddavEnabled = snapshot.carddavEnabled,
@@ -160,6 +170,10 @@ private sealed interface CredForm {
 @Composable
 fun MailSettingsContent(
     enabled: Boolean,
+    // The shared mail-usable answer (`mail_settings_mail_usable` off the
+    // session's one mail machine, read by [MailUsableVM]) gating the sub-page
+    // nav rows — never re-derived here from `enabled`.
+    mailUsable: Possibility,
     // `MailSettingsSnapshot.mailUnavailableHere` — this box cannot enable mail (no
     // content scanners). Read from the shared machine, never re-derived; while
     // mail is off the toggle is disabled with state `unavailable` and the notice
@@ -515,18 +529,23 @@ fun MailSettingsContent(
                         onCommitForwardPerHour = onCommitForwardPerHour,
                     )
                 }
+            }
 
-                // ── Sub-page nav rows (Aliases / Lists / Export / Spam) ──
-                // All email-feature sub-pages, so they stay gated on `enabled`
-                // (a CalDAV-only mailbox has no email aliases/lists/export/spam).
-                if (enabled) {
-                    HorizontalDivider()
-                    NavRow(stringResource(R.string.mail_aliases_title), onNavAliases)
-                    NavRow(stringResource(R.string.mail_lists_title), onNavLists)
-                    NavRow(stringResource(R.string.mail_export_title), onNavExport)
-                    NavRow(stringResource(R.string.mail_import_title), onNavImport)
-                    NavRow(stringResource(R.string.mail_spam_title), onNavSpam)
-                }
+            // ── Sub-page nav rows (Aliases / Lists / Export / Import / Spam) ──
+            // Gated on the shared mail-usable answer (mail-settings.md § Errors
+            // & edge cases, the mail-usable gate), never on `enabled` read by
+            // hand: absent → not composed; blocked → shown disabled with the
+            // shared reason (the enable toggle above is the one live step);
+            // possible → live.
+            if (mailUsable.isShown) {
+                val live = mailUsable.isPossible
+                HorizontalDivider()
+                NavRow(stringResource(R.string.mail_aliases_title), onNavAliases, live)
+                NavRow(stringResource(R.string.mail_lists_title), onNavLists, live)
+                NavRow(stringResource(R.string.mail_export_title), onNavExport, live)
+                NavRow(stringResource(R.string.mail_import_title), onNavImport, live)
+                NavRow(stringResource(R.string.mail_spam_title), onNavSpam, live)
+                DisabledControlReasonText(localized(mailUsable.blockedReason))
             }
 
             // ── Add / enable credential form (inline reveal) ──
@@ -786,10 +805,16 @@ private fun ForwardingSection(
 }
 
 @Composable
-private fun NavRow(label: String, onClick: () -> Unit) {
+private fun NavRow(label: String, onClick: () -> Unit, enabled: Boolean = true) {
     ListItem(
-        headlineContent = { Text(label) },
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        headlineContent = {
+            Text(
+                label,
+                color = if (enabled) Color.Unspecified
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            )
+        },
+        modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick),
     )
 }
 

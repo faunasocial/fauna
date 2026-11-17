@@ -123,6 +123,21 @@ impl DnsProvider for DnsDispatch {
         }
     }
 
+    async fn create_zone(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+    ) -> Result<DnsZone, ProvisionError> {
+        match self {
+            Self::Cloudflare(p) => p.create_zone(client, domain).await,
+            Self::Porkbun(p) => p.create_zone(client, domain).await,
+            Self::Namecheap(p) => p.create_zone(client, domain).await,
+            Self::Gandi(p) => p.create_zone(client, domain).await,
+            Self::Hetzner(p) => p.create_zone(client, domain).await,
+            Self::Bundled(p) => p.create_zone(client, domain).await,
+        }
+    }
+
     async fn create_record(
         &self,
         client: &reqwest::Client,
@@ -560,6 +575,21 @@ impl Registrar for RegistrarDispatch {
         }
     }
 
+    async fn set_nameservers(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), ProvisionError> {
+        match self {
+            Self::Porkbun(p) => p.set_nameservers(client, domain, nameservers).await,
+            Self::Gandi(p) => p.set_nameservers(client, domain, nameservers).await,
+            Self::Namecheap(p) => p.set_nameservers(client, domain, nameservers).await,
+            Self::Cloudflare(p) => p.set_nameservers(client, domain, nameservers).await,
+            Self::Bundled(p) => p.set_nameservers(client, domain, nameservers).await,
+        }
+    }
+
     fn requires_contact(&self) -> bool {
         match self {
             Self::Porkbun(p) => p.requires_contact(),
@@ -626,10 +656,15 @@ pub fn dns_provider(
     match id {
         ProviderId::Cloudflare => {
             let token = creds.get("api-token")?.to_string();
-            let adapter = match override_base_url {
+            let mut adapter = match override_base_url {
                 Some(base) => crate::dns::cloudflare::Cloudflare::with_base_url(token, base),
                 None => crate::dns::cloudflare::Cloudflare::new(token),
             };
+            // Optional here: only the zone door reads it (field kinds
+            // `[registrar, zone]`); record calls build without it.
+            if let Some(account_id) = creds.get("account-id") {
+                adapter = adapter.with_account_id(account_id.to_string());
+            }
             Some(DnsDispatch::Cloudflare(adapter))
         }
         ProviderId::Porkbun => {

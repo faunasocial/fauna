@@ -21,7 +21,14 @@ def test_bridged_thread_disables_attachment_and_topic(logged_in_app):
         body="bridged capability gate",
     )
     assert logged_in_app.driver.get_attr("attachment-button", "disabled") == "true"
-    assert logged_in_app.driver.get_attr("topic-toggle-button", "disabled") == "true"
+    # A rail with no subject offers no topic toggle: absent where the app
+    # paints the shared `ThreadControl::Subject` answer (tui), disabled on the
+    # apps still to take it — offered live on neither
+    # (`ui/conversations.md` § Errors & edge cases → *Controls this person can
+    # never use*).
+    assert not logged_in_app.driver.is_enabled("topic-toggle-button"), (
+        logged_in_app.driver.diagnose("topic-toggle-button")
+    )
 
 @pytest.mark.feature("message-formatting", "conversation-attachments")
 def test_fauna_oneonone_enables_all_compose_affordances(logged_in_app):

@@ -40,6 +40,14 @@ pub fn show_quick_create(
     state: &Rc<RefCell<CalendarViewState>>,
     client: &Rc<FaunaClient>,
 ) {
+    // Both positional doors (the month cell's double-click, the time-slot
+    // press) come through here, so the gate is asked here: while no calendar
+    // can hold an event the gesture is simply not live (`ui/events.md`
+    // § Errors & edge cases → *No calendar to hold an event*, ruling 3); the
+    // reason is painted on the calendar list's empty state.
+    if !state.borrow().create_gate.possibility().is_possible() {
+        return;
+    }
     let popover = gtk::Popover::new();
     popover.set_parent(parent);
     popover.set_autohide(true);
@@ -138,6 +146,10 @@ pub fn show_quick_create(
 
     btn_row.append(&more_btn);
     btn_row.append(&save_btn);
+    // The compose's own `error-message` (ruling 4): a refused or failed save
+    // is said here, with the popover kept open and what was typed intact.
+    let error_label = crate::form_gate::dialog_error_label();
+    vbox.append(&error_label);
     vbox.append(&btn_row);
 
     popover.set_child(Some(&vbox));
@@ -151,8 +163,10 @@ pub fn show_quick_create(
         let start_ref = start_entry.clone();
         let end_ref = end_entry.clone();
         let cal_ids = calendar_ids.clone();
+        let st = Rc::clone(state);
+        let error_label = error_label.clone();
 
-        save_btn.connect_clicked(move |_| {
+        save_btn.connect_clicked(move |save_btn| {
             let summary = title_ref.text().to_string();
             let start = start_ref.text().to_string();
             if summary.is_empty() || start.is_empty() {
@@ -161,7 +175,19 @@ pub fn show_quick_create(
 
             let end = end_ref.text().to_string();
             let selected_idx = cal_dropdown_for_save.selected() as usize;
-            let calendar_id = cal_ids.get(selected_idx).cloned().unwrap_or_default();
+            // The submit asks the gate again and resolves the calendar through
+            // the shared `event_create_target` (ruling 3): no empty calendar
+            // id is ever put on the wire.
+            let calendar_id = match st
+                .borrow()
+                .create_target(cal_ids.get(selected_idx).map(String::as_str))
+            {
+                Ok(id) => id,
+                Err(reason) => {
+                    crate::form_gate::show_error(&error_label, Some(&reason));
+                    return;
+                }
+            };
 
             let uid = format!("{}@fauna-desktop", uuid::Uuid::new_v4());
             let mut params = serde_json::json!({
@@ -174,8 +200,16 @@ pub fn show_quick_create(
                 params["dtend"] = serde_json::Value::String(end);
             }
 
-            c.create_event(params);
-            pop.popdown();
+            crate::form_gate::show_error(&error_label, None);
+            save_btn.set_sensitive(false);
+            let pop = pop.clone();
+            let error_label = error_label.clone();
+            let save_btn = save_btn.clone();
+            let page = Rc::clone(&c);
+            c.create_event(params, move |result| {
+                save_btn.set_sensitive(true);
+                finish_compose(&pop, &error_label, &page, result);
+            });
         });
     }
 
@@ -187,6 +221,7 @@ pub fn show_quick_create(
         let end_ref = end_entry.clone();
         let cal_ids = calendar_ids.clone();
         let cl = Rc::clone(client);
+        let st_more = Rc::clone(state);
 
         more_btn.connect_clicked(move |btn| {
             let selected_idx = cal_dropdown.selected() as usize;
@@ -204,7 +239,7 @@ pub fn show_quick_create(
                 location: String::new(),
             };
 
-            let dialog = event_form::build_event_form_prefilled(&data, &cl);
+            let dialog = event_form::build_event_form_prefilled(&data, &st_more, &cl);
 
             // Set transient for the current window.
             if let Some(root) = btn.root()
@@ -265,6 +300,44 @@ pub fn show_quick_create(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// A compose's save finished (`ui/events.md` § *No calendar to hold an
+/// event*, ruling 4): close `compose` on success; on a refusal keep it open
+/// with what was typed and say so in a whole sentence on its own
+/// `error-message`. A compose the person already closed hands the sentence to
+/// the page's `error-message` instead — the one place it is then seen.
+pub(super) fn finish_compose(
+    compose: &impl IsA<gtk::Widget>,
+    error_label: &gtk::Label,
+    client: &FaunaClient,
+    result: Result<(), String>,
+) {
+    let compose = compose.upcast_ref::<gtk::Widget>();
+    match result {
+        Ok(()) => {
+            crate::form_gate::show_error(error_label, None);
+            if let Some(pop) = compose.downcast_ref::<gtk::Popover>() {
+                pop.popdown();
+            } else if let Some(win) = compose.downcast_ref::<gtk::Window>() {
+                win.close();
+            }
+        }
+        Err(cause) => {
+            let sentence = save_failed(&cause);
+            if compose.is_visible() {
+                crate::form_gate::show_error(error_label, Some(&sentence));
+            } else {
+                client.report_on_page(sentence);
+            }
+        }
+    }
+}
+
+/// The compose's whole-sentence report of a refused create (ruling 4) — never
+/// a raw `event_created:` context prefix.
+pub(super) fn save_failed(cause: &str) -> String {
+    events_strings::SAVE_FAILED.replace("{error}", cause)
+}
 
 fn labeled_row(label_text: &str, widget: &impl IsA<gtk::Widget>) -> gtk::Box {
     let label = gtk::Label::new(Some(label_text));

@@ -332,6 +332,11 @@ public sealed partial class OnboardingPage : Page
             // reached from identity_choice's emergency-lockout-entry-button.
             OnboardingStep.EmergencyLockoutEntry => _emergencyLockoutEntryView,
             OnboardingStep.HandleEntry           => _handleEntryView,
+            // The choose-providers page (onboarding-provisioning.md § 3d) is not
+            // built on windows yet: the VM never declares SetRendersProviderChoice,
+            // so the machine never routes here; mapped so the throwing switch
+            // cannot throw on it.
+            OnboardingStep.ProviderChoice        => _handleEntryView,
             OnboardingStep.DnsConfig             => _dnsConfigView,
             OnboardingStep.VpsConfig             => _vpsConfigView,
             OnboardingStep.DnsPostInstructions   => _dnsPostInstructionsView,

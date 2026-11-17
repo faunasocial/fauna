@@ -5518,6 +5518,39 @@ pub fn room_pending_invite_text(invite: JsValue) -> Result<String, JsValue> {
     Ok(fauna_conversations::room::room_pending_invite_text(invite))
 }
 
+/// Whether a thread or room control a role or the rail decides can succeed now
+/// (`ThreadCapabilities::possibility`; `docs/goal/ui/conversations.md` § Errors
+/// & edge cases → *Controls this person can never use*), in `Possibility`'s
+/// serde form (`{state: "possible"}`, `{state: "blocked", reason}` or
+/// `{state: "absent"}`) for `#lib/possibility`'s `paintPossibility`.
+/// `capabilities` is the thread detail's `capabilities` as the snapshot ships
+/// it, `control` a `ThreadControl` token (`invite`, `remove_member`,
+/// `set_policy`, `appoint_admins`, `transfer_ownership`, `leave_room`,
+/// `local_remove`, `subject`), `myRole` the room's `my_role` (`Owner` /
+/// `Admin` / `Member`; `null` on a policy-less thread). The wasm twin of the
+/// UniFFI `thread_control_possibility`: the paint and the handler ask this one
+/// answer.
+#[wasm_bindgen(js_name = threadControlPossibility)]
+pub fn thread_control_possibility(
+    capabilities: JsValue,
+    control: JsValue,
+    my_role: JsValue,
+) -> Result<JsValue, JsValue> {
+    let capabilities: fauna_conversations::ThreadCapabilities = crate::rpc::from_js(capabilities)?;
+    let control: fauna_conversations::ThreadControl = crate::rpc::from_js(control)?;
+    let my_role: Option<fauna_conversations::room::RoomRole> =
+        if my_role.is_null() || my_role.is_undefined() {
+            None
+        } else {
+            Some(crate::rpc::from_js(my_role)?)
+        };
+    crate::rpc::to_js(&fauna_conversations::thread_control_possibility(
+        capabilities,
+        control,
+        my_role,
+    ))
+}
+
 /// Whether a community room may name a labeler of this artifact kind — the
 /// filter every editor applies to the catalog before painting a
 /// `room-labeler-toggle` row (`room_may_name_labeler_kind`).

@@ -16,6 +16,27 @@ public final class NotificationsVM {
     public private(set) var unreadCount = 0
     public var errorMessage: String?
 
+    /// Whether the page's list read has answered at least once (`ui/README.md`
+    /// § Offer only what is possible, rule 5) — what *Mark all read* and
+    /// *Clear all* wait on (`notifications.md` § Errors & edge cases; tui's
+    /// `NotificationsState::read`, android's `NotificationsVM.read`). `failed`
+    /// after a first read that threw, until a later one succeeds; a failure
+    /// after a resolved read keeps the rows shown actionable.
+    public private(set) var read: ReadState = .pending
+
+    /// `notification-mark-read`'s answer — the shared
+    /// `mark_all_read_possibility` over ``read``; ``markAllRead()`` asks it again.
+    public var markAllReadAnswer: Possibility {
+        notificationsMarkAllReadPossibility(read: read)
+    }
+
+    /// `notification-clear`'s answer — the shared `clear_all_possibility` over
+    /// ``read`` and the rows the page holds (`notifications.nothing_to_clear`
+    /// on an empty page); ``clearAll()`` asks it again.
+    public var clearAllAnswer: Possibility {
+        notificationsClearAllPossibility(read: read, rows: UInt32(clamping: notifications.count))
+    }
+
     /// Row ids the user tapped `notification-muted-reveal-button` on
     /// (`notifications.md` § Muted words, rule 3: per-row, session-local, the
     /// mute stays). A shared static like `FeedVM.revealedMutedPostIds`, so a
@@ -53,6 +74,7 @@ public final class NotificationsVM {
         notifications = []
         unreadCount = 0
         errorMessage = nil
+        read = .pending
     }
 
     public func configure(api: APIClient, actorId: String?, overlays: FfiContactOverlays) {
@@ -68,6 +90,12 @@ public final class NotificationsVM {
     func seedForTest(notifications: [NotificationItem], unreadCount: Int) {
         self.notifications = notifications
         self.unreadCount = unreadCount
+        read = .resolved
+    }
+
+    /// Unit-test seam: stand in for a list read that threw.
+    func failReadForTest() {
+        if read != .resolved { read = .failed }
     }
     #endif
 
@@ -80,11 +108,21 @@ public final class NotificationsVM {
             guard self.api === api else { return }
             notifications = data.items
             unreadCount = data.unread
+            read = .resolved
             errorMessage = nil
         } catch {
             guard self.api === api else { return }
+            if read != .resolved { read = .failed }
             errorMessage = DisplayError.http(error)
         }
+    }
+
+    /// Rule 6: the refusal an action's own answer gives, on `error-message`;
+    /// `true` when it refused (nothing is sent).
+    private func refuses(_ answer: Possibility) -> Bool {
+        guard let refusal = answer.refusal else { return false }
+        errorMessage = refusal
+        return true
     }
 
     /// `configure` + `loadNotifications`, the fetch sequence both platform
@@ -143,6 +181,7 @@ public final class NotificationsVM {
     /// page has loaded (muted-collapsed rows included, § Muted words rule 4),
     /// then refetch. Retained security notices stay listed.
     public func clearAll() async {
+        if refuses(clearAllAnswer) { return }
         guard let api, let newest = notifications.map(\.createdAt).max() else { return }
         do {
             try await api.clearNotifications(upTo: Int64(newest))
@@ -155,6 +194,7 @@ public final class NotificationsVM {
     }
 
     public func markAllRead() async {
+        if refuses(markAllReadAnswer) { return }
         guard let api, let actorId else { return }
         do {
             try await api.markNotificationsRead(actorId: actorId)

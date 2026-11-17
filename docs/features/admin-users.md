@@ -120,13 +120,13 @@ Stamped 2026-11-07 at 6a0ded1015.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
-| linux | ✅ full | 0.1.5-dev+acde58f9 standalone |
-| windows | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
-| macos | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| web | ✅ full | 0.1.7-dev+00c1f744 standalone |
+| linux | ✅ full | 0.1.7-dev+00c1f744 standalone |
+| windows | ⚠ partial | 0.1.7-dev+00c1f744 standalone |
+| macos | ✅ full | 0.1.6-dev+e46418b8 standalone |
 | ios | ⚠ partial | 0.1.5-dev+407a19e1 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| tui | ✅ full | 0.1.7-dev+00c1f744 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

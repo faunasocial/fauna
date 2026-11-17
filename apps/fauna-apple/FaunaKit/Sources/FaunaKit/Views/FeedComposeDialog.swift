@@ -42,6 +42,7 @@ public struct FeedComposeDialog: View {
                             // read as absent (e2e points 2/6/11).
                             .automationValue(Ids.composeError, text: { vm.composeError })
                     }
+                    FaunaPossibilityReason(vm.postSubmitPossibility)
                 }
             }
             .accessibilityIdentifier(Ids.feedComposeDialog)
@@ -54,14 +55,15 @@ public struct FeedComposeDialog: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button(L.common.post) {
                         Task {
-                            await vm.submitPost()
-                            onClose()
+                            // Closes only on a saved post; a failure keeps the
+                            // dialog open with its text and the reason on
+                            // `compose-error` (`ui/README.md` § Offer only what
+                            // is possible, rule 7).
+                            if await vm.submitPost() { onClose() }
                         }
                     }
-                    .disabled(
-                        vm.composeText.trimmingCharacters(in: .whitespaces).isEmpty
-                        || !vm.composeReady
-                    )
+                    .disabled(!vm.composeReady)
+                    .faunaPossible(vm.postSubmitPossibility)
                 }
             }
         }

@@ -3786,6 +3786,7 @@ dependencies = [
  "fauna-client-folders",
  "fauna-client-snapshots",
  "fauna-core",
+ "fauna-i18n",
  "fauna-protocol",
  "fauna-rpc-wasm",
  "fauna-uniffi-async",
@@ -4235,6 +4236,7 @@ version = "0.1.7"
 dependencies = [
  "blake3",
  "fauna-anon-client",
+ "fauna-client-config",
  "fauna-client-drafts",
  "fauna-client-testkit",
  "fauna-core",
@@ -4245,6 +4247,7 @@ dependencies = [
  "fauna-rpc-wasm",
  "hex",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -6831,6 +6834,7 @@ dependencies = [
  "fauna-client-recovery",
  "fauna-client-region",
  "fauna-client-search",
+ "fauna-client-share",
  "fauna-client-share-host",
  "fauna-client-snapshots",
  "fauna-client-spam",
@@ -7188,6 +7192,7 @@ dependencies = [
  "fauna-client-folders",
  "fauna-core",
  "fauna-devices-machine",
+ "fauna-folders-machine",
  "fauna-media",
  "fauna-media-machine",
  "fauna-mls",

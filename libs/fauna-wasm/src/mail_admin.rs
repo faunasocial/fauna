@@ -934,6 +934,16 @@ impl WasmMailSettingsMachine {
         to_js(&self.inner.snapshot())
     }
 
+    /// `MailSettingsSnapshot::mail_usable` over the machine's LIVE snapshot —
+    /// the one answer every mail sub-page and its settings rail row is gated
+    /// on (`docs/goal/ui/mail-settings.md` § Errors & edge cases, the
+    /// mail-usable gate), in `Possibility`'s serde form (`{state: "possible"}`,
+    /// `{state: "blocked", reason}`, `{state: "absent"}`). Sync.
+    #[wasm_bindgen(js_name = mailUsable)]
+    pub fn mail_usable(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().mail_usable())
+    }
+
     /// Initial page load. Resolves `undefined`; read state via `snapshot()`.
     #[wasm_bindgen(js_name = hydrate)]
     pub fn hydrate(&self) -> js_sys::Promise {

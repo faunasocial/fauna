@@ -86,6 +86,29 @@ public final class LaunchMachineBox {
         return generation
     }
 
+    /// A launch's claim at its entry: a fresh ``beginLaunch()`` claim, or — for a
+    /// RE-ENTRY that a gate deferred — the claim it was deferred with, while that is
+    /// still current. `nil` means a superseding path ran in between: drop the
+    /// re-entry before it touches anything.
+    ///
+    /// ⚠ **The second window, which both apple targets fell in after the first was
+    /// closed.** The sign-out gate (`OnboardingVM.launchMayProceed`) defers the
+    /// FIRST launch of every process across a detached finish and re-enters through
+    /// its `relaunch` closure. A launch that claimed only after that gate held no
+    /// claim across the finish, so an e2e session patch landing then cleared an empty
+    /// box and retired nothing. The re-entry then read the patched-in actor, entered
+    /// optimistically with a second `FaunaClient` and built the production
+    /// conversations session over the patch's: one process, two sessions, the
+    /// patch's MLS engine retired under the send that was using it. Measured on ios
+    /// as `conversations_real_resolve_send_new: send failed: … handed over to a newer
+    /// engine` in the at-rest upgrade cell, and as both
+    /// rail stamps in one seat's log. So a launch claims
+    /// at entry, BEFORE the gate, and the deferred re-entry carries that claim.
+    public func claim(resuming claim: UInt64?) -> UInt64? {
+        guard let claim else { return beginLaunch() }
+        return isCurrent(launch: claim) ? claim : nil
+    }
+
     /// Whether the launch that ``beginLaunch()`` returned `launch` to is still the
     /// current one — nothing has cleared the box or begun a newer launch since.
     public func isCurrent(launch: UInt64) -> Bool {

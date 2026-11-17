@@ -25,7 +25,9 @@ tier_3: the real nest, taken down and brought back on the same data dir; a real
 seat; every mutation a UI gesture (convention 8); every wait a deadline poll on
 painted state (convention 14). tui first (``testing.md`` § Default app and nest
 mode), then linux and web (their batch: the shared FFI door, the linux feed host,
-the web feed manager); the remaining apps add their marker as theirs reaches them.
+the web feed manager), then macos and ios (FaunaKit's ``ConnectionWordFeed``)
+and windows (``MainViewModel``'s connection handler, beside its offline gate);
+android adds its marker when its e2e runs on an emulator.
 """
 from __future__ import annotations
 
@@ -45,6 +47,7 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.windows,
 ]
 
 #: A post composed online reaching the seat's feed state.

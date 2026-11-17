@@ -106,8 +106,8 @@ Stamped 2026-10-21 at 77c610862e.
 | linux | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 | windows | ⚠ partial | 0.1.5-dev+97d945a3 standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.6 docker |
-| android | ⚠ partial | 0.1.6 docker |
+| ios | ⚠ partial | 0.1.7 docker |
+| android | ⚠ partial | 0.1.7 docker |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |

@@ -356,11 +356,8 @@ def test_a_folder_can_be_created_already_public(
     3. The owner row then paints `public` with no `folder-audience-unattested`
        line: this seat's own attestation verifies.
 
-    The gate reads the surface registry: an app joins by widening
-    `folder-create-public`'s `built` in `tests/e2e-unified/surfaces.toml`."""
-    from helpers.app_surface import require_surface
-
-    require_surface(logged_in_app.driver, "folder-create-public")
+    Built on all seven apps (windows last, 2026-11-15), so it carries no surface
+    gate."""
     app = logged_in_app
     b = app.backups
     b.navigate_folders()

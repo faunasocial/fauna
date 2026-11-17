@@ -285,7 +285,7 @@ def _kotlin_key_list(source, name):
 
 def test_the_android_app_launch_env_sets_the_dns_seams():
     source = _CONFTEST.read_text(encoding="utf-8")
-    start = source.index('elif app_name == "android":')
+    start = source.index('elif KIDS_PARENT.get(app_name, app_name) == "android":')
     block = source[start:source.index('config["environment"] = env', start)]
     for name in _DNS_SEAMS:
         assert re.search(rf'"{name}":\s*"', block), (

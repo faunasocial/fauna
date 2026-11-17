@@ -39,6 +39,8 @@ use fauna_client_subscriptions::SubscriptionsClient;
 use fauna_client_subscriptions::orchestration::SubscriptionsAuthor;
 use fauna_client_subscriptions::subscriptions::{PendingRequest, TierItem};
 use fauna_core::identity::{ActorId, ActorKeypair};
+#[cfg(feature = "payments")]
+use fauna_core::possibility::{Possibility, ReadState};
 
 use crate::async_helper::spawn_with_snapshot;
 use crate::client::FaunaClient;
@@ -146,6 +148,11 @@ struct Ctx {
     /// select's dropdown model (refreshed with the same `tiers_list` read).
     #[cfg(feature = "payments")]
     claim_tier_names: RefCell<Vec<String>>,
+    /// Where the tab's own tier read stands — the claim mint and the provider
+    /// form's opener are painted from the shared `own_tiers_possibility` over
+    /// it (`profile.md` § Errors & edge cases, *A tier before what sells it*).
+    #[cfg(feature = "payments")]
+    tiers_read: std::cell::Cell<ReadState>,
     /// The §5 claim CODE whose Void is armed (first press), if any. Keyed by
     /// code, not row index; every landed re-read clears it.
     #[cfg(feature = "payments")]
@@ -778,12 +785,16 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
         #[cfg(feature = "payments")]
         claim_tier_names: RefCell::new(Vec::new()),
         #[cfg(feature = "payments")]
+        tiers_read: std::cell::Cell::new(ReadState::Pending),
+        #[cfg(feature = "payments")]
         claim_void_armed: RefCell::new(None),
         #[cfg(feature = "payments")]
         claims_read: RefCell::new(Vec::new()),
         w: widgets,
     });
 
+    #[cfg(feature = "payments")]
+    paint_own_tier_gates(&ctx);
     refresh_all(&ctx);
 
     // §1: Create → open the form in create mode.
@@ -809,7 +820,16 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
             ctx.w.form.set_visible(false);
         });
     }
-    // §1: Save → create or update.
+    // §1: Save → create or update. Painted from the shared
+    // `tier_form_possibility` as the name is typed (`ui/profile.md` § Errors &
+    // edge cases); the press asks it again in `submit_form`.
+    paint_tier_save(&ctx.w.form_save, &ctx.w.form_name);
+    {
+        let save = ctx.w.form_save.clone();
+        ctx.w
+            .form_name
+            .connect_changed(move |name| paint_tier_save(&save, name));
+    }
     {
         let ctx = Rc::clone(&ctx);
         ctx.w
@@ -845,6 +865,11 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
         {
             let ctx = Rc::clone(&ctx);
             ctx.w.provider_add_button.clone().connect_clicked(move |_| {
+                // The form is gated at its entry: with no tier its tier map
+                // would have nothing to save, so it does not open.
+                if crate::form_gate::refuse(&provider_add_answer(&ctx), &ctx.w.error_label) {
+                    return;
+                }
                 ctx.w.provider_form_secret.set_text("");
                 prefill_provider_product(&ctx);
                 update_webhook_url_preview(&ctx);
@@ -895,6 +920,9 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
         {
             let ctx = Rc::clone(&ctx);
             ctx.w.claim_mint_button.clone().connect_clicked(move |_| {
+                if crate::form_gate::refuse(&claim_mint_answer(&ctx), &ctx.w.error_label) {
+                    return;
+                }
                 let idx = ctx.w.claim_tier_select.selected() as usize;
                 let tier = ctx.claim_tier_names.borrow().get(idx).cloned();
                 if let Some(tier) = tier {
@@ -1009,10 +1037,26 @@ fn submit_provider_form(ctx: &Rc<Ctx>) {
     );
 }
 
+/// `subscription-tier-form-save` painted from the shared predicate over the
+/// typed name — a tier needs a name, it is the tier's key on the nest.
+fn paint_tier_save(save: &gtk::Button, name: &gtk::Entry) {
+    crate::form_gate::paint_submit(
+        save,
+        &fauna_client_subscriptions::forms::tier_form_possibility(&name.text()),
+        None,
+    );
+}
+
 /// Read the form and dispatch create or update, depending on `Ctx::editing`.
+/// A nameless tier is refused by the predicate the Save is painted from, its
+/// reason on the page's `error-message` — never sent, never silent.
 fn submit_form(ctx: &Rc<Ctx>) {
     let name = ctx.w.form_name.text().trim().to_string();
-    if name.is_empty() {
+    if crate::form_gate::refuse(
+        &fauna_client_subscriptions::forms::tier_form_possibility(&name),
+        &ctx.w.error_label,
+    ) {
+        ctx.w.error_label.add_css_class("error");
         return;
     }
     // Shared non-negative parse (value-formatting.md § Tier rank);
@@ -1391,9 +1435,20 @@ fn apply_snapshot(ctx: &Rc<Ctx>, snap: Snapshot) {
                 if !names.is_empty() {
                     ctx.w.claim_tier_select.set_selected(restore as u32);
                 }
+                ctx.tiers_read
+                    .set(tiers_read_after(ctx.tiers_read.get(), true));
+                paint_own_tier_gates(ctx);
             }
         }
-        Err(msg) => show_error(&ctx.w, &msg),
+        Err(msg) => {
+            #[cfg(feature = "payments")]
+            {
+                ctx.tiers_read
+                    .set(tiers_read_after(ctx.tiers_read.get(), false));
+                paint_own_tier_gates(ctx);
+            }
+            show_error(&ctx.w, &msg)
+        }
     }
     match snap.requests {
         Ok(requests) => render_request_rows(ctx, &requests),
@@ -1819,6 +1874,72 @@ fn repaint_claims(ctx: &Rc<Ctx>) {
     });
 }
 
+/// Where the tab's tier read stands after one more read landed: the first
+/// answer resolves it, a failure before any answer fails it, and a later
+/// failure leaves an answered list standing (`profile.md` § Errors & edge
+/// cases, *A tier before what sells it*).
+#[cfg(feature = "payments")]
+fn tiers_read_after(prev: ReadState, ok: bool) -> ReadState {
+    match (prev, ok) {
+        (_, true) => ReadState::Resolved,
+        (ReadState::Resolved, false) => ReadState::Resolved,
+        (_, false) => ReadState::Failed,
+    }
+}
+
+/// `subscription-claim-mint-button`'s answer — the shared own-tier answer,
+/// use `ClaimCode`, over the tab's tier read.
+#[cfg(feature = "payments")]
+fn claim_mint_answer(ctx: &Ctx) -> Possibility {
+    use fauna_client_subscriptions::own_tiers::{OwnTierUse, own_tiers_possibility};
+    own_tiers_possibility(
+        ctx.tiers_read.get(),
+        ctx.claim_tier_names.borrow().len(),
+        OwnTierUse::ClaimCode,
+    )
+}
+
+/// `subscription-provider-add-button`'s answer — the same, use
+/// `PaymentProvider`.
+#[cfg(feature = "payments")]
+fn provider_add_answer(ctx: &Ctx) -> Possibility {
+    use fauna_client_subscriptions::own_tiers::{OwnTierUse, own_tiers_possibility};
+    own_tiers_possibility(
+        ctx.tiers_read.get(),
+        ctx.provider_tier_names.borrow().len(),
+        OwnTierUse::PaymentProvider,
+    )
+}
+
+/// Paint the claim mint and the provider form's opener from their answers
+/// (the reason rides each button's tooltip); a form already open when the
+/// answer turns blocked is closed, since it may not be offered.
+#[cfg(feature = "payments")]
+fn paint_own_tier_gates(ctx: &Ctx) {
+    paint_own_tier_buttons(
+        &ctx.w.claim_mint_button,
+        &ctx.w.provider_add_button,
+        &ctx.w.provider_form,
+        claim_mint_answer(ctx),
+        provider_add_answer(ctx),
+    );
+}
+
+#[cfg(feature = "payments")]
+fn paint_own_tier_buttons(
+    mint: &gtk::Button,
+    provider_add: &gtk::Button,
+    provider_form: &gtk::Box,
+    mint_answer: Possibility,
+    provider_answer: Possibility,
+) {
+    crate::possible::paint(mint, None, mint_answer);
+    if !provider_answer.is_possible() {
+        provider_form.set_visible(false);
+    }
+    crate::possible::paint(provider_add, None, provider_answer);
+}
+
 fn show_error(w: &Widgets, msg: &str) {
     w.error_label.add_css_class("error");
     crate::settings::render_error_label(&w.error_label, Some(msg));
@@ -1826,4 +1947,106 @@ fn show_error(w: &Widgets, msg: &str) {
 
 fn clear_error(w: &Widgets) {
     crate::settings::render_error_label(&w.error_label, None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tab's tier read: pending until the first answer, failed only when
+    /// it failed before ever answering — a later failure leaves the answered
+    /// list standing, so the mint never turns "failed to load" over tiers it
+    /// already showed.
+    #[cfg(feature = "payments")]
+    #[test]
+    fn the_tier_read_fails_only_before_it_ever_answered() {
+        assert_eq!(
+            tiers_read_after(ReadState::Pending, false),
+            ReadState::Failed
+        );
+        assert_eq!(
+            tiers_read_after(ReadState::Failed, true),
+            ReadState::Resolved
+        );
+        assert_eq!(
+            tiers_read_after(ReadState::Resolved, false),
+            ReadState::Resolved
+        );
+    }
+
+    /// The claim mint and the provider opener paint from the shared own-tier
+    /// answer: still loading before the read, blocked "create a tier" on an
+    /// answered empty list — an open provider form closing, since it may not
+    /// be offered — and live with a tier.
+    #[cfg(feature = "payments")]
+    #[test]
+    fn mint_and_provider_add_paint_from_the_own_tier_answer() {
+        use fauna_client_subscriptions::own_tiers::{OwnTierUse, own_tiers_possibility};
+        crate::testid::run_on_gtk_thread(|| {
+            let mint = gtk::Button::new();
+            let add = gtk::Button::new();
+            let form = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let lookup = |k: &str| {
+                fauna_core::localized::LocalizedText::key(k).resolve(crate::i18n::strings::lookup)
+            };
+            let paint = |read, count| {
+                paint_own_tier_buttons(
+                    &mint,
+                    &add,
+                    &form,
+                    own_tiers_possibility(read, count, OwnTierUse::ClaimCode),
+                    own_tiers_possibility(read, count, OwnTierUse::PaymentProvider),
+                )
+            };
+            paint(ReadState::Pending, 0);
+            assert!(!mint.is_sensitive());
+            assert_eq!(
+                mint.tooltip_text().as_deref(),
+                Some(lookup("common.still_loading").as_str())
+            );
+            paint(ReadState::Resolved, 0);
+            assert_eq!(
+                mint.tooltip_text().as_deref(),
+                Some(lookup("subscriptions.claim_needs_tier").as_str())
+            );
+            assert_eq!(
+                add.tooltip_text().as_deref(),
+                Some(lookup("subscriptions.provider_needs_tier").as_str())
+            );
+            assert!(!form.is_visible());
+            paint(ReadState::Resolved, 1);
+            assert!(mint.is_sensitive() && add.is_sensitive());
+        });
+    }
+
+    /// `subscription-tier-form-save` is painted from the shared
+    /// `tier_form_possibility`: a nameless tier is blocked with
+    /// `subscriptions.tier_name_required`, refused with the same reason on
+    /// `error-message`, and a typed name makes the save live.
+    #[test]
+    fn tier_form_save_paints_and_refuses_from_the_shared_predicate() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("connected");
+            let (_form, name, _rank, _desc, _money, _auto, save, _cancel) = build_form();
+            paint_tier_save(&save, &name);
+            {
+                let save = save.clone();
+                name.connect_changed(move |name| paint_tier_save(&save, name));
+            }
+            let reason =
+                fauna_core::localized::LocalizedText::key("subscriptions.tier_name_required")
+                    .resolve(crate::i18n::strings::lookup);
+            assert!(!save.is_sensitive());
+            assert_eq!(save.tooltip_text().as_deref(), Some(reason.as_str()));
+            let error = gtk::Label::new(None);
+            assert!(crate::form_gate::refuse(
+                &fauna_client_subscriptions::forms::tier_form_possibility(&name.text()),
+                &error,
+            ));
+            assert_eq!(error.text().as_str(), reason);
+            name.set_text("Gold");
+            assert!(save.is_sensitive());
+            crate::offline_gate::reset_for_test("disconnected");
+        });
+    }
 }

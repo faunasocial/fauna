@@ -24,7 +24,8 @@ the list.
 tier_3: the real nest, taken down and brought back on the same data dir; every
 mutation a UI gesture (convention 8); every wait a deadline poll on painted
 state (convention 14). tui first (``testing.md`` § Default app and nest mode);
-the other six apps add their marker as their trickle-down batch reaches them.
+the other six followed in their trickle-down batches, windows last, so all seven
+carry the marker.
 """
 from __future__ import annotations
 
@@ -49,6 +50,7 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.linux,
     pytest.mark.android,
+    pytest.mark.windows,
 ]
 
 #: A post composed online reaching the seat's feed state.

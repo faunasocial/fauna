@@ -89,6 +89,25 @@
       "promoted": true,
       "public_commit": "9a01dbc0273f42b387f670902c8307f14ae4bff2",
       "version": "0.1.6"
+    },
+    {
+      "commit": "15aa0a1f46a9a991efedbd1c0d25182371df0de6",
+      "date": "2026-11-15",
+      "image": "ghcr.io/faunasocial/nest:sha-15aa0a1f46a9a991efedbd1c0d25182371df0de6",
+      "image_digest": "sha256:fe86d2485827a06f9848340ab53daf678e296136f10af0833b1245eb81324f35",
+      "promoted": false,
+      "verified": "2026-11-15",
+      "version": "0.1.7"
+    },
+    {
+      "candidate_run": "2026-11-16",
+      "commit": "72b3e3f9b7a4aa062640ccc684bbe85fc16f2e23",
+      "date": "2026-11-16",
+      "image": "ghcr.io/faunasocial/nest:sha-8f6c0a5abbc682a520d9050bf976d3066ce4b75d",
+      "image_digest": "sha256:cbc067baaf3e9d89d8ce011d48d0a05c0119c3c0c5772509b91128ac5b213cbd",
+      "promoted": false,
+      "public_commit": "8f6c0a5abbc682a520d9050bf976d3066ce4b75d",
+      "version": "0.1.7"
     }
   ],
   "schema": 1,
@@ -138,9 +157,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-10-30",
+              "date": "2026-11-01",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.5-dev+99dc4c58 standalone",
               "state": "full"
             },
             "web": {
@@ -197,7 +216,7 @@
               "date": "2026-11-09",
               "dirty": false,
               "stamp": "0.1.6-dev+3aeb19b0 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-11-10",
@@ -207,9 +226,9 @@
             },
             "tui": {
               "date": "2026-11-07",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.6-dev+59444f07 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
               "date": "2026-11-10",
@@ -279,7 +298,7 @@
             },
             "tui": {
               "date": "2026-11-05",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.6-dev+8438e5ce standalone",
               "state": "partial"
             },
@@ -415,7 +434,7 @@
             },
             "tui": {
               "date": "2026-11-11",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.6-dev+89d36747 standalone",
               "state": "full"
             },
@@ -495,9 +514,9 @@
               "state": "partial"
             },
             "macos": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "tui": {
@@ -513,9 +532,9 @@
               "state": "full"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             }
           },
@@ -990,7 +1009,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+1e755069 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -1002,13 +1021,13 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+1e755069 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-31",
@@ -1020,7 +1039,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+1e755069 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-31",
@@ -1074,9 +1093,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "ios-kids": {
@@ -1098,9 +1117,9 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -1110,9 +1129,9 @@
               "state": "partial"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             }
           },
@@ -1145,7 +1164,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+17b5832c standalone",
-              "state": "full"
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -1154,28 +1173,28 @@
               "state": "none"
             },
             "linux": {
-              "date": "2026-10-31",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+cbd813be standalone",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "macos": {
               "date": "2026-10-24",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "web": {
               "date": "2026-11-05",
               "dirty": false,
               "stamp": "0.1.5-dev+1c9a6a26 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-11-02",
@@ -1210,9 +1229,9 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-13",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+d36d802e standalone",
               "state": "full"
             },
             "ios-kids": {
@@ -1246,9 +1265,9 @@
               "state": "partial"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             }
           },
@@ -1352,9 +1371,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -1364,34 +1383,34 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "tui": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "web": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
-              "state": "partial"
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
+              "state": "unbuilt"
             }
           },
           "full": true,
@@ -1433,7 +1452,7 @@
             },
             "linux": {
               "date": "2026-11-11",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.6-dev+5c83561c standalone",
               "state": "full"
             },
@@ -1569,7 +1588,7 @@
             },
             "linux": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+cbd813be standalone",
               "state": "full"
             },
@@ -1580,9 +1599,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -1627,7 +1646,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+390d61b5 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "2026-10-30",
@@ -1651,7 +1670,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+390d61b5 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
               "date": "2026-10-30",
@@ -1766,9 +1785,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "ios-kids": {
@@ -1790,9 +1809,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -2003,9 +2022,9 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-22",
-              "dirty": true,
-              "stamp": "0.1.5-dev+646e0070 standalone",
+              "date": "2026-11-14",
+              "dirty": false,
+              "stamp": "0.1.7-dev+ef6a45c3 standalone",
               "state": "full"
             },
             "web": {
@@ -2059,10 +2078,10 @@
               "state": "none"
             },
             "linux": {
-              "date": "2026-10-31",
+              "date": "2026-11-02",
               "dirty": false,
-              "stamp": "0.1.5-dev+5a9a5fa8 standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "state": "full"
             },
             "macos": {
               "date": "2026-10-24",
@@ -2077,10 +2096,10 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-31",
+              "date": "2026-11-02",
               "dirty": false,
-              "stamp": "0.1.5-dev+88622a93 standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-11-02",
@@ -2187,8 +2206,8 @@
             },
             "ios": {
               "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "dirty": true,
+              "stamp": "0.1.5-dev+c9e7fe5d standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -2198,9 +2217,9 @@
               "state": "none"
             },
             "linux": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "date": "2026-10-31",
+              "dirty": true,
+              "stamp": "0.1.5-dev+cbd813be standalone",
               "state": "partial"
             },
             "macos": {
@@ -2210,21 +2229,21 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-30",
+              "date": "2026-11-07",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.6-dev+c788c80c standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-10-30",
+              "date": "2026-11-15",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-30",
+              "date": "2026-11-15",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             }
           },
@@ -2887,7 +2906,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -2911,13 +2930,13 @@
               "date": "2026-11-09",
               "dirty": false,
               "stamp": "0.1.6-dev+4c3abb30 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-10-31",
               "dirty": true,
               "stamp": "0.1.5-dev+d6b5dbea.dirty standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
               "date": "2026-10-16",
@@ -2952,15 +2971,15 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "ios-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "linux": {
@@ -2988,9 +3007,9 @@
               "state": "full"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             }
           },
@@ -3094,9 +3113,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "ios-kids": {
@@ -3118,9 +3137,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-10-30",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -3418,7 +3437,7 @@
               "date": "2026-11-05",
               "dirty": false,
               "stamp": "0.1.6-dev+8438e5ce standalone",
-              "state": "failing"
+              "state": "partial"
             },
             "tui": {
               "date": "",
@@ -3468,9 +3487,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-10-30",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+500226d2 standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -3480,9 +3499,9 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-10-30",
+              "date": "2026-10-31",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.5-dev+cbd813be standalone",
               "state": "partial"
             },
             "macos": {
@@ -3492,21 +3511,21 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "date": "2026-11-01",
+              "dirty": true,
+              "stamp": "0.1.5-dev+7674275f.dirty standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-10-30",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+500226d2 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-30",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+500226d2 standalone",
               "state": "partial"
             }
           },
@@ -3702,7 +3721,7 @@
             },
             "ios": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "partial"
             },
@@ -3714,31 +3733,31 @@
             },
             "linux": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "partial"
             },
             "macos": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "partial"
             },
             "tui": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "full"
             },
             "web": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "partial"
             },
             "windows": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "unbuilt"
             }
@@ -3967,9 +3986,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-08",
-              "dirty": true,
-              "stamp": "0.1.6-dev+54cdf1b6.dirty standalone",
+              "date": "2026-11-14",
+              "dirty": false,
+              "stamp": "0.1.7-dev+4df11101 standalone",
               "state": "full"
             },
             "web": {
@@ -4062,7 +4081,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "partial"
+              "state": "full"
             }
           },
           "full": true,
@@ -4194,9 +4213,9 @@
               "state": "absent"
             },
             "windows": {
-              "date": "2026-11-14",
-              "dirty": false,
-              "stamp": "0.1.7-dev+49e2a8cc standalone",
+              "date": "2026-11-16",
+              "dirty": true,
+              "stamp": "0.1.7-dev+bea44c4b standalone",
               "state": "partial"
             }
           },
@@ -4214,27 +4233,27 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "unbuilt"
             },
             "android-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "unbuilt"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "partial"
+              "stamp": "0.1.7 docker",
+              "state": "unbuilt"
             },
             "ios-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "unbuilt"
             },
             "linux": {
@@ -4250,10 +4269,10 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "full"
+              "stamp": "0.1.7 docker",
+              "state": "partial"
             },
             "web": {
               "date": "2026-10-31",
@@ -4262,9 +4281,9 @@
               "state": "partial"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             }
           },
@@ -4462,9 +4481,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-12",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.6-dev+ef3fcb6a standalone",
               "state": "full"
             },
             "ios-kids": {
@@ -4476,7 +4495,7 @@
             "linux": {
               "date": "2026-11-11",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.6-dev+5c83561c standalone",
               "state": "full"
             },
             "macos": {
@@ -4488,7 +4507,7 @@
             "tui": {
               "date": "2026-11-11",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.6-dev+89d36747 standalone",
               "state": "full"
             },
             "web": {
@@ -4498,10 +4517,10 @@
               "state": "full"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-12",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "unbuilt"
+              "stamp": "0.1.6-dev+ef3fcb6a standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -4762,7 +4781,7 @@
             },
             "macos": {
               "date": "2026-10-24",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
               "state": "partial"
             },
@@ -4779,9 +4798,9 @@
               "state": "full"
             },
             "windows": {
-              "date": "2026-09-25",
-              "dirty": true,
-              "stamp": "0.1.2-dev+a3582c8b.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+35d33bf9 standalone",
               "state": "partial"
             }
           },
@@ -4852,9 +4871,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -4977,9 +4996,9 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "android-kids": {
@@ -4989,9 +5008,9 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "ios-kids": {
@@ -5235,7 +5254,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "unbuilt"
+              "state": "partial"
             },
             "android-kids": {
               "date": "",
@@ -5265,7 +5284,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-30",
@@ -5283,7 +5302,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "unbuilt"
+              "state": "partial"
             }
           },
           "full": true,
@@ -5452,21 +5471,21 @@
               "state": "none"
             },
             "android-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "unbuilt"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "ios-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "unbuilt"
             },
             "linux": {
@@ -5491,12 +5510,12 @@
               "date": "2026-11-10",
               "dirty": false,
               "stamp": "0.1.6-dev+7df68063 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "partial"
             }
           },
@@ -5844,7 +5863,7 @@
               "date": "2026-10-30",
               "dirty": true,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "unbuilt"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -5862,7 +5881,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "unbuilt"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-30",
@@ -5947,7 +5966,7 @@
             "windows": {
               "date": "2026-11-11",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.6-dev+89d36747 standalone",
               "state": "partial"
             }
           },
@@ -6415,10 +6434,10 @@
               "state": "absent"
             },
             "ios": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -6427,34 +6446,34 @@
               "state": "absent"
             },
             "linux": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
               "state": "full"
             },
             "macos": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
+              "state": "full"
             },
             "tui": {
               "date": "2026-11-11",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.6-dev+b536197e standalone",
               "state": "full"
             },
             "web": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
               "state": "full"
             },
             "windows": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
+              "state": "full"
             }
           },
           "full": true,
@@ -6902,10 +6921,10 @@
               "state": "partial"
             },
             "windows": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.7-dev+bea44c4b standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -6974,7 +6993,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "unbuilt"
+              "state": "partial"
             },
             "web": {
               "date": "2026-10-30",
@@ -7104,7 +7123,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+962dc452 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-24",
@@ -7492,7 +7511,7 @@
             "tui": {
               "date": "2026-10-30",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.5-dev+8755c14e standalone",
               "state": "full"
             },
             "web": {
@@ -8105,7 +8124,7 @@
             },
             "ios": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             },
@@ -8117,7 +8136,7 @@
             },
             "linux": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             },
@@ -8129,7 +8148,7 @@
             },
             "tui": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             },
@@ -8141,7 +8160,7 @@
             },
             "windows": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             }
@@ -8199,9 +8218,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-08",
+              "date": "2026-11-15",
               "dirty": false,
-              "stamp": "0.1.6-dev+8f244c6f standalone",
+              "stamp": "0.1.7-dev+500226d2 standalone",
               "state": "full"
             },
             "web": {
@@ -8388,10 +8407,10 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
-              "state": "partial"
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -8400,33 +8419,33 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
-              "state": "partial"
-            },
-            "tui": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "full"
             },
+            "tui": {
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "state": "partial"
+            },
             "web": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "full"
             },
             "windows": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "unbuilt"
             }
           },
@@ -8673,7 +8692,7 @@
             },
             "ios": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "partial"
             },
@@ -8685,7 +8704,7 @@
             },
             "linux": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             },
@@ -8697,19 +8716,19 @@
             },
             "tui": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             },
             "web": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             },
             "windows": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             }
@@ -8755,33 +8774,33 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-11-02",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-11-02",
+              "date": "2026-11-10",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "stamp": "0.1.6-dev+e46418b8 standalone",
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-02",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-11-02",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "windows": {
-              "date": "2026-11-02",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "partial"
             }
           },
@@ -8887,7 +8906,7 @@
             "ios": {
               "date": "2026-10-30",
               "dirty": true,
-              "stamp": "0.1.5-dev+662ece79 standalone",
+              "stamp": "0.1.5-dev+e4b19f90 standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -8911,7 +8930,7 @@
             "tui": {
               "date": "2026-10-30",
               "dirty": true,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.5-dev+e4b19f90 standalone",
               "state": "partial"
             },
             "web": {
@@ -9027,9 +9046,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "ios-kids": {
@@ -9051,9 +9070,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "web": {
@@ -9254,9 +9273,9 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-10-30",
+              "date": "2026-11-05",
               "dirty": false,
-              "stamp": "0.1.5-dev+b7384d11 standalone",
+              "stamp": "0.1.5-dev+37e2409c standalone",
               "state": "full"
             },
             "macos": {
@@ -9266,15 +9285,15 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-10-19",
+              "date": "2026-11-15",
               "dirty": false,
-              "stamp": "0.1.5-dev+cab1c46a standalone",
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-10-30",
+              "date": "2026-11-05",
               "dirty": false,
-              "stamp": "0.1.5-dev+b7384d11 standalone",
+              "stamp": "0.1.5-dev+1c9a6a26 standalone",
               "state": "full"
             },
             "windows": {
@@ -9479,9 +9498,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -9597,7 +9616,7 @@
               "date": "2026-11-01",
               "dirty": false,
               "stamp": "0.1.5-dev+ab838565 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -9961,6 +9980,11 @@
       "date": "2026-11-11",
       "promoted": true,
       "version": "0.1.6"
+    },
+    {
+      "date": "2026-11-16",
+      "promoted": false,
+      "version": "0.1.7"
     }
   ]
 }

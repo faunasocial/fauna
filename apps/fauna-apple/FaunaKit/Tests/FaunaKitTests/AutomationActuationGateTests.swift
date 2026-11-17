@@ -127,7 +127,7 @@ struct AutomationActuationGateTests {
     @Test("the predicate is consulted live, not captured at registration")
     func predicateIsLive() {
         // Registrations are re-run per body pass and the predicates close over
-        // view state (`!vm.isBusy`, `!form.canCreate`), so the gate must read
+        // view state (`!vm.isBusy`, `!vm.creatingFeed`), so the gate must read
         // the CURRENT value each call — a snapshot would refuse a control that
         // has since enabled, which is worse than not gating at all.
         var enabled = false

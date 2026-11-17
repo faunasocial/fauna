@@ -243,12 +243,7 @@ def _require_log_reader(admin_app, what: str) -> None:
 
 
 def _error_text(admin_app) -> str | None:
-    if admin_app.driver.count("error-message") == 0:
-        return None
-    try:
-        return admin_app.driver.get_text("error-message") or None
-    except Exception:
-        return None
+    return admin_app.error_text() or None
 
 
 def _mode_of(admin_app, domain: str) -> str | None:

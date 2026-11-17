@@ -23,9 +23,16 @@ import social.fauna.generated.Ids
 /**
  * `kids_ineligible` — the Fauna Kids build's refusal for an account that is
  * not supervised (`account-age-band.md` § The account age band, the kids-app
- * bullet, item (3)). Replaces the whole signed-in shell when the shared
- * `kidsAppEligible` verdict is false; the verdict keys on supervision, never
- * on the band. One explanation and a sign-out — nothing else is reachable.
+ * bullet, item (3)). Replaces the whole signed-in shell whenever the shared
+ * three-way `kidsAppEligibility` answer is not ELIGIBLE; the verdict keys on
+ * supervision, never on the band. One explanation and a sign-out — nothing
+ * else is reachable.
+ *
+ * [showMessage] is true for INELIGIBLE. While the answer is UNKNOWN
+ * (`account-age-band.md` § *Kids-app eligibility while it is unknown*) the
+ * page shows its frame WITHOUT `kids-ineligible-message` — the refusal is not
+ * shown on a guess — and `sign-out-button` stays live; [error] then carries
+ * the could-not-reach line once a read has failed.
  *
  * Kids-only: the only caller sits behind `BuildConfig.KIDS` in `FaunaNavHost`,
  * so the release shrinker drops the screen from the other four build types.
@@ -33,6 +40,7 @@ import social.fauna.generated.Ids
 @Composable
 fun KidsIneligibleScreen(
     onSignOut: () -> Unit,
+    showMessage: Boolean = true,
     error: String? = null,
 ) {
     Column(
@@ -40,12 +48,14 @@ fun KidsIneligibleScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text(
-            stringResource(R.string.family_kids_ineligible_message),
-            style = MaterialTheme.typography.bodyLarge,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.testTag(Ids.KIDS_INELIGIBLE_MESSAGE),
-        )
+        if (showMessage) {
+            Text(
+                stringResource(R.string.family_kids_ineligible_message),
+                style = MaterialTheme.typography.bodyLarge,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.testTag(Ids.KIDS_INELIGIBLE_MESSAGE),
+            )
+        }
         if (error != null) {
             Spacer(Modifier.height(16.dp))
             Text(

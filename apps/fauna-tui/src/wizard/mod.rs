@@ -29,6 +29,7 @@ pub mod nat_mode_choice;
 pub mod nest_provisioning;
 pub mod nest_recovery;
 pub mod nest_retire;
+pub mod provider_choice;
 pub mod recover_selfhosted_instructions;
 pub mod recovery_entry;
 pub mod recovery_kit;
@@ -162,6 +163,12 @@ pub enum WizardField {
     DnsCred(String),
     VpsCred(String),
     Contact(ContactField),
+    /// A field of a provider's dialog on `provider_choice`
+    /// (`provider-credentials-form-<field>`): (provider id, field id).
+    ProviderCred(String, String),
+    /// A WHOIS contact field inside the open provider's dialog — the
+    /// registrar's own contact (`provider_contact`), not `dns_config`'s.
+    ProviderContact(ContactField),
     /// A `nest_retire` credential field (`vps-credentials-form-<id>`, reused
     /// from `vps_config`) — pushed to the retire machine, not the wizard's.
     RetireCred(String),
@@ -258,6 +265,27 @@ pub enum Action {
     /// provisioning, exits through `dns_post_instructions` (§7).
     DnsSetUpLater,
     ContinueFromDns,
+
+    // --- provider_choice (§3d) ---
+    /// Open a provider's dialog (the sign-in pop-up). Client-local: which
+    /// dialog is open is presentation, held on [`Wizard::provider_dialog`].
+    OpenProviderDialog(String),
+    /// `provider-dialog-close-button`. Client-local like the open.
+    CloseProviderDialog,
+    /// `provider-connect-button` — every check of the provider's
+    /// capabilities with its one credential set.
+    ConnectProvider(String),
+    /// `provider-disconnect-button`.
+    DisconnectProvider(String),
+    /// A `hosted-auth` field of a provider's dialog: (provider id, field id).
+    ProviderHostedAuth(String, String),
+    /// A pick on `provider-goal-select[...]`, or the manual row for DNS.
+    SelectGoalCover(
+        fauna_onboarding_machine::ProviderGoal,
+        fauna_onboarding_machine::GoalCover,
+    ),
+    /// `provider-choice-continue-button` — straight to `nest_provisioning`.
+    ContinueFromProviders,
 
     // --- vps_config (§5) ---
     SelectVpsProvider(String),
@@ -374,6 +402,10 @@ pub struct Wizard {
     /// `Some`, this page is what the wizard paints, whatever the onboarding
     /// machine's step.
     pub retire: Option<nest_retire::RetireView>,
+    /// The provider whose dialog is open on `provider_choice`, if any — the
+    /// page's one piece of presentation state (which pop-up is up); every
+    /// rule about coverage stays the machine's.
+    pub provider_dialog: Option<String>,
 }
 
 impl Wizard {
@@ -404,6 +436,11 @@ impl Wizard {
         // NAT step's exits through the one-tap trust offer. The other six apps
         // leave it undeclared and keep exiting straight to `Done`.
         machine.set_renders_trust_prompt(true);
+        // And the choose-providers page (`onboarding-provisioning.md` § 3d):
+        // tui renders it, so the handle check's Continue lands there instead of
+        // `dns_config`. The other six apps keep `dns_config` → `vps_config`
+        // until their trickle-down lands.
+        machine.set_renders_provider_choice(true);
         // A desktop app keeps a door key where SSH keys live: the run writes
         // it to `~/.ssh` with a `Host` entry (`installers/vps.md` § The SSH
         // door → *The key*).
@@ -417,6 +454,7 @@ impl Wizard {
             selfhosted_command: None,
             pending_invite_persisted: None,
             retire: None,
+            provider_dialog: None,
         }
     }
 
@@ -439,6 +477,7 @@ impl Wizard {
         self.inputs.clear();
         self.error = None;
         self.selfhosted_command = None;
+        self.provider_dialog = None;
         // Dropping the page drops its token with it (the machine holds it in
         // memory only); `cancel` makes that explicit.
         if let Some(view) = self.retire.take() {
@@ -479,9 +518,17 @@ impl Wizard {
             | WizardField::LockoutSecret
             | WizardField::LockoutAccount
             | WizardField::LockoutConfirm => self.inputs.get(&field).cloned().unwrap_or_default(),
-            WizardField::DnsCred(_) | WizardField::VpsCred(_) => {
+            WizardField::DnsCred(_) | WizardField::VpsCred(_) | WizardField::ProviderCred(..) => {
                 self.inputs.get(&field).cloned().unwrap_or_default()
             }
+            // Reads through to the machine, like `Contact`: *Connect* fetched
+            // the registrar's default contact into it.
+            WizardField::ProviderContact(which) => self
+                .provider_dialog
+                .as_ref()
+                .and_then(|id| self.machine.provider_contact(id.clone()))
+                .map(|c| which.get(&c).to_string())
+                .unwrap_or_default(),
             WizardField::RetireCred(_) | WizardField::RetireConfirmName => self
                 .retire
                 .as_ref()
@@ -506,6 +553,21 @@ impl Wizard {
             WizardField::VpsCred(ref id) => {
                 self.machine.set_vps_cred(id.clone(), value.clone());
                 self.inputs.insert(field, value);
+            }
+            WizardField::ProviderCred(ref pid, ref fid) => {
+                self.machine
+                    .set_provider_cred(pid.clone(), fid.clone(), value.clone());
+                self.inputs.insert(field, value);
+            }
+            WizardField::ProviderContact(which) => {
+                if let Some(id) = self.provider_dialog.clone() {
+                    let mut contact = self
+                        .machine
+                        .provider_contact(id.clone())
+                        .unwrap_or_default();
+                    which.set(&mut contact, value);
+                    self.machine.set_provider_contact(id, contact);
+                }
             }
             // `set_contact` takes the whole struct, so read-modify-write. No
             // local buffer: `field()` reads it back off the machine.
@@ -560,6 +622,7 @@ impl Wizard {
             OnboardingStep::InviteRequest => invite_request::elements(self),
             OnboardingStep::ClaimCode => claim_code::elements(self),
             OnboardingStep::NatModeChoice => nat_mode_choice::elements(self),
+            OnboardingStep::ProviderChoice => provider_choice::elements(self),
             OnboardingStep::DnsConfig => dns_config::elements(self),
             OnboardingStep::VpsConfig => vps_config::elements(self),
             OnboardingStep::NestProvisioning => nest_provisioning::elements(self),
@@ -624,6 +687,7 @@ impl Wizard {
             OnboardingStep::InviteRequest => invite_request::title(),
             OnboardingStep::ClaimCode => claim_code::title(),
             OnboardingStep::NatModeChoice => nat_mode_choice::title(),
+            OnboardingStep::ProviderChoice => provider_choice::title(),
             OnboardingStep::DnsConfig => dns_config::title(),
             OnboardingStep::VpsConfig => vps_config::title(),
             OnboardingStep::NestProvisioning => nest_provisioning::title(),
@@ -656,6 +720,7 @@ impl Wizard {
             OnboardingStep::InviteRequest => invite_request::description(),
             OnboardingStep::ClaimCode => claim_code::description(),
             OnboardingStep::NatModeChoice => nat_mode_choice::description(),
+            OnboardingStep::ProviderChoice => provider_choice::description(),
             OnboardingStep::DnsConfig => dns_config::description(),
             OnboardingStep::VpsConfig => vps_config::description(),
             OnboardingStep::NestProvisioning => nest_provisioning::description(self),
@@ -693,7 +758,20 @@ impl Wizard {
                 self.inputs.remove(&f);
             }
         }
+        // The open dialog belongs to `provider_choice` alone: leaving the page
+        // closes it, so a Back and a return never reopen a stale pop-up.
+        if self.machine.step() != OnboardingStep::ProviderChoice {
+            self.provider_dialog = None;
+        }
         match action {
+            Action::OpenProviderDialog(id) => {
+                self.provider_dialog = Some(id.clone());
+                Ok(String::new())
+            }
+            Action::CloseProviderDialog => {
+                self.provider_dialog = None;
+                Ok(String::new())
+            }
             Action::ConfirmImportedIdentity => {
                 let pasted = self.field(WizardField::ImportSecret);
                 let parsed = fauna_core::identity_qr::parse_import_input(&pasted)
@@ -953,6 +1031,33 @@ pub async fn run_action(
         DnsSetUpLater => machine.dns_set_up_later(),
         ContinueFromDns => {
             let _ = machine.continue_from_dns();
+        }
+
+        // --- provider_choice (§3d) ---
+        // Client-local: `prepare` already moved the dialog state.
+        OpenProviderDialog(_) | CloseProviderDialog => {}
+        ConnectProvider(id) => {
+            // A failed check is on the row (`ProviderRow::error`), painted as
+            // the dialog's status line — nothing to re-derive here.
+            let _ = machine.connect_provider(id).await;
+        }
+        DisconnectProvider(id) => machine.disconnect_provider(id),
+        ProviderHostedAuth(pid, field_id) => {
+            if let Ok(prompt) = machine
+                .provider_hosted_auth_begin(pid.clone(), field_id.clone())
+                .await
+            {
+                open_in_browser(&prompt.verification_url);
+                let _ = machine.provider_hosted_auth_wait(pid, field_id).await;
+            }
+        }
+        SelectGoalCover(goal, cover) => {
+            if let Err(e) = machine.select_goal_cover(goal, cover) {
+                tracing::warn!("select_goal_cover: {e}");
+            }
+        }
+        ContinueFromProviders => {
+            let _ = machine.continue_from_providers();
         }
 
         // --- vps_config (§5) ---

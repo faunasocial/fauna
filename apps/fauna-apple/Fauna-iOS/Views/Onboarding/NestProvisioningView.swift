@@ -25,6 +25,10 @@ struct NestProvisioningView: View {
 
                 ProvisioningPriceBom(items: vm.machine.billOfMaterials())
 
+                // The choose-providers path's choices region (onboarding-provisioning.md
+                // § 3d): the price confirm, then the server choices. Empty otherwise.
+                provisioningChoicesRegion(vm: vm)
+
                 // Below the price recap, before the Buy-and-set-up CTA.
                 TermsNotice()
 
@@ -38,6 +42,10 @@ struct NestProvisioningView: View {
                     .automationActivate(Ids.provisioningStartButton) {
                         Task { await vm.machine.runProvisioning() }
                     }
+                    // Dead while the machine names a reason on the choose-providers
+                    // path (§ 3d), the reason beneath it (rule 5).
+                    .faunaPossible(vm.provisioningStartPossibility)
+                    FaunaPossibilityReason(vm.provisioningStartPossibility)
                 }
 
                 VStack(spacing: 8) {
@@ -117,21 +125,14 @@ struct NestProvisioningView: View {
                         _ = vm.machine.continueFromProvisioning()
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(snap.overall != .succeeded)
                     .accessibilityIdentifier(Ids.provisioningContinueButton)
-                    .automationActivate(
-                        Ids.provisioningContinueButton,
-                        isEnabled: { vm.machine.canContinueProvisioning() }
-                    ) {
+                    .automationActivate(Ids.provisioningContinueButton) {
                         _ = vm.machine.continueFromProvisioning()
                     }
-                    // Copy comprehensibility rule 5 — why Continue is disabled
-                    // (`ui/README.md` § Copy comprehensibility).
-                    if snap.overall != .succeeded, let reason = vm.machine.provisioningContinueBlockedReason() {
-                        Text(renderLocalizedText(reason))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    // Enabled and the reason are the shared answer's
+                    // (`ui/README.md` § Offer only what is possible, rule 6).
+                    .faunaPossible(vm.machine.provisioningContinuePossibility())
+                    FaunaPossibilityReason(vm.machine.provisioningContinuePossibility())
                 }
             }
             .padding()

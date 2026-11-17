@@ -468,11 +468,15 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // is ours.
         _listening?.Dispose();
         _listening = null;
+        // A wizard's declassify confirm hidden by this navigation (an e2e reset's
+        // Dialogs.CloseAll, a sign-out) must not reopen the wizard over the next page.
+        _navigatedAway = true;
         base.OnNavigatedFrom(e);
     }
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {
+        _navigatedAway = false;
         // e2e-only one-shot slow-load injection (TestLoadDelayMs): keeps _machine null
         // for `testDelayMs` ms so the nav-readiness regression can prove an immediate
         // post-navigate add-click is honoured (pre-fix it was dropped). Consumed here.
@@ -1850,6 +1854,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     // get_text reads the stable value back.
 
     private const string AudiencePublic = "public";
+    private const string AudiencePrivate = "private";
 
     // The actor's own web-address opt-in, as of the last snapshot — the
     // best-effort second half of the website hint's tri-state. `null` is a REAL
@@ -2006,6 +2011,14 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     private async void FolderAudienceConfirm_Click(object sender, RoutedEventArgs e)
     {
         FolderAudienceDialog.Hide();
+        // A Public wizard's Create armed this same dialog: its answer is the wizard's
+        // `confirm_public_create()`, which AnswerWizardDeclassifyAsync sends once the
+        // dialog's show returns.
+        if (_wizardOwnsAudienceDialog)
+        {
+            _wizardAudienceConfirmed = true;
+            return;
+        }
         if (_machine is not null && _pendingAudienceFolder is { } name)
             await _machine.SetFolderAudience(name, AudiencePublic);
         _pendingAudienceFolder = null;
@@ -3860,9 +3873,12 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // (measured in the 600-DIP e2e window: a 184 px row, 81 + 87 of buttons and
         // two 8 px gaps), and a driver probing it for "is this row open?" shuts the
         // open row.
+        // Labelled with the shared settings.sync_page keys tui, linux and macos use —
+        // a real field header, never placeholder text alone (one element on every
+        // app, so one visible label).
         var pathInput = new TextBox
         {
-            PlaceholderText = S.Get("folders/location_path_placeholder"),
+            Header = S.Get("settings/sync_page/location_path"),
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(pathInput, Ids.FolderLocationPathInput);
         var browse = new Button { Content = S.Get("folders/choose") };
@@ -3870,7 +3886,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         browse.Click += (_, _) => BrowseFolder(pathInput);
         var bind = new Button
         {
-            Content = S.Get("folders/bind_location"),
+            Content = S.Get("settings/sync_page/add_location"),
             Style = (Style)Application.Current.Resources["AccentButtonStyle"],
             Tag = target,
         };
@@ -4351,16 +4367,28 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             catch { /* best-effort */ }
         }
         BuildWizardDeviceRows();
+        BuildWizardAudienceOptions();
 
         WizardErrorText.Visibility = Visibility.Collapsed;
-        WizardDialog.XamlRoot = this.XamlRoot;
         WizardDialog.Title = S.Get("devices/wizard/new_folder");
         _wizardDialogShown = true;
+        _wizardDeclassifyPresented = false;
         RenderWizardSteps();
-        // Through the gate: a later test's reset() force-closes it if the test left it
-        // open, and another dialog already up refuses this open legibly instead of
-        // crashing (Controls.Dialogs states the policy).
-        await Controls.Dialogs.ShowAsync(WizardDialog);
+        while (true)
+        {
+            // Through the gate: a later test's reset() force-closes it if the test left
+            // it open, and another dialog already up refuses this open legibly instead
+            // of crashing (Controls.Dialogs states the policy).
+            WizardDialog.XamlRoot = this.XamlRoot;
+            await Controls.Dialogs.ShowAsync(WizardDialog);
+            // A Public wizard's Create armed the declassify confirm, and WinUI holds one
+            // ContentDialog at a time: the wizard closed to hand the page to the owner
+            // row's FolderAudienceDialog (RenderWizardSteps). Answer it, then open the
+            // wizard again when the answer leaves it on Review.
+            if (!_wizardDeclassifyHandover) break;
+            _wizardDeclassifyHandover = false;
+            if (!await AnswerWizardDeclassifyAsync()) break;
+        }
 
         // The show returns when the dialog closes (Done hid it programmatically, the
         // user cancelled, a reset() Hid it) or at once when the gate refused it. Drop
@@ -4369,6 +4397,69 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // throw out of this async void handler.
         _wizardDialogShown = false;
         try { _machine.CloseWizard(); } catch { }
+    }
+
+    // ── Born public: the wizard's declassify confirm ──
+    //
+    // ui/folders.md § Audience and website serving → *Born public*, ruling 2: on a
+    // Public wizard Create arms the owner row's SAME declassify dialog — reused on
+    // this page, never a wizard copy — and answering it is the gesture that creates.
+    // The arm is the shared machine's (`ReviewSnapshot.declassify_armed`); the flags
+    // below only remember that this page has already handed the wizard over to the
+    // dialog answering it, once per arm.
+
+    /// <summary>The wizard closed to show FolderAudienceDialog for the machine's arm;
+    /// FolderAdd_Click's loop answers it once the wizard's show returns.</summary>
+    private bool _wizardDeclassifyHandover;
+
+    /// <summary>The current arm has been handed to the dialog — never twice per arm.
+    /// Cleared whenever the snapshot reads unarmed.</summary>
+    private bool _wizardDeclassifyPresented;
+
+    /// <summary>FolderAudienceDialog is up for the wizard's arm, not a row's.</summary>
+    private bool _wizardOwnsAudienceDialog;
+
+    /// <summary>Its confirm was pressed while the wizard owned it.</summary>
+    private bool _wizardAudienceConfirmed;
+
+    /// <summary>The page was navigated away from (a sign-out, an e2e reset): a dialog
+    /// those Hid must not bring the wizard back.</summary>
+    private bool _navigatedAway;
+
+    /// <summary>
+    /// Show FolderAudienceDialog for the wizard's arm and answer the machine: the
+    /// confirm is <c>confirm_public_create()</c>, which creates the folder public and
+    /// attests it; a cancel, Escape or a refused open is <c>cancel_public_create()</c>,
+    /// which sends nothing. Returns whether the wizard opens again — on Review after a
+    /// cancel or a failed create (its error painted there), never after Done or once
+    /// the page is gone.
+    /// </summary>
+    private async Task<bool> AnswerWizardDeclassifyAsync()
+    {
+        if (Wiz is not { } wiz) return false;
+        _wizardAudienceConfirmed = false;
+        FolderAudienceDialog.XamlRoot = this.XamlRoot;
+        await Controls.Dialogs.ShowAsync(FolderAudienceDialog,
+            prepare: () => _wizardOwnsAudienceDialog = true);
+        _wizardOwnsAudienceDialog = false;
+        if (_wizardAudienceConfirmed && !_navigatedAway)
+        {
+            _wizardAudienceConfirmed = false;
+            try
+            {
+                // Ticks the observer (Submitting → Done/Failed) exactly as Submit does;
+                // Done refreshes the list in RenderWizardSteps.
+                if (await wiz.ConfirmPublicCreate() == FolderWizardStep.Done) return false;
+            }
+            catch (Exception ex)
+            {
+                WizardErrorText.Text = Strings.Error(ex);
+                WizardErrorText.Visibility = Visibility.Visible;
+            }
+            return !_navigatedAway && Wiz is not null;
+        }
+        wiz.CancelPublicCreate();
+        return !_navigatedAway && Wiz is not null;
     }
 
     // ── Wizard gestures (forward to the embedded machine) ──
@@ -4453,9 +4544,36 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             }
             var onReview = step == FolderWizardStep.Review;
             WizardCreateBtn.Visibility = onReview ? Visibility.Visible : Visibility.Collapsed;
-            if (onReview) WizardCreateBtn.IsEnabled = Wiz.ReviewSnapshot().createEnabled;
+            var armed = false;
+            if (onReview)
+            {
+                var review = Wiz.ReviewSnapshot();
+                armed = review.declassifyArmed;
+                // While the declassify confirm asks, Create stays painted but dim:
+                // answering the dialog is the gesture that creates.
+                WizardCreateBtn.IsEnabled = review.createEnabled && !armed;
+            }
+            HandOverToDeclassifyIfArmed(armed);
         }
         finally { _suppressWizardEvents = false; }
+    }
+
+    /// <summary>A Public wizard's Create armed the declassify confirm (Born public,
+    /// ruling 2). WinUI shows one ContentDialog per XamlRoot, so the wizard closes and
+    /// FolderAdd_Click's loop shows the owner row's FolderAudienceDialog in its place
+    /// (<see cref="AnswerWizardDeclassifyAsync"/>) — once per arm, never per render
+    /// tick.</summary>
+    private void HandOverToDeclassifyIfArmed(bool armed)
+    {
+        if (!armed)
+        {
+            _wizardDeclassifyPresented = false;
+            return;
+        }
+        if (_wizardDeclassifyPresented || !_wizardDialogShown) return;
+        _wizardDeclassifyPresented = true;
+        _wizardDeclassifyHandover = true;
+        WizardDialog.Hide();
     }
 
     // ── Wizard step 1: the name alone (the type step is retired — a folder has no type) ──
@@ -4464,6 +4582,52 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     {
         var snap = Wiz!.NameSnapshot();
         if (WizardNameBox.Text != snap.name) WizardNameBox.Text = snap.name;
+
+        // Who can see the new folder (Born public, ruling 1): absent on a seam that
+        // cannot attest a born-public create — a control that cannot work must not
+        // paint. The select paints the user's choice: nothing exists yet, so there is
+        // no current audience to snap back to (the owner row's non-optimistic rule has
+        // nothing here to protect). The hint rides the same (unbound, chosen) inputs
+        // as the option set.
+        WizardAudienceRow.Visibility = snap.audienceOffered ? Visibility.Visible : Visibility.Collapsed;
+        if (!snap.audienceOffered) return;
+        for (int i = 0; i < WizardAudienceSelect.Items.Count; i++)
+        {
+            if (WizardAudienceSelect.Items[i] is ComboBoxItem item && item.Tag is string v
+                && v == snap.audience && WizardAudienceSelect.SelectedIndex != i)
+            {
+                WizardAudienceSelect.SelectedIndex = i;
+                break;
+            }
+        }
+        WizardAudienceHint.Text = S.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.AudienceHint(false, snap.audience));
+    }
+
+    /// <summary>The Name step's audience options — the shared <c>audience_options</c>
+    /// for an unbound folder, so exactly Private | Public — painted as the value/label
+    /// split every picker on this page uses (<see cref="PickerOption"/>: the localized
+    /// label shown, the wire value the cross-app select contract drives). Built once
+    /// per wizard open, before the first render selects the snapshot's value.</summary>
+    private void BuildWizardAudienceOptions()
+    {
+        _suppressWizardEvents = true;
+        try
+        {
+            WizardAudienceSelect.Items.Clear();
+            var current = Wiz?.NameSnapshot().audience ?? AudiencePrivate;
+            foreach (var opt in uniffi.fauna_ffi.FaunaFfiMethods.AudienceOptions(false, current))
+                WizardAudienceSelect.Items.Add(PickerOption.Create(S.Resolve(opt.label), opt.value));
+        }
+        finally { _suppressWizardEvents = false; }
+    }
+
+    private void WizardAudience_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressWizardEvents || Wiz is null) return;
+        if (WizardAudienceSelect.SelectedItem is not ComboBoxItem item || item.Tag is not string value) return;
+        // The choice rides the wizard; it commits nothing. Create on a Public wizard
+        // arms the declassify confirm (AnswerWizardDeclassifyAsync).
+        if (value != Wiz.NameSnapshot().audience) Wiz.SetAudience(value);
     }
 
     // ── Wizard step 2: per-device enrollment + place flags ──
@@ -4594,6 +4758,13 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         var snap = Wiz!.ReviewSnapshot();
         WizardReviewContainer.Children.Clear();
         AppendReviewRow(S.Get("devices/wizard/review_name"), snap.name);
+        // Who can see it — the Name step's choice, read-only like the name (Born
+        // public, ruling 1); painted only where the Name step offered the choice.
+        if (Wiz.NameSnapshot().audienceOffered)
+        {
+            AppendReviewRow(S.Get("devices/wizard/review_audience"),
+                S.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.AudienceLabel(snap.audience)));
+        }
         // No mode line, no retention line, no cadence line: a folder has no type
         // (phase 2 slice e), retention is the nest place's policy edited on the row
         // rather than chosen at create, and the scan cadence is a constant (phase 5).

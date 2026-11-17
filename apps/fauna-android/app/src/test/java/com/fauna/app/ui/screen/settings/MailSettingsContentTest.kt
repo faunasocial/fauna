@@ -16,6 +16,8 @@ import uniffi.fauna_client_mail_settings.MailCredentialSummary
 import uniffi.fauna_client_mail_settings.MuaInstructions
 import uniffi.fauna_client_mail_settings.PendingRotationStatus
 import uniffi.fauna_client_mail_settings.SettingsStatus
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [MailSettingsContent] (the
@@ -55,6 +57,7 @@ class MailSettingsContentTest {
 
     private fun render(
         enabled: Boolean = true,
+        mailUsable: Possibility = if (enabled) Possibility.Possible else Possibility.Blocked(LocalizedText("mail_settings.usable_needs_mail_on", emptyMap())),
         mailUnavailableHere: Boolean = false,
         caldavEnabled: Boolean = false,
         carddavEnabled: Boolean = false,
@@ -112,6 +115,7 @@ class MailSettingsContentTest {
         composeTestRule.setContent {
             MailSettingsContent(
                 enabled = enabled,
+                mailUsable = mailUsable,
                 mailUnavailableHere = mailUnavailableHere,
                 caldavEnabled = caldavEnabled,
                 carddavEnabled = carddavEnabled,
@@ -538,5 +542,50 @@ class MailSettingsContentTest {
         render(enabled = true, servingEnabled = false)
         composeTestRule.onNodeWithTag("mail-settings-serve-here-toggle").performScrollTo()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "off"))
+    }
+
+    // ── The mail-usable gate on the sub-page rows (mail-settings.md § Errors &
+    // edge cases, the mail-usable gate) ──
+
+    private fun text(id: Int) = RuntimeEnvironment.getApplication().getString(id)
+
+    private val subpageRows = listOf(
+        R.string.mail_aliases_title,
+        R.string.mail_lists_title,
+        R.string.mail_export_title,
+        R.string.mail_import_title,
+        R.string.mail_spam_title,
+    )
+
+    @Test
+    fun subpageRowsAreAbsentWhereTheBoxCanNeverServeMail() {
+        render(enabled = false, mailUnavailableHere = true, mailUsable = Possibility.Absent)
+        subpageRows.forEach { composeTestRule.onAllNodesWithText(text(it)).assertCountEquals(0) }
+    }
+
+    @Test
+    fun subpageRowsAreDisabledWithTheSharedReasonWhileBlocked() {
+        var taps = 0
+        render(
+            enabled = false,
+            mailUsable = Possibility.Blocked(LocalizedText("mail_settings.usable_needs_mail_on", emptyMap())),
+            onNavAliases = { taps++ },
+        )
+        subpageRows.forEach {
+            composeTestRule.onNodeWithText(text(it)).performScrollTo().assertIsDisplayed()
+        }
+        composeTestRule.onNodeWithText(text(R.string.mail_settings_usable_needs_mail_on))
+            .performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText(text(R.string.mail_aliases_title)).performClick()
+        assertEquals(0, taps)
+    }
+
+    @Test
+    fun subpageRowsAreLiveWhenPossible() {
+        var taps = 0
+        render(enabled = true, mailUsable = Possibility.Possible, onNavAliases = { taps++ })
+        composeTestRule.onNodeWithText(text(R.string.mail_aliases_title)).performScrollTo().performClick()
+        assertEquals(1, taps)
+        composeTestRule.onAllNodesWithText(text(R.string.mail_settings_usable_needs_mail_on)).assertCountEquals(0)
     }
 }

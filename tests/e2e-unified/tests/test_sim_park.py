@@ -219,10 +219,165 @@ def test_the_file_provider_seat_is_never_parked():
     assert "sim_park" not in src
 
 
-def test_the_cli_opens_and_closes_a_park(tmp_path, capsys):
+def test_the_cli_opens_and_closes_a_park(tmp_path, capsys, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(sim_park, "_spawn_holder", lambda directory: spawned.append(directory))
     d = tmp_path / "p"
     assert sim_park.main(["open", str(d), "--owner-pid", str(os.getpid())]) == 0
     assert (d / "owner").read_text().strip() == str(os.getpid())
+    assert spawned == [d]
     assert sim_park.main(["close", str(d)]) == 0
     assert not d.exists()
     assert "deleted 0 parked device(s)" in capsys.readouterr().out
+
+
+# ── the park's grant: a parked device is never under no grant ────────────────
+
+
+class FakeSlots:
+    """The build-slot library surface the park's holder uses."""
+
+    SIM_IDLE_POOL = "sim_idle"
+
+    def __init__(self, enabled=True, refuse=0):
+        self.enabled = enabled
+        self.refuse = refuse  # TimeoutErrors before a grant
+        self.acquired: list[str] = []
+        self.released: list[tuple] = []
+        self.notes: list[list[str]] = []
+
+    def sim_idle_enabled(self):
+        return self.enabled
+
+    def acquire_slot(self, pool, cmd=None, timeout_s=None):
+        if self.refuse:
+            self.refuse -= 1
+            raise TimeoutError("no room")
+        self.acquired.append(pool)
+        return 7
+
+    def annotate_note(self, fd, fields):
+        assert fd == 7
+        self.notes.append(sorted(fields["sims"]))
+
+    def release_slot(self, fd, pool=None):
+        self.released.append((fd, pool))
+
+
+def _driven_hold(park, slots, script):
+    """Run the holder, calling `script[i]()` after its i-th pass; once the
+    script is spent the owner closes the park and the next pass ends it."""
+    passes = iter(script)
+    (park / sim_park._HOLDER_FILE).write_text(f"{os.getpid()}\n")
+
+    def step(_s):
+        fn = next(passes, None)
+        if fn is None:
+            (park / "owner").unlink(missing_ok=True)
+        else:
+            fn()
+
+    return sim_park.hold(park, slots, step=step, log=lambda *_: None)
+
+
+def test_the_holder_names_every_parked_device_under_one_sim_idle_grant(park):
+    """From the first parked device to the park's close, ONE `sim_idle`
+    grant names the parked devices (`sims`): a park adds a device, a lease
+    takes it off (the lessee's own grant names it from then), and the grant
+    is released only once the owner has closed the park."""
+    sim = FakeSimctl()
+    sim.add("U20", "a")
+    sim.add("U21", "b")
+    slots = FakeSlots()
+    _driven_hold(park, slots, [
+        lambda: None,  # nothing parked yet: no grant
+        lambda: sim_park.park(park, "U20", RT, DT, (), run=sim),
+        lambda: sim_park.park(park, "U21", RT, DT, (), run=sim),
+        lambda: sim_park.lease(park, RT, DT, "n", run=sim),
+    ])
+    assert slots.acquired == ["sim_idle"]
+    assert slots.notes[0] == ["U20"]
+    assert slots.notes[1] == ["U20", "U21"]
+    assert len(slots.notes[2]) == 1
+    assert slots.released == [(7, "sim_idle")]
+
+
+def test_the_holder_takes_no_grant_for_an_empty_park(park):
+    slots = FakeSlots()
+    _driven_hold(park, slots, [lambda: None, lambda: None])
+    assert slots.acquired == [] and slots.released == []
+
+
+def test_the_holder_asks_again_after_a_refused_wait(park):
+    sim = FakeSimctl()
+    sim.add("U22", "a")
+    sim_park.park(park, "U22", RT, DT, (), run=sim)
+    slots = FakeSlots(refuse=1)
+    _driven_hold(park, slots, [lambda: None, lambda: None])
+    assert slots.acquired == ["sim_idle"]
+    assert slots.notes == [["U22"]]
+    assert slots.released == [(7, "sim_idle")]
+
+
+def test_where_sim_idle_is_no_pool_the_holder_asks_nothing(park):
+    sim = FakeSimctl()
+    sim.add("U26", "a")
+    sim_park.park(park, "U26", RT, DT, (), run=sim)
+    slots = FakeSlots(enabled=False)
+    _driven_hold(park, slots, [lambda: None])
+    assert slots.acquired == [] and slots.released == []
+
+
+def test_a_device_mid_lease_stays_named_by_the_park(park):
+    """Between a lessee's claim of the record and its own grant naming the
+    device, the park's grant still names it: no gap at the hand-over."""
+    sim = FakeSimctl()
+    sim.add("U23", "a")
+    sim_park.park(park, "U23", RT, DT, (), run=sim)
+    rec = park / "U23.json"
+    os.rename(rec, rec.with_name(f"U23.json{sim_park._LEASING}{os.getpid()}"))
+    assert sim_park.parked_udids(park) == ["U23"]
+
+
+def test_a_superseded_holder_ends(park):
+    """A holder whose park was reopened for another holder (its pid no longer
+    in the holder file) ends and releases what it held."""
+    sim = FakeSimctl()
+    sim.add("U24", "a")
+    sim_park.park(park, "U24", RT, DT, (), run=sim)
+    slots = FakeSlots()
+
+    def supersede():
+        (park / sim_park._HOLDER_FILE).write_text("999999999\n")
+
+    _driven_hold(park, slots, [
+        supersede, lambda: pytest.fail("held on after it was superseded")])
+    assert slots.released == [(7, "sim_idle")]
+
+
+def test_open_starts_the_holder_and_close_waits_for_it_after_the_deletes(tmp_path):
+    """`open` starts the holder and writes its pid; `close` deletes the
+    parked devices first (still under the grant), then ends the owner and
+    waits for the holder to release before it removes the park."""
+    d = tmp_path / "sim-park"
+    sim = FakeSimctl()
+    spawned = []
+    sim_park.open_park(d, os.getpid(), run=sim,
+                       spawn=lambda p: spawned.append(p) or 4242)
+    assert spawned == [d]
+    assert (d / sim_park._HOLDER_FILE).read_text().strip() == "4242"
+    sim.add("U25", "a")
+    assert sim_park.park(d, "U25", RT, DT, (), run=sim)
+    probes = []
+    alive = {"n": 2}
+
+    def holder_alive(pid):
+        assert pid == 4242
+        probes.append((sorted(sim.devices), (d / "owner").exists()))
+        alive["n"] -= 1
+        return alive["n"] > 0
+
+    assert sim_park.close(d, run=sim, holder_alive=holder_alive,
+                          step=lambda _s: None) == ["U25"]
+    assert probes and all(p == ([], False) for p in probes)
+    assert not d.exists()

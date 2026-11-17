@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The property list embedded in the macOS fauna-sync-agent binary (its
+     __TEXT,__info_plist section). When the agent hosts the account store it
+     binds the device-to-device leg itself, and macOS attributes the Local
+     Network prompt to the agent, so it explains the prompt as the apps do. -->
+<plist version="1.0">
+<dict>
+  <!-- The identifier is the agent's LaunchAgent label, and the name is the
+       binary's own, the one macOS shows for a bare executable today: embedding
+       them changes no wording a user sees. The identifier is also the binary's
+       default code-signing identifier, so its designated requirement names it
+       (installers/macos.md § Identifier domain). -->
+  <key>CFBundleIdentifier</key>
+  <string>social.fauna.sync-agent</string>
+  <key>CFBundleName</key>
+  <string>fauna-sync-agent</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <!-- public-text: apple-permission-strings: every usage description from here to
+       the end marker is a public text, changed only in a public-texts round
+       (docs/goal/architecture/public-texts.md § The boundary). The app
+       Info.plists hold the same region. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Fauna connects directly to your other devices on this network, so they stay in step even when your nest can't be reached.</string>
+  <!-- public-text-end: apple-permission-strings -->
+</dict>
+</plist>

@@ -36,6 +36,10 @@ public enum L {
 
         public static let loadFailed = "Failed to load"
 
+        public static let inFlight = "Still saving — wait for it to finish"
+
+        public static let nothingToConfirm = "Nothing is waiting to be confirmed"
+
         public static let notFound = "Not found"
 
         public static let search = "Search"
@@ -932,6 +936,10 @@ public enum L {
 
                 public static let domainRegistering = "Registering domain"
 
+                public static let domainCreatingZone = "Creating the DNS zone"
+
+                public static let domainSettingNameservers = "Pointing the domain at its DNS"
+
                 public static let domainVerifyingZone = "Verifying DNS zone"
 
                 public static let serverGeneratingDkim = "Generating DKIM keys"
@@ -984,6 +992,110 @@ public enum L {
             public static let localhostHint = "test@localhost is allowed for trying out the app."
 
             public static let controlCheckbox = "I control DNS for this domain"
+        }
+
+        public enum providerChoice {
+            public static let title = "Choose providers"
+
+            public static let description = "Connect the providers that will set up your nest. Nothing is bought or changed until you press Buy and set up on the next page."
+
+            public static func goalDomain(domain: String) -> String {
+                "Register \(domain)"
+            }
+
+            public static func goalDns(domain: String) -> String {
+                "DNS for \(domain)"
+            }
+
+            public static let goalVps = "A server"
+
+            public static func goalCoveredBy(provider: String) -> String {
+                "Covered by \(provider)"
+            }
+
+            public static let goalOpen = "Not covered yet — connect a provider below."
+
+            public static func goalPrice(price: String, renewal: String) -> String {
+                "\(price) first year, then \(renewal) a year"
+            }
+
+            public static func goalPriceFirstYear(price: String) -> String {
+                "\(price) first year"
+            }
+
+            public static let cannotCoverNoDns = "Doesn't run DNS."
+
+            public static let cannotCoverNoServer = "Doesn't rent servers."
+
+            public static let cannotCoverNoRegistrar = "Doesn't register domains."
+
+            public static let cannotCoverNotRegistrable = "Can't register this domain."
+
+            public static func cannotCoverZoneMissing(domain: String) -> String {
+                "This account doesn't hold \(domain)."
+            }
+
+            public static let cannotCoverNoZoneDoor = "Can't set up DNS for a domain registered elsewhere."
+
+            public static func cannotCoverNoNameserverDoor(provider: String) -> String {
+                "\(provider) can't point a domain at another provider's DNS."
+            }
+
+            public static func cannotCoverPointedElsewhere(provider: String) -> String {
+                "Your domain now points at \(provider)'s DNS."
+            }
+
+            public static func dnsNotPointedYet(domain: String, provider: String) -> String {
+                "\(domain) doesn't point at \(provider) yet."
+            }
+
+            public static let heldCredential = "Connected with a sign-in this device already holds."
+
+            public static func statusCoverDomain(domain: String) -> String {
+                "Connect a provider that can register \(domain) to continue."
+            }
+
+            public static let statusCoverDns = "Connect a provider that can run DNS for your domain, or set DNS up later, to continue."
+
+            public static let statusCoverVps = "Connect a provider that rents servers to continue."
+
+            public static func statusContactMissing(provider: String) -> String {
+                "Open \(provider) and fill in the registration contact to continue."
+            }
+
+            public static let startBlockedPrice = "Tick the box under the domain's price to agree to it."
+
+            public static let startBlockedServerType = "Choose a server type to continue."
+
+            public static let manualRowHelp = "Shows you the DNS records to add yourself once your nest is built."
+
+            public static let providersHeading = "Providers"
+
+            public static let capabilityRegistrar = "registers domains"
+
+            public static let capabilityDns = "runs DNS"
+
+            public static let capabilityVps = "rents servers"
+
+            public static let stateConnected = "connected"
+
+            public static let stateAvailable = "not connected"
+
+            public static let stateConnecting = "connecting…"
+
+            public static let manualRow = "I will set DNS up later"
+
+            public static let goalSelect = "Covered by"
+
+            public static let connect = "Connect"
+
+            public static let disconnect = "Disconnect"
+
+            public static let close = "Close"
+
+            public static let dialogConnected = "Connected."
+
+            public static let dialogConnecting = "Connecting…"
         }
 
         public enum dnsConfig {
@@ -1596,6 +1708,8 @@ public enum L {
     public enum feed {
         public static let composeEmpty = "Post cannot be empty"
 
+        public static let replyEmpty = "Write your reply first."
+
         public static func importedNotice(platform: String) -> String {
             "Showing the posts you imported from \(platform)"
         }
@@ -1748,12 +1862,18 @@ public enum L {
             public static let uri = "Feed URI"
 
             public static let name = "Display Name"
+
+            public static let kindRequired = "Choose a bridge first."
+
+            public static let uriRequired = "Type the feed URI first."
         }
 
         public enum create {
             public static let title = "New Feed"
 
             public static let namePlaceholder = "My Feed"
+
+            public static let nameRequired = "Name the feed first."
 
             public static let addRule = "Add Rule"
 
@@ -2012,6 +2132,14 @@ public enum L {
             public static let resolve = "Resolve"
 
             public static let writeMessage = "Write your message..."
+
+            public static let needsRecipient = "Add who it goes to first."
+
+            public static let recipientUnsupported = "This app cannot send to this recipient. Remove it and add another."
+
+            public static let noAttachmentsHere = "Files cannot be sent to this recipient."
+
+            public static let noTopicHere = "A topic cannot be set for this recipient."
 
             public static let encrypted = "Encrypted"
         }
@@ -2716,6 +2844,28 @@ public enum L {
             }
         }
 
+        public enum createBlocked {
+            public static let loading = "Your calendars are still loading."
+
+            public static func provisionFailed(error: String) -> String {
+                "Your first calendar could not be set up (\(error)). It is tried again the next time Events loads."
+            }
+
+            public static let addCredential = "To keep events, turn on calendar storage by adding a credential in Settings → Mail & Calendar."
+
+            public static let adminEnableCalendar = "To keep events, turn on calendar for this nest in Nest Admin → Calendar first."
+
+            public static let notHere = "Events cannot be kept on this account, because this nest does not serve calendars."
+
+            public static let openMailSettings = "Open Mail & Calendar settings"
+
+            public static let openAdminCalendar = "Open Nest Admin → Calendar"
+        }
+
+        public static func saveFailed(error: String) -> String {
+            "The event could not be saved (\(error)). What you typed is kept; press Save to try again."
+        }
+
         public enum error {
             public static let loadCalendars = "Failed to load calendars"
 
@@ -3085,6 +3235,8 @@ public enum L {
         }
 
         public static let errorNoIdentity = "This app cannot authorize posting from external apps. Use another of your devices to turn it on."
+
+        public static let pageUnavailable = "Bluesky settings are not available in this session: this device could not read your identity key. Sign in again to try once more."
 
         public static func errorDelegationUntrusted(message: String) -> String {
             "The stored authorization for external apps was not created by this account, so it is not being shown. (\(message))"
@@ -3536,7 +3688,9 @@ public enum L {
             "Failed to delete: \(message)"
         }
 
-        public static let errorNoSet = "You don't have a folder to upload into yet. Create a folder under Settings → Folders first."
+        public static func errorFirstFolder(message: String) -> String {
+            "Couldn't create your first folder, so nothing was uploaded: \(message). Try the upload again."
+        }
 
         public static func errorRestore(message: String) -> String {
             "Failed to restore version: \(message)"
@@ -3986,6 +4140,20 @@ public enum L {
 
         public static let backupDestinationCapacityInvalid = "Enter a storage limit like \"50 GB\" or \"500 MB\"."
 
+        public static let backupDestinationUrlRequired = "Type the address of the nest to back up to first."
+
+        public static let snapshotDeleteAlreadyPending = "Already scheduled for deletion."
+
+        public static let snapshotDeleteAlreadyDeleted = "Already deleted — recover it to keep it."
+
+        public static let snapshotSelectFolderFirst = "Choose a folder first."
+
+        public static let restoreKindUnticked = "Tick this snapshot's kind to restore it."
+
+        public static let snapshotRestoreDestinationRequired = "Type the folder to restore into first."
+
+        public static let snapshotRestoreRunning = "A restore is already running."
+
         public static func backupDestinationUsage(held: String, cap: String) -> String {
             "\(held) of \(cap) used"
         }
@@ -4430,15 +4598,21 @@ public enum L {
     public enum folders {
         public static let title = "Folders"
 
+        public static let followHandleRequired = "Type the folder owner's handle first."
+
+        public static let followNameRequired = "Type the folder's name first."
+
+        public static let followNotReady = "Sign in first, then follow the folder."
+
+        public static let shareRecipientRequired = "Type who to share with first."
+
+        public static let shareNotReady = "Sharing needs your conversations to be ready — wait a moment, then try again."
+
         public static let photoLibrarySection = "Photo Library"
 
         public static let syncedLocations = "Synced Locations"
 
         public static let noLocationsBound = "No locations bound to this set."
-
-        public static let locationPathPlaceholder = "Location path"
-
-        public static let bindLocation = "Bind Location"
 
         public static let choose = "Choose…"
 
@@ -4503,6 +4677,8 @@ public enum L {
         public static let offlineShareCodeMalformed = "That does not look like a code. It should be 64 letters and numbers."
 
         public static let offlineShareCodeOwn = "That is this device's own code — type the other person's."
+
+        public static let offlineShareCodeNeeded = "Type the other person's code first."
 
         public static func errorOfflineShare(message: String) -> String {
             "Sharing did not finish: \(message)"
@@ -5153,6 +5329,8 @@ public enum L {
 
             public static let creatingFolder = "Creating folder..."
 
+            public static let confirmPublicPending = "Answer the public-folder question above to create it."
+
             public static let failedCreate = "Failed to create folder."
 
             public static let selectDevicesRoles = "Select devices and choose what each one does (optional — skip to just store files here):"
@@ -5275,19 +5453,7 @@ public enum L {
         }
 
         public enum syncLocations {
-            public static let title = "Sync Locations"
-
-            public static let locationPlaceholder = "Location path (or use Browse...)"
-
             public static let browse = "Browse..."
-
-            public static let addLocation = "Add Location"
-
-            public static let noLocations = "No sync locations configured."
-
-            public static let folderPlaceholder = "Folder name"
-
-            public static let unbound = "(unbound)"
 
             public static let onDemandLabel = "On-demand"
 
@@ -5553,6 +5719,10 @@ public enum L {
 
             public static func reviewRemoveUnsyncedSeats(seats: String) -> String {
                 "They are also in \(seats) group chat(s) not yet synced to this device. Choose Remove again after syncing completes, or from a device that has those chats."
+            }
+
+            public static func reviewKeepFailed(reason: String) -> String {
+                "Could not record your decision yet: \(reason). They stay listed until it succeeds."
             }
 
             public static func reviewVerdictFailed(who: String, reason: String) -> String {
@@ -6334,6 +6504,16 @@ public enum L {
             public static let lanAddresses = "LAN Addresses"
 
             public static let lanNone = "(no active interfaces detected)"
+
+            public static let serviceUnavailable = "Peer connections did not start on this device. Restart Fauna to try again."
+
+            public static let nodeIdCopyNeedsTunnel = "Start the tunnel to get a node ID to copy."
+
+            public static let lanCopyNone = "No LAN address to copy."
+
+            public static func contactRemoveFailed(name: String, error: String) -> String {
+                "Could not remove \(name): \(error)"
+            }
         }
 
         public static let signOutConfirm = "Are you sure you want to sign out? You will need your secret key to sign back in."
@@ -6759,6 +6939,12 @@ public enum L {
         public static let keysInfo = "Your mail is protected by an encryption key held on your Fauna devices. Each app password or token you add unlocks that same key for one email app (Thunderbird, Apple Mail, …). Rotate your keys if a password or token may have leaked, or if a device that had your mail set up was lost or stolen — rotating replaces the key so the exposed credential can no longer read your mail (messages you've already received stay readable). If you're just retiring an app you no longer use, revoke that one credential instead — you don't need to rotate."
 
         public static let credentialsOnConnectedApps = "Your app passwords are listed under Settings → Connected apps — copy, reveal or disconnect each one there."
+
+        public static let usableNeedsMailOn = "Turn on mail on the Mail & Calendar page first."
+
+        public static let usableReading = "Checking whether mail is on for your account…"
+
+        public static let usableUnbuilt = "Mail settings could not be loaded on this device. Signing out and back in rebuilds them."
 
         public static let serveHereLabel = "Serve my mail & calendar over IMAP/CalDAV on this nest"
 
@@ -7678,6 +7864,8 @@ public enum L {
 
         public static let loadMoreFailed = "Load more failed"
 
+        public static let queryRequired = "Type something to search for first."
+
         public static let searchMessages = "Search messages..."
 
         public static let badgePost = "Post"
@@ -7726,6 +7914,8 @@ public enum L {
             public static let linkButton = "Link Account"
 
             public static let enterNsec = "Please enter an nsec key"
+
+            public static let enterBunkerUrl = "Paste the bunker URL from your signer app first."
 
             public static let noNip07 = "No NIP-07 browser extension detected"
         }
@@ -7807,6 +7997,10 @@ public enum L {
 
             public static let invalidUrl = "Relay URL must start with wss:// or ws://"
 
+            public static let urlRequired = "Type a relay address first."
+
+            public static let alreadyAdded = "This relay is already in your list."
+
             public static let privateAddress = "Relays on a private network or on this device can't be used. Use a public relay address."
         }
 
@@ -7820,6 +8014,8 @@ public enum L {
             public static let pubkeyPlaceholder = "npub1... or hex pubkey"
 
             public static let petnamePlaceholder = "Petname"
+
+            public static let pubkeyRequired = "Type the npub or hex pubkey to follow first."
         }
 
         public enum connectedApps {
@@ -7872,6 +8068,8 @@ public enum L {
             public static let unnamed = "Unnamed signer"
 
             public static let invalidPubkey = "A signer pubkey must be 64 hexadecimal characters."
+
+            public static let pubkeyRequired = "Paste your wallet provider's signer pubkey first."
         }
     }
 
@@ -8186,6 +8384,10 @@ public enum L {
             public static let makeAdmin = "Make Admin"
 
             public static let removeAdmin = "Remove Admin"
+
+            public static let removeAdminLastSuperadmin = "This is the last admin with full rights. Make another user an admin first."
+
+            public static let ageBandNeedsGuardian = "Pick a guardian first. An age band applies only to a supervised account."
 
             public static func supervisedBy(guardian: String) -> String {
                 "Supervised by \(guardian)"
@@ -9687,6 +9889,24 @@ public enum L {
 
             public static let dmarcPolicyNone = "None — reports only"
 
+            public static let modeNeedsCredential = "Add a DNS-provider credential that covers this domain first."
+
+            public static let manageAllNeedsDomain = "Add a domain first."
+
+            public static let manageAllNeedsCredential = "Add a DNS-provider credential that covers every domain first."
+
+            public static let domainRequired = "Type a domain name."
+
+            public static let domainMalformed = "Type a domain name such as example.com."
+
+            public static let domainDuplicate = "That domain is already added."
+
+            public static let removePrimaryBlocked = "Rename the primary domain onto another domain to remove it."
+
+            public static let credentialProviderRequired = "Pick a DNS provider."
+
+            public static let credentialFieldRequired = "Fill in every field."
+
             public enum cert {
                 public static let label = "Certificate:"
 
@@ -9737,6 +9957,8 @@ public enum L {
                 public static func issuanceFailed(date: String, error: String) -> String {
                     "Certificate request failed (\(date)): \(error)"
                 }
+
+                public static let issuePending = "Finish or cancel the certificate request below first."
             }
 
             public enum rename {
@@ -9779,6 +10001,14 @@ public enum L {
                 public static let abortConfirm = "Confirm abort"
 
                 public static let abortPostflipWarning = "Aborting after the anchor flip re-flips the primary and rewrites every domain's DNS — expensive but safe."
+
+                public static let needsSecondDomain = "Add a second domain to rename onto."
+
+                public static let inProgress = "A rename is already in progress."
+
+                public static let targetRequired = "Pick the new primary domain."
+
+                public static let daysInvalid = "Type a whole number of days from 1 to 30, or leave it blank."
             }
         }
 
@@ -10646,6 +10876,16 @@ public enum L {
 
         public static let contactAddInvalidActorId = "Not a valid actor ID (expected hex)"
 
+        public static let contactAddRequired = "Type the actor ID to pre-approve first."
+
+        public static let transferRequired = "Type the new guardian's actor ID first."
+
+        public static let transferInvalidActorId = "Not a valid actor ID for the new guardian (expected hex)"
+
+        public static func policyScreenTimeInvalid(reason: String) -> String {
+            "Screen time cannot be saved: \(reason)"
+        }
+
         public static let graduateButton = "Graduate to full account"
 
         public static func graduateConfirmButton(handle: String) -> String {
@@ -10859,6 +11099,8 @@ public enum L {
         public static let dismiss = "Dismiss"
 
         public static let clearAll = "Clear all"
+
+        public static let nothingToClear = "No notifications to clear"
 
         public static func rowTipSats(sender: String, value: String) -> String {
             "\(sender) tipped \(value) sats on your post"
@@ -11105,6 +11347,14 @@ public enum L {
 
     public enum subscriptions {
         public static let title = "Subscriptions"
+
+        public static let tierNameRequired = "Name the tier first."
+
+        public static let redeemCodeRequired = "Type the claim code first."
+
+        public static let claimNeedsTier = "Create a tier first — a claim code entitles one of your tiers."
+
+        public static let providerNeedsTier = "Create a tier first — a payment provider sells one of your tiers."
 
         public static let myTiers = "My Tiers"
 
@@ -12300,6 +12550,16 @@ public enum L {
             "Keys to your records published by \(publisher): \(kinds) — read only"
         }
 
+        public static func trustScopeDeposit(folder: String) -> String {
+            "Put files into your folder \"\(folder)\""
+        }
+
+        public static let trustScopeDepositDeleted = "Put files into a folder you have since deleted"
+
+        public static let trustScopeDepositUnnamed = "Put files into one of your folders"
+
+        public static let trustScopeOpUnknown = "An operation your nest does for this app"
+
         public static let trustStatusExpired = "Expired — the app will ask again if it needs them"
 
         public static let trustEmpty = "This app holds no keys to your records"
@@ -12548,6 +12808,7 @@ private enum _LFlat {
         "admin.dns.cert.issue": "Get certificate",
         "admin.dns.cert.issue_cancel": "Cancel",
         "admin.dns.cert.issue_complete": "I've added the record",
+        "admin.dns.cert.issue_pending": "Finish or cancel the certificate request below first.",
         "admin.dns.cert.label": "Certificate:",
         "admin.dns.cert.paste_instructions": "Add this DNS record at your registrar, then confirm:",
         "admin.dns.cert.remove_delegation": "Remove delegation",
@@ -12557,6 +12818,8 @@ private enum _LFlat {
         "admin.dns.cert.status_on_floor": "Renew needed",
         "admin.dns.cert.status_valid": "Valid",
         "admin.dns.copy": "Copy",
+        "admin.dns.credential_field_required": "Fill in every field.",
+        "admin.dns.credential_provider_required": "Pick a DNS provider.",
         "admin.dns.credential_zones": "Zones",
         "admin.dns.credentials_empty": "No DNS-provider credentials yet.",
         "admin.dns.credentials_title": "DNS-provider credentials",
@@ -12565,14 +12828,20 @@ private enum _LFlat {
         "admin.dns.dmarc_policy_none": "None — reports only",
         "admin.dns.dmarc_policy_quarantine": "Quarantine",
         "admin.dns.dmarc_policy_reject": "Reject (default)",
+        "admin.dns.domain_duplicate": "That domain is already added.",
+        "admin.dns.domain_malformed": "Type a domain name such as example.com.",
+        "admin.dns.domain_required": "Type a domain name.",
         "admin.dns.empty": "No domains yet.",
         "admin.dns.empty_desc": "Add a mail domain and its required DNS records appear here.",
         "admin.dns.field_name": "Name",
         "admin.dns.field_type": "Type",
         "admin.dns.field_value": "Value",
         "admin.dns.manage_all": "Fauna controls all domains",
+        "admin.dns.manage_all_needs_credential": "Add a DNS-provider credential that covers every domain first.",
+        "admin.dns.manage_all_needs_domain": "Add a domain first.",
         "admin.dns.mode_managed": "Fauna-managed",
         "admin.dns.mode_manual": "Manual",
+        "admin.dns.mode_needs_credential": "Add a DNS-provider credential that covers this domain first.",
         "admin.dns.primary_badge": "Primary",
         "admin.dns.ptr_provider_note": "Reverse DNS (PTR) is set at your server's IP provider, not published here. Most VPS providers let you set it in their control panel.",
         "admin.dns.refresh": "Refresh",
@@ -12580,6 +12849,7 @@ private enum _LFlat {
         "admin.dns.remove_confirm": "Remove domain",
         "admin.dns.remove_confirm_body": "{domain} will stop receiving mail: the addresses your members have on it stop working, and mail sent to them is refused. You can restore the domain for 30 days, and those addresses come back with it. After 30 days the domain, its signing key and the aliases on it are gone for good, and adding it again starts with a new key. Mail already on its way may still arrive.",
         "admin.dns.remove_confirm_title": "Remove {domain}?",
+        "admin.dns.remove_primary_blocked": "Rename the primary domain onto another domain to remove it.",
         "admin.dns.removed_desc": "Restorable for 30 days.",
         "admin.dns.removed_title": "Recently removed",
         "admin.dns.rename.abort": "Abort rename",
@@ -12591,17 +12861,21 @@ private enum _LFlat {
         "admin.dns.rename.complete": "Complete now",
         "admin.dns.rename.complete_confirm": "Confirm complete",
         "admin.dns.rename.complete_force_warning": "Completing before the grace window ends may briefly break mail delivery for peers whose caches have not yet refreshed.",
+        "admin.dns.rename.days_invalid": "Type a whole number of days from 1 to 30, or leave it blank.",
         "admin.dns.rename.extend": "Extend grace",
         "admin.dns.rename.extend_days_label": "Extend by (days):",
         "admin.dns.rename.grace_days_label": "Grace window (days, default 7)",
         "admin.dns.rename.grace_elapsed": "Grace window elapsed",
         "admin.dns.rename.grace_ends": "Grace ends:",
+        "admin.dns.rename.in_progress": "A rename is already in progress.",
+        "admin.dns.rename.needs_second_domain": "Add a second domain to rename onto.",
         "admin.dns.rename.new_primary_label": "New primary domain",
         "admin.dns.rename.promote": "Promote to primary",
         "admin.dns.rename.renaming_to": "Renaming to",
         "admin.dns.rename.sheet_title": "Rename primary domain",
         "admin.dns.rename.state_label": "State:",
         "admin.dns.rename.submit": "Start rename",
+        "admin.dns.rename.target_required": "Pick the new primary domain.",
         "admin.dns.restore": "Restore",
         "admin.dns.role_address_admin_default": "Admin (default)",
         "admin.dns.role_address_label": "Role addresses:",
@@ -13071,6 +13345,7 @@ private enum _LFlat {
         "admin.users_page.admit_actor_label": "Their account key (64 characters)",
         "admin.users_page.admit_button": "Admit",
         "admin.users_page.admit_handle_label": "Their handle (blank admits without one — they cannot send email until they have a handle)",
+        "admin.users_page.age_band_needs_guardian": "Pick a guardian first. An age band applies only to a supervised account.",
         "admin.users_page.age_verification_required_label": "Accept only signups carrying app age verification",
         "admin.users_page.cancel": "Cancel",
         "admin.users_page.cancel_eviction": "Cancel Eviction",
@@ -13105,6 +13380,7 @@ private enum _LFlat {
         "admin.users_page.registration_mode_unknown": "This nest uses a registration setting this app version does not recognize ({mode}). Update the app to change it.",
         "admin.users_page.registration_save": "Save",
         "admin.users_page.remove_admin": "Remove Admin",
+        "admin.users_page.remove_admin_last_superadmin": "This is the last admin with full rights. Make another user an admin first.",
         "admin.users_page.section_admit": "Admit someone directly",
         "admin.users_page.section_invite": "Invite",
         "admin.users_page.section_pending": "Pending admin actions",
@@ -13338,6 +13614,7 @@ private enum _LFlat {
         "atproto_settings.identity_status_tombstoned": "Permanently retired",
         "atproto_settings.mint_button": "New app credential",
         "atproto_settings.mint_dm_access_label": "Let this app password read and send my Bluesky direct messages",
+        "atproto_settings.page_unavailable": "Bluesky settings are not available in this session: this device could not read your identity key. Sign in again to try once more.",
         "atproto_settings.reveal_button": "Reveal",
         "atproto_settings.revoke_button": "Revoke",
         "atproto_settings.session_created_prefix": "Connected {date}",
@@ -13392,6 +13669,7 @@ private enum _LFlat {
         "backups.backup_destination_resolving": "Resolving destination…",
         "backups.backup_destination_unattested_mark": "Added before you recovered this account — still backing up. Keep it, or remove it if you don't recognise it.",
         "backups.backup_destination_url_placeholder": "Destination nest URL (https://…)",
+        "backups.backup_destination_url_required": "Type the address of the nest to back up to first.",
         "backups.backup_destination_usage": "{held} of {cap} used",
         "backups.backup_destination_usage_cap_reached": "{held} of {cap} used — full, older copies are being dropped",
         "backups.backup_destination_usage_uncapped": "{held} held, no limit set",
@@ -13600,6 +13878,7 @@ private enum _LFlat {
         "backups.restore_files_written": "Restored {count} files to {path}",
         "backups.restore_history_row": "{kinds} from {source} — {when}",
         "backups.restore_into_directory_desc": "Restores every file in this snapshot into the chosen directory.",
+        "backups.restore_kind_unticked": "Tick this snapshot's kind to restore it.",
         "backups.restore_kinds_calendar": "calendar",
         "backups.restore_kinds_contacts": "contacts",
         "backups.restore_kinds_conversations": "conversations",
@@ -13637,17 +13916,22 @@ private enum _LFlat {
         "backups.select_snapshot": "Select a snapshot to view files.",
         "backups.snapshot": "Snapshot #{id}",
         "backups.snapshot_count": "{count} snapshots",
+        "backups.snapshot_delete_already_deleted": "Already deleted — recover it to keep it.",
+        "backups.snapshot_delete_already_pending": "Already scheduled for deletion.",
         "backups.snapshot_delete_button": "Delete",
         "backups.snapshot_integrity_implicated": "integrity problem found in this snapshot",
         "backups.snapshot_integrity_ok": "integrity verified",
         "backups.snapshot_restore_button": "Restore all files",
         "backups.snapshot_restore_destination_not_absolute": "Enter the full path of a folder to restore into (starting with / or ~/), not {path}",
         "backups.snapshot_restore_destination_placeholder": "Folder to restore into, e.g. ~/Restored",
+        "backups.snapshot_restore_destination_required": "Type the folder to restore into first.",
         "backups.snapshot_restore_done": "Restored {files} files ({size}) into {path}",
         "backups.snapshot_restore_failed": "Restore failed: {message}",
         "backups.snapshot_restore_partial": "Restored {files} files into {path}; {failed} failed their integrity check and were not written: {paths}",
         "backups.snapshot_restore_progress": "Restoring snapshot #{id} into {path}…",
+        "backups.snapshot_restore_running": "A restore is already running.",
         "backups.snapshot_row": "#{id} · {when} · {files} · {size}",
+        "backups.snapshot_select_folder_first": "Choose a folder first.",
         "backups.snapshot_state_deletion_pending": "Deletion scheduled — cancel before {when}",
         "backups.snapshot_state_deletion_pending_undated": "Deletion scheduled",
         "backups.snapshot_state_soft_deleted": "Deleted — recoverable until {when}",
@@ -13808,6 +14092,7 @@ private enum _LFlat {
         "common.handle": "Handle",
         "common.identity": "Identity",
         "common.identity_required": "Set up your identity in the Status tab first.",
+        "common.in_flight": "Still saving — wait for it to finish",
         "common.inactive": "Inactive",
         "common.inbox": "Inbox",
         "common.leave": "Leave",
@@ -13836,6 +14121,7 @@ private enum _LFlat {
         "common.not_connected": "Not connected",
         "common.not_found": "Not found",
         "common.not_linked": "Not linked",
+        "common.nothing_to_confirm": "Nothing is waiting to be confirmed",
         "common.notifications": "Notifications",
         "common.ok": "OK",
         "common.open": "Open",
@@ -13982,8 +14268,12 @@ private enum _LFlat {
         "connected_apps.title": "Connected apps",
         "connected_apps.trust_bound_note": "On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and does not yet block content arriving after you disconnect.",
         "connected_apps.trust_empty": "This app holds no keys to your records",
+        "connected_apps.trust_scope_deposit": "Put files into your folder \"{folder}\"",
+        "connected_apps.trust_scope_deposit_deleted": "Put files into a folder you have since deleted",
+        "connected_apps.trust_scope_deposit_unnamed": "Put files into one of your folders",
         "connected_apps.trust_scope_ext_ro": "Keys to your records published by {publisher}: {kinds} — read only",
         "connected_apps.trust_scope_ext_rw": "Keys to your records published by {publisher}: {kinds} — read and write",
+        "connected_apps.trust_scope_op_unknown": "An operation your nest does for this app",
         "connected_apps.trust_status_expired": "Expired — the app will ask again if it needs them",
         "connected_apps.unblock": "Allow requests again",
         "connected_apps.unnamed": "Unnamed app",
@@ -14036,7 +14326,11 @@ private enum _LFlat {
         "contacts.wants_to_connect": "wants to connect",
         "conversations.compose.body": "Body",
         "conversations.compose.encrypted": "Encrypted",
+        "conversations.compose.needs_recipient": "Add who it goes to first.",
         "conversations.compose.new_message": "New Message",
+        "conversations.compose.no_attachments_here": "Files cannot be sent to this recipient.",
+        "conversations.compose.no_topic_here": "A topic cannot be set for this recipient.",
+        "conversations.compose.recipient_unsupported": "This app cannot send to this recipient. Remove it and add another.",
         "conversations.compose.resolve": "Resolve",
         "conversations.compose.subject": "Subject",
         "conversations.compose.title": "Compose",
@@ -14484,9 +14778,7 @@ private enum _LFlat {
         "devices.show_on_demand_finder": "Show in Finder",
         "devices.show_on_demand_hint": "Browse this set on demand — files download when opened and can be freed again.",
         "devices.sync_defaults": "Sync defaults",
-        "devices.sync_locations.add_location": "Add Location",
         "devices.sync_locations.browse": "Browse...",
-        "devices.sync_locations.folder_placeholder": "Folder name",
         "devices.sync_locations.free_space_button": "Free up space",
         "devices.sync_locations.free_space_kept_pinned": "Kept {count} files you chose to keep on this device.",
         "devices.sync_locations.free_space_on_device": "{on_device} of {total} on this device",
@@ -14494,8 +14786,6 @@ private enum _LFlat {
         "devices.sync_locations.free_space_result_kept": "Freed {files} files ({size}). Kept {kept} files because this device may hold the only copy.",
         "devices.sync_locations.free_space_running": "Freeing up space…",
         "devices.sync_locations.helper_unavailable": "Sync service is not running. Start it and try again.",
-        "devices.sync_locations.location_placeholder": "Location path (or use Browse...)",
-        "devices.sync_locations.no_locations": "No sync locations configured.",
         "devices.sync_locations.on_demand_label": "On-demand",
         "devices.sync_locations.on_demand_mount_failed": "On-demand couldn't start for this folder, so only files already on this device are kept in sync. Turn on-demand off to keep every file here.",
         "devices.sync_locations.on_demand_mount_refused": "On-demand can't be used in this location, so only files already on this device are kept in sync. Choose a folder inside your home folder, or turn on-demand off.",
@@ -14503,8 +14793,6 @@ private enum _LFlat {
         "devices.sync_locations.on_demand_no_fuse_device": "On-demand isn't available on this system.",
         "devices.sync_locations.on_demand_unavailable": "On-demand isn't available here.",
         "devices.sync_locations.remove": "Remove",
-        "devices.sync_locations.title": "Sync Locations",
-        "devices.sync_locations.unbound": "(unbound)",
         "devices.this_device_badge": "This device",
         "devices.title": "Devices",
         "devices.unfollow_folder": "Remove",
@@ -14512,6 +14800,7 @@ private enum _LFlat {
         "devices.version_retention_count": "Keep at most (versions per file)",
         "devices.version_retention_days": "Keep versions for at most (days)",
         "devices.wizard.back": "Back",
+        "devices.wizard.confirm_public_pending": "Answer the public-folder question above to create it.",
         "devices.wizard.create": "Create",
         "devices.wizard.create_attest_error": "Folder created, but making it public did not finish: {message}. Choose Public again on the folder to finish.",
         "devices.wizard.create_error": "Failed to create folder: {message}",
@@ -14676,6 +14965,13 @@ private enum _LFlat {
         "events.calendar_name": "Calendar name",
         "events.calendars": "Calendars",
         "events.capacity": "Capacity (0 = unlimited)",
+        "events.create_blocked.add_credential": "To keep events, turn on calendar storage by adding a credential in Settings → Mail & Calendar.",
+        "events.create_blocked.admin_enable_calendar": "To keep events, turn on calendar for this nest in Nest Admin → Calendar first.",
+        "events.create_blocked.loading": "Your calendars are still loading.",
+        "events.create_blocked.not_here": "Events cannot be kept on this account, because this nest does not serve calendars.",
+        "events.create_blocked.open_admin_calendar": "Open Nest Admin → Calendar",
+        "events.create_blocked.open_mail_settings": "Open Mail & Calendar settings",
+        "events.create_blocked.provision_failed": "Your first calendar could not be set up ({error}). It is tried again the next time Events loads.",
         "events.create_event": "Create Event",
         "events.delete_event": "Delete Event",
         "events.delete_event_confirm": "Are you sure you want to delete this event?",
@@ -14773,6 +15069,7 @@ private enum _LFlat {
         "events.rsvp.tentative": "Tentative",
         "events.rsvp.title": "RSVP",
         "events.rsvp.waitlisted": "Waitlisted",
+        "events.save_failed": "The event could not be saved ({error}). What you typed is kept; press Save to try again.",
         "events.select_calendar": "Select a calendar",
         "events.select_calendar_event_hint": "Select a calendar and event to view details.",
         "events.select_event_hint": "Select an event to see its details.",
@@ -14821,6 +15118,7 @@ private enum _LFlat {
         "family.contact_add_button": "Pre-approve contact",
         "family.contact_add_invalid_actor_id": "Not a valid actor ID (expected hex)",
         "family.contact_add_placeholder": "Actor ID (hex)",
+        "family.contact_add_required": "Type the actor ID to pre-approve first.",
         "family.content_blocked_notice": "Hidden by your family policy",
         "family.content_collapsed_notice": "Flagged content",
         "family.content_reveal_button": "Show anyway",
@@ -14852,6 +15150,7 @@ private enum _LFlat {
         "family.policy_screen_caveat": "Enforced by the apps on your child's devices. Leave a field empty to remove that limit.",
         "family.policy_screen_daily_minutes_label": "Daily limit (minutes, all devices)",
         "family.policy_screen_heading": "Screen time",
+        "family.policy_screen_time_invalid": "Screen time cannot be saved: {reason}",
         "family.policy_screen_window_end_label": "Usable until (HH:MM)",
         "family.policy_screen_window_start_label": "Usable from (HH:MM)",
         "family.policy_summary_heading": "Current policy",
@@ -14875,8 +15174,10 @@ private enum _LFlat {
         "family.title": "Family",
         "family.transfer_button": "Propose new guardian",
         "family.transfer_cancel_button": "Cancel proposal",
+        "family.transfer_invalid_actor_id": "Not a valid actor ID for the new guardian (expected hex)",
         "family.transfer_pending": "Waiting for {handle} to accept guardianship",
         "family.transfer_placeholder": "New guardian actor ID (hex)",
+        "family.transfer_required": "Type the new guardian's actor ID first.",
         "family.value_allow": "Allow",
         "family.value_block": "Block",
         "family.value_collapse": "Collapse",
@@ -14967,8 +15268,10 @@ private enum _LFlat {
         "features.window_month": "month",
         "features.window_week": "week",
         "feed.bridge_form.kind": "Bridge",
+        "feed.bridge_form.kind_required": "Choose a bridge first.",
         "feed.bridge_form.name": "Display Name",
         "feed.bridge_form.uri": "Feed URI",
+        "feed.bridge_form.uri_required": "Type the feed URI first.",
         "feed.compose_attachment_missing": "Attach {filename} again — the file is not on this device.",
         "feed.compose_attachment_stale": "Attach the file again — the audience changed after it was prepared",
         "feed.compose_empty": "Post cannot be empty",
@@ -14996,6 +15299,7 @@ private enum _LFlat {
         "feed.create.mode_all": "All match",
         "feed.create.mode_any": "Any match",
         "feed.create.name_placeholder": "My Feed",
+        "feed.create.name_required": "Name the feed first.",
         "feed.create.rule_category": "Category",
         "feed.create.rule_excluded": "Excluded",
         "feed.create.rule_required": "Required",
@@ -15085,6 +15389,7 @@ private enum _LFlat {
         "feed.post_type.community": "Community",
         "feed.quote": "Quote",
         "feed.reference_restricted": "This post is for a smaller audience, and your reply would be public, so it was not sent",
+        "feed.reply_empty": "Write your reply first.",
         "feed.report_post": "Report post",
         "feed.rule_chip.body_contains": "contains: {value}",
         "feed.rule_chip.body_excludes": "excludes: {value}",
@@ -15137,17 +15442,19 @@ private enum _LFlat {
         "file_sync.new_folder": "New Folder",
         "file_sync.saf_root_summary": "Synced files",
         "folders.apply_deletes": "Apply held deletions ({count})",
-        "folders.bind_location": "Bind Location",
         "folders.choose": "Choose…",
         "folders.deletes_held": "This folder looks empty. Deletions held: {count}. Reconnect the folder, or apply them to your nest.",
         "folders.error_offline_share": "Sharing did not finish: {message}",
+        "folders.follow_handle_required": "Type the folder owner's handle first.",
+        "folders.follow_name_required": "Type the folder's name first.",
+        "folders.follow_not_ready": "Sign in first, then follow the folder.",
         "folders.keep_syncing_help_off": "The sync agent only runs while you are logged in. Turn this on to keep it syncing on this machine after you disconnect.",
         "folders.keep_syncing_help_on": "The sync agent keeps running on this machine after you log out.",
         "folders.keep_syncing_when_logged_out": "Keep syncing when logged out",
-        "folders.location_path_placeholder": "Location path",
         "folders.no_locations_bound": "No locations bound to this set.",
         "folders.offline_share_begin": "Begin sharing",
         "folders.offline_share_code_malformed": "That does not look like a code. It should be 64 letters and numbers.",
+        "folders.offline_share_code_needed": "Type the other person's code first.",
         "folders.offline_share_code_own": "That is this device's own code — type the other person's.",
         "folders.offline_share_expect": "Ready to receive",
         "folders.offline_share_from": "{who} wants to share a folder with you ({code})",
@@ -15167,6 +15474,8 @@ private enum _LFlat {
         "folders.offline_share_status_idle": "Not started",
         "folders.offline_share_status_offer_sent": "Invitation sent",
         "folders.photo_library_section": "Photo Library",
+        "folders.share_not_ready": "Sharing needs your conversations to be ready — wait a moment, then try again.",
+        "folders.share_recipient_required": "Type who to share with first.",
         "folders.share_serve_status_no_sets": "No shared folders to serve",
         "folders.share_serve_status_off": "Peer transfers are off — this nest does not enable them",
         "folders.share_serve_status_participation_off": "Peer transfers are off on this device",
@@ -15504,6 +15813,9 @@ private enum _LFlat {
         "mail_settings.submission_quota": "{used} of {limit} recipients today",
         "mail_settings.title": "Mail & Calendar",
         "mail_settings.unavailable_notice": "Mail can't be turned on for this server: it was set up without the virus scanner and spam filter that mail needs. To use mail, set up a server that includes them.",
+        "mail_settings.usable_needs_mail_on": "Turn on mail on the Mail & Calendar page first.",
+        "mail_settings.usable_reading": "Checking whether mail is on for your account…",
+        "mail_settings.usable_unbuilt": "Mail settings could not be loaded on this device. Signing out and back in rebuilds them.",
         "mail_spam.backend_unbuilt": "Spam-classifier training is not available on this nest yet.",
         "mail_spam.contribute_baseline_label": "Contribute to deployment spam baseline",
         "mail_spam.contribute_baseline_subtitle": "Off by default. When on, your training helps seed the shared filter new accounts start from — your individual messages are never shared.",
@@ -15545,12 +15857,12 @@ private enum _LFlat {
         "media.error_delete": "Failed to delete: {message}",
         "media.error_download": "Failed to download: {message}",
         "media.error_external_open": "Failed to open externally: {message}",
+        "media.error_first_folder": "Couldn't create your first folder, so nothing was uploaded: {message}. Try the upload again.",
         "media.error_followed_fetch": "Couldn't read that followed folder: {message}",
         "media.error_followed_read_only": "You follow this folder — it's read-only here. Switch to one of your own folders to upload.",
         "media.error_followed_unavailable": "This folder is no longer shared publicly. Its owner may have stopped sharing it, or removed it.",
         "media.error_foreign_removed": "You no longer have access to this shared folder. Its owner may have removed you, or stopped sharing it.",
         "media.error_metadata_only_folder": "This folder's content stays on your devices, so it can't be uploaded here. Put the file in the folder on a device that syncs it.",
-        "media.error_no_set": "You don't have a folder to upload into yet. Create a folder under Settings → Folders first.",
         "media.error_read_only_shared_folder": "This folder was shared with you to read, not to add to. Ask its owner for write access, or pick one of your own folders.",
         "media.error_refresh": "Failed to load media: {message}",
         "media.error_restore": "Failed to restore version: {message}",
@@ -15864,8 +16176,10 @@ private enum _LFlat {
         "nostr.follows.none": "No Nostr follows yet.",
         "nostr.follows.petname_placeholder": "Petname",
         "nostr.follows.pubkey_placeholder": "npub1... or hex pubkey",
+        "nostr.follows.pubkey_required": "Type the npub or hex pubkey to follow first.",
         "nostr.follows.title": "Follows",
         "nostr.link_account.description": "Connect a Nostr identity to your Fauna account.",
+        "nostr.link_account.enter_bunker_url": "Paste the bunker URL from your signer app first.",
         "nostr.link_account.enter_nsec": "Please enter an nsec key",
         "nostr.link_account.generate": "Generate new keypair",
         "nostr.link_account.import_nsec": "Import nsec",
@@ -15881,11 +16195,13 @@ private enum _LFlat {
         "nostr.npub_confirm.no_button": "No / nothing is linked",
         "nostr.npub_confirm.yes_button": "Yes, that's my npub",
         "nostr.relays.add": "Add Relay",
+        "nostr.relays.already_added": "This relay is already in your list.",
         "nostr.relays.invalid_url": "Relay URL must start with wss:// or ws://",
         "nostr.relays.none": "No relays configured. Default relays will be used.",
         "nostr.relays.placeholder": "wss://relay.example.com",
         "nostr.relays.private_address": "Relays on a private network or on this device can't be used. Use a public relay address.",
         "nostr.relays.title": "Relays",
+        "nostr.relays.url_required": "Type a relay address first.",
         "nostr.settings.auto_publish": "Auto-publish posts",
         "nostr.settings.auto_publish_subtitle": "Automatically publish Fauna posts to Nostr relays",
         "nostr.settings.description": "Configure Nostr publishing behavior",
@@ -15904,6 +16220,7 @@ private enum _LFlat {
         "nostr.zap_signers.label_placeholder": "Label (optional)",
         "nostr.zap_signers.none": "You have not designated any signer, so no zap is counted as paid. Add your wallet provider's signer key to start believing its receipts.",
         "nostr.zap_signers.pubkey_placeholder": "64-character hex signer pubkey",
+        "nostr.zap_signers.pubkey_required": "Paste your wallet provider's signer pubkey first.",
         "nostr.zap_signers.remove": "Stop trusting",
         "nostr.zap_signers.title": "Zap signers",
         "nostr.zap_signers.unnamed": "Unnamed signer",
@@ -15925,6 +16242,7 @@ private enum _LFlat {
         "notifications.knock_body": "{name} wants to connect",
         "notifications.knock_title": "New Contact Request",
         "notifications.message_from": "Message from {sender}",
+        "notifications.nothing_to_clear": "No notifications to clear",
         "notifications.row_abuse_report_received": "A report is waiting in the reports queue. Open Admin → Nest to review it.",
         "notifications.row_abuse_report_resolved": "Your report was reviewed: {outcome}.",
         "notifications.row_family_contact_request": "An account you supervise asked to add a contact. Open Family to decide.",
@@ -16207,6 +16525,46 @@ private enum _LFlat {
         "onboarding.oob_code.placeholder": "Invite code from an admin",
         "onboarding.oob_code.valid": "Code accepted. Click Continue to log in.",
         "onboarding.oob_code.verifying": "Verifying code…",
+        "onboarding.provider_choice.cannot_cover_no_dns": "Doesn't run DNS.",
+        "onboarding.provider_choice.cannot_cover_no_nameserver_door": "{provider} can't point a domain at another provider's DNS.",
+        "onboarding.provider_choice.cannot_cover_no_registrar": "Doesn't register domains.",
+        "onboarding.provider_choice.cannot_cover_no_server": "Doesn't rent servers.",
+        "onboarding.provider_choice.cannot_cover_no_zone_door": "Can't set up DNS for a domain registered elsewhere.",
+        "onboarding.provider_choice.cannot_cover_not_registrable": "Can't register this domain.",
+        "onboarding.provider_choice.cannot_cover_pointed_elsewhere": "Your domain now points at {provider}'s DNS.",
+        "onboarding.provider_choice.cannot_cover_zone_missing": "This account doesn't hold {domain}.",
+        "onboarding.provider_choice.capability_dns": "runs DNS",
+        "onboarding.provider_choice.capability_registrar": "registers domains",
+        "onboarding.provider_choice.capability_vps": "rents servers",
+        "onboarding.provider_choice.close": "Close",
+        "onboarding.provider_choice.connect": "Connect",
+        "onboarding.provider_choice.description": "Connect the providers that will set up your nest. Nothing is bought or changed until you press Buy and set up on the next page.",
+        "onboarding.provider_choice.dialog_connected": "Connected.",
+        "onboarding.provider_choice.dialog_connecting": "Connecting…",
+        "onboarding.provider_choice.disconnect": "Disconnect",
+        "onboarding.provider_choice.dns_not_pointed_yet": "{domain} doesn't point at {provider} yet.",
+        "onboarding.provider_choice.goal_covered_by": "Covered by {provider}",
+        "onboarding.provider_choice.goal_dns": "DNS for {domain}",
+        "onboarding.provider_choice.goal_domain": "Register {domain}",
+        "onboarding.provider_choice.goal_open": "Not covered yet — connect a provider below.",
+        "onboarding.provider_choice.goal_price": "{price} first year, then {renewal} a year",
+        "onboarding.provider_choice.goal_price_first_year": "{price} first year",
+        "onboarding.provider_choice.goal_select": "Covered by",
+        "onboarding.provider_choice.goal_vps": "A server",
+        "onboarding.provider_choice.held_credential": "Connected with a sign-in this device already holds.",
+        "onboarding.provider_choice.manual_row": "I will set DNS up later",
+        "onboarding.provider_choice.manual_row_help": "Shows you the DNS records to add yourself once your nest is built.",
+        "onboarding.provider_choice.providers_heading": "Providers",
+        "onboarding.provider_choice.start_blocked_price": "Tick the box under the domain's price to agree to it.",
+        "onboarding.provider_choice.start_blocked_server_type": "Choose a server type to continue.",
+        "onboarding.provider_choice.state_available": "not connected",
+        "onboarding.provider_choice.state_connected": "connected",
+        "onboarding.provider_choice.state_connecting": "connecting…",
+        "onboarding.provider_choice.status_contact_missing": "Open {provider} and fill in the registration contact to continue.",
+        "onboarding.provider_choice.status_cover_dns": "Connect a provider that can run DNS for your domain, or set DNS up later, to continue.",
+        "onboarding.provider_choice.status_cover_domain": "Connect a provider that can register {domain} to continue.",
+        "onboarding.provider_choice.status_cover_vps": "Connect a provider that rents servers to continue.",
+        "onboarding.provider_choice.title": "Choose providers",
         "onboarding.provision.adding_dkim_record": "Adding email DNS record",
         "onboarding.provision.complete": "Your nest is online!",
         "onboarding.provision.configuring_dns": "Configuring DNS...",
@@ -16232,7 +16590,9 @@ private enum _LFlat {
         "onboarding.provision.substep.dns_adding_email_records": "Adding email records",
         "onboarding.provision.substep.dns_setting_reverse_dns": "Setting reverse DNS",
         "onboarding.provision.substep.domain_checking_availability": "Checking domain availability",
+        "onboarding.provision.substep.domain_creating_zone": "Creating the DNS zone",
         "onboarding.provision.substep.domain_registering": "Registering domain",
+        "onboarding.provision.substep.domain_setting_nameservers": "Pointing the domain at its DNS",
         "onboarding.provision.substep.domain_verifying_zone": "Verifying DNS zone",
         "onboarding.provision.substep.online_claiming": "Signing you in to your new nest",
         "onboarding.provision.substep.online_waiting": "Waiting for your nest to start",
@@ -16626,6 +16986,7 @@ private enum _LFlat {
         "search_page.no_results": "No results for",
         "search_page.no_results_short": "No results",
         "search_page.placeholder": "Search posts, profiles, email...",
+        "search_page.query_required": "Type something to search for first.",
         "search_page.search_failed": "Search failed",
         "search_page.search_failed_reason": "Search failed: {reason}",
         "search_page.search_messages": "Search messages...",
@@ -16861,11 +17222,15 @@ private enum _LFlat {
         "settings.open_devices": "Open Devices",
         "settings.p2p_page.connection_group_description": "Network information for P2P connectivity",
         "settings.p2p_page.connection_group_title": "Connection",
+        "settings.p2p_page.contact_remove_failed": "Could not remove {name}: {error}",
         "settings.p2p_page.contacts_group_description": "P2P peers you can reach directly (local to this device)",
         "settings.p2p_page.contacts_group_title": "Contacts",
         "settings.p2p_page.lan_addresses": "LAN Addresses",
+        "settings.p2p_page.lan_copy_none": "No LAN address to copy.",
         "settings.p2p_page.lan_none": "(no active interfaces detected)",
         "settings.p2p_page.node_id": "Node ID",
+        "settings.p2p_page.node_id_copy_needs_tunnel": "Start the tunnel to get a node ID to copy.",
+        "settings.p2p_page.service_unavailable": "Peer connections did not start on this device. Restart Fauna to try again.",
         "settings.p2p_page.start": "Start",
         "settings.p2p_page.stop": "Stop",
         "settings.p2p_page.title": "P2P",
@@ -16993,6 +17358,7 @@ private enum _LFlat {
         "settings.recovery_kit.review_defer": "Review The Rest Later",
         "settings.recovery_kit.review_intro": "Keep the people you recognise. Anyone you don't, you can remove from your groups. You do not have to finish now.",
         "settings.recovery_kit.review_keep": "Keep",
+        "settings.recovery_kit.review_keep_failed": "Could not record your decision yet: {reason}. They stay listed until it succeeds.",
         "settings.recovery_kit.review_reason_compromise": "was in your groups before you recovered your account",
         "settings.recovery_kit.review_reason_other": "this could not confirm their identity",
         "settings.recovery_kit.review_remove": "Remove From My Groups",
@@ -17247,6 +17613,7 @@ private enum _LFlat {
         "subscriptions.claim_code": "Claim code",
         "subscriptions.claim_delivery_dm": "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app, open the author's profile and enter the code under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.",
         "subscriptions.claim_delivery_dm_link": "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. You can also enter it in a Fauna app, on the author's profile under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.",
+        "subscriptions.claim_needs_tier": "Create a tier first — a claim code entitles one of your tiers.",
         "subscriptions.claim_status_redeemed": "Redeemed",
         "subscriptions.claim_status_unredeemed": "Unredeemed",
         "subscriptions.claim_status_voided": "Voided",
@@ -17277,6 +17644,7 @@ private enum _LFlat {
         "subscriptions.product_hint": "Only payments through this link grant the tier. Leave empty to grant it for every payment on the account.",
         "subscriptions.product_label": "Payment Link (optional)",
         "subscriptions.provider_kind_label": "Provider:",
+        "subscriptions.provider_needs_tier": "Create a tier first — a payment provider sells one of your tiers.",
         "subscriptions.provider_status_configured": "Configured",
         "subscriptions.provider_status_error": "Error",
         "subscriptions.provider_status_verified": "Verified",
@@ -17284,6 +17652,7 @@ private enum _LFlat {
         "subscriptions.rank": "Rank",
         "subscriptions.redeem": "Redeem",
         "subscriptions.redeem_claim_title": "Redeem a claim code",
+        "subscriptions.redeem_code_required": "Type the claim code first.",
         "subscriptions.reject": "Reject",
         "subscriptions.remove": "Remove",
         "subscriptions.return_url_label": "Return URL:",
@@ -17292,6 +17661,7 @@ private enum _LFlat {
         "subscriptions.subscribe": "Subscribe",
         "subscriptions.subscribers": "Subscribers",
         "subscriptions.tier_name": "Name",
+        "subscriptions.tier_name_required": "Name the tier first.",
         "subscriptions.tier_select_label": "Tier:",
         "subscriptions.title": "Subscriptions",
         "subscriptions.unsafe_payment_url": "This payment link is unsafe (links must be https). Not opening it.",

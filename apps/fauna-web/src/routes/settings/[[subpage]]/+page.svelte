@@ -176,6 +176,8 @@
   import MailSpamSection from '#lib/components/MailSpamSection.svelte';
   import MailExportSection from '#lib/components/MailExportSection.svelte';
   import MailImportSection from '#lib/components/MailImportSection.svelte';
+  import { isMailSubpage, subpageGate } from '#lib/mail-gate';
+  import { mailUsable } from '#lib/mail-usable';
   import ArchiveImportSection from '#lib/components/ArchiveImportSection.svelte';
   import WebSettingsSection from '#lib/components/WebSettingsSection.svelte';
   import SubscriptionsSection from '#lib/components/SubscriptionsSection.svelte';
@@ -209,6 +211,10 @@
   // app), so web must land on the same content for either form.
   let rawSubpage = $derived(page.params.subpage ?? '');
   let current = $derived(rawSubpage === 'status' ? '' : rawSubpage);
+  // The mail-usable gate for the open mail sub-page: the shell's watch keeps
+  // `mailUsable` live (the shared "checking" answer until the machine's first
+  // read — rule 5), so the page never spells a reason of its own.
+  let mailGate = $derived(subpageGate($mailUsable));
 
   // The shared page-heading (settings.md § Sub-page heading conformance) must
   // read the SUB-PAGE's own title, not the bare "Settings" shell title — a
@@ -3507,6 +3513,13 @@
   <!-- Mail (user-facing mail-credential lifecycle). Shares the page-level
        error-message surface via bind:error. -->
   <MailSettingsSection bind:error />
+
+{:else if isMailSubpage(current) && mailGate.gated}
+  <!-- The mail-usable gate (`ui/mail-settings.md` § Errors & edge cases): a
+       mail sub-page opened while mail is not possible shows only its heading
+       (above), the reason and Back (the rail's `settings-nav-back`) — no form or
+       wizard whose submit could not succeed. -->
+  {#if mailGate.text}<p class="muted">{resolveLocalized(mailGate.text)}</p>{/if}
 
 {:else if current === 'mail-aliases'}
   <!-- Mail aliases (exact / wildcard / disposable). -->

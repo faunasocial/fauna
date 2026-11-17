@@ -13,7 +13,10 @@
 // The web lift of tui's reference implementation (`apps/fauna-tui/src/
 // {contacts,profile/mod,bridges,family}.rs`), whose rules every app copies
 // rather than re-derives:
-//   (a) the ask is offered ONLY on the typed refusal (`guardian-refusal.ts`);
+//   (a) the ask is offered at the entry when the shared
+//       `guardian_decides_contact` says the guardian decides the peer
+//       (contacts.md § Errors & edge cases), and still on the typed refusal
+//       (`guardian-refusal.ts`) — never on any other failure;
 //   (b) the refusal stays on `error-message` — the page's job, not this module's;
 //   (c) pending is durable — read from `status.contact_requests` /
 //       `status.feed_requests`, gated on `supervised_by`; a just-asked flag only
@@ -35,6 +38,7 @@
 // wasm faces), a stub in the tests.
 
 import { isGuardianApprovalRequired } from './guardian-refusal.ts';
+import type { Possibility } from './possibility.ts';
 
 /** A raw 32-byte id as serde_wasm_bindgen hands it over (either shape). */
 export type WireBytes = Uint8Array | number[];
@@ -70,14 +74,18 @@ export interface BlockedPeer {
 export type OwnPolicy = { contact_approval?: boolean };
 
 /** The ward's own asks, off one `fauna.family.status` read — plus the ward's
- *  own policy, which decides whether every knock waits on the guardian. */
+ *  own policy, which decides whether every knock waits on the guardian, and
+ *  whether a read of this run has succeeded at all (`statusRead`): "no policy"
+ *  means unsupervised only once a read said so — before it, nothing is known
+ *  (`ui/README.md` § Offer only what is possible, rule 5). */
 export interface WardAsks {
   contact: ContactAsk[];
   feed: FeedAsk[];
   policy: OwnPolicy | null;
+  statusRead: boolean;
 }
 
-export const NO_WARD_ASKS: WardAsks = { contact: [], feed: [], policy: null };
+export const NO_WARD_ASKS: WardAsks = { contact: [], feed: [], policy: null, statusRead: false };
 
 /** Rule (c)/(h): the asks a status reply carries, gated on `supervised_by`. A
  *  graduated account has no guardian to be waiting on, so a stale row from the
@@ -90,11 +98,12 @@ export function wardAsksFromStatus(status: {
   contact_requests?: ContactAsk[] | null;
   feed_requests?: FeedAsk[] | null;
 }): WardAsks {
-  if (status.supervised_by == null) return { contact: [], feed: [], policy: null };
+  if (status.supervised_by == null) return { contact: [], feed: [], policy: null, statusRead: true };
   return {
     contact: status.contact_requests ?? [],
     feed: status.feed_requests ?? [],
     policy: status.policy ?? null,
+    statusRead: true,
   };
 }
 
@@ -125,6 +134,46 @@ export interface AskRules {
   /** Whether every knock waiting on the caller waits on their guardian
    *  (`knock-guardian-pending`), over the caller's own policy. */
   knocksAwaitGuardian(policy: OwnPolicy | null): boolean;
+  /** Whether the caller may knock a resolved peer now (`contacts-add-button`),
+   *  over the read state, the caller's own policy and its roster edge to the
+   *  peer (`null` with none). */
+  knockPossibility(statusRead: boolean, policy: OwnPolicy | null, peerStatus: string | null): Possibility;
+  /** Whether the caller may accept an incoming knock now (`contacts-accept-button`). */
+  acceptPossibility(statusRead: boolean, policy: OwnPolicy | null): Possibility;
+  /** Whether the guardian decides contact with this peer — when
+   *  `contact-request-guardian-button` is the result's one step. */
+  guardianDecidesContact(statusRead: boolean, policy: OwnPolicy | null, peerStatus: string | null): boolean;
+}
+
+// ── The ward's entry gate (contacts page) ───────────────────────────────────
+// contacts.md § Errors & edge cases: the knock and the accept paint from the
+// shared `fauna_client_family::{knock_possibility, accept_possibility}`, and
+// the action asks the same answer before anything is sent.
+
+/** The knock's answer for the peer the Find User form resolved. */
+export function knockAnswer(rules: AskRules, asks: WardAsks, peerStatus: string | null): Possibility {
+  return rules.knockPossibility(asks.statusRead, asks.policy, peerStatus);
+}
+
+/** The accept's answer, the same for every knock row. */
+export function acceptAnswer(rules: AskRules, asks: WardAsks): Possibility {
+  return rules.acceptPossibility(asks.statusRead, asks.policy);
+}
+
+/** Whether the ask is offered at the entry, before anything was refused. */
+export function guardianDecides(rules: AskRules, asks: WardAsks, peerStatus: string | null): boolean {
+  return rules.guardianDecidesContact(asks.statusRead, asks.policy, peerStatus);
+}
+
+/** The caller's roster edge to `peerHex`, `null` with none — case-insensitive,
+ *  because the Find User form's id is whatever was typed and the roster's is
+ *  canonical (tui's `roster_status`). */
+export function rosterStatus(
+  roster: { peer_id: string; status: string }[],
+  peerHex: string,
+): string | null {
+  const lower = peerHex.toLowerCase();
+  return roster.find((c) => c.peer_id.toLowerCase() === lower)?.status ?? null;
 }
 
 // ── Knock rows (contacts page) ──────────────────────────────────────────────
@@ -141,19 +190,20 @@ export function knocksAwaitGuardian(rules: AskRules, asks: WardAsks): boolean {
 
 /** What the refused-send surface shows beside the knock: the durable pending
  *  label (read FIRST — it survives navigation and a restart, and is honest on
- *  a fresh session that never saw the refusal), else the ask button only after
- *  a TYPED refusal this open saw, else nothing. */
+ *  a fresh session that never saw the refusal), else the ask button when it is
+ *  offered (`offered`: the guardian decides this peer, or a TYPED refusal this
+ *  open saw), else nothing. */
 export type ContactAskRender = 'pending' | 'ask' | null;
 
 export function contactAskRender(
   rules: AskRules,
   asks: ContactAsk[],
   peerHex: string,
-  guardianRefused: boolean,
+  offered: boolean,
   askSent: boolean,
 ): ContactAskRender {
   if (rules.contactAskPending(asks, peerHex) || askSent) return 'pending';
-  if (guardianRefused) return 'ask';
+  if (offered) return 'ask';
   return null;
 }
 

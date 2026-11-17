@@ -68,9 +68,10 @@ func flushDraftsAutosave(
     }
 }
 
-/// How long a session-teardown door waits for its drafts rails — the same 2.5 s
-/// ceiling macOS's quit gate and linux's blocking flush hold.
-private let leaveFlushBound: Duration = .milliseconds(2500)
+/// How long a leave door waits for its drafts rails: the shared
+/// `fauna_client_drafts::LEAVE_FLUSH_BUDGET`, read through `fauna-ffi` so no app
+/// carries its own literal. The macOS quit gate reads the same value.
+public var leaveFlushBound: Duration { .milliseconds(leaveFlushBudgetMs()) }
 
 /// Resumes its continuation once, for whichever of the flush and the bound lands
 /// first. Main-actor-held, so the two racers need no lock.

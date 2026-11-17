@@ -616,6 +616,25 @@ impl OnboardingMachine {
             .unwrap_or_default()
     }
 
+    /// `vps-config-continue-button`'s answer in the shared possibility type
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6), as
+    /// `fauna_core::possibility::Possibility`'s serde JSON (`{"state":
+    /// "possible"}` / `{"state": "blocked", "reason": …}`). The SPA paints the
+    /// button and its reason line from this one value. See
+    /// `fauna_onboarding_machine::OnboardingMachine::vps_continue_possibility`.
+    #[wasm_bindgen(js_name = vpsContinuePossibilityJson)]
+    pub fn vps_continue_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.vps_continue_possibility()).unwrap_or_default()
+    }
+
+    /// `provisioning-continue-button`'s answer in the shared possibility type,
+    /// the same serde JSON as `vpsContinuePossibilityJson`. See
+    /// `fauna_onboarding_machine::OnboardingMachine::provisioning_continue_possibility`.
+    #[wasm_bindgen(js_name = provisioningContinuePossibilityJson)]
+    pub fn provisioning_continue_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.provisioning_continue_possibility()).unwrap_or_default()
+    }
+
     #[wasm_bindgen(js_name = beginCreateIdentity)]
     pub fn begin_create_identity(&self) {
         self.0.begin_create_identity()
@@ -1378,6 +1397,14 @@ impl OnboardingMachine {
         self.0.set_renders_recovery_kit(renders)
     }
 
+    /// App capability declaration: web renders the `provider_choice` page —
+    /// see `OnboardingMachine::set_renders_provider_choice`. Call once at
+    /// construction, beside `setRendersTrustPrompt`, when the page lands.
+    #[wasm_bindgen(js_name = setRendersProviderChoice)]
+    pub fn set_renders_provider_choice(&self, renders: bool) {
+        self.0.set_renders_provider_choice(renders)
+    }
+
     /// The minted-but-unregistered kit root `recovery-kit-secret-display`
     /// shows (bare 64-hex); `undefined` outside the screen's lifetime.
     #[wasm_bindgen(js_name = recoveryKitSecretHex)]
@@ -1932,6 +1959,7 @@ impl OnboardingMachine {
             "IdentityCreated" => OnboardingStep::IdentityCreated,
             "IdentityImport" => OnboardingStep::IdentityImport,
             "HandleEntry" => OnboardingStep::HandleEntry,
+            "ProviderChoice" => OnboardingStep::ProviderChoice,
             "DnsConfig" => OnboardingStep::DnsConfig,
             "VpsConfig" => OnboardingStep::VpsConfig,
             "NestProvisioning" => OnboardingStep::NestProvisioning,
@@ -2211,6 +2239,201 @@ pub fn awaiting_dns_poll_ms_wasm() -> f64 {
 // (`docs/goal/behavior/admin.md` § Nest → NAT-mode control). Same commit
 // ceremony as the wizard page; dispatch-style (await an action, re-read
 // `snapshotJson`).
+
+// ── The choose-providers page (`onboarding-provisioning.md` § 3d) ──────────
+// The twins of the machine's UniFFI surface. Records come back as JSON (the
+// module's convention); an optional `LocalizedText` is an empty string for
+// `None`. `goal` is `"Domain"` | `"Dns"` | `"Vps"`; a cover is the serde form of
+// `GoalCover` (`"Manual"` or `{"Provider":{"provider_id":"…"}}`).
+#[wasm_bindgen]
+impl OnboardingMachine {
+    #[wasm_bindgen(js_name = visibleProviderFieldsJson)]
+    pub fn visible_provider_fields_json(&self, provider_id: String) -> String {
+        serde_json::to_string(&self.0.visible_provider_fields(provider_id)).unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = setProviderCred)]
+    pub fn set_provider_cred(&self, provider_id: String, field_id: String, value: String) {
+        self.0.set_provider_cred(provider_id, field_id, value)
+    }
+
+    #[wasm_bindgen(js_name = canConnectProvider)]
+    pub fn can_connect_provider(&self, provider_id: String) -> bool {
+        self.0.can_connect_provider(provider_id)
+    }
+
+    /// *Connect*: every check the provider's capabilities allow, one credential.
+    #[wasm_bindgen(js_name = connectProvider)]
+    pub fn connect_provider(&self, provider_id: String) -> js_sys::Promise {
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            m.connect_provider(provider_id).await.map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = disconnectProvider)]
+    pub fn disconnect_provider(&self, provider_id: String) {
+        self.0.disconnect_provider(provider_id)
+    }
+
+    /// `held_json`: a JSON array of `{provider_id, fields}` — the credentials
+    /// signed-in accounts on this device hold; each is re-checked.
+    #[wasm_bindgen(js_name = seedHeldProviderCredentials)]
+    pub fn seed_held_provider_credentials(&self, held_json: String) -> js_sys::Promise {
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            let held: Vec<fauna_onboarding_machine::HeldProviderCredential> =
+                serde_json::from_str(&held_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+            m.seed_held_provider_credentials(held).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = selectGoalCover)]
+    pub fn select_goal_cover(&self, goal: String, cover_json: String) -> Result<(), JsValue> {
+        let goal: fauna_onboarding_machine::ProviderGoal =
+            serde_json::from_value(serde_json::Value::String(goal))
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let cover: fauna_onboarding_machine::GoalCover =
+            serde_json::from_str(&cover_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.0.select_goal_cover(goal, cover).map_err(err_to_js)
+    }
+
+    #[wasm_bindgen(js_name = providerRowsJson)]
+    pub fn provider_rows_json(&self) -> String {
+        serde_json::to_string(&self.0.provider_rows()).unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = goalRowsJson)]
+    pub fn goal_rows_json(&self) -> String {
+        serde_json::to_string(&self.0.goal_rows()).unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = canContinueProviders)]
+    pub fn can_continue_providers(&self) -> bool {
+        self.0.can_continue_providers()
+    }
+
+    #[wasm_bindgen(js_name = providersContinueBlockedReasonJson)]
+    pub fn providers_continue_blocked_reason_json(&self) -> String {
+        self.0
+            .providers_continue_blocked_reason()
+            .and_then(|t| serde_json::to_string(&t).ok())
+            .unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = continueFromProviders)]
+    pub fn continue_from_providers(&self) -> Result<(), JsValue> {
+        self.0.continue_from_providers().map_err(err_to_js)
+    }
+
+    #[wasm_bindgen(js_name = canOfferBuyDomain)]
+    pub fn can_offer_buy_domain(&self) -> bool {
+        self.0.can_offer_buy_domain()
+    }
+
+    #[wasm_bindgen(js_name = providerGoalDomain)]
+    pub fn provider_goal_domain(&self) -> String {
+        self.0.provider_goal_domain()
+    }
+
+    #[wasm_bindgen(js_name = providerShowsContactForm)]
+    pub fn provider_shows_contact_form(&self, provider_id: String) -> bool {
+        self.0.provider_shows_contact_form(provider_id)
+    }
+
+    /// The registry's note key, or an empty string for `None`.
+    #[wasm_bindgen(js_name = providerRegistrarNotesKey)]
+    pub fn provider_registrar_notes_key(&self, provider_id: String) -> String {
+        self.0
+            .provider_registrar_notes_key(provider_id)
+            .unwrap_or_default()
+    }
+
+    /// The contact as JSON, or an empty string for `None`.
+    #[wasm_bindgen(js_name = providerContactJson)]
+    pub fn provider_contact_json(&self, provider_id: String) -> String {
+        self.0
+            .provider_contact(provider_id)
+            .and_then(|c| serde_json::to_string(&c).ok())
+            .unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = setProviderContact)]
+    pub fn set_provider_contact(
+        &self,
+        provider_id: String,
+        contact_json: String,
+    ) -> Result<(), JsValue> {
+        let contact: fauna_provisioning::registrar::ContactInfo =
+            serde_json::from_str(&contact_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.0.set_provider_contact(provider_id, contact);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = provisioningChoicesVisible)]
+    pub fn provisioning_choices_visible(&self) -> bool {
+        self.0.provisioning_choices_visible()
+    }
+
+    #[wasm_bindgen(js_name = provisioningStartBlockedReasonJson)]
+    pub fn provisioning_start_blocked_reason_json(&self) -> String {
+        self.0
+            .provisioning_start_blocked_reason()
+            .and_then(|t| serde_json::to_string(&t).ok())
+            .unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = provisioningBackToProviders)]
+    pub fn provisioning_back_to_providers(&self) -> bool {
+        self.0.provisioning_back_to_providers()
+    }
+
+    #[wasm_bindgen(js_name = providerHostedAuthBegin)]
+    pub fn provider_hosted_auth_begin(
+        &self,
+        provider_id: String,
+        field_id: String,
+    ) -> js_sys::Promise {
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            let prompt = m
+                .provider_hosted_auth_begin(provider_id, field_id)
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from_str(
+                &serde_json::to_string(&prompt).unwrap_or_default(),
+            ))
+        })
+    }
+
+    #[wasm_bindgen(js_name = providerHostedAuthWait)]
+    pub fn provider_hosted_auth_wait(
+        &self,
+        provider_id: String,
+        field_id: String,
+    ) -> js_sys::Promise {
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            m.provider_hosted_auth_wait(provider_id, field_id)
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = providerHostedAuthStateJson)]
+    pub fn provider_hosted_auth_state_json(&self, provider_id: String, field_id: String) -> String {
+        serde_json::to_string(&self.0.provider_hosted_auth_state(provider_id, field_id))
+            .unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = providerHostedAuthCanBegin)]
+    pub fn provider_hosted_auth_can_begin(&self, provider_id: String, field_id: String) -> bool {
+        self.0.provider_hosted_auth_can_begin(provider_id, field_id)
+    }
+}
 
 #[wasm_bindgen]
 pub struct AdminNatModeMachine(Arc<fauna_onboarding_machine::AdminNatModeMachine>);

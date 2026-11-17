@@ -33,6 +33,10 @@ pub mod common {
 
     pub const LOAD_FAILED: &str = "Failed to load";
 
+    pub const IN_FLIGHT: &str = "Still saving — wait for it to finish";
+
+    pub const NOTHING_TO_CONFIRM: &str = "Nothing is waiting to be confirmed";
+
     pub const NOT_FOUND: &str = "Not found";
 
     pub const SEARCH: &str = "Search";
@@ -975,6 +979,10 @@ pub mod onboarding {
 
             pub const DOMAIN_REGISTERING: &str = "Registering domain";
 
+            pub const DOMAIN_CREATING_ZONE: &str = "Creating the DNS zone";
+
+            pub const DOMAIN_SETTING_NAMESERVERS: &str = "Pointing the domain at its DNS";
+
             pub const DOMAIN_VERIFYING_ZONE: &str = "Verifying DNS zone";
 
             pub const SERVER_GENERATING_DKIM: &str = "Generating DKIM keys";
@@ -1029,6 +1037,121 @@ pub mod onboarding {
         pub const LOCALHOST_HINT: &str = "test@localhost is allowed for trying out the app.";
 
         pub const CONTROL_CHECKBOX: &str = "I control DNS for this domain";
+    }
+
+    pub mod provider_choice {
+        pub const TITLE: &str = "Choose providers";
+
+        pub const DESCRIPTION: &str = "Connect the providers that will set up your nest. Nothing is bought or changed until you press Buy and set up on the next page.";
+
+        pub const GOAL_DOMAIN: &str = "Register {domain}";
+        pub fn goal_domain(domain: &str) -> String {
+            format!("Register {domain}")
+        }
+
+        pub const GOAL_DNS: &str = "DNS for {domain}";
+        pub fn goal_dns(domain: &str) -> String {
+            format!("DNS for {domain}")
+        }
+
+        pub const GOAL_VPS: &str = "A server";
+
+        pub const GOAL_COVERED_BY: &str = "Covered by {provider}";
+        pub fn goal_covered_by(provider: &str) -> String {
+            format!("Covered by {provider}")
+        }
+
+        pub const GOAL_OPEN: &str = "Not covered yet — connect a provider below.";
+
+        pub const GOAL_PRICE: &str = "{price} first year, then {renewal} a year";
+        pub fn goal_price(price: &str, renewal: &str) -> String {
+            format!("{price} first year, then {renewal} a year")
+        }
+
+        pub const GOAL_PRICE_FIRST_YEAR: &str = "{price} first year";
+        pub fn goal_price_first_year(price: &str) -> String {
+            format!("{price} first year")
+        }
+
+        pub const CANNOT_COVER_NO_DNS: &str = "Doesn't run DNS.";
+
+        pub const CANNOT_COVER_NO_SERVER: &str = "Doesn't rent servers.";
+
+        pub const CANNOT_COVER_NO_REGISTRAR: &str = "Doesn't register domains.";
+
+        pub const CANNOT_COVER_NOT_REGISTRABLE: &str = "Can't register this domain.";
+
+        pub const CANNOT_COVER_ZONE_MISSING: &str = "This account doesn't hold {domain}.";
+        pub fn cannot_cover_zone_missing(domain: &str) -> String {
+            format!("This account doesn't hold {domain}.")
+        }
+
+        pub const CANNOT_COVER_NO_ZONE_DOOR: &str = "Can't set up DNS for a domain registered elsewhere.";
+
+        pub const CANNOT_COVER_NO_NAMESERVER_DOOR: &str = "{provider} can't point a domain at another provider's DNS.";
+        pub fn cannot_cover_no_nameserver_door(provider: &str) -> String {
+            format!("{provider} can't point a domain at another provider's DNS.")
+        }
+
+        pub const CANNOT_COVER_POINTED_ELSEWHERE: &str = "Your domain now points at {provider}'s DNS.";
+        pub fn cannot_cover_pointed_elsewhere(provider: &str) -> String {
+            format!("Your domain now points at {provider}'s DNS.")
+        }
+
+        pub const DNS_NOT_POINTED_YET: &str = "{domain} doesn't point at {provider} yet.";
+        pub fn dns_not_pointed_yet(domain: &str, provider: &str) -> String {
+            format!("{domain} doesn't point at {provider} yet.")
+        }
+
+        pub const HELD_CREDENTIAL: &str = "Connected with a sign-in this device already holds.";
+
+        pub const STATUS_COVER_DOMAIN: &str = "Connect a provider that can register {domain} to continue.";
+        pub fn status_cover_domain(domain: &str) -> String {
+            format!("Connect a provider that can register {domain} to continue.")
+        }
+
+        pub const STATUS_COVER_DNS: &str = "Connect a provider that can run DNS for your domain, or set DNS up later, to continue.";
+
+        pub const STATUS_COVER_VPS: &str = "Connect a provider that rents servers to continue.";
+
+        pub const STATUS_CONTACT_MISSING: &str = "Open {provider} and fill in the registration contact to continue.";
+        pub fn status_contact_missing(provider: &str) -> String {
+            format!("Open {provider} and fill in the registration contact to continue.")
+        }
+
+        pub const START_BLOCKED_PRICE: &str = "Tick the box under the domain's price to agree to it.";
+
+        pub const START_BLOCKED_SERVER_TYPE: &str = "Choose a server type to continue.";
+
+        pub const MANUAL_ROW_HELP: &str = "Shows you the DNS records to add yourself once your nest is built.";
+
+        pub const PROVIDERS_HEADING: &str = "Providers";
+
+        pub const CAPABILITY_REGISTRAR: &str = "registers domains";
+
+        pub const CAPABILITY_DNS: &str = "runs DNS";
+
+        pub const CAPABILITY_VPS: &str = "rents servers";
+
+        pub const STATE_CONNECTED: &str = "connected";
+
+        pub const STATE_AVAILABLE: &str = "not connected";
+
+        pub const STATE_CONNECTING: &str = "connecting…";
+
+        pub const MANUAL_ROW: &str = "I will set DNS up later";
+
+        pub const GOAL_SELECT: &str = "Covered by";
+
+        pub const CONNECT: &str = "Connect";
+
+        pub const DISCONNECT: &str = "Disconnect";
+
+        pub const CLOSE: &str = "Close";
+
+        pub const DIALOG_CONNECTED: &str = "Connected.";
+
+        pub const DIALOG_CONNECTING: &str = "Connecting…";
     }
 
     pub mod dns_config {
@@ -1695,6 +1818,8 @@ pub mod tui_settings {
 pub mod feed {
     pub const COMPOSE_EMPTY: &str = "Post cannot be empty";
 
+    pub const REPLY_EMPTY: &str = "Write your reply first.";
+
     pub const IMPORTED_NOTICE: &str = "Showing the posts you imported from {platform}";
     pub fn imported_notice(platform: &str) -> String {
         format!("Showing the posts you imported from {platform}")
@@ -1863,12 +1988,18 @@ pub mod feed {
         pub const URI: &str = "Feed URI";
 
         pub const NAME: &str = "Display Name";
+
+        pub const KIND_REQUIRED: &str = "Choose a bridge first.";
+
+        pub const URI_REQUIRED: &str = "Type the feed URI first.";
     }
 
     pub mod create {
         pub const TITLE: &str = "New Feed";
 
         pub const NAME_PLACEHOLDER: &str = "My Feed";
+
+        pub const NAME_REQUIRED: &str = "Name the feed first.";
 
         pub const ADD_RULE: &str = "Add Rule";
 
@@ -2143,6 +2274,14 @@ pub mod conversations {
         pub const RESOLVE: &str = "Resolve";
 
         pub const WRITE_MESSAGE: &str = "Write your message...";
+
+        pub const NEEDS_RECIPIENT: &str = "Add who it goes to first.";
+
+        pub const RECIPIENT_UNSUPPORTED: &str = "This app cannot send to this recipient. Remove it and add another.";
+
+        pub const NO_ATTACHMENTS_HERE: &str = "Files cannot be sent to this recipient.";
+
+        pub const NO_TOPIC_HERE: &str = "A topic cannot be set for this recipient.";
 
         pub const ENCRYPTED: &str = "Encrypted";
     }
@@ -2889,6 +3028,30 @@ pub mod events {
         }
     }
 
+    pub mod create_blocked {
+        pub const LOADING: &str = "Your calendars are still loading.";
+
+        pub const PROVISION_FAILED: &str = "Your first calendar could not be set up ({error}). It is tried again the next time Events loads.";
+        pub fn provision_failed(error: &str) -> String {
+            format!("Your first calendar could not be set up ({error}). It is tried again the next time Events loads.")
+        }
+
+        pub const ADD_CREDENTIAL: &str = "To keep events, turn on calendar storage by adding a credential in Settings → Mail & Calendar.";
+
+        pub const ADMIN_ENABLE_CALENDAR: &str = "To keep events, turn on calendar for this nest in Nest Admin → Calendar first.";
+
+        pub const NOT_HERE: &str = "Events cannot be kept on this account, because this nest does not serve calendars.";
+
+        pub const OPEN_MAIL_SETTINGS: &str = "Open Mail & Calendar settings";
+
+        pub const OPEN_ADMIN_CALENDAR: &str = "Open Nest Admin → Calendar";
+    }
+
+    pub const SAVE_FAILED: &str = "The event could not be saved ({error}). What you typed is kept; press Save to try again.";
+    pub fn save_failed(error: &str) -> String {
+        format!("The event could not be saved ({error}). What you typed is kept; press Save to try again.")
+    }
+
     pub mod error {
         pub const LOAD_CALENDARS: &str = "Failed to load calendars";
 
@@ -3290,6 +3453,8 @@ pub mod atproto_settings {
     }
 
     pub const ERROR_NO_IDENTITY: &str = "This app cannot authorize posting from external apps. Use another of your devices to turn it on.";
+
+    pub const PAGE_UNAVAILABLE: &str = "Bluesky settings are not available in this session: this device could not read your identity key. Sign in again to try once more.";
 
     pub const ERROR_DELEGATION_UNTRUSTED: &str = "The stored authorization for external apps was not created by this account, so it is not being shown. ({message})";
     pub fn error_delegation_untrusted(message: &str) -> String {
@@ -3790,7 +3955,10 @@ pub mod media {
         format!("Failed to delete: {message}")
     }
 
-    pub const ERROR_NO_SET: &str = "You don't have a folder to upload into yet. Create a folder under Settings → Folders first.";
+    pub const ERROR_FIRST_FOLDER: &str = "Couldn't create your first folder, so nothing was uploaded: {message}. Try the upload again.";
+    pub fn error_first_folder(message: &str) -> String {
+        format!("Couldn't create your first folder, so nothing was uploaded: {message}. Try the upload again.")
+    }
 
     pub const ERROR_RESTORE: &str = "Failed to restore version: {message}";
     pub fn error_restore(message: &str) -> String {
@@ -4288,6 +4456,20 @@ pub mod backups {
 
     pub const BACKUP_DESTINATION_CAPACITY_INVALID: &str = "Enter a storage limit like \"50 GB\" or \"500 MB\".";
 
+    pub const BACKUP_DESTINATION_URL_REQUIRED: &str = "Type the address of the nest to back up to first.";
+
+    pub const SNAPSHOT_DELETE_ALREADY_PENDING: &str = "Already scheduled for deletion.";
+
+    pub const SNAPSHOT_DELETE_ALREADY_DELETED: &str = "Already deleted — recover it to keep it.";
+
+    pub const SNAPSHOT_SELECT_FOLDER_FIRST: &str = "Choose a folder first.";
+
+    pub const RESTORE_KIND_UNTICKED: &str = "Tick this snapshot's kind to restore it.";
+
+    pub const SNAPSHOT_RESTORE_DESTINATION_REQUIRED: &str = "Type the folder to restore into first.";
+
+    pub const SNAPSHOT_RESTORE_RUNNING: &str = "A restore is already running.";
+
     pub const BACKUP_DESTINATION_USAGE: &str = "{held} of {cap} used";
     pub fn backup_destination_usage(held: &str, cap: &str) -> String {
         format!("{held} of {cap} used")
@@ -4779,15 +4961,21 @@ pub mod backups {
 pub mod folders {
     pub const TITLE: &str = "Folders";
 
+    pub const FOLLOW_HANDLE_REQUIRED: &str = "Type the folder owner's handle first.";
+
+    pub const FOLLOW_NAME_REQUIRED: &str = "Type the folder's name first.";
+
+    pub const FOLLOW_NOT_READY: &str = "Sign in first, then follow the folder.";
+
+    pub const SHARE_RECIPIENT_REQUIRED: &str = "Type who to share with first.";
+
+    pub const SHARE_NOT_READY: &str = "Sharing needs your conversations to be ready — wait a moment, then try again.";
+
     pub const PHOTO_LIBRARY_SECTION: &str = "Photo Library";
 
     pub const SYNCED_LOCATIONS: &str = "Synced Locations";
 
     pub const NO_LOCATIONS_BOUND: &str = "No locations bound to this set.";
-
-    pub const LOCATION_PATH_PLACEHOLDER: &str = "Location path";
-
-    pub const BIND_LOCATION: &str = "Bind Location";
 
     pub const CHOOSE: &str = "Choose…";
 
@@ -4857,6 +5045,8 @@ pub mod folders {
     pub const OFFLINE_SHARE_CODE_MALFORMED: &str = "That does not look like a code. It should be 64 letters and numbers.";
 
     pub const OFFLINE_SHARE_CODE_OWN: &str = "That is this device's own code — type the other person's.";
+
+    pub const OFFLINE_SHARE_CODE_NEEDED: &str = "Type the other person's code first.";
 
     pub const ERROR_OFFLINE_SHARE: &str = "Sharing did not finish: {message}";
     pub fn error_offline_share(message: &str) -> String {
@@ -5562,6 +5752,8 @@ pub mod devices {
 
         pub const CREATING_FOLDER: &str = "Creating folder...";
 
+        pub const CONFIRM_PUBLIC_PENDING: &str = "Answer the public-folder question above to create it.";
+
         pub const FAILED_CREATE: &str = "Failed to create folder.";
 
         pub const SELECT_DEVICES_ROLES: &str = "Select devices and choose what each one does (optional — skip to just store files here):";
@@ -5690,19 +5882,7 @@ pub mod devices {
     }
 
     pub mod sync_locations {
-        pub const TITLE: &str = "Sync Locations";
-
-        pub const LOCATION_PLACEHOLDER: &str = "Location path (or use Browse...)";
-
         pub const BROWSE: &str = "Browse...";
-
-        pub const ADD_LOCATION: &str = "Add Location";
-
-        pub const NO_LOCATIONS: &str = "No sync locations configured.";
-
-        pub const FOLDER_PLACEHOLDER: &str = "Folder name";
-
-        pub const UNBOUND: &str = "(unbound)";
 
         pub const ON_DEMAND_LABEL: &str = "On-demand";
 
@@ -6001,6 +6181,11 @@ pub mod settings {
         pub const REVIEW_REMOVE_UNSYNCED_SEATS: &str = "They are also in {seats} group chat(s) not yet synced to this device. Choose Remove again after syncing completes, or from a device that has those chats.";
         pub fn review_remove_unsynced_seats(seats: &str) -> String {
             format!("They are also in {seats} group chat(s) not yet synced to this device. Choose Remove again after syncing completes, or from a device that has those chats.")
+        }
+
+        pub const REVIEW_KEEP_FAILED: &str = "Could not record your decision yet: {reason}. They stay listed until it succeeds.";
+        pub fn review_keep_failed(reason: &str) -> String {
+            format!("Could not record your decision yet: {reason}. They stay listed until it succeeds.")
         }
 
         pub const REVIEW_VERDICT_FAILED: &str = "Removed {who} from your group conversations, but your review list could not be updated yet: {reason}. They may still be listed here until it succeeds.";
@@ -6828,6 +7013,17 @@ pub mod settings {
         pub const LAN_ADDRESSES: &str = "LAN Addresses";
 
         pub const LAN_NONE: &str = "(no active interfaces detected)";
+
+        pub const SERVICE_UNAVAILABLE: &str = "Peer connections did not start on this device. Restart Fauna to try again.";
+
+        pub const NODE_ID_COPY_NEEDS_TUNNEL: &str = "Start the tunnel to get a node ID to copy.";
+
+        pub const LAN_COPY_NONE: &str = "No LAN address to copy.";
+
+        pub const CONTACT_REMOVE_FAILED: &str = "Could not remove {name}: {error}";
+        pub fn contact_remove_failed(name: &str, error: &str) -> String {
+            format!("Could not remove {name}: {error}")
+        }
     }
 
     pub const SIGN_OUT_CONFIRM: &str = "Are you sure you want to sign out? You will need your secret key to sign back in.";
@@ -7277,6 +7473,12 @@ pub mod mail_settings {
     pub const KEYS_INFO: &str = "Your mail is protected by an encryption key held on your Fauna devices. Each app password or token you add unlocks that same key for one email app (Thunderbird, Apple Mail, …). Rotate your keys if a password or token may have leaked, or if a device that had your mail set up was lost or stolen — rotating replaces the key so the exposed credential can no longer read your mail (messages you've already received stay readable). If you're just retiring an app you no longer use, revoke that one credential instead — you don't need to rotate.";
 
     pub const CREDENTIALS_ON_CONNECTED_APPS: &str = "Your app passwords are listed under Settings → Connected apps — copy, reveal or disconnect each one there.";
+
+    pub const USABLE_NEEDS_MAIL_ON: &str = "Turn on mail on the Mail & Calendar page first.";
+
+    pub const USABLE_READING: &str = "Checking whether mail is on for your account…";
+
+    pub const USABLE_UNBUILT: &str = "Mail settings could not be loaded on this device. Signing out and back in rebuilds them.";
 
     pub const SERVE_HERE_LABEL: &str = "Serve my mail & calendar over IMAP/CalDAV on this nest";
 
@@ -8263,6 +8465,8 @@ pub mod search_page {
 
     pub const LOAD_MORE_FAILED: &str = "Load more failed";
 
+    pub const QUERY_REQUIRED: &str = "Type something to search for first.";
+
     pub const SEARCH_MESSAGES: &str = "Search messages...";
 
     pub const BADGE_POST: &str = "Post";
@@ -8311,6 +8515,8 @@ pub mod nostr {
         pub const LINK_BUTTON: &str = "Link Account";
 
         pub const ENTER_NSEC: &str = "Please enter an nsec key";
+
+        pub const ENTER_BUNKER_URL: &str = "Paste the bunker URL from your signer app first.";
 
         pub const NO_NIP07: &str = "No NIP-07 browser extension detected";
     }
@@ -8393,6 +8599,10 @@ pub mod nostr {
 
         pub const INVALID_URL: &str = "Relay URL must start with wss:// or ws://";
 
+        pub const URL_REQUIRED: &str = "Type a relay address first.";
+
+        pub const ALREADY_ADDED: &str = "This relay is already in your list.";
+
         pub const PRIVATE_ADDRESS: &str = "Relays on a private network or on this device can't be used. Use a public relay address.";
     }
 
@@ -8406,6 +8616,8 @@ pub mod nostr {
         pub const PUBKEY_PLACEHOLDER: &str = "npub1... or hex pubkey";
 
         pub const PETNAME_PLACEHOLDER: &str = "Petname";
+
+        pub const PUBKEY_REQUIRED: &str = "Type the npub or hex pubkey to follow first.";
     }
 
     pub mod connected_apps {
@@ -8460,6 +8672,8 @@ pub mod nostr {
         pub const UNNAMED: &str = "Unnamed signer";
 
         pub const INVALID_PUBKEY: &str = "A signer pubkey must be 64 hexadecimal characters.";
+
+        pub const PUBKEY_REQUIRED: &str = "Paste your wallet provider's signer pubkey first.";
     }
 }
 
@@ -8784,6 +8998,10 @@ pub mod admin {
         pub const MAKE_ADMIN: &str = "Make Admin";
 
         pub const REMOVE_ADMIN: &str = "Remove Admin";
+
+        pub const REMOVE_ADMIN_LAST_SUPERADMIN: &str = "This is the last admin with full rights. Make another user an admin first.";
+
+        pub const AGE_BAND_NEEDS_GUARDIAN: &str = "Pick a guardian first. An age band applies only to a supervised account.";
 
         pub const SUPERVISED_BY: &str = "Supervised by {guardian}";
         pub fn supervised_by(guardian: &str) -> String {
@@ -10384,6 +10602,24 @@ pub mod admin {
 
         pub const DMARC_POLICY_NONE: &str = "None — reports only";
 
+        pub const MODE_NEEDS_CREDENTIAL: &str = "Add a DNS-provider credential that covers this domain first.";
+
+        pub const MANAGE_ALL_NEEDS_DOMAIN: &str = "Add a domain first.";
+
+        pub const MANAGE_ALL_NEEDS_CREDENTIAL: &str = "Add a DNS-provider credential that covers every domain first.";
+
+        pub const DOMAIN_REQUIRED: &str = "Type a domain name.";
+
+        pub const DOMAIN_MALFORMED: &str = "Type a domain name such as example.com.";
+
+        pub const DOMAIN_DUPLICATE: &str = "That domain is already added.";
+
+        pub const REMOVE_PRIMARY_BLOCKED: &str = "Rename the primary domain onto another domain to remove it.";
+
+        pub const CREDENTIAL_PROVIDER_REQUIRED: &str = "Pick a DNS provider.";
+
+        pub const CREDENTIAL_FIELD_REQUIRED: &str = "Fill in every field.";
+
         pub mod cert {
             pub const LABEL: &str = "Certificate:";
 
@@ -10438,6 +10674,8 @@ pub mod admin {
             pub fn issuance_failed(date: &str, error: &str) -> String {
                 format!("Certificate request failed ({date}): {error}")
             }
+
+            pub const ISSUE_PENDING: &str = "Finish or cancel the certificate request below first.";
         }
 
         pub mod rename {
@@ -10480,6 +10718,14 @@ pub mod admin {
             pub const ABORT_CONFIRM: &str = "Confirm abort";
 
             pub const ABORT_POSTFLIP_WARNING: &str = "Aborting after the anchor flip re-flips the primary and rewrites every domain's DNS — expensive but safe.";
+
+            pub const NEEDS_SECOND_DOMAIN: &str = "Add a second domain to rename onto.";
+
+            pub const IN_PROGRESS: &str = "A rename is already in progress.";
+
+            pub const TARGET_REQUIRED: &str = "Pick the new primary domain.";
+
+            pub const DAYS_INVALID: &str = "Type a whole number of days from 1 to 30, or leave it blank.";
         }
     }
 
@@ -11412,6 +11658,17 @@ pub mod family {
 
     pub const CONTACT_ADD_INVALID_ACTOR_ID: &str = "Not a valid actor ID (expected hex)";
 
+    pub const CONTACT_ADD_REQUIRED: &str = "Type the actor ID to pre-approve first.";
+
+    pub const TRANSFER_REQUIRED: &str = "Type the new guardian's actor ID first.";
+
+    pub const TRANSFER_INVALID_ACTOR_ID: &str = "Not a valid actor ID for the new guardian (expected hex)";
+
+    pub const POLICY_SCREEN_TIME_INVALID: &str = "Screen time cannot be saved: {reason}";
+    pub fn policy_screen_time_invalid(reason: &str) -> String {
+        format!("Screen time cannot be saved: {reason}")
+    }
+
     pub const GRADUATE_BUTTON: &str = "Graduate to full account";
 
     pub const GRADUATE_CONFIRM_BUTTON: &str = "Yes, graduate {handle}";
@@ -11651,6 +11908,8 @@ pub mod notifications {
     pub const DISMISS: &str = "Dismiss";
 
     pub const CLEAR_ALL: &str = "Clear all";
+
+    pub const NOTHING_TO_CLEAR: &str = "No notifications to clear";
 
     pub const ROW_TIP_SATS: &str = "{sender} tipped {value} sats on your post";
     pub fn row_tip_sats(sender: &str, value: &str) -> String {
@@ -11926,6 +12185,14 @@ pub mod profile {
 
 pub mod subscriptions {
     pub const TITLE: &str = "Subscriptions";
+
+    pub const TIER_NAME_REQUIRED: &str = "Name the tier first.";
+
+    pub const REDEEM_CODE_REQUIRED: &str = "Type the claim code first.";
+
+    pub const CLAIM_NEEDS_TIER: &str = "Create a tier first — a claim code entitles one of your tiers.";
+
+    pub const PROVIDER_NEEDS_TIER: &str = "Create a tier first — a payment provider sells one of your tiers.";
 
     pub const MY_TIERS: &str = "My Tiers";
 
@@ -13214,6 +13481,17 @@ pub mod connected_apps {
         format!("Keys to your records published by {publisher}: {kinds} — read only")
     }
 
+    pub const TRUST_SCOPE_DEPOSIT: &str = "Put files into your folder \"{folder}\"";
+    pub fn trust_scope_deposit(folder: &str) -> String {
+        format!("Put files into your folder \"{folder}\"")
+    }
+
+    pub const TRUST_SCOPE_DEPOSIT_DELETED: &str = "Put files into a folder you have since deleted";
+
+    pub const TRUST_SCOPE_DEPOSIT_UNNAMED: &str = "Put files into one of your folders";
+
+    pub const TRUST_SCOPE_OP_UNKNOWN: &str = "An operation your nest does for this app";
+
     pub const TRUST_STATUS_EXPIRED: &str = "Expired — the app will ask again if it needs them";
 
     pub const TRUST_EMPTY: &str = "This app holds no keys to your records";
@@ -13339,6 +13617,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "common.enable" => Some(common::ENABLE),
         "common.disable" => Some(common::DISABLE),
         "common.load_failed" => Some(common::LOAD_FAILED),
+        "common.in_flight" => Some(common::IN_FLIGHT),
+        "common.nothing_to_confirm" => Some(common::NOTHING_TO_CONFIRM),
         "common.not_found" => Some(common::NOT_FOUND),
         "common.search" => Some(common::SEARCH),
         "common.clear_search" => Some(common::CLEAR_SEARCH),
@@ -13722,6 +14002,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "onboarding.provision.step_attempt_template" => Some(onboarding::provision::STEP_ATTEMPT_TEMPLATE),
         "onboarding.provision.substep.domain_checking_availability" => Some(onboarding::provision::substep::DOMAIN_CHECKING_AVAILABILITY),
         "onboarding.provision.substep.domain_registering" => Some(onboarding::provision::substep::DOMAIN_REGISTERING),
+        "onboarding.provision.substep.domain_creating_zone" => Some(onboarding::provision::substep::DOMAIN_CREATING_ZONE),
+        "onboarding.provision.substep.domain_setting_nameservers" => Some(onboarding::provision::substep::DOMAIN_SETTING_NAMESERVERS),
         "onboarding.provision.substep.domain_verifying_zone" => Some(onboarding::provision::substep::DOMAIN_VERIFYING_ZONE),
         "onboarding.provision.substep.server_generating_dkim" => Some(onboarding::provision::substep::SERVER_GENERATING_DKIM),
         "onboarding.provision.substep.server_creating" => Some(onboarding::provision::substep::SERVER_CREATING),
@@ -13743,6 +14025,46 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "onboarding.handle.examples_help" => Some(onboarding::handle::EXAMPLES_HELP),
         "onboarding.handle.localhost_hint" => Some(onboarding::handle::LOCALHOST_HINT),
         "onboarding.handle.control_checkbox" => Some(onboarding::handle::CONTROL_CHECKBOX),
+        "onboarding.provider_choice.title" => Some(onboarding::provider_choice::TITLE),
+        "onboarding.provider_choice.description" => Some(onboarding::provider_choice::DESCRIPTION),
+        "onboarding.provider_choice.goal_domain" => Some(onboarding::provider_choice::GOAL_DOMAIN),
+        "onboarding.provider_choice.goal_dns" => Some(onboarding::provider_choice::GOAL_DNS),
+        "onboarding.provider_choice.goal_vps" => Some(onboarding::provider_choice::GOAL_VPS),
+        "onboarding.provider_choice.goal_covered_by" => Some(onboarding::provider_choice::GOAL_COVERED_BY),
+        "onboarding.provider_choice.goal_open" => Some(onboarding::provider_choice::GOAL_OPEN),
+        "onboarding.provider_choice.goal_price" => Some(onboarding::provider_choice::GOAL_PRICE),
+        "onboarding.provider_choice.goal_price_first_year" => Some(onboarding::provider_choice::GOAL_PRICE_FIRST_YEAR),
+        "onboarding.provider_choice.cannot_cover_no_dns" => Some(onboarding::provider_choice::CANNOT_COVER_NO_DNS),
+        "onboarding.provider_choice.cannot_cover_no_server" => Some(onboarding::provider_choice::CANNOT_COVER_NO_SERVER),
+        "onboarding.provider_choice.cannot_cover_no_registrar" => Some(onboarding::provider_choice::CANNOT_COVER_NO_REGISTRAR),
+        "onboarding.provider_choice.cannot_cover_not_registrable" => Some(onboarding::provider_choice::CANNOT_COVER_NOT_REGISTRABLE),
+        "onboarding.provider_choice.cannot_cover_zone_missing" => Some(onboarding::provider_choice::CANNOT_COVER_ZONE_MISSING),
+        "onboarding.provider_choice.cannot_cover_no_zone_door" => Some(onboarding::provider_choice::CANNOT_COVER_NO_ZONE_DOOR),
+        "onboarding.provider_choice.cannot_cover_no_nameserver_door" => Some(onboarding::provider_choice::CANNOT_COVER_NO_NAMESERVER_DOOR),
+        "onboarding.provider_choice.cannot_cover_pointed_elsewhere" => Some(onboarding::provider_choice::CANNOT_COVER_POINTED_ELSEWHERE),
+        "onboarding.provider_choice.dns_not_pointed_yet" => Some(onboarding::provider_choice::DNS_NOT_POINTED_YET),
+        "onboarding.provider_choice.held_credential" => Some(onboarding::provider_choice::HELD_CREDENTIAL),
+        "onboarding.provider_choice.status_cover_domain" => Some(onboarding::provider_choice::STATUS_COVER_DOMAIN),
+        "onboarding.provider_choice.status_cover_dns" => Some(onboarding::provider_choice::STATUS_COVER_DNS),
+        "onboarding.provider_choice.status_cover_vps" => Some(onboarding::provider_choice::STATUS_COVER_VPS),
+        "onboarding.provider_choice.status_contact_missing" => Some(onboarding::provider_choice::STATUS_CONTACT_MISSING),
+        "onboarding.provider_choice.start_blocked_price" => Some(onboarding::provider_choice::START_BLOCKED_PRICE),
+        "onboarding.provider_choice.start_blocked_server_type" => Some(onboarding::provider_choice::START_BLOCKED_SERVER_TYPE),
+        "onboarding.provider_choice.manual_row_help" => Some(onboarding::provider_choice::MANUAL_ROW_HELP),
+        "onboarding.provider_choice.providers_heading" => Some(onboarding::provider_choice::PROVIDERS_HEADING),
+        "onboarding.provider_choice.capability_registrar" => Some(onboarding::provider_choice::CAPABILITY_REGISTRAR),
+        "onboarding.provider_choice.capability_dns" => Some(onboarding::provider_choice::CAPABILITY_DNS),
+        "onboarding.provider_choice.capability_vps" => Some(onboarding::provider_choice::CAPABILITY_VPS),
+        "onboarding.provider_choice.state_connected" => Some(onboarding::provider_choice::STATE_CONNECTED),
+        "onboarding.provider_choice.state_available" => Some(onboarding::provider_choice::STATE_AVAILABLE),
+        "onboarding.provider_choice.state_connecting" => Some(onboarding::provider_choice::STATE_CONNECTING),
+        "onboarding.provider_choice.manual_row" => Some(onboarding::provider_choice::MANUAL_ROW),
+        "onboarding.provider_choice.goal_select" => Some(onboarding::provider_choice::GOAL_SELECT),
+        "onboarding.provider_choice.connect" => Some(onboarding::provider_choice::CONNECT),
+        "onboarding.provider_choice.disconnect" => Some(onboarding::provider_choice::DISCONNECT),
+        "onboarding.provider_choice.close" => Some(onboarding::provider_choice::CLOSE),
+        "onboarding.provider_choice.dialog_connected" => Some(onboarding::provider_choice::DIALOG_CONNECTED),
+        "onboarding.provider_choice.dialog_connecting" => Some(onboarding::provider_choice::DIALOG_CONNECTING),
         "onboarding.dns_config.title" => Some(onboarding::dns_config::TITLE),
         "onboarding.dns_config.buy_domain_checkbox" => Some(onboarding::dns_config::BUY_DOMAIN_CHECKBOX),
         "onboarding.dns_config.same_provider_checkbox" => Some(onboarding::dns_config::SAME_PROVIDER_CHECKBOX),
@@ -13968,6 +14290,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "tui_settings.external_media_always" => Some(tui_settings::EXTERNAL_MEDIA_ALWAYS),
         "tui_settings.external_media_never" => Some(tui_settings::EXTERNAL_MEDIA_NEVER),
         "feed.compose_empty" => Some(feed::COMPOSE_EMPTY),
+        "feed.reply_empty" => Some(feed::REPLY_EMPTY),
         "feed.imported_notice" => Some(feed::IMPORTED_NOTICE),
         "feed.imported_clear" => Some(feed::IMPORTED_CLEAR),
         "feed.video_external_open_confirm_title" => Some(feed::VIDEO_EXTERNAL_OPEN_CONFIRM_TITLE),
@@ -14026,8 +14349,11 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "feed.bridge_form.kind" => Some(feed::bridge_form::KIND),
         "feed.bridge_form.uri" => Some(feed::bridge_form::URI),
         "feed.bridge_form.name" => Some(feed::bridge_form::NAME),
+        "feed.bridge_form.kind_required" => Some(feed::bridge_form::KIND_REQUIRED),
+        "feed.bridge_form.uri_required" => Some(feed::bridge_form::URI_REQUIRED),
         "feed.create.title" => Some(feed::create::TITLE),
         "feed.create.name_placeholder" => Some(feed::create::NAME_PLACEHOLDER),
+        "feed.create.name_required" => Some(feed::create::NAME_REQUIRED),
         "feed.create.add_rule" => Some(feed::create::ADD_RULE),
         "feed.create.mode_all" => Some(feed::create::MODE_ALL),
         "feed.create.mode_any" => Some(feed::create::MODE_ANY),
@@ -14134,6 +14460,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "conversations.compose.body" => Some(conversations::compose::BODY),
         "conversations.compose.resolve" => Some(conversations::compose::RESOLVE),
         "conversations.compose.write_message" => Some(conversations::compose::WRITE_MESSAGE),
+        "conversations.compose.needs_recipient" => Some(conversations::compose::NEEDS_RECIPIENT),
+        "conversations.compose.recipient_unsupported" => Some(conversations::compose::RECIPIENT_UNSUPPORTED),
+        "conversations.compose.no_attachments_here" => Some(conversations::compose::NO_ATTACHMENTS_HERE),
+        "conversations.compose.no_topic_here" => Some(conversations::compose::NO_TOPIC_HERE),
         "conversations.compose.encrypted" => Some(conversations::compose::ENCRYPTED),
         "conversations.detail.badge_encrypted" => Some(conversations::detail::BADGE_ENCRYPTED),
         "conversations.detail.badge_signed" => Some(conversations::detail::BADGE_SIGNED),
@@ -14429,6 +14759,14 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "events.refused_changes.reason.attendee_unresolvable" => Some(events::refused_changes::reason::ATTENDEE_UNRESOLVABLE),
         "events.refused_changes.reason.sender_unauthenticated" => Some(events::refused_changes::reason::SENDER_UNAUTHENTICATED),
         "events.refused_changes.reason.other" => Some(events::refused_changes::reason::OTHER),
+        "events.create_blocked.loading" => Some(events::create_blocked::LOADING),
+        "events.create_blocked.provision_failed" => Some(events::create_blocked::PROVISION_FAILED),
+        "events.create_blocked.add_credential" => Some(events::create_blocked::ADD_CREDENTIAL),
+        "events.create_blocked.admin_enable_calendar" => Some(events::create_blocked::ADMIN_ENABLE_CALENDAR),
+        "events.create_blocked.not_here" => Some(events::create_blocked::NOT_HERE),
+        "events.create_blocked.open_mail_settings" => Some(events::create_blocked::OPEN_MAIL_SETTINGS),
+        "events.create_blocked.open_admin_calendar" => Some(events::create_blocked::OPEN_ADMIN_CALENDAR),
+        "events.save_failed" => Some(events::SAVE_FAILED),
         "events.error.load_calendars" => Some(events::error::LOAD_CALENDARS),
         "events.error.load_events" => Some(events::error::LOAD_EVENTS),
         "events.error.create_calendar" => Some(events::error::CREATE_CALENDAR),
@@ -14579,6 +14917,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "atproto_settings.error_authorize" => Some(atproto_settings::ERROR_AUTHORIZE),
         "atproto_settings.error_deauthorize" => Some(atproto_settings::ERROR_DEAUTHORIZE),
         "atproto_settings.error_no_identity" => Some(atproto_settings::ERROR_NO_IDENTITY),
+        "atproto_settings.page_unavailable" => Some(atproto_settings::PAGE_UNAVAILABLE),
         "atproto_settings.error_delegation_untrusted" => Some(atproto_settings::ERROR_DELEGATION_UNTRUSTED),
         "atproto_settings.error_save_local" => Some(atproto_settings::ERROR_SAVE_LOCAL),
         "atproto_settings.error_transition" => Some(atproto_settings::ERROR_TRANSITION),
@@ -14749,7 +15088,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "media.error_refresh" => Some(media::ERROR_REFRESH),
         "media.error_upload" => Some(media::ERROR_UPLOAD),
         "media.error_delete" => Some(media::ERROR_DELETE),
-        "media.error_no_set" => Some(media::ERROR_NO_SET),
+        "media.error_first_folder" => Some(media::ERROR_FIRST_FOLDER),
         "media.error_restore" => Some(media::ERROR_RESTORE),
         "media.error_followed_unavailable" => Some(media::ERROR_FOLLOWED_UNAVAILABLE),
         "media.error_followed_fetch" => Some(media::ERROR_FOLLOWED_FETCH),
@@ -14925,6 +15264,13 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "backups.backup_destination_kind_select_label" => Some(backups::BACKUP_DESTINATION_KIND_SELECT_LABEL),
         "backups.backup_destination_capacity_placeholder" => Some(backups::BACKUP_DESTINATION_CAPACITY_PLACEHOLDER),
         "backups.backup_destination_capacity_invalid" => Some(backups::BACKUP_DESTINATION_CAPACITY_INVALID),
+        "backups.backup_destination_url_required" => Some(backups::BACKUP_DESTINATION_URL_REQUIRED),
+        "backups.snapshot_delete_already_pending" => Some(backups::SNAPSHOT_DELETE_ALREADY_PENDING),
+        "backups.snapshot_delete_already_deleted" => Some(backups::SNAPSHOT_DELETE_ALREADY_DELETED),
+        "backups.snapshot_select_folder_first" => Some(backups::SNAPSHOT_SELECT_FOLDER_FIRST),
+        "backups.restore_kind_unticked" => Some(backups::RESTORE_KIND_UNTICKED),
+        "backups.snapshot_restore_destination_required" => Some(backups::SNAPSHOT_RESTORE_DESTINATION_REQUIRED),
+        "backups.snapshot_restore_running" => Some(backups::SNAPSHOT_RESTORE_RUNNING),
         "backups.backup_destination_usage" => Some(backups::BACKUP_DESTINATION_USAGE),
         "backups.backup_destination_usage_cap_reached" => Some(backups::BACKUP_DESTINATION_USAGE_CAP_REACHED),
         "backups.backup_destination_usage_uncapped" => Some(backups::BACKUP_DESTINATION_USAGE_UNCAPPED),
@@ -15093,11 +15439,14 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "backups.status_title" => Some(backups::STATUS_TITLE),
         "backups.last_seq" => Some(backups::LAST_SEQ),
         "folders.title" => Some(folders::TITLE),
+        "folders.follow_handle_required" => Some(folders::FOLLOW_HANDLE_REQUIRED),
+        "folders.follow_name_required" => Some(folders::FOLLOW_NAME_REQUIRED),
+        "folders.follow_not_ready" => Some(folders::FOLLOW_NOT_READY),
+        "folders.share_recipient_required" => Some(folders::SHARE_RECIPIENT_REQUIRED),
+        "folders.share_not_ready" => Some(folders::SHARE_NOT_READY),
         "folders.photo_library_section" => Some(folders::PHOTO_LIBRARY_SECTION),
         "folders.synced_locations" => Some(folders::SYNCED_LOCATIONS),
         "folders.no_locations_bound" => Some(folders::NO_LOCATIONS_BOUND),
-        "folders.location_path_placeholder" => Some(folders::LOCATION_PATH_PLACEHOLDER),
-        "folders.bind_location" => Some(folders::BIND_LOCATION),
         "folders.choose" => Some(folders::CHOOSE),
         "folders.deletes_held" => Some(folders::DELETES_HELD),
         "folders.apply_deletes" => Some(folders::APPLY_DELETES),
@@ -15125,6 +15474,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "folders.offline_share_set" => Some(folders::OFFLINE_SHARE_SET),
         "folders.offline_share_code_malformed" => Some(folders::OFFLINE_SHARE_CODE_MALFORMED),
         "folders.offline_share_code_own" => Some(folders::OFFLINE_SHARE_CODE_OWN),
+        "folders.offline_share_code_needed" => Some(folders::OFFLINE_SHARE_CODE_NEEDED),
         "folders.error_offline_share" => Some(folders::ERROR_OFFLINE_SHARE),
         "folders.share_transfer_section" => Some(folders::SHARE_TRANSFER_SECTION),
         "folders.share_serve_status_off" => Some(folders::SHARE_SERVE_STATUS_OFF),
@@ -15392,6 +15742,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "devices.wizard.retention_days" => Some(devices::wizard::RETENTION_DAYS),
         "devices.wizard.review" => Some(devices::wizard::REVIEW),
         "devices.wizard.creating_folder" => Some(devices::wizard::CREATING_FOLDER),
+        "devices.wizard.confirm_public_pending" => Some(devices::wizard::CONFIRM_PUBLIC_PENDING),
         "devices.wizard.failed_create" => Some(devices::wizard::FAILED_CREATE),
         "devices.wizard.select_devices_roles" => Some(devices::wizard::SELECT_DEVICES_ROLES),
         "devices.wizard.review_name" => Some(devices::wizard::REVIEW_NAME),
@@ -15443,13 +15794,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "devices.peers.last_connected" => Some(devices::peers::LAST_CONNECTED),
         "devices.peers.lan_endpoints" => Some(devices::peers::LAN_ENDPOINTS),
         "devices.peers.remove_peer" => Some(devices::peers::REMOVE_PEER),
-        "devices.sync_locations.title" => Some(devices::sync_locations::TITLE),
-        "devices.sync_locations.location_placeholder" => Some(devices::sync_locations::LOCATION_PLACEHOLDER),
         "devices.sync_locations.browse" => Some(devices::sync_locations::BROWSE),
-        "devices.sync_locations.add_location" => Some(devices::sync_locations::ADD_LOCATION),
-        "devices.sync_locations.no_locations" => Some(devices::sync_locations::NO_LOCATIONS),
-        "devices.sync_locations.folder_placeholder" => Some(devices::sync_locations::FOLDER_PLACEHOLDER),
-        "devices.sync_locations.unbound" => Some(devices::sync_locations::UNBOUND),
         "devices.sync_locations.on_demand_label" => Some(devices::sync_locations::ON_DEMAND_LABEL),
         "devices.sync_locations.on_demand_needs_fuse3" => Some(devices::sync_locations::ON_DEMAND_NEEDS_FUSE3),
         "devices.sync_locations.on_demand_no_fuse_device" => Some(devices::sync_locations::ON_DEMAND_NO_FUSE_DEVICE),
@@ -15546,6 +15891,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.recovery_kit.review_remove_none_here" => Some(settings::recovery_kit::REVIEW_REMOVE_NONE_HERE),
         "settings.recovery_kit.review_remove_folder_seats" => Some(settings::recovery_kit::REVIEW_REMOVE_FOLDER_SEATS),
         "settings.recovery_kit.review_remove_unsynced_seats" => Some(settings::recovery_kit::REVIEW_REMOVE_UNSYNCED_SEATS),
+        "settings.recovery_kit.review_keep_failed" => Some(settings::recovery_kit::REVIEW_KEEP_FAILED),
         "settings.recovery_kit.review_verdict_failed" => Some(settings::recovery_kit::REVIEW_VERDICT_FAILED),
         "settings.recovery_kit.backup_regrant_running" => Some(settings::recovery_kit::BACKUP_REGRANT_RUNNING),
         "settings.recovery_kit.backup_regrant_done" => Some(settings::recovery_kit::BACKUP_REGRANT_DONE),
@@ -15876,6 +16222,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.p2p_page.connection_group_description" => Some(settings::p2p_page::CONNECTION_GROUP_DESCRIPTION),
         "settings.p2p_page.lan_addresses" => Some(settings::p2p_page::LAN_ADDRESSES),
         "settings.p2p_page.lan_none" => Some(settings::p2p_page::LAN_NONE),
+        "settings.p2p_page.service_unavailable" => Some(settings::p2p_page::SERVICE_UNAVAILABLE),
+        "settings.p2p_page.node_id_copy_needs_tunnel" => Some(settings::p2p_page::NODE_ID_COPY_NEEDS_TUNNEL),
+        "settings.p2p_page.lan_copy_none" => Some(settings::p2p_page::LAN_COPY_NONE),
+        "settings.p2p_page.contact_remove_failed" => Some(settings::p2p_page::CONTACT_REMOVE_FAILED),
         "settings.sign_out_confirm" => Some(settings::SIGN_OUT_CONFIRM),
         "settings.sign_out_residue" => Some(settings::SIGN_OUT_RESIDUE),
         "settings.sign_out_residue_credentials" => Some(settings::SIGN_OUT_RESIDUE_CREDENTIALS),
@@ -16059,6 +16409,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "mail_settings.unavailable_notice" => Some(mail_settings::UNAVAILABLE_NOTICE),
         "mail_settings.keys_info" => Some(mail_settings::KEYS_INFO),
         "mail_settings.credentials_on_connected_apps" => Some(mail_settings::CREDENTIALS_ON_CONNECTED_APPS),
+        "mail_settings.usable_needs_mail_on" => Some(mail_settings::USABLE_NEEDS_MAIL_ON),
+        "mail_settings.usable_reading" => Some(mail_settings::USABLE_READING),
+        "mail_settings.usable_unbuilt" => Some(mail_settings::USABLE_UNBUILT),
         "mail_settings.serve_here_label" => Some(mail_settings::SERVE_HERE_LABEL),
         "mail_settings.serve_here_subtitle" => Some(mail_settings::SERVE_HERE_SUBTITLE),
         "mail_settings.forwarding_title" => Some(mail_settings::FORWARDING_TITLE),
@@ -16440,6 +16793,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "search_page.search_failed" => Some(search_page::SEARCH_FAILED),
         "search_page.search_failed_reason" => Some(search_page::SEARCH_FAILED_REASON),
         "search_page.load_more_failed" => Some(search_page::LOAD_MORE_FAILED),
+        "search_page.query_required" => Some(search_page::QUERY_REQUIRED),
         "search_page.search_messages" => Some(search_page::SEARCH_MESSAGES),
         "search_page.badge_post" => Some(search_page::BADGE_POST),
         "search_page.badge_profile" => Some(search_page::BADGE_PROFILE),
@@ -16463,6 +16817,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nostr.link_account.nip07_prompt" => Some(nostr::link_account::NIP07_PROMPT),
         "nostr.link_account.link_button" => Some(nostr::link_account::LINK_BUTTON),
         "nostr.link_account.enter_nsec" => Some(nostr::link_account::ENTER_NSEC),
+        "nostr.link_account.enter_bunker_url" => Some(nostr::link_account::ENTER_BUNKER_URL),
         "nostr.link_account.no_nip07" => Some(nostr::link_account::NO_NIP07),
         "nostr.account.title" => Some(nostr::account::TITLE),
         "nostr.account.description" => Some(nostr::account::DESCRIPTION),
@@ -16498,12 +16853,15 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nostr.relays.add" => Some(nostr::relays::ADD),
         "nostr.relays.placeholder" => Some(nostr::relays::PLACEHOLDER),
         "nostr.relays.invalid_url" => Some(nostr::relays::INVALID_URL),
+        "nostr.relays.url_required" => Some(nostr::relays::URL_REQUIRED),
+        "nostr.relays.already_added" => Some(nostr::relays::ALREADY_ADDED),
         "nostr.relays.private_address" => Some(nostr::relays::PRIVATE_ADDRESS),
         "nostr.follows.title" => Some(nostr::follows::TITLE),
         "nostr.follows.add" => Some(nostr::follows::ADD),
         "nostr.follows.none" => Some(nostr::follows::NONE),
         "nostr.follows.pubkey_placeholder" => Some(nostr::follows::PUBKEY_PLACEHOLDER),
         "nostr.follows.petname_placeholder" => Some(nostr::follows::PETNAME_PLACEHOLDER),
+        "nostr.follows.pubkey_required" => Some(nostr::follows::PUBKEY_REQUIRED),
         "nostr.connected_apps.title" => Some(nostr::connected_apps::TITLE),
         "nostr.connected_apps.description" => Some(nostr::connected_apps::DESCRIPTION),
         "nostr.connected_apps.connect_button" => Some(nostr::connected_apps::CONNECT_BUTTON),
@@ -16526,6 +16884,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nostr.zap_signers.none" => Some(nostr::zap_signers::NONE),
         "nostr.zap_signers.unnamed" => Some(nostr::zap_signers::UNNAMED),
         "nostr.zap_signers.invalid_pubkey" => Some(nostr::zap_signers::INVALID_PUBKEY),
+        "nostr.zap_signers.pubkey_required" => Some(nostr::zap_signers::PUBKEY_REQUIRED),
         "status.identity.not_configured" => Some(status::identity::NOT_CONFIGURED),
         "status.connection.service" => Some(status::connection::SERVICE),
         "status.sync_agent.running" => Some(status::sync_agent::RUNNING),
@@ -16651,6 +17010,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.users_page.suspend_default_reason" => Some(admin::users_page::SUSPEND_DEFAULT_REASON),
         "admin.users_page.make_admin" => Some(admin::users_page::MAKE_ADMIN),
         "admin.users_page.remove_admin" => Some(admin::users_page::REMOVE_ADMIN),
+        "admin.users_page.remove_admin_last_superadmin" => Some(admin::users_page::REMOVE_ADMIN_LAST_SUPERADMIN),
+        "admin.users_page.age_band_needs_guardian" => Some(admin::users_page::AGE_BAND_NEEDS_GUARDIAN),
         "admin.users_page.supervised_by" => Some(admin::users_page::SUPERVISED_BY),
         "admin.users_page.take_over" => Some(admin::users_page::TAKE_OVER),
         "admin.users_page.take_over_confirm_summary" => Some(admin::users_page::TAKE_OVER_CONFIRM_SUMMARY),
@@ -17285,6 +17646,15 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.dns.dmarc_policy_reject" => Some(admin::dns::DMARC_POLICY_REJECT),
         "admin.dns.dmarc_policy_quarantine" => Some(admin::dns::DMARC_POLICY_QUARANTINE),
         "admin.dns.dmarc_policy_none" => Some(admin::dns::DMARC_POLICY_NONE),
+        "admin.dns.mode_needs_credential" => Some(admin::dns::MODE_NEEDS_CREDENTIAL),
+        "admin.dns.manage_all_needs_domain" => Some(admin::dns::MANAGE_ALL_NEEDS_DOMAIN),
+        "admin.dns.manage_all_needs_credential" => Some(admin::dns::MANAGE_ALL_NEEDS_CREDENTIAL),
+        "admin.dns.domain_required" => Some(admin::dns::DOMAIN_REQUIRED),
+        "admin.dns.domain_malformed" => Some(admin::dns::DOMAIN_MALFORMED),
+        "admin.dns.domain_duplicate" => Some(admin::dns::DOMAIN_DUPLICATE),
+        "admin.dns.remove_primary_blocked" => Some(admin::dns::REMOVE_PRIMARY_BLOCKED),
+        "admin.dns.credential_provider_required" => Some(admin::dns::CREDENTIAL_PROVIDER_REQUIRED),
+        "admin.dns.credential_field_required" => Some(admin::dns::CREDENTIAL_FIELD_REQUIRED),
         "admin.dns.cert.label" => Some(admin::dns::cert::LABEL),
         "admin.dns.cert.status_valid" => Some(admin::dns::cert::STATUS_VALID),
         "admin.dns.cert.status_on_floor" => Some(admin::dns::cert::STATUS_ON_FLOOR),
@@ -17306,6 +17676,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.dns.cert.issuance_failed_domain" => Some(admin::dns::cert::ISSUANCE_FAILED_DOMAIN),
         "admin.dns.cert.issuance_failed_ip" => Some(admin::dns::cert::ISSUANCE_FAILED_IP),
         "admin.dns.cert.issuance_failed" => Some(admin::dns::cert::ISSUANCE_FAILED),
+        "admin.dns.cert.issue_pending" => Some(admin::dns::cert::ISSUE_PENDING),
         "admin.dns.rename.button" => Some(admin::dns::rename::BUTTON),
         "admin.dns.rename.promote" => Some(admin::dns::rename::PROMOTE),
         "admin.dns.rename.renaming_to" => Some(admin::dns::rename::RENAMING_TO),
@@ -17326,6 +17697,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.dns.rename.abort" => Some(admin::dns::rename::ABORT),
         "admin.dns.rename.abort_confirm" => Some(admin::dns::rename::ABORT_CONFIRM),
         "admin.dns.rename.abort_postflip_warning" => Some(admin::dns::rename::ABORT_POSTFLIP_WARNING),
+        "admin.dns.rename.needs_second_domain" => Some(admin::dns::rename::NEEDS_SECOND_DOMAIN),
+        "admin.dns.rename.in_progress" => Some(admin::dns::rename::IN_PROGRESS),
+        "admin.dns.rename.target_required" => Some(admin::dns::rename::TARGET_REQUIRED),
+        "admin.dns.rename.days_invalid" => Some(admin::dns::rename::DAYS_INVALID),
         "admin.view.nest_statistics" => Some(admin::view::NEST_STATISTICS),
         "admin.view.registered_users" => Some(admin::view::REGISTERED_USERS),
         "admin.view.total_storage_used" => Some(admin::view::TOTAL_STORAGE_USED),
@@ -17670,6 +18045,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "family.contact_add_placeholder" => Some(family::CONTACT_ADD_PLACEHOLDER),
         "family.contact_add_button" => Some(family::CONTACT_ADD_BUTTON),
         "family.contact_add_invalid_actor_id" => Some(family::CONTACT_ADD_INVALID_ACTOR_ID),
+        "family.contact_add_required" => Some(family::CONTACT_ADD_REQUIRED),
+        "family.transfer_required" => Some(family::TRANSFER_REQUIRED),
+        "family.transfer_invalid_actor_id" => Some(family::TRANSFER_INVALID_ACTOR_ID),
+        "family.policy_screen_time_invalid" => Some(family::POLICY_SCREEN_TIME_INVALID),
         "family.graduate_button" => Some(family::GRADUATE_BUTTON),
         "family.graduate_confirm_button" => Some(family::GRADUATE_CONFIRM_BUTTON),
         "family.transfer_placeholder" => Some(family::TRANSFER_PLACEHOLDER),
@@ -17748,6 +18127,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "notifications.row_interaction" => Some(notifications::ROW_INTERACTION),
         "notifications.dismiss" => Some(notifications::DISMISS),
         "notifications.clear_all" => Some(notifications::CLEAR_ALL),
+        "notifications.nothing_to_clear" => Some(notifications::NOTHING_TO_CLEAR),
         "notifications.row_tip_sats" => Some(notifications::ROW_TIP_SATS),
         "notifications.row_tip_msats" => Some(notifications::ROW_TIP_MSATS),
         "notifications.row_tip" => Some(notifications::ROW_TIP),
@@ -17837,6 +18217,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "profile.private_save_failed" => Some(profile::PRIVATE_SAVE_FAILED),
         "profile.private_save_elsewhere" => Some(profile::PRIVATE_SAVE_ELSEWHERE),
         "subscriptions.title" => Some(subscriptions::TITLE),
+        "subscriptions.tier_name_required" => Some(subscriptions::TIER_NAME_REQUIRED),
+        "subscriptions.redeem_code_required" => Some(subscriptions::REDEEM_CODE_REQUIRED),
+        "subscriptions.claim_needs_tier" => Some(subscriptions::CLAIM_NEEDS_TIER),
+        "subscriptions.provider_needs_tier" => Some(subscriptions::PROVIDER_NEEDS_TIER),
         "subscriptions.my_tiers" => Some(subscriptions::MY_TIERS),
         "subscriptions.my_subscriptions" => Some(subscriptions::MY_SUBSCRIPTIONS),
         "subscriptions.pending_requests" => Some(subscriptions::PENDING_REQUESTS),
@@ -18297,6 +18681,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "connected_apps.install_setting" => Some(connected_apps::INSTALL_SETTING),
         "connected_apps.trust_scope_ext_rw" => Some(connected_apps::TRUST_SCOPE_EXT_RW),
         "connected_apps.trust_scope_ext_ro" => Some(connected_apps::TRUST_SCOPE_EXT_RO),
+        "connected_apps.trust_scope_deposit" => Some(connected_apps::TRUST_SCOPE_DEPOSIT),
+        "connected_apps.trust_scope_deposit_deleted" => Some(connected_apps::TRUST_SCOPE_DEPOSIT_DELETED),
+        "connected_apps.trust_scope_deposit_unnamed" => Some(connected_apps::TRUST_SCOPE_DEPOSIT_UNNAMED),
+        "connected_apps.trust_scope_op_unknown" => Some(connected_apps::TRUST_SCOPE_OP_UNKNOWN),
         "connected_apps.trust_status_expired" => Some(connected_apps::TRUST_STATUS_EXPIRED),
         "connected_apps.trust_empty" => Some(connected_apps::TRUST_EMPTY),
         "connected_apps.trust_bound_note" => Some(connected_apps::TRUST_BOUND_NOTE),

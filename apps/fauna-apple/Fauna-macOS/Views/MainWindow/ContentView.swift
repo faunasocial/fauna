@@ -156,6 +156,18 @@ struct MainWindowView: View {
         @Bindable var state = appState
         @Bindable var searchVM = searchVM
 
+        // The conditional global banners (critical alerts, the custody warning,
+        // the rules notice, the supervised indicator, the report host) are one
+        // full-width strip in REAL layout above the split, never a safe-area
+        // inset over it: on macOS an inset applied outside a `NavigationSplitView`
+        // never reaches its columns, which then laid out underneath the strip and
+        // were covered by it. Each banner is empty (zero height) in the ordinary
+        // case. The split view and its whole modifier chain below are this
+        // stack's second child, so the screen-time lock overlay covers the split
+        // only and the strip stays clickable.
+        VStack(spacing: 0) {
+        bannerStrip
+
         NavigationSplitView(columnVisibility: $columnVisibility) {
             // `.focusRegionAnchor("sidebar")` sits on this OUTER ZStack, not
             // directly on `SidebarView`: `SidebarView.body` itself swaps its
@@ -168,11 +180,29 @@ struct MainWindowView: View {
             // that reached it. Same fix, same reason: a ZStack wrapper has no
             // identity of its own tied to `selection`, so the marker riding
             // its `.background()` survives the inner swap untouched.
-            ZStack {
-                SidebarView(selection: $state.selectedSidebar)
+            //
+            // The two always-present status indicators head the sidebar column
+            // (`sync-agent.md` § Local agent health — the top of the sidebar, as
+            // linux, windows and tui place them), in real layout above the list.
+            // They sit in this wrapper, OUTSIDE `SidebarView`, so its wholesale
+            // swap to the Settings / Admin rails never takes them away.
+            VStack(spacing: 0) {
+                if columnVisibility != .detailOnly {
+                    statusIndicators
+                }
+                ZStack {
+                    SidebarView(selection: $state.selectedSidebar)
+                }
             }
             .focusRegionAnchor("sidebar")
         } detail: {
+            VStack(spacing: 0) {
+            // With the sidebar column collapsed the indicators move here, to the
+            // detail column's top, in real layout: `connection-status` is always
+            // visible (transport.md § Connection-status indicator), never nowhere.
+            if columnVisibility == .detailOnly {
+                statusIndicators
+            }
             // `.focusRegionAnchor("page")` sits on this OUTER ZStack, not on the
             // `.id()`-reset Group below: `switch_pane`'s marker must survive a
             // sidebar-selection change, but the Group's `.id()` deliberately
@@ -191,7 +221,7 @@ struct MainWindowView: View {
             // reconcile toolbar items across different detail views during the
             // transition, which crashes in -[NSToolbar _insertNewItemWithItemIdentifier:].
             Group {
-            if searchVM.hasSearched {
+            if searchVM.showsResults {
                 SearchResultsView(vm: searchVM)
             } else {
                 switch appState.selectedSidebar {
@@ -259,58 +289,17 @@ struct MainWindowView: View {
             .accessibilityElement(children: .contain)
             }
             .focusRegionAnchor("page")
+            }
         }
         .navigationSplitViewStyle(.balanced)
         // The ward's full-screen screen-time lock (family-safety.md § Screen
-        // time) — covers the content only, applied BEFORE the safeAreaInset
-        // top chrome below so the supervised-indicator there stays clickable.
+        // time) — covers the split view only, so the banner strip above it
+        // (below) — the supervised-indicator included — stays clickable.
         // Never mounted on the Family page itself: a locked ward must always
         // be able to read who supervises them and what the policy is.
         .overlay {
             if let message = appState.screenTime.lockMessage, appState.selectedSidebar != .family {
                 ScreenTimeLockOverlay(message: message)
-            }
-        }
-        // Global connection-status indicator pinned to the top of the shell, above
-        // the sidebar/detail split. Shared FaunaKit view, fed the live
-        // `FaunaClient.connectionState` (transport.md § Connection-status indicator).
-        // The off-box-recovery custody warning rides just above it — shown only when the launch
-        // glue couldn't confirm custody; tap-to-dismiss.
-        .safeAreaInset(edge: .top) {
-            VStack(spacing: 0) {
-                // Highest-severity global chrome — deliberately above every
-                // other banner (critical-alerts.md § Severity bar).
-                CriticalAlertsBanner(host: criticalAlertsHost)
-                RecoveryCustodyBanner(session: appState.session)
-                ConnectionStatusBar(client: client)
-                // The one-line changed-rules notice (nest-rules.md § Acceptance
-                // at joining, and a change of rules): names the nest; a tap opens
-                // Settings → Status, whose rules surface clears it.
-                NestRulesChangedNotice(nestRules: appState.region.nestRules) {
-                    appState.selectedSidebar = .settings
-                    appState.selectedSettingsPage = .status
-                }
-                // Global local sync-agent process-health indicator, sibling to
-                // `connection-status` (`sync-agent.md` § Local agent health) —
-                // distinct from the WS-RPC link above it.
-                SyncAgentStatusBar(model: syncAgentHealth)
-                // The global `supervised-indicator` (family-safety.md § Client
-                // surface — permanent, non-dismissable chrome on EVERY page for a
-                // supervised account). It lives here, above the split, and NOT in
-                // the sidebar: the Settings and Admin shells swap the sidebar out
-                // in place, so a sidebar-hosted indicator would vanish on exactly
-                // the pages a supervised user is most likely to visit. (Linux uses
-                // its header bar for the same reason.)
-                SupervisedIndicatorBar(store: appState.familyStatus) {
-                    appState.selectedSidebar = .family
-                }
-                // The shared report sheet + its acknowledgement
-                // (moderation.md § User-initiated reporting): ONE host over
-                // every page, because the three verbs (feed ⋯, message ⋯, an
-                // OTHER profile) live on different pages and a report filed from
-                // a card the reporter-side hide then replaces must still
-                // paint its `report-status` somewhere that survives it.
-                ReportHost()
             }
         }
         // .searchable(placement: .toolbar) crashes on macOS 26 during page
@@ -337,6 +326,16 @@ struct MainWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: .faunaOpenModerationAppeal)) { _ in
             appState.selectedSidebar = .moderation
         }
+        #if DEBUG
+        // The e2e `sidebar_set_visible` seam (FaunaMacApp's test-command
+        // handler): collapse or restore the sidebar column, so the
+        // status-chrome test can witness the indicators' collapsed placement.
+        // Compiled out of release (testing.md convention 15).
+        .onReceive(NotificationCenter.default.publisher(for: .faunaE2ESidebarVisibility)) { note in
+            guard let visible = note.object as? Bool else { return }
+            columnVisibility = visible ? .all : .detailOnly
+        }
+        #endif
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -356,13 +355,13 @@ struct MainWindowView: View {
                     Image(systemName: "magnifyingglass")
                 }
                 .accessibilityIdentifier(Ids.searchSubmitButton)
-                .disabled(searchVM.query.trimmingCharacters(in: .whitespaces).isEmpty)
-                .automationActivate(
-                    Ids.searchSubmitButton,
-                    isEnabled: { !searchVM.query.trimmingCharacters(in: .whitespaces).isEmpty }
-                ) {
+                .automationActivate(Ids.searchSubmitButton) {
                     Task { await searchVM.search() }
                 }
+                // The shared `query_possibility` (`search.md` § Errors & edge
+                // cases): a blank query is disabled with its reason on the
+                // tooltip; `search()` asks it again on Enter.
+                .faunaPossible(searchVM.queryPossibility)
             }
             // `search-type-filter` — one shared mapping applies the token to
             // BOTH search backends (search.md § State & data shape); re-fires
@@ -412,11 +411,11 @@ struct MainWindowView: View {
                     Text(L.common.cancel)
                 }
                 .accessibilityIdentifier(Ids.searchCancelButton)
-                .opacity(searchVM.hasSearched ? 1 : 0)
-                .disabled(!searchVM.hasSearched)
+                .opacity(searchVM.showsResults ? 1 : 0)
+                .disabled(!searchVM.showsResults)
                 .automationActivate(
                     Ids.searchCancelButton,
-                    isEnabled: { searchVM.hasSearched }
+                    isEnabled: { searchVM.showsResults }
                 ) {
                     searchVM.cancel()
                 }
@@ -506,6 +505,57 @@ struct MainWindowView: View {
         // wherever the user is, not only while Notifications is mounted
         // (`notifications.md` § Architectural rules, rule 4).
         .onPushNotification { await refreshUnreadNotificationCount() }
+        }
+    }
+
+    /// The two always-present status indicators, one block: the nest link
+    /// (`connection-status`) over the local agent's health (`sync-agent-status`,
+    /// `sync-agent.md` § Local agent health). Mounted at the top of the sidebar
+    /// column, or of the detail column while the sidebar is collapsed — exactly
+    /// one of the two at a time, so neither id is ever duplicated.
+    private var statusIndicators: some View {
+        VStack(spacing: 0) {
+            ConnectionStatusBar(client: client, alignment: .leading)
+            SyncAgentStatusBar(model: syncAgentHealth)
+        }
+    }
+
+    /// The conditional global banners, top to bottom by severity; every one is
+    /// absent (zero height) in the ordinary case.
+    @ViewBuilder
+    private var bannerStrip: some View {
+        VStack(spacing: 0) {
+            // Highest-severity global chrome — deliberately above every
+            // other banner (critical-alerts.md § Severity bar).
+            CriticalAlertsBanner(host: criticalAlertsHost)
+            // The off-box-recovery custody warning — shown only when the launch glue
+            // couldn't confirm custody; tap-to-dismiss.
+            RecoveryCustodyBanner(session: appState.session)
+            // The one-line changed-rules notice (nest-rules.md § Acceptance
+            // at joining, and a change of rules): names the nest; a tap opens
+            // Settings → Status, whose rules surface clears it.
+            NestRulesChangedNotice(nestRules: appState.region.nestRules) {
+                appState.selectedSidebar = .settings
+                appState.selectedSettingsPage = .status
+            }
+            // The global `supervised-indicator` (family-safety.md § Client
+            // surface — permanent, non-dismissable chrome on EVERY page for a
+            // supervised account). It lives here, above the split, and NOT in
+            // the sidebar: the Settings and Admin shells swap the sidebar out
+            // in place, so a sidebar-hosted indicator would vanish on exactly
+            // the pages a supervised user is most likely to visit. (Linux uses
+            // its header bar for the same reason.)
+            SupervisedIndicatorBar(store: appState.familyStatus) {
+                appState.selectedSidebar = .family
+            }
+            // The shared report sheet + its acknowledgement
+            // (moderation.md § User-initiated reporting): ONE host over
+            // every page, because the three verbs (feed ⋯, message ⋯, an
+            // OTHER profile) live on different pages and a report filed from
+            // a card the reporter-side hide then replaces must still
+            // paint its `report-status` somewhere that survives it.
+            ReportHost()
+        }
     }
 
     /// `keepingLastAnswer` is the reconnect re-read: a failed read moves nothing.
@@ -517,7 +567,7 @@ struct MainWindowView: View {
 
     /// `search-cancel-button`'s own act, taken when the user chooses a page.
     private func dismissSearchForPageChange() {
-        if searchVM.hasSearched { searchVM.cancel() }
+        if searchVM.showsResults { searchVM.cancel() }
     }
 
     /// The in-flight clause: a read still suspended when the session changes

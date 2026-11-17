@@ -367,6 +367,11 @@ impl RailBackend for BridgedBackend {
     /// *Delete for everyone* that reaches no one; the local remove, derived
     /// from the rail and never declared, is offered in its place
     /// (`bridged-adapter.md` § Removing bridged rows, rule 1).
+    ///
+    /// The declared `can_leave_room` is masked to `false` too: the bridged
+    /// rail has no leave door (`RailBackend::leave_room` stays
+    /// `NotSupported`), so a declared `true` would paint a live *Leave room*
+    /// that fails.
     fn capabilities(&self, thread: &ThreadDetail) -> ThreadCapabilities {
         let base = derive_capabilities(Rail::Bridged, thread.flavor.clone());
         match bridge_id_of(&thread.participants).and_then(|id| self.identity(id)) {
@@ -375,6 +380,7 @@ impl RailBackend for BridgedBackend {
                 can_send: base.can_send,
                 supports_local_remove: base.supports_local_remove,
                 supports_message_delete: false,
+                can_leave_room: false,
                 ..identity.capabilities
             },
             // No identity is the send's own refusal (`NotSupported`, below):
@@ -822,6 +828,9 @@ mod tests {
                 // far-side delete is masked until the family carries one.
                 supports_local_remove: true,
                 supports_message_delete: false,
+                // The bridged rail has no leave door (`RailBackend::leave_room`
+                // is `NotSupported`), so a declared `true` is masked.
+                can_leave_room: false,
                 ..declared()
             }
         );

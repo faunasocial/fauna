@@ -55,6 +55,8 @@ Stamped 2026-09-19 at acb58fddf3.
 6. [app] If the place you asked to go back to is already gone, the app starts normally instead of failing — `docs/goal/architecture/apps/account-scoping.md` § Concurrent instances
    - `tests/e2e-unified/tests/test_launch_instance_chooser_tui.py::test_tui_focus_existing_onto_an_instance_that_has_gone_starts_normally`
    - `tests/e2e-unified/tests/test_launch_instance_chooser_linux.py::test_linux_focus_existing_onto_an_instance_that_has_gone_starts_normally`
+   - `tests/e2e-unified/tests/test_launch_instance_chooser_tui.py::test_tui_chooser_opens_the_account_by_itself_once_the_served_instance_quits`
+   - `tests/e2e-unified/tests/test_launch_instance_chooser_linux.py::test_linux_chooser_opens_the_account_by_itself_once_the_served_instance_quits`
    - `tests/e2e-unified/tests/test_launch_instance_chooser_windows.py::test_windows_focus_existing_onto_an_instance_that_has_gone_starts_normally`
    - `tests/e2e-unified/tests/artifact/test_macos_app_bundle.py::test_relaunching_the_bundle_after_quitting_starts_normally_as_the_same_account`
    - `tests/e2e-unified/tests/test_account_tab_pin_web.py::test_web_a_tab_pinned_to_a_gone_account_starts_on_the_running_identity`
@@ -106,6 +108,8 @@ Stamped 2026-09-19 at acb58fddf3.
 | 5 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_bound_launch_onto_the_served_account_coexists` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_tui.py::test_tui_focus_existing_onto_an_instance_that_has_gone_starts_normally` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_linux.py::test_linux_focus_existing_onto_an_instance_that_has_gone_starts_normally` | linux (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_tui.py::test_tui_chooser_opens_the_account_by_itself_once_the_served_instance_quits` | tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_linux.py::test_linux_chooser_opens_the_account_by_itself_once_the_served_instance_quits` | linux (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_windows.py::test_windows_focus_existing_onto_an_instance_that_has_gone_starts_normally` | windows (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/artifact/test_macos_app_bundle.py::test_relaunching_the_bundle_after_quitting_starts_normally_as_the_same_account` | macos (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_account_tab_pin_web.py::test_web_a_tab_pinned_to_a_gone_account_starts_on_the_running_identity` | web (linux): passed |

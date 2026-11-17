@@ -51,6 +51,7 @@ pub mod admission;
 pub mod client;
 pub mod discovery;
 pub mod lan;
+pub mod p2p_page;
 pub mod quota;
 pub mod ranged;
 pub mod server;

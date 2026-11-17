@@ -35,6 +35,7 @@ pub mod caldav_policy;
 pub mod carddav_policy;
 pub mod credential;
 pub mod dmarc_reports;
+pub mod domain_forms;
 pub mod error;
 pub mod export;
 pub mod forwarders;
@@ -180,5 +181,6 @@ pub use fauna_mail::spam::model_write::ModelWriteOp;
 pub use state::{
     CredentialKind, MailCredentialSummary, MailSettingsAction, MailSettingsSnapshot,
     MuaInstructions, PendingRotationStatus, SettingsStatus, credential_kind_badge,
-    resolve_mua_username, settings_status_label,
+    mail_settings_mail_usable, mail_usable_unbuilt, mail_usable_unread, resolve_mua_username,
+    settings_status_label,
 };

@@ -222,6 +222,24 @@ public final class MediaMachineVM {
         return machine?.snapshot()
     }
 
+    /// Whether `file-upload` / `upload-button` can succeed now — the shared
+    /// `MediaMachine::upload_possibility`, handed over as the machine answers it
+    /// (`ui/media.md` § Errors & edge cases → *What this person may write*;
+    /// `ui/README.md` § Offer only what is possible, rule 6). Absent with no
+    /// machine, the android VM's reading.
+    public var uploadPossibility: Possibility {
+        _ = _observerTick
+        return machine?.uploadPossibility() ?? .absent
+    }
+
+    /// Whether `media-delete-button` and each `file-version-restore-button` can
+    /// succeed on an item of the set `folder` names (the item's `filterValue`) —
+    /// the shared `MediaMachine::write_possibility`. Absent with no machine.
+    public func writePossibility(folder: String) -> Possibility {
+        _ = _observerTick
+        return machine?.writePossibility(folder: folder) ?? .absent
+    }
+
     /// The page-level `error-message`: the connect failure first, then a
     /// client-glue upload failure, else the machine snapshot's localized `error`.
     public var errorMessage: String? {

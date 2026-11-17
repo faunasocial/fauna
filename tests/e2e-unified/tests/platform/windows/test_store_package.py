@@ -7,17 +7,15 @@ why there is no `skipif(sys.platform != "win32")` here. The *packing* half — d
 `makeappx` accept this manifest, and are two arch packages actually produced — is
 `test_store_package_pack.py` (tier_3, win-only).
 
-Background — why a SECOND MSIX exists beside the sparse one
------------------------------------------------------------
-The sparse package (`test_sparse_package.py`) is a manifest-only identity carrier
-for the MSI-installed shell extension: its payload lives outside the package. That
-shape **cannot be Store-distributed**. The Store channel therefore ships a *full*
-MSIX carrying its binaries inside, which is what earns Store re-signing (no
-certificate to manage, no SmartScreen). See
+Background — why a FULL MSIX
+----------------------------
+A manifest-only identity carrier whose payload lives outside it (the sparse package
+an MSI once registered, retired 2026-11-16 — `installers/windows.md` § Direct
+download, 6) **cannot be Store-distributed**. Fauna therefore ships a *full* MSIX
+carrying its binaries inside, which is what earns Store re-signing (no certificate
+to manage, no SmartScreen), and the same template, rendered for the direct channel,
+is the direct-download bundle. It is the app's one package identity on Windows. See
 `docs/goal/architecture/installers/windows.md` § Store distribution (MSIX).
-
-The two packages are disjoint identities serving disjoint installs; neither
-replaces the other.
 
 The load-bearing invariants pinned here
 ---------------------------------------
@@ -26,20 +24,27 @@ The load-bearing invariants pinned here
    both remain build-time tokens — hard-coding either would weld the package to one
    Store reservation. `ProcessorArchitecture` is a token too: a full MSIX carrying
    native binaries must declare the arch it carries, and we ship two.
-2. **No 9th CLSID** — same invariant as the sparse package: the Store package is a
-   third *registration surface* for the one root `IExplorerCommand` implementation,
-   so the expected GUID is read out of `ShellExt.wxs`, never restated here.
+2. **No 9th CLSID** — the package is a second *registration surface* for the one
+   root `IExplorerCommand` implementation the MSI's legacy-menu verb names, so the
+   expected GUID is read out of `ShellExt.wxs`, never restated here.
 3. **The feature subset is the ratified one.** Desktop App + `fauna://` + sync agent
    + context menu are IN; **services are OUT** — an MSIX service can only run as
    localSystem/localService/networkService, which would abandon the ratified
    `NT SERVICE\\FaunaNest` virtual-account least-privilege shape. A service
    declaration sneaking into this manifest is a design regression, not a typo.
-4. **Data continuity is scoped, not blanket.** `%LocalAppData%\\Fauna` is excluded
-   from write virtualization so Store and MSI clients see one state; the exclusion
-   must stay *scoped to that directory* rather than switching AppData virtualization
-   off wholesale.
-5. **Content is internal.** No `AllowExternalContent` — that is the sparse package's
-   mechanism and is precisely what disqualifies it from the Store.
+4. **Each channel keeps user data where its ruling says.** The Store package accepts
+   AppData write virtualization: no opt-out and no `unvirtualizedResources`
+   (§ Data continuity). The direct-download package declares the opt-out for
+   `%LocalAppData%\\Fauna`: the scoped Windows 11 form, plus the blanket switch the
+   Windows 10 versions it installs on honour instead (§ Direct download, 5).
+5. **Content is internal.** No `AllowExternalContent` — that is an external-location
+   (sparse) package's mechanism and is precisely what disqualifies one from the Store.
+6. **One template, two channels, exactly five differences** (§ Direct download,
+   *One template, one packer, two channels*): the identity name, the publisher,
+   `Properties/DisplayName`, the write-virtualization block and the flavour. The
+   Store rendering is the template with its tokens substituted and nothing added;
+   the direct rendering differs from it in the manifest's four of the five and in
+   nothing else (the flavour is the payload's, graded below).
 """
 
 import importlib.util
@@ -69,7 +74,7 @@ NS = {
     "virtualization": "http://schemas.microsoft.com/appx/manifest/virtualization/windows10",
 }
 
-# Same floor as the sparse package: MSIX packaging itself. The Win11 DEFAULT context
+# The MSIX packaging floor itself. The Win11 DEFAULT context
 # menu only renders from 22000, but every other feature in this package (app,
 # fauna://, startupTask) works below that, and a Windows 10 box still gets the
 # legacy menu — so the floor is the packaging floor, not the menu's.
@@ -80,6 +85,18 @@ MIN_OS_VERSION = "10.0.19041.0"
 # no MSI installs in the field it served nobody while costing the submission its
 # one unusual restricted capability. See installers/windows.md § Data continuity.
 EXPECTED_CAPABILITIES = {"runFullTrust"}
+
+# The direct-download package's: `unvirtualizedResources` is what its write-
+# virtualization opt-out needs (installers/windows.md § Direct download, 5).
+DIRECT_CAPABILITIES = {"runFullTrust", "unvirtualizedResources"}
+
+# The one directory the direct package keeps out of write virtualization, in the
+# known-folder form Microsoft's flexible-virtualization page gives.
+DIRECT_EXCLUDED_DIRECTORY = r"$(KnownFolder:LocalAppData)\Fauna"
+
+# Identity values a structural render takes; the real ones are the build's arguments.
+RENDER_PUBLISHER = "CN=00000000-0000-0000-0000-000000000000"
+RENDER_VERSION = "0.1.1.0"
 
 
 def _repo_root():
@@ -121,8 +138,10 @@ def wxs_root_clsid():
     """The root IExplorerCommand CLSID, read from ShellExt.wxs (never restated).
 
     The MSI writes this GUID as `*\\shell\\Fauna`'s `ExplorerCommandHandler`; the
-    sparse package reuses it; the Store package must too. Drift between the three
-    is exactly the bug this reads-from-source fixture exists to catch.
+    full package must reuse it. Drift between the two is exactly the bug this
+    reads-from-source fixture exists to catch. When the full-feature MSI's sources
+    retire, the GUID moves with the shell extension's other registrations and this
+    read moves with it.
     """
     wxs = os.path.join(_installer_dir(), "ShellExt.wxs")
     with open(wxs, encoding="utf-8") as f:
@@ -151,6 +170,48 @@ def builder():
     return mod
 
 
+def _render(builder, template_text, channel, identity_name="FaunaSocialTest.FaunaRender",
+            arch="x64"):
+    return builder.render_manifest(template_text, identity_name, RENDER_PUBLISHER,
+                                   RENDER_VERSION, arch, channel=channel)
+
+
+def _parse(text):
+    # Bytes, not str: ElementTree refuses a str carrying an `encoding=` declaration.
+    return ET.fromstring(text.encode("utf-8"))
+
+
+@pytest.fixture(scope="module")
+def store_rendered(builder, template_text):
+    return _render(builder, template_text, "store")
+
+
+@pytest.fixture(scope="module")
+def store_manifest(store_rendered):
+    return _parse(store_rendered)
+
+
+@pytest.fixture(scope="module")
+def direct_rendered(builder, template_text):
+    return _render(builder, template_text, "direct", identity_name=builder.DIRECT_IDENTITY_NAME)
+
+
+@pytest.fixture(scope="module")
+def direct_manifest(direct_rendered):
+    return _parse(direct_rendered)
+
+
+def _excluded_directories(root):
+    return [
+        (e.text or "").strip()
+        for e in root.iterfind(
+            "pkg:Properties/virtualization:FileSystemWriteVirtualization"
+            "/virtualization:ExcludedDirectories/virtualization:ExcludedDirectory",
+            NS,
+        )
+    ]
+
+
 class TestStorePackageManifestTemplate:
     def test_all_build_time_tokens_are_present(self, template_text):
         """Every value the build substitutes must actually appear in the template.
@@ -159,7 +220,7 @@ class TestStorePackageManifestTemplate:
         *absent* fails the other way — silently shipping a hard-coded value. Both
         halves are checked (here, and by the builder's own missing-token guard).
         """
-        for token in ("@@IdentityName@@", "@@Publisher@@",
+        for token in ("@@IdentityName@@", "@@Publisher@@", "@@DisplayName@@",
                       "@@PackageVersion@@", "@@ProcessorArchitecture@@"):
             assert token in template_text, (
                 f"{token} missing from the store AppxManifest.xml.in — every "
@@ -191,10 +252,10 @@ class TestStorePackageManifestTemplate:
         )
 
     def test_content_is_internal_no_external_location(self, manifest):
-        """No `AllowExternalContent` — that is what disqualifies sparse from the Store.
+        """No `AllowExternalContent` — what disqualifies an external-location package
+        from the Store.
 
-        A Store package must carry its payload. This is the single structural
-        difference from the sparse manifest, and getting it wrong produces a package
+        A Store package must carry its payload; getting it wrong produces a package
         the Store silently refuses.
         """
         el = manifest.find("pkg:Properties/uap10:AllowExternalContent", NS)
@@ -217,7 +278,7 @@ class TestStorePackageManifestTemplate:
         )
 
     def test_com_class_path_is_the_bare_shell_dll(self, manifest):
-        """`com:Class/@Path` is the BARE DLL name, unlike the sparse package's.
+        """`com:Class/@Path` is the BARE DLL name, unlike the MSI's installed copy.
 
         Path 1's version-stamped filename exists because an MSI cannot replace a DLL
         Explorer holds open. Inside an MSIX there is no such lock to dodge — the
@@ -296,8 +357,9 @@ class TestStorePackageManifestTemplate:
             "MSI-only by ratified design"
         )
 
-    def test_capability_set_is_exactly_the_ratified_one(self, manifest):
-        """Exactly `runFullTrust`, nothing more.
+    def test_capability_set_is_exactly_the_ratified_one(self, manifest, store_manifest):
+        """Exactly `runFullTrust`, nothing more — in the template and in the
+        manifest the Store channel renders from it.
 
         It is a *restricted* capability needing a Store-submission justification,
         but it is the standard desktop-bridge one every full-trust Win32 Store app
@@ -306,16 +368,17 @@ class TestStorePackageManifestTemplate:
         `unvirtualizedResources` was dropped. An extra capability appearing here
         silently re-adds that cost.
         """
-        caps = manifest.find("pkg:Capabilities", NS)
-        assert caps is not None, "manifest has no <Capabilities>"
-        names = {c.get("Name") for c in caps}
-        assert names == EXPECTED_CAPABILITIES, (
-            f"store package declares capabilities {sorted(names)}; want exactly "
-            f"{sorted(EXPECTED_CAPABILITIES)} — every extra one needs its own "
-            "certification justification"
-        )
+        for label, root in (("template", manifest), ("Store rendering", store_manifest)):
+            caps = root.find("pkg:Capabilities", NS)
+            assert caps is not None, f"{label} has no <Capabilities>"
+            names = {c.get("Name") for c in caps}
+            assert names == EXPECTED_CAPABILITIES, (
+                f"the {label} declares capabilities {sorted(names)}; want exactly "
+                f"{sorted(EXPECTED_CAPABILITIES)} — every extra one needs its own "
+                "certification justification"
+            )
 
-    def test_declares_no_write_virtualization_opt_out(self, manifest):
+    def test_declares_no_write_virtualization_opt_out(self, manifest, store_manifest):
         r"""The package accepts AppData write virtualization. Do not re-add an opt-out.
 
         Until 2026-08-23 this package unvirtualized `%LocalAppData%\Fauna` via
@@ -336,34 +399,48 @@ class TestStorePackageManifestTemplate:
         MSIX package cannot register one (it needs an HKLM key).
 
         Re-adding either form is a goal-doc decision (§ Data continuity), not a
-        manifest edit — and it needs a fresh certification justification.
+        manifest edit — and it needs a fresh certification justification. The
+        direct-download channel's opt-out (§ Direct download, 5) is the packer's to
+        insert for that channel alone, so the template and the Store rendering both
+        carry none.
         """
-        excluded = [
-            (e.text or "").strip()
-            for e in manifest.iterfind(
-                "pkg:Properties/virtualization:FileSystemWriteVirtualization"
-                "/virtualization:ExcludedDirectories/virtualization:ExcludedDirectory",
-                NS,
+        for label, root in (("template", manifest), ("Store rendering", store_manifest)):
+            excluded = _excluded_directories(root)
+            assert excluded == [], (
+                f"the {label} excludes {excluded} from write virtualization. That "
+                "requires the unvirtualizedResources restricted capability, dropped "
+                "2026-08-23 — the two would-be beneficiaries (MSI coexistence, "
+                "MSI->Store migration) have no users"
             )
-        ]
-        assert excluded == [], (
-            f"store package excludes {excluded} from write virtualization. That "
-            "requires the unvirtualizedResources restricted capability, dropped "
-            "2026-08-23 — the two would-be beneficiaries (MSI coexistence, "
-            "MSI->Store migration) have no users"
+
+            blanket = root.find("pkg:Properties/desktop6:FileSystemWriteVirtualization", NS)
+            assert blanket is None, (
+                f"the {label} declares the pre-Windows-11 blanket "
+                "desktop6:FileSystemWriteVirtualization switch. That switch unvirtualizes "
+                "ALL of AppData and needs the same restricted capability this package "
+                "deliberately no longer declares (installers/windows.md § Data continuity)."
+            )
+
+    def test_the_store_rendering_is_the_template_with_its_tokens_substituted(
+            self, template_text, store_rendered):
+        """The Store channel adds nothing to the template: its manifest is the
+        template's own bytes with the five token values in place. So a change made
+        for the direct channel cannot reach a Store upload — the packages
+        certification has passed are built from exactly this text."""
+        expected = template_text
+        for token, value in (("@@IdentityName@@", "FaunaSocialTest.FaunaRender"),
+                             ("@@Publisher@@", RENDER_PUBLISHER),
+                             ("@@DisplayName@@", "Fauna Social"),
+                             ("@@PackageVersion@@", RENDER_VERSION),
+                             ("@@ProcessorArchitecture@@", "x64")):
+            expected = expected.replace(token, value)
+        assert store_rendered == expected, (
+            "the Store channel's manifest is not the template with its tokens "
+            "substituted — the packer inserted or changed text for the Store"
         )
 
-        blanket = manifest.find(
-            "pkg:Properties/desktop6:FileSystemWriteVirtualization", NS
-        )
-        assert blanket is None, (
-            "store package declares the pre-Windows-11 blanket "
-            "desktop6:FileSystemWriteVirtualization switch. That switch unvirtualizes "
-            "ALL of AppData and needs the same restricted capability this package "
-            "deliberately no longer declares (installers/windows.md § Data continuity)."
-        )
-
-    def test_listing_name_matches_the_reservation_app_name_does_not(self, manifest):
+    def test_listing_name_matches_the_reservation_app_name_does_not(self, manifest,
+                                                                    store_manifest):
         """The two DisplayNames differ ON PURPOSE — do not "fix" the inconsistency.
 
         `Fauna` was unavailable at Partner Center reservation (another publisher
@@ -383,9 +460,18 @@ class TestStorePackageManifestTemplate:
         becomes the one app with a different name; lower the listing name to "Fauna"
         and the upload is rejected. Authority:
         `docs/goal/architecture/installers/windows.md` § Identity & coexistence.
+
+        The template carries the listing name as a token since the direct-download
+        channel, which has no reservation, names itself `Fauna` there
+        (§ Direct download, 5); the Store channel's value is the reservation.
         """
-        listing = manifest.find("pkg:Properties/pkg:DisplayName", NS)
-        assert listing is not None, "manifest has no Properties/DisplayName"
+        token = manifest.find("pkg:Properties/pkg:DisplayName", NS)
+        assert token is not None, "template has no Properties/DisplayName"
+        assert token.text == "@@DisplayName@@", (
+            f"the template's Properties/DisplayName is {token.text!r}; it is the "
+            "@@DisplayName@@ token, the one field the two channels name differently"
+        )
+        listing = store_manifest.find("pkg:Properties/pkg:DisplayName", NS)
         assert listing.text == "Fauna Social", (
             f"Properties/DisplayName is {listing.text!r}, but Partner Center only "
             "accepts a name reserved for this product — the reservation is "
@@ -419,17 +505,17 @@ class TestStorePackageManifestTemplate:
         )
 
     def test_publishes_a_real_app_list_entry(self, manifest):
-        """Unlike the sparse package, THIS package is the app.
+        """THIS package is the app.
 
-        The sparse manifest sets `AppListEntry="none"` because the MSI already
-        installs the real Start-menu shortcut. A Store install has no MSI, so
+        `AppListEntry="none"` belongs to an identity carrier beside an MSI that
+        installs the real Start-menu shortcut. A package install has no MSI, so
         suppressing the entry here would ship an app with no way to launch it.
         """
         ve = manifest.find(".//uap:VisualElements", NS)
         assert ve is not None, "manifest has no uap:VisualElements"
         assert ve.get("AppListEntry") != "none", (
-            'store package sets AppListEntry="none" — that is the sparse identity '
-            "carrier's setting; a Store install would then have no Start-menu entry"
+            'store package sets AppListEntry="none" — that is an identity carrier\'s '
+            "setting; a package install would then have no Start-menu entry"
         )
 
     def test_app_is_a_full_trust_win32_executable(self, manifest):
@@ -448,6 +534,117 @@ class TestStorePackageManifestTemplate:
         assert tdf.get("MinVersion") == MIN_OS_VERSION, (
             f'TargetDeviceFamily/@MinVersion is {tdf.get("MinVersion")}, want '
             f"{MIN_OS_VERSION} (the MSIX packaging floor)"
+        )
+
+
+def _strip_blank_text(root):
+    for el in root.iter():
+        if el.text is not None and not el.text.strip():
+            el.text = None
+        if el.tail is not None and not el.tail.strip():
+            el.tail = None
+    return root
+
+
+class TestDirectPackageManifest:
+    """The direct-download package: the same template, rendered for the direct
+    channel (installers/windows.md § Direct download (MSIX app + nest MSI))."""
+
+    def test_the_channels_are_the_store_and_the_direct_download(self, builder):
+        assert tuple(builder.CHANNELS) == ("store", "direct")
+
+    def test_identity_name_is_fauna_desktop(self, builder, direct_manifest):
+        """A name of its own, not the Store reservation's: with the Store's name and
+        another publisher Windows refuses whichever package comes second
+        (0x80073CF3), and `FaunaSocial.Fauna` was the retired sparse package's (§ 5)."""
+        assert builder.DIRECT_IDENTITY_NAME == "FaunaSocial.FaunaDesktop"
+        identity = direct_manifest.find("pkg:Identity", NS)
+        assert identity.get("Name") == "FaunaSocial.FaunaDesktop"
+        assert identity.get("Publisher") == RENDER_PUBLISHER, "the publisher is the build's argument"
+
+    def test_its_names_are_fauna(self, direct_manifest):
+        """No reservation binds a download from the organisation, so its package
+        name is the app's own (§ 5, the identity table)."""
+        assert direct_manifest.find("pkg:Properties/pkg:DisplayName", NS).text == "Fauna"
+        assert direct_manifest.find("pkg:Properties/pkg:PublisherDisplayName", NS).text == "Fauna Social"
+        assert direct_manifest.find(".//uap:VisualElements", NS).get("DisplayName") == "Fauna"
+        app = direct_manifest.find("pkg:Applications/pkg:Application", NS)
+        assert app.get("Id") == "FaunaApp", "the AUMID suffix is the Store package's"
+
+    def test_capability_set_adds_unvirtualized_resources(self, direct_manifest):
+        names = {c.get("Name") for c in direct_manifest.find("pkg:Capabilities", NS)}
+        assert names == DIRECT_CAPABILITIES, (
+            f"the direct package declares {sorted(names)}; want exactly "
+            f"{sorted(DIRECT_CAPABILITIES)} — the opt-out needs unvirtualizedResources"
+        )
+
+    def test_local_app_data_fauna_is_excluded_from_write_virtualization(self, direct_manifest):
+        """The Windows 11 form: exactly the one directory, so the rest of AppData
+        stays the package's private view there (§ 5, *The form*)."""
+        assert _excluded_directories(direct_manifest) == [DIRECT_EXCLUDED_DIRECTORY]
+
+    def test_windows_10_gets_the_blanket_file_system_switch(self, direct_manifest):
+        """The package installs from 10.0.19041, and the scoped form is Windows 11's:
+        on earlier Windows it is ignored and the blanket switch is honoured instead
+        (Microsoft's flexible-virtualization page). Without it a Windows 10 install
+        would keep its data in the package's own folder, which a forced uninstall
+        deletes. The registry stays virtualized: no requirement reaches it."""
+        blanket = direct_manifest.find("pkg:Properties/desktop6:FileSystemWriteVirtualization", NS)
+        assert blanket is not None and (blanket.text or "").strip() == "disabled", (
+            "the direct package lacks desktop6:FileSystemWriteVirtualization=disabled, "
+            "so %LocalAppData%\\Fauna is virtualized on Windows 10"
+        )
+        for tag in ("desktop6:RegistryWriteVirtualization", "virtualization:RegistryWriteVirtualization"):
+            assert direct_manifest.find(f"pkg:Properties/{tag}", NS) is None, (
+                f"the direct package declares {tag}; nothing asks for unvirtualized registry writes"
+            )
+        tdf = direct_manifest.find("pkg:Dependencies/pkg:TargetDeviceFamily", NS)
+        assert tdf.get("MinVersion") == MIN_OS_VERSION
+
+    def test_every_ignorable_prefix_is_declared_on_the_package(self, direct_rendered):
+        """IgnorableNamespaces must name only prefixes declared on <Package>, and it
+        must name the two the opt-out adds, or a Windows version that does not know
+        the virtualization namespace refuses the manifest."""
+        import io
+        declared = {}
+        for event, item in ET.iterparse(io.BytesIO(direct_rendered.encode("utf-8")),
+                                        events=("start-ns", "start")):
+            if event == "start":
+                break
+            declared[item[0]] = item[1]
+        ignorable = re.search(r'IgnorableNamespaces="([^"]*)"', direct_rendered).group(1).split()
+        assert {"desktop6", "virtualization"} <= set(ignorable), ignorable
+        assert set(ignorable) <= set(declared), (
+            f"IgnorableNamespaces names {sorted(set(ignorable) - set(declared))}, "
+            "which <Package> does not declare"
+        )
+        assert declared["desktop6"] == NS["desktop6"]
+        assert declared["virtualization"] == NS["virtualization"]
+
+    def test_it_differs_from_the_store_rendering_in_the_ruled_fields_only(self, builder,
+                                                                         template_text):
+        """Render both channels with the same identity arguments, take the direct
+        rendering's manifest differences out (Properties/DisplayName; the
+        write-virtualization block: its two IgnorableNamespaces prefixes, its two
+        elements, its capability), and the two trees are equal: the feature subset,
+        the extensions, the dependencies are one."""
+        store = _strip_blank_text(_parse(_render(builder, template_text, "store")))
+        direct = _strip_blank_text(_parse(_render(builder, template_text, "direct")))
+        ignorable = store.get("IgnorableNamespaces")
+        assert direct.get("IgnorableNamespaces") == f"{ignorable} desktop6 virtualization"
+        direct.set("IgnorableNamespaces", ignorable)
+        props = direct.find("pkg:Properties", NS)
+        for tag in ("desktop6:FileSystemWriteVirtualization",
+                    "virtualization:FileSystemWriteVirtualization"):
+            el = props.find(tag, NS)
+            assert el is not None, tag
+            props.remove(el)
+        props.find("pkg:DisplayName", NS).text = "Fauna Social"
+        caps = direct.find("pkg:Capabilities", NS)
+        (extra,) = [c for c in caps if c.get("Name") == "unvirtualizedResources"]
+        caps.remove(extra)
+        assert ET.tostring(direct) == ET.tostring(store), (
+            "the direct rendering differs from the Store's beyond the ruled fields"
         )
 
 
@@ -479,9 +676,9 @@ class TestStorePackageBuildScript:
     def test_packs_with_path_validation_enabled(self, builder):
         """No `/nv`: the Store package's content is internal, so paths MUST validate.
 
-        The sparse build passes `/nv` because its manifest references files outside
-        the package. Carrying that flag over would disable exactly the check that
-        catches a payload we forgot to stage — the failure would then surface as a
+        `/nv` is for a manifest that references files outside the package (the
+        retired sparse build passed it). Passing it here would disable exactly the
+        check that catches a payload we forgot to stage — the failure would then surface as a
         broken install on a user's machine instead of a red build.
         """
         # Inject the tool name: resolving the real SDK is win-only, but the
@@ -489,12 +686,12 @@ class TestStorePackageBuildScript:
         argv = builder._pack_argv("some-pack-dir", "some-out.msix", tool="makeappx")
         assert "/nv" not in argv, (
             f"makeappx argv contains /nv ({argv}) — path validation must run for a "
-            "full package; /nv is the sparse package's external-content escape hatch"
+            "full package; /nv is an external-content package's escape hatch"
         )
         assert "pack" in argv and "some-pack-dir" in argv and "some-out.msix" in argv
 
     def test_refuses_to_ship_an_unsubstituted_token(self, builder):
-        """The packer hard-fails on a surviving `@@…@@`, per the sparse convention."""
+        """The packer hard-fails on a surviving `@@…@@`."""
         with pytest.raises(SystemExit):
             builder.render_manifest(
                 template="<Package Name='@@IdentityName@@' X='@@NeverSubstituted@@'/>",
@@ -503,6 +700,38 @@ class TestStorePackageBuildScript:
                 version="0.1.1.0",
                 arch="x64",
             )
+
+    def test_refuses_an_unknown_channel(self, builder, template_text):
+        with pytest.raises(ValueError):
+            _render(builder, template_text, "sideload")
+
+    def test_refuses_a_template_the_opt_out_cannot_be_placed_in(self, builder, template_text):
+        """The direct channel's block goes in at three fixed places; a template that
+        lost one must stop the build, not ship a package without its opt-out."""
+        for anchor in ("  </Properties>", "  </Capabilities>", "IgnorableNamespaces="):
+            broken = template_text.replace(anchor, "", 1)
+            with pytest.raises(SystemExit):
+                _render(builder, broken, "direct")
+
+    def test_bundles_at_the_product_version_with_path_validation(self, builder):
+        """`makeappx bundle` versions the bundle from the clock unless told, and an
+        update installs only over a lower version, so the bundle carries the
+        product version (§ Direct download, 2)."""
+        argv = builder._bundle_argv("pkgs", "Fauna.msixbundle", "0.1.7.0", tool="makeappx")
+        assert argv[:2] == ["makeappx", "bundle"]
+        assert argv[argv.index("/bv") + 1] == "0.1.7.0"
+        assert argv[argv.index("/d") + 1] == "pkgs" and argv[argv.index("/p") + 1] == "Fauna.msixbundle"
+        assert "/nv" not in argv
+
+    def test_the_direct_download_is_one_bundle_of_both_arches(self):
+        """A subset of the arches is refused before anything is packed: the site
+        offers one file for every Windows PC."""
+        script = os.path.join(_repo_root(), "scripts", "build-store-package.py")
+        out = subprocess.run([sys.executable, script, "--channel", "direct", "--arch", "arm64"],
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode != 0
+        assert "unrecognized arguments" not in out.stderr, out.stderr
+        assert "both" in out.stderr, out.stderr
 
 
 # ── Grading a packed upload (`build-store-package.py --grade`) ────────────────────
@@ -544,14 +773,38 @@ def _pe(machine, cor_flags=None, chpe=False):
     return bytes(data)
 
 
+_CHANNEL_DISPLAY_NAME = {"store": "Fauna Social", "direct": "Fauna"}
+_CHANNEL_CAPABILITIES = {"store": ("runFullTrust",),
+                         "direct": ("runFullTrust", "unvirtualizedResources")}
+
+
 def _manifest_xml(name=GRADE_IDENTITY, publisher=GRADE_PUBLISHER, version="0.1.1.0",
-                  arch="x64", capabilities=("runFullTrust",)):
+                  arch="x64", capabilities=None, channel="store", display_name=None,
+                  opt_out=None, excluded=(DIRECT_EXCLUDED_DIRECTORY,)):
+    """A packaged manifest of the `channel`, every field its own unless named."""
+    if capabilities is None:
+        capabilities = _CHANNEL_CAPABILITIES[channel]
+    if display_name is None:
+        display_name = _CHANNEL_DISPLAY_NAME[channel]
+    if opt_out is None:
+        opt_out = channel == "direct"
     caps = "".join(f'<rescap:Capability Name="{c}"/>' for c in capabilities)
+    virtualization = ""
+    if opt_out:
+        dirs = "".join(f"<virtualization:ExcludedDirectory>{d}</virtualization:ExcludedDirectory>"
+                       for d in excluded)
+        virtualization = (
+            "<desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>"
+            "<virtualization:FileSystemWriteVirtualization><virtualization:ExcludedDirectories>"
+            f"{dirs}</virtualization:ExcludedDirectories></virtualization:FileSystemWriteVirtualization>"
+        )
     return (
         '<?xml version="1.0" encoding="utf-8"?>'
-        f'<Package xmlns="{NS["pkg"]}" xmlns:rescap="{NS["rescap"]}">'
+        f'<Package xmlns="{NS["pkg"]}" xmlns:rescap="{NS["rescap"]}" '
+        f'xmlns:desktop6="{NS["desktop6"]}" xmlns:virtualization="{NS["virtualization"]}">'
         f'<Identity Name="{name}" Publisher="{publisher}" Version="{version}" '
         f'ProcessorArchitecture="{arch}"/>'
+        f"<Properties><DisplayName>{display_name}</DisplayName>{virtualization}</Properties>"
         f"<Capabilities>{caps}</Capabilities></Package>"
     )
 
@@ -561,16 +814,21 @@ def _manifest_xml(name=GRADE_IDENTITY, publisher=GRADE_PUBLISHER, version="0.1.1
 # well-formed upload's core carries them.
 _P2P_NATIVE = (b"uniffi_fauna_ffi_fn_func_offline_share_begin", b"FfiCeremonySeat",
                b"share_plane_view", b"FfiSharePlaneView")
+# The money plane's three kind namespaces (its PAY_KIND_PATS), which the full
+# default-feature core carries beside the sharing plane.
+_PAY_NATIVE = (b"fauna.payments.invoice", b"fauna.tips.send", b"fauna.nostr.zap_signers.list")
+_CHANNEL_CORE = {"store": _P2P_NATIVE, "direct": _PAY_NATIVE + _P2P_NATIVE}
 
 
-def _msix(tmp_path, arch="x64", manifest=None, extra=None):
+def _msix(tmp_path, arch="x64", manifest=None, extra=None, channel="store"):
     """A package-shaped zip carrying the four payload binaries built for `arch`, its
-    core in the Store's flavour."""
+    core in the `channel`'s flavour."""
     pe = _pe(_MACHINE[arch])
     entries = {
-        "AppxManifest.xml": manifest if manifest is not None else _manifest_xml(arch=arch),
+        "AppxManifest.xml": manifest if manifest is not None
+        else _manifest_xml(arch=arch, channel=channel),
         "App/FaunaApp.exe": pe,
-        "App/fauna_ffi.dll": pe + b"".join(m + b"\x00" for m in _P2P_NATIVE),
+        "App/fauna_ffi.dll": pe + b"".join(m + b"\x00" for m in _CHANNEL_CORE[channel]),
         "fauna-sync-agent.exe": pe,
         "fauna_shell.dll": pe,
         # Stand-ins: what is graded is where the files sit and that they are not
@@ -581,7 +839,7 @@ def _msix(tmp_path, arch="x64", manifest=None, extra=None):
     }
     entries.update(extra or {})
     entries = {k: v for k, v in entries.items() if v is not None}
-    path = tmp_path / f"Fauna-Store-{arch}.msix"
+    path = tmp_path / f"Fauna-{channel.capitalize()}-{arch}.msix"
     with zipfile.ZipFile(path, "w") as z:
         for name, body in entries.items():
             z.writestr(name, body)
@@ -611,6 +869,16 @@ class TestStorePackageGrade:
     def test_run_full_trust_is_the_only_capability(self, builder, tmp_path, caps):
         problems = self._grade(builder, _msix(tmp_path, manifest=_manifest_xml(capabilities=caps)))
         assert any("capabilit" in p.lower() for p in problems), problems
+
+    def test_a_store_package_carrying_the_opt_out_is_refused(self, builder, tmp_path):
+        """The direct channel's block reaching a Store upload: certification would
+        stop on its restricted capability (§ Data continuity)."""
+        problems = self._grade(builder, _msix(tmp_path, manifest=_manifest_xml(opt_out=True)))
+        assert any("virtualization" in p for p in problems), problems
+
+    def test_the_listing_name_is_the_reservation(self, builder, tmp_path):
+        problems = self._grade(builder, _msix(tmp_path, manifest=_manifest_xml(display_name="Fauna")))
+        assert any("DisplayName" in p for p in problems), problems
 
     def test_a_pe_of_another_arch_is_refused(self, builder, tmp_path):
         """An x64 binary inside the arm64 package: the slip the 2026-10-10 hand builds
@@ -762,10 +1030,154 @@ class TestStorePackageFlavourGrade:
         problems = self._grade(builder, path, "store-safe")
         assert any("App/fauna_ffi.dll" in p and "missing" in p for p in problems), problems
 
-    def test_the_full_flavour_keeps_the_payments_plane(self, builder, tmp_path):
-        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(b"fauna.payments.invoice")})
+    def test_a_full_core_grades_clean(self, builder, tmp_path):
+        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(*_PAY_NATIVE, *self._P2P)})
         assert self._grade(builder, path, "full") == []
+
+    @pytest.mark.parametrize("dropped", range(len(_PAY_NATIVE) + len(_P2P_NATIVE)))
+    def test_a_full_core_missing_a_plane_is_refused(self, builder, tmp_path, dropped):
+        """The full flavour asserts every plane present (the `default` column of
+        `just windows-store-safe-check`), or a direct download built over a
+        store-flavour core would pass for the full one."""
+        markers = _PAY_NATIVE + self._P2P
+        kept = tuple(m for i, m in enumerate(markers) if i != dropped)
+        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(*kept)})
+        problems = self._grade(builder, path, "full")
+        assert problems and all("App/fauna_ffi.dll" in p for p in problems), problems
 
     def test_an_unknown_flavour_is_refused(self, builder, tmp_path):
         with pytest.raises(ValueError):
             self._grade(builder, _msix(tmp_path), "kids-safe")
+
+
+class TestDirectPackageGrade:
+    """`--grade --channel direct`: the direct-download package read back
+    (installers/windows.md § Direct download): identity, its two capabilities, the
+    write-virtualization opt-out, `Fauna` as its DisplayName and the full flavour,
+    over everything a Store upload's grade reads (arch, symbols, licences, surface)."""
+
+    def _grade(self, builder, path, arch="x64", **kw):
+        return builder.grade_package(path, arch, GRADE_IDENTITY, GRADE_PUBLISHER, "0.1.1.0",
+                                     channel="direct", **kw)
+
+    @pytest.mark.parametrize("arch", ["x64", "arm64"])
+    def test_a_well_formed_direct_package_grades_clean(self, builder, tmp_path, arch):
+        assert self._grade(builder, _msix(tmp_path, arch=arch, channel="direct"), arch=arch) == []
+
+    def test_the_direct_flavour_is_full(self, builder, tmp_path):
+        assert builder.CHANNEL_FLAVOUR["direct"] == "full"
+        with pytest.raises(ValueError):
+            self._grade(builder, _msix(tmp_path, channel="direct"), flavour="store-no-payments")
+
+    def test_a_store_core_is_refused(self, builder, tmp_path):
+        path = _msix(tmp_path, channel="direct",
+                     extra={"App/fauna_ffi.dll": _pe(_MACHINE["x64"]) + b"".join(
+                         m + b"\x00" for m in _P2P_NATIVE)})
+        assert any("App/fauna_ffi.dll" in p for p in self._grade(builder, path))
+
+    @pytest.mark.parametrize("caps", [("runFullTrust",), ("unvirtualizedResources",),
+                                      ("runFullTrust", "unvirtualizedResources", "broadFileSystemAccess")])
+    def test_the_capability_set_is_exactly_the_two(self, builder, tmp_path, caps):
+        manifest = _manifest_xml(channel="direct", capabilities=caps)
+        problems = self._grade(builder, _msix(tmp_path, channel="direct", manifest=manifest))
+        assert any("capabilit" in p.lower() for p in problems), problems
+
+    @pytest.mark.parametrize("manifest", [
+        _manifest_xml(channel="direct", opt_out=False),
+        _manifest_xml(channel="direct", excluded=()),
+        _manifest_xml(channel="direct", excluded=(r"$(KnownFolder:RoamingAppData)\Fauna",)),
+        _manifest_xml(channel="direct", excluded=(DIRECT_EXCLUDED_DIRECTORY, r"$(KnownFolder:LocalAppData)\Other")),
+    ], ids=["no-opt-out", "no-directory", "wrong-directory", "extra-directory"])
+    def test_the_opt_out_is_exactly_local_app_data_fauna(self, builder, tmp_path, manifest):
+        problems = self._grade(builder, _msix(tmp_path, channel="direct", manifest=manifest))
+        assert any("virtualization" in p for p in problems), problems
+
+    def test_a_package_without_the_windows_10_switch_is_refused(self, builder, tmp_path):
+        manifest = _manifest_xml(channel="direct").replace(
+            "<desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>", "")
+        problems = self._grade(builder, _msix(tmp_path, channel="direct", manifest=manifest))
+        assert any("desktop6" in p for p in problems), problems
+
+    def test_the_display_name_is_fauna(self, builder, tmp_path):
+        manifest = _manifest_xml(channel="direct", display_name="Fauna Social")
+        problems = self._grade(builder, _msix(tmp_path, channel="direct", manifest=manifest))
+        assert any("DisplayName" in p for p in problems), problems
+
+    def test_an_identity_that_is_not_the_builds_is_refused(self, builder, tmp_path):
+        manifest = _manifest_xml(channel="direct", name="FaunaSocial.FaunaSocial")
+        problems = self._grade(builder, _msix(tmp_path, channel="direct", manifest=manifest))
+        assert any("identity" in p.lower() for p in problems), problems
+
+
+_BUNDLE_NS = "http://schemas.microsoft.com/appx/2013/bundle"
+
+
+def _bundle(tmp_path, packages=None, name=GRADE_IDENTITY, publisher=GRADE_PUBLISHER,
+            version="0.1.1.0", listed=None):
+    """A bundle-shaped zip: AppxMetadata/AppxBundleManifest.xml listing `listed`
+    ({arch: file name}, default every packed arch) and the inner packages."""
+    if packages is None:
+        packages = {}
+        for arch in ("x64", "arm64"):
+            (tmp_path / arch).mkdir()
+            with open(_msix(tmp_path / arch, arch=arch, channel="direct"), "rb") as f:
+                packages[f"Fauna-Direct-{arch}.msix"] = (arch, f.read())
+    if listed is None:
+        listed = {arch: fname for fname, (arch, _) in packages.items()}
+    rows = "".join(f'<Package Type="application" Version="{version}" Architecture="{arch}" '
+                   f'FileName="{fname}" Offset="0" Size="1"/>' for arch, fname in listed.items())
+    manifest = (f'<?xml version="1.0" encoding="UTF-8"?><Bundle xmlns="{_BUNDLE_NS}" SchemaVersion="5.0">'
+                f'<Identity Name="{name}" Publisher="{publisher}" Version="{version}"/>'
+                f"<Packages>{rows}</Packages></Bundle>")
+    path = tmp_path / "Fauna.msixbundle"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("AppxMetadata/AppxBundleManifest.xml", manifest)
+        for fname, (_, body) in packages.items():
+            z.writestr(fname, body)
+    return str(path)
+
+
+class TestDirectBundleGrade:
+    """`--grade Fauna.msixbundle --channel direct`: the bundle's identity and version,
+    one package per arch, and each inner package graded as a direct package of its
+    arch (§ Direct download, *The two files*)."""
+
+    def _grade(self, builder, path, version="0.1.1.0"):
+        return builder.grade_bundle(path, GRADE_IDENTITY, GRADE_PUBLISHER, version)
+
+    def test_a_well_formed_bundle_grades_clean(self, builder, tmp_path):
+        assert self._grade(builder, _bundle(tmp_path)) == []
+
+    def test_a_bundle_missing_an_arch_is_refused(self, builder, tmp_path):
+        (tmp_path / "x64").mkdir()
+        with open(_msix(tmp_path / "x64", arch="x64", channel="direct"), "rb") as f:
+            only = {"Fauna-Direct-x64.msix": ("x64", f.read())}
+        problems = self._grade(builder, _bundle(tmp_path, packages=only))
+        assert any("arm64" in p for p in problems), problems
+
+    @pytest.mark.parametrize("field,value", [("name", "FaunaSocial.FaunaDev"),
+                                             ("publisher", "CN=Fauna Dev"),
+                                             ("version", "0.1.0.0")])
+    def test_a_bundle_identity_that_is_not_the_builds_is_refused(self, builder, tmp_path, field, value):
+        problems = self._grade(builder, _bundle(tmp_path, **{field: value}))
+        assert any("bundle identity" in p for p in problems), problems
+
+    def test_an_inner_package_is_graded_by_name(self, builder, tmp_path):
+        """A finding inside a package names the package it is in."""
+        (tmp_path / "x64").mkdir()
+        (tmp_path / "arm64").mkdir()
+        with open(_msix(tmp_path / "x64", arch="x64", channel="direct"), "rb") as f:
+            x64 = f.read()
+        bad = _msix(tmp_path / "arm64", arch="arm64", channel="direct",
+                    extra={"App/stray.dll": _pe(_MACHINE["x64"])})
+        with open(bad, "rb") as f:
+            arm64 = f.read()
+        packages = {"Fauna-Direct-x64.msix": ("x64", x64), "Fauna-Direct-arm64.msix": ("arm64", arm64)}
+        problems = self._grade(builder, _bundle(tmp_path, packages=packages))
+        assert any(p.startswith("Fauna-Direct-arm64.msix") and "App/stray.dll" in p
+                   for p in problems), problems
+
+    def test_a_listed_package_missing_from_the_bundle_is_refused(self, builder, tmp_path):
+        listed = {"x64": "Fauna-Direct-x64.msix", "arm64": "Fauna-Direct-arm64-gone.msix"}
+        problems = self._grade(builder, _bundle(tmp_path, listed=listed))
+        assert any("Fauna-Direct-arm64-gone.msix" in p for p in problems), problems

@@ -44,9 +44,15 @@
   <key>NSHighResolutionCapable</key>
   <true/>
 
-  <!-- Photo library access -->
+  <!-- public-text: apple-permission-strings: every usage description from here to
+       the end marker is a public text, changed only in a public-texts round
+       (docs/goal/architecture/public-texts.md § The boundary). The iOS
+       Info.plist holds the same region. -->
   <key>NSPhotoLibraryUsageDescription</key>
-  <string>Fauna backs up your photos and videos to your personal nest.</string>
+  <string>Fauna backs up your photos and videos to your own nest.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Fauna connects directly to your other devices on this network, so they stay in step even when your nest can't be reached.</string>
+  <!-- public-text-end: apple-permission-strings -->
 
   <!-- Export compliance: NO. Apple's rule ("Complying with Encryption Export
        Regulations"): set NO when the app uses only encryption that is exempt

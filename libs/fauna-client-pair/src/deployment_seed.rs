@@ -19,7 +19,7 @@
 
 use fauna_client_config::{
     CustodyLegReport, DeploymentSeedStore, SeedRotation, rotate_deployment_seed_on_plane,
-    run_deployment_seed_custody_leg,
+    run_deployment_seed_custody_leg_settling,
 };
 use fauna_core::identity::ActorId;
 use fauna_protocol::{RpcErrorClass, RpcRequester};
@@ -39,8 +39,11 @@ pub async fn bound_actor_id(identity: &LinkedNestsMachine) -> Result<ActorId, St
         .map_err(|_| "the nest reported an identity that is not 32 bytes".to_string())
 }
 
-/// **The custody leg** (`fauna_client_config::run_deployment_seed_custody_leg`)
-/// over `nest`, keyed on the id `identity` is bound to.
+/// **The custody leg** as a host edge runs it
+/// (`fauna_client_config::run_deployment_seed_custody_leg_settling`) over
+/// `nest`, keyed on the id `identity` is bound to: a store that refuses the
+/// write while it settles is waited out, bounded by
+/// `fauna_client_config::CUSTODY_STORE_SETTLE_WAIT`.
 ///
 /// # Errors
 ///
@@ -58,7 +61,7 @@ where
     S: DeploymentSeedStore + ?Sized,
 {
     let bound = bound_actor_id(identity).await?;
-    Ok(run_deployment_seed_custody_leg(nest, bound, store).await)
+    Ok(run_deployment_seed_custody_leg_settling(nest, bound, store).await)
 }
 
 /// **The plane rotation drive** (`fauna_client_config::

@@ -214,14 +214,13 @@ struct MacFeedListView: View {
                                 Button(L.feed.list.subscribeBridge) {
                                     subscribeBridgeAction()
                                 }
-                                .disabled(bridgeFeedUri.isEmpty || bridgeFeedName.isEmpty)
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.small)
                                 .accessibilityIdentifier(Ids.bridgeFormSubscribeButton)
-                                .automationActivate(
-                                    Ids.bridgeFormSubscribeButton,
-                                    isEnabled: { !(bridgeFeedUri.isEmpty || bridgeFeedName.isEmpty) }
-                                ) { subscribeBridgeAction() }
+                                .automationActivate(Ids.bridgeFormSubscribeButton) {
+                                    subscribeBridgeAction()
+                                }
+                                .faunaPossible(bridgeSubscribePossibility)
                                 Button(L.common.cancel) {
                                     showBridgeSubscribe = false
                                 }
@@ -231,6 +230,7 @@ struct MacFeedListView: View {
                                     showBridgeSubscribe = false
                                 }
                             }
+                            FaunaPossibilityReason(bridgeSubscribePossibility)
                         }
                         .padding(.vertical, 4)
                     }
@@ -275,12 +275,25 @@ struct MacFeedListView: View {
 
     /// The bridge-subscribe button's action, factored out so the automation
     /// sibling drives the exact same code path the Button does.
+    ///
+    /// `FeedVM.subscribeBridge` asks the shared predicate again; the form
+    /// clears and closes only once the subscription is saved — a refusal or a
+    /// failure keeps what was typed (`ui/README.md` § Offer only what is
+    /// possible, rule 7).
     private func subscribeBridgeAction() {
         Task {
-            await vm.subscribeBridge(bridge: bridgeName, feedUri: bridgeFeedUri, name: bridgeFeedName)
+            guard await vm.subscribeBridge(
+                bridge: bridgeName, feedUri: bridgeFeedUri, name: bridgeFeedName) else { return }
             bridgeFeedUri = ""
             bridgeFeedName = ""
             showBridgeSubscribe = false
         }
+    }
+
+    /// `bridge-form-subscribe-button`'s shared draft-validity answer
+    /// (`fauna_feed::forms::bridge_subscribe_possibility`): the bridge and the
+    /// feed URI; the name is optional.
+    private var bridgeSubscribePossibility: Possibility {
+        vm.bridgeSubscribePossibility(bridge: bridgeName, feedUri: bridgeFeedUri)
     }
 }

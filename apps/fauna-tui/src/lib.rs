@@ -281,6 +281,11 @@ async fn run(
         fauna_onboarding_machine::INVITE_RECHECK_POLL_MS,
     ));
     invite_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The launch-collision chooser's watch (`launch::watch_chooser`): while
+    // the chooser is shown it notices the serving instance quitting and
+    // continues as the plain launch with no input.
+    let mut chooser_watch = tokio::time::interval(fauna_client_accounts::CHOOSER_WATCH_INTERVAL);
+    chooser_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut lock_tick = tokio::time::interval(screen_lock::LOCK_TICK);
     lock_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The mail-import Progress screen's live-refresh poll
@@ -401,6 +406,12 @@ async fn run(
             // from the same page geometry the registry's `in-viewport` reads
             // (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`).
             app.painted_text_area.observe(page.laid_out_text());
+            // What this frame showed at the root, from the same paint
+            // (`fauna_e2e_agent::ROOT_SURFACE_KEY`): one entry per change, so a
+            // blank frame between the wizard and the app is recorded however
+            // briefly it stood.
+            let showing = ui::root_surface(&app, &page);
+            app.root_surface.observe(showing);
             agent.publish(&app, None);
         }
 
@@ -482,6 +493,12 @@ async fn run(
                     wizard::Action::RecheckInviteStatus,
                     String::new(),
                 );
+            }
+            _ = periodic_tick(
+                &mut chooser_watch,
+                matches!(app.launch, launch::LaunchSurface::InstanceChooser { .. }),
+            ) => {
+                launch::watch_chooser(&mut app, &tx);
             }
             // A held first press whose double-press window closed: it was a
             // single press after all, so its own gesture runs now (`press`).

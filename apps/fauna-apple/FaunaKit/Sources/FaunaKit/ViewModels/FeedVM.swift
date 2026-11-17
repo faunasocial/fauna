@@ -745,6 +745,43 @@ public final class FeedVM {
         clientErrorMessage = message
     }
 
+    // ── Form validity (`docs/goal/ui/README.md` § Offer only what is possible,
+    //    rule 4's form case; `feed.md` § Errors & edge cases) ────────────────
+    // Each feed form's submit paints from its shared draft-validity predicate
+    // (`fauna_feed::forms`, over UniFFI) through `faunaPossible`, and its verb
+    // asks the same predicate first and refuses with the same reason on
+    // `error-message` (``refuseForm(_:)``). The four verbs answer whether the
+    // save succeeded, so a form closes only on a saved result (rule 7).
+
+    /// `post-submit-button`: a post needs text.
+    public var postSubmitPossibility: Possibility {
+        feedPostSubmitPossibility(text: composeText)
+    }
+
+    /// `feed-reply-submit-button`: a reply needs text.
+    public func replySubmitPossibility(_ text: String) -> Possibility {
+        feedReplySubmitPossibility(text: text)
+    }
+
+    /// `create-feed`: a custom feed needs a name.
+    public func createFeedPossibility(name: String) -> Possibility {
+        feedCreatePossibility(name: name)
+    }
+
+    /// `bridge-form-subscribe-button`: the bridge and the feed URI (the name
+    /// is optional — it defaults to the URI).
+    public func bridgeSubscribePossibility(bridge: String, feedUri: String) -> Possibility {
+        feedBridgeSubscribePossibility(kind: bridge, uri: feedUri)
+    }
+
+    /// Refuse a form submit whose answer is not possible, with its reason on
+    /// the page's `error-message`. `true` when refused.
+    func refuseForm(_ answer: Possibility) -> Bool {
+        guard let refusal = answer.refusal else { return false }
+        setClientErrorMessage(refusal)
+        return true
+    }
+
     // ── The post's mark-as-spam verb (`report-sharing.md` § Report capture →
     //    *The post's mark-as-spam verb*) ─────────────────────────────────────
     //
@@ -1246,20 +1283,26 @@ public final class FeedVM {
     /// upload + `submitGatedPost`/`abortGatedSubmit` pair below — mirrors linux
     /// `client.rs::submit_post`. The manager validates + builds + signs; errors
     /// land on `snapshot.compose.error` (→ compose-error).
-    public func submitPost() async {
+    ///
+    /// Asks ``postSubmitPossibility`` first (a blank post refuses with its
+    /// reason on `error-message`). Answers whether the post was sent, so the
+    /// compose dialog closes only on a saved result.
+    @discardableResult
+    public func submitPost() async -> Bool {
         composeGlueError = nil
         guard let manager else {
             // Should be unreachable — every submit surface disables itself on
             // `composeReady` — but a silent no-op here is exactly what e2e
             // point 11 forbids, so fail loudly rather than drop the post.
             preManagerComposeError = L.errors.feedNotReady
-            return
+            return false
         }
+        if refuseForm(postSubmitPossibility) { return false }
         // A bad asking price is refused before anything is sealed, uploaded or
         // minted (`compose-error`, the shared parse's own catalog string).
         if let sell = composeSell, let refusal = Self.askingPriceRefusal(sell) {
             composeGlueError = refusal
-            return
+            return false
         }
         // ── Seal the attachment for the staged audience, THEN upload it ──
         // `ui/media.md` § Encryption at rest: "The seal is resolved BEFORE the
@@ -1279,7 +1322,7 @@ public final class FeedVM {
                 // restricted post, nothing plaintext was uploaded either. Surface it
                 // and keep the composer (text and pick both) for a retry.
                 composeGlueError = DisplayError.message(error)
-                return
+                return false
             }
         }
         do {
@@ -1298,11 +1341,11 @@ public final class FeedVM {
             guard let sealed else {
                 try await manager.submitPost()
                 pendingAttachment = nil
-                return
+                return true
             }
             guard let api else {
                 manager.abortGatedSubmit(message: "No connection")
-                return
+                return false
             }
             do {
                 // The sidecar class comes off the staged post — `GroupRestrictedPost`
@@ -1314,15 +1357,18 @@ public final class FeedVM {
                 let hash = try await api.uploadGatedPostBlob(sealed: sealed, sidecar: manager.gatedUploadSidecar())
                 try await manager.submitGatedPost(uploadedHash: hash)
                 pendingAttachment = nil
+                return true
             } catch {
                 // The upload failed after the post was staged — drop it and surface
                 // the reason on compose-error; the composer keeps its text for a retry.
                 manager.abortGatedSubmit(message: DisplayError.message(error) ?? "")
+                return false
             }
         } catch {
             // A validation/build error from `prepare_gated_blob` (empty teaser, no
             // key for the tier) is already on snapshot.compose.error; the banner
             // renders it. Same swallow as the ungated path above.
+            return false
         }
     }
 
@@ -1371,26 +1417,49 @@ public final class FeedVM {
     // ── Feeds (create / delete; rules encoded by the shared codec) ──────────
     // `factors` is the `feed-factor-*` editor's staged entries
     // (content-moderation-and-ranking.md § Composition).
+    //
+    // Asks ``createFeedPossibility(name:)`` first; answers whether the feed was
+    // created, and closes the inline form only then (iOS's sheet dismisses on
+    // the same answer).
+    @discardableResult
     public func createFeed(
         name: String, combination: String, rules: [FilterRuleInput],
         factors: [FactorWeightInput] = []
-    ) async {
+    ) async -> Bool {
+        if refuseForm(createFeedPossibility(name: name)) { return false }
+        guard let manager else { return false }
         creatingFeed = true
         defer { creatingFeed = false }
         do {
-            _ = try await manager?.createFeed(
+            _ = try await manager.createFeed(
                 name: name, rules: rules, combination: combination,
                 scope: nil, contributorSeeds: nil, factors: factors)
             showCreateForm = false
-        } catch { /* reason already on snapshot.error */ }
+            return true
+        } catch {
+            // The reason is already on snapshot.error; the form stays open.
+            return false
+        }
     }
     public func deleteFeed(id: String) async {
         try? await manager?.deleteFeed(feedId: id)
     }
 
     // ── Bridge feeds ────────────────────────────────────────────────────────
-    public func subscribeBridge(bridge: String, feedUri: String, name: String) async {
-        try? await manager?.subscribeBridge(kind: bridge, uri: feedUri, name: name)
+    /// `bridge-form-subscribe-button`. Asks
+    /// ``bridgeSubscribePossibility(bridge:feedUri:)`` first; answers whether
+    /// the subscription was saved, so the form closes only then (a failure's
+    /// reason is on the manager's bridge-form state).
+    @discardableResult
+    public func subscribeBridge(bridge: String, feedUri: String, name: String) async -> Bool {
+        if refuseForm(bridgeSubscribePossibility(bridge: bridge, feedUri: feedUri)) { return false }
+        guard let manager else { return false }
+        do {
+            _ = try await manager.subscribeBridge(kind: bridge, uri: feedUri, name: name)
+            return true
+        } catch {
+            return false
+        }
     }
     public func unsubscribeBridge(id: Int64) async {
         try? await manager?.unsubscribeBridge(id: id)
@@ -1789,8 +1858,10 @@ public final class FeedVM {
         return feedRefusalI18nKey(err: text).map(L.lookup) ?? text
     }
 
-    private func runVerb(_ verb: (FfiFeedManager) async throws -> Void) async {
-        guard let manager else { return }
+    /// Answers whether the verb succeeded (`false` with no manager).
+    @discardableResult
+    private func runVerb(_ verb: (FfiFeedManager) async throws -> Void) async -> Bool {
+        guard let manager else { return false }
         let generation = managerGeneration
         do {
             try await verb(manager)
@@ -1800,11 +1871,13 @@ public final class FeedVM {
                 setClientErrorMessage(nil)
             }
             verbErrorMessage = nil
+            return true
         } catch {
             let shown = Self.verbErrorCopy(error)
             if landClientErrorMessage(generation: generation, message: shown) {
                 verbErrorMessage = shown
             }
+            return false
         }
     }
 
@@ -1871,8 +1944,13 @@ public final class FeedVM {
     // stated refusal under a restricted post this reader cannot author under).
     // The audience is the manager's answer, never decided here — mirrors tui
     // `send_reply` and windows `FeedViewModel.SendReplyAsync`.
-    public func replyToPost(postId: String, body: String, publicConfirmed: Bool = false) async {
-        await runVerb { manager in
+    //
+    // Asks ``replySubmitPossibility(_:)`` first; answers whether the reply was
+    // saved, so the reply dialog closes only then.
+    @discardableResult
+    public func replyToPost(postId: String, body: String, publicConfirmed: Bool = false) async -> Bool {
+        if refuseForm(replySubmitPossibility(body)) { return false }
+        return await runVerb { manager in
             if publicConfirmed {
                 try await manager.replyPublicConfirmed(postId: postId, body: body)
                 return

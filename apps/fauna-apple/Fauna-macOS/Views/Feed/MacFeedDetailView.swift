@@ -59,20 +59,19 @@ struct MacFeedDetailView: View {
                     Button(L.common.post) {
                         submitPost()
                     }
-                    .disabled(
-                        vm.composeText.trimmingCharacters(in: .whitespaces).isEmpty
-                        || !vm.composeReady
-                    )
+                    .disabled(!vm.composeReady)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .accessibilityIdentifier(Ids.postSubmitButton)
                     .automationActivate(
                         Ids.postSubmitButton,
-                        isEnabled: {
-                            !vm.composeText.trimmingCharacters(in: .whitespaces).isEmpty
-                            && vm.composeReady
-                        }
+                        isEnabled: { vm.composeReady }
                     ) { submitPost() }
+                    // The draft's shared answer (`fauna_feed::forms`), outside
+                    // the automation modifier so the registry reads it too.
+                    // The always-mounted composer carries the reason on the
+                    // control (tooltip + hint), not a standing caption.
+                    .faunaPossible(vm.postSubmitPossibility)
                 }
                 TextField(L.feed.post.tagsPlaceholder, text: composeTags)
                     .textFieldStyle(.roundedBorder)

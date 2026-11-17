@@ -217,6 +217,11 @@
                   Return="ignore" />
 
     <!-- ── Sparse-package register / deregister (STEP E — the Win11 DEFAULT context menu) ──
+      RETIRED with the sparse package (installers/windows.md § Direct download, 6): no MSI
+      ships Fauna-Sparse.msix any more (every MSI is linked -d NoSparsePackage=1), so the
+      register action finds no package and does nothing, while the deregister action still
+      removes a registration an earlier install left. Both go with the full-feature
+      package's sources.
       An HKCR verb (ShellExt.wxs) surfaces only under "Show more options". The Windows 11
       DEFAULT menu renders context-menu handlers ONLY from a component that carries PACKAGE
       IDENTITY, which the (unpackaged) Fauna shell extension obtains from a manifest-only

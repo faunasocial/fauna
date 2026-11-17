@@ -72,9 +72,10 @@ pub enum Action {
     /// (`build_knock_payload` → `fauna.inbox.send`, same-nest). Async.
     AddContact,
     /// `contact-request-guardian-button` — the supervised ward's in-app ask,
-    /// offered ONLY after the nest refused the knock with the typed
-    /// guardian-approval error (`family-safety.md` § Child-initiated contact
-    /// requests). `fauna.family.contact.request`; async.
+    /// offered at the entry when the ward's own policy says the guardian
+    /// decides the resolved peer, and after the nest refused the knock with the
+    /// typed guardian-approval error (`family-safety.md` § Child-initiated
+    /// contact requests). `fauna.family.contact.request`; async.
     ///
     /// The ask carries **who, never why** — no message text, deliberately: a
     /// ward-authored free-text field is a disclosure surface the guardian's
@@ -199,7 +200,9 @@ pub struct ContactsState {
     /// The nest refused the last knock to `find_result` with the typed
     /// guardian-approval error — a supervised ward whose `contact_approval`
     /// knob is on. Reveals `contact-request-guardian-button` in place of a dead
-    /// error banner (`family-safety.md` § Child-initiated contact requests).
+    /// error banner (`family-safety.md` § Child-initiated contact requests) —
+    /// the fallback for a policy that changed between the paint and the act;
+    /// the entry offers the ask from the held policy first.
     ///
     /// Reset by every new lookup, alongside `knock_sent`: the refusal belongs to
     /// the peer it was refused for, and offering the ask against a *different*
@@ -397,6 +400,29 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         .account_outbox
         .clone()
         .map(|outbox| outbox as Arc<dyn OfflineIntentQueue>);
+    // The knock and the accept ask the predicates their buttons paint from
+    // before anything is sent (`ui/README.md` § Offer only what is possible,
+    // rule 6). The buttons are already disabled when the answer is not
+    // possible; this is the same answer guarding the action, for a gesture
+    // that arrives anyway (an agent's click, a policy read landing between the
+    // paint and the act).
+    match &action {
+        Action::AddContact if !app.contacts.knock_sent => {
+            if let Some(found) = app.contacts.find_result.as_ref() {
+                let answer = knock_answer(app, &found.actor_id.clone());
+                if !admit(app, answer) {
+                    return None;
+                }
+            }
+        }
+        Action::AcceptKnock { .. } => {
+            let answer = fauna_client_family::accept_possibility(app.family.own_supervision());
+            if !admit(app, answer) {
+                return None;
+            }
+        }
+        _ => {}
+    }
     let st = &mut app.contacts;
     match action {
         Action::Lookup => {
@@ -553,6 +579,54 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 mail: st.mail.clone()?,
                 uid_hash,
             })
+        }
+    }
+}
+
+/// The caller's contact edge to `peer_actor_id_hex` as the roster holds it
+/// (`ContactItem::status`), `None` with no edge — the peer half of
+/// [`fauna_client_family::knock_possibility`]. Case-insensitive, because the
+/// Find User form's id is whatever was typed and the roster's is canonical.
+fn roster_status<'a>(st: &'a ContactsState, peer_actor_id_hex: &str) -> Option<&'a str> {
+    st.contacts
+        .iter()
+        .find(|c| c.peer_id.eq_ignore_ascii_case(peer_actor_id_hex))
+        .map(|c| c.status.as_str())
+}
+
+/// The knock's answer for the peer the Find User form resolved — the one
+/// predicate the paint and [`Action::AddContact`] both ask.
+fn knock_answer(app: &App, peer_actor_id_hex: &str) -> fauna_core::possibility::Possibility {
+    fauna_client_family::knock_possibility(
+        app.family.own_supervision(),
+        roster_status(&app.contacts, peer_actor_id_hex),
+    )
+}
+
+/// Whether the guardian decides contact with this peer — the ward's policy
+/// has `contact_approval` on and the peer is not already a contact — which is
+/// when the ask (`contact-request-guardian-button`) is the result's one step
+/// (`ui/README.md` § Offer only what is possible, rule 3).
+fn guardian_decides(app: &App, peer_actor_id_hex: &str) -> bool {
+    fauna_client_family::guardian_decides_contact(
+        app.family.own_supervision(),
+        roster_status(&app.contacts, peer_actor_id_hex),
+    )
+}
+
+/// Refuse a gesture whose predicate is not possible, with the predicate's own
+/// reason on the page's `error-message` (rule 6: the action asks the same
+/// predicate the paint does; rule 7: a refusal is never silent). `true` when
+/// the gesture may go ahead.
+fn admit(app: &mut App, answer: fauna_core::possibility::Possibility) -> bool {
+    match answer.reason() {
+        None => true,
+        Some(reason) => {
+            app.errors.insert(
+                crate::pages::Page::Contacts,
+                reason.resolve(fauna_i18n::strings::lookup),
+            );
+            false
         }
     }
 }
@@ -1257,12 +1331,49 @@ pub fn elements(app: &App) -> Vec<Element> {
             ids::CONTACT_ACTOR_ID_RESULT,
             r.actor_id.clone(),
         ));
-        out.push(Element::gesture_button(
+        // The ward's in-app ask (`family-safety.md` § Child-initiated contact
+        // requests). Offered at the ENTRY when the ward's own policy says the
+        // guardian decides this peer (`ui/README.md` § Offer only what is
+        // possible, rules 3–4: the knock it stands in for is blocked, so the
+        // ask is the result's one step — painted first, the only live control
+        // of the knock pair), and still after a typed refusal: the policy can
+        // change between the paint and the act (rule 7). With the knob off the
+        // ward contacts freely and the ask is never offered (it would be
+        // refused as moot). Rendered as the *pending* state instead once one is
+        // outstanding.
+        //
+        // `pending` reads the durable `status.contact_requests` FIRST and the
+        // just-asked flag second: the durable list is what survives navigation
+        // and a restart, and it is also what makes the state honest on a fresh
+        // session.
+        let pending = app.family.contact_ask_pending(&r.actor_id) || st.contact_ask_sent;
+        if pending {
+            out.push(Element::label(
+                ids::CONTACT_REQUEST_PENDING,
+                t::CONTACT_REQUEST_PENDING.to_string(),
+            ));
+        } else if st.guardian_refused || guardian_decides(app, &r.actor_id) {
+            out.push(Element::gesture_button(
+                ids::CONTACT_REQUEST_GUARDIAN_BUTTON,
+                t::ASK_GUARDIAN,
+                true,
+                Gesture::Contacts(Action::RequestContact),
+            ));
+        }
+        // The knock, from the one predicate the send asks too: blocked with
+        // its reason while the status read is unresolved (rule 5) or the
+        // guardian decides this peer; a knock already sent reads "Sent".
+        let knock = Element::gesture_button(
             ids::CONTACTS_ADD_BUTTON,
             if st.knock_sent { t::SENT } else { t::KNOCK },
             !st.knock_sent,
             Gesture::Contacts(Action::AddContact),
-        ));
+        );
+        out.push(if st.knock_sent {
+            knock
+        } else {
+            knock.possible(knock_answer(app, &r.actor_id))
+        });
         out.push(Element::gesture_button(
             ids::CONTACT_ACTOR_ID_COPY_BTN,
             common::COPY,
@@ -1281,30 +1392,6 @@ pub fn elements(app: &App) -> Vec<Element> {
                 home: r.nest_url.clone(),
             },
         ));
-        // The ward's in-app ask (`family-safety.md` § Child-initiated contact
-        // requests). Offered only after the nest actually refused — the knob
-        // may be off, in which case the ward contacts freely and an ask would be
-        // refused as moot — and rendered as the *pending* state instead once one
-        // is outstanding.
-        //
-        // `pending` reads the durable `status.contact_requests` FIRST and the
-        // just-asked flag second: the durable list is what survives navigation
-        // and a restart, and it is also what makes the state honest on a fresh
-        // session where this page never saw the refusal at all.
-        let pending = app.family.contact_ask_pending(&r.actor_id) || st.contact_ask_sent;
-        if pending {
-            out.push(Element::label(
-                ids::CONTACT_REQUEST_PENDING,
-                t::CONTACT_REQUEST_PENDING.to_string(),
-            ));
-        } else if st.guardian_refused {
-            out.push(Element::gesture_button(
-                ids::CONTACT_REQUEST_GUARDIAN_BUTTON,
-                t::ASK_GUARDIAN,
-                true,
-                Gesture::Contacts(Action::RequestContact),
-            ));
-        }
     }
     if let Some(e) = &st.find_error {
         out.push(Element::label(ids::CONTACT_FIND_ERROR, e.clone()));
@@ -1317,6 +1404,7 @@ pub fn elements(app: &App) -> Vec<Element> {
     // derivation over the caller's own status policy, no per-knock wire field.
     let awaits_guardian =
         fauna_client_family::knocks_await_guardian(app.family.own_policy.as_ref());
+    let accept = fauna_client_family::accept_possibility(app.family.own_supervision());
     for k in &st.knocks {
         out.push(Element::label(ids::KNOCK_CARD, k.summary.clone()));
         // Through the one resolver with no handle: the viewer's nickname for
@@ -1335,14 +1423,20 @@ pub fn elements(app: &App) -> Vec<Element> {
                 t::KNOCK_GUARDIAN_PENDING,
             ));
         }
-        out.push(Element::gesture_button(
-            ids::CONTACTS_ACCEPT_BUTTON,
-            common::ACCEPT,
-            true,
-            Gesture::Contacts(Action::AcceptKnock {
-                peer_id: k.sender.clone(),
-            }),
-        ));
+        // Accept is the guardian's while contact approval is on (the nest
+        // refuses the ward's own), so it is blocked with the reason the row
+        // already shows; block and dismiss stay the ward's.
+        out.push(
+            Element::gesture_button(
+                ids::CONTACTS_ACCEPT_BUTTON,
+                common::ACCEPT,
+                true,
+                Gesture::Contacts(Action::AcceptKnock {
+                    peer_id: k.sender.clone(),
+                }),
+            )
+            .possible(accept.clone()),
+        );
         out.push(Element::gesture_button(
             ids::CONTACTS_BLOCK_BUTTON,
             common::BLOCK,
@@ -1639,6 +1733,10 @@ mod tests {
     fn contacts_app() -> crate::app::App {
         let mut app = authed_app();
         app.page = Page::Contacts;
+        // This run's family status read has resolved, for an account it found
+        // unsupervised — the state every page test below starts from (a ward
+        // sets `own_policy` on top; the unread state is tested on its own).
+        app.family.status_read = true;
         // The Address Book ops read the account's mail custody since
         // `fauna.state.mail` went plane-only; without a store they build no op.
         app.contacts.mail = Some(Arc::new(
@@ -2850,6 +2948,135 @@ mod tests {
             .expect("button still registers");
         assert!(!add.enabled, "a sent knock disables the button");
         assert_eq!(add.text, t::SENT);
+    }
+
+    /// A ward whose guardian decides new contacts, after a status read.
+    fn ward_app() -> crate::app::App {
+        let mut app = contacts_app();
+        app.family.supervised_by = Some("mum".into());
+        app.family.own_policy = Some(fauna_protocol::family::ReachPolicy {
+            contact_approval: true,
+            ..Default::default()
+        });
+        app
+    }
+
+    fn resolve(app: &mut crate::app::App, peer: &str) {
+        apply_outcome(
+            app,
+            Outcome::Resolved {
+                actor_id: peer.to_string(),
+                nest_url: None,
+            },
+        );
+    }
+
+    /// The painted (post-seam) elements with `id`: `(enabled, label)` each.
+    fn painted(app: &crate::app::App, id: &str) -> Vec<(bool, Option<String>)> {
+        app.page_elements()
+            .into_iter()
+            .filter(|e| e.id == id)
+            .map(|e| (e.enabled, e.label))
+            .collect()
+    }
+
+    /// `ui/README.md` § Offer only what is possible, rules 3–4, on the ward's
+    /// Find User result (`contacts.md` § Errors & edge cases): with contact
+    /// approval on, the knock is never enabled toward a stranger — it is
+    /// blocked with the refusal's own words — and the ask is offered at the
+    /// entry, painted first, before anything was refused.
+    #[test]
+    fn a_ward_is_offered_the_ask_at_the_entry_in_place_of_an_enabled_knock() {
+        let mut app = ward_app();
+        let peer = "cd".repeat(32);
+        resolve(&mut app, &peer);
+        assert_eq!(
+            painted(&app, "contacts-add-button"),
+            vec![(false, Some(t::GUARDIAN_APPROVAL_REQUIRED.to_string()))],
+            "the knock is blocked with its reason, never enabled"
+        );
+        assert_eq!(
+            painted(&app, "contact-request-guardian-button"),
+            vec![(true, None)]
+        );
+        let order = ids(&app);
+        let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
+        assert!(
+            pos("contact-request-guardian-button") < pos("contacts-add-button"),
+            "the ask is the result's first step: {order:?}"
+        );
+
+        // The send asks the same predicate and refuses with the same reason.
+        assert!(apply_local(&mut app, Action::AddContact).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Contacts).map(String::as_str),
+            Some(t::GUARDIAN_APPROVAL_REQUIRED)
+        );
+
+        // A pending ask replaces the ask button; the knock stays blocked.
+        app.family.own_contact_requests = vec![an_ask(0xcd)];
+        assert_eq!(count_id(&app, "contact-request-guardian-button"), 0);
+        assert_eq!(count_id(&app, "contact-request-pending"), 1);
+        assert!(!painted(&app, "contacts-add-button")[0].0);
+    }
+
+    /// The nest's outbound gate passes a peer the ward already has as an
+    /// accepted or confirmed contact, so the knock does too — and no ask.
+    #[test]
+    fn a_ward_may_knock_a_peer_who_is_already_a_contact() {
+        let mut app = ward_app();
+        let peer = "cd".repeat(32);
+        app.contacts.contacts = vec![a_contact(&peer.to_uppercase(), Some("ada"), "accepted")];
+        resolve(&mut app, &peer);
+        assert_eq!(painted(&app, "contacts-add-button"), vec![(true, None)]);
+        assert_eq!(count_id(&app, "contact-request-guardian-button"), 0);
+    }
+
+    /// Rule 5: before this run's status read resolves, neither the knock nor
+    /// an accept is enabled on a guess — and no ask is offered on one either.
+    #[test]
+    fn nothing_is_enabled_on_a_guess_before_the_status_read() {
+        let mut app = contacts_app();
+        app.family.status_read = false;
+        app.contacts.knocks = vec![knock(&"aa".repeat(32))];
+        resolve(&mut app, &"cd".repeat(32));
+        assert_eq!(
+            painted(&app, "contacts-add-button"),
+            vec![(false, Some(common::LOADING.to_string()))]
+        );
+        assert_eq!(count_id(&app, "contact-request-guardian-button"), 0);
+        assert!(!painted(&app, "contacts-accept-button")[0].0);
+    }
+
+    /// With contact approval on, acceptance is the guardian's: each knock row
+    /// keeps its `knock-guardian-pending` line, and its accept is blocked by
+    /// it (the reason already painted on the row); block and dismiss stay
+    /// live. The accept asks the same predicate.
+    #[test]
+    fn a_wards_accept_is_blocked_while_the_guardian_decides() {
+        let mut app = ward_app();
+        app.contacts.knocks = vec![knock(&"aa".repeat(32))];
+        assert_eq!(painted(&app, "contacts-accept-button"), vec![(false, None)]);
+        assert_eq!(count_id(&app, "knock-guardian-pending"), 1);
+        assert!(painted(&app, "contacts-block-button")[0].0);
+        assert!(painted(&app, "knock-dismiss")[0].0);
+        assert!(
+            apply_local(
+                &mut app,
+                Action::AcceptKnock {
+                    peer_id: "aa".repeat(32)
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(
+            app.errors.get(&Page::Contacts).map(String::as_str),
+            Some(t::KNOCK_GUARDIAN_PENDING)
+        );
+
+        // The guardian turns approval off: the ward decides again.
+        app.family.own_policy = Some(Default::default());
+        assert_eq!(painted(&app, "contacts-accept-button"), vec![(true, None)]);
     }
 
     /// `family-safety.md` § Child-initiated contact requests: a supervised

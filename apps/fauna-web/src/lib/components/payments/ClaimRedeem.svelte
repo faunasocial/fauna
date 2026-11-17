@@ -20,6 +20,14 @@
   import { paymentsClaimsRedeemAcrossNests, type PaymentClaimRedeemed } from '#lib/payments';
   import { redeemClaimCode } from '#lib/components/payments/claim-redeem';
   import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
+  import { fetchFeatures, type FeatureRow } from '#lib/api';
+  import {
+    ensureWasm, featuresGatePossibility, readPossibility, subscriptionRedeemCodePossibility,
+  } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import { andPossibility, featureAnswer, readFailed, type ReadWord } from '#lib/read-gate';
+  import { resolveLocalizedNested } from '#lib/i18n/localized';
+  import { onMount, untrack } from 'svelte';
 
   interface Props {
     /** The logged-in actor's secret, or null before identity resolves. */
@@ -39,7 +47,61 @@
 
   let claimCode = $state('');
 
+  // The `payments` plane's courtesy read (`fauna.features.status`) the redeem
+  // waits on, issued by this block itself — both doors (Settings and another
+  // person's profile) mount it, so neither depends on the other having been
+  // visited (`ui/README.md` § Offer only what is possible, rule 5). The answer
+  // is the shared `fauna_client_features::gate_possibility`: still loading
+  // before the read, its failure after a failed one, the restriction when the
+  // plane says no, and absent — the whole block left out — on a nest without
+  // the plane (rule 2). Painted here; `redeem()` asks it again (rule 6).
+  let wasmUp = $state(false);
+  let featureRows = $state<FeatureRow[] | null>(null);
+  let featureRead = $state<ReadWord>('pending');
+  const asks = { readPossibility, featuresGatePossibility };
+  // The plane's answer first, then the shared code-draft predicate
+  // (`fauna_client_subscriptions::forms::redeem_code_possibility`, profile.md
+  // § Errors & edge cases): a blank code is blocked with its own reason.
+  function redeemAnswer() {
+    return andPossibility(
+      featureAnswer(asks, featureRows, featureRead, 'payments'),
+      subscriptionRedeemCodePossibility(claimCode),
+    );
+  }
+  const gate = $derived(
+    formGate(wasmUp ? askPossibility(() => redeemAnswer()) : null, resolveLocalizedNested),
+  );
+
+  async function loadFeatures(secret: string): Promise<void> {
+    try {
+      featureRows = await fetchFeatures(secret);
+      featureRead = 'resolved';
+    } catch {
+      featureRead = readFailed(featureRead);
+    }
+  }
+
+  onMount(async () => {
+    try {
+      await ensureWasm();
+      wasmUp = true;
+    } catch (err) {
+      onerror(err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  $effect(() => {
+    const s = secretHex;
+    if (!s || !wasmUp) return;
+    untrack(() => void loadFeatures(s));
+  });
+
   async function redeem(): Promise<void> {
+    const refusal = formRefusal(askPossibility(() => redeemAnswer()), resolveLocalizedNested);
+    if (refusal !== null) {
+      onerror(refusal);
+      return;
+    }
     try {
       const reply = await redeemClaimCode(
         claimCode,
@@ -59,23 +121,29 @@
   }
 </script>
 
-<h2 class="claim-title">{t.subscriptions.redeem_claim_title}</h2>
-<div class="row">
-  <input
-    class="input grow" type="text" placeholder={t.subscriptions.claim_code}
-    data-testid={PAYMENTS_IDS.SUBSCRIPTION_CLAIM_REDEEM_INPUT} bind:value={claimCode}
-  />
-  <button
-    class="btn primary" data-testid={PAYMENTS_IDS.SUBSCRIPTION_CLAIM_REDEEM_BUTTON}
-    onclick={redeem}
-  >{t.subscriptions.redeem}</button>
-</div>
+{#if gate.shown}
+  <h2 class="claim-title">{t.subscriptions.redeem_claim_title}</h2>
+  <div class="row">
+    <input
+      class="input grow" type="text" placeholder={t.subscriptions.claim_code}
+      data-testid={PAYMENTS_IDS.SUBSCRIPTION_CLAIM_REDEEM_INPUT} bind:value={claimCode}
+    />
+    <button
+      class="btn primary" data-testid={PAYMENTS_IDS.SUBSCRIPTION_CLAIM_REDEEM_BUTTON}
+      onclick={redeem} disabled={gate.disabled} title={gate.reason || undefined}
+    >{t.subscriptions.redeem}</button>
+  </div>
+  {#if gate.disabled && gate.reason}
+    <p class="muted">{gate.reason}</p>
+  {/if}
+{/if}
 
 <style>
   /* Scoped copies of the host section's chrome — see `ProviderSection.svelte`'s
      matching note on why these are duplicated rather than shared globally. */
   .claim-title { font-size: 1rem; margin: 1rem 0 0.5rem; }
   .grow { flex: 1; }
+  .muted { color: var(--text-muted, #8b949e); margin: 0.25rem 0 0; font-size: 0.85rem; }
   .row {
     display: flex;
     align-items: center;

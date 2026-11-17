@@ -13,9 +13,9 @@
 
 import { familyStatus, type FamilyStatus } from '#lib/rpc';
 import { registerActorScopedReset } from '#lib/actorScope';
-import { keepOnEmptyReread, wardAsksFromStatus, type WardAsks } from '#lib/ward-asks';
+import { keepOnEmptyReread, NO_WARD_ASKS, wardAsksFromStatus, type WardAsks } from '#lib/ward-asks';
 
-let asks = $state<WardAsks>({ contact: [], feed: [], policy: null });
+let asks = $state<WardAsks>({ ...NO_WARD_ASKS });
 
 /** The current cache (reactive when read inside a component). */
 export function wardAsks(): WardAsks {
@@ -52,6 +52,7 @@ export async function rereadAfterAsk(secretHex: string): Promise<void> {
       feed: keepOnEmptyReread(asks.feed, fresh.feed),
       // A policy is never "empty on failure" — a failed read throws.
       policy: fresh.policy,
+      statusRead: true,
     };
   } catch {
     // Keep the held lists; the local flag carries the render.
@@ -61,5 +62,5 @@ export async function rereadAfterAsk(secretHex: string): Promise<void> {
 // Class-1 account-scoped state (`account-scoping.md` § The scoping taxonomy):
 // one ward's asks must never render for the next account.
 registerActorScopedReset(() => {
-  asks = { contact: [], feed: [], policy: null };
+  asks = { ...NO_WARD_ASKS };
 });

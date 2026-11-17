@@ -204,6 +204,12 @@ pub struct ProfileState {
     /// re-read the truth (`subscriptions.md` § The free followers tier —
     /// follow and unfollow, rule 4). Cleared by [`Self::reset_for_open`].
     follow_flip: Option<bool>,
+    /// OTHER: where the open-time `status.get` read stands — the read
+    /// [`Self::follow_answer`] waits on (`ui/README.md` § Offer only what is
+    /// possible, rule 5). `Failed` when it came back with an error, which
+    /// [`Self::status`] alone cannot tell from "not answered yet". Reset by
+    /// [`Self::reset_for_open`].
+    follow_read: fauna_core::possibility::ReadState,
     /// OTHER: the paid-tier unfollow confirm is armed — the first press on
     /// *Following* while the status names a paid tier relabelled the button
     /// (`profile.unfollow_confirm`); the second press leaves. Any other profile
@@ -366,6 +372,26 @@ impl ProfileState {
         })
     }
 
+    /// Whether `profile-follow-button` can be pressed now (`profile.md`
+    /// § Errors & edge cases, *Unread state is not possible*): only once the
+    /// page knows which way the press goes — the viewer's own press for this
+    /// open, or a status read that answered. Before it the button is blocked
+    /// still loading, and after a failed read blocked with the failure, so a
+    /// press never subscribes again to an author the viewer already follows.
+    pub(crate) fn follow_answer(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::{Possibility, ReadState};
+        if self.follow_flip.is_some() || self.status.is_some() {
+            return Possibility::from_read(ReadState::Resolved);
+        }
+        Possibility::from_read(self.follow_read)
+    }
+
+    /// Whether `profile-block-button` can be pressed now: only once the
+    /// open-time block read has said which edge the toggle crosses.
+    pub(crate) fn block_answer(&self) -> fauna_core::possibility::Possibility {
+        fauna_core::possibility::Possibility::once_read(self.is_blocked.is_some())
+    }
+
     /// Whether a press on *Following* is confirm-gated: the status names a paid
     /// tier, which the unfollow ends too (`format::unfollow_ends_paid_tier`).
     fn unfollow_needs_confirm(&self) -> bool {
@@ -382,6 +408,7 @@ impl ProfileState {
         self.pictures = HeaderPictures::default();
         self.art = HeaderArt::default();
         self.follow_flip = None;
+        self.follow_read = fauna_core::possibility::ReadState::Pending;
         self.unfollow_armed = false;
         self.copied = None;
         self.is_blocked = None;
@@ -552,6 +579,20 @@ pub fn spawn_open_refresh(
             )));
         }
         if is_other {
+            // The redeem button's gate waits on the features read; issue it
+            // here, where the button is read, rather than leaving it to a
+            // Settings visit (`ui/README.md` § Offer only what is possible,
+            // rule 5). A failed read leaves the button blocked, still loading.
+            #[cfg(feature = "payments")]
+            if let Ok(rows) = fauna_client_features::FeaturesClient::new(Arc::clone(&nest))
+                .rows()
+                .await
+            {
+                let _ = tx.send(UiMessage::Data(DataMessage::Page(
+                    session_generation,
+                    crate::app::PageOutcome::Profile(Outcome::Features(rows)),
+                )));
+            }
             let blocked = fetch_block_state(&nest, &actor_id).await;
             let _ = tx.send(UiMessage::Data(DataMessage::Page(
                 session_generation,
@@ -911,13 +952,15 @@ impl Action {
             #[cfg(feature = "payments")]
             Action::VoidClaim(_) => Some("fauna.payments.claims.void"),
 
-            // State-dependent, so the gate declines rather than guesses (the
-            // `crate::moderation::Action::Correct` rule): `ToggleBlock` issues
-            // `knocks_block` or `knocks_unblock` depending on the current edge,
-            // and `SaveTierForm` issues `tiers.create` or `tiers.update`
-            // depending on `form.editing` — only [`apply_local`]'s successor op
-            // knows which.
-            Action::ToggleBlock | Action::SaveTierForm => None,
+            // State-dependent kinds whose two arms share one offline class,
+            // so naming either gives the gate the right answer:
+            // `ToggleBlock` issues `knocks.block` or `knocks.unblock` by the
+            // current edge, and `SaveTierForm` issues `tiers.create` or
+            // `tiers.update` by `form.editing` — both pairs `OfflineSafe`
+            // (`fauna_protocol::offline_class`). The test below holds the
+            // pairs together, so a reclassification of one arm reds here.
+            Action::ToggleBlock => Some("fauna.knocks.block"),
+            Action::SaveTierForm => Some("fauna.subscriptions.tiers.create"),
 
             // The Posts tab's reads, and its cards' own gestures answering as
             // they do on the feed.
@@ -1031,6 +1074,27 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         .view
         .is_none()
         .then(|| app.settings.web_origin_handle());
+    // The gestures painted from an answer ask the same answer again and
+    // refuse with its reason (`ui/README.md` § Offer only what is possible,
+    // rule 6), so a press the page did not offer never reaches the wire.
+    let answer = match action {
+        Action::Follow => Some(app.profile.follow_answer()),
+        Action::ToggleBlock => Some(app.profile.block_answer()),
+        #[cfg(feature = "payments")]
+        Action::RedeemClaim => Some(redeem_answer(app)),
+        Action::SaveTierForm => app
+            .profile
+            .author
+            .form
+            .as_ref()
+            .map(|f| fauna_client_subscriptions::forms::tier_form_possibility(&f.name)),
+        _ => None,
+    };
+    if let Some(answer) = answer
+        && app.errors.refuse(Page::Profile, &answer)
+    {
+        return None;
+    }
     let st = &mut app.profile;
     match action {
         Action::StartDm
@@ -1242,10 +1306,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // home slot, exactly as the follow carries it.
         #[cfg(feature = "payments")]
         Action::RedeemClaim => {
+            // The blank code is refused above, by the shared predicate.
             let code = st.redeem_input.trim();
-            if code.is_empty() {
-                return None;
-            }
             Some(Op::RedeemClaim {
                 nest: st.nest.clone()?,
                 secret: st.secret.clone()?,
@@ -1357,6 +1419,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         #[cfg(feature = "payments")]
         Action::OpenProviderForm => {
+            // The gate is at the entry (rule 4): no form opens whose save has
+            // no tier to map.
+            if app
+                .errors
+                .refuse(Page::Profile, &tiers::provider_add_possibility(&st.author))
+            {
+                return None;
+            }
             st.author.provider_form = Some(tiers::ProviderForm::default());
             // Hydrate the web origin the return-URL display needs, once: the
             // settings page owns refresh after that.
@@ -1430,6 +1500,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         #[cfg(feature = "payments")]
+        Action::MintClaim
+            if app
+                .errors
+                .refuse(Page::Profile, &tiers::claim_mint_possibility(&st.author)) =>
+        {
+            None
+        }
+        #[cfg(feature = "payments")]
         Action::MintClaim => Some(Op::MintClaim {
             nest: st.nest.clone()?,
             roster_tier: st.author.roster_tier.clone(),
@@ -1480,6 +1558,16 @@ fn start_dm(app: &mut App) {
 
 /// Trim to `Option<String>` — an empty display name / bio is `None` on the wire
 /// (linux's `non_empty`).
+/// `subscription-claim-redeem-button`'s answer: the payments feature gate, then
+/// the shared code predicate (`fauna_client_subscriptions::forms`) — what the
+/// button paints from and what [`Action::RedeemClaim`] refuses by.
+#[cfg(feature = "payments")]
+fn redeem_answer(app: &App) -> fauna_core::possibility::Possibility {
+    crate::settings::subscriptions::redeem_gate(&app.settings).and(
+        fauna_client_subscriptions::forms::redeem_code_possibility(&app.profile.redeem_input),
+    )
+}
+
 fn non_empty(s: &str) -> Option<String> {
     let t = s.trim();
     (!t.is_empty()).then(|| t.to_string())
@@ -1766,6 +1854,12 @@ pub enum Outcome {
     /// re-blocked — succeeding on the wire, leaving the label on "Unblock" with
     /// no error to show for it.
     BlockState { epoch: u64, blocked: bool },
+    /// The open-time features courtesy read the redeem button waits on
+    /// (`crate::settings::subscriptions::redeem_gate`). It lands in the
+    /// settings state, the one place both pages that paint the button read
+    /// it from; a failed read leaves whatever was already there.
+    #[cfg(feature = "payments")]
+    Features(Vec<fauna_client_features::FeatureRow>),
     /// The block toggle flipped to this new state.
     BlockToggled(bool),
     /// How the knock to `peer` ended. Carries the peer because the reply can
@@ -2108,8 +2202,12 @@ impl Op {
                 // blank/garbage falls to rank 0, matching every app's form.
                 let rank = fauna_core::format::parse_count(&form.rank).unwrap_or(0);
                 let name = form.name.trim().to_string();
-                if name.is_empty() {
-                    return Outcome::AuthorFailed("tier name is required".into());
+                // Backstop: the Save button is painted from, and the action
+                // refuses by, the same predicate.
+                if let Some(reason) =
+                    fauna_client_subscriptions::forms::tier_form_possibility(&name).reason()
+                {
+                    return Outcome::AuthorFailed(reason.resolve(fauna_i18n::strings::lookup));
                 }
                 let description = non_empty(&form.description);
                 let price_hint = non_empty(&form.price_hint);
@@ -2585,8 +2683,15 @@ pub fn offers_reload_op(app: &mut App) -> Option<Op> {
 
 /// Fold an outcome back into the page — one function for both dispatch paths.
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
+    #[cfg(feature = "payments")]
+    if let Outcome::Features(rows) = outcome {
+        app.settings.features = Some(rows);
+        return;
+    }
     let st = &mut app.profile;
     match outcome {
+        #[cfg(feature = "payments")]
+        Outcome::Features(_) => unreachable!("handled above"),
         // An open-time read: it answers the actor that open was showing, so a
         // reply that outlived its open belongs to nobody on screen.
         Outcome::HeaderName {
@@ -2654,8 +2759,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // A background open-time read: it never clears a live error, and a
         // reply that outlived its open belongs to nobody on screen.
         Outcome::FollowStatus { epoch, status } => {
-            if epoch == st.open_epoch && status.is_some() {
-                st.status = status;
+            if epoch == st.open_epoch {
+                st.follow_read = if status.is_some() {
+                    fauna_core::possibility::ReadState::Resolved
+                } else {
+                    fauna_core::possibility::ReadState::Failed
+                };
+                if status.is_some() {
+                    st.status = status;
+                }
             }
         }
         // A background open-time read — never clears a live error, and never
@@ -2785,6 +2897,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             }
             st.author.busy = false;
             st.author.tiers = tiers;
+            st.author.tiers_read = fauna_core::possibility::ReadState::Resolved;
             st.author.requests = requests;
             st.author.subscribers = subscribers;
             st.author.roster_tier = roster_tier;
@@ -2814,6 +2927,12 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // Clear the in-flight marker too — an approve that errors must not
             // leave `subscription-request-busy` painted forever.
             st.author.busy = false;
+            // A failure before the tab ever read its tiers leaves them
+            // unknown, which the tier-needing controls say; after a good read
+            // the list on screen stands (the error is the mutation's).
+            if st.author.tiers_read != fauna_core::possibility::ReadState::Resolved {
+                st.author.tiers_read = fauna_core::possibility::ReadState::Failed;
+            }
             app.errors.insert(Page::Profile, e);
         }
     }
@@ -2937,24 +3056,30 @@ pub fn elements(app: &App) -> Vec<Element> {
             Gesture::Profile(Action::OpenEdit),
         ));
     } else {
-        out.push(Element::gesture_button(
-            ids::PROFILE_FOLLOW_BUTTON,
-            follow_label(st),
-            true,
-            Gesture::Profile(Action::Follow),
-        ));
+        out.push(
+            Element::gesture_button(
+                ids::PROFILE_FOLLOW_BUTTON,
+                follow_label(st),
+                true,
+                Gesture::Profile(Action::Follow),
+            )
+            .possible(st.follow_answer()),
+        );
         out.push(Element::gesture_button(
             ids::PROFILE_START_DM_BUTTON,
             t::START_DM,
             true,
             Gesture::Profile(Action::StartDm),
         ));
-        out.push(Element::gesture_button(
-            ids::PROFILE_BLOCK_BUTTON,
-            block_label(st),
-            st.is_blocked.is_some(),
-            Gesture::Profile(Action::ToggleBlock),
-        ));
+        out.push(
+            Element::gesture_button(
+                ids::PROFILE_BLOCK_BUTTON,
+                block_label(st),
+                true,
+                Gesture::Profile(Action::ToggleBlock),
+            )
+            .possible(st.block_answer()),
+        );
         // Report this account — beside block, OTHER view only (`moderation.md`
         // § User-initiated reporting → *App surface*); opens the shared report
         // sheet with the actor as its subject.
@@ -3001,7 +3126,7 @@ pub fn elements(app: &App) -> Vec<Element> {
         }
         // Below the relationship actions, above the tab strip (profile.md
         // § The private section).
-        private::elements(st, &mut out);
+        private::elements(app, st, &mut out);
     }
 
     out.push(Element::gesture_button(
@@ -3182,26 +3307,31 @@ pub fn elements(app: &App) -> Vec<Element> {
         // so a code minted on another nest redeems from the creator's profile.
         // Same compile-time excision and the same Dim-3 courtesy gate as the
         // settings pair — one decision, read from the shared crate.
+        // The features read it waits on is issued by the profile open
+        // ([`spawn_open_refresh`]), so the gate never depends on the viewer
+        // having visited Settings first.
         #[cfg(feature = "payments")]
         {
-            out.push(Element::chrome(s::REDEEM_CLAIM_TITLE));
-            out.push(
-                Element::input(
-                    ids::SUBSCRIPTION_CLAIM_REDEEM_INPUT,
-                    st.redeem_input.clone(),
-                    Field::Profile(ProfileField::RedeemCode),
-                )
-                .labelled(s::CLAIM_CODE),
-            );
             let gate = crate::settings::subscriptions::redeem_gate(&app.settings);
-            out.push(Element::gesture_button(
-                ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON,
-                s::REDEEM,
-                gate.is_none(),
-                Gesture::Profile(Action::RedeemClaim),
-            ));
-            if let Some(reason) = gate {
-                out.push(Element::chrome(reason));
+            if gate.is_shown() {
+                out.push(Element::chrome(s::REDEEM_CLAIM_TITLE));
+                out.push(
+                    Element::input(
+                        ids::SUBSCRIPTION_CLAIM_REDEEM_INPUT,
+                        st.redeem_input.clone(),
+                        Field::Profile(ProfileField::RedeemCode),
+                    )
+                    .labelled(s::CLAIM_CODE),
+                );
+                out.push(
+                    Element::gesture_button(
+                        ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON,
+                        s::REDEEM,
+                        true,
+                        Gesture::Profile(Action::RedeemClaim),
+                    )
+                    .possible(redeem_answer(app)),
+                );
             }
         }
     }
@@ -3504,7 +3634,12 @@ mod tests {
         app
     }
 
+    /// The follow press once the open-time status read has answered "not
+    /// following" — before it the press is refused (rule 5).
     fn follow_home(app: &mut App) -> Option<String> {
+        if app.profile.status.is_none() {
+            hydrate_status(app, None, false);
+        }
         match apply_local(app, Action::Follow) {
             Some(Op::Follow { home_nest_url, .. }) => home_nest_url,
             _ => panic!("the button must emit the follow"),
@@ -3524,6 +3659,112 @@ mod tests {
                 }),
             },
         );
+    }
+
+    /// The element as painted, through the possibility seam (connected, so
+    /// the offline gate does not mask the page's own answer).
+    fn painted(app: &App, id: &str) -> Option<crate::element::Element> {
+        app.page_elements().into_iter().find(|e| e.id == id)
+    }
+
+    fn connected(mut app: App) -> App {
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Connected;
+        app
+    }
+
+    /// Unknown is not possible (`profile.md` § Errors & edge cases → *Unread
+    /// state is not possible*): before the status read answers, Follow is
+    /// blocked still loading and its press refuses with that reason, so it
+    /// never subscribes again to an author the viewer already follows; a
+    /// failed read blocks it with the failure; an answered one enables it.
+    #[test]
+    fn follow_waits_for_the_status_read() {
+        let mut app = connected(knock_ready(None));
+        let button = painted(&app, ids::PROFILE_FOLLOW_BUTTON).unwrap();
+        assert!(!button.enabled);
+        assert_eq!(
+            button.label.as_deref(),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+        assert!(apply_local(&mut app, Action::Follow).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Profile).map(String::as_str),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+
+        let epoch = app.profile.open_epoch;
+        apply_outcome(
+            &mut app,
+            Outcome::FollowStatus {
+                epoch,
+                status: None,
+            },
+        );
+        assert_eq!(
+            painted(&app, ids::PROFILE_FOLLOW_BUTTON)
+                .unwrap()
+                .label
+                .as_deref(),
+            Some(fauna_i18n::strings::common::LOAD_FAILED)
+        );
+
+        hydrate_status(&mut app, None, false);
+        assert!(painted(&app, ids::PROFILE_FOLLOW_BUTTON).unwrap().enabled);
+    }
+
+    /// Block names its edge only once the block read has answered: before it
+    /// the toggle is blocked still loading (not merely dead with no reason),
+    /// and its press refuses.
+    #[test]
+    fn block_waits_for_the_block_read_with_its_reason() {
+        let mut app = connected(with_nest(other_app()));
+        let button = painted(&app, ids::PROFILE_BLOCK_BUTTON).unwrap();
+        assert!(!button.enabled);
+        assert_eq!(
+            button.label.as_deref(),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+        assert!(apply_local(&mut app, Action::ToggleBlock).is_none());
+        hydrate_block(&mut app, false);
+        assert!(painted(&app, ids::PROFILE_BLOCK_BUTTON).unwrap().enabled);
+    }
+
+    /// Private Save is blocked until the account store has assembled, with
+    /// the reason the shared `save_possibility` gives — never enabled and
+    /// refused only at the submit.
+    #[test]
+    fn private_save_waits_for_the_account_store() {
+        let app = connected(other_app());
+        assert!(app.settings.account_store.is_none());
+        let button = painted(&app, ids::PROFILE_PRIVATE_SAVE_BUTTON).unwrap();
+        assert!(!button.enabled);
+        assert!(button.label.is_some(), "a blocked Save says why");
+    }
+
+    /// Block and tier save answer the offline gate: each names one kind of a
+    /// pair whose two arms share an offline class, so either arm's kind gives
+    /// the gate the same answer.
+    #[test]
+    fn block_and_tier_save_declare_their_wire_kind() {
+        use fauna_protocol::offline_class::offline_class as class_of;
+        for (action, pair) in [
+            (
+                Action::ToggleBlock,
+                ["fauna.knocks.block", "fauna.knocks.unblock"],
+            ),
+            (
+                Action::SaveTierForm,
+                [
+                    "fauna.subscriptions.tiers.create",
+                    "fauna.subscriptions.tiers.update",
+                ],
+            ),
+        ] {
+            let kind = action.wire_kind().expect("offline-classified");
+            assert!(pair.contains(&kind));
+            assert!(class_of(pair[0]).is_some(), "{pair:?}");
+            assert_eq!(class_of(pair[0]), class_of(pair[1]), "{pair:?}");
+        }
     }
 
     /// `subscriptions.md` § The free followers tier — follow and unfollow,
@@ -3846,6 +4087,7 @@ mod tests {
             (None, None),
         ] {
             let mut app = knock_ready(route);
+            hydrate_status(&mut app, None, false);
             match apply_local(&mut app, Action::Follow) {
                 Some(Op::Follow {
                     author,
@@ -4869,7 +5111,7 @@ mod tests {
             .find(|e| e.id == "profile-block-button")
             .expect("the toggle paints while the read is in flight");
         assert!(
-            !toggle.enabled,
+            !app.element_possibility(&toggle).is_possible(),
             "the toggle is disabled until the edge is known"
         );
         assert!(
@@ -5019,8 +5261,87 @@ mod tests {
         let mut app = self_app();
         app.profile.tab = Tab::Tiers;
         app.profile.author.tiers = vec![a_tier("gold", Some("$5/mo"))];
+        // The tab's tier read has answered (what `Outcome::Author` sets).
+        app.profile.author.tiers_read = fauna_core::possibility::ReadState::Resolved;
         app.profile.author.roster_tier = "gold".to_string();
         app
+    }
+
+    /// `profile.md` § Errors & edge cases, *A tier before what sells it*: the
+    /// claim mint and the provider form need one of the author's own tiers.
+    /// With none — or before the tier read answers — both are blocked with
+    /// the reason, the form does not open, and the mint sends nothing.
+    #[test]
+    #[cfg(feature = "payments")]
+    fn mint_and_provider_add_wait_on_a_tier_and_say_why() {
+        use fauna_core::possibility::ReadState;
+        for (read, tiers, want) in [
+            (
+                ReadState::Pending,
+                false,
+                fauna_i18n::strings::common::STILL_LOADING,
+            ),
+            (
+                ReadState::Failed,
+                false,
+                fauna_i18n::strings::common::LOAD_FAILED,
+            ),
+            (ReadState::Resolved, false, s::PROVIDER_NEEDS_TIER),
+        ] {
+            let mut app = author_app();
+            app.profile.author.tiers_read = read;
+            if !tiers {
+                app.profile.author.tiers.clear();
+            }
+            let add = tiers::provider_add_possibility(&app.profile.author);
+            assert!(!add.is_possible(), "{read:?}");
+            assert_eq!(
+                add.reason().map(crate::wizard::localized).as_deref(),
+                Some(want),
+                "{read:?}"
+            );
+            let mint = tiers::claim_mint_possibility(&app.profile.author);
+            assert!(!mint.is_possible(), "{read:?}");
+            // The entry is the gate: no form opens, and the reason is said.
+            assert!(apply_local(&mut app, Action::OpenProviderForm).is_none());
+            assert!(app.profile.author.provider_form.is_none(), "{read:?}");
+            assert!(
+                apply_local(&mut app, Action::MintClaim).is_none(),
+                "{read:?}"
+            );
+            assert!(app.errors.get(&Page::Profile).is_some(), "{read:?}");
+        }
+        assert_eq!(
+            tiers::claim_mint_possibility(&tiers::AuthorState {
+                tiers_read: ReadState::Resolved,
+                ..Default::default()
+            })
+            .reason()
+            .map(crate::wizard::localized)
+            .as_deref(),
+            Some(s::CLAIM_NEEDS_TIER)
+        );
+        // With a tier the answers are possible.
+        let app = author_app();
+        assert!(tiers::provider_add_possibility(&app.profile.author).is_possible());
+        assert!(tiers::claim_mint_possibility(&app.profile.author).is_possible());
+    }
+
+    /// A failure after a good read keeps the list on screen as answered; a
+    /// failure before any read leaves the tiers unknown.
+    #[test]
+    fn an_author_failure_before_any_read_leaves_the_tiers_unknown() {
+        use fauna_core::possibility::ReadState;
+        let mut app = self_app();
+        assert_eq!(app.profile.author.tiers_read, ReadState::Pending);
+        apply_outcome(&mut app, Outcome::AuthorFailed("load tiers: down".into()));
+        assert_eq!(app.profile.author.tiers_read, ReadState::Failed);
+        let mut app = author_app();
+        apply_outcome(
+            &mut app,
+            Outcome::AuthorFailed("create tier: refused".into()),
+        );
+        assert_eq!(app.profile.author.tiers_read, ReadState::Resolved);
     }
 
     /// The five section landmarks + their entry-point controls paint on SELF,
@@ -5172,6 +5493,24 @@ mod tests {
         assert!(f.editing.is_none());
         assert_eq!(f.name, "");
         assert_eq!(f.asking_price, "", "an unpriced create form starts empty");
+
+        // A nameless tier is blocked at the Save button and refused with the
+        // same reason on press — never sent to the nest (apps 6040).
+        let save_reason = |app: &App| {
+            app.page_elements()
+                .into_iter()
+                .find(|e| e.id == "subscription-tier-form-save")
+                .and_then(|e| e.possibility)
+                .and_then(|p| p.reason().map(|r| r.key.clone()))
+        };
+        assert_eq!(
+            save_reason(&app).as_deref(),
+            Some("subscriptions.tier_name_required")
+        );
+        assert!(apply_local(&mut app, Action::SaveTierForm).is_none());
+        assert!(app.errors.contains_key(&Page::Profile));
+        app.profile.author.form.as_mut().unwrap().name = "Gold".into();
+        assert_eq!(save_reason(&app), None);
     }
 
     /// One listed provider with the given product (the list reply never
@@ -5687,10 +6026,43 @@ mod tests {
     fn the_redeem_goes_to_the_viewed_creators_home() {
         let mut app = knock_ready(Some("https://author-home.test"));
         app.profile.tab = Tab::Tiers;
+        // The features read the open issues has answered: the plane is there.
+        let payments = fauna_client_features::GatedFeature::Payments;
+        apply_outcome(
+            &mut app,
+            Outcome::Features(vec![fauna_client_features::feature_row(
+                &fauna_protocol::features::FeatureStatusItem {
+                    feature: payments,
+                    policy: fauna_core::feature_gate::effective_policy(payments, &[], &[]),
+                    usage: fauna_core::feature_gate::UsageCounters::default(),
+                    extra: Default::default(),
+                },
+                &[fauna_protocol::discovery::capability::SUBSCRIPTIONS.to_string()],
+            )]),
+        );
         assert!(
             apply_local(&mut app, Action::RedeemClaim).is_none(),
-            "a blank code is a no-op, never a nest round-trip"
+            "a blank code is never a nest round-trip"
         );
+        assert_eq!(
+            app.errors.get(&Page::Profile),
+            fauna_i18n::strings::lookup("subscriptions.redeem_code_required")
+                .map(str::to_string)
+                .as_ref(),
+            "and it is refused with its reason, not silently"
+        );
+        let redeem_reason = app
+            .page_elements()
+            .into_iter()
+            .find(|e| e.id == "subscription-claim-redeem-button")
+            .and_then(|e| e.possibility)
+            .and_then(|p| p.reason().map(|r| r.key.clone()));
+        assert_eq!(
+            redeem_reason.as_deref(),
+            Some("subscriptions.redeem_code_required"),
+            "the button is painted blocked from the same predicate"
+        );
+        app.errors.remove(&Page::Profile);
         set_field(
             &mut app.profile,
             ProfileField::RedeemCode,

@@ -66,14 +66,42 @@ public class AdminVM {
     /// action failures land here, per admin.md § Errors.
     public var actionError: String?
 
+    // Admin take-over (`family-safety.md` § App surface → *Admin take-over*).
+    /// The viewing admin's raw actor id — what the shared take-over offer keys
+    /// on (`adminUserRowControls(user:viewer:)`); `nil` offers no take-over.
+    public private(set) var viewerActorId: Data?
+    /// The ward whose row's inline confirm is armed, captured by ACTOR ID at
+    /// arm time so a re-read that re-orders the rows cannot retarget the
+    /// confirm; one row at a time (linux `TakeOverArm`, tui's
+    /// `UsersState::take_over_armed`).
+    public private(set) var takeOverArmed: Data?
+    /// The take-over's one sender, `fauna.family.transfer { ward, self }` —
+    /// a seam so a unit test can record the dispatch; `nil` sends through the
+    /// configured family client.
+    var takeOverSender: ((_ ward: Data, _ guardian: Data) async throws -> Void)?
+    /// The app-root family-status read that gates `family-tab`, re-read after a
+    /// take-over lands (the viewer just became a guardian).
+    private var familyStatus: FamilyStatusStore?
+
     private var api: APIClient?
 
     public init() {}
 
     /// Wire the VM to the authenticated `APIClient`. The admin WS-RPC kinds are
     /// session-gated (the caller must be a nest admin) — no admin token.
-    public func configure(api: APIClient) {
+    /// `viewerActorIdHex` is the signed-in actor (the take-over offer's viewer);
+    /// `familyStatus` is re-read after a take-over.
+    public func configure(api: APIClient, viewerActorIdHex: String? = nil,
+                          familyStatus: FamilyStatusStore? = nil) {
         self.api = api
+        self.viewerActorId = viewerActorIdHex.flatMap { Data(hexString: $0) }
+        self.familyStatus = familyStatus
+        self.takeOverArmed = nil
+    }
+
+    /// Test seam: set the viewer without an `APIClient`.
+    func setViewer(_ viewer: Data?) {
+        viewerActorId = viewer
     }
 
     private func admin() async throws -> FfiAdminClient {
@@ -316,6 +344,55 @@ public class AdminVM {
         } catch {
             actionError = error.localizedDescription
         }
+    }
+
+    // MARK: - Admin take-over (family-safety.md § App surface → *Admin take-over*)
+
+    /// Which lifecycle controls a Users row offers — the shared decision, with
+    /// this viewer, so the take-over offer is the shared rule's too (never
+    /// re-derived from `user.guardian` here).
+    public func rowControls(_ user: FfiAdminUser) -> FfiAdminUserRowControls {
+        adminUserRowControls(user: user, viewer: viewerActorId)
+    }
+
+    /// Whether `user`'s row shows the armed confirm triple.
+    public func isTakeOverArmed(_ user: FfiAdminUser) -> Bool {
+        takeOverArmed == user.actorId
+    }
+
+    /// Arm `user`'s row, disarming any other.
+    public func armTakeOver(_ user: FfiAdminUser) {
+        takeOverArmed = user.actorId
+    }
+
+    /// Disarm without sending anything.
+    public func cancelTakeOver() {
+        takeOverArmed = nil
+    }
+
+    /// Confirm the armed take-over: disarm FIRST (a second confirm can never
+    /// re-send), then `fauna.family.transfer { ward, self }`, then re-read the
+    /// users page and the viewer's family status. A refusal lands on
+    /// `admin-users-action-error`.
+    public func confirmTakeOver() async {
+        guard let ward = takeOverArmed else { return }
+        takeOverArmed = nil
+        guard let viewer = viewerActorId else { return }
+        actionError = nil
+        do {
+            if let takeOverSender {
+                try await takeOverSender(ward, viewer)
+            } else {
+                guard let api else { throw APIError.ffiError("AdminVM not configured") }
+                try await api.familyClient().transfer(
+                    supervisedActorId: ward, newGuardianActorId: viewer)
+            }
+        } catch {
+            actionError = error.localizedDescription
+            return
+        }
+        await loadUsers()
+        await familyStatus?.refresh(api: api)
     }
 
     // MARK: - Registration section (admin.md § 2 Users → Section 2)

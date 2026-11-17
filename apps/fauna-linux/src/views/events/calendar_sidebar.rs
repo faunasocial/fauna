@@ -93,6 +93,130 @@ fn assign_colors(calendars: &[CalendarRow], existing: &mut HashMap<String, Strin
 // Public API
 // ---------------------------------------------------------------------------
 
+/// The calendar list's empty state (`ui/events.md` § Errors & edge cases →
+/// *No calendar to hold an event*, ruling 3) — the list box's placeholder, so
+/// it shows only while no calendar row is listed. Painted from the page's
+/// [`super::calendar_view::CreateGate`] by [`EmptyState::paint`]: while the
+/// read is unresolved the loading line, never the empty state; on *no key* or
+/// *provision failed* the predicate's reason (`calendar-list-empty-state`)
+/// and, when it names a step taken on another page, the one-press jump there
+/// (`calendar-list-empty-state-step`). "No calendars yet." is said only of a
+/// loaded list that painted no row (every row failed to unseal), which the
+/// lazy `Personal` makes unreachable in a working account.
+#[derive(Clone)]
+pub struct EmptyState {
+    pub root: gtk::Box,
+    pub loading: gtk::Label,
+    pub reason: gtk::Label,
+    pub step: gtk::Button,
+    pub none: gtk::Label,
+    /// The step the jump goes to, as last painted.
+    step_target: Rc<std::cell::Cell<Option<fauna_client_caldav::EventCreateStep>>>,
+}
+
+impl EmptyState {
+    fn new() -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        root.set_margin_top(8);
+        root.set_margin_bottom(8);
+        root.set_margin_start(8);
+        root.set_margin_end(8);
+
+        let loading = gtk::Label::new(Some(events_strings::create_blocked::LOADING));
+        loading.add_css_class("dim-label");
+        loading.set_wrap(true);
+        root.append(&loading);
+
+        let reason = gtk::Label::new(None);
+        reason.set_wrap(true);
+        reason.set_xalign(0.0);
+        crate::testid::set_test_id(&reason, ids::CALENDAR_LIST_EMPTY_STATE);
+        reason.set_visible(false);
+        root.append(&reason);
+
+        let step = gtk::Button::new();
+        step.add_css_class("suggested-action");
+        crate::testid::set_test_id(&step, ids::CALENDAR_LIST_EMPTY_STATE_STEP);
+        step.set_visible(false);
+        root.append(&step);
+
+        let none = gtk::Label::new(Some(events_strings::NO_CALENDARS));
+        none.add_css_class("dim-label");
+        none.set_visible(false);
+        root.append(&none);
+
+        let step_target = Rc::new(std::cell::Cell::new(None));
+        {
+            let step_target = Rc::clone(&step_target);
+            step.connect_clicked(move |btn| match step_target.get() {
+                Some(fauna_client_caldav::EventCreateStep::AddCredential) => {
+                    crate::app::navigate_to_settings_subpage(btn, "mail-settings");
+                }
+                Some(fauna_client_caldav::EventCreateStep::AdminEnableCalendar) => {
+                    crate::app::navigate_to_admin_subpage(btn, "admin-calendar");
+                }
+                None => {}
+            });
+        }
+
+        Self {
+            root,
+            loading,
+            reason,
+            step,
+            none,
+            step_target,
+        }
+    }
+
+    /// Paint the empty state from the page's gate. `listed` is whether any
+    /// calendar row is painted (the placeholder is then not shown anyway).
+    pub fn paint(&self, gate: &super::calendar_view::CreateGate, listed: bool) {
+        use fauna_client_caldav::{CalendarsReadState, EventCreateStep};
+        let (loading, reason, none) = match (&gate.read, listed) {
+            (_, true) => (false, None, false),
+            (CalendarsReadState::Unresolved, false) => (true, None, false),
+            (CalendarsReadState::Loaded, false) => (false, None, true),
+            (CalendarsReadState::NoKey | CalendarsReadState::ProvisionFailed { .. }, false) => {
+                let text = crate::form_gate::reason_text(&gate.possibility())
+                    .unwrap_or_else(|| events_strings::create_blocked::NOT_HERE.to_string());
+                (false, Some(text), false)
+            }
+        };
+        self.loading.set_visible(loading);
+        self.none.set_visible(none);
+        match &reason {
+            Some(text) => {
+                self.reason.set_text(text);
+                self.reason.set_visible(true);
+            }
+            None => self.reason.set_visible(false),
+        }
+        let step = if reason.is_some() { gate.step() } else { None };
+        self.step_target.set(step);
+        match step {
+            Some(step) => {
+                self.step.set_label(match step {
+                    EventCreateStep::AddCredential => {
+                        events_strings::create_blocked::OPEN_MAIL_SETTINGS
+                    }
+                    EventCreateStep::AdminEnableCalendar => {
+                        events_strings::create_blocked::OPEN_ADMIN_CALENDAR
+                    }
+                });
+                self.step.set_visible(true);
+            }
+            None => self.step.set_visible(false),
+        }
+    }
+
+    /// The step the jump currently goes to (for tests).
+    #[cfg(test)]
+    pub fn step_target(&self) -> Option<fauna_client_caldav::EventCreateStep> {
+        self.step_target.get()
+    }
+}
+
 /// Build the calendar sidebar container and its inner `ListBox`.
 ///
 /// The container is a vertical `gtk::Box` with a "Calendars" label, the
@@ -102,7 +226,7 @@ pub fn build_calendar_sidebar(
     state: &Rc<RefCell<CalendarViewState>>,
     client: &Rc<FaunaClient>,
     on_visibility_changed: impl Fn() + Clone + 'static,
-) -> (gtk::Box, gtk::ListBox) {
+) -> (gtk::Box, gtk::ListBox, EmptyState) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 6);
 
     // Section label.
@@ -116,11 +240,8 @@ pub fn build_calendar_sidebar(
     list_box.set_selection_mode(gtk::SelectionMode::None);
     list_box.add_css_class("boxed-list");
 
-    let placeholder = gtk::Label::new(Some(events_strings::NO_CALENDARS));
-    placeholder.add_css_class("dim-label");
-    placeholder.set_margin_top(8);
-    placeholder.set_margin_bottom(8);
-    list_box.set_placeholder(Some(&placeholder));
+    let empty_state = EmptyState::new();
+    list_box.set_placeholder(Some(&empty_state.root));
 
     let scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -296,7 +417,7 @@ pub fn build_calendar_sidebar(
     let _ = state;
     let _ = on_visibility_changed;
 
-    (outer, list_box)
+    (outer, list_box, empty_state)
 }
 
 /// Re-populate the calendar sidebar list from `calendars`.

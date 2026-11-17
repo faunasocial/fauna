@@ -86,7 +86,20 @@ pub(super) fn bridges_elements(state: &AdminState) -> Vec<Element> {
         ids::ADMIN_BRIDGES_PENDING_SECTION,
         t::bridges_pending::PENDING_SECTION,
     ));
-    if pending.is_empty() {
+    // An unread list is not an empty one (`docs/goal/ui/README.md` § Offer
+    // only what is possible, rule 5): until the read resolves the section says
+    // it is loading, or that the read failed.
+    let read = state
+        .bridges
+        .as_ref()
+        .map(|m| m.read_state())
+        .unwrap_or_default();
+    let read_reason = fauna_core::possibility::Possibility::from_read(read)
+        .reason()
+        .map(|r| r.resolve(fauna_i18n::strings::lookup));
+    if let Some(reason) = &read_reason {
+        els.push(Element::chrome(reason.clone()));
+    } else if pending.is_empty() {
         els.push(Element::chrome(t::bridges_pending::EMPTY));
     }
     for bridge in pending {
@@ -166,7 +179,7 @@ pub(super) fn bridges_elements(state: &AdminState) -> Vec<Element> {
         ids::ADMIN_BRIDGES_APPROVED_SECTION,
         t::bridges_pending::APPROVED_SECTION,
     ));
-    if approved.is_empty() {
+    if read_reason.is_none() && approved.is_empty() {
         els.push(Element::chrome(t::bridges_pending::APPROVED_EMPTY));
     }
     for bridge in approved {

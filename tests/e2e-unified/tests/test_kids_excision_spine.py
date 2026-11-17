@@ -231,7 +231,7 @@ def test_the_android_kids_build_type_is_store_safe_under_its_own_identity():
 def test_the_android_kids_source_set_takes_the_excised_twins():
     text = _ANDROID_GRADLE.read_text(encoding="utf-8")
     kids = _code(_block(_block(text, "sourceSets {"), 'getByName("kids")'))
-    for twin in ("src/noPayments/java", "src/noP2pShare/java", "src/noAgent/java"):
+    for twin in ("src/kidsTwin/java", "src/noPayments/java", "src/noP2pShare/java", "src/noAgent/java"):
         assert f'java.srcDir("{twin}")' in kids, f"the kids source set lost `{twin}`"
     # Play-distributed (Families policy), so the REAL store-age twin.
     assert 'java.srcDir("src/storeAge/java")' in kids
@@ -319,7 +319,7 @@ def test_kids_app_eligible_is_one_shared_verdict_on_both_faces():
 _ANDROID_APP = _REPO / "apps/fauna-android/app"
 _ANDROID_MAIN = _ANDROID_APP / "src/main/java"
 _ANDROID_NO_KIDS = _ANDROID_APP / "src/noKids/java"
-_ANDROID_KIDS_TWIN = _ANDROID_APP / "src/kids/java/com/fauna/app"
+_ANDROID_KIDS_TWIN = _ANDROID_APP / "src/kidsTwin/java/com/fauna/app"
 # The OTHER source dirs the kids build type compiles (its `sourceSets` entry);
 # hand-written product code that must name nothing the kids bindings lack.
 _ANDROID_KIDS_EXTRA_SRCS = ("src/noPayments/java", "src/noP2pShare/java", "src/noAgent/java", "src/storeAge/java")
@@ -348,6 +348,10 @@ _KIDS_ABSENT_FUNCTIONS = (
     "subscriptionsRemoveSubscriber", "subscriptionsSubscribePublishingEk",
     "subscriptionsReconcileOnce", "subscriptionsAuthorPollSecs", "runCriticalAlertSweep",
     "runCriticalAlertSweepLoop", "startCriticalAlertSweep", "npubConfirmationOwed", "confirmNpub", "classifySources",
+    # The device outbox's unsent-changes doors (`feed-manager`-gated; 2026-11-16 the
+    # account page named them from src/main and the kids compile broke).
+    "unsentChanges", "unsentChangeStateText", "unsentChangeReasonText", "retryUnsentChange",
+    "discardUnsentChange",
 )
 # Element-id prefixes of the surfaces the kids flavor excises — the same list the
 # `android-kids-check` witness greps the dex for (a test below keeps them equal).
@@ -439,7 +443,7 @@ def test_no_kids_compiled_android_source_names_a_kids_absent_ffi_symbol():
     assert not offenders, (
         "these sources are compiled by the kids build type but name FFI symbols its "
         "kids-safe bindings do not export, so `just android-kids` cannot compile. Move "
-        "the file to app/src/noKids/ (a twin in app/src/kids/ only if src/main still "
+        "the file to app/src/noKids/ (a twin in app/src/kidsTwin/ only if src/main still "
         f"names it): {offenders!r}"
     )
 
@@ -1127,3 +1131,223 @@ def test_the_android_kids_build_paints_no_find_user_open_profile_button():
     assert "if (!BuildConfig.KIDS)" not in before[-200:], (
         "the Find User knock must stay in the kids build"
     )
+
+
+
+# --- the `--app android-kids` lane (feature-catalog.md § Cell semantics) ---
+#
+# The android twin of the ios-kids lane above: the kids column is the kids build
+# product on android's venue, driven like android. So the e2e needs a kids build
+# that ALSO carries the e2e agent and a kids FFI that carries the seams — the
+# drivable `kidsDebug` build type. That is a TEST artifact; the shipped `kids`
+# build type, its FFI and the `android-kids-check` witness must stay free of it.
+
+
+def test_the_drivable_android_kids_build_type_is_debug_under_the_kids_identity():
+    text = _ANDROID_GRADLE.read_text(encoding="utf-8")
+    drivable = _code(_block(text, 'create("kidsDebug")'))
+    assert 'initWith(getByName("debug"))' in drivable, (
+        "kidsDebug must initWith(debug): debuggable, so `run-as` reaches its data, and "
+        "no store-shaped build type carries the agent"
+    )
+    for field, value in (("KIDS", "true"), ("PAYMENTS", "false"), ("P2P_SHARE", "false")):
+        assert f'buildConfigField("boolean", "{field}", "{value}")' in drivable, (
+            f"kidsDebug must set {field}={value}, the kids artifact's render constants"
+        )
+    variant = _code(_block(text, 'onVariants(selector().withBuildType("kidsDebug"))'))
+    assert 'applicationId.set("social.fauna.faunakids")' in variant, (
+        "the drivable kids build must answer to the kids identity the column names"
+    )
+    # The instrumentation APK (the harness bridge) is built for one build type; the
+    # recipe points it at kidsDebug, nothing else may change the default.
+    assert re.search(
+        r'testBuildType = \(project\.findProperty\("faunaTestBuildType"\) as String\?\) \?: "debug"',
+        text,
+    ), "testBuildType must default to debug and take only the recipe's property"
+
+
+def test_the_drivable_android_kids_source_set_is_the_kids_shell_plus_the_agent():
+    sets = _block(_ANDROID_GRADLE.read_text(encoding="utf-8"), "sourceSets {")
+    drivable = _code(_block(sets, 'getByName("kidsDebug")'))
+    for src in ("src/kidsTwin/java", "src/agent/java", "src/noPayments/java", "src/noP2pShare/java"):
+        assert f'java.srcDir("{src}")' in drivable, f"the kidsDebug source set lost `{src}`"
+    for banned in ("src/noKids/java", "src/noAgent/java", "src/kids/java"):
+        assert banned not in drivable, (
+            f"the kidsDebug source set takes `{banned}` — the drivable build would "
+            "diverge from the shipped kids shell (or duplicate-declare its agent or bindings)"
+        )
+    assert 'manifest.srcFile("src/kids/AndroidManifest.xml")' in drivable, (
+        "kidsDebug must merge the kids permission manifest, so it runs with the shipped "
+        "kids artifact's permission set"
+    )
+    # The agent rides debug and kidsDebug only: every shipping build type keeps the
+    # inert twin, so the automation surface never reaches a shipped artifact.
+    debug = _code(_block(sets, 'getByName("debug")'))
+    assert 'java.srcDir("src/agent/java")' in debug, "the debug build type lost the e2e agent"
+    for shipping in ("release", "storeSafe", "storeNoPayments", "foss", "kids"):
+        body = _code(_block(sets, f'getByName("{shipping}")'))
+        assert "src/agent/java" not in body and 'java.srcDir("src/noAgent/java")' in body, (
+            f"the shipping `{shipping}` build type must take src/noAgent, never src/agent"
+        )
+        assert "src/agentNoKids" not in body and "src/agentKids" not in body, (
+            f"the shipping `{shipping}` build type takes a KidsExcisedAgent twin — agent code"
+        )
+    # The agent's kids-excised arms: built for debug, refusing for kidsDebug.
+    assert 'java.srcDir("src/agentNoKids/java")' in debug and "src/agentKids/" not in debug, (
+        "debug must take the built KidsExcisedAgent (src/agentNoKids), never the refusing one"
+    )
+    assert 'java.srcDir("src/agentKids/java")' in drivable and "src/agentNoKids" not in drivable, (
+        "kidsDebug must take the refusing KidsExcisedAgent (src/agentKids), never the built one"
+    )
+
+
+_ANDROID_AGENT = _ANDROID_APP / "src/agent/java"
+_ANDROID_AGENT_NO_KIDS = _ANDROID_APP / "src/agentNoKids/java/com/fauna/app/testing/KidsExcisedAgent.kt"
+_ANDROID_AGENT_KIDS = _ANDROID_APP / "src/agentKids/java/com/fauna/app/testing/KidsExcisedAgent.kt"
+# The agent's own reach into the planes the kids bindings lack (the 88 errors
+# `compileKidsDebugKotlin` failed on, 2026-11-16): the test-helpers seams of the
+# excised planes and the app-side hosts that only `src/noKids` declares.
+_KIDS_ABSENT_AGENT_FUNCTIONS = (
+    "appOutboxDrainNowForTest", "setOutboxDrainHoldForTest", "setDelegationClockOffsetSecs",
+    "offlineShareAdvanceClock", "offlineShareDropConnectionsForTest", "offlineShareHoldServes",
+    "shareServeTally", "subscriptionsHoldAuthorDrainForTest", "subscriptionsReleaseAuthorDrainForTest",
+    "criticalAlertsRegistry", "criticalAlertSweepWakeForTest",
+)
+_KIDS_ABSENT_AGENT_NAMES = (
+    "FfiServeTally", "FfiRuleEditor", "FeedManagerHost", "AtprotoSettingsHost", "ArchiveImportVM",
+    "feedPostsJson()", "feedReloadsJson()",
+)
+
+
+def _public_member_names(path: Path) -> set[str]:
+    code = _kotlin_code_only(path.read_text(encoding="utf-8"))
+    code = code[code.index("object KidsExcisedAgent") :]  # the object, not the entry point
+    return set(re.findall(r"^    (?:suspend )?fun (\w+)\s*\(", code, flags=re.MULTILINE))
+
+
+def test_the_android_agent_kids_excised_twins_share_one_surface():
+    """`KidsExcisedAgent`'s two twins declare the same object-level functions, so
+    `src/agent` — compiled into both `debug` and `kidsDebug` — calls the same
+    names on each; the refusing twin answers every routed action by its plane."""
+    assert _ANDROID_AGENT_NO_KIDS.is_file() and _ANDROID_AGENT_KIDS.is_file()
+    built, refusing = _public_member_names(_ANDROID_AGENT_NO_KIDS), _public_member_names(_ANDROID_AGENT_KIDS)
+    assert refusing, "the refusing KidsExcisedAgent declares no function — the pin is vacuous"
+    assert built == refusing, (
+        f"the KidsExcisedAgent twins diverge: built-only {sorted(built - refusing)!r}, "
+        f"refusing-only {sorted(refusing - built)!r}"
+    )
+    kids = _kotlin_code_only(_ANDROID_AGENT_KIDS.read_text(encoding="utf-8"))
+    assert re.search(r"fun dispatch\([^)]*\): String\? = KidsExcisedActions\.refusal\(action\)", kids), (
+        "the refusing twin's dispatch must refuse every routed action by its plane — never ack"
+    )
+
+
+def test_no_kidsdebug_compiled_agent_source_names_a_kids_absent_symbol():
+    """`src/agent` and `src/agentKids` are what `kidsDebug` compiles of the agent;
+    neither may name what the kids bindings (or the kids shell) lack — that reach
+    belongs in `src/agentNoKids`."""
+    sources = _hand_written(_ANDROID_AGENT) + [_ANDROID_AGENT_KIDS]
+    offenders = {}
+    for path in sources:
+        code = _kotlin_code_only(path.read_text(encoding="utf-8"))
+        hits = [f"uniffi.{m}" for m in _KIDS_ABSENT_MODULES if re.search(rf"\buniffi\.{m}\b", code)]
+        hits += [t for t in _KIDS_ABSENT_TYPES if re.search(rf"\b{t}\b", code)]
+        hits += [
+            f"com.fauna.ffi.{f}"
+            for f in _KIDS_ABSENT_FUNCTIONS + _KIDS_ABSENT_AGENT_FUNCTIONS
+            if re.search(rf"com\.fauna\.ffi\.{f}\b", code)
+        ]
+        hits += [n for n in _KIDS_ABSENT_AGENT_NAMES if re.search(rf"(?<![\w.]){re.escape(n)}", code)]
+        if hits:
+            offenders[path.relative_to(_REPO).as_posix()] = hits
+    assert len(sources) > 1, "no agent source scanned — the pin is vacuous"
+    assert not offenders, (
+        "these agent sources are compiled by kidsDebug but reach a plane the kids build "
+        f"excises; move the arm into src/agentNoKids' KidsExcisedAgent: {offenders!r}"
+    )
+
+
+def test_the_android_kids_e2e_ffi_is_the_kids_flavor_plus_the_seams():
+    assert '_android-ffi-flavor kidsDebug "kids-safe,kids-floor,test-helpers"' in _recipe(
+        "android-ffi-kids-test"
+    )
+    flavor = _recipe("_android-ffi-flavor")
+    arm = (
+        'elif [ "$FEATURES" = "kids-safe,kids-floor,test-helpers" ]; then\n'
+        '        FEATURE_FLAGS="--no-default-features --features '
+        'kids-safe,kids-floor,test-helpers,file-provider-host"'
+    )
+    assert arm in flavor, (
+        "_android-ffi-flavor has no kids-plus-seams arm: the flavor falls through to the "
+        "additive arm and builds WITH the default features"
+    )
+    assert flavor.index(arm) < flavor.index('elif [ -z "$FEATURES" ]; then')
+    # The partial test flavor's seam witness is skipped by name, never asserted as
+    # the full test tree (whose floor names seams of the excised planes).
+    assert re.search(
+        r"\*/src/kidsDebug/\*\)\s+FLAVOR_FLAG=skip;", _recipe("_android-ffi-bindgen")
+    )
+    body = _recipe("android-kids-debug")
+    assert "android-ffi-kids-test" in body.splitlines()[0]
+    assert "-PfaunaTestBuildType=kidsDebug assembleKidsDebug assembleKidsDebugAndroidTest" in body
+
+
+def test_the_shipped_android_kids_build_never_takes_the_seams_or_the_drivable_variant():
+    for name in ("android-ffi-kids", "android-kids", "android-kids-check"):
+        body = _recipe(name)
+        assert "test-helpers" not in body and "kidsDebug" not in body and "kids-test" not in body, (
+            f"`{name}` must build the PRODUCTION kids flavor only — the drivable "
+            "kidsDebug variant and its seam FFI are test artifacts"
+        )
+
+
+def test_the_drivable_android_kids_staging_is_ignored():
+    ignore = (_REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
+    base = "apps/fauna-android/app/src/kidsDebug/"
+    for entry in ("jniLibs/", "java/com/fauna/ffi/", "java/uniffi/"):
+        assert base + entry in ignore, f"`{base}{entry}` is not ignored"
+
+
+def test_the_android_kids_app_axis_value_routes_to_the_drivable_build(monkeypatch):
+    import conftest
+    from drivers import create_driver
+    from drivers.android import AndroidBridgeDriver, AndroidKidsBridgeDriver
+    from helpers import android_device
+
+    calls = []
+    monkeypatch.setattr(conftest, "_build_via_just", lambda recipe, why: calls.append(recipe))
+    conftest._build_app_via_just("android-kids")
+    assert calls == ["android-kids-debug"]
+    assert conftest.APP_PATHS["android-kids"].endswith("/apk/kidsDebug/app-kidsDebug.apk")
+    assert android_device.TEST_APKS["android-kids"].endswith(
+        "/apk/androidTest/kidsDebug/app-kidsDebug-androidTest.apk"
+    )
+
+    monkeypatch.setattr(conftest, "get_available_apps", lambda: ["android-kids"])
+    assert conftest._android_kids_run() and conftest._android_app() == "android-kids"
+
+    driver = create_driver("android-kids")
+    assert isinstance(driver, AndroidKidsBridgeDriver)
+    assert driver.APPLICATION_ID == "social.fauna.faunakids" and driver.APP_NAME == "android-kids"
+    assert driver.TEST_PACKAGE == "social.fauna.faunakids.test"
+    assert AndroidBridgeDriver.APPLICATION_ID == "social.fauna.fauna"
+
+
+def test_one_run_drives_one_android_build():
+    import conftest
+
+    with pytest.raises(pytest.UsageError, match="one run drives one android build"):
+        conftest._resolve_app_tokens("android,android-kids")
+    assert conftest._resolve_app_tokens("android-kids") == ["android-kids"]
+
+
+def test_the_android_driver_names_the_app_only_through_its_identity():
+    """Every `run-as`, `pm`, `am`, locale and instrumentation call reads the driver's
+    APPLICATION_ID, so `--app android-kids` reaches the kids install everywhere."""
+    text = (_REPO / "tests/e2e-unified/drivers/android.py").read_text(encoding="utf-8")
+    literal = [
+        line.strip()
+        for line in text.splitlines()
+        if "social.fauna.fauna" in line and "faunakids" not in line
+    ]
+    assert literal == ['APPLICATION_ID = "social.fauna.fauna"'], literal

@@ -237,6 +237,18 @@ impl FfiOverlayEditor {
     pub fn reset(&self) {
         self.staging().reset();
     }
+
+    /// Whether Save (`profile-private-save-button`) can succeed now:
+    /// [`fauna_client_account_runtime::contact_overlays::save_possibility`]
+    /// over this seat — it always holds a manager, so the answer waits only
+    /// on the account store assembling (`common.still_loading`). The app
+    /// paints the button from it; [`Self::save`] refuses with the same reason.
+    pub fn save_possibility(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_account_runtime::contact_overlays::save_possibility(
+            true,
+            crate::account_runtime::handle().is_some(),
+        )
+    }
 }
 
 #[fauna_uniffi_async::export]
@@ -394,6 +406,30 @@ mod tests {
             "Mum"
         );
         assert_eq!(face.vocabulary(), ["Family"]);
+    }
+
+    /// Save's answer is the shared one over this seat: a face always holds a
+    /// manager, so it waits only on the account store (none registered in a
+    /// unit test: still loading).
+    #[test]
+    fn save_is_possible_only_once_the_store_has_assembled() {
+        let (manager, mum) = a_manager();
+        let editor = face(manager).editor(mum);
+        assert_eq!(
+            editor.save_possibility(),
+            fauna_client_account_runtime::contact_overlays::save_possibility(
+                true,
+                crate::account_runtime::handle().is_some(),
+            )
+        );
+        if crate::account_runtime::handle().is_none() {
+            assert_eq!(
+                editor.save_possibility(),
+                fauna_core::possibility::Possibility::blocked(
+                    fauna_core::localized::LocalizedText::key("common.still_loading")
+                )
+            );
+        }
     }
 
     /// The editor follows the live form until the first edit, stages from

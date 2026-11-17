@@ -562,17 +562,12 @@ private struct TrustGrantItemView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             // REQUIRED honest-bound copy (nests.md § Honest bound) — never
-            // over-promise past the honest bound. A bounded (content-sealing-epochs)
-            // mail grant gets the stronger, crypto-bounded wording WITH the honest
-            // INFO-A caveat; every other kind/regime keeps the standing
-            // trust-until-revoke wording (flip-checklist line 6). Never re-derive
-            // the (class, kind, tier) check here — the shared predicate is the
-            // single source of truth (priority #2).
+            // over-promise. The regime (materialization, bounded mail,
+            // standing) is picked by the shared `grant_bound_note`, never
+            // re-derived here (priority #2).
             automationText(
                 Ids.nestTrustGrantBoundNote,
-                trustScopeIsBoundedMailGrant(scope: grant.scope)
-                    ? L.nests.boundNoteBoundedMail
-                    : L.nests.boundNoteStanding
+                renderLocalizedText(FaunaFFISwift.grantBoundNote(scope: grant.scope))
             )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -844,14 +839,37 @@ struct MintFlowView: View {
     /// one per held tier), so it doubles as a stable selection key.
     @State private var selectedOptionLabel = ""
     @State private var selectedHolderIndex = 0
-    /// "" = the row's default (`mintDefaultDuration`: standard on a blessed
-    /// nest, one-off otherwise) until the user picks; else the option's label.
+    /// "" = the picked option's default (the shared
+    /// `mint_option_default_duration` over the row's `mintDefaultDuration`:
+    /// standard on a blessed nest, one-off otherwise) until the user picks a
+    /// duration; else that duration's label. A new scope pick resets it, so
+    /// every pick pre-selects its own option's default.
     @State private var selectedDurationLabel = ""
 
     private var durationOptions: [TrustGrantDuration] { mintDurationOptions() }
 
+    private var defaultDuration: TrustGrantDuration {
+        selectedOption.map {
+            FaunaFFISwift.mintOptionDefaultDuration(o: $0, rowDefault: row.mintDefaultDuration)
+        } ?? row.mintDefaultDuration
+    }
+
     private var selectedDuration: TrustGrantDuration {
-        Self.duration(picked: selectedDurationLabel, default: row.mintDefaultDuration)
+        Self.duration(picked: selectedDurationLabel, default: defaultDuration)
+    }
+
+    /// The picked option's mint-time note (the shared `mint_option_note` —
+    /// the materialization options' honesty copy, `capability-grants.md`
+    /// § Capability tiering → *The materialization grant*); nil (the note
+    /// absent) for an option that carries none. No per-kind branch here.
+    private var selectedOptionNote: String? {
+        selectedOption.flatMap(FaunaFFISwift.mintOptionNote(o:)).map(renderLocalizedText)
+    }
+
+    private func pickOption(_ label: String) {
+        selectedOptionLabel = label
+        selectedHolderIndex = 0
+        selectedDurationLabel = ""
     }
 
     /// The duration a mint sends: the option the user picked (by its rendered
@@ -872,7 +890,10 @@ struct MintFlowView: View {
                 .automationActivate(Ids.nestTrustGrantMintButton) { showForm = true }
 
             if showForm {
-                Picker(L.nests.mintScopePlaceholder, selection: $selectedOptionLabel) {
+                Picker(L.nests.mintScopePlaceholder, selection: Binding(
+                    get: { selectedOptionLabel },
+                    set: { pickOption($0) }
+                )) {
                     Text(L.nests.mintScopePlaceholder).tag("")
                     ForEach(row.mintOptions, id: \.self) { option in
                         Text(mintOptionLabel(option)).tag(mintOptionLabel(option))
@@ -890,8 +911,7 @@ struct MintFlowView: View {
                     Ids.nestTrustMintScopeSelect, value: { selectedOptionLabel },
                     options: { [L.nests.mintScopePlaceholder] + row.mintOptions.map(mintOptionLabel) }
                 ) { newValue in
-                    selectedOptionLabel = newValue
-                    selectedHolderIndex = 0
+                    pickOption(newValue)
                 }
 
                 if let option = selectedOption, option.holderCandidates.count > 1 {
@@ -929,6 +949,16 @@ struct MintFlowView: View {
                     options: { durationOptions.map(durationText) }
                 ) { newValue in
                     selectedDurationLabel = newValue
+                }
+
+                // Read BEFORE the confirm: present exactly while the picked
+                // option carries a note (`nests.md` § Mint → *The
+                // materialization option*).
+                if let note = selectedOptionNote {
+                    automationText(Ids.nestTrustMintMaterializeNote, note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Button(L.nests.mintConfirm) { confirmMint() }

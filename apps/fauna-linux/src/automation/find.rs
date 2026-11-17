@@ -50,8 +50,8 @@ pub(crate) fn search_roots() -> Vec<gtk::Widget> {
                 roots.push(win.upcast());
             }
             // Dialogs still on `adw::MessageDialog` (rename / add-participant,
-            // the feed train-target sheet, the folder share dialog) are
-            // separate toplevels that set `transient_for` + modal but are NOT
+            // the feed train-target sheet) and the folder share dialog's modal
+            // `adw::Window` are separate toplevels that set `transient_for` + modal but are NOT
             // registered in `app.windows()`, so scan the global toplevel list
             // for them. `AlertDialog` confirms need none of this — they embed
             // directly in `app.active_window()`'s own tree. The visible +

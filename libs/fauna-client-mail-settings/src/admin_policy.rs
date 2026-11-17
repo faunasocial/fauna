@@ -1087,6 +1087,9 @@ pub trait MailPolicyNest: MaybeSendSync {
 pub struct MailPolicyMachine {
     nest: Arc<dyn MailPolicyNest>,
     inner: Mutex<MailPolicySnapshot>,
+    /// Where the page's policy read stands (`docs/goal/ui/README.md` § Offer
+    /// only what is possible, rule 5).
+    read: Mutex<fauna_core::possibility::ReadState>,
 }
 
 impl MailPolicyMachine {
@@ -1094,6 +1097,33 @@ impl MailPolicyMachine {
         Self {
             nest,
             inner: Mutex::new(MailPolicySnapshot::defaults()),
+            read: Mutex::new(fauna_core::possibility::ReadState::Pending),
+        }
+    }
+
+    /// Whether a control on `admin-mail` that writes what the policy read
+    /// decides is live — the mail-enable and new-user auto-enable toggles,
+    /// every group's save, and the rotate and publish confirms: only once the
+    /// read resolved (rule 5: a press before it would write a guessed value,
+    /// or save defaults over the nest's real policy), and not while a change
+    /// is on its way. The press asks the same answer.
+    pub fn write_possibility(&self) -> fauna_core::possibility::Possibility {
+        let idle = self.inner.lock().expect("snapshot mutex").status == MailPolicyStatus::Idle;
+        let read = *self.read.lock().expect("read mutex");
+        crate::bool_toggle_policy::toggle_possibility(read, idle)
+    }
+
+    async fn refresh(&self) -> Result<(), DispatchError> {
+        match self.read_policy().await {
+            Ok(()) => {
+                *self.read.lock().expect("read mutex") =
+                    fauna_core::possibility::ReadState::Resolved;
+                Ok(())
+            }
+            Err(e) => {
+                crate::bool_toggle_policy::note_read_failed(&self.read);
+                Err(e)
+            }
         }
     }
 
@@ -1101,7 +1131,7 @@ impl MailPolicyMachine {
         self.inner.lock().expect("snapshot mutex").status = status;
     }
 
-    async fn refresh(&self) -> Result<(), DispatchError> {
+    async fn read_policy(&self) -> Result<(), DispatchError> {
         self.set_status(MailPolicyStatus::Loading);
         // Four reads per refresh: `get_mail_config` for the five projected groups
         // + the mail-enable toggle, the separate `get_alias_policy` and
@@ -2185,6 +2215,24 @@ mod tests {
         assert_eq!(health.state, "records_failing");
         assert_eq!(health.checks.len(), 1);
         assert_eq!(health.last_outbound_delivered_at, Some(1_700_000_000));
+    }
+
+    /// Rule 5 (`docs/goal/ui/README.md` § Offer only what is possible): the
+    /// toggles, saves and confirms wait for the policy read — still loading
+    /// before it, failed after a refused one, live once it resolves.
+    #[tokio::test]
+    async fn writes_wait_for_the_policy_read() {
+        let key = |m: &MailPolicyMachine| m.write_possibility().reason().map(|r| r.key.clone());
+        let m = machine();
+        assert_eq!(key(&m), Some("common.still_loading".to_string()));
+        m.hydrate().await.unwrap();
+        assert!(m.write_possibility().is_possible());
+
+        let nest = Arc::new(FakeNest::new());
+        *nest.health.lock().unwrap() = None;
+        let m = MailPolicyMachine::new(nest);
+        m.hydrate().await.unwrap_err();
+        assert_eq!(key(&m), Some("common.load_failed".to_string()));
     }
 
     #[tokio::test]

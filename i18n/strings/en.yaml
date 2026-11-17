@@ -15,6 +15,13 @@ common:
   enable: Enable
   disable: Disable
   load_failed: Failed to load
+  # A control whose last change is still on its way to the nest is not live
+  # again until that change answers (docs/goal/ui/README.md § Offer only what
+  # is possible, rule 5).
+  in_flight: Still saving — wait for it to finish
+  # A confirm pressed with no confirm dialog open (a second press after the
+  # first already ran).
+  nothing_to_confirm: Nothing is waiting to be confirmed
   not_found: Not found
   search: Search
   clear_search: Clear search
@@ -737,6 +744,8 @@ onboarding:
     substep:
       domain_checking_availability: Checking domain availability
       domain_registering: Registering domain
+      domain_creating_zone: Creating the DNS zone
+      domain_setting_nameservers: Pointing the domain at its DNS
       domain_verifying_zone: Verifying DNS zone
       server_generating_dkim: Generating DKIM keys
       server_creating: Creating server
@@ -762,6 +771,66 @@ onboarding:
     examples_help: 'Example: alice@example.com or alice@bsky.social. Format: user@domain.'
     localhost_hint: test@localhost is allowed for trying out the app.
     control_checkbox: I control DNS for this domain
+  # The choose-providers page (onboarding-provisioning.md § 3d), built on tui
+  # first. DRAFT wording: the prose shown before sign-in that states what a
+  # provider does, what a goal needs or what the person must do (from
+  # `description` to `manual_row_help`) is a public text, carried by the page's
+  # public-texts request, which marks it `app-strings-public` in its round;
+  # bare labels and buttons are the apps' own (public-texts.md § The boundary).
+  # Chosen by OnboardingMachine::provider_rows, goal_rows and
+  # providers_continue_blocked_reason, never by an app re-deriving coverage.
+  provider_choice:
+    title: Choose providers
+    description: Connect the providers that will set up your nest. Nothing is bought or changed until you press Buy and set up on the next page.
+    # The goal lines at the top of the page, in page order.
+    goal_domain: 'Register {domain}'
+    goal_dns: 'DNS for {domain}'
+    goal_vps: A server
+    goal_covered_by: 'Covered by {provider}'
+    goal_open: Not covered yet — connect a provider below.
+    goal_price: '{price} first year, then {renewal} a year'
+    goal_price_first_year: '{price} first year'
+    # Why a provider cannot cover a goal — stated as what it means, never as a
+    # verification the person must pass (§ 3d, the owner's question).
+    cannot_cover_no_dns: Doesn't run DNS.
+    cannot_cover_no_server: Doesn't rent servers.
+    cannot_cover_no_registrar: Doesn't register domains.
+    cannot_cover_not_registrable: Can't register this domain.
+    cannot_cover_zone_missing: 'This account doesn''t hold {domain}.'
+    # While a domain is bought, its DNS may run at another provider: one that
+    # can create the zone, when the registrar can point the domain at it.
+    cannot_cover_no_zone_door: Can't set up DNS for a domain registered elsewhere.
+    cannot_cover_no_nameserver_door: '{provider} can''t point a domain at another provider''s DNS.'
+    cannot_cover_pointed_elsewhere: 'Your domain now points at {provider}''s DNS.'
+    # Beside the DNS goal when its cover holds a zone the domain is not
+    # delegated to yet.
+    dns_not_pointed_yet: '{domain} doesn''t point at {provider} yet.'
+    held_credential: Connected with a sign-in this device already holds.
+    # The status line beside a dead Continue names the first goal still open,
+    # in page order, then a registrar's missing contact.
+    status_cover_domain: 'Connect a provider that can register {domain} to continue.'
+    status_cover_dns: Connect a provider that can run DNS for your domain, or set DNS up later, to continue.
+    status_cover_vps: Connect a provider that rents servers to continue.
+    status_contact_missing: 'Open {provider} and fill in the registration contact to continue.'
+    # The line beneath a dead "Buy and set up" on the setting-things-up page.
+    start_blocked_price: Tick the box under the domain's price to agree to it.
+    start_blocked_server_type: Choose a server type to continue.
+    manual_row_help: Shows you the DNS records to add yourself once your nest is built.
+    # Bare labels and buttons (the apps' own strings).
+    providers_heading: Providers
+    capability_registrar: registers domains
+    capability_dns: runs DNS
+    capability_vps: rents servers
+    state_connected: connected
+    state_available: not connected
+    state_connecting: connecting…
+    manual_row: I will set DNS up later
+    goal_select: Covered by
+    connect: Connect
+    disconnect: Disconnect
+    close: Close
+    dialog_connected: Connected.
+    dialog_connecting: Connecting…
   dns_config:
     title: Configure DNS
     buy_domain_checkbox: Buy domain on Continue (this page)
@@ -1242,6 +1311,8 @@ feed:
   # snapshot's LocalizedText (feed.md § Errors & edge cases). Named {message}
   # placeholders carry the underlying transport error.
   compose_empty: Post cannot be empty
+  # `feed-reply-submit-button`'s blocked reason (`fauna_feed::forms`).
+  reply_empty: Write your reply first.
   # The imported-posts selection (feed.md § State & data shape → The
   # imported-posts selection): feed-imported-notice names the archive's
   # platform ({platform}, its display label); feed-imported-clear leaves it.
@@ -1440,9 +1511,14 @@ feed:
     kind: Bridge
     uri: Feed URI
     name: Display Name
+    # `bridge-form-subscribe-button`'s blocked reasons (`fauna_feed::forms`).
+    kind_required: Choose a bridge first.
+    uri_required: Type the feed URI first.
   create:
     title: New Feed
     name_placeholder: My Feed
+    # `create-feed`'s blocked reason (`fauna_feed::forms`).
+    name_required: Name the feed first.
     add_rule: Add Rule
     mode_all: All match
     mode_any: Any match
@@ -1616,6 +1692,14 @@ conversations:
     body: Body
     resolve: Resolve
     write_message: Write your message...
+    # Why a new-thread composer control is disabled — the reasons the shared
+    # predicate `fauna_conversations::new_thread_controls` answers with
+    # (docs/goal/ui/conversations.md § Errors & edge cases → *The new-thread
+    # composer offers only what it can send*).
+    needs_recipient: Add who it goes to first.
+    recipient_unsupported: This app cannot send to this recipient. Remove it and add another.
+    no_attachments_here: Files cannot be sent to this recipient.
+    no_topic_here: A topic cannot be set for this recipient.
     # public-text: app-strings-public
     encrypted: Encrypted
     # public-text-end: app-strings-public
@@ -2147,6 +2231,23 @@ events:
       attendee_unresolvable: The guest they answered for could not be confirmed.
       sender_unauthenticated: The message did not come from a confirmed sender.
       other: The change was refused.
+  # Why an event cannot be created yet — the reasons
+  # `fauna_client_caldav::event_create_possibility` answers (events.md § Errors
+  # & edge cases → *No calendar to hold an event*, ruling 3). Each is painted
+  # in the calendar list's empty state and refuses the create on the same words.
+  create_blocked:
+    loading: Your calendars are still loading.
+    provision_failed: 'Your first calendar could not be set up ({error}). It is tried again the next time Events loads.'
+    add_credential: To keep events, turn on calendar storage by adding a credential in Settings → Mail & Calendar.
+    admin_enable_calendar: To keep events, turn on calendar for this nest in Nest Admin → Calendar first.
+    not_here: Events cannot be kept on this account, because this nest does not serve calendars.
+    # The one-press jump beside the reason (ruling 3), to the place the step
+    # is taken.
+    open_mail_settings: Open Mail & Calendar settings
+    open_admin_calendar: Open Nest Admin → Calendar
+  # A create refused after the gate (ruling 4): said in the compose, which
+  # stays open with what was typed.
+  save_failed: 'The event could not be saved ({error}). What you typed is kept; press Save to try again.'
   error:
     load_calendars: Failed to load calendars
     load_events: Failed to load events
@@ -2425,6 +2526,10 @@ atproto_settings:
   # This app build has no identity key wired, so it cannot sign the
   # authorization. Reading and revoking still work — only granting does not.
   error_no_identity: 'This app cannot authorize posting from external apps. Use another of your devices to turn it on.'
+  # The page's machine could not be built (an unreadable identity key on this
+  # device), so there is nothing here that could succeed. Painted in place of
+  # every control, never a page of rungs whose presses do nothing.
+  page_unavailable: 'Bluesky settings are not available in this session: this device could not read your identity key. Sign in again to try once more.'
   # The stored authorization does not verify under this account's identity key
   # — it is not something this account signed. Deliberately alarming wording:
   # the row is hidden rather than shown, so nothing on screen implies a grant
@@ -2794,11 +2899,12 @@ media:
   error_refresh: 'Failed to load media: {message}'
   error_upload: 'Failed to upload: {message}'
   error_delete: 'Failed to delete: {message}'
-  # The two no-upload-target conditions are DIFFERENT messages on purpose: a
-  # user with zero sets needs "create one", while a user whose sets all fail
-  # the (former) sync-type-only upload rule needed to hear the rule —
-  # "select a folder first" left a real user with backup-type sets stuck.
-  error_no_set: You don't have a folder to upload into yet. Create a folder under Settings → Folders first.
+  # A folderless account's first upload makes its first folder, Personal
+  # (ui/media.md § Errors & edge cases → No folder to upload into); this is the
+  # one sentence for a create that failed, carrying the create's own reason.
+  # Nothing is uploaded and the next upload tries again — so the sentence says
+  # so, rather than sending the person to make a folder by hand.
+  error_first_folder: "Couldn't create your first folder, so nothing was uploaded: {message}. Try the upload again."
   error_restore: 'Failed to restore version: {message}'
   # ── Followed browse scope (ui/media.md § Followed public folders). ⚠ ONE
   # message for every cause of "no longer served" — the home nest deliberately
@@ -3067,6 +3173,16 @@ backups:
   backup_destination_kind_select_label: Where should the copy live?
   backup_destination_capacity_placeholder: 'Storage limit, e.g. 50 GB'
   backup_destination_capacity_invalid: 'Enter a storage limit like "50 GB" or "500 MB".'
+  # Possibility reasons (`ui/README.md` § Offer only what is possible), each
+  # painted beside the control it disables and refused with on `error-message`
+  # by the same shared answer (`fauna_backups_machine::possibility`).
+  backup_destination_url_required: Type the address of the nest to back up to first.
+  snapshot_delete_already_pending: Already scheduled for deletion.
+  snapshot_delete_already_deleted: Already deleted — recover it to keep it.
+  snapshot_select_folder_first: Choose a folder first.
+  restore_kind_unticked: Tick this snapshot's kind to restore it.
+  snapshot_restore_destination_required: Type the folder to restore into first.
+  snapshot_restore_running: A restore is already running.
   backup_destination_usage: '{held} of {cap} used'
   backup_destination_usage_cap_reached: '{held} of {cap} used — full, older copies are being dropped'
   backup_destination_usage_uncapped: '{held} held, no limit set'
@@ -3295,6 +3411,12 @@ folders:
   # folder list/wizard/conflict strings live under `devices.*` (the shared
   # DevicesMachine snapshot drives both the Devices roster and the Folders plane).
   title: Folders
+  # The follow and share forms' blocked reasons (`fauna_client_folders::forms`).
+  follow_handle_required: Type the folder owner's handle first.
+  follow_name_required: Type the folder's name first.
+  follow_not_ready: Sign in first, then follow the folder.
+  share_recipient_required: Type who to share with first.
+  share_not_ready: Sharing needs your conversations to be ready — wait a moment, then try again.
   # Apple photo-backup reframe (media.md § Apple photo-backup reframe) + the
   # desktop location binding nested per set. (The per-set scan-frequency
   # strings retired with phase 5 of the folders re-model — the cadence is a
@@ -3302,8 +3424,6 @@ folders:
   photo_library_section: Photo Library
   synced_locations: Synced Locations
   no_locations_bound: No locations bound to this set.
-  location_path_placeholder: Location path
-  bind_location: Bind Location
   choose: "Choose…"
   # The mass-delete floor's confirm affordance (delete-propagation.md § A
   # wholesale-vanished folder is infrastructure failure). Every tracked file in a
@@ -3359,6 +3479,7 @@ folders:
   # Compare-code refusals (fauna_client_capabilities::group_ceremony_view).
   offline_share_code_malformed: "That does not look like a code. It should be 64 letters and numbers."
   offline_share_code_own: "That is this device's own code — type the other person's."
+  offline_share_code_needed: "Type the other person's code first."
   error_offline_share: "Sharing did not finish: {message}"
   # The peer-transfer surface (share-serve-status + share-transfer-* on the
   # Folders page). The status line is rule-5 transparency: it says plainly
@@ -3948,6 +4069,9 @@ devices:
     retention_days: Keep days
     review: Review
     creating_folder: Creating folder...
+    # Create's blocked reason while a public create waits on its confirm
+    # (`fauna_folders_machine::possibility::review_create_possibility`).
+    confirm_public_pending: Answer the public-folder question above to create it.
     failed_create: Failed to create folder.
     select_devices_roles: 'Select devices and choose what each one does (optional — skip to just store files here):'
     review_name: "Name"
@@ -4013,13 +4137,7 @@ devices:
     lan_endpoints: LAN Endpoints
     remove_peer: Remove Peer
   sync_locations:
-    title: Sync Locations
-    location_placeholder: Location path (or use Browse...)
     browse: Browse...
-    add_location: Add Location
-    no_locations: No sync locations configured.
-    folder_placeholder: Folder name
-    unbound: (unbound)
     on_demand_label: On-demand
     # The line beside `folder-location-mode-toggle` when on-demand cannot be
     # served (on-demand-files-linux.md § Linux FUSE binding, the lifecycle rule): the
@@ -4326,6 +4444,11 @@ settings:
     # The eviction completed but the verdict could not be written, so the row
     # stays even though the removal worked. Naming that is the honest rendering:
     # the alternative is a row that silently refuses to clear.
+    # Keep could not be recorded (the review-list write, or its re-read, failed):
+    # the mark stays, and the page says so rather than leaving a Keep that
+    # silently did nothing (docs/goal/ui/README.md § Offer only what is possible,
+    # rule 7).
+    review_keep_failed: 'Could not record your decision yet: {reason}. They stay listed until it succeeds.'
     review_verdict_failed: 'Removed {who} from your group conversations, but your review list could not be updated yet: {reason}. They may still be listed here until it succeeds.'
     # The aftermath's NestBackupKey leg (identity-succession.md § Re-key scope,
     # the NestBackupKey row). The succession transaction deletes the old grant,
@@ -4895,6 +5018,12 @@ settings:
     connection_group_description: Network information for P2P connectivity
     lan_addresses: LAN Addresses
     lan_none: (no active interfaces detected)
+    # The P2P tab's possibility reasons and failure text
+    # (`fauna_peer_sync::p2p_page`; p2p.md § Element IDs → Only what can work).
+    service_unavailable: Peer connections did not start on this device. Restart Fauna to try again.
+    node_id_copy_needs_tunnel: Start the tunnel to get a node ID to copy.
+    lan_copy_none: No LAN address to copy.
+    contact_remove_failed: 'Could not remove {name}: {error}'
   sign_out_confirm: 'Are you sure you want to sign out? You will need your secret key to sign back in.'
   # A sign-out completes even when the erase cannot remove everything
   # (account-scoping.md § Erasure follows scope) — so the user has to be TOLD,
@@ -5327,6 +5456,13 @@ mail_settings:
   # Shown where the credential rows used to be, on an app whose Connected
   # apps page lists them (connected-apps.md § Layout & flow).
   credentials_on_connected_apps: 'Your app passwords are listed under Settings → Connected apps — copy, reveal or disconnect each one there.'
+  # The reasons the mail sub-pages (aliases, spam, export, import, lists)
+  # paint while mail is not usable for the account: the one shared predicate
+  # `MailSettingsSnapshot::mail_usable()` answers with them
+  # (ui/mail-settings.md § Errors & edge cases, the mail-usable gate).
+  usable_needs_mail_on: Turn on mail on the Mail & Calendar page first.
+  usable_reading: Checking whether mail is on for your account…
+  usable_unbuilt: Mail settings could not be loaded on this device. Signing out and back in rebuilds them.
   serve_here_label: Serve my mail & calendar over IMAP/CalDAV on this nest
   serve_here_subtitle: >-
     When on, this nest answers IMAP and CalDAV for your mailbox so email and
@@ -6043,6 +6179,9 @@ search_page:
   # set; when both backends fail, the reasons are joined with "; ".
   search_failed_reason: "Search failed: {reason}"
   load_more_failed: Load more failed
+  # `search-submit-button`'s blocked reason on a blank query
+  # (`fauna_client_search::query_possibility`).
+  query_required: Type something to search for first.
   search_messages: Search messages...
   badge_post: Post
   badge_profile: Profile
@@ -6078,6 +6217,9 @@ nostr:
     nip07_prompt: Your browser extension will be prompted for the public key.
     link_button: Link Account
     enter_nsec: Please enter an nsec key
+    # Remote (NIP-46) mode's blocked reason with no bunker URL typed
+    # (`fauna_client_bridges::link_possibility`).
+    enter_bunker_url: Paste the bunker URL from your signer app first.
     no_nip07: No NIP-07 browser extension detected
   account:
     title: Nostr Account
@@ -6130,6 +6272,9 @@ nostr:
     add: Add Relay
     placeholder: 'wss://relay.example.com'
     invalid_url: 'Relay URL must start with wss:// or ws://'
+    # `nostr-add-relay`'s blocked reasons (`fauna_protocol::nostr_relay::add_relay_possibility`).
+    url_required: Type a relay address first.
+    already_added: This relay is already in your list.
     # The store-time relay SSRF refusal (network-exposure.md § Rulings F7):
     # an IP-literal or localhost relay the nest may never dial.
     private_address: "Relays on a private network or on this device can't be used. Use a public relay address."
@@ -6139,6 +6284,8 @@ nostr:
     none: No Nostr follows yet.
     pubkey_placeholder: npub1... or hex pubkey
     petname_placeholder: Petname
+    # `nostr-add-follow`'s blocked reason (`fauna_client_bridges::add_follow_possibility`).
+    pubkey_required: Type the npub or hex pubkey to follow first.
   connected_apps:
     title: Connected apps
     # public-text: app-strings-public
@@ -6165,6 +6312,7 @@ nostr:
     none: 'You have not designated any signer, so no zap is counted as paid. Add your wallet provider''s signer key to start believing its receipts.'
     unnamed: Unnamed signer
     invalid_pubkey: 'A signer pubkey must be 64 hexadecimal characters.'
+    pubkey_required: Paste your wallet provider's signer pubkey first.
 status:
   identity:
     not_configured: Not configured
@@ -6355,6 +6503,10 @@ admin:
     suspend_default_reason: Suspended by admin
     make_admin: Make Admin
     remove_admin: Remove Admin
+    # Reasons painted beside a disabled control (docs/goal/ui/README.md
+    # § Offer only what is possible).
+    remove_admin_last_superadmin: This is the last admin with full rights. Make another user an admin first.
+    age_band_needs_guardian: Pick a guardian first. An age band applies only to a supervised account.
     # Admin take-over of a supervised account (family-safety.md § App surface
     # → Admin take-over).
     supervised_by: 'Supervised by {guardian}'
@@ -7427,6 +7579,17 @@ admin:
     dmarc_policy_reject: Reject (default)
     dmarc_policy_quarantine: Quarantine
     dmarc_policy_none: None — reports only
+    # Why an admin-dns control is disabled, or why its form refused
+    # (`dns-management.md` § Errors & edge cases).
+    mode_needs_credential: Add a DNS-provider credential that covers this domain first.
+    manage_all_needs_domain: Add a domain first.
+    manage_all_needs_credential: Add a DNS-provider credential that covers every domain first.
+    domain_required: Type a domain name.
+    domain_malformed: Type a domain name such as example.com.
+    domain_duplicate: That domain is already added.
+    remove_primary_blocked: Rename the primary domain onto another domain to remove it.
+    credential_provider_required: Pick a DNS provider.
+    credential_field_required: Fill in every field.
     cert:
       label: 'Certificate:'
       status_valid: Valid
@@ -7451,6 +7614,7 @@ admin:
       issuance_failed_domain: 'Certificate request failed ({date}): {error}'
       issuance_failed_ip: 'IP address certificate request failed ({date}): {error}'
       issuance_failed: 'Certificate request failed ({date}): {error}'
+      issue_pending: Finish or cancel the certificate request below first.
     rename:
       button: Rename primary domain
       promote: Promote to primary
@@ -7472,6 +7636,10 @@ admin:
       abort: Abort rename
       abort_confirm: Confirm abort
       abort_postflip_warning: Aborting after the anchor flip re-flips the primary and rewrites every domain's DNS — expensive but safe.
+      needs_second_domain: Add a second domain to rename onto.
+      in_progress: A rename is already in progress.
+      target_required: Pick the new primary domain.
+      days_invalid: Type a whole number of days from 1 to 30, or leave it blank.
   view:
     nest_statistics: Nest Statistics
     registered_users: Registered Users
@@ -8228,6 +8396,11 @@ family:
   contact_add_placeholder: Actor ID (hex)
   contact_add_button: Pre-approve contact
   contact_add_invalid_actor_id: Not a valid actor ID (expected hex)
+  # The Family forms' blocked reasons (`fauna_client_family::forms`).
+  contact_add_required: Type the actor ID to pre-approve first.
+  transfer_required: Type the new guardian's actor ID first.
+  transfer_invalid_actor_id: Not a valid actor ID for the new guardian (expected hex)
+  policy_screen_time_invalid: 'Screen time cannot be saved: {reason}'
   # Graduation (§ Graduation & transfer).
   graduate_button: Graduate to full account
   graduate_confirm_button: 'Yes, graduate {handle}'
@@ -8353,6 +8526,9 @@ notifications:
   # § Retention rule 2): the per-row dismiss and the clear-all.
   dismiss: Dismiss
   clear_all: Clear all
+  # Why clear-all is disabled on an empty page (ui/README.md § Offer only
+  # what is possible, rule 2): it comes alive when a notification arrives.
+  nothing_to_clear: No notifications to clear
   # tip (monetization.md § Tips): a credited tip on the reader's post. The unit
   # split is fauna_core::format::tip_amount's (a sub-sat tip keeps msats); a
   # receipt with no parseable amount, or naming no tipper, has its own form.
@@ -8480,6 +8656,13 @@ profile:
   private_save_elsewhere: Your private notes can only be saved in the other open instance of this app
 subscriptions:
   title: Subscriptions
+  # The tier form and claim-redeem blocked reasons (`fauna_client_subscriptions::forms`).
+  tier_name_required: Name the tier first.
+  redeem_code_required: Type the claim code first.
+  # Own-tier blocked reasons (`fauna_client_subscriptions::own_tiers`): the
+  # read answered and the author owns no tier; Create Tier above is the step.
+  claim_needs_tier: Create a tier first — a claim code entitles one of your tiers.
+  provider_needs_tier: Create a tier first — a payment provider sells one of your tiers.
   my_tiers: My Tiers
   my_subscriptions: My Subscriptions
   pending_requests: Pending Requests
@@ -9409,6 +9592,15 @@ connected_apps:
   # never capability/grant (participants.md § Naming).
   trust_scope_ext_rw: 'Keys to your records published by {publisher}: {kinds} — read and write'
   trust_scope_ext_ro: 'Keys to your records published by {publisher}: {kinds} — read only'
+  # A keyless grant on a principal's row, in the consent card's words: the
+  # folder a deposit grant lets the app put files into ({folder} is the
+  # owner's own folder name). An identity.op grant rides `verbatim` with the
+  # card's row for its class.
+  trust_scope_deposit: 'Put files into your folder "{folder}"'
+  trust_scope_deposit_deleted: Put files into a folder you have since deleted
+  trust_scope_deposit_unnamed: Put files into one of your folders
+  # An identity.op class this app version does not know yet.
+  trust_scope_op_unknown: An operation your nest does for this app
   # An expired key on a principal's row: nothing renews an app's trust; the
   # app asks again on a consent card when it needs them.
   trust_status_expired: Expired — the app will ask again if it needs them

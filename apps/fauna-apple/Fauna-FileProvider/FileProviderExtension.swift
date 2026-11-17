@@ -156,8 +156,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// (`defaultRescanIntervalSecs()` — the one constant every seat ticks at
     /// since folders re-model phase 5, crossed from Rust rather than copied
     /// here) we `host.refresh()` and, iff it folded something new or flipped an
-    /// item's keep, tell the OS to re-enumerate — the root, and the working set
-    /// whose change feed reports the kept flips (`FileProviderWorkingSetFeed`;
+    /// item's keep, signal the root and the working set, whose change feeds
+    /// report what moved (`FileProviderWorkingSetFeed`;
     /// `on-demand-files.md` § Apple File Provider binding — *a pulled remote
     /// change signals the enumerator*). A `nil` host or an indeterminate binding starts no tick.
     ///

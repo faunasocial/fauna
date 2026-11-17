@@ -57,7 +57,7 @@ class DnsConfigVM @Inject constructor(
     fun setContact(contact: ContactInfo) = host.machine.setContact(contact)
 }
 
-private fun emptyContact() = ContactInfo(
+internal fun emptyContact() = ContactInfo(
     firstName = "",
     lastName = "",
     email = "",
@@ -450,7 +450,7 @@ internal fun CredentialsForm(
 }
 
 @Composable
-private fun ContactForm(
+internal fun ContactForm(
     contact: ContactInfo,
     enabled: Boolean,
     onChange: (ContactInfo) -> Unit,

@@ -9,7 +9,7 @@
   // here: the shared `LaunchMachine` classifies the launch row and owns the
   // pin-forget seam. They stay exported from `#lib/wasm` for the SPA's own
   // `challengeVerify` path (`lib/store.ts`'s background identity refresh).
-  import { ensureWasm, parseIdentityImport, logMessage, recoveryBoxesLocal, recoverSelfhostedCommandLocal, shortNestId, actorIdFromSecret, resolveVerifiedSuccessor, adoptHeldSuccessor, termsUrl } from '#lib/wasm';
+  import { ensureWasm, parseIdentityImport, logMessage, retireHeldDns, recoveryBoxesLocal, recoverSelfhostedCommandLocal, shortNestId, actorIdFromSecret, resolveVerifiedSuccessor, adoptHeldSuccessor, termsUrl } from '#lib/wasm';
   import { resolve } from '$app/paths';
   import {
     dnsManagementMachineWithCredentials,
@@ -46,6 +46,10 @@
     type BillOfMaterialsItem,
     type CredentialForm,
     type HostedAuthState,
+    type GoalRow,
+    type GoalCover,
+    type ProviderGoal,
+    type ProviderRow,
   } from '#lib/onboarding/machine.svelte';
   import {
     savePendingInvite,
@@ -106,6 +110,7 @@
   } from '#lib/wasm-onboarding';
   import { t } from '#lib/i18n/strings';
   import { resolveLocalized, resolveLocalizedNested, resolveKey, type LocalizedText } from '#lib/i18n/localized';
+  import { paintPossibility } from '#lib/possibility';
   import { IDS } from '#lib/generated/uiIds';
   import NestRulesJoining from '#lib/components/NestRulesJoining.svelte';
   import { NEST_RULES_LANG } from '#lib/nestRulesPaint';
@@ -126,6 +131,7 @@
     | 'recovery_entry'
     | 'emergency_lockout_entry'
     | 'handle_entry'
+    | 'provider_choice'
     | 'dns_config'
     | 'vps_config'
     | 'dns_post_instructions'
@@ -408,16 +414,237 @@
       case 'dev': return { label: v.update_channel_dev_label, desc: desc || v.update_channel_dev_desc };
     }
   }
-  const canContinueVpsValue: boolean = $derived.by(() => {
+  // `vps-config-continue-button` paints from the machine's one answer
+  // (`ui/README.md` § Offer only what is possible, rule 6): disabled exactly
+  // while it is not possible, with the answer's reason beside it (rule 5).
+  // Before the machine exists the button is dead and says nothing.
+  const vpsContinuePaint = $derived.by(() => {
     void machineTick.value;
-    return m?.canContinueVps() ?? false;
+    const answer = m?.vpsContinuePossibility();
+    return answer ? paintPossibility(answer) : { shown: true, disabled: true, reason: null };
   });
-  // The reason `vps-config-continue-button` is disabled, or `''` when it's
-  // live (`ui/README.md` § Copy comprehensibility rule 5).
-  const vpsContinueBlockedReasonValue: string = $derived.by(() => {
+  const vpsContinueBlockedReasonValue: string = $derived(resolveLocalized(vpsContinuePaint.reason));
+
+  // ── The choose-providers page (`onboarding-provisioning.md` § 3d) ──
+  // Every rule is the machine's (§ 3d *Where logic lives*): the page renders
+  // goal lines, provider rows and one dialog from its getters and forwards
+  // presses. Which dialog is open is the one piece of state the page keeps —
+  // presentation, like tui's `Wizard::provider_dialog`; it decides nothing.
+  let providerDialog = $state<string | null>(null);
+  const goalRowsValue: GoalRow[] = $derived.by(() => {
     void machineTick.value;
-    return resolveLocalized(m?.vpsContinueBlockedReason());
+    return m?.goalRows() ?? [];
   });
+  const providerRowsValue: ProviderRow[] = $derived.by(() => {
+    void machineTick.value;
+    return m?.providerRows() ?? [];
+  });
+  const canOfferBuyDomainValue: boolean = $derived.by(() => {
+    void machineTick.value;
+    return m?.canOfferBuyDomain() ?? false;
+  });
+  const providerGoalDomainValue: string = $derived.by(() => {
+    void machineTick.value;
+    return m?.providerGoalDomain() ?? '';
+  });
+  const providersContinueBlockedValue: string = $derived.by(() => {
+    void machineTick.value;
+    return resolveLocalized(m?.providersContinueBlockedReason());
+  });
+  const providerDnsCoverValue: GoalCover | null = $derived(
+    goalRowsValue.find((g) => g.goal === 'Dns')?.cover ?? null,
+  );
+  /** The open dialog's per-provider reads, re-derived every observer tick. */
+  const providerDialogValue = $derived.by(() => {
+    void machineTick.value;
+    const id = providerDialog;
+    if (!m || !id) return null;
+    const fields = m.visibleProviderFields(id);
+    const hosted: Record<string, { label: string; enabled: boolean }> = {};
+    for (const f of fields) {
+      if (f.field_type !== 'HostedAuth') continue;
+      hosted[f.id] = {
+        label: hostedAuthButtonLabel(m.providerHostedAuthState(id, f.id)),
+        enabled: m.providerHostedAuthCanBegin(id, f.id),
+      };
+    }
+    return {
+      id,
+      meta: PROVIDERS.find((p) => p.id === id) ?? null,
+      fields,
+      hosted,
+      canConnect: m.canConnectProvider(id),
+      notesKey: m.providerRegistrarNotesKey(id),
+      showsContact: m.providerShowsContactForm(id),
+      contact: m.providerContact(id) ?? {
+        first_name: '', last_name: '', email: '', phone: '',
+        address1: '', city: '', state: '', postal_code: '', country: '',
+      },
+    };
+  });
+  // nest_provisioning's choices region and its start predicate (§ 3d *The
+  // choices on the setting-things-up page*): the start is dead on the set-up
+  // path while the machine names a reason, said beneath the button (rule 5).
+  const provisioningChoicesVisibleValue: boolean = $derived.by(() => {
+    void machineTick.value;
+    return m?.provisioningChoicesVisible() ?? false;
+  });
+  const provisioningStartBlockedValue: string = $derived.by(() => {
+    void machineTick.value;
+    if (!m?.provisioningBackToProviders()) return '';
+    return resolveLocalized(m.provisioningStartBlockedReason());
+  });
+
+  const PROVIDER_MANUAL = 'manual';
+  function goalKey(goal: ProviderGoal): string {
+    return goal === 'Domain' ? 'domain' : goal === 'Dns' ? 'dns' : 'vps';
+  }
+  function coverKey(cover: GoalCover): string {
+    return cover === 'Manual' ? PROVIDER_MANUAL : cover.Provider.provider_id;
+  }
+  function coverFromKey(key: string): GoalCover {
+    return key === PROVIDER_MANUAL ? 'Manual' : { Provider: { provider_id: key } };
+  }
+  /** A provider's display name, or the id for one the registry does not know. */
+  function providerName(id: string): string {
+    if (id === PROVIDER_MANUAL) return t.onboarding.provider_choice.manual_row;
+    const p = PROVIDERS.find((x) => x.id === id);
+    return p ? L(p.displayNameKey) : id;
+  }
+  function goalLine(row: GoalRow): string {
+    const pc = t.onboarding.provider_choice;
+    const domain = providerGoalDomainValue;
+    const name = row.goal === 'Domain'
+      ? pc.goal_domain({ domain })
+      : row.goal === 'Dns' ? pc.goal_dns({ domain }) : pc.goal_vps;
+    const status = row.cover
+      ? pc.goal_covered_by({ provider: providerName(coverKey(row.cover)) })
+      : pc.goal_open;
+    let line = `${name} — ${status}`;
+    if (row.price_cents != null) {
+      const cur = row.currency ?? 'USD';
+      const first = formatPrice(BigInt(row.price_cents), cur);
+      line += ' · ' + (row.renewal_cents != null
+        ? pc.goal_price({ price: first, renewal: formatPrice(BigInt(row.renewal_cents), cur) })
+        : pc.goal_price_first_year({ price: first }));
+    }
+    return line;
+  }
+  function capabilityLabel(c: string): string | null {
+    const pc = t.onboarding.provider_choice;
+    if (c === 'Registrar') return pc.capability_registrar;
+    if (c === 'Dns') return pc.capability_dns;
+    if (c === 'Vps') return pc.capability_vps;
+    return null;
+  }
+  /** A provider row's text: its name, what it can do, whether it is connected. */
+  function providerRowText(row: ProviderRow): string {
+    const pc = t.onboarding.provider_choice;
+    if (row.provider_id === PROVIDER_MANUAL) return `${pc.manual_row} — ${pc.manual_row_help}`;
+    const caps = row.capabilities.map(capabilityLabel).filter((c) => c !== null).join(', ');
+    const state = row.connecting ? pc.state_connecting : row.connected ? pc.state_connected : pc.state_available;
+    return `${providerName(row.provider_id)} — ${caps} · ${state}`;
+  }
+  /** The un-id'd line beneath a row: why it cannot cover the goals it cannot
+   * (rule 5); a reason repeated across goals is said once. The manual row's
+   * server and registration reasons restate what it is — only DNS explains. */
+  function providerReasonLine(row: ProviderRow): string {
+    const reasons = row.provider_id === PROVIDER_MANUAL
+      ? [row.dns_reason]
+      : [row.domain_reason, row.dns_reason, row.vps_reason];
+    const seen: string[] = [];
+    for (const r of reasons) {
+      if (!r) continue;
+      const text = resolveLocalized(r);
+      if (text && !seen.includes(text)) seen.push(text);
+    }
+    return seen.join(' ');
+  }
+  function providerRowConnected(row: ProviderRow): boolean {
+    if (row.provider_id === PROVIDER_MANUAL) return providerDnsCoverValue === 'Manual';
+    return row.connected;
+  }
+  function onProviderRowPress(row: ProviderRow): void {
+    error = '';
+    if (row.provider_id === PROVIDER_MANUAL) {
+      try { m?.selectGoalCover('Dns', 'Manual'); }
+      catch (e) { error = e instanceof Error ? e.message : String(e); }
+      return;
+    }
+    providerDialog = row.provider_id;
+  }
+  function onGoalSelect(goal: ProviderGoal, key: string): void {
+    error = '';
+    try { m?.selectGoalCover(goal, coverFromKey(key)); }
+    catch (e) { error = e instanceof Error ? e.message : String(e); }
+  }
+  async function onConnectProvider(id: string): Promise<void> {
+    error = '';
+    try {
+      await m?.connectProvider(id);
+    } catch (e) {
+      // A failed check is the provider's own error, read back on the row
+      // (`provider-dialog-status-text`); only a refusal reaches here.
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+  function onProviderContactInput(id: string, field: ContactField, value: string): void {
+    const current = providerDialogValue?.contact;
+    if (!m || !current) return;
+    m.setProviderContact(id, { ...current, [field]: value });
+  }
+  /** The dialog's `hosted-auth` button — the dns_config form's flow, on the
+   * provider's own slot (popup opened synchronously, see `beginHostedAuth`). */
+  async function beginProviderHostedAuth(id: string, fieldId: string) {
+    error = '';
+    const tab = window.open('about:blank', '_blank', 'noopener,noreferrer');
+    try {
+      const prompt = await m?.providerHostedAuthBegin(id, fieldId);
+      if (prompt) {
+        if (tab && !tab.closed) {
+          tab.location.href = prompt.verification_url;
+        } else {
+          window.open(prompt.verification_url, '_blank', 'noopener,noreferrer');
+        }
+      }
+      await m?.providerHostedAuthWait(id, fieldId);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+  /** An add-account run shows as already connected every provider whose
+   * credential the signed-in account holds in its DNS record (§ 3d *Held
+   * credentials*): the record is read through this tab's live account runtime
+   * — the same read the retire page makes — and the credentials passed INTO
+   * the machine, which re-runs each provider's checks before the row reads
+   * connected. Best-effort, like tui's `App::enter_add_account`: a failed
+   * read leaves every row unconnected, the state a first-nest run starts in. */
+  async function seedHeldProviderCredentials(machine: Machine): Promise<void> {
+    try {
+      const held = await retireHeldDns();
+      if (!held || 'error' in held) {
+        if (held) logMessage('info', 'fauna_web::provider_choice', `DNS record read failed: ${held.error}`);
+        return;
+      }
+      const creds = held.providerIds.map((provider_id, i) => ({
+        provider_id,
+        fields: JSON.parse(held.credsJson[i] ?? '{}') as Record<string, string>,
+      }));
+      if (creds.length > 0) await machine.seedHeldProviderCredentials(creds);
+    } catch (e) {
+      logMessage('info', 'fauna_web::provider_choice', `held credential seeding failed: ${e}`);
+    }
+  }
+
+  function onContinueFromProviders(): void {
+    error = '';
+    try {
+      m?.continueFromProviders();
+      providerDialog = null;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
   const dnsPostInstructionsValue: string | undefined = $derived.by(() => {
     void machineTick.value;
     return m?.dnsPostInstructions();
@@ -468,13 +695,17 @@
     void machineTick.value;
     return m?.provisioningSnapshot();
   });
-  // The reason `provisioning-continue-button` is disabled, or `''` when it's
-  // live — the four `○` step glyphs are a symbol, not a reason
+  // `provisioning-continue-button` paints from the machine's one answer, its
+  // reason `''` when it is live — the four `○` step glyphs are a symbol, not a reason
   // (`ui/README.md` § Copy comprehensibility rule 5).
-  const provisioningContinueBlockedReasonValue: string = $derived.by(() => {
+  const provisioningContinuePaint = $derived.by(() => {
     void machineTick.value;
-    return resolveLocalized(m?.provisioningContinueBlockedReason());
+    const answer = m?.provisioningContinuePossibility();
+    return answer ? paintPossibility(answer) : { shown: true, disabled: true, reason: null };
   });
+  const provisioningContinueBlockedReasonValue: string = $derived(
+    resolveLocalized(provisioningContinuePaint.reason),
+  );
   // Top-region price summary ("Bill of Materials", onboarding.md §6) — up to
   // two items: domain (one-time, only when buying a new domain) then VPS
   // (recurring, always present). Pure recap of prices already shown/agreed
@@ -681,6 +912,35 @@
   // keeps no timer of its own — the machine's one refresh at the unlock time
   // is what signs the tab back in.
   let lockedShownUntil: number | null = $state(null);
+
+  // What this page's root shows, named for `fauna_e2e_agent::ROOT_SURFACE_KEY`'s
+  // journal (`#lib/e2e-root-surface`, test builds only): the template's own
+  // branch order, so the name is the arm the page renders. A frame in which
+  // that arm painted no text is journaled as nothing, whatever its name.
+  const rootSurface: string = $derived.by(() => {
+    if (retireEntry !== null) return 'nest_retire';
+    if (awaitingDns) return 'awaiting_manual_dns';
+    if (step === 'loading' || step === 'done') {
+      switch (launchState) {
+        case 'idle':
+        case 'in_flight':
+          return 'launch_progress';
+        case 'transient_error':
+          return 'launch_retry';
+        case 'needs_update':
+          return 'launch_needs_update';
+        case 'identity_forked':
+          return 'launch_identity_changed';
+        case 'account_index_refusal':
+          return 'launch_account_index_unreadable';
+        case 'identity_stolen_entry':
+          return 'identity_stolen_entry';
+        default:
+          return `launch_${launchState}`;
+      }
+    }
+    return 'wizard';
+  });
   // `launch-identity-label` on `launch_progress` (in flight) and `launch_retry`
   // (transient error): the bound account's cached `handle@domain · tier` from
   // the registry's server-data cache ($identity), absent while it holds no
@@ -874,6 +1134,7 @@
         appendMode = true;
         resetMachine();
         m = await initOnboardingMachine();
+        void seedHeldProviderCredentials(m);
         return;
       }
 
@@ -2778,7 +3039,115 @@
   </p>
 {/snippet}
 
-<div class="onboarding">
+<!-- The server choices of § 5 — location, mail mode, SSH door, server type —
+     shown on `vps_config` (cloud recovery) and in `nest_provisioning`'s
+     choices region on the set-up path (`onboarding-provisioning.md` § 3d *The
+     choices on the setting-things-up page*): one markup, two places. -->
+{#snippet vpsServerChoices()}
+  <!-- vps-location-picker: the verified locations, the machine's
+       pre-selection shown. The cross-app contract reads and selects
+       by the location's DISPLAY NAME (the tui and apple pickers
+       do the same), so each option's value is its name and the
+       change maps it back to the id. The setter re-lists the
+       server types for the new location (registry.md § Server
+       offers follow the location); the radio below follows it. -->
+  {#if vpsConfigValue && vpsConfigValue.locations.length > 0}
+    <label class="location-picker">
+      {t.onboarding.vps_config.location_heading}
+      <select
+        data-testid={IDS.VPS_LOCATION_PICKER}
+        value={vpsConfigValue.locations.find(
+          (l) => l.id === vpsConfigValue?.selected_location_id,
+        )?.name ?? ''}
+        onchange={(e) => {
+          const name = (e.currentTarget as HTMLSelectElement).value;
+          const loc = vpsConfigValue?.locations.find((l) => l.name === name);
+          if (loc) m?.selectVpsLocation(loc.id);
+        }}
+      >
+        {#each vpsConfigValue.locations as loc (loc.id)}
+          <option value={loc.name}>{loc.name}</option>
+        {/each}
+      </select>
+    </label>
+  {/if}
+
+  <label class="checkbox-row">
+    <input
+      type="checkbox"
+      data-testid={IDS.VPS_CONFIG_MAIL_MODE_TOGGLE}
+      checked={provisionMailModeEnabledValue}
+      onchange={(e) =>
+        m?.setProvisionMailMode((e.currentTarget as HTMLInputElement).checked)}
+    />
+    {t.onboarding.vps_config.mail_mode_label}
+  </label>
+  <p class="help">{t.onboarding.vps_config.mail_mode_desc}</p>
+
+  <label class="checkbox-row">
+    <input
+      type="checkbox"
+      data-testid={IDS.VPS_CONFIG_SSH_DOOR_TOGGLE}
+      checked={provisionSshDoorEnabledValue}
+      onchange={(e) =>
+        m?.setProvisionSshDoor((e.currentTarget as HTMLInputElement).checked)}
+    />
+    {t.onboarding.vps_config.ssh_door_label}
+  </label>
+  {#if provisionSshDoorEnabledValue}
+    <p class="help warning" data-testid={IDS.VPS_CONFIG_SSH_DOOR_WARNING}>
+      {t.onboarding.vps_config.ssh_door_warning}
+    </p>
+  {/if}
+
+  {#if vpsConfigValue && vpsConfigValue.server_types.length > 0}
+    <fieldset class="server-type-picker">
+      <legend>{t.onboarding.vps_config.server_type_radio_legend}</legend>
+      {#each vpsConfigValue.server_types
+        .filter((st) => serverTypeAllowedForMail(JSON.stringify(st), provisionMailModeEnabledValue))
+        .slice(0, 5) as st, idx (st.id)}
+        <label>
+          <input
+            type="radio"
+            name="vps-server-type"
+            data-testid={`vps-server-type-radio[${idx}]`}
+            data-state={vpsConfigValue.selected_server_type_id === st.id ? 'on' : 'off'}
+            checked={vpsConfigValue.selected_server_type_id === st.id}
+            onchange={() => m?.selectVpsServerType(st.id)}
+          />
+          {serverTypeLabel(JSON.stringify(st))}
+        </label>
+      {/each}
+    </fieldset>
+  {/if}
+{/snippet}
+
+<!-- Which builds the box's updater follows — the same two places. -->
+{#snippet vpsUpdateChannel()}
+  <!-- Which builds the box's updater follows. Outside the per-provider
+       detail on purpose: the choice does not depend on the provider, so it
+       is shown before one is picked. One keyed radio per channel
+       (`vps-config-update-channel-row[<id>]`), exactly one on. -->
+  <fieldset data-testid={IDS.VPS_CONFIG_UPDATE_CHANNEL_ROW} class="update-channel-picker">
+    <legend>{t.onboarding.vps_config.update_channel_heading}</legend>
+    {#each UPDATE_CHANNEL_IDS as id (id)}
+      {@const copy = updateChannelCopy(id)}
+      <label>
+        <input
+          type="radio"
+          name="vps-update-channel"
+          data-testid={`vps-config-update-channel-row[${id}]`}
+          data-state={provisionUpdateChannelValue === id ? 'on' : 'off'}
+          checked={provisionUpdateChannelValue === id}
+          onchange={() => m?.setProvisionUpdateChannel(id)}
+        />
+        {copy.label} — {copy.desc}
+      </label>
+    {/each}
+  </fieldset>
+{/snippet}
+
+<div class="onboarding" data-root-surface={__FAUNA_E2E_AUTOMATION__ ? rootSurface : undefined}>
   <!-- The "Almost ready" surface (onboarding.md § "Almost ready" surface).
        NOT an OnboardingStep, so it is matched BEFORE the step branches: it is
        rendered whenever `wizard_outcome() == AwaitingManualDns`, which is true on
@@ -3064,6 +3433,22 @@
           <p data-testid={IDS.LAUNCH_IDENTITY_LABEL} class="muted">{launchIdentityLine}</p>
         {/if}
         <p class="muted">{t.common.loading}</p>
+      {/if}
+    </div>
+
+  {:else if step === 'done'}
+    <!-- The wizard's `LoggedIn` exit (onboarding.md § Wizard exit handling →
+         *The wizard becomes the app in place*): the machine sits at `Done`
+         while `handleWizardExit`'s terminal registers the account (and, in
+         append mode, switches to it) and then enters the app, so the tab shows
+         the launch progress view — never a blank page — until the app's first
+         page replaces it. The `AwaitingManualDns` exit never reaches here (its
+         surface is matched above). An append add refused by the registry
+         stays on this surface with its line in `error-message`. -->
+    <div class="center">
+      <p class="muted">{t.common.loading}</p>
+      {#if errorMessageValue}
+        <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
       {/if}
     </div>
 
@@ -3419,6 +3804,215 @@
       </div>
     </div>
 
+  {:else if step === 'provider_choice'}
+    <!-- Choose providers (`onboarding-provisioning.md` § 3d): the goals at the
+         top, the providers below, each opened in its own dialog whose Connect
+         runs every check of the provider's capabilities. Every predicate is
+         the machine's; tui's `wizard::provider_choice` is the reference. -->
+    <div class="center">
+      <h1>{t.onboarding.provider_choice.title}</h1>
+      <p class="muted">{t.onboarding.provider_choice.description}</p>
+
+      {#if errorMessageValue}
+        <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
+      {/if}
+
+      <div data-testid={IDS.PROVIDER_GOAL_ROW} class="provider-goals">
+        {#each goalRowsValue as row (row.goal)}
+          {@const g = goalKey(row.goal)}
+          <p
+            data-testid={`provider-goal-row[${g}]`}
+            data-state={row.cover ? 'covered' : 'open'}
+            data-provider={row.cover ? coverKey(row.cover) : undefined}
+          >{goalLine(row)}</p>
+          {#if row.note}
+            <p class="muted">{resolveLocalized(row.note)}</p>
+          {/if}
+          {#if row.candidates.length > 1}
+            <label class="location-picker">
+              {t.onboarding.provider_choice.goal_select}
+              <select
+                data-testid={`provider-goal-select[${g}]`}
+                value={row.cover ? coverKey(row.cover) : ''}
+                onchange={(e) => onGoalSelect(row.goal, (e.currentTarget as HTMLSelectElement).value)}
+              >
+                {#each row.candidates as c (c)}
+                  <option value={c}>{providerName(c)}</option>
+                {/each}
+              </select>
+            </label>
+          {/if}
+        {/each}
+      </div>
+
+      {#if canOfferBuyDomainValue}
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            data-testid={IDS.DNS_BUY_DOMAIN_CHECKBOX}
+            checked={dnsConfigValue?.buy_domain ?? false}
+            onchange={(e) => m?.toggleBuyDomain((e.currentTarget as HTMLInputElement).checked)}
+          />
+          {t.onboarding.dns_config.buy_domain_checkbox}
+        </label>
+      {/if}
+      {#if shouldShowNoProviderMessageValue}
+        <p data-testid={IDS.DNS_NO_PROVIDER_MESSAGE} class="warning">
+          {t.onboarding.dns_config.no_provider_carries_tld({ tld: handleTld })}
+        </p>
+      {/if}
+
+      <h2>{t.onboarding.provider_choice.providers_heading}</h2>
+      <!-- Row presses are delegated at the container, as on dns_config: a
+           button with both a template-literal testid and a dynamic `disabled`
+           had its own `onclick` dropped there. Disabled buttons dispatch no
+           click, so they self-guard; the row is named by `data-provider-id`.
+           Presses inside an open dialog carry no `data-provider-id` and pass. -->
+      <div
+        data-testid={IDS.PROVIDER_ROW}
+        class="provider-list"
+        role="presentation"
+        onclick={(e) => {
+          const btn = (e.target as HTMLElement).closest('button[data-provider-id]') as HTMLButtonElement | null;
+          if (!btn || btn.disabled || !btn.dataset.providerId) return;
+          const row = providerRowsValue.find((r) => r.provider_id === btn.dataset.providerId);
+          if (row) onProviderRowPress(row);
+        }}
+      >
+        {#each providerRowsValue as row (row.provider_id)}
+          {@const reason = providerReasonLine(row)}
+          <button
+            class="btn provider-choice-row"
+            data-testid={`provider-row[${row.provider_id}]`}
+            data-provider-id={row.provider_id}
+            data-state={providerRowConnected(row) ? 'connected' : 'available'}
+            disabled={row.provider_id === PROVIDER_MANUAL && row.dns_reason != null}
+          >{providerRowText(row)}</button>
+          {#if row.held}
+            <p class="muted">{t.onboarding.provider_choice.held_credential}</p>
+          {/if}
+          {#if reason}
+            <p class="muted">{reason}</p>
+          {/if}
+          <!-- The open dialog paints directly under its own row, inside this
+               {#each} item: the same Svelte 5 scheduling reason as the
+               dns_config form (an {#each}-item block is re-scheduled where a
+               step-block-level {#if} is not). -->
+          {#if providerDialogValue && providerDialogValue.id === row.provider_id}
+            {@const d = providerDialogValue}
+            <div data-testid={IDS.PROVIDER_DIALOG} class="provider-detail provider-dialog" role="dialog" aria-label={providerName(d.id)}>
+              <h3>{providerName(d.id)}</h3>
+              {#if d.meta}
+                <a
+                  data-testid={IDS.PROVIDER_DIALOG_LINK}
+                  href={d.meta.signupUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >{d.meta.signupUrl}</a>
+                <button
+                  class="btn"
+                  data-testid={IDS.PROVIDER_DIALOG_OPEN_BROWSER_BUTTON}
+                  onclick={() => window.open(d.meta?.signupUrl, '_blank', 'noopener,noreferrer')}
+                >{t.onboarding.dns_config.open_in_browser}</button>
+                <p data-testid={IDS.PROVIDER_DIALOG_HELP_TEXT}>{L(d.meta.helpKey)}</p>
+              {/if}
+              {#if d.notesKey}
+                <p data-testid={IDS.DNS_REGISTRAR_NOTES_TEXT} class="help">{L(d.notesKey)}</p>
+              {/if}
+
+              <div data-testid={IDS.PROVIDER_CREDENTIALS_FORM}>
+                {#each d.fields as field (field.id)}
+                  {#if field.field_type === 'HostedAuth'}
+                    <div class="form-group">
+                      <span class="field-label">{L(field.label_key)}</span>
+                      <button
+                        class="btn"
+                        data-testid={`provider-credentials-form-${field.id}`}
+                        disabled={!(d.hosted[field.id]?.enabled ?? false)}
+                        onclick={() => beginProviderHostedAuth(d.id, field.id)}
+                      >{d.hosted[field.id]?.label ?? t.provisioning.hosted_auth.connect}</button>
+                    </div>
+                  {:else}
+                    <label class="form-group">
+                      <span class="field-label">{L(field.label_key)}</span>
+                      <input
+                        type={field.field_type === 'Secret' ? 'password' : 'text'}
+                        class="input"
+                        data-testid={`provider-credentials-form-${field.id}`}
+                        oninput={(e) => m?.setProviderCred(d.id, field.id, (e.currentTarget as HTMLInputElement).value)}
+                      />
+                    </label>
+                  {/if}
+                {/each}
+              </div>
+
+              {#if row.connected}
+                <button
+                  class="btn"
+                  data-testid={IDS.PROVIDER_DISCONNECT_BUTTON}
+                  onclick={() => { error = ''; m?.disconnectProvider(d.id); }}
+                >{t.onboarding.provider_choice.disconnect}</button>
+              {:else}
+                <button
+                  class="btn primary"
+                  data-testid={IDS.PROVIDER_CONNECT_BUTTON}
+                  disabled={!d.canConnect || row.connecting}
+                  onclick={() => onConnectProvider(d.id)}
+                >{t.onboarding.provider_choice.connect}</button>
+              {/if}
+
+              {#if d.showsContact}
+                <fieldset data-testid={IDS.DNS_CONTACT_FORM} class="contact-form">
+                  <legend>{t.onboarding.dns_config.contact_form_heading}</legend>
+                  {#each contactFieldDefs as f (f.id)}
+                    <label class="form-group">
+                      <span class="field-label">{f.label}</span>
+                      <input
+                        type={f.id === 'email' ? 'email' : (f.id === 'phone' ? 'tel' : 'text')}
+                        class="input"
+                        data-testid={`dns-contact-${f.id}-input`}
+                        value={d.contact[f.field] ?? ''}
+                        oninput={(e) => onProviderContactInput(d.id, f.field, (e.currentTarget as HTMLInputElement).value)}
+                      />
+                    </label>
+                  {/each}
+                </fieldset>
+              {/if}
+
+              <p data-testid={IDS.PROVIDER_DIALOG_STATUS_TEXT}>{
+                row.connecting
+                  ? t.onboarding.provider_choice.dialog_connecting
+                  : row.error
+                    ? row.error
+                    : row.connected ? t.onboarding.provider_choice.dialog_connected : ''
+              }</p>
+              <button
+                class="btn link"
+                data-testid={IDS.PROVIDER_DIALOG_CLOSE_BUTTON}
+                onclick={() => { providerDialog = null; }}
+              >{t.onboarding.provider_choice.close}</button>
+            </div>
+          {/if}
+        {/each}
+      </div>
+
+      <p data-testid={IDS.PROVIDER_CHOICE_STATUS_TEXT} class="muted">{providersContinueBlockedValue}</p>
+
+      <div class="button-group">
+        <button
+          class="btn link"
+          data-testid={IDS.PROVIDER_CHOICE_BACK_BUTTON}
+          onclick={() => { error = ''; providerDialog = null; m?.clearError(); m?.back(); }}
+        >{t.common.back}</button>
+        <button
+          class="btn primary large"
+          data-testid={IDS.PROVIDER_CHOICE_CONTINUE_BUTTON}
+          disabled={providersContinueBlockedValue !== ''}
+          onclick={onContinueFromProviders}
+        >{t.common.continue}</button>
+      </div>
+    </div>
+
   {:else if step === 'dns_config'}
     <div class="center">
       <h1>{t.onboarding.dns_config.title}</h1>
@@ -3739,107 +4333,13 @@
               }}
             >{isLoadingValue ? t.common.loading : t.common.verify}</button>
 
-            <!-- vps-location-picker: the verified locations, the machine's
-                 pre-selection shown. The cross-app contract reads and selects
-                 by the location's DISPLAY NAME (the tui and apple pickers
-                 do the same), so each option's value is its name and the
-                 change maps it back to the id. The setter re-lists the
-                 server types for the new location (registry.md § Server
-                 offers follow the location); the radio below follows it. -->
-            {#if vpsConfigValue && vpsConfigValue.locations.length > 0}
-              <label class="location-picker">
-                {t.onboarding.vps_config.location_heading}
-                <select
-                  data-testid={IDS.VPS_LOCATION_PICKER}
-                  value={vpsConfigValue.locations.find(
-                    (l) => l.id === vpsConfigValue?.selected_location_id,
-                  )?.name ?? ''}
-                  onchange={(e) => {
-                    const name = (e.currentTarget as HTMLSelectElement).value;
-                    const loc = vpsConfigValue?.locations.find((l) => l.name === name);
-                    if (loc) m?.selectVpsLocation(loc.id);
-                  }}
-                >
-                  {#each vpsConfigValue.locations as loc (loc.id)}
-                    <option value={loc.name}>{loc.name}</option>
-                  {/each}
-                </select>
-              </label>
-            {/if}
-
-            <label class="checkbox-row">
-              <input
-                type="checkbox"
-                data-testid={IDS.VPS_CONFIG_MAIL_MODE_TOGGLE}
-                checked={provisionMailModeEnabledValue}
-                onchange={(e) =>
-                  m?.setProvisionMailMode((e.currentTarget as HTMLInputElement).checked)}
-              />
-              {t.onboarding.vps_config.mail_mode_label}
-            </label>
-            <p class="help">{t.onboarding.vps_config.mail_mode_desc}</p>
-
-            <label class="checkbox-row">
-              <input
-                type="checkbox"
-                data-testid={IDS.VPS_CONFIG_SSH_DOOR_TOGGLE}
-                checked={provisionSshDoorEnabledValue}
-                onchange={(e) =>
-                  m?.setProvisionSshDoor((e.currentTarget as HTMLInputElement).checked)}
-              />
-              {t.onboarding.vps_config.ssh_door_label}
-            </label>
-            {#if provisionSshDoorEnabledValue}
-              <p class="help warning" data-testid={IDS.VPS_CONFIG_SSH_DOOR_WARNING}>
-                {t.onboarding.vps_config.ssh_door_warning}
-              </p>
-            {/if}
-
-            {#if vpsConfigValue && vpsConfigValue.server_types.length > 0}
-              <fieldset class="server-type-picker">
-                <legend>{t.onboarding.vps_config.server_type_radio_legend}</legend>
-                {#each vpsConfigValue.server_types
-                  .filter((st) => serverTypeAllowedForMail(JSON.stringify(st), provisionMailModeEnabledValue))
-                  .slice(0, 5) as st, idx (st.id)}
-                  <label>
-                    <input
-                      type="radio"
-                      name="vps-server-type"
-                      data-testid={`vps-server-type-radio[${idx}]`}
-                      checked={vpsConfigValue.selected_server_type_id === st.id}
-                      onchange={() => m?.selectVpsServerType(st.id)}
-                    />
-                    {serverTypeLabel(JSON.stringify(st))}
-                  </label>
-                {/each}
-              </fieldset>
-            {/if}
+            {@render vpsServerChoices()}
             </div>
           {/if}
         {/each}
       </div>
 
-      <!-- Which builds the box's updater follows. Outside the per-provider
-           detail on purpose: the choice does not depend on the provider, so it
-           is shown before one is picked. One keyed radio per channel
-           (`vps-config-update-channel-row[<id>]`), exactly one on. -->
-      <fieldset data-testid={IDS.VPS_CONFIG_UPDATE_CHANNEL_ROW} class="update-channel-picker">
-        <legend>{t.onboarding.vps_config.update_channel_heading}</legend>
-        {#each UPDATE_CHANNEL_IDS as id (id)}
-          {@const copy = updateChannelCopy(id)}
-          <label>
-            <input
-              type="radio"
-              name="vps-update-channel"
-              data-testid={`vps-config-update-channel-row[${id}]`}
-              data-state={provisionUpdateChannelValue === id ? 'on' : 'off'}
-              checked={provisionUpdateChannelValue === id}
-              onchange={() => m?.setProvisionUpdateChannel(id)}
-            />
-            {copy.label} — {copy.desc}
-          </label>
-        {/each}
-      </fieldset>
+      {@render vpsUpdateChannel()}
 
       <div class="button-group">
         <button
@@ -3851,7 +4351,7 @@
         <button
           class="btn primary large"
           data-testid={IDS.VPS_CONFIG_CONTINUE_BUTTON}
-          disabled={!canContinueVpsValue || isLoadingValue}
+          disabled={vpsContinuePaint.disabled || isLoadingValue}
           onclick={async () => {
             error = '';
             try {
@@ -4192,7 +4692,33 @@
                 })}
               {/if}
             </div>
+            {#if !item.recurring && provisioningChoicesVisibleValue && dnsConfigValue?.buy_domain && !dnsConfigValue?.set_up_later}
+              <!-- On the set-up path the price is agreed here, at the
+                   purchase, directly under the domain line; it gates *Buy and
+                   set up* (`onboarding-provisioning.md` § 3d). § 4's label. -->
+              <label class="checkbox-row">
+                <input
+                  type="checkbox"
+                  data-testid={IDS.DNS_PRICE_CONFIRM_CHECKBOX}
+                  checked={dnsConfigValue?.price_agreed ?? false}
+                  value={t.registrar.price_confirm}
+                  onchange={(e) => {
+                    if ((e.currentTarget as HTMLInputElement).checked) m?.confirmPrice();
+                  }}
+                />
+                {t.registrar.price_confirm}
+              </label>
+            {/if}
           {/each}
+        </div>
+      {/if}
+
+      {#if provisioningChoicesVisibleValue}
+        <!-- The choices region (§ 3d): every choice has a default, so the
+             shortest path is connect, Continue, *Buy and set up*. -->
+        <div class="provisioning-choices">
+          {@render vpsServerChoices()}
+          {@render vpsUpdateChannel()}
         </div>
       {/if}
 
@@ -4207,8 +4733,12 @@
           <button
             class="btn primary large"
             data-testid={IDS.PROVISIONING_START_BUTTON}
+            disabled={provisioningStartBlockedValue !== ''}
             onclick={onProvisioningStart}
           >{t.onboarding.nest_provisioning.start_button}</button>
+          {#if provisioningStartBlockedValue}
+            <p class="muted">{provisioningStartBlockedValue}</p>
+          {/if}
         </div>
       {/if}
 
@@ -4305,7 +4835,7 @@
           <button
             class="btn primary large"
             data-testid={IDS.PROVISIONING_CONTINUE_BUTTON}
-            disabled={provisioningSnapshotValue.overall !== 'Succeeded'}
+            disabled={provisioningContinuePaint.disabled}
             onclick={onProvisioningContinue}
           >{t.common.continue}</button>
           {#if provisioningContinueBlockedReasonValue}
