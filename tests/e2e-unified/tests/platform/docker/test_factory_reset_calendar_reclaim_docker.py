@@ -293,7 +293,15 @@ def _boot_reclaim_nest(name, http_port, mail_ports, network, scan_env):
         remove_container(name)
 
 
-@pytest.mark.feature("factory-reset")
+# No `feature` marker: the catalog's witness of what this test guards is split by
+# surface (feature-catalog.md § Cell semantics). The image half — a reset and
+# re-claimed image serves the calendar again — is `factory-reset.md`'s `[nest]`
+# outcome, witnessed app-less by
+# `test_factory_reset_calendar_reclaim_app_less_docker.py` through the shared
+# calendar code every app runs, so it counts for every column; the app half — the
+# Events page after a re-claim — is outcome 13's tier_3
+# `test_factory_reset_calendar_reclaim.py`. This test stays the tier_4 guard of
+# the two joined, on the apps its drive is built for.
 def test_calendar_works_after_factory_reset_reclaim_docker(app, docker_reclaim_nest, request):
     """The Personal calendar must provision AND accept an event after a REAL
     (s6-driven) ``factory_reset → re-claim (same identity) → enable-mail`` against

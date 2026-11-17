@@ -444,16 +444,59 @@ def _ios_domain_read(member_app, name: str, expected: str) -> str:
     after."""
     import hashlib
 
-    from tests.platform.ios.test_file_provider_eviction import _extension_diagnostics, _fauna
+    from tests.platform.ios.test_file_provider_eviction import _fauna
 
     dom = member_app.driver._share_domain
     out = _fauna(dom["udid"], "read", dom["folder_ref"], dom["set_name"], name)
     digest = hashlib.sha256(expected.encode()).hexdigest()
-    assert f"read OK: {name}" in out and digest in out, (
-        f"[member] the domain did not serve {name} byte for byte: {out}\n"
-        f"{_extension_diagnostics(dom['udid'])}"
-    )
+    if not (f"read OK: {name}" in out and digest in out):
+        # The listing's far side is fileproviderd's enumeration of the
+        # extension, whose logs live on the simulator: keep them whole
+        # (convention 6), not only the tail.
+        raise AssertionError(
+            f"[member] the domain did not serve {name} byte for byte: {out}\n"
+            f"[member] the iOS staging tree:\n{_ios_tree_listing(dom['udid'])}\n"
+            f"[member] the File Provider extension's own logs:\n"
+            f"{_ios_extension_logs(dom['udid'])}"
+        )
     return out
+
+
+def _await_nest_recorded(nest, owner, set_name: str, size: int, owner_app) -> None:
+    """Block until the nest's log for the owner's set holds a row of ``size``
+    bytes — the owner's record landed (a state poll, convention 14), read as
+    the owner over the nest's own `fauna.sync.changes.list`."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.set_names import find_set
+
+    def _call(kind, req):
+        with WsRpcAdminClient(
+            nest["url"], actor_id=bytes.fromhex(owner["actor_id_hex"]),
+            signing_key=owner["signing_key"].encode(),
+        ) as ws:
+            return ws.call(kind, req)
+
+    row = find_set(_call("fauna.folders.list", {})["folders"], set_name)
+    assert row is not None, f"[owner] the shared set {set_name!r} is not listed"
+    folder_id = int(row["id"])
+    seen: list = []
+
+    def _recorded():
+        changes = _call("fauna.sync.changes.list", {"folder_id": folder_id, "since": 0})["changes"]
+        seen[:] = [(c.get("seq"), c.get("size_bytes"), c.get("change_type")) for c in changes]
+        return any(c.get("size_bytes") == size for c in changes)
+
+    wait_until(
+        _recorded,
+        _NEST_HYDRATION_S,
+        interval=1.0,
+        diagnose=lambda: (
+            f"[owner] the nest never recorded the owner's {size}-byte row after "
+            f"the record refusal lifted — the owner's engine did not retry the "
+            f"refused record; the set's rows (seq, size, type): {seen!r}\n"
+            + _agent_diagnosis(owner_app, "owner")
+        ),
+    )
 
 
 def _member_back_in_front(member_app) -> None:
@@ -1226,23 +1269,32 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
     1. the member sets their OWN per-file cap on Peer transfers to 1 KB, in
        Settings' Feature limits editor (convention 8 — the self tier, the
        limit's source the row will name);
-    2. the nest holds every `fauna.sync.changes.list`, so the member's agent
-       cannot fetch the new row and the peer pull is the first to meet it —
-       without the hold the two paths race, and a row the nest path delivered
-       first is never planned peer-side, so it is never capped;
+    2. the nest turns away the OWNER's `fauna.sync.changes.record`, so the
+       file the owner adds next stays the owner's own-PENDING row (minted
+       before any network call, upgraded only at the record's `Ok(seq)`):
+       the nest never holds it, so the nest path cannot race the peer pull,
+       and the member meets it un-sequenced. Un-sequenced is also what
+       makes every member plan the body peer-side: a bound tree wants every
+       body, but an on-demand replica — an iOS member's File Provider
+       domain — wants only an un-sequenced row's, a sequenced row's bytes
+       being the nest's to serve on open (`share_landing::body_is_wanted`;
+       `p2p-shared-set-build.md` § Phone peers — design, decision 1). The
+       member's own nest reads are untouched, so an iOS extension's cold
+       engine build (which reads `fauna.sync.changes.list` for its custody
+       walk) is never parked;
     3. the owner adds a 16 KB file;
     4. the member's row reads "Limited by Your own setting" while the file is
        still absent from the member's folder (kept off the peer leg);
-    5. the hold lifts and the file arrives through the nest.
+    5. the refusal lifts, the owner's record lands, and the file arrives
+       through the nest.
 
-    The limited reading belongs to the pass that capped the file (the cursor
-    then moves past its row), so step 4 polls fast enough to read one whole
-    pump pass; a loaded box makes a pass longer, never shorter.
+    The limited reading belongs to a pass that capped the file, so step 4
+    polls fast enough to read one whole pump pass; a loaded box makes a pass
+    longer, never shorter.
     """
-    from helpers.app_surface import require_surface
-    from helpers.rpc_hold import arm_rpc_hold, release_rpc_hold, rpc_hold_status
+    from helpers.rpc_hold import refuse_rpc, release_rpc_hold, rpc_hold_status
 
-    require_surface(folder_share_recipient_app[0].driver, "share-cap-nest-hold")
+    owner_user = folder_share_owner_app[2]
     owner_app, member_app, nest, owner_folder, member_folder, set_name = (
         _share_and_reach_peer_barrier(
             request, folder_share_owner_app, folder_share_recipient_app, tmp_path
@@ -1275,13 +1327,13 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
     editor.close_if_open()
     member_app.backups.navigate_folders()
 
-    kind = "fauna.sync.changes.list"
+    kind = "fauna.sync.changes.record"
     big = f"over-cap-{secrets.token_hex(3)}.bin"
     payload = ("over the cap — " + secrets.token_hex(8) + "\n") * 512  # ~16 KB
     expected_state = S.folders.share_transfer_state_limited(source=S.features.tier_self)
     try:
-        # ── 2–3. hold the nest path, then the owner adds the big file ──
-        arm_rpc_hold(nest["port"], kind)
+        # ── 2–3. keep the owner's next row un-sequenced, then add the big file ──
+        refuse_rpc(nest["port"], kind, actor=owner_user["actor_id_hex"])
         _author(owner_folder, big, payload)
 
         # ── 4. the member's row says limited; the file is not here yet ──
@@ -1303,15 +1355,16 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
                 "ARRIVED with no limited reading crossed the peer leg uncapped "
                 "(the pass read a policy without the cap, or the cap is not put "
                 "to each file); no arrival and no reading means no pass planned "
-                f"it (a relayed path defers bodies before the gate). nest hold: "
+                f"it (a relayed path defers bodies before the gate). owner's "
+                f"record refusal: "
                 f"{rpc_hold_status(nest['port'], kind)!r}; "
                 f"error={member_app.error_text()!r}\n"
                 + _agent_diagnosis(member_app, "member")
             ),
         )
         assert _replica_read(member_folder, big) is None, (
-            "[member] the over-cap file is already here while the nest path is "
-            "held — it crossed the peer leg the cap should have kept it off"
+            "[member] the over-cap file is already here while the nest does "
+            "not hold it — it crossed the peer leg the cap should have kept it off"
         )
     finally:
         release_rpc_hold(nest["port"], kind)
@@ -1319,7 +1372,9 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
     # ── 5. the file arrives through the nest ──
     if _is_ios(member_app):
         # A phone's copy of a file the nest serves is the OS's, fetched on
-        # open: the domain answers the read through the nest.
+        # open: once the owner's record lands, the domain answers the read
+        # through the nest.
+        _await_nest_recorded(nest, owner_user, set_name, len(payload.encode()), owner_app)
         _ios_domain_read(member_app, big, payload)
         return
     wait_until(
@@ -1327,8 +1382,8 @@ def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_
         _NEST_HYDRATION_S,
         interval=1.0,
         diagnose=lambda: (
-            f"[member] {big} never arrived through the nest after the hold "
-            "lifted — a capped file must still reach the device by the nest "
+            f"[member] {big} never arrived through the nest after the owner's "
+            "record refusal lifted — a capped file must still reach the device by the nest "
             f"path; error={member_app.error_text()!r}\n"
             + _agent_diagnosis(member_app, "member")
             + "\n"

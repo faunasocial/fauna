@@ -110,7 +110,7 @@ Stamped 2026-10-13 at ab51f8d2bd.
 | macos | ✅ full | |
 | ios | ✅ full | |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6 docker |
+| tui | ✅ full | 0.1.7 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

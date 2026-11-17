@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fauna_backups_machine::{BackupsMachine, BackupsObserver, build_backups_machine};
+use fauna_core::possibility::Possibility;
 
 use crate::client::FaunaClient;
 
@@ -34,6 +35,36 @@ pub struct BackupsHandles {
     pub destinations_refresh: Rc<dyn Fn()>,
 }
 
+/// A press asks the answer its control was painted from again (`ui/README.md`
+/// § Offer only what is possible, rule 7): `true` when the gesture may run;
+/// otherwise the reason goes on the page's one `error-message`, never a silent
+/// no-op. An absent answer is a control that is not offered at all — a stale
+/// press on it does nothing.
+pub(crate) fn allowed(error_label: &gtk::Label, answer: &Possibility) -> bool {
+    match answer {
+        Possibility::Possible => true,
+        Possibility::Blocked { reason } => {
+            error_label.add_css_class("error");
+            crate::settings::render_error_label(
+                error_label,
+                Some(&reason.resolve(crate::i18n::strings::lookup)),
+            );
+            false
+        }
+        Possibility::Absent => false,
+    }
+}
+
+/// [`crate::possible::paint`] for an icon-only button, whose tooltip is also
+/// its only visible name: blocked, the tooltip carries the reason (the seam's
+/// own write); live, it goes back to naming the button rather than to nothing.
+pub(crate) fn paint_icon(button: &gtk::Button, name: &str, answer: Possibility) {
+    crate::possible::paint(button, None, answer);
+    if button.tooltip_text().is_none() {
+        button.set_tooltip_text(Some(name));
+    }
+}
+
 crate::async_helper::snapshot_wake_observer!(
     /// Bridges `BackupsMachine` notifications to the GTK main loop: each
     /// `on_changed` pushes a tick onto an `async-channel` the render loop drains.
@@ -49,6 +80,15 @@ crate::async_helper::snapshot_wake_observer!(
 pub fn build_backups_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, BackupsHandles) {
     // ── Machine + observer wiring ───────────────────────────────────────
     let (tx, rx) = crate::async_helper::snapshot_wake_channel();
+    // The carve-out controls (a file's download, the whole-snapshot restore)
+    // paint from the connection word, which moves without a machine tick: a
+    // change of it owes this page the same repaint a tick does.
+    {
+        let tx = tx.clone();
+        crate::offline_gate::on_connection_change(Rc::new(move || {
+            let _ = tx.try_send(());
+        }));
+    }
     let observer: Arc<dyn BackupsObserver> = Arc::new(GtkBackupsObserver { tx });
     // Custody is a construction input, so a sealed set's snapshot paths arrive
     // opened rather than as envelopes (`behavior/path-sealing.md` § THE
@@ -64,7 +104,13 @@ pub fn build_backups_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView
     // rather than refusing the capture.
     machine.set_device_id(crate::sync::device_id().ok().map(|id| id.to_vec()));
 
-    let (list_widget, snapshot_handles) = snapshot_list::build_snapshot_list(client, &machine);
+    // The destinations section is built first because it owns the page's one
+    // `error-message`, which every half's press refusal writes to.
+    let (audit_alerts, destinations_box, error_label, destinations_refresh) =
+        destinations::build_destinations_section(client);
+
+    let (list_widget, snapshot_handles) =
+        snapshot_list::build_snapshot_list(client, &machine, &error_label);
 
     let list_page = adw::NavigationPage::builder()
         .title(crate::i18n::strings::backups::TITLE)
@@ -81,14 +127,12 @@ pub fn build_backups_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView
     content_box.append(&file_list_widget);
     // The whole-snapshot restore, inside the open snapshot detail beside the
     // file list (`ui/backups.md` § Whole-snapshot restore).
-    let restore_panel = snapshot_restore::SnapshotRestorePanel::build(client);
+    let restore_panel = snapshot_restore::SnapshotRestorePanel::build(client, &error_label);
     content_box.append(&restore_panel.widget);
 
     // Restore surfaces + backup-destination management — scrollable together so
     // the history list, restore action card, and destination list all fit.
-    let (restore_box, restore_handles) = restore::build_restore_section(client);
-    let (audit_alerts, destinations_box, error_label, destinations_refresh) =
-        destinations::build_destinations_section(client);
+    let (restore_box, restore_handles) = restore::build_restore_section(client, &error_label);
     let scroll_inner = gtk::Box::new(gtk::Orientation::Vertical, 0);
     scroll_inner.append(&restore_box);
     scroll_inner.append(&destinations_box);
@@ -136,6 +180,7 @@ pub fn build_backups_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView
                     &file_list_box,
                     page.detail.as_ref(),
                     &client,
+                    &error_label,
                 );
                 restore_panel.update(page.detail.as_ref());
                 // The machine's `error` is the page's ONE `error-message`

@@ -2006,3 +2006,29 @@ async fn the_snapshots_dav_flags_follow_the_deployment() {
     let (fresh, _nest, _mail) = build_machine();
     assert!(!fresh.snapshot().caldav_enabled);
 }
+
+#[tokio::test]
+async fn mail_usable_follows_the_first_hydrate_and_the_enable() {
+    // The predicate every mail sub-page entry is gated on
+    // (`ui/mail-settings.md` § Errors & edge cases, the mail-usable gate):
+    // waiting before the first read, then the nest's answer — mail off names
+    // the toggle, an enable makes it possible, and a later fold keeps the read.
+    use fauna_core::possibility::Possibility;
+    let (machine, _nest, _mail) = build_machine();
+    let reason = |p: Possibility| p.reason().map(|r| r.key.clone());
+    assert_eq!(
+        reason(machine.snapshot().mail_usable()).as_deref(),
+        Some("mail_settings.usable_reading")
+    );
+    machine.hydrate().await.expect("hydrate");
+    assert!(machine.snapshot().read, "a resolved hydrate marks the read");
+    assert_eq!(
+        reason(machine.snapshot().mail_usable()).as_deref(),
+        Some("mail_settings.usable_needs_mail_on")
+    );
+    machine
+        .enable_mail_with_generated_password("Default".into())
+        .await
+        .expect("enable");
+    assert_eq!(machine.snapshot().mail_usable(), Possibility::Possible);
+}

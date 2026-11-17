@@ -116,6 +116,16 @@ def observe(nest: dict | None, nodeid: str) -> None:
     """Census every shared actor on ``nest`` after the test ``nodeid``."""
     if _state["disabled"] or not nest or not nest.get("db_path"):
         return
+    proc = nest.get("proc")
+    if proc is not None and proc.poll() is not None:
+        # A stopped nest: the session nest once the last test's teardown has run
+        # its finalizer, or one a test stopped. Its cleanup is `terminate()` —
+        # TerminateProcess on Windows — so its WAL and -shm are left as the killed
+        # process had them, and opening that db read-only crashed python.exe
+        # with an access violation inside sqlite3 on Windows: no exception reaches
+        # the `except` below, and the whole run ends with no verdict and no
+        # last-green merge. A stopped nest has nothing live to count.
+        return
     from helpers import shared_identity
 
     actors = shared_identity.shared_actors()

@@ -1948,6 +1948,70 @@ where
     report
 }
 
+/// The pairing mark's reconcile (`account-runtime.md` § Multi-instance
+/// concurrency → *the pairing mark*, part 3): the bound nest's mark is put
+/// whenever the digest of the listing this leg just read is not the row's
+/// value, and shipped at once — this step runs after the pass's own fleet
+/// publish. As a pump run's write it moves this runtime's change generation,
+/// so a pairing that lapsed, one a succession burned, a link by an app that
+/// writes no mark and a gesture whose mark failed all reach every open Nests
+/// page at this leg's cadence. Best-effort: the bound nest is named only by a
+/// pin of exactly one identity (a rotation in flight waits a pass), a mark
+/// never runs a first-need mint (no tip yet → the next run), and a failed
+/// put is logged, never a step error.
+async fn reconcile_pairing_mark<B, R>(
+    store: &AccountStore<B>,
+    bound_fleet: &AccountStatePlane<'_, B, R>,
+    fleet_writer: FleetWriter<'_, R>,
+    pinned: &[[u8; 32]],
+    listing: &fauna_protocol::pair::PairListReply,
+    report: &mut PumpReport,
+) where
+    B: StoreBackend,
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+{
+    use fauna_protocol::merge_policy::KIND_PAIRING_MARK;
+    let [bound] = pinned else {
+        tracing::debug!(
+            pins = pinned.len(),
+            "pairing mark: the bound nest is not one pinned identity — left for a later pass"
+        );
+        return;
+    };
+    if !matches!(
+        bound_fleet.origination_mints(KIND_PAIRING_MARK).await,
+        Ok(false)
+    ) {
+        tracing::debug!(
+            "pairing mark: no generation tip to seal under yet — left for a later pass"
+        );
+        return;
+    }
+    let digest = fauna_client_core::linked_nests::pairing_mark_digest(listing);
+    let me = fleet_writer.key.verifying_key().to_bytes();
+    match crate::pairing_mark_rows::put_pairing_mark(store, bound_fleet, me, bound, digest).await {
+        Ok(false) => {}
+        Ok(true) => {
+            tracing::info!(
+                nest = %fauna_core::hex32::encode(bound),
+                "pairing mark: the bound nest's listing moved — mark rewritten"
+            );
+            match publish_fleet(bound_fleet, Prompt::Unprompted).await {
+                Ok(n) => *report.fleet_published.get_or_insert(0) += n,
+                Err(e) => push_step_error(
+                    report,
+                    format!("publish_pending (fleet, pairing mark): {e:#}"),
+                    &e,
+                ),
+            }
+        }
+        Err(e) => {
+            tracing::warn!("pairing mark: the reconcile write failed (next run retries): {e:#}")
+        }
+    }
+}
+
 /// The secondary leg over every linked replica the account lists
 /// (`crate::linked_leg`): the pairings are read on the owner session, each
 /// target is connected through the host's connector and completed in turn —
@@ -1971,10 +2035,15 @@ where
 {
     use crate::linked_leg::{
         LinkedChainOutcome, LinkedChainPass, LinkedCtx, LinkedNestPass, LinkedOutcome, LinkedPass,
-        complete_linked_nest, list_linked_targets, reconcile_linked_chain, retire_carried_evidence,
+        complete_linked_nest, linked_targets, list_pairings, reconcile_linked_chain,
+        retire_carried_evidence,
     };
-    let targets = match list_linked_targets(fleet_writer.session_rpc, pinned).await {
-        Ok(t) => t,
+    let targets = match list_pairings(fleet_writer.session_rpc).await {
+        Ok(listing) => {
+            reconcile_pairing_mark(store, bound_fleet, fleet_writer, pinned, &listing, report)
+                .await;
+            linked_targets(&listing, pinned)
+        }
         Err(e) => {
             tracing::debug!("secondary leg: the pairings could not be listed: {e:#}");
             push_step_error(report, format!("secondary leg: {e:#}"), &e);

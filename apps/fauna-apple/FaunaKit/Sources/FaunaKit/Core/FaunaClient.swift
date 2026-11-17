@@ -167,6 +167,12 @@ public class FaunaClient {
     #if !FAUNA_KIDS
     /// The shared mail refresh is spawned once per client.
     private var mailEpochRefreshStarted = false
+
+    /// The session's mail-usable answer, painted on the six mail sub-pages and
+    /// their Settings rail rows on both apple apps (`mail-settings.md`
+    /// § Errors & edge cases, the mail-usable gate). One per client, so a new
+    /// session starts unread.
+    public let mailUsable = MailUsableGate()
     #endif
 
     /// Long-lived loop that dispatches every inbound push (`fauna.notification`,

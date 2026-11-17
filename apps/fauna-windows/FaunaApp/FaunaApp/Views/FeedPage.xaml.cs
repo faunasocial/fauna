@@ -143,6 +143,10 @@ public sealed partial class FeedPage : Page, IPostCardPage
     /// </summary>
     private bool _navigatedAway;
 
+    /// <summary>The unsent-likes re-read while this page shows (<see cref="UnsentRefresh"/>);
+    /// started at the end of <see cref="Page_Loaded"/>, stopped in <see cref="OnNavigatedFrom"/>.</summary>
+    private UnsentRefresh? _unsentRefresh;
+
     private void ViewModel_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         => Refresh();
 
@@ -221,6 +225,8 @@ public sealed partial class FeedPage : Page, IPostCardPage
         // the e2e reset — MainPage ends its inner page, Views.NestedFrame), and on those
         // it runs AFTER the actor change: nothing below may assume a live session.
         _navigatedAway = true;
+        _unsentRefresh?.Dispose();
+        _unsentRefresh = null;
         // Stop the cue-capture tick + scroll hook and flush every tracked card —
         // mirrors linux's unmap handling (off-screen is off-viewport). Must run
         // before the page is discarded: FeedPage isn't cached
@@ -394,6 +400,13 @@ public sealed partial class FeedPage : Page, IPostCardPage
             // Left while the hydrate ran: the teardown already detached what was built.
             if (_navigatedAway) return;
             Refresh();
+
+            // The heart's queued / unsent word (account-offline-mutation.md § The
+            // unsent-changes surface, point 2): the drain runs in the account pump and
+            // tells the feed nothing, so while the page shows, the manager re-reads the
+            // device outbox's likes every two seconds and notifies on a change.
+            // Stopped in OnNavigatedFrom.
+            _unsentRefresh = Core.Helpers.UnsentRefresh.Start("feed", () => manager.RefreshUnsentLikes());
 
             // search.md § User actions (SearchNav.Post) — fire-and-forget: the
             // dialog it opens blocks on ShowAsync until the user closes it, and
@@ -2096,7 +2109,7 @@ public sealed partial class FeedPage : Page, IPostCardPage
                 // PrepareSellPostAsync runs it itself and the flow is one call, as before.
                 if (bytes is not null)
                 {
-                    await _viewModel.StageSellTierAsync(s.SubscribersGetItFree, s.AskingPrice);
+                    await _viewModel.StageSellTierAsync(s.SubscribersGetItFree);
                 }
             }
 #endif
@@ -2154,7 +2167,7 @@ public sealed partial class FeedPage : Page, IPostCardPage
             {
                 var priceHint = string.IsNullOrWhiteSpace(sellFields.Price) ? null : sellFields.Price;
                 sealedBlob = await _viewModel.PrepareSellPostAsync(
-                    priceHint, sellFields.AskingPrice, sellFields.SubscribersGetItFree);
+                    priceHint, sellFields.SubscribersGetItFree);
             }
             else
 #endif

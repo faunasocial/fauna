@@ -231,6 +231,23 @@ class NostrActions:
         self.driver.click("nostr-add-relay")
         time.sleep(0.5)
 
+    def try_add_relay(self, url: str) -> bool:
+        """Type `url` and press Add only if Add is offered; return whether it
+        was (`ui/README.md` § Offer only what is possible, rule 4's form
+        case). An app on the shared `add_relay_possibility` paints Add
+        disabled, its reason beside it, for a blank, malformed, private or
+        duplicate URL — that disabled control IS the refusal, and pressing it
+        is refused by the bridge (convention 11). An app not yet lifted still
+        offers Add and refuses on the press, naming the reason on
+        `error-message`; the caller checks that path when this returns True.
+        """
+        self.driver.wait_for("nostr-relay-input", timeout=10.0)
+        self.driver.clear_and_type("nostr-relay-input", url)
+        if not self.driver.is_enabled("nostr-add-relay"):
+            return False
+        self.driver.click("nostr-add-relay")
+        return True
+
     def remove_relay(self, index: int = 0) -> None:
         self.driver.click("nostr-remove-relay", index=index)
         time.sleep(0.5)
@@ -354,6 +371,14 @@ class NostrActions:
         self.driver.clear_and_type("nostr-zap-signer-pubkey-input", pubkey)
         if label:
             self.driver.clear_and_type("nostr-zap-signer-label-input", label)
+        # The button is painted from one answer — the features plane's gate,
+        # blocked "still loading" until that read answers, ANDed with the
+        # draft (linux `nostr_tab.rs::ZapSignerAdd`). Wait for the state, not a
+        # time (convention 14); a button the plane refuses stays disabled and
+        # the click below raises the named 409, as a caller expecting it wants.
+        deadline = time.monotonic() + 20.0
+        while not self.driver.is_enabled("nostr-zap-signer-add-btn") and time.monotonic() < deadline:  # deadline-ok: the click below raises the named 409 on a still-disabled button
+            time.sleep(0.3)
         self.driver.click("nostr-zap-signer-add-btn")
         time.sleep(0.5)
 

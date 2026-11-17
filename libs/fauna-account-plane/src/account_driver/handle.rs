@@ -375,6 +375,13 @@ pub(crate) enum Cmd {
         write: crate::refused_change_rows::RefusedChangeWrite,
         reply: oneshot::Sender<Result<bool>>,
     },
+    /// The pairing mark's write door
+    /// ([`AccountStoreHandle::put_pairing_mark`]) — a gesture's own write.
+    PutPairingMark {
+        nest_id: [u8; 32],
+        digest: [u8; 32],
+        reply: oneshot::Sender<Result<bool>>,
+    },
     /// The blessed-nests write door
     /// ([`AccountStoreHandle::set_nest_blessed`]).
     SetNestBlessed {
@@ -747,6 +754,7 @@ impl Cmd {
             | Cmd::MergePeerAnchors { .. }
             | Cmd::WriteRefusedChanges { .. }
             | Cmd::SetNestBlessed { .. }
+            | Cmd::PutPairingMark { .. }
             | Cmd::PutCustodiesHeld { .. }
             | Cmd::PutShareEndpoints { .. }
             | Cmd::TombstoneShareEndpoints { .. }
@@ -851,6 +859,7 @@ impl Cmd {
             Cmd::MergePeerAnchors { .. } => Some(mp::KIND_PEER_ANCHORS),
             Cmd::WriteRefusedChanges { .. } => Some(mp::KIND_REFUSED_SCHEDULING_CHANGES),
             Cmd::SetNestBlessed { .. } => Some(mp::KIND_BLESSED_NESTS),
+            Cmd::PutPairingMark { .. } => Some(mp::KIND_PAIRING_MARK),
             Cmd::MergeFolderKeys { .. } | Cmd::SettleFolderRemoval { .. } => {
                 Some(mp::KIND_FOLDER_KEYS)
             }
@@ -908,6 +917,7 @@ impl Cmd {
             Cmd::MergePeerAnchors { reply, .. } => drop(reply.send(Err(err))),
             Cmd::WriteRefusedChanges { reply, .. } => drop(reply.send(Err(err))),
             Cmd::SetNestBlessed { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::PutPairingMark { reply, .. } => drop(reply.send(Err(err))),
             Cmd::MergeFolderKeys { reply, .. } => drop(reply.send(Err(err))),
             Cmd::SettleFolderRemoval { reply, .. } => drop(reply.send(Err(err))),
             other => {
@@ -2529,6 +2539,45 @@ impl AccountStoreHandle {
         Ok(crate::blessed_nest_rows::blessed_nests_of(&entries)?
             .iter()
             .any(|b| b.blessed))
+    }
+
+    /// The pairing mark this store holds for `nest_id`
+    /// (`fauna.state.pairing-mark`) — the digest of the last listing a writer
+    /// recorded for that nest, or `None`. A local read; `pairing_mark_rows`
+    /// owns the mechanics. Nothing reads it for what a page lists.
+    pub async fn pairing_mark(&self, nest_id: [u8; 32]) -> Result<Option<[u8; 32]>> {
+        let key = fauna_client_core::linked_nests::pairing_mark_key(&nest_id);
+        let entry = self
+            .states_of_kind(fauna_protocol::merge_policy::KIND_PAIRING_MARK)
+            .await?
+            .into_iter()
+            .find(|e| e.key == key && !e.tombstone);
+        match entry {
+            None => Ok(None),
+            Some(e) => <[u8; 32]>::try_from(e.value.as_slice())
+                .map(Some)
+                .map_err(|_| anyhow::anyhow!("the pairing mark at {key:?} is not 32 bytes")),
+        }
+    }
+
+    /// Put `digest` as `nest_id`'s pairing mark (`fauna.state.pairing-mark`)
+    /// — the Nests page's link, both-ends link or unlink, after the gesture's
+    /// own re-list (`account-runtime.md` § Multi-instance concurrency → *the
+    /// pairing mark*, part 2). A gesture's own write: it moves no generation
+    /// here; other replicas see it through the pump's walk. Whether anything
+    /// was written (`false` when the row already holds `digest`); the writer
+    /// door's refusal while no generation tip resolves surfaces as `Err`.
+    pub async fn put_pairing_mark(&self, nest_id: [u8; 32], digest: [u8; 32]) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::PutPairingMark {
+                nest_id,
+                digest,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
     /// Record the user's blessing verdict for `nest_id` at `now`
@@ -5285,6 +5334,23 @@ where
                 local.publish_due,
                 reply,
             );
+        }
+        // The pairing mark: a compare-then-LWW-put on this one store thread —
+        // `pairing_mark_rows` owns the mechanics.
+        Cmd::PutPairingMark {
+            nest_id,
+            digest,
+            reply,
+        } => {
+            let r = crate::pairing_mark_rows::put_pairing_mark(
+                local.store,
+                local.fleet_plane,
+                me,
+                &nest_id,
+                digest,
+            )
+            .await;
+            return wrote(r, |written| *written, local.publish_due, reply);
         }
         // The blessed nests: a read-stamp-put on this one store thread —
         // `blessed_nest_rows` owns the mechanics.

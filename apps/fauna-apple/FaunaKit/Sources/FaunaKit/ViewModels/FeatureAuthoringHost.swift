@@ -107,8 +107,23 @@ public final class FeatureAuthoringHost {
         view = editor.view()
     }
 
-    /// `feature-policy-editor-save-button`.
-    public func save() async { await write(remove: false) }
+    /// `feature-policy-editor-save-button`'s paint: the open draft's own
+    /// validity (`FfiPolicyEditor.savePossibility`, the shared `draft()`), the
+    /// unparseable cell's reason when blocked; absent with no editor open.
+    public var savePossibility: Possibility {
+        editor?.savePossibility() ?? .absent
+    }
+
+    /// `feature-policy-editor-save-button` — asks ``savePossibility`` first
+    /// and refuses with its reason on the error banner.
+    public func save() async {
+        guard editor != nil else { return }
+        if let refusal = savePossibility.refusal {
+            error = refusal
+            return
+        }
+        await write(remove: false)
+    }
 
     /// `feature-policy-editor-remove-button`.
     public func remove() async { await write(remove: true) }

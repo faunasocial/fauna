@@ -31,7 +31,7 @@
     classifyLinkInput,
     shortNestId,
     grantBoundNote,
-    offlineAffordance,
+    offlinePossibility,
     grantScopeLabels,
     type TrustFolder,
     statusLabel as wasmStatusLabel,
@@ -74,7 +74,7 @@
   // W4 (account-data-plane.md § Workstreams) phase 4's UI desensitizing (`account-data-plane.md` § The
   // offline-mutation contract). The verdict is the shared rule's, never a class
   // test written here; `#lib/offline-gate` owns how a reactive tree obeys it.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // The parent settings page owns the single error surface (its MessageBanner /
   // `error-message`); Nests-page dispatch errors flow into it.

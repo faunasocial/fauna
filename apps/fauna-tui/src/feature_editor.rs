@@ -96,12 +96,21 @@ pub fn editor_elements(
     }
     // Save and Remove are `OnlineOnly`: the offline gate greys them from the
     // write kind the host's gesture declares. Cancel is local and stays live.
-    els.push(Element::gesture_button(
-        ids::FEATURE_POLICY_EDITOR_SAVE_BUTTON,
-        f::EDITOR_SAVE,
-        true,
-        gestures.save,
-    ));
+    // The save is painted from the draft's own validity — an unparseable cell
+    // disables it with the reason (`ui/README.md` § Offer only what is
+    // possible, rule 4's form case); the hosts' save actions ask the same
+    // `draft()` and refuse with the same reason.
+    els.push(
+        Element::gesture_button(
+            ids::FEATURE_POLICY_EDITOR_SAVE_BUTTON,
+            f::EDITOR_SAVE,
+            true,
+            gestures.save,
+        )
+        .possible(fauna_core::possibility::Possibility::from_blocked_reason(
+            editor.draft().err(),
+        )),
+    );
     if view.can_remove {
         els.push(Element::gesture_button(
             ids::FEATURE_POLICY_EDITOR_REMOVE_BUTTON,

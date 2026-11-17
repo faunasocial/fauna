@@ -694,7 +694,18 @@ public struct FaunaApp: App {
     /// launch. Instead we enter optimistically and let the machine's verdict correct
     /// course — including backing out of the session entirely when it must.
     @MainActor
-    private func runLaunch() {
+    private func runLaunch(resuming claim: UInt64? = nil) {
+        // Claimed FIRST — before the sign-out gate below, whose first call of every
+        // process defers this launch across a detached finish and re-enters through
+        // `relaunch` with the same claim (`LaunchMachineBox.claim(resuming:)` owns
+        // why). A re-entry superseded while the gate's finish ran — an e2e session
+        // patch or a teardown cleared the box — drops before touching anything.
+        guard let launch = launchMachineBox.claim(resuming: claim) else {
+            logMessage(
+                level: .info, target: "fauna.app",
+                message: "[launch] superseded while the sign-out gate's finish ran — dropping it")
+            return
+        }
         let keychain = KeychainStore()
 
         // Bring credential rows in line with the iCloud-backup preference (default:
@@ -711,12 +722,11 @@ public struct FaunaApp: App {
         // record still owes the wipe fails closed — no launch machine, the
         // wizard's `identity_choice` painting the refusal line, until Remove
         // Again clears it and re-enters here. The macOS root gates the same way.
-        guard onboardingVM.launchMayProceed(relaunch: { runLaunch() }) else {
+        guard onboardingVM.launchMayProceed(relaunch: { runLaunch(resuming: launch) }) else {
             appState.isOnboarding = true
             appState.launchPending = !onboardingVM.launchFailedClosed
             return
         }
-
         // The optimistic read below and the machine both resolve through the registry's
         // ACTIVE account, so a same-process account SWITCH (`switchAccount(to:)` moves the
         // active pointer) builds the incoming identity's session on both halves — there is
@@ -1777,6 +1787,7 @@ public struct FaunaApp: App {
                 "pending": pb.pendingCount,
                 "passes_started": pb.passesStarted,
                 "passes_completed": pb.passesCompleted,
+                "requests_coalesced": pb.requestsCoalesced,
                 "completed_total": pb.completedCount,
                 "last_backup_at": pb.lastBackupDate?.timeIntervalSince1970 as Any,
                 "enabled": AppDefaults.store.bool(forKey: PhotoBackupControlsView.enabledKey),
@@ -2828,6 +2839,15 @@ public struct FaunaApp: App {
                     // (`test_subscriptions.py::test_follow_auto_grants_in_encrypted_mode`).
                     #if !FAUNA_KIDS
                     SubscriptionsAuthorCadence.shared.start(api: faunaClient.api)
+                    // Same reasoning for the TLS-cert auto-renew cadence
+                    // (tls-certificates.md § C.3): only the production launch
+                    // arms it, so an e2e-logged-in admin had no loop and the
+                    // `auto_renew_wake` seam was refused "no authenticated
+                    // session" (`test_admin_dns_cert_auto_renew_tick.py`).
+                    // Latched, and its first tick waits the full interval, so
+                    // no other walk is disturbed. Twin of macOS's and of
+                    // windows's start at its e2e login `session` seam.
+                    DnsAutoRenewCadence.shared.start(api: faunaClient.api)
                     #endif
                     // Two e2e sub-modes (the e2e session-patch path never runs the
                     // production `activate(...)`, which keeps the deterministic mock
@@ -3298,7 +3318,7 @@ public struct FaunaApp: App {
     /// "Add account" → onboarding in **append** mode (a sheet over the live session).
     @MainActor
     private func beginAddAccount() {
-        onboardingVM.machine.reset()
+        onboardingVM.beginAddAccount()
         appState.isAddingAccount = true
     }
 

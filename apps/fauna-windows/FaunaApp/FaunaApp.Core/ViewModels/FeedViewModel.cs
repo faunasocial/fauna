@@ -464,10 +464,16 @@ internal partial class FeedViewModel : ViewModelBase
     /// runs it itself, so the one-call flow is unchanged. Pass the same arguments that call
     /// will: this one decides the tier's rank and refuses an unconvertible asking price while
     /// refusing is still free.</summary>
-    public async Task StageSellTierAsync(bool subscribersGetItFree, string? askingPriceText)
-        => await _manager.StageSellTier(
-            subscribersGetItFree,
-            ulong.TryParse(askingPriceText?.Trim(), out var sats) ? sats : (ulong?)null);
+    public async Task StageSellTierAsync(bool subscribersGetItFree)
+        => await _manager.StageSellTier(subscribersGetItFree, ComposeSellAskingPriceSats());
+
+    /// <summary>The sell composer's asking-price field as sats, by the ONE shared rule
+    /// (<c>FeedManager::compose_sell_asking_price_sats</c>, the same parse the <i>Change
+    /// price…</i> dialog reads): <c>null</c> when the field is empty; text that is not a
+    /// whole number of sats is REFUSED — stamped on <c>compose-error</c> with the rule's
+    /// catalog key and thrown, so a mistyped price never publishes a post a zap cannot buy.
+    /// Reads the field <see cref="UpdateComposeSell"/> staged.</summary>
+    public ulong? ComposeSellAskingPriceSats() => _manager.ComposeSellAskingPriceSats();
 
     /// <summary>Run the sell-this-post orchestration (mint + persist the period key, build the
     /// birth KeyBlob, build the gated body naming the auto-minted tier) and return its sealed
@@ -475,20 +481,13 @@ internal partial class FeedViewModel : ViewModelBase
     /// <see cref="PrepareGatedBlobAsync"/>, but never <c>null</c> on success (sell mode always
     /// produces a post; call this only when <c>IsSellSelected()</c>). Empty
     /// <paramref name="priceHint"/> is normalized to <c>null</c> by the caller, matching
-    /// linux's exact shape. Finishes through the SAME <see cref="SubmitGatedPostAsync"/> /
+    /// linux's exact shape. The asking price comes from the shared
+    /// <see cref="ComposeSellAskingPriceSats"/> (empty = an unpriced sold post, permanently
+    /// valid; a bad price refused); <c>prepare_sell_post</c> owns the sats→msat conversion.
+    /// Finishes through the SAME <see cref="SubmitGatedPostAsync"/> /
     /// <see cref="AbortGatedSubmit"/> pair as an ordinary gated post — no new upload glue.</summary>
-    public async Task<byte[]> PrepareSellPostAsync(string? priceHint, string? askingPriceText, bool subscribersGetItFree)
-        // Empty or unparseable both mean no machine price — never an error at this
-        // layer (mirrors tui's `feed/mod.rs` reference leg:
-        // `sell.asking_price.trim().parse::<u64>().ok()` exactly); an unpriced sold
-        // post is permanently valid, staying buyable through an explicit-intent
-        // mechanism, with a zap on it staying a tip (monetization.md § The asking
-        // price). `prepare_sell_post` owns the sats→msat conversion and the overflow
-        // refusal — this is a plain text→u64 parse, nothing else.
-        => await _manager.PrepareSellPost(
-            priceHint,
-            subscribersGetItFree,
-            ulong.TryParse(askingPriceText?.Trim(), out var sats) ? sats : (ulong?)null);
+    public async Task<byte[]> PrepareSellPostAsync(string? priceHint, bool subscribersGetItFree)
+        => await _manager.PrepareSellPost(priceHint, subscribersGetItFree, ComposeSellAskingPriceSats());
 
     /// <summary>Resolve a loaded gated post's sealed-blob hash (hex <c>encrypted_ref</c>) for the
     /// page to fetch (`GET /api/v1/blob/{hash}`), caching the decoded gate info for
@@ -896,6 +895,15 @@ public partial class FeedPostItem : ObservableObject
     /// <c>feed-like-button</c> means the next tap un-likes (feed.md § Interaction bar →
     /// Repost, ratified 2026-08-10). Drives <c>PostCardBind.LikedToButtonStyle</c>.</summary>
     public bool ViewerLiked { get; }
+
+    /// <summary><c>feed-like-button</c>'s <c>state</c> word (<c>on | off | queued | unsent</c>)
+    /// — <c>PostSummary.like_state</c>, spelled by the shared <c>like_state_word</c>
+    /// (<c>account-offline-mutation.md</c> § The offline-mutation contract →
+    /// <i>The unsent-changes surface</i>, point 2): <c>queued</c> while the like waits in the
+    /// device outbox, <c>unsent</c> once the drain parked it — whose tap the shared manager
+    /// turns into a retry. Painted as the button's <c>HelpText</c>, windows' <c>state</c>
+    /// channel; never derived here.</summary>
+    public string LikeStateWord { get; }
 
     /// <summary>One <c>post-reaction-pill</c> per emoji group of the shared tally
     /// (<c>PostSummary.reactions</c>, nest first-added order), in order; empty on a repost
@@ -1527,6 +1535,7 @@ public partial class FeedPostItem : ObservableObject
         RepostCount = p.repostCount;
         QuoteCount = p.quoteCount;
         ViewerLiked = p.viewerLiked;
+        LikeStateWord = FaunaFeedMethods.LikeStateWord(p.likeState);
         // The shared per-emoji tally (feed.md ruling 4): empty on a bluesky row, and no
         // pill row is painted on a repost row (the bar is hidden there).
         ReactionPills = p.repostedPostId is { Length: > 0 }
@@ -1792,6 +1801,7 @@ public partial class FeedPostItem : ObservableObject
             && RepostCount == other.RepostCount
             && QuoteCount == other.QuoteCount
             && ViewerLiked == other.ViewerLiked
+            && LikeStateWord == other.LikeStateWord
             && ReactionPills.SequenceEqual(other.ReactionPills)
             && RepostedPostId == other.RepostedPostId
             && QuotedPostId == other.QuotedPostId

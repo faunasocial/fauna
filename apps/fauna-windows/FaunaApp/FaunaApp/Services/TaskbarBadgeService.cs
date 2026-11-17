@@ -22,11 +22,11 @@ namespace FaunaApp.Services;
 ///
 /// <para><b>Needs package identity.</b> Badge notifications are keyed on the app's
 /// AUMID, so the updater throws <c>0x80070490</c> (element not found) in a process
-/// with no package identity. The Store package is packaged, so it always has one;
-/// the MSI channel's FaunaApp.exe gets one from the sparse identity package the MSI
-/// registers (installers/windows.md § Package identity for FaunaApp.exe), and has none
-/// when that package is absent — Explorer Integration deselected, or the plain e2e
-/// launch of a build output. Without identity the badge is simply not painted and
+/// with no package identity. A full-MSIX install (the Store package, the
+/// direct-download bundle) always has one, in every process started in the package's
+/// context (installers/windows.md § Package identity for FaunaApp.exe); an unpackaged
+/// FaunaApp.exe — an install of the full-feature MSI, or the plain e2e launch of a
+/// build output — has none. Without identity the badge is simply not painted and
 /// nothing else changes: the first failure is logged once as <c>[badge]</c> (the e2e
 /// witness folds the app log into its failure message) and every later push is
 /// skipped, so a headless launch never pays a throwing WinRT call per snapshot.</para>

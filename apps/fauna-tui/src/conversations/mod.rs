@@ -37,8 +37,9 @@ use fauna_client_mail_settings::MailSettingsMachine;
 use fauna_conversations::SortOrder;
 use fauna_conversations::room::RoomSearchStatus;
 use fauna_conversations::{
-    ConversationsManager, ConversationsSnapshot, MessageId, Rail, RecipientPickerState, SendState,
-    SnapshotObserver, ThreadId, TypedAddress, next_sort_order,
+    ConversationsManager, ConversationsSnapshot, MessageId, NewThreadControl, Rail,
+    RecipientPickerState, SendState, SnapshotObserver, ThreadControl, ThreadId, TypedAddress,
+    next_sort_order,
 };
 use fauna_core::identity::ActorId;
 use fauna_core::obligation::RenderVerdict;
@@ -1268,6 +1269,43 @@ pub fn open_room_search_hit(
     }
 }
 
+/// Whether `control` is possible on the open thread now — the same
+/// `ThreadCapabilities::possibility` answer the paint declared, asked again by
+/// the handler (`ui/README.md` § Offer only what is possible, rule 6). `false`
+/// with no thread open.
+fn open_thread_control(
+    app: &App,
+    manager: &fauna_conversations::ConversationsManager,
+    control: ThreadControl,
+) -> bool {
+    let Mode::Detail(thread_id) = &app.conversations.mode else {
+        return false;
+    };
+    manager
+        .thread_detail(thread_id.clone())
+        .is_some_and(|detail| {
+            let my_role = detail.room.as_ref().and_then(|room| room.my_role);
+            detail
+                .capabilities
+                .possibility(control, my_role)
+                .is_possible()
+        })
+}
+
+/// Whether `control` is possible in the open new-thread composer — the same
+/// `new_thread_possibility` answer the paint declared, asked again by the
+/// handler (rule 6). A refusal is said on `error-message` with the reason the
+/// paint showed, never dropped (rule 7).
+fn new_thread_control(
+    app: &mut App,
+    compose: Option<&fauna_conversations::compose::ComposeState>,
+    control: NewThreadControl,
+) -> bool {
+    let answer = fauna_conversations::new_thread_possibility(compose, control);
+    !app.errors
+        .refuse(crate::pages::Page::Conversations, &answer)
+}
+
 pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     let manager = app.conversations.manager.clone()?;
     match action {
@@ -1370,13 +1408,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // (Some("") reveals the input, None hides it); a selected thread rides
             // `toggle_topic(thread_id)`.
             match &app.conversations.mode {
-                Mode::Detail(thread_id) => manager.toggle_topic(thread_id.clone()),
+                Mode::Detail(thread_id) => {
+                    if open_thread_control(app, &manager, ThreadControl::Subject) {
+                        manager.toggle_topic(thread_id.clone());
+                    }
+                }
                 _ => {
-                    let showing = manager
-                        .snapshot()
-                        .new_thread_compose
-                        .and_then(|c| c.subject_draft)
-                        .is_some();
+                    let compose = manager.snapshot().new_thread_compose;
+                    if !new_thread_control(app, compose.as_ref(), NewThreadControl::Topic) {
+                        return None;
+                    }
+                    let showing = compose.and_then(|c| c.subject_draft).is_some();
                     manager.set_new_thread_subject((!showing).then(String::new));
                 }
             }
@@ -1410,7 +1452,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
 
         // ── the conversation_detail overlays ──
         Action::OpenAddParticipant => {
-            if let Mode::Detail(thread_id) = &app.conversations.mode {
+            // The same answer the paint declared: no picker opens for a
+            // viewer the control is absent for.
+            let may_invite = open_thread_control(app, &manager, ThreadControl::Invite);
+            if let Mode::Detail(thread_id) = &app.conversations.mode
+                && may_invite
+            {
                 manager.open_add_participant(thread_id.clone());
             }
             None
@@ -1511,14 +1558,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::ToggleRoomLabeler { labeler } => {
-            let Mode::Detail(thread_id) = &app.conversations.mode else {
-                return None;
-            };
-            // A greyed control must not act, whoever raced it: the draft's own
-            // bound covers a full set, the capability is this app's term.
-            let may_set = manager
-                .thread_detail(thread_id.clone())
-                .is_some_and(|d| d.capabilities.can_set_policy);
+            // A control that is not offered must not act, whoever raced it:
+            // the draft's own bound covers a full set, the role is the shared
+            // answer the paint declared.
+            let may_set = open_thread_control(app, &manager, ThreadControl::SetPolicy);
             if may_set && let Some(draft) = app.conversations.room_settings.as_mut() {
                 draft.toggle_labeler(&labeler);
             }
@@ -1543,13 +1586,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::SetRoomJoinRule(token) => {
-            if let Some(draft) = app.conversations.room_settings.as_mut() {
+            let may_set = open_thread_control(app, &manager, ThreadControl::SetPolicy);
+            if may_set && let Some(draft) = app.conversations.room_settings.as_mut() {
                 draft.set_join_rule_token(&token);
             }
             None
         }
         Action::SetRoomHistoryPolicy(token) => {
-            if let Some(draft) = app.conversations.room_settings.as_mut() {
+            let may_set = open_thread_control(app, &manager, ThreadControl::SetPolicy);
+            if may_set && let Some(draft) = app.conversations.room_settings.as_mut() {
                 draft.set_history_policy_token(&token);
             }
             None
@@ -1564,7 +1609,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 return None;
             };
             let participants = manager.thread_detail(thread_id.clone())?.participants;
-            if let Some(draft) = app.conversations.room_settings.as_mut() {
+            let may = open_thread_control(app, &manager, ThreadControl::AppointAdmins);
+            if may && let Some(draft) = app.conversations.room_settings.as_mut() {
                 draft.toggle_admin(index, &participants);
             }
             None
@@ -1574,29 +1620,26 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 return None;
             };
             let participants = manager.thread_detail(thread_id.clone())?.participants;
-            if let Some(draft) = app.conversations.room_settings.as_mut() {
+            let may = open_thread_control(app, &manager, ThreadControl::TransferOwnership);
+            if may && let Some(draft) = app.conversations.room_settings.as_mut() {
                 draft.toggle_transfer(index, &participants);
             }
             None
         }
         Action::ToggleRoomNestRead => {
-            if let Some(draft) = app.conversations.room_settings.as_mut() {
+            let may_set = open_thread_control(app, &manager, ThreadControl::SetPolicy);
+            if may_set && let Some(draft) = app.conversations.room_settings.as_mut() {
                 draft.toggle_nest_read();
             }
             None
         }
         Action::StartRoomLeave => {
             // Local, and only while the editor is open — the control is painted
-            // inside it. Gated on the capability as well as on the paint: the
-            // button is greyed for the owner, and a greyed control must not be
+            // inside it. Gated on the same answer as the paint: the button is
+            // blocked for the owner, and a blocked control must not be
             // openable by a driver or by a gesture raced against a snapshot
             // that has since named this seat the owner.
-            let Mode::Detail(thread_id) = &app.conversations.mode else {
-                return None;
-            };
-            let may_leave = manager
-                .thread_detail(thread_id.clone())
-                .is_some_and(|d| d.capabilities.can_leave_room);
+            let may_leave = open_thread_control(app, &manager, ThreadControl::LeaveRoom);
             if app.conversations.room_settings.is_some() && may_leave {
                 app.conversations.room_leave_confirm = true;
             }
@@ -1616,14 +1659,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::StartRoomRemove => {
             // The walk-out's shape: only from inside the open editor, and
-            // gated on the capability as well as on the paint, so a driver
-            // cannot open a confirm the greyed control would not.
-            let Mode::Detail(thread_id) = &app.conversations.mode else {
-                return None;
-            };
-            let may_remove = manager
-                .thread_detail(thread_id.clone())
-                .is_some_and(|d| d.capabilities.supports_local_remove);
+            // gated on the same answer as the paint, so a driver cannot open
+            // a confirm the absent control would not.
+            let may_remove = open_thread_control(app, &manager, ThreadControl::LocalRemove);
             if app.conversations.room_settings.is_some() && may_remove {
                 app.conversations.room_remove_confirm = true;
             }
@@ -1750,6 +1788,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::CommitAttachment => {
             let path = app.conversations.attach_path_draft.trim().to_string();
             if path.is_empty() {
+                return None;
+            }
+            if !matches!(app.conversations.mode, Mode::Detail(_))
+                && !new_thread_control(
+                    app,
+                    manager.snapshot().new_thread_compose.as_ref(),
+                    NewThreadControl::Attach,
+                )
+            {
                 return None;
             }
             // Read now, not at send: the composer must show the chip immediately
@@ -2138,7 +2185,10 @@ pub enum Outcome {
     /// A new-thread send returned — sent, refused, or not attempted at all (no
     /// recipient). Whichever: the page follows the manager, which is what
     /// decides whether a thread now holds the draft ([`apply_outcome`]).
-    NewThreadSent,
+    /// Carries the error's user detail when the send returned one, so a
+    /// failure the manager did not stamp on a draft still reaches
+    /// `error-message` (`ui/README.md` § Offer only what is possible, rule 7).
+    NewThreadSent(Option<String>),
     /// The room policy editor's Save ran: `true` when every staged commit
     /// landed (the editor closes), `false` when one was refused (it stays
     /// open, the refusal already on the page's `error-message`).
@@ -2170,9 +2220,10 @@ pub enum Outcome {
     /// the point: the store's merge is what decides what is still open (a peer
     /// device may have answered someone else in the same window), so dropping
     /// the pressed row locally would be this app guessing at a merge it does not
-    /// run. `None` when the write or the re-read failed — the marks then stay as
-    /// they were, which over-asks rather than hiding a flagged person.
-    MemberReviews(Option<Vec<fauna_core::data::MemberReview>>),
+    /// run. `Err` (the failure's text) when the write or the re-read failed — the
+    /// marks then stay as they were, which over-asks rather than hiding a
+    /// flagged person, and the page says the Keep did not land.
+    MemberReviews(Result<Vec<fauna_core::data::MemberReview>, String>),
 }
 
 impl Op {
@@ -2180,13 +2231,17 @@ impl Op {
         match self {
             // `send_new_thread` first flushes a typed-but-uncommitted recipient
             // (the manager's own contract), so Send never silently drops a pending
-            // recipient. On failure it has already stamped `send_state = Failed`
-            // before returning, so the Err is dropped here — `apply_outcome`
-            // lands the page on the thread and resyncs `error-message` from
-            // that stamp via `sync_page_error`.
+            // recipient, and refuses — stamped on the draft's `send_state` — when
+            // there is no one to send to. The error is carried back, never
+            // dropped: `apply_outcome` resyncs `error-message` from the stamp and
+            // falls back to this detail for a failure no draft carries.
             Op::SendNewThread { manager } => {
-                let _ = manager.send_new_thread().await;
-                Outcome::NewThreadSent
+                let error = manager
+                    .send_new_thread()
+                    .await
+                    .err()
+                    .map(|e| e.user_detail());
+                Outcome::NewThreadSent(error)
             }
             Op::AcceptRecipientChip { manager } => {
                 manager.resolve_recipient().await;
@@ -2234,7 +2289,8 @@ impl Op {
             // it has no manager snapshot to repaint from — the roster is re-read
             // and carried back instead. A failed write and a failed re-read are
             // deliberately the same outcome: both leave the mark standing, which
-            // is the over-ask direction § Propagation blesses.
+            // is the over-ask direction § Propagation blesses — and both say so on
+            // `error-message`, so a Keep never silently does nothing.
             Op::KeepMember { store, person } => {
                 let refreshed = match fauna_client_config::decide_member_review(
                     store.as_ref(),
@@ -2245,13 +2301,13 @@ impl Op {
                 {
                     Ok(_) => fauna_client_config::load_member_reviews(store.as_ref())
                         .await
-                        .inspect_err(|e| {
-                            tracing::warn!(error = %e, "re-reading the review roster after Keep failed")
-                        })
-                        .ok(),
+                        .map_err(|e| {
+                            tracing::warn!(error = %e, "re-reading the review roster after Keep failed");
+                            e.to_string()
+                        }),
                     Err(e) => {
                         tracing::warn!(error = %e, "recording Keep on a member review failed");
-                        None
+                        Err(e.to_string())
                     }
                 };
                 Outcome::MemberReviews(refreshed)
@@ -2556,7 +2612,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // slot really moved — a send that never started (no recipient) leaves
         // the draft where it is, and a user who navigated away mid-send is not
         // yanked back.
-        Outcome::NewThreadSent => {
+        Outcome::NewThreadSent(error) => {
             if app.conversations.mode == Mode::Compose
                 && let Some(snapshot) = app.conversations.snapshot()
                 && snapshot.new_thread_compose.is_none()
@@ -2565,6 +2621,16 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 show_detail(&mut app.conversations, thread_id);
             }
             sync_page_error(app);
+            // A failure the manager stamped is already on the page; one it did
+            // not (no draft to carry it) is shown from the returned detail.
+            if let Some(detail) = error
+                && app.errors.get(&crate::pages::Page::Conversations).is_none()
+            {
+                app.errors.insert(
+                    crate::pages::Page::Conversations,
+                    conversations::unified::error_send(&detail),
+                );
+            }
         }
         // The accepted room opens where the user is: the manager selected its
         // thread, so the page follows it into the detail view — the room reads
@@ -2627,11 +2693,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // reads the same field — so it lands on `App` and both surfaces drop
         // the person in the same frame. `None` leaves it untouched: a failed
         // Keep must not blank a mark that is still genuinely open.
-        Outcome::MemberReviews(refreshed) => {
-            if let Some(roster) = refreshed {
-                app.member_reviews = roster;
+        Outcome::MemberReviews(refreshed) => match refreshed {
+            Ok(roster) => app.member_reviews = roster,
+            Err(reason) => {
+                app.errors.insert(
+                    crate::pages::Page::Conversations,
+                    fauna_i18n::strings::settings::recovery_kit::review_keep_failed(&reason),
+                );
             }
-        }
+        },
     }
 }
 
@@ -3136,20 +3206,27 @@ fn compose_elements(snapshot: &ConversationsSnapshot) -> Vec<Element> {
     );
     out.extend(markdown_toolbar());
     // `attachment-button` + one chip pair per staged attachment
-    // (`add_new_thread_attachment` routes here — `Mode` is Compose).
-    // No rail is resolved until a recipient is, so the new-thread composer paints
-    // the control enabled (the same "enabled by default until caps resolve" rule
-    // the markdown toolbar follows here).
-    out.extend(attachment_elements(
+    // (`add_new_thread_attachment` routes here — `Mode` is Compose). Attach and
+    // topic follow the rail the recipient decides, so they paint from the shared
+    // answer (`fauna_conversations::new_thread_controls`): live for a draft not
+    // yet addressed, then as the recipient's rail allows, blocked with its
+    // reason. The seam folds the declaration; the handler asks it again.
+    let answer = |control| fauna_conversations::new_thread_possibility(compose, control);
+    let mut attach = attachment_elements(
         compose.map(|c| c.attachments.as_slice()).unwrap_or(&[]),
         true,
-    ));
-    out.push(Element::gesture_button(
-        ids::TOPIC_TOGGLE_BUTTON,
-        conversations::unified::TOPIC_TOGGLE_ADD,
-        true,
-        Gesture::Conversations(Action::ToggleTopic),
-    ));
+    );
+    attach[0].possibility = Some(answer(NewThreadControl::Attach));
+    out.extend(attach);
+    out.push(
+        Element::gesture_button(
+            ids::TOPIC_TOGGLE_BUTTON,
+            conversations::unified::TOPIC_TOGGLE_ADD,
+            true,
+            Gesture::Conversations(Action::ToggleTopic),
+        )
+        .possible(answer(NewThreadControl::Topic)),
+    );
     out.extend(list_send_elements(
         compose.and_then(|c| c.list_send.as_ref()),
     ));
@@ -3160,12 +3237,18 @@ fn compose_elements(snapshot: &ConversationsSnapshot) -> Vec<Element> {
     let rail = picker
         .and_then(|p| p.chips.first())
         .and_then(TypedAddress::rail);
-    out.push(Element::gesture_button(
-        ids::DM_SEND_BUTTON,
-        common::SEND,
-        !sending,
-        Gesture::Conversations(Action::SendNewThread { rail, founds_room }),
-    ));
+    // Send is possible once there is anyone to send to — a committed chip, or
+    // typed text the manager's send flushes into one — and blocked with its
+    // reason otherwise; the manager asks the same predicate and stamps a refusal.
+    out.push(
+        Element::gesture_button(
+            ids::DM_SEND_BUTTON,
+            common::SEND,
+            !sending,
+            Gesture::Conversations(Action::SendNewThread { rail, founds_room }),
+        )
+        .possible(answer(NewThreadControl::Send)),
+    );
     out.push(Element::gesture_button(
         ids::NEW_CONVERSATION_CANCEL,
         common::CANCEL,
@@ -3244,17 +3327,19 @@ use fauna_conversations::{history_policy_label, join_rule_label, member_chip_tex
 /// ui.yaml `conversations.sub_pages.room_settings` — the policy editor,
 /// replacing the read view like the rename overlay. Two token pickers
 /// (localized labels ride `display_value`), one admin switch and one
-/// hand-over control per participant (each greyed unless the viewer holds
-/// the owner-only capability behind it, and never live on the owner's own
-/// row), a community room's labeler set over the labeler catalog (with that
-/// catalog's inspect view painted in place), Save, and the walk-out.
+/// hand-over control per participant (never live on the owner's own row), a
+/// community room's labeler set over the labeler catalog (with that catalog's
+/// inspect view painted in place), Save, and the walk-out.
 ///
-/// **Any member of a room opens this** (user-approved 2026-09-20) — the
-/// walk-out is a plain member's verb, so gating the door on `can_set_policy`
-/// hid the one control a member needs behind the one capability a member
-/// never has. A member therefore reads this surface with every policy
-/// control greyed and only `room-leave-button` live. Esc cancels
-/// (`cancel_detail_overlay`).
+/// **Every role- or rail-gated control declares its shared answer**
+/// (`ThreadCapabilities::possibility`, `ui/conversations.md` § Errors & edge
+/// cases → *Controls this person can never use*): the seam in
+/// `App::page_elements` drops what is absent and disables what is blocked,
+/// painting its reason. **Any member of a room opens this** (user-approved
+/// 2026-09-20) — the walk-out is a plain member's verb. A member therefore
+/// reads the room's settings as plain lines, with no policy control, no
+/// per-participant control and no Save, and `room-leave-button` live. Esc
+/// cancels (`cancel_detail_overlay`).
 fn room_settings_elements(
     detail: &fauna_conversations::ThreadDetail,
     draft: &RoomSettingsDraft,
@@ -3276,32 +3361,51 @@ fn room_settings_elements(
         return out;
     }
     use fauna_conversations::{HistoryPolicy, JoinRule};
-    let mut out = vec![
-        Element::chrome(conversations::unified::ROOM_JOIN_RULE_LABEL),
-        Element::select(
-            ids::ROOM_JOIN_RULE_SELECT,
-            draft.join_rule.token(),
-            SelectTarget::RoomJoinRule,
-            JoinRule::EDITOR_CHOICES
-                .iter()
-                .map(|rule| rule.token().to_string())
-                .collect(),
-        )
-        .display_value(join_rule_label(draft.join_rule))
-        .enabled(detail.capabilities.can_set_policy),
-        Element::chrome(conversations::unified::ROOM_HISTORY_POLICY_LABEL),
-        Element::select(
-            ids::ROOM_HISTORY_POLICY_SELECT,
-            draft.history_policy.token(),
-            SelectTarget::RoomHistoryPolicy,
-            HistoryPolicy::EDITOR_CHOICES
-                .iter()
-                .map(|policy| policy.token().to_string())
-                .collect(),
-        )
-        .display_value(history_policy_label(draft.history_policy))
-        .enabled(detail.capabilities.can_set_policy),
-    ];
+    let my_role = detail.room.as_ref().and_then(|room| room.my_role);
+    let answer = |control| detail.capabilities.possibility(control, my_role);
+    let set_policy = answer(ThreadControl::SetPolicy);
+    let appoint = answer(ThreadControl::AppointAdmins);
+    let transfer = answer(ThreadControl::TransferOwnership);
+    // A viewer who can never edit the policy reads it: the two values as
+    // plain lines where the pickers would sit.
+    let mut out = if set_policy.is_shown() {
+        vec![
+            Element::chrome(conversations::unified::ROOM_JOIN_RULE_LABEL),
+            Element::select(
+                ids::ROOM_JOIN_RULE_SELECT,
+                draft.join_rule.token(),
+                SelectTarget::RoomJoinRule,
+                JoinRule::EDITOR_CHOICES
+                    .iter()
+                    .map(|rule| rule.token().to_string())
+                    .collect(),
+            )
+            .display_value(join_rule_label(draft.join_rule))
+            .possible(set_policy.clone()),
+            Element::chrome(conversations::unified::ROOM_HISTORY_POLICY_LABEL),
+            Element::select(
+                ids::ROOM_HISTORY_POLICY_SELECT,
+                draft.history_policy.token(),
+                SelectTarget::RoomHistoryPolicy,
+                HistoryPolicy::EDITOR_CHOICES
+                    .iter()
+                    .map(|policy| policy.token().to_string())
+                    .collect(),
+            )
+            .display_value(history_policy_label(draft.history_policy))
+            .possible(set_policy.clone()),
+        ]
+    } else {
+        vec![
+            Element::chrome(conversations::unified::ROOM_JOIN_RULE_LABEL),
+            Element::chrome(join_rule_label(draft.join_rule)),
+            Element::chrome(conversations::unified::ROOM_HISTORY_POLICY_LABEL),
+            Element::chrome(history_policy_label(draft.history_policy)),
+        ]
+    };
+    // Each per-participant list keeps one row per participant — the owner's
+    // own row painted dead — so `[i]` stays the chip's index; a whole list is
+    // absent for a viewer without the role behind it.
     for (i, display) in detail.participant_displays.iter().enumerate() {
         // Resolved through the draft's identity column, never indexed into
         // its vectors: `i` is a live-list index and those vectors are seeded
@@ -3312,7 +3416,7 @@ fn room_settings_elements(
         let staged = draft.admin_at(i, &detail.participants);
         // Which rows either control may act on at all is the shared draft's
         // call (`RoomSettingsDraft::eligible`: a Fauna member who is not the
-        // owner); each app adds only its own capability term.
+        // owner); the role term is the declared answer.
         let eligible = draft.is_eligible(i, &detail.participants);
         let mark = if staged {
             conversations::unified::ROOM_ADMIN_YES
@@ -3323,10 +3427,11 @@ fn room_settings_elements(
             Element::gesture_button(
                 ids::ROOM_ADMIN_TOGGLE,
                 format!("{display} · {mark}"),
-                detail.capabilities.can_appoint_admins && eligible,
+                eligible,
                 Gesture::Conversations(Action::ToggleRoomAdmin { index: i }),
             )
-            .attr("checked", if staged { "true" } else { "false" }),
+            .attr("checked", if staged { "true" } else { "false" })
+            .possible(appoint.clone()),
         );
         // The hand-over control beside the same name: owner only, never on
         // the owner's own row, at most one row staged.
@@ -3340,28 +3445,34 @@ fn room_settings_elements(
             Element::gesture_button(
                 ids::ROOM_OWNER_TRANSFER_BUTTON,
                 format!("{display} · {transfer_mark}"),
-                detail.capabilities.can_transfer_ownership && eligible,
+                eligible,
                 Gesture::Conversations(Action::ToggleRoomOwnerTransfer { index: i }),
             )
-            .attr("checked", if staged_owner { "true" } else { "false" }),
+            .attr("checked", if staged_owner { "true" } else { "false" })
+            .possible(transfer.clone()),
         );
     }
     // The home nest's read, only where there is one to stage: a community
     // room whose answer this device has read (`RoomSettingsDraft::nest_read`).
+    // A viewer who can never stage it reads the same sentence as a line.
     if let Some(reads) = draft.nest_read {
-        out.push(
+        let text = if reads {
+            conversations::unified::ROOM_NEST_READ_YES
+        } else {
+            conversations::unified::ROOM_NEST_READ_NO
+        };
+        out.push(if set_policy.is_shown() {
             Element::gesture_button(
                 ids::ROOM_NEST_READ_TOGGLE,
-                if reads {
-                    conversations::unified::ROOM_NEST_READ_YES
-                } else {
-                    conversations::unified::ROOM_NEST_READ_NO
-                },
-                detail.capabilities.can_set_policy,
+                text,
+                true,
                 Gesture::Conversations(Action::ToggleRoomNestRead),
             )
-            .attr("checked", if reads { "true" } else { "false" }),
-        );
+            .attr("checked", if reads { "true" } else { "false" })
+            .possible(set_policy.clone())
+        } else {
+            Element::chrome(text)
+        });
     }
     // What stands pending on the room, only once the home nest has served
     // this viewer a list and only while it is not empty: the section is
@@ -3396,14 +3507,17 @@ fn room_settings_elements(
         }
     }
     out.extend(room_labeler_elements(detail, draft, catalog));
-    // Greyed for a member, who opens this surface to read it and to leave:
+    // Absent for a member, who opens this surface to read it and to leave:
     // every staged edit behind it is owner-or-admin work.
-    out.push(Element::gesture_button(
-        ids::ROOM_SETTINGS_SAVE_BUTTON,
-        common::SAVE,
-        detail.capabilities.can_set_policy,
-        Gesture::Conversations(Action::SaveRoomSettings),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::ROOM_SETTINGS_SAVE_BUTTON,
+            common::SAVE,
+            true,
+            Gesture::Conversations(Action::SaveRoomSettings),
+        )
+        .possible(set_policy),
+    );
     out.extend(room_departure_elements(
         detail,
         leave_confirm,
@@ -3413,43 +3527,62 @@ fn room_settings_elements(
 }
 
 /// The editor's two immediate acts, below Save and outside the staged set:
-/// the walk-out and the local remove. Leaving is greyed — never hidden — for
-/// the owner, who hands the room over first; the remove is greyed unless
-/// `capabilities.supports_local_remove` (§ Architectural rules 5;
-/// `bridged-adapter.md` § Removing bridged rows, rule 6).
+/// the walk-out and the local remove, each declaring its shared answer
+/// (`ThreadCapabilities::possibility`). Leaving is blocked for the owner —
+/// shown disabled with the hand-over as its reason, the hand-over control
+/// standing above it in this editor; the remove is absent off a bridged rail
+/// (`bridged-adapter.md` § Removing bridged rows, rule 6).
 fn room_departure_elements(
     detail: &fauna_conversations::ThreadDetail,
     leave_confirm: bool,
     remove_confirm: bool,
 ) -> Vec<Element> {
-    let mut out = vec![Element::gesture_button(
-        ids::ROOM_LEAVE_BUTTON,
-        conversations::unified::ROOM_LEAVE,
-        detail.capabilities.can_leave_room,
-        Gesture::Conversations(Action::StartRoomLeave),
-    )];
+    let my_role = detail.room.as_ref().and_then(|room| room.my_role);
+    let leave = detail
+        .capabilities
+        .possibility(ThreadControl::LeaveRoom, my_role);
+    let remove = detail
+        .capabilities
+        .possibility(ThreadControl::LocalRemove, my_role);
+    let mut out = vec![
+        Element::gesture_button(
+            ids::ROOM_LEAVE_BUTTON,
+            conversations::unified::ROOM_LEAVE,
+            true,
+            Gesture::Conversations(Action::StartRoomLeave),
+        )
+        .possible(leave.clone()),
+    ];
     if leave_confirm {
-        out.push(Element::gesture_button(
-            ids::ROOM_LEAVE_CONFIRM,
-            common::LEAVE,
-            detail.capabilities.can_leave_room,
-            Gesture::Conversations(Action::ConfirmRoomLeave),
-        ));
+        out.push(
+            Element::gesture_button(
+                ids::ROOM_LEAVE_CONFIRM,
+                common::LEAVE,
+                true,
+                Gesture::Conversations(Action::ConfirmRoomLeave),
+            )
+            .possible(leave),
+        );
     }
-    let may_remove = detail.capabilities.supports_local_remove;
-    out.push(Element::gesture_button(
-        ids::ROOM_REMOVE_BUTTON,
-        conversations::unified::ROOM_REMOVE,
-        may_remove,
-        Gesture::Conversations(Action::StartRoomRemove),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::ROOM_REMOVE_BUTTON,
+            conversations::unified::ROOM_REMOVE,
+            true,
+            Gesture::Conversations(Action::StartRoomRemove),
+        )
+        .possible(remove.clone()),
+    );
     if remove_confirm {
-        out.push(Element::gesture_button(
-            ids::ROOM_REMOVE_CONFIRM,
-            conversations::unified::ROOM_REMOVE_CONFIRM,
-            may_remove,
-            Gesture::Conversations(Action::ConfirmRoomRemove),
-        ));
+        out.push(
+            Element::gesture_button(
+                ids::ROOM_REMOVE_CONFIRM,
+                conversations::unified::ROOM_REMOVE_CONFIRM,
+                true,
+                Gesture::Conversations(Action::ConfirmRoomRemove),
+            )
+            .possible(remove),
+        );
     }
     out
 }
@@ -3478,6 +3611,10 @@ fn room_labeler_elements(
         return out;
     }
     out.push(Element::chrome(conversations::unified::ROOM_LABELERS_LABEL));
+    let my_role = detail.room.as_ref().and_then(|room| room.my_role);
+    let set_policy = detail
+        .capabilities
+        .possibility(ThreadControl::SetPolicy, my_role);
     for (index, entry) in catalog.entries().iter().enumerate() {
         if !fauna_conversations::room_may_name_labeler_kind(entry.artifact_kind.clone()) {
             continue;
@@ -3491,17 +3628,22 @@ fn room_labeler_elements(
         // The kind and a prefix of the id: the catalog row carries no name,
         // and the full id sits one gesture away in the inspect view.
         let short_id: String = entry.labeler_id.chars().take(16).collect();
-        out.push(
+        let text = format!("{} · {short_id}… · {mark}", entry.artifact_kind);
+        // A viewer who can never stage the set reads each row as a line.
+        out.push(if set_policy.is_shown() {
             Element::gesture_button(
                 ids::ROOM_LABELER_TOGGLE,
-                format!("{} · {short_id}… · {mark}", entry.artifact_kind),
-                detail.capabilities.can_set_policy && draft.labeler_toggle_live(&entry.labeler_id),
+                text,
+                draft.labeler_toggle_live(&entry.labeler_id),
                 Gesture::Conversations(Action::ToggleRoomLabeler {
                     labeler: entry.labeler_id.clone(),
                 }),
             )
-            .attr("checked", if staged { "true" } else { "false" }),
-        );
+            .attr("checked", if staged { "true" } else { "false" })
+            .possible(set_policy.clone())
+        } else {
+            Element::chrome(text)
+        });
         // Inspecting is a read any member may make.
         out.push(Element::gesture_button(
             ids::ROOM_LABELER_INSPECT_BUTTON,
@@ -3751,19 +3893,22 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
             ));
         }
     }
-    // The "+ add participant" affordance is painted whenever the rail's
-    // membership is mutable and GREYED when the viewer's role in a governed
-    // room may not invite (`capabilities.can_invite`, the roles table applied
-    // in shared Rust — `conversations.md` § Architectural rules 5: never a
-    // role branch here).
-    if detail.capabilities.supports_membership_change {
-        out.push(Element::gesture_button(
+    // The "+ add participant" affordance is painted only where the viewer may
+    // add someone: the rail's membership is mutable AND the viewer's role in a
+    // governed room may invite (`ThreadControl::Invite`, the roles table
+    // applied in shared Rust — `conversations.md` § Architectural rules 5:
+    // never a role branch here).
+    let my_role = detail.room.as_ref().and_then(|room| room.my_role);
+    let control = |control| detail.capabilities.possibility(control, my_role);
+    out.push(
+        Element::gesture_button(
             ids::THREAD_ADD_PARTICIPANT_BUTTON,
             conversations::unified::THREAD_ADD_PARTICIPANT,
-            detail.capabilities.can_invite,
+            true,
             Gesture::Conversations(Action::OpenAddParticipant),
-        ));
-    }
+        )
+        .possible(control(ThreadControl::Invite)),
+    );
     if detail.capabilities.supports_rename {
         out.push(Element::gesture_button(
             ids::THREAD_RENAME_BUTTON,
@@ -3783,11 +3928,14 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
     //
     // A governed room marks the owner and admins on their chips and carries
     // the role as the chip's `role` attribute (`conversation-rooms.md`
-    // § Roles and authorization — "roles on member chips"); the tap is
-    // greyed when the viewer may not remove (`capabilities.can_remove_members`).
+    // § Roles and authorization — "roles on member chips"). The tap exists
+    // only for a viewer who may remove (`ThreadControl::RemoveMember`);
+    // anyone else reads the chips as the roster, inert, as a mail thread's
+    // are (the chip is the roster, so it is never itself absent).
     // `room.members` is index-parallel with `participants`, exactly as
     // `participant_displays` is.
     if detail.capabilities.supports_membership_change {
+        let may_remove = control(ThreadControl::RemoveMember).is_shown();
         for (i, (display, addr)) in detail
             .participant_displays
             .iter()
@@ -3799,12 +3947,17 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
                 .as_ref()
                 .and_then(|room| room.members.get(i))
                 .and_then(|member| member.role);
-            let mut chip = Element::gesture_button(
-                ids::THREAD_MEMBER_CHIP,
-                member_chip_text(display, role),
-                detail.capabilities.can_remove_members,
-                Gesture::Conversations(Action::RemoveMember { addr: addr.clone() }),
-            );
+            let text = member_chip_text(display, role);
+            let mut chip = if may_remove {
+                Element::gesture_button(
+                    ids::THREAD_MEMBER_CHIP,
+                    text,
+                    true,
+                    Gesture::Conversations(Action::RemoveMember { addr: addr.clone() }),
+                )
+            } else {
+                Element::label(ids::THREAD_MEMBER_CHIP, text)
+            };
             if let Some(role) = role {
                 chip = chip.attr("role", role_attr(role));
             }
@@ -4688,7 +4841,8 @@ fn reply_compose_bar(
             Field::Conversations(ConversationsField::ComposeBody),
         )
         .labelled(conversations::compose::WRITE_MESSAGE)
-        .enabled(caps.can_send),
+        .enabled(caps.send_possibility().is_possible())
+        .possible(caps.send_possibility()),
     );
     // The reply bar carries the same attach control + chip row as the new-thread
     // composer (ui.yaml declares the ids on both); `Mode::Detail` routes the commit
@@ -4703,16 +4857,16 @@ fn reply_compose_bar(
     // `conversations.sub_pages.conversation_detail`. tui had never painted it here,
     // which made `test_capability_gating.py`'s Detail-mode assertions pass
     // **vacuously** (`get_attr` on an absent id answers `None`, and `None` satisfies
-    // `in ("false", None)`). Gated on `supports_subject` the way the attach control
-    // gates on `supports_attachments`.
+    // `in ("false", None)`). Absent where the rail has no subject
+    // (`ThreadControl::Subject`): a rail absence, never a disabled control.
     out.push(
         Element::gesture_button(
             ids::TOPIC_TOGGLE_BUTTON,
             conversations::unified::TOPIC_TOGGLE_ADD,
-            caps.supports_subject,
+            true,
             Gesture::Conversations(Action::ToggleTopic),
         )
-        .enabled(caps.supports_subject),
+        .possible(caps.possibility(ThreadControl::Subject, None)),
     );
     if let Some(subject) = compose.subject_draft.clone() {
         out.push(
@@ -4726,12 +4880,15 @@ fn reply_compose_bar(
     }
     out.extend(list_send_elements(compose.list_send.as_ref()));
     let sending = matches!(compose.send_state, SendState::Sending);
-    out.push(Element::gesture_button(
-        ids::DM_SEND_BUTTON,
-        common::SEND,
-        !sending && caps.can_send,
-        Gesture::Conversations(Action::SendThread { rail }),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::DM_SEND_BUTTON,
+            common::SEND,
+            !sending && caps.send_possibility().is_possible(),
+            Gesture::Conversations(Action::SendThread { rail }),
+        )
+        .possible(caps.send_possibility()),
+    );
     out
 }
 
@@ -5485,8 +5642,20 @@ mod tests {
         app
     }
 
-    fn ids(app: &App) -> BTreeSet<String> {
+    /// The page's elements as the frame paints them: [`elements`] minus every
+    /// one whose declared answer is absent — the half of the seam in
+    /// `App::page_elements` that decides what is painted at all (the offline
+    /// half, which only disables, is left out so `enabled` reads the page's
+    /// own answer).
+    fn painted(app: &App) -> Vec<Element> {
         elements(app)
+            .into_iter()
+            .filter(|e| e.possibility.as_ref().is_none_or(|p| p.is_shown()))
+            .collect()
+    }
+
+    fn ids(app: &App) -> BTreeSet<String> {
+        painted(app)
             .into_iter()
             .map(|e| e.id)
             .filter(|id| !id.is_empty()) // chrome
@@ -6268,17 +6437,20 @@ mod tests {
                 vec![expect_enabled],
                 "{rail}: attachment-button must paint exactly once, enabled={expect_enabled}"
             );
-            // Same gate on the topic toggle, which tui had never painted in Detail at
-            // all — the absence is what made this suite's Detail assertions vacuous.
-            let topic: Vec<bool> = elements(&app)
+            // The topic toggle is a rail absence where the rail has no subject
+            // (`ThreadControl::Subject`): painted, enabled, exactly once where it
+            // has one, and not painted at all where it never can — read off the
+            // seamed list, which is what the frame shows.
+            let topic: Vec<bool> = app
+                .page_elements()
                 .into_iter()
                 .filter(|e| e.id == "topic-toggle-button")
                 .map(|e| e.enabled)
                 .collect();
+            let expect_topic = if expect_enabled { vec![true] } else { vec![] };
             assert_eq!(
-                topic,
-                vec![expect_enabled],
-                "{rail}: topic-toggle-button must paint in the reply bar, enabled={expect_enabled}"
+                topic, expect_topic,
+                "{rail}: topic-toggle-button paints in the reply bar only where the rail has a subject"
             );
         }
     }
@@ -8708,6 +8880,8 @@ mod tests {
             glyph: fauna_core::source_glyph::SourceGlyph::Bridge,
             capabilities: fauna_conversations::ThreadCapabilities {
                 supports_membership_change: true,
+                // The chip carries the remove only for a viewer who may.
+                can_remove_members: true,
                 ..fauna_conversations::capabilities::derive_capabilities(
                     Rail::Bridged,
                     fauna_conversations::ThreadFlavor::OneToOne,
@@ -9618,13 +9792,26 @@ mod tests {
             reasons: vec![fauna_core::data::MemberUnattestedReason::CompromiseWindow],
         }];
 
-        apply_outcome(&mut app, Outcome::MemberReviews(None));
+        apply_outcome(
+            &mut app,
+            Outcome::MemberReviews(Err("store offline".into())),
+        );
         assert!(
             ids(&app).contains("thread-member-unattested-mark"),
             "a failed Keep must not clear a mark that is still genuinely open"
         );
+        assert_eq!(
+            app.errors
+                .get(&crate::pages::Page::Conversations)
+                .map(String::as_str),
+            Some(
+                fauna_i18n::strings::settings::recovery_kit::review_keep_failed("store offline")
+                    .as_str()
+            ),
+            "a failed Keep must say so on error-message, never only in the log"
+        );
 
-        apply_outcome(&mut app, Outcome::MemberReviews(Some(Vec::new())));
+        apply_outcome(&mut app, Outcome::MemberReviews(Ok(Vec::new())));
         assert!(
             !ids(&app).contains("thread-member-unattested-mark"),
             "the re-read roster is what clears it"
@@ -11334,17 +11521,37 @@ mod tests {
         };
         let (mut app, thread_id, mock) = governed_group_app(&["bob", "carol"]);
 
-        // The owner first: the control is painted and dead.
+        // The owner first: the control is blocked — painted, dead, and naming
+        // the hand-over, whose controls stand live above it (read off the
+        // seamed list, which is what the frame paints).
         assert!(apply_local(&mut app, Action::OpenRoomSettings).is_none());
-        let owner_view = elements(&app);
+        let owner_view = app.page_elements();
         let leave = owner_view
             .iter()
             .find(|e| e.id == ids::ROOM_LEAVE_BUTTON)
-            .expect("the walk-out is painted for the owner too — greyed, never hidden");
+            .expect("the walk-out is painted for the owner too — blocked, never hidden");
         assert!(
             !leave.enabled,
             "a room is never owner-less: the owner hands it over first"
         );
+        assert_eq!(
+            leave.label.as_deref(),
+            Some(fauna_i18n::strings::error::send::ROOM_OWNER_CANNOT_LEAVE),
+            "the blocked walk-out names its remedy within eyeshot"
+        );
+        let leave_at = owner_view
+            .iter()
+            .position(|e| e.id == ids::ROOM_LEAVE_BUTTON)
+            .unwrap();
+        assert!(
+            owner_view
+                .iter()
+                .take(leave_at)
+                .any(|e| e.id == ids::ROOM_OWNER_TRANSFER_BUTTON && e.enabled),
+            "the hand-over the reason names is offered, live, in the same editor"
+        );
+        crate::walk::check_enabled_means_possible(&app, "the owner's room editor")
+            .expect("I8 holds on the owner's room editor");
         assert!(
             apply_local(&mut app, Action::StartRoomLeave).is_none()
                 && !ids(&app).contains(ids::ROOM_LEAVE_CONFIRM),
@@ -11403,10 +11610,28 @@ mod tests {
             ids(&app).contains(ids::ROOM_LEAVE_CONFIRM),
             "the button opens the confirm"
         );
+        // A member has nothing to stage, so no Save and no policy control at
+        // all — the room's values are read as plain lines instead.
+        let member_ids = ids(&app);
+        for id in [
+            ids::ROOM_SETTINGS_SAVE_BUTTON,
+            ids::ROOM_JOIN_RULE_SELECT,
+            ids::ROOM_HISTORY_POLICY_SELECT,
+            ids::ROOM_ADMIN_TOGGLE,
+            ids::ROOM_OWNER_TRANSFER_BUTTON,
+        ] {
+            assert!(
+                !member_ids.contains(id),
+                "{id} is a control a plain member can never use: absent"
+            );
+        }
         assert!(
-            ids(&app).contains(ids::ROOM_SETTINGS_SAVE_BUTTON),
-            "and Save is still there — the departure is not one of its staged edits"
+            painted(&app).iter().any(|e| e.id.is_empty()
+                && e.text == fauna_conversations::join_rule_label(JoinRule::Invite)),
+            "the member reads the join rule as a line"
         );
+        crate::walk::check_enabled_means_possible(&app, "a member's room editor")
+            .expect("I8 holds on a member's room editor");
 
         let op = apply_local(&mut app, Action::ConfirmRoomLeave)
             .expect("confirming hands back the departure");
@@ -11704,10 +11929,85 @@ mod tests {
         );
     }
 
-    /// A plain member reads the set and may inspect, but every toggle is greyed
-    /// and a raced toggle stages nothing.
+    /// A plain member's thread header offers no control only a role could
+    /// give (`ThreadCapabilities::possibility`): no add-person control under
+    /// the `invite` rule, and the member chips read as the roster — inert,
+    /// still carrying the role — instead of a remove nobody can enable. The
+    /// raced gestures act on nothing.
     #[test]
-    fn a_plain_member_reads_the_labeler_set_greyed() {
+    fn a_plain_member_is_offered_no_role_gated_header_control() {
+        use fauna_conversations::{
+            HistoryPolicy, JoinRule, PrincipalKind, RoomClass, RoomMemberSnapshot,
+            RoomPolicySnapshot, RoomRole, RoomSnapshot,
+        };
+        let (mut app, thread_id, mock) = governed_group_app(&["bob", "carol"]);
+        mock.set_room(
+            thread_id,
+            RoomSnapshot {
+                class: RoomClass::EndToEnd,
+                members: vec![
+                    RoomMemberSnapshot {
+                        kind: PrincipalKind::User,
+                        role: Some(RoomRole::Owner),
+                    },
+                    RoomMemberSnapshot {
+                        kind: PrincipalKind::User,
+                        role: Some(RoomRole::Member),
+                    },
+                ],
+                policy: Some(RoomPolicySnapshot {
+                    version: 1,
+                    name: None,
+                    join_rule: JoinRule::Invite,
+                    history_policy: HistoryPolicy::None,
+                }),
+                my_role: Some(RoomRole::Member),
+                nest_read: None,
+                labelers: None,
+                awaiting_key: false,
+                severance_owed: false,
+                moderation_unverified: false,
+                bridge_disconnected: false,
+                pending_invites: None,
+                search: None,
+            },
+        );
+        assert!(
+            !ids(&app).contains(ids::THREAD_ADD_PARTICIPANT_BUTTON),
+            "under `invite` a plain member can never add: absent"
+        );
+        let chips: Vec<Element> = painted(&app)
+            .into_iter()
+            .filter(|e| e.id == ids::THREAD_MEMBER_CHIP)
+            .collect();
+        assert_eq!(chips.len(), 2, "the roster still paints, one chip a member");
+        assert!(
+            chips
+                .iter()
+                .all(|c| matches!(c.role, crate::element::Role::Label)),
+            "a plain member's chips carry no remove: {chips:?}"
+        );
+        assert!(
+            chips
+                .iter()
+                .any(|c| c.attrs.contains(&("role".to_string(), "owner".to_string()))),
+            "and still say who holds which role"
+        );
+        apply_local(&mut app, Action::OpenAddParticipant);
+        assert!(
+            app.conversations
+                .snapshot()
+                .is_some_and(|s| s.add_participant.is_none()),
+            "a raced open of the absent control opens no picker"
+        );
+        crate::walk::check_enabled_means_possible(&app, "a member's thread header")
+            .expect("I8 holds on a member's thread header");
+    }
+
+    /// A plain member reads the set and may inspect, but is offered no toggle —
+    /// each row is a plain line — and a raced toggle stages nothing.
+    #[test]
+    fn a_plain_member_reads_the_labeler_set_as_lines() {
         use fauna_conversations::{
             HistoryPolicy, JoinRule, PrincipalKind, RoomClass, RoomMemberSnapshot,
             RoomPolicySnapshot, RoomRole, RoomSnapshot,
@@ -11751,12 +12051,24 @@ mod tests {
             },
         );
         apply_local(&mut app, Action::OpenRoomSettings);
-        let painted = elements(&app);
-        let toggle = painted
-            .iter()
-            .find(|e| e.id == ids::ROOM_LABELER_TOGGLE)
-            .expect("a member reads the set");
-        assert!(!toggle.enabled, "greyed for a member");
+        let painted = painted(&app);
+        assert!(
+            !painted.iter().any(|e| e.id == ids::ROOM_LABELER_TOGGLE),
+            "a member can never stage the set: no toggle"
+        );
+        assert!(
+            painted
+                .iter()
+                .any(|e| e.id.is_empty() && e.text.starts_with("wasm · ")),
+            "a member reads the set, one line a labeler"
+        );
+        assert!(
+            !painted.iter().any(|e| e.id == ids::ROOM_NEST_READ_TOGGLE)
+                && painted.iter().any(
+                    |e| e.id.is_empty() && e.text == conversations::unified::ROOM_NEST_READ_YES
+                ),
+            "and the home nest's read as a line"
+        );
         assert!(
             painted
                 .iter()
@@ -11844,6 +12156,85 @@ mod tests {
             .into_iter()
             .find(|e| e.id == id)
             .unwrap_or_else(|| panic!("{id} is painted"))
+    }
+
+    /// The new-thread composer offers only what it can send
+    /// (`conversations.md` § Errors & edge cases): Send is blocked, with its
+    /// reason, until there is anyone to send to — a typed recipient alone is
+    /// enough (Send flushes it) — while attach and topic stay live for a draft
+    /// written before it is addressed, and then follow the recipient's rail; a
+    /// gesture on a blocked control says why on `error-message`.
+    #[test]
+    fn the_new_thread_composer_offers_send_only_with_a_recipient_and_attach_and_topic_by_rail() {
+        let mut app = conv_app(&[]);
+        apply_local(&mut app, Action::StartNewConversation);
+        let seamed = |app: &App, id: &str| {
+            app.page_elements()
+                .into_iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("{id} is painted"))
+        };
+        let send = seamed(&app, ids::DM_SEND_BUTTON);
+        assert!(!send.enabled, "Send is blocked with no recipient");
+        assert_eq!(
+            send.possibility
+                .as_ref()
+                .and_then(|p| p.reason().cloned())
+                .map(|r| r.key),
+            Some("conversations.compose.needs_recipient".to_string()),
+            "and says why"
+        );
+        for id in [ids::ATTACHMENT_BUTTON, ids::TOPIC_TOGGLE_BUTTON] {
+            assert!(
+                seamed(&app, id).enabled,
+                "{id} takes a draft not yet addressed"
+            );
+        }
+
+        let manager = app.conversations.manager.clone().unwrap();
+        manager.set_new_thread_recipient_input("someone@example.org".into());
+        assert!(
+            seamed(&app, ids::DM_SEND_BUTTON).enabled,
+            "a typed recipient makes Send possible — Send flushes it"
+        );
+
+        manager.accept_new_thread_chip(TypedAddress::Email {
+            email_address: "someone@example.org".to_string(),
+        });
+        for id in [
+            ids::DM_SEND_BUTTON,
+            ids::ATTACHMENT_BUTTON,
+            ids::TOPIC_TOGGLE_BUTTON,
+        ] {
+            assert!(
+                seamed(&app, id).enabled,
+                "{id} is possible with a mail recipient"
+            );
+        }
+
+        // A recipient whose rail carries no topic blocks the toggle, and a press
+        // says why rather than doing nothing.
+        manager.remove_recipient_chip(0);
+        manager.accept_new_thread_chip(TypedAddress::Bridged {
+            bridge_id: "bridge".to_string(),
+            address: "far".to_string(),
+        });
+        assert!(!seamed(&app, ids::TOPIC_TOGGLE_BUTTON).enabled);
+        assert!(!seamed(&app, ids::ATTACHMENT_BUTTON).enabled);
+        assert!(apply_local(&mut app, Action::ToggleTopic).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Conversations).map(String::as_str),
+            Some(conversations::compose::NO_TOPIC_HERE),
+            "a gesture on the blocked topic toggle says why"
+        );
+        assert!(
+            manager
+                .snapshot()
+                .new_thread_compose
+                .and_then(|c| c.subject_draft)
+                .is_none(),
+            "and opens nothing"
+        );
     }
 
     /// The composer paints the home-nest choice before any chip; turning it on

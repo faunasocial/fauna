@@ -94,20 +94,24 @@ struct SettingsShellView: View {
                 AtprotoSettingsView()
             case .mail:
                 MailSettingsView()
+            // The six mail sub-pages open behind the shared mail-usable gate
+            // (`MailSubpageGate`; mail-settings.md § Errors & edge cases).
             case .mailAliases:
-                MailAliasesView()
+                MailSubpageGate(.mailAliases) { MailAliasesView() }
             case .mailSpam:
-                MailSpamView()
+                MailSubpageGate(.mailSpam) { MailSpamView() }
             case .mailExport:
-                MailExportView()
+                MailSubpageGate(.mailExport) { MailExportView() }
             case .mailImport:
                 // The foreign-mailbox migration wizard (shared FaunaKit;
                 // mailbox-migration.md). Its two Done deep-links go to
                 // Conversations, where mail lives — the tui lead app's own
                 // resolution, since no "view inbox" / "skip log" RPC exists.
-                MailImportView(onNavigateToConversations: {
-                    appState.selectedSidebar = .conversations
-                })
+                MailSubpageGate(.mailImport) {
+                    MailImportView(onNavigateToConversations: {
+                        appState.selectedSidebar = .conversations
+                    })
+                }
             case .archiveImport:
                 // Import from other services (shared FaunaKit;
                 // archive-import.md § The wizard and its machine). View
@@ -118,16 +122,20 @@ struct SettingsShellView: View {
                     onNavigateToFolders: { appState.selectedSettingsPage = .folders }
                 )
             case .mailLists:
-                MailListsView(onNavigateToMembers: { listIdHex, friendlyName in
-                    appState.selectedMailListId = listIdHex
-                    appState.selectedMailListName = friendlyName
-                    appState.selectedSettingsPage = .mailListMembers
-                })
+                MailSubpageGate(.mailLists) {
+                    MailListsView(onNavigateToMembers: { listIdHex, friendlyName in
+                        appState.selectedMailListId = listIdHex
+                        appState.selectedMailListName = friendlyName
+                        appState.selectedSettingsPage = .mailListMembers
+                    })
+                }
             case .mailListMembers:
-                if let listIdHex = appState.selectedMailListId, let name = appState.selectedMailListName {
-                    MailListMembersView(listIdHex: listIdHex, listName: name)
-                } else {
-                    MailListMembersView()
+                MailSubpageGate(.mailListMembers) {
+                    if let listIdHex = appState.selectedMailListId, let name = appState.selectedMailListName {
+                        MailListMembersView(listIdHex: listIdHex, listName: name)
+                    } else {
+                        MailListMembersView()
+                    }
                 }
             case .web:
                 WebSettingsView(webPublish: appState.webPublish, reloadToken: appState.navGeneration)

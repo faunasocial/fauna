@@ -47,9 +47,9 @@ Stamped 2026-11-01 at a6047fbd8b.
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.3-dev+a6f1524b standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6 docker |
+| ios | ✅ full | 0.1.7 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.7 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

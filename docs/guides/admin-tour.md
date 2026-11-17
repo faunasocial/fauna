@@ -121,7 +121,20 @@ clearing the link leaves your subscription tier untouched. If you have no
 subscription tiers yet, create one first from your own profile's Tiers tab.
 
 Once a tier is linked, someone can redeem one of the tier's claim codes
-(minted the same way as any other subscription's — by a payment provider or in **Manual Claim Codes**, on your profile's Tiers tab; see the [app tour](app-tour.md#profile)) either from their own Settings → Subscriptions page if they already have an account, or by entering it in the invite-code field during sign-up if they don't, which works once **Registration** on [Users](#users) is set to anything other than **Nobody — only I can admit people** and the age-verification switch there is off — either way their quota tier is set right away. What's still
+(minted the same way as any other subscription's — by a payment provider or in **Manual Claim Codes**, on your profile's Tiers tab; see the [app tour](app-tour.md#profile)). Where they redeem it depends on where their account lives:
+
+- An account on your nest redeems it on their own Settings → Subscriptions
+  page, or under **Redeem a claim code** on your profile's Tiers tab.
+- Someone without an account enters it in the invite-code field during
+  sign-up, which works once **Registration** on [Users](#users) is set to
+  anything other than **Nobody — only I can admit people** and the
+  age-verification switch there is off.
+- An account on another nest cannot redeem it, because a membership is an
+  account on your nest: if they enter it under **Redeem a claim code** on your
+  profile's Tiers tab, their app tells them to use the code as their invite
+  code when they join your nest, and the code stays unused.
+
+In the first two cases their quota tier is set right away. What's still
 missing: there's no page yet that shows a prospective member your membership
 offering before they sign up — hand them the code directly for now.
 

@@ -254,8 +254,11 @@ def seat_media_door(
 
 
 def stolen_seat(alice_app, request, alice, nest_instance, *, screenshot_tag: str):
-    """A second seat of ``alice``'s seed on the app under test — the thief's
-    device runs the same app the owner does: a second launch on a native app
+    """A second seat of ``alice``'s seed on ``alice_app``'s app — the thief's
+    device runs the same app the owner does. Pass the member fixture's
+    ``owner_app``: on android that is a tui seat (the phone plays the member),
+    so the thief lands on tui too and never needs a second emulator instance.
+    A second launch on a native app
     (``_alice_extra_seat``), a twin page in its own ``BrowserContext`` on web
     (``_alice_web_twin_seat``). A generator yielding ``(seat_app, driver)``;
     the caller closes it."""

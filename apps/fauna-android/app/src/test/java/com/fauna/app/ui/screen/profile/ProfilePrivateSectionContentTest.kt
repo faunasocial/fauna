@@ -36,6 +36,7 @@ class ProfilePrivateSectionContentTest {
         onSave: () -> Unit = {},
         onNickname: (String) -> Unit = {},
         onNotes: (String) -> Unit = {},
+        saveAnswer: uniffi.fauna_core.Possibility = uniffi.fauna_core.Possibility.Possible,
     ) {
         composeTestRule.setContent {
             var nickname by remember { mutableStateOf("") }
@@ -50,8 +51,26 @@ class ProfilePrivateSectionContentTest {
                 onAddLabel = onAddLabel,
                 onRemoveLabel = onRemoveLabel,
                 onSave = onSave,
+                saveAnswer = saveAnswer,
             )
         }
+    }
+
+    /** Save answers the shared `save_possibility` (`FfiOverlayEditor.savePossibility`):
+     *  before the account store assembles it is blocked still loading, its reason in
+     *  eyeshot, and a press does nothing (`docs/goal/ui/README.md` § Offer only what
+     *  is possible, rules 2 and 5). */
+    @Test
+    fun saveWaitsForTheStoreWithItsReason() {
+        var saves = 0
+        render(
+            onSave = { saves++ },
+            saveAnswer = com.fauna.ffi.readPossibility(uniffi.fauna_core.ReadState.PENDING),
+        )
+        composeTestRule.onNodeWithTag("profile-private-save-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Still loading — try again in a moment").assertExists()
+        composeTestRule.onNodeWithTag("profile-private-save-button").performClick()
+        assertEquals(0, saves)
     }
 
     @Test

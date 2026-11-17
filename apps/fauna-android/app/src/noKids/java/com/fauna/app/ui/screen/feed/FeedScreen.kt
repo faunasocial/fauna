@@ -20,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -49,7 +50,10 @@ import com.fauna.app.core.RegionPlaneHost
 import com.fauna.app.core.RegionSubject
 import com.fauna.app.core.UrlOpener
 import com.fauna.app.core.post
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.GuardianReason
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.launch
 import com.fauna.app.ui.components.NestBlockWitness
 import com.fauna.app.ui.components.NestPlaceholder
 import com.fauna.app.ui.components.RegionBlockWitness
@@ -71,6 +75,9 @@ import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.navigation.navigateToDrawerRoute
 import com.fauna.app.ui.navigation.profileRoute
 import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
+import com.fauna.app.ui.util.formRefusal
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.resolveLocalized
@@ -162,13 +169,15 @@ fun FeedScreen(navController: NavController, vm: FeedVM = hiltViewModel()) {
     // snapshot repaints each heart's state word; cancelled with the screen.
     LaunchedEffect(Unit) { vm.refreshUnsentLikesWhileShown() }
 
-    LaunchedEffect(errorText) { appMessages.showError(errorText) }
-
-    // Cue hydrate/observe/flush failures reach the same `error-message` banner
-    // as the page error — a silently-dropped cue call is indistinguishable from
-    // a real product bug.
+    // The page error and the cue hydrate/observe/flush failures share the one
+    // `error-message` banner — a silently-dropped cue call is indistinguishable
+    // from a real product bug. One effect over both, the page error leading:
+    // the page error going back to null (the feed's own load clearing its
+    // slot) must not wipe a cue failure still standing, such as an unopenable
+    // `cues:v1` rollup met at session start (engagement-cues.md § At rest —
+    // the surfaced error stays on the line after the feed loads).
     val cueError by vm.cueError.collectAsState()
-    LaunchedEffect(cueError) { cueError?.let { appMessages.showError(it) } }
+    LaunchedEffect(errorText, cueError) { appMessages.showError(errorText ?: cueError) }
 
     // Every per-post verb failure the card can raise (delete, train, the buy,
     // web publishing, reply / quote / repost) — one effect set, shared with the
@@ -479,12 +488,17 @@ fun FeedScreen(navController: NavController, vm: FeedVM = hiltViewModel()) {
     }
 
     if (showCreateFeedDialog) {
+        // The dialog closes itself only once the save succeeds; a failure
+        // stays open with what was typed, the error on `error-message`
+        // (feed.md § Errors & edge cases — the form case).
         FeedCreateDialog(
             onDismiss = { showCreateFeedDialog = false },
             onCreate = { name, combination, rules, factors ->
-                vm.createFeed(name, rules, combination, factors)
-                showCreateFeedDialog = false
+                val err = vm.createFeed(name, rules, combination, factors)
+                if (err != null) appMessages.showError(err)
+                err == null
             },
+            onRefuse = { appMessages.showError(it) },
             fetchTrainedFactors = { vm.trainedTopicsList() },
         )
     }
@@ -494,9 +508,11 @@ fun FeedScreen(navController: NavController, vm: FeedVM = hiltViewModel()) {
             bridges = availableBridges,
             onDismiss = { showBridgeDialog = false },
             onSubscribe = { kind, uri, name ->
-                vm.subscribeBridge(kind, uri, name)
-                showBridgeDialog = false
+                val err = vm.subscribeBridge(kind, uri, name)
+                if (err != null) appMessages.showError(err)
+                err == null
             },
+            onRefuse = { appMessages.showError(it) },
         )
     }
 }
@@ -762,20 +778,7 @@ internal fun PostActionsMenu(
                     }
                     null -> Unit
                 }
-                // Gated on [BuildConfig.PAYMENTS] as well as the caller's null:
-                // the constant is what lets the release shrinker drop `feed-post-sale-price-button`
-                // from the no-payments artifact (`dynamic-features.md` § What
-                // "completely compiled away" means).
-                if (BuildConfig.PAYMENTS && onChangePrice != null) {
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.sale_price_button)) },
-                        onClick = {
-                            expanded = false
-                            onChangePrice()
-                        },
-                        modifier = Modifier.testTag(Ids.FEED_POST_SALE_PRICE_BUTTON),
-                    )
-                }
+                SalePriceMenuItem(onChangePrice) { expanded = false }
             }
 
             if (isOwn) {
@@ -942,15 +945,14 @@ internal fun FeedVerbFailureEffects(vm: FeedVM) {
     val deleteErrorText = deleteError?.let { stringResourceFmt(R.string.feed_error_delete, it) }
     LaunchedEffect(deleteErrorText) { deleteErrorText?.let { appMessages.showError(it) } }
 
-    // Training-gesture failures (feed-post-more-like-this / -less-like-this)
-    // reach the same `error-message` banner, wrapped in the localized
-    // feed_error_train template — mirrors the delete-error handling above.
+    // Mark-as-spam failures reach the same `error-message` banner, wrapped in
+    // the localized feed_error_mark_spam template — mirrors the delete-error
+    // handling above. A training-gesture refusal needs no handler here: the
+    // shared manager stamps `feed.error_train` on the snapshot's page error,
+    // which the feed screen already paints.
     val markSpamError by vm.markSpamError.collectAsState()
     val markSpamErrorText = markSpamError?.let { stringResourceFmt(R.string.feed_error_mark_spam, it) }
     LaunchedEffect(markSpamErrorText) { markSpamErrorText?.let { appMessages.showError(it) } }
-    val trainError by vm.trainError.collectAsState()
-    val trainErrorText = trainError?.let { stringResourceFmt(R.string.feed_error_train, it) }
-    LaunchedEffect(trainErrorText) { trainErrorText?.let { appMessages.showError(it) } }
 
     // Self-serve teaser-buy failures (`gated-post-buy-button`, monetization.md
     // § Per-post pay-to-unlock) reach the same `error-message` banner, wrapped
@@ -1274,16 +1276,17 @@ internal fun PostCard(
                         val menuContext = LocalContext.current
                         // The sold post's *Change price...* dialog, opened by its
                         // verb and read against the post's own selling tier —
-                        // a payments surface, so the dialog and its verb are
-                        // gated on [BuildConfig.PAYMENTS] and compiled away
-                        // from the no-payments artifact.
+                        // a payments surface: [SalePriceDialog] and
+                        // [SalePriceMenuItem] live in `src/payments/`, and the
+                        // flavors without payments compile the inert twins in
+                        // `src/noKidsNoPayments/`, which name no id.
                         var salePriceOpen by remember(post.postId) { mutableStateOf(false) }
                         val salePriceTier = post.gatedTier
-                        if (BuildConfig.PAYMENTS && salePriceOpen && salePriceTier != null) {
+                        if (salePriceOpen && salePriceTier != null) {
                             SalePriceDialog(vm, salePriceTier, advertised = post.nostrAdvertisedAt != null) { salePriceOpen = false }
                         }
                         PostActionsMenu(
-                            onChangePrice = if (BuildConfig.PAYMENTS && vm.postOffersSalePriceVerb(post)) {
+                            onChangePrice = if (vm.postOffersSalePriceVerb(post)) {
                                 { salePriceOpen = true }
                             } else {
                                 null
@@ -1416,6 +1419,14 @@ internal fun PostCard(
                         }
                     }
                 }
+
+                // The folded archive comments — owner-only context from the owner's own
+                // archive, never published (`archive-import.md` § What each category
+                // becomes → *Placement under the owner's own post*). The shared
+                // `PostSummary.archiveComments` is filled only on the owner's own
+                // archive-origin posts; anything else paints nothing. Mirrors
+                // FaunaKit's `ArchiveCommentsFold` and tui's `archive_comment_elements`.
+                ArchiveCommentsFold(post.archiveComments)
 
                 TipSurface(tips = post.tips, postId = post.postId, vm = vm)
 
@@ -1673,6 +1684,38 @@ internal fun PostReactionPills(post: PostSummary, vm: FeedVM) {
     ReactionPillRow(reactionPillGroups(post)) { emoji -> vm.react(post.postId, emoji) }
 }
 
+/**
+ * `post-archive-comments`: the collapsed comments other people left on the
+ * owner's imported post, from the owner's own archive — one
+ * `post-archive-comment-item` ("author: text") each, indented under a rule.
+ * Paints nothing when the list is empty (every post but the owner's own
+ * archive-origin ones). A pure Compose leaf, so it runs on the host JVM.
+ */
+@Composable
+internal fun ArchiveCommentsFold(comments: List<uniffi.fauna_feed.ArchiveCommentView>) {
+    if (comments.isEmpty()) return
+    val rule = MaterialTheme.colorScheme.outlineVariant
+    Column(
+        modifier = Modifier
+            .padding(top = 8.dp)
+            .testTag(Ids.POST_ARCHIVE_COMMENTS)
+            .drawBehind {
+                drawRect(rule, size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height))
+            }
+            .padding(start = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        comments.forEach { comment ->
+            Text(
+                "${comment.authorName}: ${comment.text}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.POST_ARCHIVE_COMMENT_ITEM),
+            )
+        }
+    }
+}
+
 /** The pure Compose leaf of [PostReactionPills] — no FFI seam, so it runs on the host JVM. */
 @Composable
 internal fun ReactionPillRow(
@@ -1719,14 +1762,24 @@ internal fun ReactionPillRow(
  * through `FeedManager::reply` ([FeedVM.reply]); never `interact`, whose native
  * arm discards the typed text (feed.md § Interaction bar). Submit is a no-op on
  * blank text. A refused reply surfaces through [VerbErrorEffect].
+ *
+ * The submit is painted from the shared `feed_reply_submit_possibility`
+ * (blank -> `feed.reply_empty`, the reason beside it), asks the same predicate
+ * again on click and refuses with that reason on `error-message`, and the
+ * dialog closes only once [onSend] reports the reply SAVED (feed.md § Errors &
+ * edge cases — the form case of README § Offer only what is possible).
  */
 @Composable
 internal fun ReplyComposerDialog(post: PostSummary, vm: FeedVM, onDismiss: () -> Unit) {
+    val appMessages = LocalAppMessages.current
     ReplyComposerDialogContent(
         audience = post.replyAudience,
         roomLabel = post.roomLabel,
         gatedTier = post.gatedTier,
-        onSend = { text, publicConfirmed -> vm.reply(post.postId, text, publicConfirmed) },
+        // A failed save lands on [FeedVM.verbError] -> `error-message` through
+        // [VerbErrorEffect]; the dialog stays open with the typed text.
+        onSend = { text, publicConfirmed -> vm.sendReply(post.postId, text, publicConfirmed) },
+        onRefuse = { appMessages.showError(it) },
         onDismiss = onDismiss,
     )
 }
@@ -1744,10 +1797,15 @@ internal fun ReplyComposerDialogContent(
     audience: uniffi.fauna_feed.ReplyAudience?,
     roomLabel: String?,
     gatedTier: String?,
-    onSend: (text: String, publicConfirmed: Boolean) -> Unit,
+    onSend: suspend (text: String, publicConfirmed: Boolean) -> Boolean,
+    onRefuse: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var replyText by remember { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val submit = faunaFormGate(askForm { com.fauna.ffi.feedReplySubmitPossibility(replyText) })
     // Born unchecked at every open, never remembered (restricted-posts.md (e)).
     var publicConfirmed by remember { mutableStateOf(false) }
     val audienceCopy = when (audience) {
@@ -1795,15 +1853,29 @@ internal fun ReplyComposerDialogContent(
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = {
-                    if (replyText.isNotBlank()) {
-                        onSend(replyText, needsConfirm && publicConfirmed)
-                        onDismiss()
-                    }
-                },
-                modifier = Modifier.testTag(Ids.FEED_REPLY_SUBMIT_BUTTON),
-            ) { Text(stringResource(R.string.common_send)) }
+            Column {
+                TextButton(
+                    onClick = {
+                        val refusal = formRefusal(
+                            context,
+                            askForm { com.fauna.ffi.feedReplySubmitPossibility(replyText) },
+                        )
+                        if (refusal != null) {
+                            refusal.reason?.let(onRefuse)
+                        } else {
+                            saving = true
+                            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                                val saved = onSend(replyText, needsConfirm && publicConfirmed)
+                                saving = false
+                                if (saved) onDismiss()
+                            }
+                        }
+                    },
+                    enabled = submit.enabled && !saving,
+                    modifier = Modifier.testTag(Ids.FEED_REPLY_SUBMIT_BUTTON),
+                ) { Text(stringResource(R.string.common_send)) }
+                DisabledControlReasonText(submit.reason)
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
@@ -2349,15 +2421,20 @@ fun TipSurface(tips: TipView?, postId: String, vm: FeedVM) {
 @Composable
 internal fun FeedCreateDialog(
     onDismiss: () -> Unit,
-    onCreate: (
+    onCreate: suspend (
         name: String,
         combination: String,
         rules: List<FilterRuleInput>,
         factors: List<FactorWeightInput>,
-    ) -> Unit,
+    ) -> Boolean,
+    onRefuse: (String) -> Unit,
     fetchTrainedFactors: suspend () -> List<com.fauna.ffi.FfiTrainedTopicRow> = { emptyList() },
 ) {
     var name by remember { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
+    val createScope = rememberCoroutineScope()
+    val createContext = LocalContext.current
+    val createSubmit = faunaFormGate(askForm { com.fauna.ffi.feedCreatePossibility(name) })
     var combinationIsAll by remember { mutableStateOf(true) }
     var combinationExpanded by remember { mutableStateOf(false) }
     var ruleTypeIndex by remember { mutableStateOf(0) }
@@ -2645,21 +2722,36 @@ internal fun FeedCreateDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = {
-                    val trimmed = name.trim()
-                    if (trimmed.isNotEmpty()) {
-                        onCreate(
-                            trimmed,
-                            if (combinationIsAll) "all" else "any",
-                            addedRules.toList(),
-                            addedFactors.toList(),
+            Column {
+                TextButton(
+                    onClick = {
+                        val refusal = formRefusal(
+                            createContext,
+                            askForm { com.fauna.ffi.feedCreatePossibility(name) },
                         )
-                    }
-                },
-                enabled = name.trim().isNotEmpty(),
-                modifier = Modifier.testTag(Ids.CREATE_FEED),
-            ) { Text(stringResource(R.string.common_create)) }
+                        if (refusal != null) {
+                            refusal.reason?.let(onRefuse)
+                        } else {
+                            saving = true
+                            createScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                                val saved = onCreate(
+                                    name.trim(),
+                                    if (combinationIsAll) "all" else "any",
+                                    addedRules.toList(),
+                                    addedFactors.toList(),
+                                )
+                                saving = false
+                                // Closes only on a saved feed: a failure keeps
+                                // the name, rules and factors as typed.
+                                if (saved) onDismiss()
+                            }
+                        }
+                    },
+                    enabled = createSubmit.enabled && !saving,
+                    modifier = Modifier.testTag(Ids.CREATE_FEED),
+                ) { Text(stringResource(R.string.common_create)) }
+                DisabledControlReasonText(createSubmit.reason)
+            }
         },
         dismissButton = {
             TextButton(
@@ -2677,7 +2769,8 @@ internal fun FeedCreateDialog(
 internal fun BridgeSubscribeDialog(
     bridges: List<uniffi.fauna_feed.AvailableBridge>,
     onDismiss: () -> Unit,
-    onSubscribe: (kind: String, uri: String, name: String) -> Unit,
+    onSubscribe: suspend (kind: String, uri: String, name: String) -> Boolean,
+    onRefuse: (String) -> Unit,
 ) {
     // Options = the bridges the nest can actually serve (snapshot.available_bridges,
     // build+runtime gated), never a hard-coded protocol list — Dim 3 consumption.
@@ -2685,6 +2778,13 @@ internal fun BridgeSubscribeDialog(
     var kindExpanded by remember { mutableStateOf(false) }
     var uri by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    // The selected bridge's id, `""` when the nest serves none — the shared
+    // predicate answers `feed.bridge_form.kind_required` for that.
+    val kind = bridges.getOrNull(kindIndex)?.id.orEmpty()
+    val submit = faunaFormGate(askForm { com.fauna.ffi.feedBridgeSubscribePossibility(kind, uri) })
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2733,11 +2833,30 @@ internal fun BridgeSubscribeDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = { bridges.getOrNull(kindIndex)?.let { onSubscribe(it.id, uri.trim(), name.trim()) } },
-                enabled = uri.isNotBlank() && bridges.isNotEmpty(),
-                modifier = Modifier.testTag(Ids.BRIDGE_FORM_SUBSCRIBE_BUTTON),
-            ) { Text(stringResource(R.string.feed_list_subscribe_bridge)) }
+            Column {
+                TextButton(
+                    onClick = {
+                        val refusal = formRefusal(
+                            context,
+                            askForm { com.fauna.ffi.feedBridgeSubscribePossibility(kind, uri) },
+                        )
+                        if (refusal != null) {
+                            refusal.reason?.let(onRefuse)
+                        } else {
+                            saving = true
+                            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                                val saved = onSubscribe(kind, uri.trim(), name.trim())
+                                saving = false
+                                // Closes only on a saved subscription.
+                                if (saved) onDismiss()
+                            }
+                        }
+                    },
+                    enabled = submit.enabled && !saving,
+                    modifier = Modifier.testTag(Ids.BRIDGE_FORM_SUBSCRIBE_BUTTON),
+                ) { Text(stringResource(R.string.feed_list_subscribe_bridge)) }
+                DisabledControlReasonText(submit.reason)
+            }
         },
         dismissButton = {
             TextButton(

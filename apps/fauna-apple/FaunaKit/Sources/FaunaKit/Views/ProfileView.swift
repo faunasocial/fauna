@@ -138,6 +138,8 @@ public struct ProfileView: View {
     /// `refresh_block_state` / `toggle_block` / `apply_block_state`.
     @State private var blockEdge = ProfileBlockEdge()
     @State private var blocking = false
+    /// A refused block press's reason, for the page's `error-message`.
+    @State private var blockRefusal: String?
 
     public init(
         session: SessionState,
@@ -289,6 +291,7 @@ public struct ProfileView: View {
                 await offersVM.configure(api: client.api, authorIdHex: viewedActorId,
                                          home: knockVM.home(peer: viewedActorId))
                 blockEdge.reset()
+                blockRefusal = nil
                 publishState()
                 await refreshBlockState()
             }
@@ -334,7 +337,7 @@ public struct ProfileView: View {
         if activeTab == "posts", let error = postsWindow?.errorMessage { return error }
         #endif
         return isSelf ? vm.errorMessage
-                      : (privateVM.errorMessage ?? knockVM.errorMessage ?? offersVM.errorMessage)
+                      : (blockRefusal ?? privateVM.errorMessage ?? knockVM.errorMessage ?? offersVM.errorMessage)
     }
 
     /// The Posts tab's content (`profile-posts-section`). The Fauna Kids build
@@ -496,6 +499,10 @@ public struct ProfileView: View {
                 ) {
                     toggleFollow()
                 }
+                // Blocked until the status read tells Follow from Following
+                // (`profile.md` § Errors & edge cases, *Unread state is not
+                // possible*); outside `automation*` so the registry reads it.
+                .faunaPossible(offersVM.followAnswer)
                 #endif
             }
         }
@@ -542,13 +549,16 @@ public struct ProfileView: View {
                    role: blockEdge.labelBlocked ? nil : .destructive) {
                 toggleBlock()
             }
-            .disabled(blocking || !blockEdge.isToggleEnabled)
             .accessibilityIdentifier(Ids.profileBlockButton)
             .automationActivate(
                 Ids.profileBlockButton,
-                isEnabled: { !blocking && blockEdge.isToggleEnabled },
                 value: { renderLocalizedText(contactToggleBlockLabel(isBlocked: blockEdge.labelBlocked)) }
             ) { toggleBlock() }
+            // The round-trip guard, then the read's answer (blocked still
+            // loading until the open-time edge read lands) — both outside
+            // `automation*` so the registry reads the same enabled-ness.
+            .disabled(blocking)
+            .faunaPossible(blockEdge.answer)
 
             // Report account — opens the shared report sheet on this OTHER profile
             // (moderation.md § User-initiated reporting → *App surface*; the
@@ -661,10 +671,13 @@ public struct ProfileView: View {
             }
 
             Button(L.profile.privateSave) { savePrivate() }
-                .disabled(privateVM.isSaving)
                 .accessibilityIdentifier(Ids.profilePrivateSaveButton)
-                .automationActivate(Ids.profilePrivateSaveButton,
-                                    isEnabled: { !privateVM.isSaving }) { savePrivate() }
+                .automationActivate(Ids.profilePrivateSaveButton) { savePrivate() }
+                // The in-flight guard, then the shared save answer — both
+                // outside `automation*` so the registry reads them.
+                .disabled(privateVM.isSaving)
+                .faunaPossible(privateVM.saveAnswer)
+            FaunaPossibilityReason(privateVM.saveAnswer)
         }
         .padding(.horizontal)
         // Section landmark — registered so the driver's is_visible sees it.
@@ -727,7 +740,13 @@ public struct ProfileView: View {
     }
 
     private func toggleBlock() {
-        guard let client, !blocking, blockEdge.isToggleEnabled else { return }
+        // Rule 6: the press asks the answer the toggle was painted from.
+        if let refusal = blockEdge.answer.refusal {
+            blockRefusal = refusal
+            return
+        }
+        guard let client, !blocking else { return }
+        blockRefusal = nil
         let wasBlocked = blockEdge.labelBlocked
         blocking = true
         Task {
@@ -991,7 +1010,11 @@ private struct SubscriptionTiersTab: View {
                     .automationActivate(Ids.subscriptionTierFormSave) {
                         Task { await vm.saveForm() }
                     }
+                    // The draft's shared answer, outside the automation
+                    // modifier so the registry reads it too.
+                    .faunaPossible(vm.tierFormPossibility)
             }
+            FaunaPossibilityReason(vm.tierFormPossibility)
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .contain)
@@ -1499,8 +1522,12 @@ private struct SubscriptionOffersTab: View {
                 // profile*): the `subscription-settings` pair, here carrying this
                 // creator's home — paints with or without offer rows. Same
                 // excision and Dim-3 gate as the settings pair (the shared row).
-                Text(L.subscriptions.redeemClaimTitle).font(.headline)
-                ClaimRedeemRow(code: $vm.claimCodeInput) {
+                // A nest without the `payments` plane leaves the whole block
+                // out, title included (rule 2); the row paints the rest.
+                if vm.redeemAnswer.isShown {
+                    Text(L.subscriptions.redeemClaimTitle).font(.headline)
+                }
+                ClaimRedeemRow(code: $vm.claimCodeInput, answer: vm.redeemAnswer) {
                     let actorHome = home()
                     Task { await vm.redeemClaim(home: actorHome) }
                 }

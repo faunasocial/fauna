@@ -239,6 +239,83 @@ def test_stage_refuses_a_payload_without_its_licence_files(packer, tmp_path, mis
     assert missing in str(exc.value)
 
 
+def test_store_recipe_stages_the_direct_channel_without_packing_it():
+    """`windows-store-package <arch> full "" "" direct` is the direct package's
+    payload recipe (installers/windows.md § Direct download: one template, one
+    packer, one payload recipe): it builds and stages the arch's payload in the
+    direct channel's flavour and stops, because the direct channel packs both arches
+    into one bundle in one packer call."""
+    header = re.search(r"^windows-store-package (.*?):", _JUSTFILE.read_text(encoding="utf-8"), re.M)
+    assert 'channel="store"' in header.group(1), header.group(1)
+    body = _recipe_body(_RECIPE)
+    assert 'case "$CHANNEL" in' in body, f"`just {_RECIPE}` validates no channel"
+    case = body.split('case "$CHANNEL" in', 1)[1].split("esac", 1)[0]
+    arms = dict(re.findall(r"^\s*([\w|*-]+)\)(.*?);;", case, re.M | re.S))
+    assert set(arms) == {"store", "direct", "*"}, sorted(arms)
+    assert '"$FLAVOR" = full' in arms["direct"], "the direct channel's flavour is full (§ Direct download, 4)"
+    assert "exit 2" in arms["direct"] and "exit 2" in arms["*"]
+    code = "\n".join(_code_lines(body))
+    stop = code.index('if [ "$CHANNEL" = direct ]')
+    assert code.index("shipped-notices.py") < stop < code.index("build-store-package.py"), (
+        "the direct channel must stop after the whole payload is staged and before the Store pack"
+    )
+
+
+_DIRECT = "windows-direct-package"
+
+
+def test_direct_recipe_stages_both_arches_through_the_store_payload_recipe():
+    code = "\n".join(_code_lines(_recipe_body(_DIRECT)))
+    assert re.search(r"^\s*for ARCH in x64 arm64; do\s*$", code, re.M), code
+    assert re.search(r'^\s*just windows-store-package "\$ARCH" full "" "" direct\s*$', code, re.M), code
+    for forbidden in ("FaunaE2eAgent", "windows-ffi-test", "--allow-test-surface", "--arch"):
+        assert forbidden not in code, f"`just {_DIRECT}` names {forbidden!r}"
+
+
+_BUNDLE = "windows-direct-bundle"
+
+
+def test_direct_recipe_packs_bundles_and_grades_on_the_direct_channel():
+    """`windows-direct-package` stages both payloads, then hands its publisher to
+    `windows-direct-bundle`, which packs both in one packer call and grades the
+    bundle — the half the public release workflow runs on its own, in the job
+    that takes both arches' payloads."""
+    joined = "\n".join(_code_lines(_recipe_body(_DIRECT)))
+    assert "scripts/build-store-package.py" not in joined, "the pack is the bundle recipe's"
+    assert re.search(r'^\s*just windows-direct-bundle "\{\{publisher\}\}"\s*$', joined, re.M), joined
+    assert joined.index("just windows-store-package") < joined.index("just windows-direct-bundle")
+
+    code = _code_lines(_recipe_body(_BUNDLE))
+    calls = [l.strip() for l in code if "scripts/build-store-package.py" in l]
+    assert len(calls) == 2, calls
+    pack, grade = calls
+    assert "--channel direct" in pack and "--grade" not in pack and '"${SIGN[@]}"' in pack
+    assert "--channel direct" in grade and "--grade build/installer/Fauna.msixbundle" in grade
+    assert "\n".join(code).index(pack) < "\n".join(code).index(grade)
+    assert "{{slot_build_body}}" not in "\n".join(code), "the bundle compiles nothing"
+
+
+def test_direct_recipe_self_signs_dev_and_checks_a_production_publisher_before_building():
+    """`dev` (the default) signs the bundle with the dev certificate for the dev
+    loop; `production` packs with the recorded publisher, unsigned (signing is the
+    release workflow's leg), and refuses before anything builds while no publisher
+    is recorded — in the package recipe before its slot, and in the bundle recipe
+    for its own callers."""
+    text = _JUSTFILE.read_text(encoding="utf-8")
+    for recipe in (_DIRECT, _BUNDLE):
+        header = re.search(rf"^{recipe} (.*?):", text, re.M)
+        assert header and 'publisher="dev"' in header.group(1), recipe
+        arms = dict(re.findall(r"^\s*([\w*]+)\)(.*?);;", _recipe_body(recipe), re.M | re.S))
+        assert "scripts/_windows_package_identity.py direct-production" in arms["production"], recipe
+        assert "exit 2" in arms["*"], recipe
+    arms = dict(re.findall(r"^\s*([\w*]+)\)(.*?);;", _recipe_body(_BUNDLE), re.M | re.S))
+    assert "SIGN=(--self-sign)" in arms["dev"]
+    assert "SIGN=(--production)" in arms["production"]
+    code = "\n".join(_code_lines(_recipe_body(_DIRECT)))
+    assert code.index("direct-production") < code.index("{{slot_build_body}}") < \
+        code.index("just windows-store-package")
+
+
 @pytest.mark.parametrize("arch,rid", [("arm64", "win-arm64"), ("x64", "win-x64")])
 def test_recipe_handles_both_store_architectures(arch, rid):
     code = "\n".join(_code_lines(_recipe_body(_RECIPE)))

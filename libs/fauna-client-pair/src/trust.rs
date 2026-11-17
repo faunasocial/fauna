@@ -64,6 +64,15 @@ pub struct TrustScope {
     pub class: String,
     pub kind: Option<String>,
     pub tier: Option<String>,
+    /// The folder a keyless `deposit` tuple lets its holder put files into,
+    /// named through the owner's folders ([`name_deposit_folders`]) — the
+    /// tuple's own `folder:<id>` token is a row id, never a name
+    /// (`connected-apps.md` § The trust facet and history lens → *The words
+    /// rule*). `None` on every other tuple, and on a deposit tuple whose
+    /// folders could not be read.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub folder: Option<TrustFolder>,
 }
 
 /// The folder a third-party principal's folder read grant covers,
@@ -760,7 +769,8 @@ pub fn principal_scope_labels(
     let mut labels = Vec::new();
     for tuple in &scope {
         let Some(kind) = ext_of(tuple) else {
-            let label = scope_label_in_folder(tuple, folder.clone());
+            let label = keyless_principal_label(tuple)
+                .unwrap_or_else(|| scope_label_in_folder(tuple, folder.clone()));
             if !labels.contains(&label) {
                 labels.push(label);
             }
@@ -794,6 +804,71 @@ pub fn principal_scope_labels(
         .collect();
     out.extend(labels);
     out
+}
+
+/// A keyless principal tuple in the consent card's words (`connected-apps.md`
+/// § The trust facet and history lens → *The words rule*): an `identity.op`
+/// class by the card row its scope rendered
+/// ([`fauna_core::identity_op::IdentityOpClass::card_row`], carried verbatim so
+/// the card's constant stays the one source of the words), a `deposit` by the
+/// folder it lets the app put files into ([`TrustScope::folder`]). `None` for
+/// every other tuple. Never a raw class or kind token: a class this build does
+/// not know reads as an unnamed operation.
+fn keyless_principal_label(s: &TrustScope) -> Option<LocalizedText> {
+    use fauna_mls::wrapped_blob::ScopeTuple;
+    if s.class == ScopeTuple::CLASS_IDENTITY_OP {
+        let class = s
+            .kind
+            .as_deref()
+            .and_then(|k| fauna_core::identity_op::IdentityOpClass::parse(k).ok());
+        return Some(match class {
+            Some(class) => {
+                LocalizedText::key_arg("connected_apps.verbatim", "text", class.card_row())
+            }
+            None => LocalizedText::key("connected_apps.trust_scope_op_unknown"),
+        });
+    }
+    if s.class == ScopeTuple::CLASS_DEPOSIT {
+        return Some(match &s.folder {
+            Some(TrustFolder::Named { name }) => {
+                LocalizedText::key_arg("connected_apps.trust_scope_deposit", "folder", name.clone())
+            }
+            Some(TrustFolder::Deleted) => {
+                LocalizedText::key("connected_apps.trust_scope_deposit_deleted")
+            }
+            None => LocalizedText::key("connected_apps.trust_scope_deposit_unnamed"),
+        });
+    }
+    None
+}
+
+/// Name each keyless `deposit` tuple's folder from the owner's folder id →
+/// name map (the names the consent card words its folder rows with):
+/// [`TrustFolder::Named`] for a folder the owner has, [`TrustFolder::Deleted`]
+/// for one the map does not hold — so call it only with a map that was read;
+/// an unread map must never guess Deleted. Every other tuple is left as it is.
+pub fn name_deposit_folders(
+    scope: &mut [TrustScope],
+    names: &std::collections::BTreeMap<i64, String>,
+) {
+    for s in scope
+        .iter_mut()
+        .filter(|s| s.class == fauna_core::grant_event::CLASS_DEPOSIT)
+    {
+        let id = GrantEventScope {
+            class: s.class.clone(),
+            kind: s.kind.clone(),
+            tier: s.tier.clone(),
+        }
+        .base_kind()
+        .and_then(fauna_core::grant_event::parse_deposit_folder_token);
+        if let Some(id) = id {
+            s.folder = Some(match names.get(&id) {
+                Some(name) => TrustFolder::Named { name: name.clone() },
+                None => TrustFolder::Deleted,
+            });
+        }
+    }
 }
 
 /// Localized label for a grant's [`TrustLiveness`] (`nest-trust-grant-status`).
@@ -929,6 +1004,7 @@ mod label_tests {
             class: class.to_string(),
             kind: kind.map(String::from),
             tier: tier.map(String::from),
+            folder: None,
         }
     }
 
@@ -1028,6 +1104,89 @@ mod label_tests {
             principal_scope_labels(Vec::new(), folder)[0].key,
             "nests.scope_folder"
         );
+    }
+
+    /// A deposit tuple as the consent mints it: the folder token in the kind
+    /// slot, the writer factor folded in after it.
+    fn deposit(folder_id: i64, folder: Option<TrustFolder>) -> TrustScope {
+        let t = fauna_mls::wrapped_blob::ScopeTuple::folder_deposit(folder_id, &[7; 32]);
+        let mut s = project_scope(
+            fauna_client_capabilities::grant_log::event_scope_of(std::slice::from_ref(&t))
+                .remove(0),
+        );
+        s.folder = folder;
+        s
+    }
+
+    /// No keyless principal grant renders a raw class or kind token
+    /// (`connected-apps.md` § The trust facet and history lens → *The words
+    /// rule*): an `identity.op` class reads as the consent card's row for it.
+    #[test]
+    fn principal_scope_names_every_identity_op_class_by_its_card_row() {
+        for class in fauna_core::identity_op::IdentityOpClass::ALL {
+            let labels =
+                principal_scope_labels(vec![scope("identity.op", Some(class.name()), None)], None);
+            assert_eq!(labels.len(), 1, "{class:?}");
+            assert_eq!(labels[0].key, "connected_apps.verbatim", "{class:?}");
+            assert_eq!(
+                labels[0].args.get("text").map(String::as_str),
+                Some(class.card_row()),
+                "{class:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn principal_scope_never_shows_an_unknown_operation_class_raw() {
+        let labels =
+            principal_scope_labels(vec![scope("identity.op", Some("future.op"), None)], None);
+        assert_eq!(labels[0].key, "connected_apps.trust_scope_op_unknown");
+        assert!(labels[0].args.is_empty());
+    }
+
+    /// A `deposit` grant names the folder it lets the app put files into,
+    /// named as a folder read is — and never the bare word `deposit`.
+    #[test]
+    fn principal_scope_names_a_deposit_by_its_folder() {
+        let named = principal_scope_labels(
+            vec![deposit(
+                17,
+                Some(TrustFolder::Named {
+                    name: "inbox".into(),
+                }),
+            )],
+            None,
+        );
+        assert_eq!(named[0].key, "connected_apps.trust_scope_deposit");
+        assert_eq!(
+            named[0].args.get("folder").map(String::as_str),
+            Some("inbox")
+        );
+
+        let deleted = principal_scope_labels(vec![deposit(17, Some(TrustFolder::Deleted))], None);
+        assert_eq!(deleted[0].key, "connected_apps.trust_scope_deposit_deleted");
+
+        let unnamed = principal_scope_labels(vec![deposit(17, None)], None);
+        assert_eq!(unnamed[0].key, "connected_apps.trust_scope_deposit_unnamed");
+    }
+
+    #[test]
+    fn name_deposit_folders_names_each_deposit_tuple_and_nothing_else() {
+        let names = std::collections::BTreeMap::from([(17_i64, "inbox".to_string())]);
+        let mut scope_list = vec![
+            deposit(17, None),
+            deposit(18, None),
+            scope("content.read", Some("folder"), None),
+        ];
+        name_deposit_folders(&mut scope_list, &names);
+        assert_eq!(
+            scope_list[0].folder,
+            Some(TrustFolder::Named {
+                name: "inbox".into()
+            })
+        );
+        assert_eq!(scope_list[1].folder, Some(TrustFolder::Deleted));
+        assert_eq!(scope_list[2].folder, None);
     }
 
     #[test]
@@ -1413,6 +1572,7 @@ fn project_scope(s: GrantEventScope) -> TrustScope {
         class: s.class,
         kind: s.kind,
         tier: s.tier,
+        folder: None,
     }
 }
 

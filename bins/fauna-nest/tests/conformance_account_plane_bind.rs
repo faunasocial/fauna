@@ -4420,7 +4420,10 @@ async fn store_a_record_of(d: &AccountStoreHandle, kind: TipSealedKind) -> bool 
         | K::KindManifest
         // Born on the plane with the remembered mail-import source, never a
         // blob field.
-        | K::MailImportSource => return false,
+        | K::MailImportSource
+        // Born on the plane as a notice's transport, never a blob field —
+        // and recreatable from the nest's listing whatever the floor holds.
+        | K::PairingMark => return false,
         K::GroupShareCeremony => {
             d.merge_group_shares(fauna_core::group_ceremony::GroupShareConfig {
                 initiated: vec![],

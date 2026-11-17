@@ -376,6 +376,29 @@ impl std::fmt::Display for ReplicaKeyMismatch {
 
 impl std::error::Error for ReplicaKeyMismatch {}
 
+/// Whether `err`, from opening or reading a store at rest, says the store will
+/// never open for this opener: sealed under another key
+/// ([`ReplicaKeyMismatch`]), or its database file is not a database or is
+/// corrupt. Anything else — a busy lock, an I/O error, a store written by a
+/// newer build — may pass, so it is NOT this. The outbox carry settles a
+/// retired identity's store on this answer (`succession-aftermath.md`
+/// § Implementation status today, the outbox carry): rows nothing can open
+/// can be neither sent nor discarded.
+pub fn is_unopenable(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<ReplicaKeyMismatch>().is_some()
+            || cause
+                .downcast_ref::<rusqlite::Error>()
+                .and_then(rusqlite::Error::sqlite_error_code)
+                .is_some_and(|code| {
+                    matches!(
+                        code,
+                        rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+                    )
+                })
+    })
+}
+
 /// How an open treats the seal key.
 enum Keying {
     /// No key: opened rows read and write as before; a sealed row errors.

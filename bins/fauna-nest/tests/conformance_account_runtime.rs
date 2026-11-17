@@ -1427,6 +1427,9 @@ async fn nest_with_escrow() -> (Arc<RouterRequester>, Arc<AppState>, tempfile::T
     // `fauna.capabilities.reconcile` — every full pass enumerates it.
     fauna_nest::bridge_blob_handlers::register_capability_handlers(&mut b);
     fauna_nest::generation_escrow_handlers::register_generation_escrow_handlers(&mut b);
+    // The secondary leg lists the account's pairings every run, and the
+    // pairing-mark pins add one behind the runtime's back.
+    fauna_nest::pair_handlers::register_pair_handlers(&mut b);
     // V12's peer-leg bind gate fetches `fauna.nest.info` for the `peer-sync`
     // brake — the REAL handler, so the always-on advertisement
     // (`discovery_core::advertised_capabilities`) is what the gate sees.
@@ -2943,6 +2946,172 @@ async fn own_pump_a_background_custody_write_moves_the_generation_and_a_gesture_
     );
 
     a.shutdown().await;
+}
+
+// ── The pairing mark (`account-runtime.md` § Multi-instance concurrency →
+// *A nest-side change a store-backed page shows leaves a mark in the store*) ──
+
+/// [`params_trusting_deployment`] with the secondary leg armed: a linked-nest
+/// connector, so the seed-leg role's holder runs the leg that lists the
+/// account's pairings each pass. The pins below add pairings with no address,
+/// which the leg never connects to — the connector only arms the leg.
+fn params_with_secondary_leg(
+    base: &Path,
+    device: &str,
+    rpc: &Arc<RouterRequester>,
+) -> AccountRuntimeParams<Arc<RouterRequester>> {
+    let connector: fauna_sync_engine::account_runtime::LinkedNestConnector<Arc<RouterRequester>> =
+        Arc::new(|_target| Box::pin(async { anyhow::bail!("this suite links no reachable nest") }));
+    AccountRuntimeParams {
+        linked_nests: Some(connector),
+        ..params_trusting_deployment(base, device, rpc)
+    }
+}
+
+/// A pairing at the bound nest, written there and nowhere else — what an app
+/// older than the mark, or a gesture whose mark write failed, leaves behind.
+async fn pair_behind_the_runtimes_back(rpc: &RouterRequester, id: u8) {
+    let reply: fauna_protocol::pair::PairAddReply = rpc
+        .request(
+            "fauna.pair.add",
+            fauna_protocol::pair::PairAddRequest {
+                private_nest_id: vec![id; 32].into(),
+                capabilities: vec!["account_replica".into()],
+                expires_at: None,
+                label: Some(format!("nest {id}")),
+                nest_url: None,
+                extra: Default::default(),
+            },
+        )
+        .await
+        .expect("the pairing lands at the nest");
+    assert!(reply.ok);
+}
+
+/// Drive passes until one moves nothing — the runtime's own first-need mint
+/// and its echoes settle — and answer the quiet generation. Bounded.
+async fn quiesce(handle: &AccountStoreHandle) -> u64 {
+    let mut last = handle.change_generation();
+    for _ in 0..12 {
+        handle.reconcile_now().await.expect("pass");
+        handle.settled().await;
+        let now = handle.change_generation();
+        if now == last {
+            return now;
+        }
+        last = now;
+    }
+    panic!("the runtime never quiesced: the generation still moves at {last}");
+}
+
+/// The digest of what the bound nest lists now.
+async fn bound_listing_digest(rpc: &RouterRequester) -> [u8; 32] {
+    let listing = fauna_sync_engine::linked_leg::list_pairings(rpc)
+        .await
+        .expect("the listing");
+    fauna_client_core::linked_nests::pairing_mark_digest(&listing)
+}
+
+/// Part 3, the reconcile: a pairing added at the bound nest behind the
+/// runtime's back moves the generation at the next run of the secondary leg,
+/// and the mark it writes is the listing's digest; a run with the listing
+/// unchanged writes nothing and moves nothing. Red-verified: with
+/// `reconcile_pairing_mark` switched off, the first assertion fails.
+#[tokio::test]
+async fn pairing_mark_a_pairing_added_behind_the_runtimes_back_moves_the_generation_at_the_next_leg_run()
+ {
+    let (rpc, _state, tmp) = nest_with_escrow().await;
+    let a = AccountStoreRuntime::start(params_with_secondary_leg(tmp.path(), "a", &rpc))
+        .await
+        .expect("start A");
+    a.reconcile_now().await.expect("A's barrier");
+    // The mark is tip-sealed and never mints: a gesture of a tip-sealed kind
+    // runs the first-need mint the mark then seals under.
+    a.merge_custody(custody_record(0x01))
+        .await
+        .expect("the minting gesture");
+    let g0 = quiesce(&a).await;
+    let bound = deployment_key().verifying_key().to_bytes();
+    assert_eq!(
+        a.pairing_mark(bound).await.expect("read"),
+        Some(bound_listing_digest(&rpc).await),
+        "the leg recorded the bound nest's (empty) listing once a tip resolved"
+    );
+
+    pair_behind_the_runtimes_back(&rpc, 0x42).await;
+    a.reconcile_now().await.expect("the leg's next run");
+    assert!(
+        a.change_generation() > g0,
+        "a pairing the nest holds and the mark does not moves the generation"
+    );
+    assert_eq!(
+        a.pairing_mark(bound).await.expect("read"),
+        Some(bound_listing_digest(&rpc).await),
+        "the mark is the new listing's digest"
+    );
+
+    let g1 = quiesce(&a).await;
+    a.reconcile_now()
+        .await
+        .expect("a run with the listing unchanged");
+    assert_eq!(
+        a.change_generation(),
+        g1,
+        "an unchanged listing writes no mark and moves nothing"
+    );
+
+    a.shutdown().await;
+}
+
+/// Part 2's far side: a sibling's mark row, put by its gesture door and
+/// published, moves this holder's generation when its walk applies it — the
+/// transport by which a link on one device repaints another's open page —
+/// while the gesture moves nothing on the runtime that made it.
+#[tokio::test]
+async fn pairing_mark_a_siblings_mark_applied_by_this_holders_walk_moves_the_generation() {
+    let (rpc, _state, tmp) = nest_with_escrow().await;
+    let a = AccountStoreRuntime::start(params_trusting_deployment(tmp.path(), "a", &rpc))
+        .await
+        .expect("start A");
+    let b = AccountStoreRuntime::start(params_trusting_deployment(tmp.path(), "b", &rpc))
+        .await
+        .expect("start B");
+    a.reconcile_now().await.expect("A's barrier");
+    b.merge_custody(custody_record(0x01))
+        .await
+        .expect("B's minting gesture");
+    quiesce(&b).await;
+    let ga = quiesce(&a).await;
+    let gb = b.change_generation();
+
+    let bound = deployment_key().verifying_key().to_bytes();
+    assert!(
+        b.put_pairing_mark(bound, [0x5A; 32])
+            .await
+            .expect("B's gesture puts the mark"),
+        "a new value is written"
+    );
+    assert!(
+        !b.put_pairing_mark(bound, [0x5A; 32]).await.expect("again"),
+        "the value the entry holds writes nothing"
+    );
+    b.settled().await; // B's publish step has run: the row is on the feed.
+    assert_eq!(
+        b.change_generation(),
+        gb,
+        "a gesture's own write is never a source on the acting runtime"
+    );
+
+    a.nudge_scope(fauna_protocol::account_state::ACCOUNT_STATE_FLEET_SCOPE);
+    generation_moves_past(&a, ga, "A's walk applied B's mark").await;
+    assert_eq!(
+        a.pairing_mark(bound).await.expect("read"),
+        Some([0x5A; 32]),
+        "A holds B's mark"
+    );
+
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 /// Pin (e): a non-holder's generation never moves — it runs no pass, so its

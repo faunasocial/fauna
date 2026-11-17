@@ -40,7 +40,11 @@
 //! pass's drain, so a group joined since is carried and drained in the same
 //! pass. Once a predecessor's store reads back with no undrained intent the
 //! registry records the carry ([`AccountRegistry::record_outbox_carried`]) and
-//! no later pass opens that store.
+//! no later pass opens that store. So does a store that will never open for
+//! the seed this device holds — sealed under another key, or damaged
+//! ([`fauna_account_store::sqlite::is_unopenable`]): its rows can be neither
+//! carried nor listed for a discard, and leaving the carry owed would refuse
+//! the retired identity's removal with a remedy the user cannot take.
 
 use std::collections::BTreeSet;
 
@@ -80,8 +84,15 @@ pub struct CarryReport {
     /// Rows left in a predecessor's store: an MLS row whose group the
     /// successor's engine does not hold yet, and every later row of its scope.
     pub waiting: usize,
-    /// Predecessors whose outbox read back empty and were recorded carried.
+    /// Predecessors whose outbox read back empty and were recorded carried —
+    /// the [`Self::unreadable`] ones among them.
     pub settled: usize,
+    /// Predecessors whose store rests here but will never open for the seed
+    /// this device holds (sealed under another key, or damaged —
+    /// [`fauna_account_store::sqlite::is_unopenable`]): nothing in it can be
+    /// carried, sent or discarded, so the carry settles rather than refuse the
+    /// retired identity's removal for ever.
+    pub unreadable: usize,
     /// Why, for every predecessor the pass could not finish.
     pub errors: Vec<String>,
 }
@@ -101,7 +112,9 @@ impl OutboxCarry {
     /// One carry pass for `successor_hex`, landing in `target`. `mls` is the
     /// app's conversations engine when one is up — it answers the MLS hold;
     /// `None` carries no MLS row this pass. Best-effort: a predecessor whose
-    /// store does not open is logged and left for the next pass.
+    /// store fails to open is logged and left for the next pass — unless the
+    /// failure says it will never open for its seed (another key's seal, a
+    /// damaged database), when the carry settles as [`CarryReport::unreadable`].
     pub async fn run(
         &self,
         successor_hex: &str,
@@ -117,7 +130,10 @@ impl OutboxCarry {
                     report.waiting += one.waiting;
                     if one.empty {
                         match self.registry.record_outbox_carried(&predecessor) {
-                            Ok(()) => report.settled += 1,
+                            Ok(()) => {
+                                report.settled += 1;
+                                report.unreadable += usize::from(one.unreadable);
+                            }
                             Err(e) => report
                                 .errors
                                 .push(format!("record the carry of {predecessor}: {e}")),
@@ -132,6 +148,7 @@ impl OutboxCarry {
                 carried = report.carried,
                 waiting = report.waiting,
                 settled = report.settled,
+                unreadable = report.unreadable,
                 errors = ?report.errors,
                 "outbox carry"
             );
@@ -209,8 +226,11 @@ pub fn held_changes_of(rows: &[OutboxIntent]) -> Vec<UnsentChange> {
 struct OneCarry {
     carried: usize,
     waiting: usize,
-    /// The store read back with nothing left (or there was none).
+    /// The store read back with nothing left (or there was none, or it will
+    /// never open).
     empty: bool,
+    /// The store rests here but will never open for this seed.
+    unreadable: bool,
 }
 
 async fn carry_one(
@@ -220,12 +240,29 @@ async fn carry_one(
     target: &dyn CarryTarget,
     mls: Option<&dyn MlsIntentSender>,
 ) -> Result<OneCarry> {
-    let Some(rows) = read_rows(root, predecessor, seal.clone()).await? else {
+    let rows = match read_rows(root, predecessor, seal.clone()).await {
+        Ok(rows) => rows,
+        Err(e) if unopenable(&e) => {
+            tracing::warn!(
+                "outbox carry: {predecessor}'s store will never open for its seed \
+                 ({e:#}) — nothing in it can be carried; settling the carry"
+            );
+            return Ok(OneCarry {
+                carried: 0,
+                waiting: 0,
+                empty: true,
+                unreadable: true,
+            });
+        }
+        Err(e) => return Err(e),
+    };
+    let Some(rows) = rows else {
         tracing::debug!("outbox carry: no store for {predecessor} on this device");
         return Ok(OneCarry {
             carried: 0,
             waiting: 0,
             empty: true,
+            unreadable: false,
         });
     };
     let mut waiting_scopes: BTreeSet<&str> = BTreeSet::new();
@@ -268,7 +305,23 @@ async fn carry_one(
         carried: moved.len(),
         waiting,
         empty: left == 0,
+        unreadable: false,
     })
+}
+
+/// Whether a read's failure says the predecessor's store will never open —
+/// [`fauna_account_store::sqlite::is_unopenable`] on native; the IndexedDB
+/// store carries no seal and names no such failure.
+fn unopenable(err: &anyhow::Error) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        fauna_account_store::sqlite::is_unopenable(err)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = err;
+        false
+    }
 }
 
 /// The predecessor's undrained intents, `(scope, channel_seq)` ascending;
@@ -683,10 +736,12 @@ mod tests {
         assert!(fx.successor.0.outbox_undrained().await.unwrap().is_empty());
     }
 
-    /// A store sealed under another seed — a thief's, say — does not open:
-    /// nothing is carried, nothing is recorded, the error is reported.
+    /// A store sealed under another seed — a thief's, say — does not open
+    /// under the seed this device holds, and never will: nothing is carried,
+    /// and the carry settles as unreadable, so the retired identity's removal
+    /// is not refused for rows nobody can send or discard.
     #[tokio::test]
-    async fn a_store_sealed_under_another_seed_carries_nothing() {
+    async fn a_store_sealed_under_another_seed_carries_nothing_and_settles() {
         let fx = fixture().await;
         predecessor_store(
             &fx.root,
@@ -695,13 +750,52 @@ mod tests {
             &[(intent(9, "posts.interact:a", IntentDrainer::Rpc), None)],
         )
         .await;
+        let carry = carry(&fx);
+        let succ = fx.succ.actor_id_hex();
+        let report = carry.run(&succ, &fx.successor, None).await;
+        assert_eq!(
+            (report.carried, report.settled, report.unreadable),
+            (0, 1, 1)
+        );
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(fx.successor.0.outbox_undrained().await.unwrap().is_empty());
+        assert!(!owed(&fx), "nothing carriable is owed");
+        assert!(carry.held_changes(&succ).await.is_empty());
+    }
+
+    /// A damaged store — its database file not a database — is as unreadable
+    /// as another seed's: the carry settles, and nothing is listed.
+    #[tokio::test]
+    async fn a_damaged_store_settles_as_unreadable() {
+        let fx = fixture().await;
+        let dir = fx.root.store_dir(&fx.pred.actor_id_hex()).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(fauna_account_store::sqlite::ACCOUNT_STORE_DB_FILENAME),
+            vec![0x5a; 8192],
+        )
+        .unwrap();
         let report = carry(&fx)
             .run(&fx.succ.actor_id_hex(), &fx.successor, None)
             .await;
-        assert_eq!((report.carried, report.settled), (0, 0));
-        assert_eq!(report.errors.len(), 1, "{report:?}");
-        assert!(fx.successor.0.outbox_undrained().await.unwrap().is_empty());
-        assert!(owed(&fx));
+        assert_eq!(
+            (report.carried, report.settled, report.unreadable),
+            (0, 1, 1)
+        );
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(!owed(&fx));
+    }
+
+    /// Only a failure that says no key this device holds will ever open the
+    /// store settles it; any other (a busy lock, an I/O error) stays owed
+    /// and is retried by the next pass.
+    #[test]
+    fn only_a_definitive_open_failure_is_unopenable() {
+        let plain = anyhow::anyhow!("account store: migration lock busy");
+        assert!(!fauna_account_store::sqlite::is_unopenable(&plain));
+        let mismatch = anyhow::Error::from(fauna_account_store::sqlite::ReplicaKeyMismatch)
+            .context("open the account store");
+        assert!(fauna_account_store::sqlite::is_unopenable(&mismatch));
     }
 
     /// A crash between the append and the predecessor's delete leaves the

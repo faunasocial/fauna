@@ -1,6 +1,7 @@
 use fauna_client::{AuthClient, MultipartBlob, NestClient, NestClientError};
 use fauna_client_caldav::{
-    AnonAttendeeDiscovery, AttendeeInfo, CalDavClient, DavRecipientKeys, DecodedEventsPage,
+    AnonAttendeeDiscovery, AttendeeInfo, CalDavClient, CalendarsRead, DavRecipientKeys,
+    DecodedEventsPage,
     bridge_routing::{DeleteEventRequest, ProvisionCalendarRequest, QueryEventsRequest},
     delta_sync::{BackstopVerdict, CalendarSyncTokens, backstop_probe},
     dispatch_imip_request, imip_reply_for_rsvp, imip_request_for_invite, uid_hash,
@@ -14,6 +15,7 @@ use fauna_client_config::{DavStoreContext, dav_store_context};
 use fauna_client_conversations::{ConversationsClient, NestImipDispatch};
 use fauna_client_recovery::linked_fanout::native::NativeLinkedNestDial;
 use fauna_core::identity::{ActorId, ActorKeypair};
+use fauna_core::possibility::ReadState;
 use fauna_core::rsvp::RsvpResponse;
 use fauna_core::secret::SecretString;
 use fauna_nest_http::paths;
@@ -531,7 +533,7 @@ impl FaunaClient {
     }
 
     #[cfg(test)]
-    fn offline_for_test() -> Self {
+    pub(crate) fn offline_for_test() -> Self {
         let (tx, rx) = ui_channel();
         std::mem::forget(rx);
         let machine = fauna_launch_machine::LaunchMachine::new(
@@ -612,8 +614,14 @@ impl FaunaClient {
     /// connects as on any launch — or the machine reaches a verdict a retry
     /// cannot change (refused, identity changed, outdated, …), where it stops.
     /// The loop lives on this client's runtime, so it ends with the session.
+    ///
+    /// **A retried failure is a gap in reaching the nest, not an
+    /// authentication verdict** ([`session_mint_failure_message`]): it shows on
+    /// the `connection-status` indicator — "Connecting…", then "Cannot
+    /// connect" — and never on the app-wide error banner, which outlived the
+    /// sign-in it described. Only a verdict a retry cannot
+    /// change paints `AuthFailed`.
     pub fn authenticate(&self) {
-        use fauna_launch_machine::LaunchPhase;
         use fauna_protocol::reconnect::{Backoff, JitterRng};
         use fauna_ws_substrate::supervisor::{INITIAL_BACKOFF, MAX_BACKOFF};
 
@@ -624,10 +632,10 @@ impl FaunaClient {
             machine.refresh_token().await;
             let mut backoff = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
             let mut jitter = JitterRng::from_entropy();
-            let mut failure_painted = false;
+            let mut failures: u32 = 0;
             loop {
                 if machine.current_bearer().is_some() {
-                    if failure_painted {
+                    if failures > 0 {
                         // The FaunaClient was built off `Online`, so the TTL
                         // refresh loop it spawned returned at once; arm it now
                         // the machine holds a bearer again.
@@ -638,16 +646,11 @@ impl FaunaClient {
                     }));
                     return;
                 }
+                failures = failures.saturating_add(1);
                 let snapshot = machine.snapshot();
-                let retryable = matches!(snapshot.phase, LaunchPhase::Offline { transient: true })
-                    && !snapshot.sign_in_refused;
-                if !failure_painted || !retryable {
-                    let error = snapshot
-                        .last_error
-                        .unwrap_or_else(|| crate::i18n::strings::errors::AUTH_FAILED.to_string());
-                    tx.send(UiMessage::Data(DataMessage::AuthFailed { error }));
-                    failure_painted = true;
-                }
+                let message = session_mint_failure_message(&snapshot, failures);
+                let retryable = matches!(message, UiMessage::Realtime(_));
+                tx.send(message);
                 if !retryable {
                     return;
                 }
@@ -1210,34 +1213,25 @@ impl FaunaClient {
 
     /// Fetch all calendars for the authenticated user from the encrypted
     /// `bridge_caldav_*` store via `fauna.bridges.list_calendars` (events.md
-    /// Decision B). When the actor has no calendars yet, the Personal calendar
-    /// is lazily provisioned (`personal_calendar_id()`, byte-identical to the
-    /// MDA's) so the page always has at least one selectable calendar. Degrades
-    /// to an empty list when the calendar key is unavailable (mail/CalDAV not
-    /// enabled — see [`caldav_context`]).
+    /// Decision B), as the shared four-answer read (`ui/events.md` § Errors &
+    /// edge cases → *No calendar to hold an event*, ruling 2): custody decides
+    /// *unresolved* and *no key* without a call; with the key the shared load
+    /// (the lazy `Personal` included) answers *loaded* or *provision failed*.
+    /// An empty list is none of the answers, so the page never paints one as
+    /// "No calendars yet.". `fauna.setup.status` is read only on *no key*,
+    /// the one answer whose reason it changes.
     pub fn fetch_calendars(&self) {
         self.fetch_refused_changes();
         let nest = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         let secret_hex = self.secret_hex.clone();
         self.spawn_bg(async move {
-            let Some(DavStoreContext { actor_id, msek, prior_mseks }) = caldav_context(&nest, &secret_hex).await else {
-                tx.send(UiMessage::Data(DataMessage::CalendarsLoaded {
-                    calendars: vec![],
-                }));
-                return;
-            };
-            let client = CalDavClient::new(Arc::clone(&nest));
-            // The shared load: lazy-provisions Personal so a fresh actor
-            // always has a calendar, and hands back the provision error to
-            // log — a silent failure reads as "no calendars".
-            let entries = match client.list_calendars_with_personal(&actor_id, &msek).await {
-                Ok(reply) => {
-                    if let Some(e) = &reply.personal_provision_error {
-                        tracing::error!("fetch_calendars: lazy Personal: {e}");
-                    }
-                    reply.calendars
-                }
+            let custody = caldav_custody(&secret_hex).await;
+            let read = match CalDavClient::new(Arc::clone(&nest))
+                .read_calendars(&custody)
+                .await
+            {
+                Ok(read) => read,
                 Err(e) => {
                     tx.send(UiMessage::Action(ActionResult::Failed {
                         context: "fauna.bridges.list_calendars".into(),
@@ -1246,30 +1240,56 @@ impl FaunaClient {
                     return;
                 }
             };
-            // Surface (don't silently `.ok()`-drop) an entry that fails to
-            // decode: a calendar whose sealed metadata the client can't open —
-            // e.g. a non-canonical-CBOR producer (the MDA lazy-Personal bug) or
-            // an msek mismatch — would otherwise just vanish from the list.
-            // Derived once for the whole list — every row's metadata reuses it
-            // instead of paying its own X-Wing keygen .
-            let dav_keys = DavRecipientKeys::from_mseks(fauna_client_caldav::DavKind::Calendar, &msek, &prior_mseks);
-            let calendars: Vec<_> = entries
-                .iter()
-                .filter_map(
-                    |e| match caldav_backend::calendar_row_from_entry(e, &dav_keys) {
-                        Ok(row) => Some(row),
-                        Err(err) => {
-                            tracing::error!(
-                                "fetch_calendars: decode entry (cal_id={}, meta_len={}) failed: {err}",
-                                fauna_core::format::hex_full(&e.calendar_id),
-                                e.encrypted_metadata.len()
-                            );
-                            None
-                        }
-                    },
-                )
-                .collect();
-            tx.send(UiMessage::Data(DataMessage::CalendarsLoaded { calendars }));
+            if let CalendarsRead::ProvisionFailed { error } = &read {
+                tracing::error!("fetch_calendars: lazy Personal: {error}");
+            }
+            let serves_dav_or_mail = match read {
+                CalendarsRead::NoKey => Some(deployment_serves_dav_or_mail(&nest).await),
+                _ => None,
+            };
+            let calendars: Vec<_> = match (&custody, &read) {
+                (
+                    fauna_client_config::DavCustody::Ready(DavStoreContext {
+                        msek, prior_mseks, ..
+                    }),
+                    CalendarsRead::Loaded { calendars: entries },
+                ) => {
+                    // Surface (don't silently `.ok()`-drop) an entry that fails
+                    // to decode: a calendar whose sealed metadata the client
+                    // can't open — e.g. a non-canonical-CBOR producer (the MDA
+                    // lazy-Personal bug) or an msek mismatch — would otherwise
+                    // just vanish from the list. Derived once for the whole
+                    // list — every row's metadata reuses it instead of paying
+                    // its own X-Wing keygen .
+                    let dav_keys = DavRecipientKeys::from_mseks(
+                        fauna_client_caldav::DavKind::Calendar,
+                        msek,
+                        prior_mseks,
+                    );
+                    entries
+                        .iter()
+                        .filter_map(|e| {
+                            match caldav_backend::calendar_row_from_entry(e, &dav_keys) {
+                                Ok(row) => Some(row),
+                                Err(err) => {
+                                    tracing::error!(
+                                        "fetch_calendars: decode entry (cal_id={}, meta_len={}) failed: {err}",
+                                        fauna_core::format::hex_full(&e.calendar_id),
+                                        e.encrypted_metadata.len()
+                                    );
+                                    None
+                                }
+                            }
+                        })
+                        .collect()
+                }
+                _ => vec![],
+            };
+            tx.send(UiMessage::Data(DataMessage::CalendarsLoaded {
+                read: read.state(),
+                serves_dav_or_mail,
+                calendars,
+            }));
         });
     }
 
@@ -1628,66 +1648,47 @@ impl FaunaClient {
     /// Create a new event in the encrypted store: build the canonical VEVENT
     /// from the form params (the reused `fauna_core::ical` writer), seal it, and
     /// PUT it via `fauna.bridges.put_event_ciphertext`. `params` carries the
-    /// `calendar_id` and a freshly-minted `uid` (its `blake3` is the dedup key).
-    pub fn create_event(&self, params: serde_json::Value) {
+    /// `calendar_id` (resolved by the compose through the shared
+    /// `event_create_target`, so never empty) and a freshly-minted `uid` (its
+    /// `blake3` is the dedup key).
+    ///
+    /// The result goes back to the compose that sent it, `on_done` running on
+    /// the GTK thread with `Err(cause)` when the create was refused
+    /// (`ui/events.md` § *No calendar to hold an event*, ruling 4: the form
+    /// says so and stays open, never a toast or the app-wide banner). A
+    /// success also posts `ActionResult::Success { context: "event_created" }`,
+    /// whose handler re-reads the calendars and clears the drafts rail.
+    pub fn create_event(
+        &self,
+        params: serde_json::Value,
+        on_done: impl FnOnce(Result<(), String>) + 'static,
+    ) {
         let nest = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         let secret_hex = self.secret_hex.clone();
         let self_email = self.self_email();
-        self.spawn_bg(async move {
-            let cal_hex = params
-                .get("calendar_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let uid = params
-                .get("uid")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("{}@fauna-desktop", uuid::Uuid::new_v4()));
-            let Some(cal_id) = hex32(&cal_hex) else {
-                tx.send(UiMessage::Action(ActionResult::Failed {
-                    context: "event_created".into(),
-                    error: crate::i18n::strings::errors::NO_CALENDAR_SELECTED.into(),
-                }));
-                return;
-            };
-            let Some(DavStoreContext { actor_id, msek, .. }) =
-                caldav_context(&nest, &secret_hex).await
-            else {
-                tx.send(UiMessage::Action(ActionResult::Failed {
-                    context: "event_created".into(),
-                    error: crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.into(),
-                }));
-                return;
-            };
-            let fields = caldav_backend::event_fields_from_params(&params, &uid);
-            let client = CalDavClient::new(nest);
-            let msg = match client
-                .seal_and_put_event(
-                    &actor_id,
-                    &cal_id,
-                    &uid_hash(&uid),
-                    &msek,
-                    &fields,
-                    &[],
-                    &self_email,
-                    None,
-                    now_secs(),
-                    None,
-                )
-                .await
-            {
-                Ok(_) => UiMessage::Action(ActionResult::Success {
-                    context: "event_created".into(),
-                }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.bridges.put_event_ciphertext".into(),
-                    error: e.to_string(),
-                }),
-            };
-            tx.send(msg);
-        });
+        crate::async_helper::spawn_with_snapshot(
+            &self.runtime_handle(),
+            move || async move {
+                let result = put_new_event(nest, secret_hex, self_email, params).await;
+                if result.is_ok() {
+                    tx.send(UiMessage::Action(ActionResult::Success {
+                        context: "event_created".into(),
+                    }));
+                }
+                result
+            },
+            on_done,
+        );
+    }
+
+    /// Report a failure on the page's own `error-message` (and its toast) as
+    /// a whole sentence — for a compose whose result arrived after the person
+    /// closed it (`ui/events.md` § *No calendar to hold an event*, ruling 4:
+    /// the page takes the report only when no form is open).
+    pub fn report_on_page(&self, message: String) {
+        self.tx
+            .send(UiMessage::Action(ActionResult::FailedLocalized { message }));
     }
 
     /// Delete an event from the encrypted store via `fauna.bridges.delete_event`,
@@ -2244,12 +2245,23 @@ impl FaunaClient {
     /// shape. What the shared `FeedComposeState::clear_sent` then decides the
     /// composer paints from the snapshot (`ui/feed.md` § User actions,
     /// `post-submit-button`).
-    pub fn submit_post(&self, manager: Arc<LinuxFeedManager>, text: String, tags: String) {
+    ///
+    /// `on_done` runs on the GTK thread with whether the post was saved — the
+    /// compose dialog closes on `true` only (`ui/README.md` § Offer only what
+    /// is possible, rule 7); a failure is already stamped on `compose-error`.
+    pub fn submit_post(
+        &self,
+        manager: Arc<LinuxFeedManager>,
+        text: String,
+        tags: String,
+        on_done: impl FnOnce(bool) + 'static,
+    ) {
         let nest = Arc::clone(&self.content_api);
-        let staged = self.staged_attachment.borrow_mut().take();
         let Some(rt) = self.runtime.borrow().as_ref().map(|r| r.handle().clone()) else {
+            on_done(false);
             return;
         };
+        let staged = self.staged_attachment.borrow_mut().take();
         crate::async_helper::spawn_with_snapshot(
             &rt,
             move || async move {
@@ -2365,7 +2377,7 @@ impl FaunaClient {
                     Err(_) => false,
                 }
             },
-            |_sent: bool| {},
+            on_done,
         );
     }
 
@@ -2503,20 +2515,45 @@ impl FaunaClient {
         post_id: &str,
         text: &str,
         public_confirmed: bool,
+        on_done: impl FnOnce(Result<(), String>) + 'static,
     ) {
         let manager = Arc::clone(manager);
         let nest = Arc::clone(&self.content_api);
         let tx = self.tx.clone();
         let (post_id, text) = (post_id.to_string(), text.to_string());
-        self.spawn_bg(async move {
-            let msg = match send_reply(&manager, &nest, post_id, text, public_confirmed).await {
-                Ok(()) => UiMessage::Action(ActionResult::Success {
-                    context: "post_reply".into(),
-                }),
-                Err(e) => UiMessage::Action(interact_failure(e)),
-            };
-            tx.send(msg);
-        });
+        let Some(rt) = self.runtime.borrow().as_ref().map(|r| r.handle().clone()) else {
+            on_done(Err(crate::i18n::strings::common::ERROR.to_string()));
+            return;
+        };
+        // `on_done` gets the save's own result on the GTK thread: the reply
+        // dialog closes only on `Ok`, and a failure stays in it with the typed
+        // text (`ui/README.md` § Offer only what is possible, rule 7). The
+        // action message still goes out as before.
+        crate::async_helper::spawn_with_snapshot(
+            &rt,
+            move || async move {
+                let result = send_reply(&manager, &nest, post_id, text, public_confirmed).await;
+                let (msg, shown) = match &result {
+                    Ok(()) => (
+                        UiMessage::Action(ActionResult::Success {
+                            context: "post_reply".into(),
+                        }),
+                        Ok(()),
+                    ),
+                    Err(e) => {
+                        let failure = interact_failure(e.clone());
+                        let shown = match &failure {
+                            ActionResult::FailedLocalized { message } => message.clone(),
+                            _ => e.clone(),
+                        };
+                        (UiMessage::Action(failure), Err(shown))
+                    }
+                };
+                tx.send(msg);
+                shown
+            },
+            on_done,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -8322,6 +8359,21 @@ impl FaunaClient {
     /// a follow-on). Owner-only per `docs/goal/ui/folders.md` § Sharing.
     /// `access`: the invited member's grant from `folder-share-role-select` —
     /// `Some("writer")` for read-write, `None` = reader (multi-writer Phase 1).
+    /// Whether the folder follow/share ops have what they need from this
+    /// client: the signed-in identity secret (the nest channel and the devices
+    /// machine are held whenever a `FaunaClient` is) — the `ready` input of
+    /// `fauna_client_folders::forms::follow_possibility`.
+    pub fn folder_ops_ready(&self) -> bool {
+        ActorKeypair::from_secret_hex(&self.secret_hex).is_ok()
+    }
+
+    /// The share's `ready`: [`Self::folder_ops_ready`] AND the live
+    /// conversations session the share admits the recipient through
+    /// (`fauna_client_folders::forms::share_possibility`).
+    pub fn folder_share_ready(&self) -> bool {
+        self.folder_ops_ready() && crate::conversations::conv_backend::active_session().is_some()
+    }
+
     pub fn share_folder(
         &self,
         machine: Arc<fauna_devices_machine::DevicesMachine>,
@@ -8642,18 +8694,26 @@ impl FaunaClient {
     /// The creator's own subscription tier names (ascending by rank) — the option
     /// set the `folder-paywall-tier-select` offers. Returns a `Send`
     /// future the Folders view drives off the GTK thread and caches, mirroring
-    /// [`can_serve_webdav`](Self::can_serve_webdav). A failed read (or no tiers)
-    /// degrades to an empty list — the select renders disabled with a "create a
-    /// tier first" hint, since there is nothing to paywall to.
+    /// [`can_serve_webdav`](Self::can_serve_webdav), with where the read
+    /// stands: a failed read is `Failed` with no names, so the select is painted
+    /// from the shared `own_tiers_possibility` as "failed to load", never as
+    /// "create a tier first" (`folders.md` § Errors & edge cases, *Own-tier and
+    /// mail gates*).
     pub fn fetch_own_tier_names(
         &self,
-    ) -> impl std::future::Future<Output = Vec<String>> + Send + 'static {
+    ) -> impl std::future::Future<Output = (ReadState, Vec<String>)> + Send + 'static {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         async move {
             let subs = fauna_client_subscriptions::SubscriptionsClient::new(nest_rpc);
             match subs.tiers_list().await {
-                Ok(tiers) => tiers.into_iter().map(|t| t.name).collect(),
-                Err(_) => Vec::new(),
+                Ok(tiers) => (
+                    ReadState::Resolved,
+                    tiers.into_iter().map(|t| t.name).collect(),
+                ),
+                Err(e) => {
+                    tracing::warn!("folders: own tiers read failed: {e}");
+                    (ReadState::Failed, Vec::new())
+                }
             }
         }
     }
@@ -8663,18 +8723,35 @@ impl FaunaClient {
     /// the Folders view can drive it off the GTK thread through
     /// `async_helper::spawn_with_snapshot` and cache the answer.
     ///
-    /// A failed read degrades to `false` — the toggle stays disabled + hinted.
-    /// Not offering a control is the safe failure; offering one that cannot
-    /// succeed is not (`serve_set_folder` commits the nest flag before it can
-    /// discover the missing MSEK).
-    pub fn can_serve_webdav(&self) -> impl std::future::Future<Output = bool> + Send + 'static {
+    /// Answers where the custody read stands beside what it found: a failed
+    /// read is `Failed`, which the toggle paints (through the shared
+    /// `webdav_serve_possibility`) as "failed to load" — still not offered,
+    /// since `serve_set_folder` commits the nest flag before it can discover a
+    /// missing MSEK, but never mistold as "set up mail".
+    pub fn can_serve_webdav(
+        &self,
+    ) -> impl std::future::Future<Output = (ReadState, bool)> + Send + 'static {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let secret_hex = self.secret_hex.clone();
         async move {
-            do_can_serve_webdav(&nest_rpc, &secret_hex)
-                .await
-                .unwrap_or(false)
+            match do_can_serve_webdav(&nest_rpc, &secret_hex).await {
+                Ok(holds) => (ReadState::Resolved, holds),
+                Err(e) => {
+                    tracing::warn!("folders: mail custody read failed: {e}");
+                    (ReadState::Failed, false)
+                }
+            }
         }
+    }
+
+    /// Refuse a gesture with its possibility answer's reason on the shared
+    /// `error-message` banner — the press half of a painted control, never a
+    /// silent return.
+    pub fn refuse_gesture(&self, context: &str, reason: String) {
+        self.tx.send(UiMessage::Action(ActionResult::Failed {
+            context: context.into(),
+            error: reason,
+        }));
     }
 
     /// Fetch the recipient-side **pending folder shares** — the staged
@@ -10182,6 +10259,88 @@ fn attendee_rows(attendees: &[AttendeeInfo]) -> Vec<caldav_backend::CalDavAttend
         .collect()
 }
 
+/// Seal and put one new event — [`FaunaClient::create_event`]'s work, its
+/// refusal the cause the compose's sentence carries.
+async fn put_new_event(
+    nest: Arc<NestClient>,
+    secret_hex: SecretString,
+    self_email: String,
+    params: serde_json::Value,
+) -> Result<(), String> {
+    let cal_hex = params
+        .get("calendar_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let uid = params
+        .get("uid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{}@fauna-desktop", uuid::Uuid::new_v4()));
+    let cal_id = hex32(&cal_hex)
+        .ok_or_else(|| crate::i18n::strings::errors::NO_CALENDAR_SELECTED.to_string())?;
+    let DavStoreContext { actor_id, msek, .. } = caldav_context(&nest, &secret_hex)
+        .await
+        .ok_or_else(|| crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.to_string())?;
+    let fields = caldav_backend::event_fields_from_params(&params, &uid);
+    CalDavClient::new(nest)
+        .seal_and_put_event(
+            &actor_id,
+            &cal_id,
+            &uid_hash(&uid),
+            &msek,
+            &fields,
+            &[],
+            &self_email,
+            None,
+            now_secs(),
+            None,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The calendar custody answer for the Events page's four-answer read
+/// (`ui/events.md` § *No calendar to hold an event*, ruling 2). A connection
+/// secret that does not parse is no answer about custody, so it reads as
+/// *unresolved* (logged), never as *no key* — tui's `caldav_custody`.
+async fn caldav_custody(secret_hex: &str) -> fauna_client_config::DavCustody {
+    match secret_to_keypair(secret_hex) {
+        Ok(kp) => {
+            fauna_client_config::dav_custody(
+                crate::account_runtime::mail_store().as_ref(),
+                kp.actor_id().0,
+            )
+            .await
+        }
+        Err(e) => {
+            tracing::error!("events: the connection secret does not parse: {e}");
+            fauna_client_config::DavCustody::Unreadable(e.to_string())
+        }
+    }
+}
+
+/// Does the deployment serve CalDAV, CardDAV or mail (`fauna.setup.status`,
+/// the shared `SetupStatusReply::serves_dav_or_mail` fold)? It decides only
+/// which step a *no key* reason names; a failed read takes the common
+/// deployment's answer (served — the step is Add credential), as on tui.
+async fn deployment_serves_dav_or_mail(nest: &Arc<NestClient>) -> bool {
+    use fauna_client::{SetupStatusReply, SetupStatusRequest};
+    let reply: Result<SetupStatusReply, _> = nest
+        .request("fauna.setup.status", SetupStatusRequest::default())
+        .await;
+    match reply {
+        Ok(status) => status.serves_dav_or_mail(),
+        Err(e) => {
+            tracing::warn!(
+                "events: setup status unreadable, taking the deployment as serving: {e}"
+            );
+            true
+        }
+    }
+}
+
 /// The actor's identity (`actor_id`) and mail-sealing key (`msek`) — the two
 /// inputs every encrypted-CalDAV op needs. `None` when the secret is malformed,
 /// the mail custody read fails, or mail/CalDAV is not enabled (no `msek` minted yet —
@@ -10344,6 +10503,72 @@ async fn apply_self_identity(handle: String, domain: String, tier: String, tx: &
         domain,
         tier,
     }));
+}
+
+/// What one failed sign-in of [`FaunaClient::authenticate`]'s loop says, after
+/// `consecutive_failures` in a row: the shared rule
+/// ([`fauna_launch_machine::LaunchSnapshot::session_mint_gap_word`]) reads a
+/// failure the machine will retry as a gap on the `connection-status` indicator
+/// (`transport-connection.md` § Connection-status indicator: a transient gap is
+/// never an error banner), so it is the matching `WsEvent`; anything else is the
+/// verdict, `AuthFailed` with the machine's own words. The loop retries exactly
+/// when this is a `Realtime` message.
+fn session_mint_failure_message(
+    snapshot: &fauna_launch_machine::LaunchSnapshot,
+    consecutive_failures: u32,
+) -> UiMessage {
+    use crate::app::WsEvent;
+    match snapshot.session_mint_gap_word(consecutive_failures) {
+        Some("unreachable") => UiMessage::Realtime(WsEvent::Unreachable),
+        Some(_) => UiMessage::Realtime(WsEvent::Connecting),
+        None => UiMessage::Data(DataMessage::AuthFailed {
+            error: snapshot
+                .last_error
+                .clone()
+                .unwrap_or_else(|| crate::i18n::strings::errors::AUTH_FAILED.to_string()),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod session_mint_failure_message_tests {
+    use super::*;
+    use crate::app::WsEvent;
+    use fauna_launch_machine::{LaunchPhase, LaunchSnapshot};
+
+    /// The 0.1.7 walk's failure — the nest's name did not resolve — reads
+    /// "Connecting…", then "Cannot connect", and never paints the banner; a
+    /// refusal still does.
+    #[test]
+    fn a_reach_failure_goes_on_the_indicator_and_a_refusal_on_the_banner() {
+        let gap = LaunchSnapshot {
+            phase: LaunchPhase::Offline { transient: true },
+            last_error: Some(
+                "WebSocket error: ws connect: IO error: failed to lookup address information"
+                    .into(),
+            ),
+            ..LaunchSnapshot::initial()
+        };
+        assert!(matches!(
+            session_mint_failure_message(&gap, 1),
+            UiMessage::Realtime(WsEvent::Connecting)
+        ));
+        let settled = fauna_core::format::CONNECTION_UNREACHABLE_AFTER_CONSECUTIVE_FAILURES;
+        assert!(matches!(
+            session_mint_failure_message(&gap, settled),
+            UiMessage::Realtime(WsEvent::Unreachable)
+        ));
+        let refused = LaunchSnapshot {
+            phase: LaunchPhase::Offline { transient: false },
+            sign_in_refused: true,
+            last_error: Some("refused".into()),
+            ..LaunchSnapshot::initial()
+        };
+        assert!(matches!(
+            session_mint_failure_message(&refused, 1),
+            UiMessage::Data(DataMessage::AuthFailed { error }) if error == "refused"
+        ));
+    }
 }
 
 /// The message a stopped supervisor's reason escalates as, if it is a
@@ -10532,7 +10757,9 @@ pub async fn load_selfhosted_recovery_command(
 /// recovery floor → *(c) The writes*) over `nest` and the account-store
 /// handle, mapping a run that ends with custody unconfirmed onto linux's
 /// app-wide `warning-message` banner (`UiMessage::RecoveryCustodyWarning`,
-/// app.rs) in the shared words, never a silent drop. Called from both edges: [`FaunaClient::run_deployment_seed_custody_leg`]
+/// app.rs) in the shared words, never a silent drop — and a later run that
+/// confirms custody (a reconnect's retry) onto taking that warning down
+/// (`UiMessage::RecoveryCustodyCleared`). Called from both edges: [`FaunaClient::run_deployment_seed_custody_leg`]
 /// (post-auth, when the store is already up) and `account_runtime::install`'s
 /// installed arm (store-ready, when post-auth already landed).
 pub async fn run_deployment_seed_custody_leg(
@@ -10540,13 +10767,19 @@ pub async fn run_deployment_seed_custody_leg(
     store: fauna_sync_engine::account_runtime::AccountStoreHandle,
     tx: UiSender,
 ) {
-    if let Some(warning) =
-        fauna_client_account_runtime::deployment_seeds::run_custody_leg(&nest, &store).await
-    {
-        tx.send(UiMessage::RecoveryCustodyWarning(
-            warning.resolve(crate::i18n::strings::lookup),
-        ));
-    }
+    fauna_client_account_runtime::deployment_seeds::run_custody_leg_signalled(
+        &nest,
+        store,
+        move |signal| {
+            tx.send(match signal {
+                fauna_client_config::CustodyLegSignal::Warning(warning) => {
+                    UiMessage::RecoveryCustodyWarning(warning.resolve(crate::i18n::strings::lookup))
+                }
+                fauna_client_config::CustodyLegSignal::Cleared => UiMessage::RecoveryCustodyCleared,
+            });
+        },
+    )
+    .await;
 }
 
 /// Derive the hex actor_id from a hex secret. Returns None when the

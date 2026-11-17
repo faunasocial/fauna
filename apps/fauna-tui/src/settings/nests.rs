@@ -151,6 +151,20 @@ pub(crate) fn blessing_door(
     )
 }
 
+/// The Nests page's pairing-mark door — the account plane's
+/// `fauna.state.pairing-mark`, through the shared impl every runtime-hosting
+/// app wires beside the blessing door, over this app's slot: a link or an
+/// unlink here repaints a sibling seat's open Nests page.
+pub(crate) fn pairing_mark_door(
+    runtime: super::AccountRuntimeSlot,
+) -> Arc<dyn fauna_client_pair::PairingMarkStore> {
+    Arc::new(
+        fauna_client_account_runtime::pairing_marks::PlanePairingMarks::new(move || {
+            runtime.lock().ok().and_then(|handle| handle.clone())
+        }),
+    )
+}
+
 /// The succession-ledger door — the account plane's
 /// `fauna.state.succession-ledger` (the grant log and its marks) over the same
 /// slot, resolved at every call: a machine built before the runtime lands
@@ -194,6 +208,7 @@ impl NestsState {
         runtime: super::AccountRuntimeSlot,
         mail: Arc<dyn fauna_client_config::MailStore>,
     ) -> Self {
+        let marks = pairing_mark_door(runtime.clone());
         let machine = match crate::mail_glue::build_linked_nests_machine_with_trust(
             Arc::clone(&nest),
             secret_hex,
@@ -209,7 +224,8 @@ impl NestsState {
                 tracing::error!("[settings/nests] build trust machine: {e}");
                 fauna_client_pair::build_linked_nests_machine(nest)
             }
-        };
+        }
+        .with_pairing_marks(marks);
         NestsState {
             machine: Some(Arc::new(machine)),
             ..Default::default()
@@ -1217,6 +1233,7 @@ mod tests {
             class: class.to_string(),
             kind: kind.map(str::to_string),
             tier: tier.map(str::to_string),
+            folder: None,
         }
     }
 

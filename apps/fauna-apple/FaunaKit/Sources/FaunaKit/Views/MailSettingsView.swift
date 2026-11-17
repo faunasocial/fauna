@@ -151,6 +151,13 @@ public struct MailSettingsView: View {
         .onChange(of: client?.mailSettledGeneration) { _, _ in
             Task { await vm.rehydrateOnSettle() }
         }
+        // This page's machine is the one the person turns mail on with: hand
+        // every snapshot it reads to the session's mail-usable gate, so the
+        // mail sub-pages' rail rows come alive without leaving the page
+        // (`mail-settings.md` § Errors & edge cases, the mail-usable gate).
+        .onChange(of: vm.snapshot) { _, snapshot in
+            if let snapshot { client?.mailUsable.observe(snapshot) }
+        }
     }
 
     // MARK: - Enable toggle

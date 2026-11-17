@@ -553,6 +553,23 @@ class AdminActions:
         self.driver.click("admin-dns-domain-mode", index=index)
         time.sleep(1)
 
+    def try_toggle_domain_mode(self, index: int = 0) -> bool:
+        """Flip the mode control only if it is offered; return whether it was
+        (`ui/README.md` § Offer only what is possible; `dns-management.md`
+        § Errors & edge cases). An app on the shared `set_mode_possibility`
+        paints the switch to managed disabled, its reason beside it, while no
+        held credential covers the domain — that disabled control IS the
+        refusal. An app not yet lifted still offers it and refuses on the
+        press, naming the reason on `error-message`; the caller checks that
+        path when this returns True."""
+        self.driver.wait_for("admin-dns-domain-mode", timeout=10.0)
+        if not self.driver.is_enabled(
+            "admin-dns-domain-mode", scope=f"admin-dns-domain[{index}]"
+        ):
+            return False
+        self.toggle_domain_mode(index=index)
+        return True
+
     def toggle_manage_all(self) -> None:
         """Flip the deployment "Fauna controls all domains" master switch
         (`admin-dns-manage-all-toggle`) — sets every active domain's mode at once

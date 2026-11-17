@@ -38,7 +38,19 @@ paths and a witness for one says nothing about the other:
     (`BackgroundScheduler.runScheduledUploadPass`) and not a test-only shortcut
     around it.
 
-**Why this module is iOS-only.** macOS instantiates the same engine against the
+**Android, and why its foreground test is iOS-only.** android has ONE trigger
+for this outcome: the `PhotoBackupWorker` WorkManager schedule (`folders.md`
+§ Photo backup → *What drives the ingress*; no `ContentObserver`, by design). So
+`test_a_new_photo_goes_up_with_nothing_pressed`, whose subject is the foreground
+PhotoKit observer, carries no android mark — android has no such path for it to
+witness, and its 15-minute period is not something a test may wait out. The
+scheduled test does run on android, through the same `photo_backup_scheduled_pass_now`
+poke, which there enqueues the identical `PhotoBackupWorker` the schedule runs
+(`PhotoBackupWorker.enqueueOneShot`). With no observer to race it, android's leg
+asserts more than iOS's can: a photo added after the enable's pass is uploaded BY
+the poked pass, so the upload itself is attributed to the scheduled entry point.
+
+**Why macOS is not marked here.** macOS instantiates the same engine against the
 HOST Photos library, which is machine-global state an ordinary e2e launch must not
 touch (convention 10 — and `FaunaMacApp.swift`'s own funnel comment says so). The
 macOS column runs the first test below from
@@ -72,17 +84,11 @@ from helpers.photo_backup import (
 )
 from helpers.waiting import describe_photo_backup_funnel
 
-pytestmark = [
-    pytest.mark.tier_3,
-    # iOS only in THIS module, and by design rather than by lag — see the module
-    # docstring's "Why this module is iOS-only" (macOS runs it from
-    # `tests/real_session/test_photo_backup_macos.py`). android's identical ingress (`PhotoBackupEngine.kt`,
-    # MediaStore) is equally built and equally unwitnessed, but android e2e runs
-    # on no development machine today (the emulator lives on the VM host —
-    # `feature-catalog.md` § Columns today), so its column stays honestly `(none)`
-    # until that is wired; it is a separate, already-tracked gap, not this file's.
-    pytest.mark.ios,
-]
+# Platform marks are per test, not per module: the foreground test is iOS-only
+# because android has no foreground trigger, while the scheduled test runs on both
+# (the module docstring's "Android, and why its foreground test is iOS-only"; macOS
+# runs the first test from `tests/real_session/test_photo_backup_macos.py`).
+pytestmark = [pytest.mark.tier_3]
 
 
 def _backup_on_with_one_photo(app, tmp_path) -> None:
@@ -104,6 +110,7 @@ def _backup_on_with_one_photo(app, tmp_path) -> None:
     await_quiet(app.driver)
 
 
+@pytest.mark.ios
 @pytest.mark.feature("photo-backup")
 def test_a_new_photo_goes_up_with_nothing_pressed(logged_in_app, tmp_path):
     """A photo appears in the library while backup is already on, and reaches the
@@ -139,6 +146,8 @@ def test_a_new_photo_goes_up_with_nothing_pressed(logged_in_app, tmp_path):
     )
 
 
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("photo-backup")
 def test_the_scheduled_background_pass_runs_the_real_ingest(logged_in_app, tmp_path):
     """The `social.fauna.sync.upload` slice really drives a backup pass over the
@@ -155,10 +164,34 @@ def test_the_scheduled_background_pass_runs_the_real_ingest(logged_in_app, tmp_p
     only this test can witness is that the scheduled entry point is WIRED — the
     precise thing android's `autoPhotoBackup` flag was not, and the failure that
     a registered-but-inert `BGProcessingTask` would otherwise hide for ever.
+
+    **On android the poke owns the upload too.** android has no foreground
+    observer, so nothing but the poked `PhotoBackupWorker` can pick up a photo
+    added after the enable's pass: there the test adds one and requires the
+    poked pass to carry it to Media. android's funnel has no `assets_seen` /
+    `already_synced` legs (convention 11: absent, never zero), so that upload is
+    its proof of the real ingest in their place.
     """
     app = logged_in_app
     driver = app.driver
     _backup_on_with_one_photo(app, tmp_path)
+
+    if driver.is_android():
+        _, completed_before = passes(driver)
+        tag = a_tag()
+        driver.add_photo_to_library(str(a_real_png(tmp_path, tag=tag)))
+        driver.call_command("photo_backup_scheduled_pass_now")
+        await_pass_after(
+            driver, completed_before,
+            what="the photo_backup_scheduled_pass_now poke (one PhotoBackupWorker "
+                 "enqueued through WorkManager)",
+        )
+        await_photo_in_media(
+            app, tag,
+            what="the scheduled pass (android has no foreground trigger, so only "
+                 "the poked PhotoBackupWorker could have carried it)",
+        )
+        return
 
     before = passes(driver)
     funnel_before = describe_photo_backup_funnel(driver)

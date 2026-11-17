@@ -1,12 +1,14 @@
 package com.fauna.app.ui.util
 
+import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.staticCompositionLocalOf
 import com.fauna.ffi.FfiConnectionState
 import com.fauna.ffi.connectionStateWord
-import com.fauna.ffi.offlineAffordance
+import com.fauna.ffi.offlinePossibility
+import uniffi.fauna_core.Possibility
 
 // W4 (account-data-plane.md § Workstreams) phase 4's UI desensitizing for android — the android leg of the
 // offline-mutation contract (`docs/goal/architecture/account-data-plane.md`
@@ -47,7 +49,7 @@ import com.fauna.ffi.offlineAffordance
 //
 // ## The rule is not reimplemented here
 //
-// The verdict is `offlineAffordance`, the UniFFI face of
+// The verdict is `offlinePossibility`, the UniFFI face of
 // `fauna_protocol::offline_class::affordance`. Its three rulings — only class 3
 // desensitizes, an unregistered kind stays available, only *known* offline
 // words count as offline — are deliberately not restated in Kotlin: that
@@ -159,18 +161,86 @@ fun faunaGate(kind: String, enabled: Boolean = true): FaunaGateVerdict {
     val state = LocalConnectionState.current
     val verdict = try {
         val word = if (state == null) UNKNOWN_STATE else connectionStateWord(state)
-        offlineAffordance(kind, word)
+        offlinePossibility(kind, word)
     } catch (_: Throwable) {
         null
     }
 
     // `null` is the fail-open path, so it must read as NOT gated — spelled
-    // `== false` rather than `!verdict.available` so an unreachable rule can
+    // `== false` rather than `!verdict.isPossible` so an unreachable rule can
     // never be mistaken for a refusal.
-    val gated = verdict?.available == false
+    val gated = verdict?.isPossible == false
     // The reason is resolved only when this gate is the one that closed the
     // control: `enabled == false` from the page means the page owns the
     // explanation.
-    val reason = if (gated && enabled) localized(verdict?.reason) else null
+    val reason = if (gated && enabled) localized(verdict?.blockedReason) else null
     return FaunaGateVerdict(enabled = enabled && !gated, reason = reason)
 }
+
+// ── The form case: a draft-validity Possibility folded with the gate ─────────
+//
+// `docs/goal/ui/README.md` § Offer only what is possible, rule 4's form case:
+// inside a form, a shared-Rust predicate answers whether the typed draft can be
+// submitted (`fauna_feed::forms`, `fauna_client_search::query_possibility`,
+// `fauna_client_bridges::nostr_forms`, `fauna_protocol::nostr_relay`), in the
+// one answer type `fauna_core::possibility::Possibility`. The submit is painted
+// from it with the SAME two halves [faunaGate] hands a page — `enabled` and a
+// reason for `DisabledControlReasonText` — so a form adds no idiom of its own:
+// the page's predicate is the `enabled` [faunaGate] already takes, and the
+// form's reason is the page's own, more specific one, which is why it wins.
+
+/**
+ * One form submit's verdict: whether it is [shown] at all (`Absent` hides it),
+ * the `enabled` to hand the composable, and the reason to render beside it.
+ */
+@Immutable
+data class FaunaFormVerdict(val shown: Boolean, val enabled: Boolean, val reason: String?)
+
+/**
+ * Paint a form submit from its draft-validity answer [form], folded with the
+ * offline [gate] when the submit issues a wire kind (call
+ * `faunaGate(kind, enabled = form.isPossible)` at the call site, so the kind
+ * stays a literal the offline-gate checker reads). `Blocked` disables with its
+ * own reason; `Absent` is `shown = false`; `Possible` defers to the gate.
+ */
+@Composable
+fun faunaFormGate(form: Possibility, gate: FaunaGateVerdict? = null): FaunaFormVerdict {
+    val formReason = (form as? Possibility.Blocked)?.let { localized(it.reason) }
+    return FaunaFormVerdict(
+        shown = form !is Possibility.Absent,
+        enabled = form is Possibility.Possible && (gate?.enabled ?: true),
+        reason = formReason ?: gate?.reason,
+    )
+}
+
+/**
+ * The submit's second half (rule 4: the submit asks the same predicate first):
+ * the localized reason a submit must REFUSE with — painted on the page's
+ * `error-message` by the caller — or `null` when the draft may go. `Absent`
+ * refuses with no text: the control was never offered, so there is nothing to
+ * explain, only nothing to do.
+ */
+fun formRefusal(context: Context, form: Possibility): FormRefusal? = when (form) {
+    is Possibility.Possible -> null
+    is Possibility.Blocked -> FormRefusal(resolveLocalized(context, form.reason))
+    is Possibility.Absent -> FormRefusal(null)
+}
+
+/** A refused submit; [reason] is what goes on `error-message` (null for `Absent`). */
+@Immutable
+data class FormRefusal(val reason: String?)
+
+/**
+ * Ask a shared predicate, failing OPEN to [Possibility.Possible] when the
+ * native face cannot be reached (a `@Preview`, a host JVM with no `.so`) — the
+ * same polarity and reason as [faunaGate]: a predicate the app cannot reach
+ * must not block the user, and the shared manager's own guard stays the
+ * backstop. A test that asserts a blocked paint needs the call to succeed, so
+ * this cannot green a red test.
+ */
+inline fun askForm(predicate: () -> Possibility): Possibility =
+    try {
+        predicate()
+    } catch (_: Throwable) {
+        Possibility.Possible
+    }

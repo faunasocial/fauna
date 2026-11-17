@@ -1309,13 +1309,61 @@ def is_ancestor(older: str, newer: str, repo: Path = REPO) -> bool:
     git cannot say (a commit unknown here) — the caller then keeps the ledger."""
     if not older or not newer or older == newer:
         return False
+    key = (str(repo), older, newer)
+    if key in _ANCESTRY:
+        return _ANCESTRY[key]
+    chain = _first_parent_chain(repo)
+    if older in chain and newer in chain:
+        _ANCESTRY[key] = chain[older] > chain[newer]
+        return _ANCESTRY[key]
     try:
         run = subprocess.run(
             ["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer],
             capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return False
+    # Exit 0 / 1 is git's answer about two commits it holds, which no later
+    # history can change; anything else (a commit unknown here) is not kept.
+    if run.returncode in (0, 1):
+        _ANCESTRY[key] = run.returncode == 0
     return run.returncode == 0
+
+
+#: (repo, older, newer) → `is_ancestor`'s answer, for the process. The lint
+#: overlays the directory twice (rule 5 renders every page, rule 2 reads the
+#: matrix), each pass asking the same ~50 pairs: ~1 s of git process starts on
+#: macOS (merge-gates.md § The 10-second budget).
+_ANCESTRY: dict = {}
+
+#: repo → `{full sha: depth along HEAD's first-parent chain}`, built once per
+#: process by ONE `git rev-list --first-parent` (~0.2 s on macOS over 100 k
+#: commits) in place of a `merge-base --is-ancestor` process per pair (53 pairs,
+#: ~1.1 s on macOS, 2026-11-16; merge-gates.md § The 10-second budget, rule 7).
+#: Two commits both on the chain are answered exactly from their depths: the
+#: deeper one is reached from the other by first-parent links, and the shallower
+#: one is the deeper one's descendant, so never its proper ancestor. A commit
+#: off the chain — a side branch, an abbreviation, a commit this checkout lacks,
+#: one landed after the index was read — falls through to the per-pair call.
+#: Ancestry between two commits never changes, so the index can only be
+#: incomplete, never wrong; nothing outlives the process.
+_CHAINS: dict = {}
+
+
+def _first_parent_chain(repo: Path) -> dict:
+    key = str(repo)
+    chain = _CHAINS.get(key)
+    if chain is None:
+        chain = {}
+        try:
+            run = subprocess.run(
+                ["git", "-C", key, "rev-list", "--first-parent", "HEAD"],
+                capture_output=True, text=True, timeout=30)
+            if run.returncode == 0:
+                chain = {sha: depth for depth, sha in enumerate(run.stdout.split())}
+        except (OSError, subprocess.SubprocessError):
+            pass
+        _CHAINS[key] = chain
+    return chain
 
 
 def directory_is_newer(ledger_record: dict, directory_record: dict,
@@ -1383,6 +1431,27 @@ def directory_as_ledger_record(ledger_record: dict, directory_records: list) -> 
     return record
 
 
+#: `(snapshot path, mtime_ns, size)` → its `_directory_index`, for the process.
+#: The lint overlays the ledger twice (its own read and rule 5's render), and each
+#: pass loaded and indexed the three snapshots, ~35 MB of JSON: ~0.5 s on macOS
+#: (2026-11-16; merge-gates.md § The 10-second budget, rule 7). The index is only
+#: read — `overlay_last_green` replaces ledger records, never an index entry.
+_LAST_GREEN_INDEXES: dict = {}
+
+
+def _last_green_index(platform: str, features: Path) -> dict:
+    path = features / "last-green" / f"{platform}.json"
+    try:
+        st = path.stat()
+    except OSError:
+        return _directory_index(load_last_green(platform, features))
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    index = _LAST_GREEN_INDEXES.get(key)
+    if index is None:
+        index = _LAST_GREEN_INDEXES[key] = _directory_index(load_last_green(platform, features))
+    return index
+
+
 def overlay_last_green(ledger: dict, features: Path = FEATURES, repo: Path = REPO,
                        ancestor=None) -> dict:
     """Replace, IN PLACE, every ledger record the published snapshot holds a newer
@@ -1412,7 +1481,7 @@ def overlay_last_green(ledger: dict, features: Path = FEATURES, repo: Path = REP
             for node_id, by_platform in (entry.get("tests") or {}).items():
                 for platform, record in list(by_platform.items()):
                     if platform not in indexes:
-                        indexes[platform] = _directory_index(load_last_green(platform, features))
+                        indexes[platform] = _last_green_index(platform, features)
                     candidates = indexes[platform].get(node_id)
                     if not candidates:
                         continue

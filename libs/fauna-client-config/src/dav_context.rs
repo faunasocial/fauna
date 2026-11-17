@@ -43,28 +43,69 @@ impl core::fmt::Debug for DavStoreContext {
     }
 }
 
-/// The [`DavStoreContext`] for an encrypted CalDAV/CardDAV op, or `None` when
-/// mail/CalDAV-CardDAV is not enabled yet (no MSEK minted —
-/// `MailSettingsMachine::enable_mail`) or the custody read failed. A read
-/// failure logs and degrades the same way as the legitimate disabled state
-/// (empty calendar/address-book list) rather than erroring the caller — the
-/// secret is fine, only the store read didn't complete.
+/// What the custody read answered for the DAV store — three answers kept apart,
+/// because each means something different to the person (`docs/goal/ui/events.md`
+/// § Errors & edge cases → *No calendar to hold an event*, ruling 2).
+#[derive(Debug, PartialEq, Eq)]
+pub enum DavCustody {
+    /// The custody read itself failed (the account store is not up yet). A
+    /// wait, not an absence: re-run the read when custody's first listing
+    /// lands. Carries the store's error for the log.
+    Unreadable(String),
+    /// Custody is read and holds no MSEK: calendar and contacts storage was
+    /// never set up for this account (`MailSettingsMachine::enable_mail` mints
+    /// it).
+    NoKey,
+    /// The key is there: the inputs every encrypted CalDAV/CardDAV op needs.
+    Ready(DavStoreContext),
+}
+
+impl DavCustody {
+    /// The context when the key is there, else `None` — the one helper for a
+    /// caller that only needs "have a context or not" (a write that refuses
+    /// without one, a read that degrades to an empty list). A caller that
+    /// paints or gates on the answer matches the enum instead.
+    pub fn into_context(self) -> Option<DavStoreContext> {
+        match self {
+            DavCustody::Ready(ctx) => Some(ctx),
+            DavCustody::Unreadable(_) | DavCustody::NoKey => None,
+        }
+    }
+}
+
+/// Read the DAV-store custody: [`DavCustody::Ready`] with the
+/// [`DavStoreContext`], [`DavCustody::NoKey`] when mail/CalDAV-CardDAV was never
+/// enabled (no MSEK minted), or [`DavCustody::Unreadable`] when the custody read
+/// failed (logged here too, so a caller folding it with
+/// [`DavCustody::into_context`] still leaves a trace).
+pub async fn dav_custody(mail: &dyn MailStore, actor_id: [u8; 32]) -> DavCustody {
+    let mail = match mail.load().await {
+        Ok(mail) => mail,
+        Err(e) => {
+            tracing::error!("dav_custody: mail custody read failed: {e}");
+            return DavCustody::Unreadable(e.to_string());
+        }
+    };
+    let Some(msek) = mail.msek else {
+        return DavCustody::NoKey;
+    };
+    DavCustody::Ready(DavStoreContext {
+        actor_id,
+        msek: msek.to_array(),
+        prior_mseks: Zeroizing::new(mail.prior_mseks.iter().map(|m| m.to_array()).collect()),
+    })
+}
+
+/// [`dav_custody`] folded to "have a context or not"
+/// ([`DavCustody::into_context`]): `None` both when no MSEK is minted and when
+/// the custody read failed. For the callers that degrade the same way on
+/// either (an empty address-book list, a write that refuses); the calendar
+/// load keeps the answers apart through `fauna_client_caldav`'s read instead.
 pub async fn dav_store_context(
     mail: &dyn MailStore,
     actor_id: [u8; 32],
 ) -> Option<DavStoreContext> {
-    let mail = match mail.load().await {
-        Ok(mail) => mail,
-        Err(e) => {
-            tracing::error!("dav_store_context: mail custody read failed: {e}");
-            return None;
-        }
-    };
-    Some(DavStoreContext {
-        actor_id,
-        msek: mail.msek?.to_array(),
-        prior_mseks: Zeroizing::new(mail.prior_mseks.iter().map(|m| m.to_array()).collect()),
-    })
+    dav_custody(mail, actor_id).await.into_context()
 }
 
 #[cfg(test)]
@@ -74,10 +115,12 @@ mod tests {
     use crate::test_nest::block_on;
     use fauna_core::data::MailConfig;
 
-    /// No `msek` minted yet (mail/CalDAV never enabled) — `None`, the
-    /// legitimate disabled state, not an error.
+    /// No `msek` minted yet (mail/CalDAV never enabled) — `NoKey`, the
+    /// legitimate disabled state, not an error; the folded helper reads `None`.
     #[test]
-    fn no_msek_reads_none() {
+    fn no_msek_reads_no_key() {
+        let custody = block_on(dav_custody(&FakeMailStore::empty(), [7; 32]));
+        assert_eq!(custody, DavCustody::NoKey);
         let ctx = block_on(dav_store_context(&FakeMailStore::empty(), [7; 32]));
         assert_eq!(ctx, None);
     }
@@ -95,7 +138,10 @@ mod tests {
             actor_id,
             msek,
             prior_mseks,
-        } = block_on(dav_store_context(&mail, [8; 32])).expect("context");
+        } = match block_on(dav_custody(&mail, [8; 32])) {
+            DavCustody::Ready(ctx) => ctx,
+            other => panic!("expected Ready, got {other:?}"),
+        };
         assert_eq!(actor_id, [8; 32]);
         assert_eq!(msek, [0x99; 32]);
         assert!(
@@ -130,8 +176,9 @@ mod tests {
         assert_eq!(*ctx.prior_mseks, vec![[0x88; 32], [0x77; 32]]);
     }
 
-    /// A custody the runtime cannot read degrades to `None`, like the
-    /// disabled state — never a panic, never a stale MSEK.
+    /// A custody the runtime cannot read is `Unreadable` — kept apart from the
+    /// disabled state (a wait, not an absence), never a panic, never a stale
+    /// MSEK; the folded helper still degrades it to `None`.
     #[test]
     fn an_unreadable_custody_reads_none() {
         struct Broken;
@@ -194,6 +241,10 @@ mod tests {
                 unreachable!()
             }
         }
+        assert!(matches!(
+            block_on(dav_custody(&Broken, [9; 32])),
+            DavCustody::Unreadable(e) if e.contains("no runtime")
+        ));
         assert_eq!(block_on(dav_store_context(&Broken, [9; 32])), None);
     }
 }

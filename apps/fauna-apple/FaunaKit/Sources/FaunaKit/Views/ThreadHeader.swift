@@ -7,7 +7,8 @@ import SwiftUI
 /// participant — matches the Windows + Linux reference impls, which render the
 /// full set; `test_thread_membership` asserts a chip per member; the chip's tap
 /// is capability-split between reveal and remove — see `MemberChip`),
-/// `thread-add-participant-button` (shown iff `capabilities.supportsMembershipChange`),
+/// `thread-add-participant-button` (shown iff the shared `ThreadControl.invite`
+/// answer is not absent),
 /// `thread-rename-button` (shown iff `capabilities.supportsRename` — MLS groups
 /// only), and a `[⋯]` overflow with "Show full headers" for email-shaped
 /// threads.
@@ -22,14 +23,14 @@ import SwiftUI
 /// authorization): where the rail models one (`detail.room` non-nil) the
 /// header states its class (`thread-room-class`, with a `class` attribute) and
 /// paints the policy editor's door (`thread-room-settings-button`, live for any
-/// member — the greying moves inside the editor, per control, off
-/// `capabilities.canSetPolicy`); each chip carries its
+/// member — each control inside answers the shared `ThreadControl` predicate);
+/// each chip carries its
 /// member's role (`role` attribute + the localized owner/admin mark). All of it
 /// is read off the projected room and the shared-Rust label/token twins, never
 /// computed here; the roles table itself becomes `capabilities.*` in shared Rust
-/// (`RoomSnapshot::gate`), so the add-participant affordance and the chip's
-/// remove grey off `canInvite` / `canRemoveMembers` without this view ever
-/// branching on a role. Where the rail models no room, both room elements are
+/// (`RoomSnapshot::gate`) and its answer `ThreadControlAnswers`, so the
+/// add-participant affordance and the chip's remove are absent for a viewer
+/// who may not use them without this view ever branching on a role. Where the rail models no room, both room elements are
 /// ABSENT (not emitted), which is what a driver reads as absence.
 public struct ThreadHeader: View {
     public let detail: ThreadDetail
@@ -85,6 +86,21 @@ public struct ThreadHeader: View {
     }
 
     private var caps: ThreadCapabilities { detail.capabilities }
+    /// The shared answer of every role- or rail-gated control on this header.
+    private var controls: ThreadControlAnswers { detail.controlAnswers }
+
+    /// The handlers ask the answer the paint asked (`ui/README.md` § Offer only
+    /// what is possible, rule 6): nothing opens for a viewer the control is
+    /// absent for, whoever raced the paint.
+    private func addParticipant() {
+        guard controls(.invite).isPossible else { return }
+        onAddParticipant()
+    }
+
+    private func removeMember(_ addr: TypedAddress) {
+        guard controls(.removeMember).isPossible else { return }
+        onRemoveMember(addr)
+    }
     private var isEmailShaped: Bool { detail.rail == .smtp }
 
     /// The member's role on a governed room — the chip's `role` attribute and
@@ -182,21 +198,19 @@ public struct ThreadHeader: View {
 
             Spacer()
 
-            if caps.supportsMembershipChange {
-                // Shown by the rail's capability, GREYED by the viewer's role in
-                // a governed room (`canInvite` — the roles table applied in shared
-                // Rust; `ui/conversations.md` § Architectural rules 5).
-                Button {
-                    onAddParticipant()
-                } label: { Image(systemName: "person.badge.plus") }
-                    .buttonStyle(.borderless)
-                    .help(L.conversations.unified.threadAddParticipant)
-                    .disabled(!caps.canInvite)
-                    .accessibilityIdentifier(Ids.threadAddParticipantButton)
-                    .automationActivate(Ids.threadAddParticipantButton, isEnabled: { caps.canInvite }) {
-                        onAddParticipant()
-                    }
-            }
+            // Painted only where the viewer may add someone: the rail's
+            // membership is mutable AND the viewer's role in a governed room may
+            // invite — the shared `ThreadControl.invite` answer, absent otherwise
+            // (`ui/conversations.md` § Errors & edge cases → *Controls this
+            // person can never use*; never a role branch here).
+            Button {
+                addParticipant()
+            } label: { Image(systemName: "person.badge.plus") }
+                .buttonStyle(.borderless)
+                .help(L.conversations.unified.threadAddParticipant)
+                .accessibilityIdentifier(Ids.threadAddParticipantButton)
+                .automationActivate(Ids.threadAddParticipantButton) { addParticipant() }
+                .faunaPossible(controls(.invite))
 
             // The policy editor's door — painted AND live whenever the thread is
             // a room: any member opens it to read the policy and to leave. The
@@ -268,13 +282,12 @@ public struct ThreadHeader: View {
         // (`conversations.md` § Participants vs reply recipients, and the
         // `thread-member-chip[i]` row of § the element table).
         //
-        // The removal half is additionally ROLE-gated: on a governed room a
-        // plain member's chip is still the Remove control, but greyed
-        // (`canRemoveMembers` false) — never demoted to the address popover,
-        // which a user and a driver both read as a live control
-        // (`ui/conversations.md` § Architectural rules 5; linux's
-        // `thread_header.rs::render` `greyed` split, the fix its tier_3 run
-        // found).
+        // Whether the chip removes is the shared answer
+        // (`ThreadControl.removeMember`: the rail's membership is real AND the
+        // viewer's role may remove). Absent — mail, or a plain member of a
+        // governed room — the chip is the inert roster, the address reveal,
+        // never a greyed Remove (`ui/conversations.md` § Errors & edge cases →
+        // *Controls this person can never use*; tui's `label` chip).
         HStack(spacing: 4) {
             ForEach(Array(detail.participants.enumerated()), id: \.offset) { i, addr in
                 let role = memberRole(i)
@@ -282,12 +295,10 @@ public struct ThreadHeader: View {
                     text: roomMemberChipText(display: memberDisplay(i, addr), role: role),
                     roleToken: role.map { roomRoleAttrToken(role: $0) },
                     address: ConversationsUI.display(addr),
-                    removal: !caps.supportsMembershipChange
-                        ? .none
-                        : (caps.canRemoveMembers ? .live : .greyed),
+                    removal: controls.memberChipRemoves ? .live : .none,
                     flaggedPerson: i < marks.count ? marks[i] : nil,
                     onKeep: onKeepMember,
-                    onRemove: { onRemoveMember(addr) }
+                    onRemove: { removeMember(addr) }
                 )
                 // Scope path for `thread-member-unattested-mark`/
                 // `thread-member-keep-button`, scoped INSIDE thread-member-chip[i]
@@ -306,14 +317,14 @@ public struct ThreadHeader: View {
 /// - `.live` (`supports_membership_change` — FaunaMls, where group membership
 ///   is real — AND `can_remove_members`): the tap REMOVES that participant
 ///   through `manager.remove_participant`.
-/// - `.greyed` (membership is real but the viewer's ROLE may not remove — a
-///   plain member of a governed room): still the Remove control, disabled —
-///   the automation gate refuses to drive it (convention 11's named 409), and
-///   it is never demoted to the address reveal below.
-/// - `.none` (mail: you cannot un-send who an email went to): the tap reveals
-///   the full canonical address in a popover (`.popover` adapts to a popover
-///   even in iOS compact width, matching the linux GTK popover) and never
-///   removes.
+/// - `.none` (mail: you cannot un-send who an email went to; or a viewer
+///   whose role may never remove — the shared `ThreadControl.removeMember`
+///   answer is absent, `ui/conversations.md` § Errors & edge cases →
+///   *Controls this person can never use*): the chip is the inert roster —
+///   the tap reveals the full canonical address in a popover (`.popover`
+///   adapts to a popover even in iOS compact width, matching the linux GTK
+///   popover) and never removes. There is no greyed Remove: a control this
+///   person can never use is not painted.
 ///
 /// ⚠ **The reveal is not offered on a removal chip, and that is the point.**
 /// One target cannot carry both a benign inspect and a destructive eviction —
@@ -336,7 +347,7 @@ public struct ThreadHeader: View {
 /// queryable alongside the chip's own container id (the memory'd
 /// Section-clobbers-children rule).
 private struct MemberChip: View {
-    enum Removal { case live, greyed, none }
+    enum Removal { case live, none }
 
     let text: String
     let roleToken: String?
@@ -348,15 +359,14 @@ private struct MemberChip: View {
     @State private var showAddress = false
 
     /// The chip's painted content — identical on every half of the split, so
-    /// the capability decides only the GESTURE, never how a member looks; a
-    /// greyed Remove dims its own text only. NOT `.disabled`: that would
-    /// disable the review pair's Keep inside it too, which is a succession-ledger
-    /// write rather than a removal and stays live (linux's rule).
+    /// the capability decides only the GESTURE, never how a member looks.
+    /// NOT `.disabled` anywhere: that would disable the review pair's Keep
+    /// inside it too, which is a succession-ledger write rather than a removal
+    /// and stays live (linux's rule).
     private var chipContent: some View {
         HStack(spacing: 4) {
             Text(text)
                 .font(.caption2)
-                .foregroundStyle(removal == .greyed ? .secondary : .primary)
             if flaggedPerson != nil {
                 automationText(
                     Ids.threadMemberUnattestedMark, L.conversations.detail.memberUnattestedMark)
@@ -383,19 +393,16 @@ private struct MemberChip: View {
     @ViewBuilder
     var body: some View {
         switch removal {
-        case .live, .greyed:
-            let live = removal == .live
+        case .live:
             chipContent
-                .onTapGesture { if live { onRemove() } }
+                .onTapGesture { onRemove() }
                 // Indexed chip — read the chip text (and the role token);
                 // activation mirrors the tap, which on this half is the
                 // REMOVAL. That equivalence is what lets an e2e journey drive
                 // the eviction the way a user does (convention 8) instead of
-                // reaching past the UI — and, greyed, what makes the gate
-                // refuse it the way the paint does.
+                // reaching past the UI.
                 .automationActivate(
                     Ids.threadMemberChip,
-                    isEnabled: { live },
                     text: { text },
                     value: { roleToken }
                 ) { onRemove() }

@@ -57,9 +57,9 @@ Stamped 2026-11-07 at b844c771f6.
 |---|---|---|
 | web | ⚠ partial | 0.1.6-dev+aa0b8e99 standalone |
 | linux | ⚠ partial | 0.1.5-dev+8b69d25b.dirty standalone |
-| windows | ⚠ partial | 0.1.6 docker |
+| windows | ⚠ partial | 0.1.7 docker |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6 docker |
+| ios | ✅ full | 0.1.7-dev+d36d802e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+94702c5c standalone |
 | android-kids |  no run recorded | |

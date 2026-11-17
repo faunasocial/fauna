@@ -688,7 +688,14 @@ private fun DidMethodRung(id: String, titleRes: Int, descRes: Int, selected: Boo
         modifier = Modifier.fillMaxWidth().selectable(selected = selected, onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RadioButton(selected = selected, onClick = onClick, modifier = Modifier.testTag(id))
+        // `state` speaks the depth rungs' vocabulary, `active` / `inactive`, as
+        // every app's DID-method radio does (atproto 22) — never the radio's
+        // native checked `true`/`false` the bridge would otherwise answer.
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
+            modifier = Modifier.testTag(id).semantics { stateDescription = if (selected) "active" else "inactive" },
+        )
         Column(modifier = Modifier.padding(start = 4.dp)) {
             Text(stringResource(titleRes), style = MaterialTheme.typography.bodyMedium)
             Text(stringResource(descRes), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

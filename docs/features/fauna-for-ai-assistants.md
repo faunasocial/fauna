@@ -77,7 +77,7 @@ Stamped 2026-11-07 at 69a49ad33d.
 | macos | ✅ full | 0.1.6-dev+41450449 standalone |
 | ios | ✅ full | |
 | android | ✅ full | |
-| tui | ✅ full | 0.1.6-dev+54cdf1b6.dirty standalone |
+| tui | ✅ full | 0.1.7-dev+4df11101 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

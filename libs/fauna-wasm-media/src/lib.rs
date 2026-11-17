@@ -143,20 +143,29 @@ impl MediaMachine {
         // through the tab's account port (`fauna_client_folders::port`).
         let transport = fauna_account_port::JsAccountTransport::new(account_port.into())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let folder_keys: Arc<dyn fauna_media_machine::FolderKeyResolver> =
-            Arc::new(fauna_client_folders::NestFolderKeyResolver::new(
-                client.clone(),
-                Arc::new(fauna_client_folders::port::PortFolderKeys::new(transport)),
-            ));
-        Ok(MediaMachine(
-            fauna_media_machine::build_media_machine_with_folder_keys(
-                client.clone(),
-                Some(&identity),
-                observer,
-                Some(folder_keys),
-            ),
-            client,
-        ))
+        let custody: Arc<dyn fauna_client_folders::FolderKeyStore> =
+            Arc::new(fauna_client_folders::port::PortFolderKeys::new(transport));
+        let folder_keys: Arc<dyn fauna_media_machine::FolderKeyResolver> = Arc::new(
+            fauna_client_folders::NestFolderKeyResolver::new(client.clone(), custody.clone()),
+        );
+        let machine = fauna_media_machine::build_media_machine_with_folder_keys(
+            client.clone(),
+            Some(&identity),
+            observer,
+            Some(folder_keys),
+        );
+        // The first folder's maker (`ui/media.md` § Errors & edge cases → *No
+        // folder to upload into*) — the browser twin of the native builders:
+        // the new folder's custody goes through the account port and its name
+        // seals at birth under the owner root this secret derives.
+        machine.set_folder_maker(fauna_folders_machine::build_first_folder_maker(
+            client.clone(),
+            Some(custody),
+            Some(fauna_core::crypto::BackupKey::derive(
+                identity.secret_bytes(),
+            )),
+        ));
+        Ok(MediaMachine(machine, client))
     }
 
     /// Wire the member-row MLS join-filter — the Media page's twin of
@@ -306,6 +315,25 @@ impl MediaMachine {
         serde_json::to_string(&self.0.snapshot()).unwrap_or_default()
     }
 
+    /// `file-upload` / `upload-button`'s answer in the shared possibility type
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6), as
+    /// `fauna_core::possibility::Possibility`'s serde JSON (`{"state":
+    /// "possible"}` / `{"state": "blocked", "reason": …}` / `{"state":
+    /// "absent"}`). See `MediaMachine::upload_possibility`.
+    #[wasm_bindgen(js_name = uploadPossibilityJson)]
+    pub fn upload_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.upload_possibility()).unwrap_or_default()
+    }
+
+    /// `media-delete-button` / `file-version-restore-button`'s answer for an
+    /// item of the set `folder` names (the item's `filter_value`), the same
+    /// serde JSON as `uploadPossibilityJson`. See
+    /// `MediaMachine::write_possibility`.
+    #[wasm_bindgen(js_name = writePossibilityJson)]
+    pub fn write_possibility_json(&self, folder: String) -> String {
+        serde_json::to_string(&self.0.write_possibility(folder)).unwrap_or_default()
+    }
+
     /// The item a **durable identity pair** names — the set's stable
     /// `FolderSummary.id` (`folderId`) plus the file's `path_hash` (hex-lowercase)
     /// — for a reference minted off this page, today `SearchNav::File`
@@ -372,8 +400,9 @@ impl MediaMachine {
     /// Upload a picked file into the **currently selected** set — the cross-app
     /// "upload into the selected folder" gesture (`media.md` § Layout & flow).
     /// The shared machine resolves the target (the `media-folder-filter` set, else
-    /// the first set with media; else it sets the `media.error_no_set` page error
-    /// and uploads nothing), so the "which set" + no-set policy is identical on
+    /// the first own set; on a folderless account it makes the first folder,
+    /// `Personal`, and uploads into it — `media.md` § Errors & edge cases → *No
+    /// folder to upload into*), so the "which set" policy is identical on
     /// every app (priority #1). `secretHex` is the identity seed hex — the owner
     /// `BackupKey` (Library audience) is derived from it here, mirroring
     /// `process_and_seal_library(data, secretHex)`. Like `upload`, this resolves

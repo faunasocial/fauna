@@ -167,17 +167,14 @@ $b = [IO.File]::ReadAllBytes($p); $o = [BitConverter]::ToInt32($b, 0x3C)
 The tier_3 `test_installer_structure.py` (`TestSyncAgentSubsystem`) gates the staged
 binary on this automatically.
 
-### 2. Build the sparse package
+### 2. No sparse package
 
-The **ShellExt** feature ships `Fauna-Sparse.msix` as a component (`ShellExt.wxs`'s
-`$(var.SparsePackage)`), built once and shared by every arch (it is
-`ProcessorArchitecture="neutral"` — § *Menu placement — the sparse package* in
-`docs/goal/architecture/installers/windows.md`; there is nothing to substitute per arch,
-only the version-stamped DLL name, which the manifest template already carries):
-
-This is built by a dedicated dev-fleet packaging script (internal tooling, not
-included in this public tree) into `build/installer/Fauna-Sparse.msix` (dev
-cert; a self-sign-and-trust option is also available).
+The sparse identity package the **ShellExt** feature once shipped is retired
+(`docs/goal/architecture/installers/windows.md` § Direct download, 6): the app's
+package identity, its default context-menu entry and its taskbar badge come from the
+full MSIX (`store/AppxManifest.xml.in`). Every MSI is linked with
+`-d NoSparsePackage=1`, which leaves `ShellExt.wxs`'s package component out; a link
+that names neither that define nor a `SparsePackage` fails with WIX0150.
 
 ### 3. Build MSI
 
@@ -189,8 +186,7 @@ The `-d` paths MUST be absolute (clean-checkout gotcha 5): WiX harvests
 `App.wxs`'s `<Files Include="$(var.AppDir)**">` relative to the **.wxs file's**
 directory, so a relative `AppDir` silently harvests zero app files and ships an
 app-less MSI. Running from the repo root, `$PWD` anchors them absolutely (the CI
-equivalent is `${{ github.workspace }}`). `SparsePackage` points at the ONE package
-step 2 built — same path for both arches.
+equivalent is `${{ github.workspace }}`). `NoSparsePackage=1` is step 2's.
 
 ```powershell
 # x64
@@ -210,7 +206,7 @@ wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
   -d IconDir=$PWD/stage/x64/icons/ `
   -d AppDir=$PWD/stage/x64/app/ `
   -d NoticesDir=$PWD/stage/x64/notices/ `
-  -d SparsePackage=$PWD/build/installer/Fauna-Sparse.msix
+  -d NoSparsePackage=1
 
 # ARM64 (from Git Bash on Windows, replace $PWD with $(pwd -W) — clean-checkout step 5)
 wix build -arch arm64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
@@ -229,8 +225,48 @@ wix build -arch arm64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
   -d IconDir=$PWD/stage/arm64/icons/ `
   -d AppDir=$PWD/stage/arm64/app/ `
   -d NoticesDir=$PWD/stage/arm64/notices/ `
-  -d SparsePackage=$PWD/build/installer/Fauna-Sparse.msix
+  -d NoSparsePackage=1
 ```
+
+### 3b. Build the nest MSI
+
+The nest MSI (`nest/Package.wxs`; `docs/goal/architecture/installers/windows.md`
+§ Direct download (MSIX app + nest MSI), 1) carries the Nest, Bridge and
+Terminal App features alone — the hosting installer beside the app's MSIX
+bundle. It needs the staging of step 1 for its four Rust binaries, the mail
+bridge and `AppIcon.ico`, and no app publish, shell DLL or sparse package. Its
+notices are its own manifest artifact. It names its WiX files one by one: a
+glob over this directory would link the full-feature package and its client
+fragments into it.
+
+```powershell
+just windows-nest-msi-notices stage/arm64/nest-notices arm64 target/fauna-mail-bridge.exe
+wix build -arch arm64 `
+  -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext -ext WixToolset.Firewall.wixext `
+  -o Fauna-Nest-Setup-arm64.msi `
+  apps/fauna-windows/installer/nest/Package.wxs `
+  apps/fauna-windows/installer/Directories.wxs `
+  apps/fauna-windows/installer/ServiceNest.wxs `
+  apps/fauna-windows/installer/ServiceBridge.wxs `
+  apps/fauna-windows/installer/TerminalApp.wxs `
+  apps/fauna-windows/installer/Notices.wxs `
+  apps/fauna-windows/installer/UI.wxs `
+  -loc apps/fauna-windows/installer/Strings.wxl `
+  -d NestBin=$PWD/stage/arm64/fauna-nest-svc.exe `
+  -d BridgeBin=$PWD/stage/arm64/fauna-bridge-svc.exe `
+  -d MailBridgeBin=$PWD/stage/arm64/fauna-mail-bridge.exe `
+  -d MailBridgeFfiDll=$PWD/stage/arm64/fauna_ffi.dll `
+  -d MailBridgeLibunwindDll=$PWD/stage/arm64/libunwind.dll `
+  -d TuiBin=$PWD/stage/arm64/fauna-tui.exe `
+  -d CliBin=$PWD/stage/arm64/fauna-cli.exe `
+  -d IconDir=$PWD/stage/arm64/icons/ `
+  -d NoticesDir=$PWD/stage/arm64/nest-notices/
+```
+
+The test fixture builds it the same way (`tests/e2e-unified/helpers/windows_installer.py::build_nest_msi`,
+whose `NEST_WXS` is the file list above) and `test_nest_installer_structure.py`
+reads it. The public release builds the full-feature MSI above until its bundle
+leg switches to this one.
 
 ### 4. Test
 

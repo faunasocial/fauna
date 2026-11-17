@@ -168,27 +168,28 @@ public struct MediaExplorerContent: View {
                 filterPicker(snap)
                 Spacer(minLength: 0)
             }
-            // A followed browse scope is READ-ONLY, structurally: the upload
-            // affordance is ABSENT entirely rather than painted-but-inert,
-            // because a follow never enters `known_folders` and so can never be
-            // an upload target (`ui/media.md` § Followed public folders; tui
-            // gates its own upload gesture on the same `followed_scope.is_none()`
-            // and linux hides the whole row). ⚠ Withdrawing it means REMOVING
-            // it from the tree, not disabling it — the e2e counts
-            // `upload-button == 0`, and a disabled control still counts.
+            // The upload affordance paints from the shared upload answer
+            // (`ui/media.md` § Errors & edge cases → *What this person may
+            // write*): absent in a followed scope — REMOVED from the tree, so
+            // the e2e's `upload-button == 0` holds — blocked with its reason
+            // before the first read or on a reader's / metadata-only target,
+            // else enabled. Nothing here re-derives it (`ui/README.md` § Offer
+            // only what is possible, rule 6).
+            let upload = vm.uploadPossibility
             HStack(spacing: 12) {
-                if snap?.followedScope == nil {
-                    TextField(L.media.chooseFile, text: $filePath)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(minWidth: 140)
-                        .accessibilityIdentifier(Ids.fileUpload)
-                        .automationField(Ids.fileUpload, text: $filePath)
-                    Button(L.media.upload) { submitUpload() }
-                        .accessibilityIdentifier(Ids.uploadButton)
-                        // In-process e2e actuation: fires the same `submitUpload()` the
-                        // Button does, exercising the real upload path. No-op in production.
-                        .automationActivate(Ids.uploadButton) { submitUpload() }
-                }
+                TextField(L.media.chooseFile, text: $filePath)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 140)
+                    .accessibilityIdentifier(Ids.fileUpload)
+                    .automationField(Ids.fileUpload, text: $filePath)
+                    .faunaPossible(upload)
+                Button(L.media.upload) { submitUpload() }
+                    .accessibilityIdentifier(Ids.uploadButton)
+                    // In-process e2e actuation: fires the same `submitUpload()` the
+                    // Button does, exercising the real upload path. No-op in production.
+                    .automationActivate(Ids.uploadButton) { submitUpload() }
+                    .faunaPossible(upload)
+                FaunaPossibilityReason(upload)
                 // "Shared links" — the page-level entry to the caller's share
                 // links (`share-links.md` § Flows → List), after the upload
                 // affordance in the ui.yaml page order. A page control, not an

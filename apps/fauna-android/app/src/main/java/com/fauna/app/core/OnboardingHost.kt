@@ -18,7 +18,12 @@ import com.fauna.ffi.onboarding.RestoredPredecessorSeed
 import com.fauna.ffi.onboarding.WizardOutcome
 import com.fauna.app.widget.WidgetDataWorker
 import dagger.hilt.android.qualifiers.ApplicationContext
+import com.fauna.ffi.retireHeldInputs
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import uniffi.fauna_launch_machine.LaunchPersistence
@@ -84,11 +89,42 @@ class OnboardingHost @Inject constructor(
         // `confirmGeneratedIdentity` through the sign-up kit offer; the
         // declaration and the screens land together.
         it.setRendersRecoveryKit(true)
+        // …and the choose-providers page (`onboarding-provisioning.md` § 3d):
+        // `ProviderChoiceScreen`. Declaring it lands the handle check's
+        // Continue there instead of `dns_config`, and Back from
+        // `nest_provisioning` returns there. The kids build registers no
+        // page for setting up a nest at all, so it leaves the flag undeclared.
+        if (!BuildConfig.KIDS) it.setRendersProviderChoice(true)
         // box-recovery.md § The plane-era recovery floor, *(b) The reads*: the
         // re-provision drive's local custody read opens THIS device's account
         // store, which on android lives in the app container — the platform
         // default (`$HOME/.config/fauna/sync`) is the wrong place in the sandbox.
         it.setStoreContainerDir(accountStores.accountStoreContainerDir())
+    }
+
+    /** Outlives the screen that starts an add-account run (the settings page
+     *  unmounts as the append wizard mounts), so the held-credential seed is
+     *  not cancelled with it. */
+    private val seedScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * An add-account run shows as already connected every provider whose
+     * credential the signed-in account holds in its DNS record
+     * (`onboarding-provisioning.md` § 3d *Held credentials*): the record is read
+     * through the live account runtime (the shared `retireHeldInputs` read the
+     * retire page uses) and handed INTO the machine, which re-runs each
+     * provider's checks before it shows the row connected — a revoked token
+     * reads as not connected. Best-effort: a failed read leaves every row
+     * unconnected, the state a first-nest run starts in anyway.
+     */
+    fun seedHeldProviderCredentials() {
+        if (BuildConfig.KIDS) return
+        seedScope.launch {
+            runCatching {
+                val held = retireHeldInputs(waitForRuntime = true)
+                machine.seedHeldProviderCredentialsJson(held.heldDnsProviderIds, held.heldDnsCredsJson)
+            }.onFailure { ShellLog.w(TAG, "provider_choice: held credential seed failed: ${it.message}") }
+        }
     }
 
     /** The store-age round's three shared-Rust calls, over the real machine + FFI fold. */
@@ -346,11 +382,13 @@ class OnboardingHost @Inject constructor(
                                 secretHex = secretHex,
                                 nestUrl = outcome.nestUrl,
                                 deviceId = sessionAccount.deviceIdFor(secretHex),
-                                // The reach hint (onboarding.md § Reach hint) is
-                                // read off the machine at this terminal once
-                                // android's leg lands; null keeps today's
-                                // behaviour — the account simply waits for DNS.
-                                reachIpv4 = null,
+                                // The reach hint (onboarding-provisioning.md
+                                // § Reach hint), read off the machine at this
+                                // terminal as on every app: the box this wizard
+                                // provisioned, at the address its claim used,
+                                // so the launch reaches it before DNS does.
+                                // Null on every path that provisioned nothing.
+                                reachIpv4 = machine.provisionReachIpv4(),
                             )
                             // The handle lands in the registry's server-data
                             // cache, so the launch flow's known-nest re-entries

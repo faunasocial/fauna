@@ -23,7 +23,7 @@ pub mod ws_rpc;
 pub use fake::{FakeCall, FakeFolderNestApi};
 pub use types::*;
 #[cfg(feature = "rpc-glue")]
-pub use ws_rpc::build_folder_wizard_machine;
+pub use ws_rpc::{build_first_folder_maker, build_folder_wizard_machine};
 
 use async_trait::async_trait;
 

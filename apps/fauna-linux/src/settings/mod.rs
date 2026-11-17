@@ -8,6 +8,8 @@ pub mod admin_mail_reports;
 pub mod admin_web;
 pub mod archive_import;
 pub mod atproto;
+#[cfg(feature = "payments")]
+pub mod claim_redeem;
 pub mod connected_apps;
 pub mod email_filters;
 pub mod encryption;
@@ -18,6 +20,7 @@ pub mod logs;
 pub mod mail;
 pub mod mail_aliases;
 pub mod mail_export;
+pub mod mail_gate;
 pub mod mail_import;
 pub mod mail_list_members;
 pub mod mail_lists;

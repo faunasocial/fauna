@@ -113,22 +113,25 @@ def test_the_join_rule_decides_whether_a_plain_member_may_invite(
         f"under `invite` a plain member may not: {member_view.capabilities}"
     )
 
-    # Painted and dead — the observable of "refused client-side".
+    # Not offered live — the observable of "refused client-side". A plain
+    # member can never invite under `invite`, so an app on the shared
+    # `ThreadControl::Invite` answer paints no control at all (tui) and one
+    # not yet on it paints it greyed (`ui/conversations.md` § Errors & edge
+    # cases → *Controls this person can never use*).
     member.app.conversations.open_thread_by_id(member_view.thread_id)
-    assert member.app.driver.is_visible("thread-add-participant-button"), (
-        "the add-person control is greyed, never hidden "
-        f"(`conversations.md` § Architectural rules 5):\n"
-        f"{seat_element(member, 'thread-add-participant-button')}"
-    )
     assert not member.app.driver.is_enabled("thread-add-participant-button"), (
-        f"and dead under `invite`:\n"
+        f"no live add-person control under `invite`:\n"
         f"{seat_element(member, 'thread-add-participant-button')}"
     )
     envelopes_before = len(conv_api.channel_fetch(port, owner.actor, channel, after=0))
-    with pytest.raises(RuntimeError, match="disabled"):
-        # The automation gate's named 409 (convention 11) — the client side of
-        # "a plain member's Add is never authored under `invite`".
-        member.app.conversations.add_participant_to_thread(newcomer["actor_id_hex"])
+    # The client side of "a plain member's Add is never authored under
+    # `invite`": an absent control is not there to press — read as absent,
+    # never pressed (web's press of a missing element is Playwright's 30 s
+    # wait and a bare 500, not a "not found") — and a greyed one is refused by
+    # the automation gate's named 409 (convention 11, "disabled").
+    if not member.app.driver.is_absent("thread-add-participant-button"):
+        with pytest.raises((RuntimeError, LookupError), match="disabled"):
+            member.app.conversations.add_participant_to_thread(newcomer["actor_id_hex"])
     assert not member.app.has_error(), (
         f"a refused actuation never reaches the manager, so no page error: "
         f"{member.app.error_text()!r}"

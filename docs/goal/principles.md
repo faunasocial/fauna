@@ -55,6 +55,20 @@ editing and no terminal commands beyond starting the binaries. Features ship
 with defaults correct for the most common deployment, or are configurable in
 the app UI.
 
+**Do not offer the person choices which are not possible (owner-ruled
+2026-11-16).** An app offers only what can succeed now. The owner's case: do
+not offer the option to create a calendar entry when it will fail because
+there are no calendars. The rule usually means fewer options at the
+beginning: on a fresh account often one step is possible, and that step is
+the one offered and highlighted — or the product makes it unnecessary by
+default. In order of preference: a default that makes the precondition true
+out of the box beats asking for it; where the person must act first, the one
+step that unblocks the rest is offered and highlighted and what it unblocks
+is not live until then; what this person can never do here is not shown; and
+a failure that slips through anyway is never silent. The mechanics (hidden or
+disabled with its reason, the shared-Rust predicate, the checks that keep the
+class caught) are owned by `ui/README.md` § Offer only what is possible.
+
 ### The user always controls their data
 
 User content rests sealed on every nest — there is no storage mode and no

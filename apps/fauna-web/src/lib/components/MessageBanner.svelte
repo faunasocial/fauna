@@ -3,6 +3,7 @@
   import { logMessage } from '#lib/wasm';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
+  import { applyMessageUpdate, type MessageUpdate } from '#lib/message-update';
 
   // Not under SSR (the prerender pass) — what Kit 2's `$app/environment`
   // `browser` said.
@@ -72,11 +73,11 @@
           ((window as unknown as { __fauna_message_banner_mount_count?: number })
             .__fauna_message_banner_mount_count ?? 0) + 1;
       }
+      // The update rule is `applyMessageUpdate`'s — `withdrawWarning` takes
+      // the warning down only while it still shows one of its texts.
       handler = (e: Event) => {
-        const detail = (e as CustomEvent).detail;
-        if (detail.error !== undefined) error = detail.error;
-        if (detail.warning !== undefined) warning = detail.warning;
-        if (detail.info !== undefined) info = detail.info;
+        const detail = (e as CustomEvent).detail as MessageUpdate;
+        ({ error, warning, info } = applyMessageUpdate({ error, warning, info }, detail));
       };
       window.addEventListener('fauna-message-update', handler);
     }

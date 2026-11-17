@@ -28,7 +28,15 @@ def wait_until(predicate, budget_s, *, interval=0.3, diagnose=None):
         if value:
             return value
         time.sleep(interval)
-    detail = f": {diagnose()}" if diagnose is not None else ""
+    detail = ""
+    if diagnose is not None:
+        # A diagnose callback describes the failure; it must never replace it.
+        # One that raises (a driver 404 reading an element, say) is reported
+        # beside the timeout, so the real failure stays readable (convention 6).
+        try:
+            detail = f": {diagnose()}"
+        except Exception as exc:  # noqa: BLE001 — see above.
+            detail = f": (diagnose callback raised {type(exc).__name__}: {exc})"
     raise AssertionError(f"wait_until: timed out after {budget_s}s{detail}")
 
 

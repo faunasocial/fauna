@@ -100,6 +100,19 @@ pub struct AdminUser {
     /// enforcer; this flag is presentation).
     #[serde(default)]
     pub is_admin: bool,
+    /// Whether this actor is the nest's **last superadmin** — the one the
+    /// superadmin floor forbids removing (`fauna.admin.admins.remove` answers
+    /// `fauna.admin.conflict` for it; `admin.md` § 2 → *Cutting a user off*).
+    /// Read-only presentation, like `is_admin`: it lets a client show the
+    /// remove-admin control disabled with its reason instead of offering an
+    /// act the nest refuses (`docs/goal/ui/README.md` § Offer only what is
+    /// possible). The nest stays the only enforcer: the roster can change
+    /// before a delayed removal executes, and the writer re-refuses. A missing
+    /// key decodes to `false`, the safe direction — the control is offered and
+    /// the nest's refusal surfaces on the page's error line. Additive
+    /// 2026-11-17.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub last_superadmin: bool,
     /// The account's current guardian — `Some` only on a supervised
     /// (guardian-linked) account. Read-only: the link moves only through
     /// `fauna.family.transfer` / `.graduate`. It is on this projection so the

@@ -1,17 +1,47 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
 import com.fauna.app.payments.ClaimRedeemResult
 import com.fauna.app.payments.paymentsClaimsRedeemAcrossNests
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.ffi.FfiFeatureRow
 import com.fauna.ffi.FfiMineSubscription
+import com.fauna.ffi.featuresGatePossibility
+import com.fauna.ffi.readPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
+
+/**
+ * `subscription-claim-redeem-button`'s Dim-3 answer over the features read —
+ * the shared `fauna_client_features::gate_possibility` for the `payments`
+ * plane ([rows] `null` = the read has not answered: blocked still loading;
+ * a hidden or missing `payments` row: absent). Both doors that paint the
+ * button (Settings → Subscriptions and another person's profile) read this one
+ * answer (tui's `redeem_gate`).
+ */
+internal fun redeemGateOver(rows: List<FfiFeatureRow>?): Possibility =
+    featuresGatePossibility(rows, "payments")
+
+/** Issue the features read [read] and answer the redeem gate over it; a read
+ *  that threw answers blocked load-failed (rule 5: unknown is not possible). */
+internal suspend fun readRedeemGate(read: suspend () -> List<FfiFeatureRow>): Possibility =
+    try {
+        redeemGateOver(read())
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        readPossibility(ReadState.FAILED)
+    }
 
 /**
  * The consumer-side **`subscription-settings`** page state (subscriptions Slice
@@ -29,6 +59,7 @@ import javax.inject.Inject
 @HiltViewModel
 class SubscriptionSettingsVM @Inject constructor(
     private val api: ApiClient,
+    @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
     private val _subscriptions = MutableStateFlow<List<FfiMineSubscription>>(emptyList())
@@ -40,8 +71,19 @@ class SubscriptionSettingsVM @Inject constructor(
 
     val errorMessage = MutableStateFlow<String?>(null)
 
-    /** Re-read the caller's subscriptions (mount + on becoming visible). */
+    /** The features read, a seam only so the VM tests need no live nest. */
+    internal var readFeatures: suspend () -> List<FfiFeatureRow> = { api.fetchFeatures() }
+
+    private val _redeemAnswer = MutableStateFlow(redeemGateOver(null))
+
+    /** The redeem button's answer ([redeemGateOver]) — what the pair is
+     *  painted from and [redeemClaim] asks again. */
+    val redeemAnswer: StateFlow<Possibility> = _redeemAnswer.asStateFlow()
+
+    /** Re-read the caller's subscriptions (mount + on becoming visible), and
+     *  the features read the redeem button waits on. */
     fun refresh() {
+        viewModelScope.launch { _redeemAnswer.value = readRedeemGate(readFeatures) }
         viewModelScope.launch {
             errorMessage.value = null
             try {
@@ -85,11 +127,17 @@ class SubscriptionSettingsVM @Inject constructor(
      * universal fallback binding): binds the entitlement to this actor, then
      * re-reads so the queued grant renders exactly like a queued subscribe (a
      * "pending" row). Typed `fauna.payments.claim_*` errors ride
-     * [errorMessage] to the global banner.
+     * [errorMessage] to the global banner. The button's own answer is asked
+     * again first and a refusal shows its reason there, sending nothing
+     * (`docs/goal/ui/README.md` § Offer only what is possible, rule 6).
      */
     fun redeemClaim(code: String) {
         val trimmed = code.trim()
         if (trimmed.isEmpty()) return
+        answerRefusal(context, _redeemAnswer.value)?.let {
+            errorMessage.value = it.reason
+            return
+        }
         viewModelScope.launch {
             errorMessage.value = null
             _working.value = true

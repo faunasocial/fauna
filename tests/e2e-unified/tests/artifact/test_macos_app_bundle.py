@@ -67,6 +67,57 @@ def test_the_bundle_carries_everything_it_needs_at_runtime(macos_artifact_bundle
         f"{macos_artifact_bundle} is missing {missing}: a bundle that ships without "
         f"one launches, and looks like a successful build."
     )
+    # The assembled plist, not the tracked one: the Local Network prompt shows
+    # the BUNDLE's string (account-sync-plane.md § Implementation status today).
+    import plistlib
+
+    with open(macos_artifact_bundle / "Contents/Info.plist", "rb") as f:
+        info = plistlib.load(f)
+    assert info.get("NSLocalNetworkUsageDescription"), (
+        f"{macos_artifact_bundle} Info.plist lost NSLocalNetworkUsageDescription: "
+        f"the Local Network prompt would show no reason"
+    )
+
+
+def _embedded_info_plist(binary: Path) -> dict:
+    """The `__TEXT,__info_plist` section of a bare Mach-O, which `-sectcreate`
+    copies in verbatim: the XML property list in the file that names a bundle
+    identifier (the signature's entitlements blob is XML too, and names none)."""
+    data = binary.read_bytes()
+    start = data.find(b"<?xml")
+    while start >= 0:
+        end = data.find(b"</plist>", start)
+        if end < 0:
+            break
+        try:
+            parsed = plistlib.loads(data[start:end + len(b"</plist>")])
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict) and "CFBundleIdentifier" in parsed:
+            return parsed
+        start = data.find(b"<?xml", start + 1)
+    raise AssertionError(f"{binary} carries no embedded Info.plist")
+
+
+@pytest.mark.timeout(3600)
+def test_the_bundled_agent_embeds_its_signed_info_plist(macos_artifact_bundle):
+    """The agent hosts the account store and binds the peer leg itself, and
+    macOS attributes a launchd agent's Local Network prompt to the agent
+    binary, so the BINARY must carry the usage string
+    (account-sync-plane.md § Implementation status today), bound into its
+    signature (`codesign -dv` counts the entries and names the identifier)."""
+    agent = macos_artifact_bundle / "Contents/MacOS/fauna-sync-agent"
+    info = _embedded_info_plist(agent)
+    assert info.get("CFBundleIdentifier") == "social.fauna.sync-agent", info
+    assert info.get("NSLocalNetworkUsageDescription"), (
+        f"{agent} embeds no NSLocalNetworkUsageDescription: the agent-hosted "
+        f"Local Network prompt would show no reason"
+    )
+    shown = run("codesign", "-dv", str(agent)).stderr
+    assert "Identifier=social.fauna.sync-agent" in shown, shown
+    assert re.search(r"Info\.plist entries=\d+", shown), (
+        f"the agent's signature does not bind its Info.plist:\n{shown}"
+    )
 
 
 @pytest.mark.timeout(3600)

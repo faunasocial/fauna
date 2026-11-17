@@ -1345,7 +1345,7 @@ fn relative_name(
 /// `creds_json[i]`, each a `providers.yaml`-keyed JSON bag. A bag that does not
 /// parse keeps its provider with no fields (its `verify()` then fails and it is
 /// simply not usable); a pair missing its other half is dropped.
-fn held_dns_from_json(
+pub(crate) fn held_dns_from_json(
     provider_ids: Vec<String>,
     creds_json: Vec<String>,
 ) -> Vec<HeldDnsCredential> {

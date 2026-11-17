@@ -110,17 +110,38 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     // Pre-derived by the shared machine (`resolve_nested`, not `localized`/
     // `resolve`: `{label}` carries the step's own i18n key). Mirrors linux's
     // `onboarding::nest_provisioning`.
+    // On a run entered from the choose-providers page the price is agreed
+    // here, at the purchase: the confirm sits directly under the domain line
+    // and gates *Buy and set up* (`onboarding-provisioning.md` § 3d *The
+    // choices on the setting-things-up page*). Its label is § 4's, unchanged.
+    let choices = m.provisioning_choices_visible();
     if let Some(text) = m.bom_domain_line() {
         out.push(Element::label(
             ids::PROVISIONING_BOM_DOMAIN_LINE,
             text.resolve_nested(fauna_i18n::strings::lookup),
         ));
+        let cfg = m.dns_config();
+        if choices && cfg.buy_domain && !cfg.set_up_later {
+            out.push(Element::checkbox(
+                ids::DNS_PRICE_CONFIRM_CHECKBOX,
+                fauna_i18n::strings::registrar::PRICE_CONFIRM,
+                cfg.price_agreed,
+                Action::ConfirmPrice,
+            ));
+        }
     }
     if let Some(text) = m.bom_vps_line() {
         out.push(Element::label(
             ids::PROVISIONING_BOM_VPS_LINE,
             text.resolve_nested(fauna_i18n::strings::lookup),
         ));
+    }
+    // The choices region — location, server type, mail mode, update channel,
+    // SSH door — between the price summary and the start button, every one
+    // with a default; the same element list `vps_config` paints (§ 5's rules
+    // apply wherever those controls are shown).
+    if choices {
+        out.extend(super::vps_config::choices(w));
     }
 
     for (i, step) in snap.steps.iter().enumerate() {
@@ -193,13 +214,29 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     // Affordances are the typed predicates', not ours — `can_retry()` is the one
     // carrying the Failed-**or-Cancelled** rule (a soft-cancel must leave retry
     // reachable, else the user is stranded with only Back).
+    // *Buy and set up* is dead on a run entered from the choose-providers
+    // page while the machine names a reason (the price not agreed, no server
+    // type) — the reason on an un-id'd line beneath the button (rule 5).
+    let start_blocked = if m.provisioning_back_to_providers() {
+        m.provisioning_start_blocked_reason()
+    } else {
+        None
+    };
     if overall.is_idle() {
-        out.push(Element::button(
-            ids::PROVISIONING_START_BUTTON,
-            t::START_BUTTON,
-            true,
-            Action::StartProvisioning,
-        ));
+        out.push(
+            Element::button(
+                ids::PROVISIONING_START_BUTTON,
+                t::START_BUTTON,
+                true,
+                Action::StartProvisioning,
+            )
+            .possible(fauna_core::possibility::Possibility::from_blocked_reason(
+                start_blocked.clone(),
+            )),
+        );
+        if let Some(reason) = &start_blocked {
+            out.push(Element::chrome(localized(reason)));
+        }
     }
     if overall.is_running() {
         out.push(Element::button(
@@ -224,12 +261,20 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         true,
         Action::Back,
     ));
-    out.push(Element::button(
-        ids::PROVISIONING_CONTINUE_BUTTON,
-        common::CONTINUE,
-        overall.can_continue(),
-        Action::ContinueFromProvisioning,
-    ));
+    // Enabled is the seam's to decide (`ui/README.md` § Offer only what is
+    // possible, rule 6): the button declares the shared answer and
+    // `App::page_elements` disables it while that answer is blocked.
+    out.push(
+        Element::button(
+            ids::PROVISIONING_CONTINUE_BUTTON,
+            common::CONTINUE,
+            true,
+            Action::ContinueFromProvisioning,
+        )
+        .possible(fauna_core::possibility::Possibility::from_blocked_reason(
+            overall.continue_blocked_reason(),
+        )),
+    );
     // Rule 5's reason for the Continue directly above, from the same value
     // that disabled it. ID-less chrome: it is prose, not an affordance, and
     // rule 5's own exemplar is un-id'd on tui (the `dns-status-text` fix's
@@ -259,7 +304,8 @@ mod tests {
             .machine
             .set_step_for_test(OnboardingStep::NestProvisioning);
 
-        let els = app.wizard.elements();
+        // Through the seam, which is what disables Continue (rule 6).
+        let els = app.page_elements();
         let cont = els
             .iter()
             .find(|e| e.id == "provisioning-continue-button")

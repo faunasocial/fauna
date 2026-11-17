@@ -89,6 +89,9 @@ closed-fixed fauna-client-backup::audit::Repr  # decode-shape helper inside Ledg
 local fauna-client-backup::reseed::LedgerVerdict  # view model: the pull-back preflight's per-ledger verdict, carried in the acceptance JSON only across FFI or wasm to the same build's UI and back on confirm; never stored, never sent to a nest
 local fauna-client-capabilities::*  # 5 enums; view model: crosses only FFI or wasm to the same build's UI
 
+# fauna-client-caldav
+local fauna-client-caldav::calendars_read::CalendarsReadState  # view model: the calendar read's answer, deserialized only from the same build's web SPA handing caldavReadCalendars' value back to eventCreatePossibility; never stored, never sent to a nest
+
 # fauna-client-dns
 foreign fauna-client-dns::acme_pure::order::OrderStatus  # RFC 8555 order object
 foreign fauna-client-dns::acme_pure::order::AuthorizationStatus  # RFC 8555 authorization object
@@ -143,6 +146,8 @@ local fauna-conversations::snapshot::GuardianState # view model: crosses only FF
 local fauna-conversations::snapshot::SortOrder  # view model: crosses only FFI or wasm to the same build's UI
 open fauna-conversations::store::attachments::AttachmentOpeningKey  # history slice; a carried unknown means this attachment cannot be refilled here, and its coordinates are kept, never forgotten
 local fauna-conversations::store::attachments::AttachmentCoordinates  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::thread_controls::ThreadControl  # view model: a predicate's argument, crosses only FFI or wasm to the same build's UI, never stored or sent
+local fauna-conversations::new_thread_controls::NewThreadControl  # view model: a predicate's argument, crosses only FFI or wasm to the same build's UI, never stored or sent
 open fauna-conversations::thread::ThreadFlavor  # history slice, merged and re-uploaded; `Unknown { canonical }` crosses FFI; the thread shows with every affordance withheld
 
 # fauna-core
@@ -341,6 +346,8 @@ local fauna-onboarding-machine::state::BoxRecoveryEntry  # view model or in-proc
 local fauna-onboarding-machine::state::IdentityOrigin  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::state::ProviderStatus  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::state::CredentialForm  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::ProviderGoal  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::GoalCover  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::state::HostedAuthState  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::state::FieldTypePlain  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::state::CapabilityPlain  # view model or in-process error value; no reply decodes it

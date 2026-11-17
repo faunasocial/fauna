@@ -178,7 +178,7 @@ import org.robolectric.annotation.Config
  * the **real** shared rule (`account-data-plane.md` § The offline-mutation
  * contract → *How a surface asks*).
  *
- * These call the live `offlineAffordance` over JNA rather than a Kotlin stand-in,
+ * These call the live `offlinePossibility` over JNA rather than a Kotlin stand-in,
  * which is the whole point: the rule's three rulings are not restated in Kotlin,
  * so a test that mocked the verdict would prove only that `enabled =` is wired
  * to *something*. Run them with `just android-host-test` — it builds the host
@@ -1143,9 +1143,17 @@ class OfflineGateTest {
         )
     }
 
+    /** A typed code, so the redeem's draft half (`redeem_code_possibility`) is
+     *  satisfied and the assertion is about the offline gate alone. */
+    private fun typeClaimCode() {
+        composeTestRule.onNodeWithTag("subscription-claim-redeem-input")
+            .performScrollTo().performTextInput("CODE42")
+    }
+
     @Test
     fun subscriptionCommitsGate_whileTheClaimCodeBufferStaysLive() {
         render(FfiConnectionState.DISCONNECTED) { SubscriptionSettings() }
+        typeClaimCode()
         composeTestRule.onNodeWithTag("subscription-mine-unsubscribe-button")
             .performScrollTo().assertIsNotEnabled()
         composeTestRule.onNodeWithTag("subscription-claim-redeem-button")
@@ -1159,6 +1167,7 @@ class OfflineGateTest {
     @Test
     fun subscriptionCommitsAreLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) { SubscriptionSettings() }
+        typeClaimCode()
         composeTestRule.onNodeWithTag("subscription-mine-unsubscribe-button")
             .performScrollTo().assertIsEnabled()
         composeTestRule.onNodeWithTag("subscription-claim-redeem-button")
@@ -1188,6 +1197,8 @@ class OfflineGateTest {
             statusLabel = { "none" },
             working = false,
             onSubscribe = {},
+            // A typed code: the draft half is satisfied, so the gate is what closes it.
+            redeemCode = "CODE42",
         )
     }
 
@@ -1499,6 +1510,10 @@ class OfflineGateTest {
     @Test
     fun proposeTransferIsLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) { Family(familyStatus()) }
+        // A valid hex id, so the draft half (`transfer_possibility`) is
+        // satisfied and the assertion is about the offline gate alone.
+        composeTestRule.onNodeWithTag("family-transfer-input")
+            .performScrollTo().performTextInput("cd".repeat(32))
         composeTestRule.onNodeWithTag("family-transfer-button")
             .performScrollTo().assertIsEnabled()
     }
@@ -3312,6 +3327,7 @@ class OfflineGateTest {
     private fun MailSettings(pendingRotation: PendingRotationStatus? = null) {
         MailSettingsContent(
             enabled = true,
+            mailUsable = uniffi.fauna_core.Possibility.Possible,
             caldavEnabled = false,
             carddavEnabled = false,
             servesWebdavSet = false,
@@ -4574,14 +4590,26 @@ class OfflineGateTest {
         status = LocalizedText("features.status_restricted", emptyMap()),
     )
 
+    /** A 64-hex draft, so the add button's draft half (the shared
+     *  `zap_signer_add_possibility`) is satisfied and each case below is
+     *  about the gate, not about an empty field. */
+    private fun typeValidSignerPubkey() {
+        composeTestRule.onNodeWithTag("nostr-zap-signer-pubkey-input")
+            .performScrollTo().performTextInput("ab".repeat(32))
+    }
+
     @Composable
     private fun ZapSigners(gateRow: FfiFeatureRow? = null) {
+        // The VM's answer over a loaded read: the shared gate over the row,
+        // or a bounded-but-available plane when the case names none.
+        val gate = gateRow?.let { com.fauna.ffi.featuresGatePossibility(listOf(it), "zaps") }
+            ?: uniffi.fauna_core.Possibility.Possible
         NostrContent(
             registered = true,
             bridge = nostrBridge(),
             follows = emptyList(),
             zapSigners = listOf(zapSigner()),
-            zapSignerGateRow = gateRow,
+            zapSignerGate = gate,
             onLink = { _, _ -> },
             onUnlink = {},
             onUpdateSetting = { _, _ -> },
@@ -4595,6 +4623,7 @@ class OfflineGateTest {
     @Test
     fun theZapSignerAddAndRemoveGate_whileTheirPubkeyAndLabelBuffersStayLive() {
         render(FfiConnectionState.DISCONNECTED) { ZapSigners() }
+        typeValidSignerPubkey()
         // Designating a signer and undesignating one are both commits: the
         // remove is an immediate commit with no arming step, so the row button
         // IS the gesture.
@@ -4613,6 +4642,7 @@ class OfflineGateTest {
     @Test
     fun theZapSignerCommitsAreLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) { ZapSigners() }
+        typeValidSignerPubkey()
         composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn")
             .performScrollTo().assertIsEnabled()
         composeTestRule.onNodeWithTag("nostr-zap-signer-remove")
@@ -4623,6 +4653,7 @@ class OfflineGateTest {
     @Test
     fun theZapSignerAddStaysDeadUnderAFeatureDenyEvenConnected() {
         render(FfiConnectionState.CONNECTED) { ZapSigners(gateRow = deniedZapsRow()) }
+        typeValidSignerPubkey()
         // The converse half. The page's Dim-3 verdict is the stronger, more
         // specific reason, so with a nest present the button is still dead and
         // the reason beside it is the FEATURE's, never "needs a nest".

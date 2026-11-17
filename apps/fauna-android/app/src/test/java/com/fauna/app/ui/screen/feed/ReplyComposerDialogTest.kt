@@ -4,6 +4,8 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -26,18 +28,25 @@ class ReplyComposerDialogTest {
     @get:Rule
     val composeTestRule = createComposeRule()
 
+    private var dismissed = false
+    private val refusals = mutableListOf<String>()
+
     private fun render(
         audience: ReplyAudience?,
+        saved: Boolean = true,
         onSend: (String, Boolean) -> Unit = { _, _ -> },
     ) {
         composeTestRule.setContent {
-            ReplyComposerDialogContent(
-                audience = audience,
-                roomLabel = "Garden",
-                gatedTier = "Patrons",
-                onSend = onSend,
-                onDismiss = {},
-            )
+            if (!dismissed) {
+                ReplyComposerDialogContent(
+                    audience = audience,
+                    roomLabel = "Garden",
+                    gatedTier = "Patrons",
+                    onSend = { t, c -> onSend(t, c); saved },
+                    onRefuse = { refusals += it },
+                    onDismiss = { dismissed = true },
+                )
+            }
         }
     }
 
@@ -91,5 +100,44 @@ class ReplyComposerDialogTest {
         composeTestRule.onNodeWithTag("feed-reply-public-confirm").assertIsOn()
         composeTestRule.onNodeWithTag("feed-reply-submit-button").performClick()
         assertEquals(listOf("hello" to true), sent)
+    }
+
+    // ── The form case (feed.md § Errors & edge cases; README § Offer only
+    // what is possible, rule 4): painted from `feed_reply_submit_possibility`,
+    // and the dialog closes only on a saved reply.
+
+    @Test
+    fun aBlankReplyIsDisabledWithTheSharedReason() {
+        render(audience = null)
+        composeTestRule.onNodeWithTag("feed-reply-submit-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Write your reply first.").assertExists()
+
+        composeTestRule.onNodeWithTag("feed-reply-text-field").performTextInput("hi")
+        composeTestRule.onNodeWithTag("feed-reply-submit-button").assertIsEnabled()
+        composeTestRule.onNodeWithText("Write your reply first.").assertDoesNotExist()
+    }
+
+    @Test
+    fun aFailedSaveKeepsTheDialogOpenWithTheText() {
+        val sent = mutableListOf<Pair<String, Boolean>>()
+        render(audience = null, saved = false) { t, c -> sent += t to c }
+        composeTestRule.onNodeWithTag("feed-reply-text-field").performTextInput("keep me")
+        composeTestRule.onNodeWithTag("feed-reply-submit-button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(listOf("keep me" to false), sent)
+        assertFalse(dismissed)
+        composeTestRule.onNodeWithTag("feed-reply-dialog").assertExists()
+        composeTestRule.onNodeWithTag("feed-reply-text-field").assertTextContains("keep me")
+    }
+
+    @Test
+    fun aSavedReplyClosesTheDialog() {
+        render(audience = null, saved = true)
+        composeTestRule.onNodeWithTag("feed-reply-text-field").performTextInput("sent")
+        composeTestRule.onNodeWithTag("feed-reply-submit-button").performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(dismissed)
+        assertTrue(refusals.isEmpty())
     }
 }

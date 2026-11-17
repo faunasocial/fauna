@@ -141,6 +141,17 @@ struct AdminNavRail: View {
 /// status page) is the first/default sub-page.
 struct SettingsNavRail: View {
     @Environment(MacAppState.self) private var appState
+    @Environment(FaunaClient.self) private var client: FaunaClient?
+
+    /// The six mail sub-page rows follow the session's shared mail-usable
+    /// answer (`mail-settings.md` § Errors & edge cases, the mail-usable gate):
+    /// absent where this box can never serve mail, disabled with the reason
+    /// while mail is off or still being read. Mail & Calendar stays live — the
+    /// one step that unblocks them — and carries the reason beneath it.
+    private func answer(for page: SettingsPage) -> Possibility {
+        client?.mailUsable.answer(for: page)
+            ?? (MailUsableGate.gatedPages.contains(page) ? mailUsableUnread() : .possible)
+    }
 
     var body: some View {
         @Bindable var state = appState
@@ -164,12 +175,23 @@ struct SettingsNavRail: View {
 
             Divider()
 
-            List(SettingsPage.built, selection: $state.selectedSettingsPage) { page in
-                Label(page.label, systemImage: page.systemImage)
-                    .tag(page)
-                    .settingsNavRow(page) { appState.selectedSettingsPage = page }
+            List(SettingsPage.built.filter { answer(for: $0).isShown },
+                 selection: $state.selectedSettingsPage) { page in
+                VStack(alignment: .leading, spacing: 2) {
+                    Label(page.label, systemImage: page.systemImage)
+                    if page == .mail {
+                        FaunaPossibilityReason(answer(for: .mailAliases))
+                    }
+                }
+                .tag(page)
+                .settingsNavRow(page) { appState.selectedSettingsPage = page }
+                .faunaPossible(answer(for: page))
             }
             .listStyle(.sidebar)
+            .task {
+                guard let client else { return }
+                await client.mailUsable.refresh(api: client.api)
+            }
         }
         .frame(minWidth: 180)
     }

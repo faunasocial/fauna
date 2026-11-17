@@ -35,7 +35,9 @@ class MailSettingsVM @Inject constructor(
     private val api: ApiClient,
 ) : ViewModel() {
 
-    private val machine: MailSettingsMachine? = api.buildMailSettingsMachine()
+    // The session's shared machine, the one [MailUsableVM] reads, so an enable
+    // here is the snapshot the mail-usable gate answers from.
+    private val machine: MailSettingsMachine? = api.sharedMailSettingsMachine()
 
     val snapshot = MutableStateFlow(machine?.snapshot() ?: EMPTY_SNAPSHOT)
     val errorMessage = MutableStateFlow<String?>(null)

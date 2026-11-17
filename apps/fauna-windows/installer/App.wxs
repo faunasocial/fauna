@@ -10,6 +10,14 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
   <Fragment>
+    <!-- The client-only directories (Directories.wxs holds the shared ones). -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Directory Id="AppFolder" Name="App" />
+    </DirectoryRef>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="FaunaStartMenu" Name="Fauna" />
+    </StandardDirectory>
+
     <ComponentGroup Id="AppComponents" Directory="AppFolder">
 
       <!--

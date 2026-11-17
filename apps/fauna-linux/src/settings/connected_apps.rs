@@ -1033,9 +1033,14 @@ fn append_install_section(card: &gtk::Box, consent: &ConsentCardRow) {
 /// prompt — the shape every no-default linux select takes (`linked_nests.rs`'s
 /// scope picker): a `gtk::DropDown` holding a model still shows, and reads
 /// back, its first item after `set_selected(INVALID_LIST_POSITION)`, so the
-/// card would show a folder the machine does not hold.
+/// card would show a folder the machine does not hold. A picker with no
+/// eligible folder holds no item at all — not even the prompt, which would
+/// read back as the one option offered (as web's select, which paints only
+/// folders): nothing can be chosen, and the card's text says why.
 fn folder_dropdown(picker: &FolderPicker) -> gtk::DropDown {
-    let keys: Vec<String> = std::iter::once(String::new())
+    let prompt = (!picker.options.is_empty()).then(String::new);
+    let keys: Vec<String> = prompt
+        .into_iter()
         .chain(picker.options.iter().map(|o| o.id.to_string()))
         .collect();
     let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -1064,7 +1069,11 @@ fn folder_dropdown(picker: &FolderPicker) -> gtk::DropDown {
     let chosen = picker
         .chosen
         .and_then(|id| picker.options.iter().position(|o| o.id == id));
-    dropdown.set_selected(chosen.map_or(0, |i| i as u32 + 1));
+    dropdown.set_selected(match (chosen, picker.options.is_empty()) {
+        (_, true) => gtk::INVALID_LIST_POSITION,
+        (Some(i), false) => i as u32 + 1,
+        (None, false) => 0,
+    });
     dropdown
 }
 
@@ -1346,6 +1355,44 @@ mod tests {
             read(Some(21)),
             "21",
             "a chosen folder reads back as its key"
+        );
+    }
+
+    /// A card no folder is eligible on paints a picker holding NO item — the
+    /// `options` read (`automation::agent`, a walk of this model) answers `[]`,
+    /// as web's select does; the no-choice prompt stays only beside real
+    /// folders, where a `gtk::DropDown` needs it to show nothing chosen.
+    #[test]
+    fn a_picker_with_no_eligible_folder_holds_no_item() {
+        use fauna_atproto_settings_machine::FolderOption;
+        let items = |options: Vec<FolderOption>| {
+            let picker = FolderPicker {
+                options,
+                chosen: None,
+                none_eligible: None,
+            };
+            crate::testid::run_on_gtk_thread(move || {
+                let _ = adw::init();
+                let dropdown = folder_dropdown(&picker);
+                (
+                    dropdown.model().map_or(0, |m| m.n_items()),
+                    dropdown.selected(),
+                )
+            })
+        };
+        assert_eq!(
+            items(vec![]),
+            (0, gtk::INVALID_LIST_POSITION),
+            "no eligible folder: no item, the prompt included, and nothing selected"
+        );
+        let one = FolderOption {
+            id: 20,
+            name: "picker-drop".into(),
+        };
+        assert_eq!(
+            items(vec![one]),
+            (2, 0),
+            "a folder: the prompt then the folder"
         );
     }
 

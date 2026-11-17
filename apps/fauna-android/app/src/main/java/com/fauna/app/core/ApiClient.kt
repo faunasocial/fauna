@@ -201,11 +201,6 @@ class ApiClient @Inject constructor(
     /** Off-main scope for the fire-and-forget WS teardown in [clearAuth]. */
     private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** The bound on [clearAuth]'s leave-door drafts flush — linux's
-     *  `flush_now_blocking` bound (`feed/drafts.rs`), so no app's sign-out
-     *  waits longer on a dead nest than another's. */
-    private val leaveFlushBoundMs = 2_000L
-
     // -- Reconnect re-hydrate (transport.md § Push events) --
     //
     // Bumped once per WS reconnect-*after-first* (the initial connect never
@@ -637,7 +632,10 @@ class ApiClient @Inject constructor(
                 // (a save that misses the bound is the same loss the debounce
                 // would have had).
                 if (leaveFlush.isNotEmpty()) {
-                    kotlinx.coroutines.withTimeoutOrNull(leaveFlushBoundMs) {
+                    // The shared leave-flush budget (`fauna_client_drafts::
+                    // LEAVE_FLUSH_BUDGET`, over UniFFI), so no app's sign-out
+                    // waits longer on a dead nest than another's.
+                    kotlinx.coroutines.withTimeoutOrNull(leaveFlushBudgetMs().toLong()) {
                         kotlinx.coroutines.coroutineScope {
                             leaveFlush.forEach { save ->
                                 launch {
@@ -824,7 +822,7 @@ class ApiClient @Inject constructor(
             android.util.Log.w("ApiClient", "WS-RPC connect failed: ${e.message}")
             ShellLog.w("ApiClient", "WS-RPC connect failed: ${e.message}")
         }
-        // A clear during connect() already took this client into its teardown
+        // A clear during ensureConnected() already took this client into its teardown
         // when it emptied the seat. Starting the pumps or the account runtime
         // now would run them on a closed client as the departing actor. From
         // here to the runtime start nothing suspends, so this one check covers
@@ -1643,22 +1641,34 @@ class ApiClient @Inject constructor(
      * nest and this identity is an admin here, fetch the box's seed, refuse one
      * that does not derive to the bound id, and merge the entry. Run on every
      * connect; the account-runtime seat runs the same leg at its store-ready
-     * edge. Answers the shared warning the run owes the admin (`null` when
-     * nothing is owed) for the caller to render on the recovery-custody warning
-     * banner. A leg that could not even be reached (no connection, no secret)
-     * answers the shared "not attempted" warning, so the failure path renders
-     * Rust's text too. `appDataDir` is unused by the FFI now (kept in its
+     * edge. Every run's signal goes to [sink] — this run's, then each
+     * reconnect retry's — so the caller paints the shared warning while custody
+     * is unconfirmed and takes it down on the cleared mark (fauna-ffi
+     * `self_heal_deployment_seed_custody_signalled`). A leg that could not even
+     * be reached (no connection, no secret) signals the shared "not attempted"
+     * warning, so the failure path renders Rust's text too. `appDataDir` is unused by the FFI now (kept in its
      * signature).
      */
-    suspend fun selfHealDeploymentSeedCustody(): uniffi.fauna_core.LocalizedText? =
+    suspend fun selfHealDeploymentSeedCustody(sink: com.fauna.ffi.FfiCustodyLegSink) {
         try {
-            com.fauna.ffi.selfHealDeploymentSeedCustody(
-                backupNest(), backupSecret(), context.filesDir.absolutePath,
+            com.fauna.ffi.selfHealDeploymentSeedCustodySignalled(
+                backupNest(), backupSecret(), context.filesDir.absolutePath, sink,
             )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             ShellLog.w("DeploymentSeedGlue", "deployment-seed custody leg not attempted: ${e.message}")
-            com.fauna.ffi.deploymentSeedCustodyUnattemptedWarning()
+            sink.onWarning(com.fauna.ffi.deploymentSeedCustodyUnattemptedWarning())
         }
+    }
+
+    /**
+     * Every custody-leg warning the shared leg can paint (fauna-ffi
+     * `deployment_seed_custody_warnings`) — what the cleared mark compares the
+     * warning banner against, so the two keys stay in Rust.
+     */
+    fun deploymentSeedCustodyWarnings(): List<uniffi.fauna_core.LocalizedText> =
+        com.fauna.ffi.deploymentSeedCustodyWarnings()
 
     /**
      * Run the post-succession **aftermath** — legs 1, 2, 4, 7, 6, in the order
@@ -2174,6 +2184,17 @@ class ApiClient @Inject constructor(
     fun setConversationsSelfAddress(address: String) {
         conversationsManagerHost.session?.setSelfAddress(address)
     }
+
+    /**
+     * The `ready` half of the folder follow/share form predicates
+     * (`fauna_client_folders::forms`): the nest channel and the identity secret
+     * are held, and — with [withSession], for a share — the live conversations
+     * session [conversationsSessionOrThrow] would hand the op. The caller adds
+     * its own machine. Reads state only, never throws.
+     */
+    fun folderOpsReady(withSession: Boolean): Boolean =
+        nestClient != null && secret != null &&
+            (!withSession || conversationsManagerHost.session != null)
 
     /** The live conversations session, or throw — the folder MLS ops require it. */
     private fun conversationsSessionOrThrow(): uniffi.fauna_conversations.ConversationsSession =

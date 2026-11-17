@@ -24,11 +24,16 @@ import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.QrCanvas
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.SuppressScreenCapture
+import com.fauna.app.ui.util.and
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.stringResourceFmt
-import com.fauna.app.ui.viewmodel.CUSTODIAL_MODES
 import com.fauna.app.ui.viewmodel.NostrVM
 import com.fauna.app.ui.viewmodel.boolSetting
 import com.fauna.app.ui.viewmodel.parseRelayList
@@ -38,8 +43,14 @@ import com.fauna.ffi.FfiBridgeToggleOption
 import com.fauna.ffi.FfiCborValue
 import com.fauna.ffi.FfiCreateBunkerInviteReply
 import com.fauna.ffi.FfiException
-import com.fauna.ffi.FfiFeatureRow
+
+import com.fauna.ffi.nostrAddFollowPossibility
+import com.fauna.ffi.nostrAddRelayPossibility
+import com.fauna.ffi.nostrConnectedAppsPossibility
 import com.fauna.ffi.nostrContentToggleOptions
+import com.fauna.ffi.nostrLinkPossibility
+import com.fauna.ffi.nostrZapSignerAddPossibility
+import uniffi.fauna_core.Possibility
 import com.fauna.ffi.nostrKeySourceLabel
 import com.fauna.ffi.nostrLinkModeLabel
 import com.fauna.ffi.qrMatrix
@@ -74,7 +85,7 @@ fun NostrScreen(vm: NostrVM = hiltViewModel()) {
     val follows by vm.follows.collectAsState()
     val bunkerInvite by vm.bunkerInvite.collectAsState()
     val zapSigners by vm.zapSigners.collectAsState()
-    val zapSignerGateRow by vm.zapSignerGateRow.collectAsState()
+    val zapSignerGate by vm.zapSignerGate.collectAsState()
     val npubConfirmationOwed by vm.npubConfirmationOwed.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
     val error by vm.error.collectAsState()
@@ -96,7 +107,7 @@ fun NostrScreen(vm: NostrVM = hiltViewModel()) {
         follows = follows,
         bunkerInvite = bunkerInvite,
         zapSigners = zapSigners,
-        zapSignerGateRow = zapSignerGateRow,
+        zapSignerGate = zapSignerGate,
         npubConfirmationOwed = npubConfirmationOwed,
         onLink = vm::link,
         onUnlink = vm::unlink,
@@ -119,7 +130,9 @@ fun NostrContent(
     follows: List<FfiBridgeFollow>,
     bunkerInvite: FfiCreateBunkerInviteReply? = null,
     zapSigners: List<ZapSignerItem> = emptyList(),
-    zapSignerGateRow: FfiFeatureRow? = null,
+    // The VM's answer (`NostrVM.zapSignerGate`); the default is for the
+    // stateless harness only — the screen always hands the VM's.
+    zapSignerGate: Possibility = Possibility.Possible,
     npubConfirmationOwed: Boolean = false,
     onLink: (mode: String, fields: Map<String, String>) -> Unit,
     onUnlink: () -> Unit,
@@ -180,7 +193,11 @@ fun NostrContent(
                 RelaysSection(bridge, onAddRelay, onRemoveRelay)
                 Spacer(Modifier.height(16.dp))
                 FollowsSection(follows, onAddFollow, onRemoveFollow)
-                if (bridge.mode in CUSTODIAL_MODES) {
+                // The custodial gate is the shared `connected_apps_possibility`
+                // over the stored signing mode — Absent for a `remote`/`nip07`
+                // account (no nest-held key to sign with), never an app-local
+                // mode set (nostr.md § Errors & edge cases).
+                if (askForm { nostrConnectedAppsPossibility(bridge.mode) } !is Possibility.Absent) {
                     Spacer(Modifier.height(16.dp))
                     ConnectedAppsSection(bunkerInvite, onConnectApp)
                 }
@@ -197,7 +214,7 @@ fun NostrContent(
                 // the branch).
                 if (BuildConfig.PAYMENTS) {
                     Spacer(Modifier.height(16.dp))
-                    ZapSignersSection(zapSigners, zapSignerGateRow, onAddZapSigner, onRemoveZapSigner)
+                    ZapSignersSection(zapSigners, zapSignerGate, onAddZapSigner, onRemoveZapSigner)
                 }
             }
             else -> {
@@ -362,6 +379,10 @@ private fun UnlinkedAccountSection(onLink: (mode: String, fields: Map<String, St
             }
 
             Spacer(Modifier.height(12.dp))
+            // Painted from the shared `link_possibility` (import with no nsec,
+            // remote with no bunker URL -> blocked with the reason beside it);
+            // the VM's `link` asks it again and refuses on `error-message`.
+            val linkSubmit = faunaFormGate(askForm { nostrLinkPossibility(mode, nsec, bunkerUrl) })
             Button(
                 onClick = {
                     val fields = when (mode) {
@@ -371,10 +392,12 @@ private fun UnlinkedAccountSection(onLink: (mode: String, fields: Map<String, St
                     }
                     onLink(mode, fields)
                 },
+                enabled = linkSubmit.enabled,
                 modifier = Modifier.testTag(Ids.NOSTR_LINK_BUTTON),
             ) {
                 Text(stringResource(R.string.nostr_link_account_link_button))
             }
+            DisabledControlReasonText(linkSubmit.reason)
         }
     }
 }
@@ -463,6 +486,11 @@ private fun RelaysSection(
             }
 
             Spacer(Modifier.height(8.dp))
+            // `add_relay_possibility` over the listed relays and the draft:
+            // blank, malformed, private-network and duplicate drafts are each
+            // blocked with their reason; the field clears only on a draft that
+            // may go, so a refused one is never silently dropped.
+            val relaySubmit = faunaFormGate(askForm { nostrAddRelayPossibility(relays, newRelay) })
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = newRelay,
@@ -472,12 +500,18 @@ private fun RelaysSection(
                     modifier = Modifier.weight(1f).testTag(Ids.NOSTR_RELAY_INPUT),
                 )
                 IconButton(
-                    onClick = { onAddRelay(newRelay); newRelay = "" },
+                    onClick = {
+                        val goes = askForm { nostrAddRelayPossibility(relays, newRelay) }.isPossible
+                        onAddRelay(newRelay)
+                        if (goes) newRelay = ""
+                    },
+                    enabled = relaySubmit.enabled,
                     modifier = Modifier.testTag(Ids.NOSTR_ADD_RELAY),
                 ) {
                     Icon(Icons.Default.Add, stringResource(R.string.nostr_relays_add))
                 }
             }
+            DisabledControlReasonText(relaySubmit.reason)
         }
     }
 }
@@ -522,6 +556,7 @@ private fun FollowsSection(
             }
 
             Spacer(Modifier.height(8.dp))
+            val followSubmit = faunaFormGate(askForm { nostrAddFollowPossibility(pubkey) })
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = pubkey,
@@ -539,15 +574,20 @@ private fun FollowsSection(
                 )
                 IconButton(
                     onClick = {
+                        val goes = askForm { nostrAddFollowPossibility(pubkey) }.isPossible
                         onAddFollow(pubkey, petname.ifBlank { null })
-                        pubkey = ""
-                        petname = ""
+                        if (goes) {
+                            pubkey = ""
+                            petname = ""
+                        }
                     },
+                    enabled = followSubmit.enabled,
                     modifier = Modifier.testTag(Ids.NOSTR_ADD_FOLLOW),
                 ) {
                     Icon(Icons.Default.Add, stringResource(R.string.nostr_follows_add))
                 }
             }
+            DisabledControlReasonText(followSubmit.reason)
         }
     }
 }
@@ -565,31 +605,40 @@ private fun FollowsSection(
  * instead of pushing a locally-built row: the nest normalizes to lowercase,
  * and only that form ever matches a real receipt.
  *
- * [zapSignerGateRow] is the `zaps` gated-feature row's Dim-3 courtesy read
- * for the add button — `null` while available OR un-hydrated (an
- * un-hydrated read must leave the button LIVE; the nest, not the app, is the
- * enforcement floor). Removal is never gated — de-escalation.
+ * [zapSignerGate] is the `zaps` plane's answer over the Dim-3 courtesy read
+ * (`NostrVM.zapSignerGate`, the shared `gate_possibility`): blocked still
+ * loading before the read answers, and absent — the add row left out — when
+ * the nest has no `zaps` plane (`docs/goal/ui/README.md` § Offer only what is
+ * possible, rules 2 and 5). Removal is never gated — de-escalation.
  */
 @Composable
 private fun ZapSignersSection(
     zapSigners: List<ZapSignerItem>,
-    zapSignerGateRow: FfiFeatureRow?,
+    zapSignerGate: Possibility,
     onAddZapSigner: (pubkey: String, label: String) -> Unit,
     onRemoveZapSigner: (String) -> Unit,
 ) {
     var pubkey by remember { mutableStateOf("") }
     var label by remember { mutableStateOf("") }
-    // The Dim-3 courtesy gate: the decision is READ off the shared row,
+    // The Dim-3 courtesy gate: the decision is READ off the shared answer,
     // never re-derived — a page composing its own meet would miss the
-    // `payments` subset edge a `payments` deny reaches `zaps` through.
-    val zapSignerAddGateReason = zapSignerGateRow?.let {
-        if (it.affordance == "available") null else (localizedNested(it.restriction) ?: localized(it.status))
-    }
+    // `payments` subset edge a `payments` deny reaches `zaps` through. Its
+    // reason may carry a nested `{window}` key, hence the nested resolver.
+    val zapSignerAddGateReason = localizedNested(zapSignerGate.blockedReason)
     // Designating a signer is a commit (`fauna.nostr.zap_signers.add`); the
     // pubkey and label fields beside it are buffers and stay live. The Dim-3
     // verdict is handed over as the call site's own predicate, so a feature
     // deny still wins with a nest present.
-    val addGate = faunaGate("fauna.nostr.zap_signers.add", zapSignerAddGateReason == null)
+    // The draft half (`zap_signer_add_possibility`: no pubkey, not 64 hex)
+    // ANDs with both: the page's predicate handed to the gate is the Dim-3
+    // verdict and the draft's together, so the gate's own reason shows only
+    // when the outage is what closed an otherwise-valid add.
+    val signerDraft = askForm { nostrZapSignerAddPossibility(pubkey) }
+    val addGate = faunaGate(
+        "fauna.nostr.zap_signers.add",
+        zapSignerGate.isPossible && signerDraft.isPossible,
+    )
+    val addSubmit = faunaFormGate(signerDraft, addGate)
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -638,45 +687,54 @@ private fun ZapSignersSection(
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = pubkey,
-                    onValueChange = { pubkey = it },
-                    placeholder = { Text(stringResource(R.string.nostr_zap_signers_pubkey_placeholder)) },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f).testTag(Ids.NOSTR_ZAP_SIGNER_PUBKEY_INPUT),
-                )
-                OutlinedTextField(
-                    value = label,
-                    onValueChange = { label = it },
-                    placeholder = { Text(stringResource(R.string.nostr_zap_signers_label_placeholder)) },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f).testTag(Ids.NOSTR_ZAP_SIGNER_LABEL_INPUT),
-                )
-                IconButton(
-                    onClick = {
-                        onAddZapSigner(pubkey, label)
-                        pubkey = ""
-                        label = ""
-                    },
-                    enabled = addGate.enabled,
-                    modifier = Modifier.testTag(Ids.NOSTR_ZAP_SIGNER_ADD_BTN),
-                ) {
-                    Icon(Icons.Default.Add, stringResource(R.string.nostr_zap_signers_add))
+            // A nest without the `zaps` plane: the designate row is left out
+            // whole (rule 2) — its fields only feed the button. The roster
+            // above stays, so a signer designated earlier can still go.
+            if (zapSignerGate.isShown) {
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = pubkey,
+                        onValueChange = { pubkey = it },
+                        placeholder = { Text(stringResource(R.string.nostr_zap_signers_pubkey_placeholder)) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f).testTag(Ids.NOSTR_ZAP_SIGNER_PUBKEY_INPUT),
+                    )
+                    OutlinedTextField(
+                        value = label,
+                        onValueChange = { label = it },
+                        placeholder = { Text(stringResource(R.string.nostr_zap_signers_label_placeholder)) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f).testTag(Ids.NOSTR_ZAP_SIGNER_LABEL_INPUT),
+                    )
+                    IconButton(
+                        onClick = {
+                            val goes = (zapSignerGate and askForm { nostrZapSignerAddPossibility(pubkey) }).isPossible
+                            onAddZapSigner(pubkey, label)
+                            if (goes) {
+                                pubkey = ""
+                                label = ""
+                            }
+                        },
+                        enabled = addSubmit.enabled,
+                        modifier = Modifier.testTag(Ids.NOSTR_ZAP_SIGNER_ADD_BTN),
+                    ) {
+                        Icon(Icons.Default.Add, stringResource(R.string.nostr_zap_signers_add))
+                    }
                 }
+                // The Dim-3 reason is the more specific one and wins, then the
+                // draft's; `addGate.reason` is non-null only when the outage is
+                // what closed an otherwise-valid add.
+                DisabledControlReasonText(zapSignerAddGateReason ?: addSubmit.reason)
             }
-            // The Dim-3 reason is the more specific one and wins: `addGate.reason`
-            // is non-null only when the outage is what closed the button.
-            DisabledControlReasonText(addGate.reason ?: zapSignerAddGateReason)
         }
     }
 }
 
 /**
  * Connected apps (NIP-46 bunker) invite start — `docs/goal/ui/nostr.md` §
- * Layout & flow item 6. Rendered only for a linked custodial account
- * (`generated`/`imported`), mirrored by the caller's [CUSTODIAL_MODES] gate.
+ * Layout & flow item 6. Rendered only for a linked custodial account — the
+ * caller asks the shared `nostrConnectedAppsPossibility`.
  * Mint an invite → the one-time `bunker://` connect string reveals (string + QR
  * + copy). The pending/active roster and its per-row revoke moved to the
  * Connected apps page (`connected-apps.md` § Architectural rules): the Nostr

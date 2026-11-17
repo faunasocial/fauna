@@ -78,6 +78,7 @@ impl DnsProvider for BundledDns {
             .map(|z| DnsZone {
                 id: z.id,
                 name: z.name,
+                nameservers: Vec::new(),
             })
             .collect())
     }

@@ -103,53 +103,28 @@ struct SettingsView: View {
                             .settingsNavRow(.atproto, appState)
                         }
                         navRow {
-                            NavigationLink(value: SettingsPage.mail) {
-                                Label(L.mailSettings.title, systemImage: "envelope")
+                            VStack(alignment: .leading, spacing: 2) {
+                                NavigationLink(value: SettingsPage.mail) {
+                                    Label(L.mailSettings.title, systemImage: "envelope")
+                                }
+                                .settingsNavRow(.mail, appState)
+                                // Mail & Calendar is the one step that unblocks
+                                // the mail sub-pages below: their reason reads here.
+                                FaunaPossibilityReason(mailUsableAnswer(for: .mailAliases))
                             }
-                            .settingsNavRow(.mail, appState)
                         }
-                        navRow {
-                            NavigationLink(value: SettingsPage.mailAliases) {
-                                Label(L.mailAliases.title, systemImage: "at")
-                            }
-                            .settingsNavRow(.mailAliases, appState)
-                        }
-                        navRow {
-                            NavigationLink(value: SettingsPage.mailLists) {
-                                Label(L.mailLists.title, systemImage: "list.bullet.rectangle")
-                            }
-                            .settingsNavRow(.mailLists, appState)
-                        }
-                        navRow {
-                            NavigationLink(value: SettingsPage.mailListMembers) {
-                                Label(L.mailLists.membersTitle, systemImage: "person.2")
-                            }
-                            .settingsNavRow(.mailListMembers, appState)
-                        }
-                        navRow {
-                            NavigationLink(value: SettingsPage.mailExport) {
-                                Label(L.mailExport.title, systemImage: "square.and.arrow.up")
-                            }
-                            .settingsNavRow(.mailExport, appState)
-                        }
-                        navRow {
-                            NavigationLink(value: SettingsPage.mailImport) {
-                                Label(L.mailImport.title, systemImage: "square.and.arrow.down")
-                            }
-                            .settingsNavRow(.mailImport, appState)
-                        }
+                        mailSubpageRow(.mailAliases, L.mailAliases.title, systemImage: "at")
+                        mailSubpageRow(.mailLists, L.mailLists.title, systemImage: "list.bullet.rectangle")
+                        mailSubpageRow(.mailListMembers, L.mailLists.membersTitle, systemImage: "person.2")
+                        mailSubpageRow(.mailExport, L.mailExport.title, systemImage: "square.and.arrow.up")
+                        mailSubpageRow(.mailImport, L.mailImport.title, systemImage: "square.and.arrow.down")
                         navRow {
                             NavigationLink(value: SettingsPage.archiveImport) {
                                 Label(L.archiveImport.title, systemImage: "tray.and.arrow.down")
                             }
                             .settingsNavRow(.archiveImport, appState)
                         }
-                        navRow {
-                            NavigationLink(value: SettingsPage.mailSpam) {
-                                Label(L.mailSpam.title, systemImage: "xmark.bin")
-                            }
-                            .settingsNavRow(.mailSpam, appState)
-                        }
+                        mailSubpageRow(.mailSpam, L.mailSpam.title, systemImage: "xmark.bin")
                         navRow {
                             NavigationLink(value: SettingsPage.web) {
                                 Label(L.webSettings.title, systemImage: "globe")
@@ -378,6 +353,15 @@ struct SettingsView: View {
             // Watch connectivity is install-scoped, not account-scoped: it stays on
             // its own one-shot task so the session-keyed one below can re-fire freely.
             .task { watchManager.activate() }
+            #if !FAUNA_KIDS
+            // Read the mail machine before a mail sub-page row is reached: the
+            // six rows paint the session's shared mail-usable answer
+            // (`MailUsableGate`; mail-settings.md § Errors & edge cases).
+            .task(id: SessionKey(client)) {
+                guard let client else { return }
+                await client.mailUsable.refresh(api: client.api)
+            }
+            #endif
             // Keyed on the session's client, not one-shot: this is the Settings
             // **root**, and the switch teardown clears `selectedSettingsPage` (popping
             // the value-based sub-pages) while `moreSelectedView` stays `"settings"` —
@@ -429,6 +413,31 @@ struct SettingsView: View {
             actorId: appState.session.actorId,
             secureChannelCount: { manager.secureChannelCount() })
     }
+
+    #if !FAUNA_KIDS
+    /// The session's shared mail-usable answer for one page (`MailUsableGate`;
+    /// mail-settings.md § Errors & edge cases, the mail-usable gate).
+    private func mailUsableAnswer(for page: SettingsPage) -> Possibility {
+        client?.mailUsable.answer(for: page)
+            ?? (MailUsableGate.gatedPages.contains(page) ? mailUsableUnread() : .possible)
+    }
+
+    /// One of the six mail sub-page rows: absent where this box can never serve
+    /// mail, disabled with the reason while mail is off or still being read.
+    @ViewBuilder
+    private func mailSubpageRow(_ page: SettingsPage, _ title: String, systemImage: String) -> some View {
+        let answer = mailUsableAnswer(for: page)
+        if answer.isShown {
+            navRow {
+                NavigationLink(value: page) {
+                    Label(title, systemImage: systemImage)
+                }
+                .settingsNavRow(page, appState)
+                .faunaPossible(answer)
+            }
+        }
+    }
+    #endif
 
     /// Uniform row chrome for the eager `ScrollView { VStack }` layout above (row
     /// 384) — a touch-target-sized vertical pad plus a trailing `Divider()`,
@@ -532,18 +541,22 @@ struct SettingsView: View {
         case .folders: FoldersView(reloadToken: appState.navGeneration)  // control plane (FoldersContent)
         #if !FAUNA_KIDS
         case .mail: MailSettingsView()
-        case .mailAliases: MailAliasesView()
-        case .mailSpam: MailSpamView()
-        case .mailExport: MailExportView()
+        // The six mail sub-pages open behind the shared mail-usable gate
+        // (`MailSubpageGate`; mail-settings.md § Errors & edge cases).
+        case .mailAliases: MailSubpageGate(.mailAliases) { MailAliasesView() }
+        case .mailSpam: MailSubpageGate(.mailSpam) { MailSpamView() }
+        case .mailExport: MailSubpageGate(.mailExport) { MailExportView() }
         case .mailImport:
             // The foreign-mailbox migration wizard (shared FaunaKit;
             // mailbox-migration.md). Its two Done deep-links go to Conversations,
             // where mail lives — the tui lead app's own resolution, since no
             // "view inbox" / "skip log" RPC exists.
-            MailImportView(onNavigateToConversations: {
-                appState.selectedSettingsPage = nil
-                appState.selectedTab = "conversations"
-            })
+            MailSubpageGate(.mailImport) {
+                MailImportView(onNavigateToConversations: {
+                    appState.selectedSettingsPage = nil
+                    appState.selectedTab = "conversations"
+                })
+            }
         case .archiveImport:
             // Import from other services (shared FaunaKit; archive-import.md
             // § The wizard and its machine). View imported opens the feed; the
@@ -557,16 +570,20 @@ struct SettingsView: View {
                 onNavigateToFolders: { appState.selectedSettingsPage = .folders }
             )
         case .mailLists:
-            MailListsView(onNavigateToMembers: { listIdHex, friendlyName in
-                appState.selectedMailListId = listIdHex
-                appState.selectedMailListName = friendlyName
-                appState.selectedSettingsPage = .mailListMembers
-            })
+            MailSubpageGate(.mailLists) {
+                MailListsView(onNavigateToMembers: { listIdHex, friendlyName in
+                    appState.selectedMailListId = listIdHex
+                    appState.selectedMailListName = friendlyName
+                    appState.selectedSettingsPage = .mailListMembers
+                })
+            }
         case .mailListMembers:
-            if let listIdHex = appState.selectedMailListId, let name = appState.selectedMailListName {
-                MailListMembersView(listIdHex: listIdHex, listName: name)
-            } else {
-                MailListMembersView()
+            MailSubpageGate(.mailListMembers) {
+                if let listIdHex = appState.selectedMailListId, let name = appState.selectedMailListName {
+                    MailListMembersView(listIdHex: listIdHex, listName: name)
+                } else {
+                    MailListMembersView()
+                }
             }
         case .web: WebSettingsView(webPublish: appState.webPublish, reloadToken: appState.navGeneration)
         case .subscriptions: SubscriptionSettingsView()  // consumer "my subscriptions" page (shared FaunaKit)

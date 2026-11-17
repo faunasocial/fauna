@@ -866,6 +866,9 @@ impl NestClient {
                 Ok(Ok(())) => {}
                 Ok(Err(no_connection_can_come)) => return Err(no_connection_can_come),
                 Err(_elapsed) => {
+                    // The gap outlasted a whole read: the next request waits
+                    // only for the next dial's answer (`wait_for_connected`).
+                    self.dial_demand.mark_outlasted();
                     return Err(NestClientError::RpcDisconnected {
                         was_in_flight: false,
                     });
@@ -1016,9 +1019,25 @@ impl NestClient {
     /// retried within the initial ceiling instead of after the grown backoff,
     /// which after a few seconds' gap is already longer than a read's whole
     /// deadline (`transport-connection.md` § Connection lifecycle).
+    ///
+    /// In a gap an earlier request has already outlasted
+    /// ([`DialDemand::outlasted`](fauna_ws_substrate::DialDemand)), the wait
+    /// ends at the next refused dial too — `RpcDisconnected { was_in_flight:
+    /// false }` — rather than at the caller's deadline: with the nest down,
+    /// each of a pass's steps would otherwise pay a whole read's wait again.
     async fn wait_for_connected(&self) -> Result<(), NestClientError> {
-        let _waiting = self.dial_demand.begin_wait();
         let mut rx = self.connection_state_tx.subscribe();
+        let outlasted = self.dial_demand.outlasted();
+        let refusals = self.dial_demand.refusal_count();
+        let _waiting = self.dial_demand.begin_wait();
+        let refused = async {
+            if outlasted {
+                self.dial_demand.refused_since(refusals).await;
+            } else {
+                core::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(refused);
         loop {
             if self.torn_down.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(NestClientError::RpcDisconnected {
@@ -1031,10 +1050,19 @@ impl NestClient {
             if *rx.borrow_and_update() == ConnectionState::Connected {
                 return Ok(());
             }
-            if rx.changed().await.is_err() {
-                return Err(NestClientError::RpcDisconnected {
-                    was_in_flight: false,
-                });
+            tokio::select! {
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return Err(NestClientError::RpcDisconnected {
+                            was_in_flight: false,
+                        });
+                    }
+                }
+                () = &mut refused => {
+                    return Err(NestClientError::RpcDisconnected {
+                        was_in_flight: false,
+                    });
+                }
             }
         }
     }
@@ -1096,7 +1124,12 @@ impl fauna_protocol::RpcRequester for NestClient {
                 .kind_registry
                 .meta("fauna.nest.info")
                 .map_or(std::time::Duration::from_secs(5), |m| m.default_deadline);
-            let _ = tokio::time::timeout(within, self.wait_for_connected()).await;
+            if tokio::time::timeout(within, self.wait_for_connected())
+                .await
+                .is_err()
+            {
+                self.dial_demand.mark_outlasted();
+            }
         }
         NestClient::live_connection(self)
     }
@@ -1270,6 +1303,63 @@ mod tests {
         assert!(
             !client.dial_demand.is_waiting(),
             "a request that stopped waiting must stop counting"
+        );
+    }
+
+    /// **A gap one request outlasted is not waited out again.** With the nest
+    /// down, the first request waits its whole deadline (a sign-in's first
+    /// dial, a redeploy's gap — the wait it exists for); the next one fails at
+    /// the next refused dial, within the initial ceiling, instead of paying the
+    /// same deadline again — the account pump's ~65 s pass, one read's wait
+    /// per step, measured with the home nest down.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_in_a_gap_another_outlasted_fails_at_the_next_refused_dial() {
+        let client = unreachable_bearer_only_client();
+        client
+            .connect()
+            .await
+            .expect("connect (the auth is static)");
+        let deadline = std::time::Duration::from_secs(5);
+        let read = || {
+            client.request_with_deadline::<NoPayload, fauna_protocol::Value>(
+                "fauna.nest.info",
+                NoPayload {},
+                deadline,
+            )
+        };
+
+        let started = tokio::time::Instant::now();
+        let first = read().await.expect_err("no nest answers");
+        assert!(
+            matches!(
+                first,
+                NestClientError::RpcDisconnected {
+                    was_in_flight: false
+                }
+            ),
+            "got {first:?}"
+        );
+        assert!(
+            started.elapsed() >= deadline,
+            "the first request in a gap must wait its whole deadline, waited {:?}",
+            started.elapsed()
+        );
+
+        let started = tokio::time::Instant::now();
+        let second = read().await.expect_err("no nest answers");
+        assert!(
+            matches!(
+                second,
+                NestClientError::RpcDisconnected {
+                    was_in_flight: false
+                }
+            ),
+            "got {second:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "a request in a gap another request outlasted waited {:?}; it must fail at the next refused dial, not its deadline",
+            started.elapsed()
         );
     }
 

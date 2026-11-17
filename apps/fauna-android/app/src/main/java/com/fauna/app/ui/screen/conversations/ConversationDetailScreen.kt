@@ -84,6 +84,10 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.resolveLocalizedNested
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
+import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.ConversationsVM
 import com.fauna.ffi.composeDecorationPlan
 import com.fauna.ffi.composeShowMarkersDimRanges
@@ -140,6 +144,9 @@ import uniffi.fauna_conversations.tryParseTypedAddress
 import uniffi.fauna_conversations.typedAddressDisplayWithBridges
 import uniffi.fauna_conversations.warmupDeferredText
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_conversations.ThreadControl
+import uniffi.fauna_conversations.threadControlPossibility
 import uniffi.fauna_core.RenderDocument
 import social.fauna.generated.Ids
 
@@ -1266,7 +1273,7 @@ private fun RenameDialog(
  * `adw::MessageDialog`, which its leg had to abandon for this very reason.
  */
 @Composable
-private fun RoomSettingsDialog(
+internal fun RoomSettingsDialog(
     draft: RoomSettingsDraft,
     detail: ThreadDetail,
     onDraftChange: (RoomSettingsDraft) -> Unit,
@@ -1276,7 +1283,17 @@ private fun RoomSettingsDialog(
     onSave: (RoomSettingsDraft) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val caps: ThreadCapabilities = detail.capabilities
+    // Every control here a role or the rail decides is painted from its shared
+    // answer (`ThreadCapabilities::possibility`; `ui/conversations.md` § Errors
+    // & edge cases → *Controls this person can never use*): absent → not
+    // composed, blocked (the owner's walk-out alone) → disabled with its reason
+    // in view, possible → live. Each onClick asks the same answer again.
+    val setPolicy = detail.controlAnswer(ThreadControl.SET_POLICY)
+    val appoint = detail.controlAnswer(ThreadControl.APPOINT_ADMINS)
+    val transfer = detail.controlAnswer(ThreadControl.TRANSFER_OWNERSHIP)
+    val leave = detail.controlAnswer(ThreadControl.LEAVE_ROOM)
+    val remove = detail.controlAnswer(ThreadControl.LOCAL_REMOVE)
+    val context = LocalContext.current
     var leaveConfirmVisible by remember { mutableStateOf(false) }
     var removeConfirmVisible by remember { mutableStateOf(false) }
     // A policy-less room (a bridged room) opens this editor only for its local
@@ -1301,29 +1318,41 @@ private fun RoomSettingsDialog(
                         stringResource(R.string.conversations_unified_room_join_rule_label),
                         style = MaterialTheme.typography.labelMedium,
                     )
-                    TokenSelect(
+                    // A viewer the policy editor is absent for reads each value
+                    // as a plain line where its picker would sit.
+                    if (!setPolicy.isShown) {
+                        Text(roomJoinRuleLabel(draft.`joinRule`))
+                    } else TokenSelect(
                         testTagValue = Ids.ROOM_JOIN_RULE_SELECT,
                         selected = roomJoinRuleToken(draft.`joinRule`),
                         options = roomJoinRuleEditorChoices().map {
                             roomJoinRuleToken(it) to roomJoinRuleLabel(it)
                         },
-                        onSelect = { token -> onDraftChange(roomSettingsSetJoinRule(draft, token)) },
-                        enabled = caps.canSetPolicy,
+                        onSelect = { token ->
+                            if (setPolicy.isPossible) {
+                                onDraftChange(roomSettingsSetJoinRule(draft, token))
+                            }
+                        },
+                        enabled = setPolicy.isPossible,
                     )
                     Text(
                         stringResource(R.string.conversations_unified_room_history_policy_label),
                         style = MaterialTheme.typography.labelMedium,
                     )
-                    TokenSelect(
+                    if (!setPolicy.isShown) {
+                        Text(roomHistoryPolicyLabel(draft.`historyPolicy`))
+                    } else TokenSelect(
                         testTagValue = Ids.ROOM_HISTORY_POLICY_SELECT,
                         selected = roomHistoryPolicyToken(draft.`historyPolicy`),
                         options = roomHistoryPolicyEditorChoices().map {
                             roomHistoryPolicyToken(it) to roomHistoryPolicyLabel(it)
                         },
                         onSelect = { token ->
-                            onDraftChange(roomSettingsSetHistoryPolicy(draft, token))
+                            if (setPolicy.isPossible) {
+                                onDraftChange(roomSettingsSetHistoryPolicy(draft, token))
+                            }
                         },
-                        enabled = caps.canSetPolicy,
+                        enabled = setPolicy.isPossible,
                     )
                     // One row per member, indexed exactly like
                     // `thread-member-chip[i]` so a driver's index means the same
@@ -1331,20 +1360,25 @@ private fun RoomSettingsDialog(
                     // and whether either control may act on this row at all — is
                     // read straight off the draft: the owner's own row and a
                     // non-Fauna row are ineligible, and no app decides that itself.
-                    detail.participantDisplays.forEachIndexed { i, display ->
+                    // Each list is composed only for a viewer whose role holds
+                    // it; a shown list keeps one row per participant, so `[i]`
+                    // stays the chip's index.
+                    if (appoint.isShown || transfer.isShown) detail.participantDisplays.forEachIndexed { i, display ->
                         val eligible = roomSettingsIsEligible(draft, participants, i.toUInt())
                         val stagedAdmin = roomSettingsAdminAt(draft, participants, i.toUInt())
                         val stagedOwner =
                             roomSettingsTransferStagedAt(draft, participants, i.toUInt())
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(display, modifier = Modifier.weight(1f))
-                            TextButton(
+                            if (appoint.isShown) TextButton(
                                 onClick = {
-                                    onDraftChange(
-                                        roomSettingsToggleAdmin(draft, participants, i.toUInt()),
-                                    )
+                                    if (appoint.isPossible) {
+                                        onDraftChange(
+                                            roomSettingsToggleAdmin(draft, participants, i.toUInt()),
+                                        )
+                                    }
                                 },
-                                enabled = caps.canAppointAdmins && eligible,
+                                enabled = appoint.isPossible && eligible,
                                 modifier = Modifier
                                     .testTag(Ids.ROOM_ADMIN_TOGGLE)
                                     .semantics {
@@ -1361,13 +1395,15 @@ private fun RoomSettingsDialog(
                                     ),
                                 )
                             }
-                            TextButton(
+                            if (transfer.isShown) TextButton(
                                 onClick = {
-                                    onDraftChange(
-                                        roomSettingsToggleTransfer(draft, participants, i.toUInt()),
-                                    )
+                                    if (transfer.isPossible) {
+                                        onDraftChange(
+                                            roomSettingsToggleTransfer(draft, participants, i.toUInt()),
+                                        )
+                                    }
                                 },
-                                enabled = caps.canTransferOwnership && eligible,
+                                enabled = transfer.isPossible && eligible,
                                 modifier = Modifier
                                     .testTag(Ids.ROOM_OWNER_TRANSFER_BUTTON)
                                     .semantics {
@@ -1389,12 +1425,27 @@ private fun RoomSettingsDialog(
                     // The home nest's read, only where there is one to stage — a
                     // community room whose answer this device has read
                     // (`RoomSettingsDraft.nestRead`). Staged like the admin switches:
-                    // Save commits it as a rotation. Greyed unless the viewer may set
-                    // policy; `checked` rides `stateDescription`.
+                    // Save commits it as a rotation. A viewer who may never set
+                    // policy reads the same sentence as a line; `checked` rides
+                    // `stateDescription`.
                     draft.nestRead?.let { reads ->
-                        TextButton(
-                            onClick = { onDraftChange(roomSettingsToggleNestRead(draft)) },
-                            enabled = caps.canSetPolicy,
+                        if (!setPolicy.isShown) {
+                            Text(
+                                stringResource(
+                                    if (reads) {
+                                        R.string.conversations_unified_room_nest_read_yes
+                                    } else {
+                                        R.string.conversations_unified_room_nest_read_no
+                                    },
+                                ),
+                            )
+                        } else TextButton(
+                            onClick = {
+                                if (setPolicy.isPossible) {
+                                    onDraftChange(roomSettingsToggleNestRead(draft))
+                                }
+                            },
+                            enabled = setPolicy.isPossible,
                             modifier = Modifier
                                 .testTag(Ids.ROOM_NEST_READ_TOGGLE)
                                 .semantics { stateDescription = if (reads) "true" else "false" },
@@ -1416,7 +1467,7 @@ private fun RoomSettingsDialog(
                     // source set, so the rows come through the kids-excision seam.
                     RoomLabelerRows(
                         draft = draft,
-                        canSetPolicy = caps.canSetPolicy,
+                        setPolicy = setPolicy,
                         onDraftChange = onDraftChange,
                     )
                     // Pending invitations, off the LIVE detail (the home nest serves
@@ -1456,15 +1507,19 @@ private fun RoomSettingsDialog(
                 }
                 // The walk-out, below the staged controls and OUTSIDE Save's
                 // staged set: leaving is an immediate act, not a policy edit.
-                // Greyed — never hidden — for the owner, who hands the room
-                // over first; the capability is RE-CHECKED when the confirm
-                // opens, not only at paint.
-                TextButton(
-                    onClick = { if (caps.canLeaveRoom) leaveConfirmVisible = true },
-                    enabled = caps.canLeaveRoom,
-                    modifier = Modifier.testTag(Ids.ROOM_LEAVE_BUTTON),
-                ) {
-                    Text(stringResource(R.string.conversations_unified_room_leave))
+                // Blocked for the owner — disabled with the hand-over as its
+                // reason beneath it, the hand-over controls live above — and
+                // absent where the room has no walk-out; the answer is RE-ASKED
+                // when the confirm opens, not only at paint.
+                if (leave.isShown) {
+                    TextButton(
+                        onClick = { if (leave.isPossible) leaveConfirmVisible = true },
+                        enabled = leave.isPossible,
+                        modifier = Modifier.testTag(Ids.ROOM_LEAVE_BUTTON),
+                    ) {
+                        Text(stringResource(R.string.conversations_unified_room_leave))
+                    }
+                    DisabledControlReasonText(resolveLocalized(context, leave.blockedReason))
                 }
                 if (leaveConfirmVisible) {
                     val leaveGate = faunaGate("fauna.conversations.room.leave")
@@ -1479,7 +1534,7 @@ private fun RoomSettingsDialog(
                                         leaveConfirmVisible = false
                                         onLeave()
                                     },
-                                    enabled = caps.canLeaveRoom && leaveGate.enabled,
+                                    enabled = leave.isPossible && leaveGate.enabled,
                                     modifier = Modifier.testTag(Ids.ROOM_LEAVE_CONFIRM),
                                 ) {
                                     Text(stringResource(R.string.common_leave))
@@ -1496,15 +1551,17 @@ private fun RoomSettingsDialog(
                 }
                 // The local remove, beside the walk-out and outside Save's
                 // staged set (`bridged-adapter.md` § Removing bridged rows,
-                // rule 6): greyed unless the room's capabilities say
-                // `supportsLocalRemove`, re-checked when the confirm opens;
-                // the confirm is immediate.
-                TextButton(
-                    onClick = { if (caps.supportsLocalRemove) removeConfirmVisible = true },
-                    enabled = caps.supportsLocalRemove,
-                    modifier = Modifier.testTag(Ids.ROOM_REMOVE_BUTTON),
-                ) {
-                    Text(stringResource(R.string.conversations_unified_room_remove))
+                // rule 6): the shared `LocalRemove` answer — composed on a
+                // bridged room, absent on every rail without the act — re-asked
+                // when the confirm opens; the confirm is immediate.
+                if (remove.isShown) {
+                    TextButton(
+                        onClick = { if (remove.isPossible) removeConfirmVisible = true },
+                        enabled = remove.isPossible,
+                        modifier = Modifier.testTag(Ids.ROOM_REMOVE_BUTTON),
+                    ) {
+                        Text(stringResource(R.string.conversations_unified_room_remove))
+                    }
                 }
                 if (removeConfirmVisible) {
                     val removeGate = faunaGate("fauna.bridges.conversation.rooms.remove")
@@ -1519,7 +1576,7 @@ private fun RoomSettingsDialog(
                                         removeConfirmVisible = false
                                         onRemove()
                                     },
-                                    enabled = caps.supportsLocalRemove && removeGate.enabled,
+                                    enabled = remove.isPossible && removeGate.enabled,
                                     modifier = Modifier.testTag(Ids.ROOM_REMOVE_CONFIRM),
                                 ) {
                                     Text(stringResource(R.string.conversations_unified_room_remove_confirm))
@@ -1537,13 +1594,13 @@ private fun RoomSettingsDialog(
             }
         },
         confirmButton = {
-            // Greyed for a member, who opens this surface to read it and to
+            // Absent for a member, who opens this surface to read it and to
             // leave: every staged edit behind it is owner-or-admin work. Absent
-            // on a policy-less room, which has nothing to stage.
-            if (hasPolicy) {
+            // too on a policy-less room, which has nothing to stage.
+            if (hasPolicy && setPolicy.isShown) {
                 TextButton(
-                    onClick = { onSave(draft) },
-                    enabled = caps.canSetPolicy,
+                    onClick = { if (setPolicy.isPossible) onSave(draft) },
+                    enabled = setPolicy.isPossible,
                     modifier = Modifier.testTag(Ids.ROOM_SETTINGS_SAVE_BUTTON),
                 ) {
                     Text(stringResource(R.string.common_save))
@@ -1680,18 +1737,16 @@ private fun ThreadHeader(
                     )
                 }
             }
-            // Present off the RAIL's `supportsMembershipChange` (does this rail
-            // model membership at all), then GREYED — never hidden — off the
-            // viewer's role permitting an invite in a governed room
-            // (`ui/conversations.md` § Architectural rules 5). The role half
-            // is the roles table applied in shared Rust (`RoomSnapshot::gate`),
-            // never re-derived here; every app gated add/remove on the rail
-            // capability ALONE until the room model, so a plain member was
-            // offered an Add the room would refuse.
-            if (caps.supportsMembershipChange) {
+            // Composed only where the viewer may add someone: the rail's
+            // membership is mutable AND the viewer's role in a governed room
+            // may invite — the shared `Invite` answer, the roles table applied
+            // in shared Rust, never re-derived here (`ui/conversations.md`
+            // § Errors & edge cases → *Controls this person can never use*).
+            val invite = detail.controlAnswer(ThreadControl.INVITE)
+            if (invite.isShown) {
                 IconButton(
-                    onClick = onAddParticipant,
-                    enabled = caps.canInvite,
+                    onClick = { if (invite.isPossible) onAddParticipant() },
+                    enabled = invite.isPossible,
                     modifier = Modifier.testTag(Ids.THREAD_ADD_PARTICIPANT_BUTTON),
                 ) {
                     Icon(
@@ -1812,12 +1867,12 @@ private fun ThreadHeader(
                 // ...AND, since the room model, gated on the viewer's role
                 // permitting a removal — the roles table applied in shared Rust
                 // (`RoomSnapshot::gate`), never re-derived here
-                // (`conversation-rooms.md` § Roles and authorization). Both
-                // halves, exactly as linux's and web's headers do it: the rail
-                // decides whether membership is mutable at all, the role
-                // decides whether THIS viewer may move it.
+                // (`conversation-rooms.md` § Roles and authorization) — both
+                // halves in the one shared `RemoveMember` answer, exactly as
+                // every app's header reads it. Without it the chip is the inert
+                // roster: no remove, never itself absent.
                 val removable =
-                    caps.supportsMembershipChange && caps.canRemoveMembers && participant != null
+                    detail.controlAnswer(ThreadControl.REMOVE_MEMBER).isPossible && participant != null
                 // The member's role on a governed room: the `role` attribute a
                 // driver reads off the chip, and the localized owner/admin mark
                 // in its text. `null` on a policy-less room and on every non-room
@@ -2968,3 +3023,14 @@ internal fun adminBlockPaint(adminBlockReason: String?, documentBlockCount: Int)
         documentBlockCount == 0 -> AdminBlockPaint.IN_PLACE
         else -> AdminBlockPaint.BESIDE
     }
+
+/**
+ * The shared answer for a thread or room control a role or the rail decides —
+ * `ThreadCapabilities::possibility` over its UniFFI twin, for the viewer's
+ * role in the room (`null` on a policy-less thread). Every such control on
+ * this screen paints from it and its onClick asks it again
+ * (`ui/conversations.md` § Errors & edge cases → *Controls this person can
+ * never use*); no role or rail is branched on here.
+ */
+internal fun ThreadDetail.controlAnswer(control: ThreadControl): Possibility =
+    threadControlPossibility(capabilities, control, room?.myRole)

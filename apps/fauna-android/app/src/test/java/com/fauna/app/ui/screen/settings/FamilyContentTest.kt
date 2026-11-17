@@ -588,45 +588,48 @@ class FamilyContentTest {
         assertEquals(120, saved?.screenTime?.dailyMinutes?.toInt())
     }
 
+    // ── The form case (family-safety.md § Errors & edge cases; README § Offer
+    // only what is possible, rule 4): each submit painted from its shared
+    // predicate, disabled with the reason beside it while the draft cannot go.
+
     @Test
-    fun invalidScreenTimeInputRefusesSaveAndSurfacesTheReason() {
+    fun invalidScreenTimeInputDisablesSaveWithTheSharedReason() {
         // Fallible ONLY because of screen time: an unparseable guardian input
-        // must never leave the client — the save is refused locally and the
-        // reason surfaces via onSaveError, exactly as onSavePolicy would have
-        // fired had the input been valid (mirrors linux's editor_policy Result).
+        // must never leave the client — the shared `policy_save_possibility`
+        // disables Save with its reason beside it, so nothing is sent.
         val w = ward("Ward1")
         var saved: FfiReachPolicy? = null
-        var error: String? = null
         render(
             status = status(supervisedBy = null, policy = null, wards = listOf(w), incomingTransfers = emptyList(), usageTodayMinutes = null),
             selectedWardActorId = w.actorId,
             onSavePolicy = { _, p -> saved = p },
-            onSaveError = { error = it },
         )
+        composeTestRule.onNodeWithTag("family-policy-save-button").performScrollTo().assertIsEnabled()
         composeTestRule.onNodeWithTag("family-policy-screen-window-start-input").performTextInput("24:00")
-        composeTestRule.onNodeWithTag("family-policy-save-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("family-policy-save-button").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Screen time cannot be saved", substring = true).assertExists()
+        composeTestRule.onNodeWithTag("family-policy-save-button").performClick()
         assertNull(saved)
-        assertEquals(true, error?.isNotEmpty())
     }
 
     @Test
-    fun halfSetScreenTimeWindowRefusesSaveAndSurfacesTheReason() {
-        // Each bound parses on its own; only the shared cross-field
-        // `validateScreenTime` knows a window comes in pairs, so a half-set
-        // window must be refused locally, never sent to `policy.update`.
+    fun halfSetScreenTimeWindowDisablesSaveWithTheSharedReason() {
+        // Each bound parses on its own; only the shared cross-field rule knows
+        // a window comes in pairs, so a half-set window disables Save with the
+        // reason and is never sent to `policy.update`.
         val w = ward("Ward1")
         var saved: FfiReachPolicy? = null
-        var error: String? = null
         render(
             status = status(supervisedBy = null, policy = null, wards = listOf(w), incomingTransfers = emptyList(), usageTodayMinutes = null),
             selectedWardActorId = w.actorId,
             onSavePolicy = { _, p -> saved = p },
-            onSaveError = { error = it },
         )
         composeTestRule.onNodeWithTag("family-policy-screen-window-start-input").performTextInput("08:00")
-        composeTestRule.onNodeWithTag("family-policy-save-button").performScrollTo().performClick()
-        assertNull(saved)
-        assertEquals(true, error?.isNotEmpty())
+        composeTestRule.onNodeWithTag("family-policy-save-button").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Screen time cannot be saved", substring = true).assertExists()
+        composeTestRule.onNodeWithTag("family-policy-screen-window-end-input").performTextInput("20:00")
+        composeTestRule.onNodeWithTag("family-policy-save-button").performScrollTo().assertIsEnabled().performClick()
+        assertEquals(480, saved?.screenTime?.windowStart?.toInt())
     }
 
     @Test
@@ -922,13 +925,24 @@ class FamilyContentTest {
             selectedWardActorId = w.actorId,
             onAddContact = { supervised, peer -> added = supervised to peer },
         )
-        composeTestRule.onNodeWithTag("family-contact-add-input").performTextInput("aabbcc")
-        composeTestRule.onNodeWithTag("family-contact-add-button").performScrollTo().performClick()
-        assertEquals(listOf<Byte>(0xaa.toByte(), 0xbb.toByte(), 0xcc.toByte()), added?.second?.toList())
+        composeTestRule.onNodeWithTag("family-contact-add-input").performTextInput("ab".repeat(32))
+        composeTestRule.onNodeWithTag("family-contact-add-button").performScrollTo().assertIsEnabled().performClick()
+        assertEquals(List(32) { 0xab.toByte() }, added?.second?.toList())
     }
 
     @Test
-    fun contactAddWithInvalidHexShowsErrorAndDoesNotFire() {
+    fun aBlankContactAddIsDisabledWithTheSharedReason() {
+        val w = ward("Ward1")
+        render(
+            status = status(supervisedBy = null, policy = null, wards = listOf(w), incomingTransfers = emptyList(), usageTodayMinutes = null),
+            selectedWardActorId = w.actorId,
+        )
+        composeTestRule.onNodeWithTag("family-contact-add-button").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.family_contact_add_required)).assertExists()
+    }
+
+    @Test
+    fun contactAddWithInvalidHexIsDisabledWithTheSharedReasonAndDoesNotFire() {
         val w = ward("Ward1")
         var added: Pair<ByteArray, ByteArray>? = null
         render(
@@ -937,9 +951,41 @@ class FamilyContentTest {
             onAddContact = { supervised, peer -> added = supervised to peer },
         )
         composeTestRule.onNodeWithTag("family-contact-add-input").performTextInput("not hex zz")
-        composeTestRule.onNodeWithTag("family-contact-add-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("family-contact-add-button").performScrollTo().assertIsNotEnabled().performClick()
         assertNull(added)
         composeTestRule.onNodeWithText(ctx.getString(R.string.family_contact_add_invalid_actor_id)).assertExists()
+    }
+
+    @Test
+    fun transferHasItsOwnReasonsNotTheContactAddWords() {
+        val w = ward("Ward1", pendingTransfer = null)
+        var proposed: ByteArray? = null
+        render(
+            status = status(supervisedBy = null, policy = null, wards = listOf(w), incomingTransfers = emptyList(), usageTodayMinutes = null),
+            selectedWardActorId = w.actorId,
+            onProposeTransfer = { _, target -> proposed = target },
+        )
+        composeTestRule.onNodeWithTag("family-transfer-button").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.family_transfer_required)).assertExists()
+        composeTestRule.onNodeWithTag("family-transfer-input").performScrollTo().performTextInput("nothex")
+        composeTestRule.onNodeWithTag("family-transfer-button").performScrollTo().assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.family_transfer_invalid_actor_id)).assertExists()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.family_contact_add_invalid_actor_id)).assertDoesNotExist()
+        assertNull(proposed)
+    }
+
+    @Test
+    fun transferWithAValidHexFires() {
+        val w = ward("Ward1", pendingTransfer = null)
+        var proposed: ByteArray? = null
+        render(
+            status = status(supervisedBy = null, policy = null, wards = listOf(w), incomingTransfers = emptyList(), usageTodayMinutes = null),
+            selectedWardActorId = w.actorId,
+            onProposeTransfer = { _, target -> proposed = target },
+        )
+        composeTestRule.onNodeWithTag("family-transfer-input").performScrollTo().performTextInput("cd".repeat(32))
+        composeTestRule.onNodeWithTag("family-transfer-button").performScrollTo().assertIsEnabled().performClick()
+        assertEquals(List(32) { 0xcd.toByte() }, proposed?.toList())
     }
 
     // ── Transfer ──

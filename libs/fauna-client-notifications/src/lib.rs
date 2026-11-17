@@ -19,9 +19,11 @@ use fauna_protocol::notifications::{
 
 pub use fauna_protocol::notifications;
 
+mod actions;
 mod destination;
 mod muted;
 mod text;
+pub use actions::{clear_all_possibility, mark_all_read_possibility};
 pub use destination::{NotificationDestination, notification_destination};
 pub use muted::{knock_push_muted, notification_muted, notification_push_muted};
 pub use text::{

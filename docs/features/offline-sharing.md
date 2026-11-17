@@ -52,7 +52,7 @@ Stamped 2026-10-21 at 77c610862e.
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | 🚧 unbuilt | 0.1.5-dev+2e009c0f standalone |
 | android | 🚧 unbuilt | |
-| tui | ✅ full | 0.1.6 docker |
+| tui | ✅ full | 0.1.7 docker |
 | android-kids | 🚧 unbuilt | |
 | ios-kids | 🚧 unbuilt | |
 

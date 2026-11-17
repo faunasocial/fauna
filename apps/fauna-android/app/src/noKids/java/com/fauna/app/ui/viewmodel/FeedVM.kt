@@ -158,7 +158,7 @@ class FeedVM @Inject constructor(
 
     /**
      * Mark-as-spam failures (`feed-post-mark-as-spam-button`) — a separate
-     * channel like [trainError]: a failure mutates no page state, and it MUST
+     * channel like [deleteError]: a failure mutates no page state, and it MUST
      * reach `error-message` (testing.md § Cross-app e2e conventions, point 11).
      * Carries the raw message; the screen wraps it in `feed_error_mark_spam`.
      */
@@ -256,22 +256,9 @@ class FeedVM @Inject constructor(
     val deleteError: StateFlow<String?> = _deleteError.asStateFlow()
 
     /**
-     * Training-gesture failures (`feed-post-more-like-this` / `-less-like-this`).
-     *
-     * A separate channel — like [deleteError] — because a successful train/untrain
-     * mutates no page state directly (the manager re-seals + re-ranks and the
-     * snapshot re-emits), so the shared manager doesn't route a failure through
-     * `snapshot.error`. It still MUST reach the user's `error-message`: a
-     * silently-dropped train is indistinguishable from a real product bug
-     * (testing.md § Cross-app e2e conventions, point 11).
-     */
-    private val _trainError = MutableStateFlow<String?>(null)
-    val trainError: StateFlow<String?> = _trainError.asStateFlow()
-
-    /**
      * Self-serve teaser-buy failures (`gated-post-buy-button`, `monetization.md`
      * § Per-post pay-to-unlock, gap (2c)) — a separate channel, like
-     * [deleteError]/[trainError]: a successful buy clears
+     * [deleteError]: a successful buy clears
      * `PostSummary.unlock_offer` back to `null` as its own completion signal
      * (the teaser un-renders), so the shared manager never routes a *failure*
      * through `snapshot.error` either. Never swallowed, same reasoning as
@@ -460,6 +447,15 @@ class FeedVM @Inject constructor(
         // reaches the feed's render enforcement (family-safety.md § Content policy).
         contentPolicyStore.refresh()
         val m = host.manager() ?: return
+        // Re-read the folded archive comments in the background (`archive-import.md`
+        // § What each category becomes → *Placement under the owner's own post*), so
+        // an import finished since the last visit folds under the owner's post with
+        // no re-login; the manager re-emits when they change. A failed read keeps
+        // what the last one folded. Mirrors FaunaKit's `FeedVM.loadFeeds`.
+        viewModelScope.launch {
+            runCatching { m.refreshArchiveComments() }
+                .onFailure { com.fauna.app.core.ShellLog.i("FeedVM", "archive comments: ${it.message}") }
+        }
         viewModelScope.launch {
             m.refreshFeeds()
             m.refreshBridgeFeeds()
@@ -826,16 +822,19 @@ class FeedVM @Inject constructor(
      *  the manager encodes via the shared `encode_filter_rule`. [factors] are
      *  the `feed-factor-*` editor's entries (empty until the android factor-
      *  weight editor lands — content-moderation-and-ranking.md § Composition). */
-    fun createFeed(
+    /** Returns `null` once the feed is SAVED, else the failure's message —
+     *  the create-feed dialog closes only on `null` and paints the message on
+     *  the page's `error-message` (feed.md § Errors & edge cases, the form
+     *  case of README § Offer only what is possible, rule 4). */
+    suspend fun createFeed(
         name: String,
         rules: List<FilterRuleInput>,
         combination: String,
         factors: List<FactorWeightInput> = emptyList(),
-    ) {
-        val m = host.manager() ?: return
-        viewModelScope.launch {
-            runCatching { m.createFeed(name, rules, combination, null, null, factors) }
-        }
+    ): String? {
+        val m = host.manager() ?: return "feed manager unavailable"
+        return runCatching { m.createFeed(name, rules, combination, null, null, factors) }
+            .exceptionOrNull()?.let { it.message ?: "create feed failed" }
     }
 
     fun deleteFeed(feedId: String) {
@@ -891,15 +890,19 @@ class FeedVM @Inject constructor(
      * `TrainResult.DuplicateSignal` on a redundant tap writes nothing, no
      * UI-side duplicate guard needed). A successful call mutates the shared
      * manager's own snapshot + notifies, so the card repaints via the normal
-     * observer path — no local list mutation here. Failures surface on
-     * [trainError] → the page `error-message`, mirroring [deletePost].
+     * observer path — no local list mutation here. A refusal is the shared
+     * manager's own page error: `train_post`/`untrain_post` stamp
+     * `feed.error_train` on `FeedSnapshot.error`, which the screen already
+     * paints on `error-message` — so the VM never bridges the returned error
+     * a second time (a second paint would race or shadow it; the shape tui
+     * and linux keep).
      */
     fun dispatchTrain(postId: String, factor: String, verb: TrainVerb, alreadyMarked: Boolean) {
         val m = manager() ?: return
         viewModelScope.launch {
             runCatching {
                 if (alreadyMarked) m.untrainPost(postId, factor) else m.trainPost(postId, factor, verb)
-            }.onFailure { _trainError.value = it.message ?: "train failed" }
+            }
         }
     }
 
@@ -909,9 +912,12 @@ class FeedVM @Inject constructor(
     suspend fun trainedTopicsList(): List<com.fauna.ffi.FfiTrainedTopicRow> =
         runCatching { api.trainedTopicsList() }.getOrDefault(emptyList())
 
-    fun subscribeBridge(kind: String, uri: String, name: String) {
-        val m = host.manager() ?: return
-        viewModelScope.launch { runCatching { m.subscribeBridge(kind, uri, name) } }
+    /** `null` once the subscription is SAVED, else the failure's message —
+     *  the [createFeed] contract, for the bridge-subscribe form. */
+    suspend fun subscribeBridge(kind: String, uri: String, name: String): String? {
+        val m = host.manager() ?: return "feed manager unavailable"
+        return runCatching { m.subscribeBridge(kind, uri, name) }
+            .exceptionOrNull()?.let { it.message ?: "subscribe failed" }
     }
 
     fun unsubscribeBridge(id: Long) {
@@ -1086,6 +1092,7 @@ class FeedVM @Inject constructor(
             try {
                 m.composeSellAskingPriceSats()
             } catch (e: Exception) {
+                _verbError.value = e.message ?: "post failed"
                 return false
             }
         } else {
@@ -1131,6 +1138,7 @@ class FeedVM @Inject constructor(
             // post does NOT go out without its picture — the user asked for an
             // image, and silently publishing the caption alone is the failure this
             // whole path exists to end.
+            _verbError.value = e.message ?: "post failed"
             return false
         }
         return if (sealed != null) {
@@ -1138,12 +1146,17 @@ class FeedVM @Inject constructor(
                 api.uploadBlobWithSidecar(m.gatedUploadSidecar(), sealed).hash
             } catch (e: Exception) {
                 m.abortGatedSubmit(e.message ?: "gated blob upload failed")
+                _verbError.value = e.message ?: "gated blob upload failed"
                 return false
             }
-            runCatching { m.submitGatedPost(hash) }.isSuccess
+            runCatching { m.submitGatedPost(hash) }
+                .onFailure { _verbError.value = it.message ?: "post failed" }
+                .isSuccess
                 .also { if (it) host.stageAttachmentBytes(null) }
         } else {
-            runCatching { m.submitPost() }.isSuccess
+            runCatching { m.submitPost() }
+                .onFailure { _verbError.value = it.message ?: "post failed" }
+                .isSuccess
                 .also { if (it) host.stageAttachmentBytes(null) }
         }
     }
@@ -1301,31 +1314,38 @@ class FeedVM @Inject constructor(
     // restricted target is `replyPublicConfirmed`. The audience is the
     // manager's; this glue never decides it.
     fun reply(postId: String, text: String, publicConfirmed: Boolean = false) {
-        val m = manager() ?: return
-        viewModelScope.launch {
-            runCatching {
-                if (publicConfirmed) {
-                    m.replyPublicConfirmed(postId, text)
-                } else {
-                    val sealed = m.prepareSealedReply(postId, text)
-                    if (sealed != null) {
-                        val hash = try {
-                            api.uploadBlobWithSidecar(m.gatedUploadSidecar(), sealed).hash
-                        } catch (e: Exception) {
-                            m.abortGatedSubmit(e.message ?: "sealed reply upload failed")
-                            throw e
-                        }
-                        m.submitGatedPost(hash)
-                    } else {
-                        m.reply(postId, text)
+        viewModelScope.launch { sendReply(postId, text, publicConfirmed) }
+    }
+
+    /** [reply], awaited: `true` once the reply is SAVED. A failure still lands
+     *  on [verbError] (→ the page's `error-message`); the reply dialog closes
+     *  only on `true`, keeping what was typed otherwise (feed.md § Errors &
+     *  edge cases, the form case of README § Offer only what is possible). */
+    suspend fun sendReply(postId: String, text: String, publicConfirmed: Boolean = false): Boolean {
+        val m = manager() ?: return false
+        return runCatching {
+            if (publicConfirmed) {
+                m.replyPublicConfirmed(postId, text)
+            } else {
+                val sealed = m.prepareSealedReply(postId, text)
+                if (sealed != null) {
+                    val hash = try {
+                        api.uploadBlobWithSidecar(m.gatedUploadSidecar(), sealed).hash
+                    } catch (e: Exception) {
+                        m.abortGatedSubmit(e.message ?: "sealed reply upload failed")
+                        throw e
                     }
+                    m.submitGatedPost(hash)
+                } else {
+                    m.reply(postId, text)
                 }
             }
-                .onFailure {
-                    android.util.Log.w("FeedVM", "reply failed: ${it.message}")
-                    _verbError.value = it.message ?: "reply failed"
-                }
         }
+            .onFailure {
+                android.util.Log.w("FeedVM", "reply failed: ${it.message}")
+                _verbError.value = it.message ?: "reply failed"
+            }
+            .isSuccess
     }
 
     fun quote(postId: String, text: String) {

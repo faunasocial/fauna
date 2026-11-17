@@ -346,9 +346,47 @@ public final class FamilyVM {
         draftScreenDailyMinutes = screenTime?.dailyMinutes.map { String($0) } ?? ""
     }
 
+    // ── Form validity (`docs/goal/ui/README.md` § Offer only what is possible,
+    //    rule 4's form case; `family-safety.md` § Errors & edge cases) ───────
+    // Each guardian form's submit paints from its shared draft-validity
+    // predicate (`fauna_client_family::forms`, over UniFFI) through
+    // `faunaPossible`, and its verb asks the same predicate first and refuses
+    // with the same reason on `error-message` (``refuseForm(_:)``) — never a
+    // silent return and never a Swift-side hex check.
+
+    /// `family-contact-add-button`: a hex actor id to pre-approve.
+    public var contactAddPossibility: Possibility {
+        familyContactAddPossibility(input: contactAddInput)
+    }
+
+    /// `family-transfer-button`: the new guardian's hex actor id, with the
+    /// transfer's own reasons (never the contact-add words).
+    public var transferPossibility: Possibility {
+        familyTransferPossibility(input: transferInput)
+    }
+
+    /// `family-policy-save-button`: the screen-time cells parse and validate
+    /// through the rules the nest refuses by (empty = unset).
+    public var policySavePossibility: Possibility {
+        familyPolicySavePossibility(
+            windowStart: draftScreenWindowStart,
+            windowEnd: draftScreenWindowEnd,
+            daily: draftScreenDailyMinutes)
+    }
+
+    /// Refuse a form submit whose answer is not possible, with its reason on
+    /// the page's `error-message`. `true` when refused.
+    func refuseForm(_ answer: Possibility) -> Bool {
+        guard let refusal = answer.refusal else { return false }
+        errorMessage = refusal
+        return true
+    }
+
     /// `fauna.family.policy.update` — persist the shared editor onto the
-    /// selected ward, then re-read (never optimistic).
+    /// selected ward, then re-read (never optimistic). Asks
+    /// ``policySavePossibility`` first.
     public func savePolicy() async {
+        if refuseForm(policySavePossibility) { return }
         guard let family, let wardId = selectedWardId else { return }
         isSaving = true
         errorMessage = nil
@@ -433,13 +471,14 @@ public final class FamilyVM {
     /// `fauna.family.contact.add` — pre-approve a contact on the selected ward's
     /// behalf. v1 takes the peer's actor id as hex (handle resolution is future
     /// UX polish — `i18n family.contact_add_placeholder`).
+    ///
+    /// Asks ``contactAddPossibility`` first; the box clears only once the add
+    /// is issued.
     public func addContact() async {
+        if refuseForm(contactAddPossibility) { return }
         guard let family, let wardId = selectedWardId else { return }
         let hex = contactAddInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !hex.isEmpty, hex.count % 2 == 0, let peer = Data(hexString: hex) else {
-            errorMessage = L.family.contactAddInvalidActorId
-            return
-        }
+        guard let peer = Data(hexString: hex) else { return }
         errorMessage = nil
         do {
             // With no nest the pre-approval queues in the device's outbox and
@@ -469,14 +508,13 @@ public final class FamilyVM {
     /// `fauna.family.transfer` — propose a new guardian for the selected ward
     /// (family-safety.md § Graduation & transfer). Pending until the target
     /// accepts; the link is untouched until then. Same hex-actor-id convention
-    /// (and the same invalid-id error) as `addContact`.
+    /// as `addContact`, with the transfer's own reasons — asks
+    /// ``transferPossibility`` first.
     public func submitTransfer() async {
+        if refuseForm(transferPossibility) { return }
         guard let family, let wardId = selectedWardId else { return }
         let hex = transferInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !hex.isEmpty, hex.count % 2 == 0, let target = Data(hexString: hex) else {
-            errorMessage = L.family.contactAddInvalidActorId
-            return
-        }
+        guard let target = Data(hexString: hex) else { return }
         errorMessage = nil
         do {
             try await family.transfer(supervisedActorId: wardId, newGuardianActorId: target)

@@ -332,6 +332,19 @@ pub trait ProviderEngine {
     fn shares_links(&self) -> bool {
         false
     }
+
+    /// The change feed's persisted state ([`serve_changes_since`]), as the
+    /// face last wrote it; `None` when none rests. The default keeps none, so
+    /// every change enumeration is a full re-report with no deletions.
+    fn change_feed_state(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Persist the change feed's state (the write half of
+    /// [`Self::change_feed_state`]). The default drops it.
+    fn set_change_feed_state(&self, _state: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Stamp [`ProviderItem::share_link_eligible`] on served items: files only.
@@ -717,6 +730,230 @@ pub async fn serve_hydrated_rels<E: ProviderEngine>(engine: &E) -> Result<Vec<St
     engine.hydrated_rels()
 }
 
+// ---- The change feed ----
+//
+// A replicated File Provider learns of a change to a container it has
+// already listed ONLY from the change feed (`enumerateChanges`): a signal
+// makes the OS ask the feed what moved since the anchor it holds, and never
+// re-lists the container. So the feed has to answer with the items that
+// changed and the ones that went — a feed that reports nothing leaves a
+// pulled or peer-landed row unlisted for good (`on-demand-files-apple.md`
+// § Apple File Provider binding, *the change feed*).
+//
+// The feed keeps the last few trees it reported, each under a generation
+// number; the anchor the OS holds names a generation. A change enumeration
+// diffs the tree as it stands against the generation the anchor names; an
+// anchor the state no longer holds (or one an older build minted) gets every
+// item, which is always safe — the OS compares versions — and no deletions.
+// The state is derived: losing it costs one full re-report, never data.
+
+/// How many reported trees the feed keeps — enough for each consumer (the
+/// working set and the root container) to be a step behind.
+pub const CHANGE_FEED_GENERATIONS: usize = 4;
+
+/// What one change enumeration reports: the items that are new or changed
+/// since the anchor, the identifiers gone since it, and the anchor to finish at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeReport {
+    pub updated: Vec<ProviderItem>,
+    pub deleted: Vec<String>,
+    pub anchor: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct FeedGeneration {
+    number: u64,
+    /// Every item of the tree (files and the directories they imply, the root
+    /// excluded) by identifier, each with what a change to it changes.
+    items: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct FeedState {
+    generations: Vec<FeedGeneration>,
+}
+
+/// The anchor bytes for a generation (`g<number>`).
+pub fn encode_change_anchor(number: u64) -> Vec<u8> {
+    format!("g{number}").into_bytes()
+}
+
+/// The generation an anchor names; `None` for an anchor this feed did not mint.
+pub fn decode_change_anchor(anchor: &[u8]) -> Option<u64> {
+    std::str::from_utf8(anchor)
+        .ok()?
+        .strip_prefix('g')?
+        .parse()
+        .ok()
+}
+
+/// Every item of the tree the rows imply — each file, and each directory that
+/// is a strict ancestor of one — by identifier.
+fn tree_items(rows: &[ProviderRow]) -> std::collections::BTreeMap<String, ProviderItem> {
+    let mut items = std::collections::BTreeMap::new();
+    for r in rows {
+        let rel = r.rel.trim_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let mut prefix = String::new();
+        let mut parts = rel.split('/').peekable();
+        while let Some(part) = parts.next() {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            if parts.peek().is_none() {
+                items.insert(
+                    prefix.clone(),
+                    ProviderItem {
+                        rel: prefix.clone(),
+                        name: part.to_string(),
+                        size: r.size,
+                        mtime: r.mtime,
+                        is_dir: false,
+                        content_version: r.content_version.clone(),
+                        kept: r.kept,
+                        share_link_eligible: false,
+                    },
+                );
+            } else {
+                let dir = items.entry(prefix.clone()).or_insert_with(|| ProviderItem {
+                    rel: prefix.clone(),
+                    name: part.to_string(),
+                    size: 0,
+                    mtime: r.mtime,
+                    is_dir: true,
+                    content_version: Vec::new(),
+                    kept: false,
+                    share_link_eligible: false,
+                });
+                dir.mtime = dir.mtime.max(r.mtime);
+            }
+        }
+    }
+    items
+}
+
+/// What a change to an item changes. A directory is its existence alone —
+/// its mtime follows every descendant, and a re-report of each ancestor on
+/// every edit would be churn the OS does not need.
+fn item_fingerprint(item: &ProviderItem) -> String {
+    if item.is_dir {
+        "d".into()
+    } else {
+        format!(
+            "f{}:{}:{}:{}",
+            hex::encode(&item.content_version),
+            item.size,
+            item.mtime,
+            u8::from(item.kept)
+        )
+    }
+}
+
+/// The pure feed: diff the tree `rows` imply against the generation `anchor`
+/// names in `state`, and say what to persist. A tree that differs from the
+/// newest generation is recorded as the next one (the oldest beyond
+/// [`CHANGE_FEED_GENERATIONS`] dropped); the report finishes at the newest.
+/// An unreadable `state` reads as none. Returns the report and, when the
+/// state changed, the state to write.
+pub fn change_feed(
+    rows: &[ProviderRow],
+    state: Option<&str>,
+    anchor: Option<&[u8]>,
+) -> (ChangeReport, Option<String>) {
+    let mut state: FeedState = state
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let items = tree_items(rows);
+    let current: std::collections::BTreeMap<String, String> = items
+        .iter()
+        .map(|(rel, item)| (rel.clone(), item_fingerprint(item)))
+        .collect();
+
+    let base = anchor
+        .and_then(decode_change_anchor)
+        .and_then(|number| state.generations.iter().find(|g| g.number == number))
+        .map(|g| g.items.clone());
+
+    let mut write = None;
+    let newest = match state.generations.last() {
+        Some(g) if g.items == current => g.number,
+        last => {
+            let number = last.map_or(1, |g| g.number + 1);
+            state.generations.push(FeedGeneration {
+                number,
+                items: current.clone(),
+            });
+            let excess = state
+                .generations
+                .len()
+                .saturating_sub(CHANGE_FEED_GENERATIONS);
+            state.generations.drain(..excess);
+            write = serde_json::to_string(&state).ok();
+            number
+        }
+    };
+
+    let (updated, deleted) = match base {
+        Some(base) => (
+            items
+                .into_iter()
+                .filter(|(rel, _)| base.get(rel) != current.get(rel))
+                .map(|(_, item)| item)
+                .collect(),
+            base.keys()
+                .filter(|rel| !current.contains_key(*rel))
+                .cloned()
+                .collect(),
+        ),
+        None => (items.into_values().collect(), Vec::new()),
+    };
+    (
+        ChangeReport {
+            updated,
+            deleted,
+            anchor: encode_change_anchor(newest),
+        },
+        write,
+    )
+}
+
+/// `enumerateChanges(from: anchor)` → what changed in the set since `anchor`
+/// ([`change_feed`] over the live rows, its state persisted through the
+/// engine). Every container's feed answers for the whole set: the working set
+/// is the replicated OS's feed of every item, and an item names its own parent.
+pub async fn serve_changes_since<E: ProviderEngine>(
+    engine: &E,
+    anchor: &[u8],
+) -> Result<ChangeReport> {
+    let rows = engine.provider_rows().await?;
+    let state = engine.change_feed_state()?;
+    let (mut report, write) = change_feed(&rows, state.as_deref(), Some(anchor));
+    if let Some(write) = write {
+        engine.set_change_feed_state(&write)?;
+    }
+    report.updated = report
+        .updated
+        .into_iter()
+        .map(|item| stamp_share_link(engine, item))
+        .collect();
+    Ok(report)
+}
+
+/// `currentSyncAnchor` → the anchor of the tree as it stands now, recorded as
+/// a generation so a later [`serve_changes_since`] can diff against it.
+pub async fn serve_current_change_anchor<E: ProviderEngine>(engine: &E) -> Result<Vec<u8>> {
+    let rows = engine.provider_rows().await?;
+    let state = engine.change_feed_state()?;
+    let (report, write) = change_feed(&rows, state.as_deref(), None);
+    if let Some(write) = write {
+        engine.set_change_feed_state(&write)?;
+    }
+    Ok(report.anchor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,6 +1118,7 @@ mod tests {
         deletion_conflicted: RefCell<Vec<String>>,
         read_only: bool,
         shares_links: bool,
+        feed_state: RefCell<Option<String>>,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -952,6 +1190,147 @@ mod tests {
         fn shares_links(&self) -> bool {
             self.shares_links
         }
+        fn change_feed_state(&self) -> Result<Option<String>> {
+            Ok(self.feed_state.borrow().clone())
+        }
+        fn set_change_feed_state(&self, state: &str) -> Result<()> {
+            *self.feed_state.borrow_mut() = Some(state.to_string());
+            Ok(())
+        }
+    }
+
+    // ---- the change feed ----
+
+    fn rels(items: &[ProviderItem]) -> Vec<&str> {
+        let mut v: Vec<&str> = items.iter().map(|i| i.rel.as_str()).collect();
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn change_anchor_round_trips_and_refuses_a_foreign_anchor() {
+        assert_eq!(decode_change_anchor(&encode_change_anchor(7)), Some(7));
+        // The constant anchor builds before the feed handed the OS.
+        assert_eq!(decode_change_anchor(b"v1"), None);
+        assert_eq!(decode_change_anchor(b""), None);
+    }
+
+    /// The live failure this pins (`p2p-shared-set-build.md` § The live
+    /// witness): the OS listed the root while it held one file, a peer then
+    /// landed a second, and the feed has to report it — the OS never re-lists
+    /// a container it already holds.
+    #[tokio::test]
+    async fn a_row_landed_after_the_listing_is_reported_by_the_change_feed() {
+        let engine = FakeEngine {
+            rows: vec![row("online.txt", 3, 10, b"v-online")],
+            ..Default::default()
+        };
+        // The OS lists the root, then asks for the anchor to follow from.
+        let anchor = serve_current_change_anchor(&engine).await.unwrap();
+
+        let mut engine = engine;
+        engine.rows.push(row("offline.txt", 43, 20, b"v-offline"));
+        let report = serve_changes_since(&engine, &anchor).await.unwrap();
+        assert_eq!(rels(&report.updated), vec!["offline.txt"]);
+        assert!(report.deleted.is_empty());
+        assert_ne!(report.anchor, anchor);
+
+        // Nothing moved since: the feed reports nothing and keeps the anchor.
+        let again = serve_changes_since(&engine, &report.anchor).await.unwrap();
+        assert!(again.updated.is_empty() && again.deleted.is_empty());
+        assert_eq!(again.anchor, report.anchor);
+    }
+
+    #[tokio::test]
+    async fn the_feed_reports_a_new_version_a_gone_row_and_the_directories_a_path_implies() {
+        let mut engine = FakeEngine {
+            rows: vec![row("a.txt", 1, 1, b"v1"), row("gone.txt", 1, 1, b"g")],
+            ..Default::default()
+        };
+        let anchor = serve_current_change_anchor(&engine).await.unwrap();
+        engine.rows = vec![
+            row("a.txt", 2, 2, b"v2"),
+            row("sub/deep/new.txt", 1, 5, b"n"),
+        ];
+        let report = serve_changes_since(&engine, &anchor).await.unwrap();
+        assert_eq!(
+            rels(&report.updated),
+            vec!["a.txt", "sub", "sub/deep", "sub/deep/new.txt"]
+        );
+        assert_eq!(report.deleted, vec!["gone.txt".to_string()]);
+        let dir = report.updated.iter().find(|i| i.rel == "sub").unwrap();
+        assert!(dir.is_dir && dir.name == "sub" && dir.mtime == 5);
+        let deep = report
+            .updated
+            .iter()
+            .find(|i| i.rel == "sub/deep/new.txt")
+            .unwrap();
+        assert_eq!(
+            (deep.name.as_str(), deep.content_version.as_slice()),
+            ("new.txt", &b"n"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kept_flip_is_a_change() {
+        let mut engine = FakeEngine {
+            rows: vec![row("a.txt", 1, 1, b"v1")],
+            ..Default::default()
+        };
+        let anchor = serve_current_change_anchor(&engine).await.unwrap();
+        engine.rows[0].kept = true;
+        let report = serve_changes_since(&engine, &anchor).await.unwrap();
+        assert_eq!(rels(&report.updated), vec!["a.txt"]);
+        assert!(report.updated[0].kept);
+    }
+
+    /// An anchor the state no longer holds — or one an older build minted —
+    /// gets every item (safe: the OS compares versions) and no deletions.
+    #[tokio::test]
+    async fn an_unknown_anchor_gets_the_whole_tree_and_no_deletions() {
+        let engine = FakeEngine {
+            rows: vec![row("a.txt", 1, 1, b"v1"), row("d/b.txt", 1, 1, b"v2")],
+            ..Default::default()
+        };
+        let report = serve_changes_since(&engine, b"v1").await.unwrap();
+        assert_eq!(rels(&report.updated), vec!["a.txt", "d", "d/b.txt"]);
+        assert!(report.deleted.is_empty());
+        assert_eq!(decode_change_anchor(&report.anchor), Some(1));
+    }
+
+    /// Two consumers (the working set and the root) each follow their own
+    /// anchor over one state; the oldest generations fall away.
+    #[tokio::test]
+    async fn each_consumer_diffs_against_its_own_generation_within_the_window() {
+        let mut engine = FakeEngine {
+            rows: vec![row("a.txt", 1, 1, b"1")],
+            ..Default::default()
+        };
+        let slow = serve_current_change_anchor(&engine).await.unwrap();
+        engine.rows.push(row("b.txt", 1, 1, b"2"));
+        let fast = serve_changes_since(&engine, &slow).await.unwrap();
+        engine.rows.push(row("c.txt", 1, 1, b"3"));
+        let fast = serve_changes_since(&engine, &fast.anchor).await.unwrap();
+        assert_eq!(rels(&fast.updated), vec!["c.txt"]);
+        let behind = serve_changes_since(&engine, &slow).await.unwrap();
+        assert_eq!(rels(&behind.updated), vec!["b.txt", "c.txt"]);
+        assert_eq!(behind.anchor, fast.anchor);
+
+        for n in 0..CHANGE_FEED_GENERATIONS {
+            engine.rows.push(row(&format!("x{n}.txt"), 1, 1, b"x"));
+            serve_current_change_anchor(&engine).await.unwrap();
+        }
+        let expired = serve_changes_since(&engine, &slow).await.unwrap();
+        assert_eq!(expired.updated.len(), engine.rows.len());
+        assert!(expired.deleted.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_state_reads_as_none() {
+        let rows = vec![row("a.txt", 1, 1, b"v1")];
+        let (report, write) = change_feed(&rows, Some("not json"), Some(b"g3"));
+        assert_eq!(rels(&report.updated), vec!["a.txt"]);
+        assert!(write.is_some());
     }
 
     /// The share-link fact rides each served item: a FILE of a set whose

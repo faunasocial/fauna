@@ -55,8 +55,8 @@ Stamped 2026-11-07 at 6a0ded1015.
 |---|---|---|
 | web | ✅ full | 0.1.6-dev+3aeb19b0 standalone |
 | linux | ⚠ partial | 0.1.6-dev+f2a8f7b9 standalone |
-| windows | ⚠ partial | 0.1.6 docker |
-| macos | ⚠ partial | 0.1.6 docker |
+| windows | ⚠ partial | 0.1.7 docker |
+| macos | ⚠ partial | 0.1.7 docker |
 | ios | ✅ full | 0.1.5-dev+56c8dd96.dirty standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+3bf78261.dirty standalone |

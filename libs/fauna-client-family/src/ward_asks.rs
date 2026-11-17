@@ -17,6 +17,9 @@
 //! `supervised_by`), so deriving the answer from the data alone keeps the
 //! surfaces in step with what the nest enforces.
 
+use fauna_core::data::ContactStatus;
+use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use fauna_protocol::family::{FamilyContactRequestInfo, FamilyFeedRequestInfo, ReachPolicy};
 
 /// The two live states a ward's feed-source ask can be in, as
@@ -104,6 +107,100 @@ pub fn knocks_await_guardian(own_policy: Option<&ReachPolicy>) -> bool {
     own_policy.is_some_and(|p| p.contact_approval)
 }
 
+/// What the caller knows of its OWN supervision, as the two Contacts-page
+/// predicates below need it: whether this run's `fauna.family.status` read has
+/// succeeded yet, and the policy it carried.
+///
+/// Two states, not an `Option<ReachPolicy>`, because "no policy" means two
+/// different things: an unsupervised account (the read came back without one —
+/// the account decides its own contacts) and a read that has not resolved yet
+/// (nothing is known). `ui/README.md` § Offer only what is possible, rule 5:
+/// unknown is not possible, so the second must never read as the first.
+#[derive(Debug, Clone, Copy)]
+pub enum OwnSupervision<'a> {
+    /// No `fauna.family.status` read of this run has succeeded yet.
+    Unread,
+    /// The latest successful read: the caller's own active policy, present
+    /// only while the caller is supervised.
+    Read(Option<&'a ReachPolicy>),
+}
+
+/// The reason a ward's knock is not offered while its guardian decides new
+/// contacts — the same words the nest's typed refusal is painted with, so the
+/// entry and a refusal that slips through (rule 7) say one thing.
+const GUARDIAN_APPROVAL_REQUIRED: &str = "contacts.guardian_approval_required";
+/// The reason a ward's accept is not offered while its guardian decides
+/// knocks — the words `knock-guardian-pending` already paints on the row.
+const KNOCK_GUARDIAN_PENDING: &str = "contacts.knock_guardian_pending";
+/// The reason either affordance waits while the status read is unresolved.
+const LOADING: &str = "common.loading";
+
+fn approval_required(own: OwnSupervision<'_>) -> Option<bool> {
+    match own {
+        OwnSupervision::Unread => None,
+        OwnSupervision::Read(policy) => Some(knocks_await_guardian(policy)),
+    }
+}
+
+/// Whether the caller may knock (send a contact request to) a resolved peer
+/// now — what `contacts-add-button` paints from, and what the send asks first
+/// (`ui/README.md` § Offer only what is possible, rules 4–6;
+/// `family-safety.md` § Guardian policy, the `contact_approval` row, outbound
+/// arm; `contacts.md` § Errors & edge cases).
+///
+/// `peer_status` is the caller's contact edge to that peer, as the roster
+/// carries it (`ContactItem::status`), `None` with no edge. The answer mirrors
+/// the nest's outbound reach gate: with `contact_approval` on, a send to a peer
+/// that is not already `accepted`/`confirmed` is refused with the typed
+/// guardian-approval error, so the knock is blocked with that reason and the
+/// page offers the ask (`contact-request-guardian-button`) as its one step.
+/// An existing accepted/confirmed edge passes, as it does at the nest.
+///
+/// Blocked, never absent: the ward can make the precondition true from this
+/// app — by asking, and the guardian's approval makes the peer a contact.
+pub fn knock_possibility(own: OwnSupervision<'_>, peer_status: Option<&str>) -> Possibility {
+    let already_contact = matches!(
+        peer_status.and_then(ContactStatus::from_wire),
+        Some(ContactStatus::Accepted | ContactStatus::Confirmed)
+    );
+    if already_contact {
+        return Possibility::Possible;
+    }
+    match approval_required(own) {
+        None => Possibility::blocked(LocalizedText::key(LOADING)),
+        Some(true) => Possibility::blocked(LocalizedText::key(GUARDIAN_APPROVAL_REQUIRED)),
+        Some(false) => Possibility::Possible,
+    }
+}
+
+/// Whether the guardian decides contact with this peer: the caller's policy
+/// has `contact_approval` on and the peer is not already an
+/// `accepted`/`confirmed` contact. That is when the ask
+/// (`contact-request-guardian-button`) is the Find User result's one step,
+/// offered at the entry before anything was refused (`ui/README.md` § Offer
+/// only what is possible, rule 3; `contacts.md` § Errors & edge cases). False
+/// while the status read is unresolved: the knock then waits as loading, and
+/// no ask is offered on a guess.
+pub fn guardian_decides_contact(own: OwnSupervision<'_>, peer_status: Option<&str>) -> bool {
+    approval_required(own) == Some(true) && !knock_possibility(own, peer_status).is_possible()
+}
+
+/// Whether the caller may accept an incoming knock now — what each
+/// `contacts-accept-button[i]` paints from, and what the accept asks first.
+///
+/// With `contact_approval` on, acceptance authority for every inbound knock
+/// is the guardian's and the nest refuses the ward's own accept
+/// (`family-safety.md` § Guardian policy, the `contact_approval` row, inbound
+/// arm), so the accept is blocked with the words the row already shows
+/// (`knock-guardian-pending`). Block and dismiss stay the ward's.
+pub fn accept_possibility(own: OwnSupervision<'_>) -> Possibility {
+    match approval_required(own) {
+        None => Possibility::blocked(LocalizedText::key(LOADING)),
+        Some(true) => Possibility::blocked(LocalizedText::key(KNOCK_GUARDIAN_PENDING)),
+        Some(false) => Possibility::Possible,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +279,113 @@ mod tests {
             ..ReachPolicy::default()
         };
         assert!(knocks_await_guardian(Some(&approval_on)));
+    }
+
+    fn approval_on() -> ReachPolicy {
+        ReachPolicy {
+            contact_approval: true,
+            ..ReachPolicy::default()
+        }
+    }
+
+    fn blocked(key: &str) -> Possibility {
+        Possibility::blocked(LocalizedText::key(key))
+    }
+
+    #[test]
+    fn a_knock_waits_for_the_status_read() {
+        assert_eq!(
+            knock_possibility(OwnSupervision::Unread, None),
+            blocked(LOADING),
+            "unknown is not possible: the knock is never enabled on a guess"
+        );
+    }
+
+    #[test]
+    fn an_unsupervised_or_free_caller_may_knock() {
+        assert_eq!(
+            knock_possibility(OwnSupervision::Read(None), None),
+            Possibility::Possible
+        );
+        let off = ReachPolicy::default();
+        assert_eq!(
+            knock_possibility(OwnSupervision::Read(Some(&off)), None),
+            Possibility::Possible
+        );
+    }
+
+    #[test]
+    fn under_contact_approval_a_knock_to_a_stranger_is_the_guardians() {
+        let on = approval_on();
+        for status in [None, Some("pending"), Some("blocked")] {
+            assert_eq!(
+                knock_possibility(OwnSupervision::Read(Some(&on)), status),
+                blocked(GUARDIAN_APPROVAL_REQUIRED),
+                "peer status {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_accepted_or_confirmed_peer_passes_as_at_the_nest() {
+        let on = approval_on();
+        for status in ["accepted", "confirmed"] {
+            assert_eq!(
+                knock_possibility(OwnSupervision::Read(Some(&on)), Some(status)),
+                Possibility::Possible
+            );
+            assert_eq!(
+                knock_possibility(OwnSupervision::Unread, Some(status)),
+                Possibility::Possible,
+                "an existing edge passes the nest's gate whatever the policy"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guardian_decides_a_stranger_only_once_the_read_says_so() {
+        let on = approval_on();
+        let off = ReachPolicy::default();
+        assert!(guardian_decides_contact(
+            OwnSupervision::Read(Some(&on)),
+            None
+        ));
+        assert!(guardian_decides_contact(
+            OwnSupervision::Read(Some(&on)),
+            Some("pending")
+        ));
+        assert!(!guardian_decides_contact(
+            OwnSupervision::Read(Some(&on)),
+            Some("accepted")
+        ));
+        assert!(!guardian_decides_contact(
+            OwnSupervision::Read(Some(&off)),
+            None
+        ));
+        assert!(!guardian_decides_contact(OwnSupervision::Read(None), None));
+        assert!(
+            !guardian_decides_contact(OwnSupervision::Unread, None),
+            "no ask is offered on a guess"
+        );
+    }
+
+    #[test]
+    fn the_accept_answers_per_supervision_state() {
+        assert_eq!(accept_possibility(OwnSupervision::Unread), blocked(LOADING));
+        assert_eq!(
+            accept_possibility(OwnSupervision::Read(None)),
+            Possibility::Possible
+        );
+        let off = ReachPolicy::default();
+        assert_eq!(
+            accept_possibility(OwnSupervision::Read(Some(&off))),
+            Possibility::Possible
+        );
+        let on = approval_on();
+        assert_eq!(
+            accept_possibility(OwnSupervision::Read(Some(&on))),
+            blocked(KNOCK_GUARDIAN_PENDING)
+        );
     }
 
     #[test]

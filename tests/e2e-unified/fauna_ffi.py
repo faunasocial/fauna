@@ -2604,6 +2604,7 @@ _SEAT_EXPORTS = (
     "fauna_harness_serve_set",
     "fauna_harness_answer_consent",
     "fauna_harness_enable_mail",
+    "fauna_harness_calendar_make_event",
     "fauna_harness_topic_create",
     "fauna_harness_topic_train",
     "fauna_harness_cues_record_and_flush",
@@ -2869,6 +2870,26 @@ def harness_enable_mail(nest_url: str, owner_secret: bytes, *,
     key alone, a state no app produces."""
     return _seat_call("fauna_harness_enable_mail", nest_url, owner_secret,
                       [True] if epoch_schedule else [])
+
+
+def harness_calendar_make_event(nest_url: str, owner_secret: bytes, *, uid: str,
+                                summary: str, dtstart: str = "20361102T100000Z",
+                                dtend: str = "20361102T110000Z") -> dict:
+    """Make one event in the account's own calendar and read the calendar back
+    the way an app's Events page does, app-less: the MSEK read out of the
+    sealed mail custody through the shared ``dav_store_context`` (never a key
+    the caller hands in), the calendars loaded through the shared
+    ``list_calendars_with_personal`` (the lazy ``Personal`` a fresh or
+    re-claimed account gets), the event sealed and put, then the ``Personal``
+    calendar read back. Needs mail enabled first (``harness_enable_mail``).
+
+    Returns ``{"calendars": <count the load listed>, "events": {uid: summary}}``.
+    Raises on a refusal or with no MSEK in custody."""
+    calendars, events = _seat_call(
+        "fauna_harness_calendar_make_event", nest_url, owner_secret,
+        [uid, summary, dtstart, dtend],
+    )
+    return {"calendars": calendars, "events": dict(events)}
 
 
 def harness_device_removal(

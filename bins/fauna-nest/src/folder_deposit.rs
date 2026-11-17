@@ -979,12 +979,22 @@ impl HttpDoor {
         let mut upload: Option<ByteBuf> = None;
         let mut parts: u32 = 0;
         let mut total: u64 = 0;
+        // A part refused mid-body (the inbox quota, a folder the grant does
+        // not reach). The rest of the body is still read and dropped before
+        // the door answers, within the same bound as an accepted body: a
+        // server that answers and closes with request bytes unread leaves the
+        // client failing on a closed connection while it writes, never
+        // reading the refusal (RFC 9112 § 9.6).
+        let mut refused: Option<DoorError> = None;
         while let Some(frame) = stream.next().await {
             let frame = frame.map_err(|_| DoorError::Status(StatusCode::BAD_REQUEST))?;
             total = total.saturating_add(frame.len() as u64);
             if total > MAX_DEPOSIT_TOTAL_BYTES {
                 // The staged parts expire on their own; nothing was committed.
-                return Err(DoorError::Status(StatusCode::PAYLOAD_TOO_LARGE));
+                return Err(refused.unwrap_or(DoorError::Status(StatusCode::PAYLOAD_TOO_LARGE)));
+            }
+            if refused.is_some() {
+                continue;
             }
             hasher.update(&frame);
             buf.extend_from_slice(&frame);
@@ -993,9 +1003,16 @@ impl HttpDoor {
             while buf.len() > MAX_DEPOSIT_PART_BYTES {
                 let rest = buf.split_off(MAX_DEPOSIT_PART_BYTES);
                 let part = std::mem::replace(&mut buf, rest);
-                self.send_part(&mut upload, parts, part).await?;
+                if let Err(err) = self.send_part(&mut upload, parts, part).await {
+                    refused = Some(err);
+                    buf = Vec::new();
+                    break;
+                }
                 parts += 1;
             }
+        }
+        if let Some(err) = refused {
+            return Err(err);
         }
         let statement = DepositStatement {
             folder_id: self.folder_id,

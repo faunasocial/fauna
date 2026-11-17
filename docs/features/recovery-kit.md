@@ -65,7 +65,7 @@ Stamped 2026-11-07 at ac836c937b.
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+413aa33d standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | 0.1.6 docker |
+| windows | ⚠ partial | 0.1.6-dev+89d36747 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |

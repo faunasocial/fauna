@@ -7,10 +7,14 @@
 //!
 //! The rules tui established, which this copies rather than re-derives:
 //!
-//! - **(a) The ask is offered only on the TYPED refusal** — the host calls
-//!   [`GuardianAsk::refused`] only for [`crate::client::KnockSend::RefusedByGuardian`].
-//!   Painting it on any other failure would tell an unsupervised user their
-//!   account is supervised.
+//! - **(a) The ask is offered at the entry, or on the TYPED refusal** — the
+//!   host calls [`GuardianAsk::offer`] when the shared
+//!   `fauna_client_family::guardian_decides_contact` says the guardian decides
+//!   this peer (`contacts.md` § Errors & edge cases: the ask is the result's
+//!   one step before anything was refused), and [`GuardianAsk::refused`] only
+//!   for [`crate::client::KnockSend::RefusedByGuardian`] (the policy can change
+//!   between the paint and the act). Painting it on any other failure would
+//!   tell an unsupervised user their account is supervised.
 //! - **(c) Pending is durable**: it reads `crate::ward_asks` (the ward's own
 //!   `status.contact_requests`, gated on `supervised_by` where it is folded)
 //!   FIRST, the local just-asked flag second — the flag only makes the render
@@ -40,8 +44,9 @@ pub struct GuardianAsk {
     ask_btn: gtk::Button,
     pending: gtk::Label,
     peer: String,
-    /// The nest refused a knock to `peer` with the typed guardian error.
-    refused: Cell<bool>,
+    /// The ask is offered: the guardian decides this peer, or the nest refused
+    /// a knock to `peer` with the typed guardian error.
+    offered: Cell<bool>,
     /// This session just sent the ask, before any status re-read has landed.
     asked: Cell<bool>,
     on_ask: RefCell<Option<Rc<dyn Fn()>>>,
@@ -72,7 +77,7 @@ impl GuardianAsk {
             ask_btn,
             pending,
             peer: peer.to_string(),
-            refused: Cell::new(false),
+            offered: Cell::new(false),
             asked: Cell::new(false),
             on_ask: RefCell::new(None),
         });
@@ -111,7 +116,13 @@ impl GuardianAsk {
 
     /// The knock to this peer came back with the TYPED guardian refusal.
     pub fn refused(&self) {
-        self.refused.set(true);
+        self.offer();
+    }
+
+    /// The guardian decides contact with this peer: the ask is the result's
+    /// one step (the shared `fauna_client_family::guardian_decides_contact`).
+    pub fn offer(&self) {
+        self.offered.set(true);
         self.render();
     }
 
@@ -139,8 +150,8 @@ impl GuardianAsk {
     fn render(&self) {
         let pending = self.is_pending();
         self.pending.set_visible(pending);
-        self.ask_btn.set_visible(!pending && self.refused.get());
-        self.widget.set_visible(pending || self.refused.get());
+        self.ask_btn.set_visible(!pending && self.offered.get());
+        self.widget.set_visible(pending || self.offered.get());
     }
 }
 

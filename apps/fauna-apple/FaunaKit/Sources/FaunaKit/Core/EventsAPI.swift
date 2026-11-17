@@ -22,6 +22,12 @@ import Foundation
 /// it held `APIClient?` before.
 public protocol EventsAPI: AnyObject {
     func listCalendars() async throws -> [FaunaCalendar]
+    /// The shared four-answer calendar read (defaulted below for doubles).
+    func readCalendars() async throws -> CalendarsLoad
+    /// Read only on a *no key* answer: does the deployment serve calendar
+    /// storage or mail (`SetupStatusReply::serves_dav_or_mail`)?
+    func deploymentServesDavOrMail() async -> Bool
+    func amIAdmin() async throws -> Bool
     func createCalendar(name: String) async throws
     func queryEvents(calendarId: String) async throws -> [EventSummary]
     /// `queryEvents`'s COST-saving twin for the backstop poll (events.md §
@@ -47,7 +53,34 @@ public protocol EventsAPI: AnyObject {
     func refusedChangeDismiss(key: String) async throws -> Bool
 }
 
+/// The Events page's calendar read in the shared four answers
+/// (`FfiCalendarsRead`: unresolved / no key / provision failed / loaded)
+/// beside the calendars it carries, as the page's own rows.
+public struct CalendarsLoad: Equatable {
+    public var read: FfiCalendarsRead
+    public var calendars: [FaunaCalendar]
+
+    public init(read: FfiCalendarsRead, calendars: [FaunaCalendar]) {
+        self.read = read
+        self.calendars = calendars
+    }
+}
+
 extension EventsAPI {
+    /// Test doubles that stub only `listCalendars` read as the folded list: an
+    /// empty list is a *no key* answer, anything else *loaded*. `APIClient`
+    /// supplies the real four-answer read.
+    public func readCalendars() async throws -> CalendarsLoad {
+        let cals = try await listCalendars()
+        if cals.isEmpty { return CalendarsLoad(read: .noKey, calendars: []) }
+        return CalendarsLoad(
+            read: .loaded(calendars: cals.map {
+                FfiCalendarRow(id: $0.id, name: $0.name, color: $0.color ?? "")
+            }),
+            calendars: cals)
+    }
+    public func deploymentServesDavOrMail() async -> Bool { true }
+    public func amIAdmin() async throws -> Bool { false }
     public func refusedChangesOpen() async -> [FfiRefusedChange] { [] }
     @discardableResult
     public func refusedChangeDismiss(key: String) async throws -> Bool { false }

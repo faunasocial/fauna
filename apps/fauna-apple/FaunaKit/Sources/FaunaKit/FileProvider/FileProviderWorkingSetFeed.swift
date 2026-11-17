@@ -16,28 +16,48 @@ import Foundation
     /// a change (`FfiFileProviderHost.refresh`) and holds the flipped items
     /// until the working set's feed takes them (`takeKeptFlips`).
     public enum FileProviderWorkingSetFeed {
-        /// The containers to signal after a refresh: the root, whose re-listing
-        /// picks up pulled rows, and the working set, whose change feed reports
-        /// the kept flips. Nothing when the refresh changed nothing.
+        /// The containers to signal after a refresh: the root and the working
+        /// set, whose change feeds report what the refresh pulled or flipped
+        /// (the OS never re-lists a container it holds). Nothing when the
+        /// refresh changed nothing.
         public static func containersToSignal(changed: Bool) -> [NSFileProviderItemIdentifier] {
             changed ? [.rootContainer, .workingSet] : []
         }
 
-        /// The working set's `enumerateChanges`: report the items whose kept bit
-        /// a refresh flipped as updated, projected by `item` so the OS reads
-        /// their new policy, then finish at `anchor`. A take that fails reports
-        /// nothing — the items keep the policy the OS last read.
+        /// Whether `container`'s change feed reports the set's changes: the
+        /// working set (the replicated OS's feed of every item) and the root.
+        public static func reportsTheSet(_ container: NSFileProviderItemIdentifier) -> Bool {
+            container == .workingSet || container == .rootContainer
+        }
+
+        /// A change feed's `enumerateChanges`: the set's changes since
+        /// `anchor` (`changesSince`, the shared `serve_changes_since`)
+        /// reported as updates and deletions, plus the items whose kept bit a
+        /// refresh flipped (`takeKeptFlips`; the working set's alone), each
+        /// projected by `item`, then finish at the feed's new anchor. A feed
+        /// that fails reports the kept flips alone and finishes at `anchor`,
+        /// so the next ask covers the same span.
         public static func reportChanges(
             to observer: NSFileProviderChangeObserver,
-            upTo anchor: NSFileProviderSyncAnchor,
+            from anchor: NSFileProviderSyncAnchor,
+            changesSince: (Data) async throws -> FfiFileProviderChanges,
             takeKeptFlips: () async throws -> [FfiFileProviderItem],
             item: (FfiFileProviderItem) -> NSFileProviderItem
         ) async {
+            let changes = try? await changesSince(anchor.rawValue)
+            var updated = changes?.updated ?? []
             let flipped = (try? await takeKeptFlips()) ?? []
-            if !flipped.isEmpty {
-                observer.didUpdate(flipped.map(item))
+            let reported = Set(updated.map { $0.rel })
+            updated += flipped.filter { !reported.contains($0.rel) }
+            if !updated.isEmpty {
+                observer.didUpdate(updated.map(item))
             }
-            observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+            if let deleted = changes?.deleted, !deleted.isEmpty {
+                observer.didDeleteItems(
+                    withIdentifiers: deleted.map { NSFileProviderItemIdentifier(rawValue: $0) })
+            }
+            let next = changes.map { NSFileProviderSyncAnchor(Data($0.anchor)) } ?? anchor
+            observer.finishEnumeratingChanges(upTo: next, moreComing: false)
         }
     }
 #endif

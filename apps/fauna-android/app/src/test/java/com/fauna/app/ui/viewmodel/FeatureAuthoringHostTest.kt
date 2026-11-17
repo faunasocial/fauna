@@ -13,6 +13,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * [FeatureAuthoringHost] over a fake editor — no Android, no native library.
@@ -48,6 +49,13 @@ class FeatureAuthoringHostTest {
             canRemove = true,
             hint = LocalizedText("features.editor_hint", emptyMap()),
         )
+
+        override fun savePossibility(): Possibility =
+            if (cellText.isBlank() || cellText.trim().first().isDigit()) {
+                Possibility.Possible
+            } else {
+                Possibility.Blocked(LocalizedText("features.editor_cell_invalid", emptyMap()))
+            }
 
         override fun setOn(on: Boolean) {
             currentOn = on
@@ -130,6 +138,22 @@ class FeatureAuthoringHostTest {
         f.host.setOn(false)
         assertEquals(false, f.host.state.value.view!!.on)
         assertEquals(emptyList<FfiEditorCell>(), f.host.state.value.view!!.cells)
+    }
+
+    /** Save's paint follows the shared draft's own validity, re-read with each
+     *  keystroke (`ui/README.md` § Offer only what is possible, rule 4). */
+    @Test
+    fun theSaveAnswerFollowsTheSharedDraftOnEveryKeystroke() {
+        val f = Fixture()
+        f.host.open("payments")
+        assertEquals(Possibility.Possible, f.host.state.value.saveAnswer)
+        f.host.setCell(0, "lots")
+        val blocked = f.host.state.value.saveAnswer as Possibility.Blocked
+        assertEquals("features.editor_cell_invalid", blocked.reason.key)
+        f.host.setCell(0, "5 GB")
+        assertEquals(Possibility.Possible, f.host.state.value.saveAnswer)
+        f.host.cancel()
+        assertEquals(Possibility.Possible, f.host.state.value.saveAnswer)
     }
 
     @Test

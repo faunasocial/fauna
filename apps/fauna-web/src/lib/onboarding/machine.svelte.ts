@@ -29,6 +29,7 @@ import {
   deletePendingInvite,
 } from './pending-invite-store';
 import { logMessage, type NestRulesSummaryValue } from '#lib/wasm';
+import type { Possibility } from '#lib/possibility';
 import { commitConfirmedIdentity as commitIdentity } from './identity-commit';
 import { setNestDialOverride } from '#lib/api';
 
@@ -98,6 +99,8 @@ export type RegistrarAvailability =
 export interface DnsZone {
   id: string;
   name: string;
+  /** Filled by a zone-door provider (Hetzner, Cloudflare); empty otherwise. */
+  nameservers?: string[];
 }
 
 export interface DnsConfigState {
@@ -157,7 +160,7 @@ export interface VpsConfigState {
  * from `#lib/generated/providers.ts`'s `FieldMeta` (which is the static
  * registry shape with camelCase + a richer field set). */
 export type FieldTypePlain = 'Text' | 'Secret' | 'Select' | 'HostedAuth';
-export type CapabilityPlain = 'Dns' | 'Vps' | 'Registrar';
+export type CapabilityPlain = 'Dns' | 'Vps' | 'Registrar' | 'Zone';
 
 /** Which credential form a `hosted-auth` field is being driven on — mirrors
  * `fauna_onboarding_machine::state::CredentialForm`. The two forms hold
@@ -203,6 +206,46 @@ export type LoginPhase =
 export interface LocalizedText {
   key: string;
   args: Record<string, string>;
+}
+
+// ── The choose-providers page (`onboarding-provisioning.md` § 3d) ──
+//
+// Mirrors `fauna_onboarding_machine::state::{ProviderGoal, GoalCover,
+// ProviderRow, GoalRow, HeldProviderCredential}` as the wasm `*Json` getters
+// serialize them (serde's default enum forms).
+export type ProviderGoal = 'Domain' | 'Dns' | 'Vps';
+export type GoalCover = 'Manual' | { Provider: { provider_id: string } };
+
+export interface ProviderRow {
+  provider_id: string;
+  capabilities: CapabilityPlain[];
+  connected: boolean;
+  connecting: boolean;
+  held: boolean;
+  /** The provider's own error from the last failed *Connect*. */
+  error: string | null;
+  domain_reason: LocalizedText | null;
+  dns_reason: LocalizedText | null;
+  vps_reason: LocalizedText | null;
+}
+
+export interface GoalRow {
+  goal: ProviderGoal;
+  /** `null` = open. */
+  cover: GoalCover | null;
+  /** Connected providers that can cover the goal; a choice when > 1. */
+  candidates: string[];
+  price_cents: number | null;
+  renewal_cents: number | null;
+  currency: string | null;
+  note: LocalizedText | null;
+}
+
+/** A credential a signed-in account on this device holds in its DNS record,
+ *  passed INTO the machine (§ 3d *Held credentials*). */
+export interface HeldProviderCredential {
+  provider_id: string;
+  fields: Record<string, string>;
 }
 
 // ── HandleCheck snapshot ──
@@ -393,6 +436,8 @@ export type OverallStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Cance
 export type SubstepKey =
   | 'DomainCheckingAvailability'
   | 'DomainRegistering'
+  | 'DomainCreatingZone'
+  | 'DomainSettingNameservers'
   | 'DomainVerifyingZone'
   | 'ServerGeneratingDkim'
   | 'ServerCreating'
@@ -411,7 +456,8 @@ export type SkipReason =
   | 'ServerAlreadyExists'
   | 'DnsRecordAlreadyExists'
   | 'PtrAlreadySet'
-  | 'NestAlreadyOnline';
+  | 'NestAlreadyOnline'
+  | 'DomainAlreadyRegistered';
 
 export interface StepSnapshot {
   kind: ProvisionStep;
@@ -548,15 +594,15 @@ export interface Machine {
   canVerifyDns(): boolean;
   canContinueDns(): boolean;
   canVerifyVps(): boolean;
-  canContinueVps(): boolean;
-  /** The reason `vps-config-continue-button` is disabled, or `undefined`
-   * when it's live. A disabled control owes the user a reason
-   * (`ui/README.md` § Copy comprehensibility rule 5). */
-  vpsContinueBlockedReason(): LocalizedText | undefined;
-  /** The reason `provisioning-continue-button` is disabled, or `undefined`
-   * when it's live — the four `○` step glyphs are a symbol, not a reason
-   * (`ui/README.md` rule 5). */
-  provisioningContinueBlockedReason(): LocalizedText | undefined;
+  /** `vps-config-continue-button`'s answer from the shared machine
+   * (`vps_continue_possibility`; `ui/README.md` § Offer only what is
+   * possible, rule 6): enabled, or disabled with the reason to paint beside
+   * it. The page never pairs its own condition with a reason getter. */
+  vpsContinuePossibility(): Possibility;
+  /** `provisioning-continue-button`'s answer (`provisioning_continue_possibility`)
+   * — the four `○` step glyphs are a symbol, not a reason (rule 5), so a
+   * blocked answer carries the line to paint. */
+  provisioningContinuePossibility(): Possibility;
   // Typed JSON helpers (Proxy-supplied)
   dnsConfig(): DnsConfigState;
   vpsConfig(): VpsConfigState;
@@ -918,6 +964,43 @@ export interface Machine {
    * already a working default) and returns `"Done"` with a `LoggedIn`
    * outcome — there is no resume slot to persist and no unresolved state. */
   deferNatModeChoice(): string;
+  // ── Choose providers (onboarding-provisioning.md § 3d) ──
+  //
+  // App capability declaration, called once at construction (below): the
+  // handle check lands on `provider_choice` and Back from `nest_provisioning`
+  // returns there. Every rule of the page is the machine's; these are its
+  // getters and presses.
+  setRendersProviderChoice(renders: boolean): void;
+  goalRows(): GoalRow[];
+  providerRows(): ProviderRow[];
+  canOfferBuyDomain(): boolean;
+  providerGoalDomain(): string;
+  visibleProviderFields(providerId: string): FieldMeta[];
+  setProviderCred(providerId: string, fieldId: string, value: string): void;
+  canConnectProvider(providerId: string): boolean;
+  connectProvider(providerId: string): Promise<void>;
+  disconnectProvider(providerId: string): void;
+  /** Credentials signed-in accounts hold; each is re-checked by the machine. */
+  seedHeldProviderCredentials(held: HeldProviderCredential[]): Promise<void>;
+  selectGoalCover(goal: ProviderGoal, cover: GoalCover): void;
+  /** `undefined` while Continue is live. */
+  providersContinueBlockedReason(): LocalizedText | undefined;
+  continueFromProviders(): void;
+  /** The registry's note key, `undefined` when none shows. */
+  providerRegistrarNotesKey(providerId: string): string | undefined;
+  providerShowsContactForm(providerId: string): boolean;
+  providerContact(providerId: string): ContactInfo | undefined;
+  setProviderContact(providerId: string, contact: ContactInfo): void;
+  providerHostedAuthBegin(providerId: string, fieldId: string): Promise<HostedAuthPrompt>;
+  providerHostedAuthWait(providerId: string, fieldId: string): Promise<void>;
+  providerHostedAuthState(providerId: string, fieldId: string): HostedAuthState;
+  providerHostedAuthCanBegin(providerId: string, fieldId: string): boolean;
+  /** `nest_provisioning`'s choices region shows (set-up path, run not live). */
+  provisioningChoicesVisible(): boolean;
+  /** Why *Buy and set up* is dead on the set-up path; `undefined` when live. */
+  provisioningStartBlockedReason(): LocalizedText | undefined;
+  /** `nest_provisioning` was entered from the choose-providers page. */
+  provisioningBackToProviders(): boolean;
   // ── One-tap "trust this box" offer (onboarding.md § 3b-ter) ──
   //
   // App capability declaration, called once at construction (below) — see
@@ -1033,8 +1116,10 @@ const TYPED_JSON_HELPERS = new Set([
   'claimCodeSnapshot', 'natModeSnapshot', 'awaitingManualDnsSnapshot',
   'wizardOutcome', 'identityOrigin', 'dnsStatusTextKey',
   'providerStatus', 'provisioningSnapshot', 'billOfMaterials',
-  'vpsContinueBlockedReason', 'provisioningContinueBlockedReason',
+  'vpsContinuePossibility', 'provisioningContinuePossibility',
   'sshDoorReadout',
+  'goalRows', 'providerRows', 'providersContinueBlockedReason',
+  'provisioningStartBlockedReason',
 ]);
 const JSON_GETTER_FOR: Record<string, string> = {
   dnsConfig: 'dnsConfigJson',
@@ -1053,9 +1138,13 @@ const JSON_GETTER_FOR: Record<string, string> = {
   providerStatus: 'providerStatus',
   provisioningSnapshot: 'provisioningSnapshot',
   billOfMaterials: 'billOfMaterials',
-  vpsContinueBlockedReason: 'vpsContinueBlockedReasonJson',
-  provisioningContinueBlockedReason: 'provisioningContinueBlockedReasonJson',
+  vpsContinuePossibility: 'vpsContinuePossibilityJson',
+  provisioningContinuePossibility: 'provisioningContinuePossibilityJson',
   sshDoorReadout: 'sshDoorReadoutJson',
+  goalRows: 'goalRowsJson',
+  providerRows: 'providerRowsJson',
+  providersContinueBlockedReason: 'providersContinueBlockedReasonJson',
+  provisioningStartBlockedReason: 'provisioningStartBlockedReasonJson',
 };
 
 // `m.step()` on the wasm-bindgen surface returns the Rust `Debug` name
@@ -1177,6 +1266,11 @@ export async function initOnboardingMachine(): Promise<Machine> {
         // identity routes through the kit screen. The declaration and the
         // page's two steps land together.
         _machine.setRendersRecoveryKit(true);
+        // web renders the `provider_choice` page (`onboarding-provisioning.md`
+        // § 3d; tui led): the handle check lands there in place of
+        // `dns_config` → `vps_config`, and Back from `nest_provisioning`
+        // returns to it. `vps_config` stays for cloud recovery alone.
+        _machine.setRendersProviderChoice(true);
         return _machine;
       })
       .catch((e) => {
@@ -1471,6 +1565,59 @@ function wrapMachine(inner: object): Machine {
           const raw = fn(providerId);
           if (raw === undefined || raw === null || raw === '') return undefined;
           return JSON.parse(raw);
+        };
+      }
+      // The choose-providers page's argument-taking getters and setters: the
+      // wasm surface speaks JSON strings (an empty string for `None`), the
+      // typed surface objects — same convention as the arms around them.
+      if (prop === 'visibleProviderFields') {
+        return (providerId: string) => {
+          const fn = (target as Record<string, (id: string) => string>).visibleProviderFieldsJson.bind(target);
+          const raw = fn(providerId);
+          return raw ? JSON.parse(raw) : [];
+        };
+      }
+      if (prop === 'providerContact') {
+        return (providerId: string) => {
+          const fn = (target as Record<string, (id: string) => string>).providerContactJson.bind(target);
+          const raw = fn(providerId);
+          return raw ? JSON.parse(raw) : undefined;
+        };
+      }
+      if (prop === 'setProviderContact') {
+        return (providerId: string, contact: ContactInfo) => {
+          const fn = (target as Record<string, (id: string, c: string) => void>).setProviderContact.bind(target);
+          fn(providerId, JSON.stringify(contact));
+        };
+      }
+      if (prop === 'providerRegistrarNotesKey') {
+        return (providerId: string) => {
+          const fn = (target as Record<string, (id: string) => string>).providerRegistrarNotesKey.bind(target);
+          return fn(providerId) || undefined;
+        };
+      }
+      if (prop === 'selectGoalCover') {
+        return (goal: string, cover: unknown) => {
+          const fn = (target as Record<string, (g: string, c: string) => void>).selectGoalCover.bind(target);
+          fn(goal, JSON.stringify(cover));
+        };
+      }
+      if (prop === 'seedHeldProviderCredentials') {
+        return (held: unknown[]) => {
+          const fn = (target as Record<string, (h: string) => Promise<void>>).seedHeldProviderCredentials.bind(target);
+          return fn(JSON.stringify(held));
+        };
+      }
+      if (prop === 'providerHostedAuthBegin') {
+        return async (providerId: string, fieldId: string) => {
+          const fn = (target as Record<string, (p: string, id: string) => Promise<string>>).providerHostedAuthBegin.bind(target);
+          return JSON.parse(await fn(providerId, fieldId));
+        };
+      }
+      if (prop === 'providerHostedAuthState') {
+        return (providerId: string, fieldId: string) => {
+          const fn = (target as Record<string, (p: string, id: string) => string>).providerHostedAuthStateJson.bind(target);
+          return JSON.parse(fn(providerId, fieldId));
         };
       }
       // hostedAuthBegin: async, takes (form, fieldId) — the wasm surface

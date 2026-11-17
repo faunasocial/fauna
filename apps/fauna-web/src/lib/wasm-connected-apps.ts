@@ -202,7 +202,14 @@ export interface ConnectedAppRow {
   trust?: PrincipalTrust | null;
 }
 
-export type TrustScopeTuple = { class: string; kind: string | null; tier: string | null };
+/** One scope tuple (`fauna_client_pair::TrustScope`); `folder` names a
+ *  keyless `deposit` tuple's folder, absent on every other tuple. */
+export type TrustScopeTuple = {
+  class: string;
+  kind: string | null;
+  tier: string | null;
+  folder?: TrustFolderRef | null;
+};
 /** The folder a folder read grant covers (`fauna_client_pair::TrustFolder`). */
 export type TrustFolderRef = { Named: { name: string } } | 'Deleted';
 

@@ -123,12 +123,6 @@ fn muted_keywords_weight(composition: &[FeedCompositionEntry]) -> i64 {
     }
 }
 
-/// The poll step of the muted-words read's wait for an account store still
-/// opening (`FeedManager::muted_words_and_factors_settled`), inside
-/// [`fauna_client_config::LEDGER_READY_WAIT`] — the step the store seam's own
-/// waiting reads use.
-const PREFERENCES_READY_POLL: std::time::Duration = std::time::Duration::from_millis(100);
-
 /// How often [`FeedManager::hydrate_cues`] re-reads the e2e cue-hydration hold
 /// while it is held, and how many reads it waits at most: 3000 × 200 ms = 600 s.
 const CUE_HYDRATION_HOLD_POLL: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1068,22 +1062,39 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         ),
         fauna_client_config::StoreError,
     > {
-        let polls =
-            fauna_client_config::LEDGER_READY_WAIT.as_millis() / PREFERENCES_READY_POLL.as_millis();
-        for _ in 0..polls {
-            match self.muted_words_and_factors().await {
-                Err(
-                    fauna_client_config::StoreError::Load(m)
-                    | fauna_client_config::StoreError::Save(m),
-                ) if m == fauna_client_config::LEDGER_NOT_READY => {}
-                answer => return answer,
-            }
+        // The unit tests' single-poll executor has no timer; there the bound
+        // never passes and the poll count below ends the wait.
+        #[cfg(not(test))]
+        let deadline = fauna_sleep::sleep(fauna_client_config::LEDGER_READY_WAIT);
+        #[cfg(test)]
+        let deadline = std::future::pending::<()>();
+        self.muted_words_and_factors_within(deadline).await
+    }
+
+    /// [`Self::muted_words_and_factors_settled`]'s wait, bounded by `deadline`
+    /// — one bound, never one per read
+    /// ([`fauna_client_config::wait_out_not_ready`] says why).
+    async fn muted_words_and_factors_within(
+        &self,
+        deadline: impl std::future::Future<Output = ()>,
+    ) -> Result<
+        (
+            Vec<fauna_core::data::MutedKeyword>,
+            Vec<fauna_core::data::TrainedFactorMeta>,
+        ),
+        fauna_client_config::StoreError,
+    > {
+        fauna_client_config::wait_out_not_ready(
+            deadline,
             // The unit tests' single-poll executor has no timer; there each
             // poll re-reads at once, which is the loop under test.
-            #[cfg(not(test))]
-            fauna_sleep::sleep(PREFERENCES_READY_POLL).await;
-        }
-        self.muted_words_and_factors().await
+            || async {
+                #[cfg(not(test))]
+                fauna_sleep::sleep(fauna_client_config::LEDGER_READY_POLL).await;
+            },
+            || self.muted_words_and_factors(),
+        )
+        .await
     }
 
     /// The installed period-key store, or why there is none.
@@ -10468,6 +10479,34 @@ mod tests {
         assert_eq!(snap.status, FeedStatus::Loaded, "the posts still load");
         assert_eq!(snap.posts.len(), 2);
         assert!(snap.error.is_some(), "the filters are off, and it says so");
+    }
+
+    /// The wait is ONE bound, never a bound per read: once the bound has
+    /// passed, no read starts again. Each read of a never-listed replica crosses
+    /// the first-listing gate and may itself wait out the gate's own bound, so a
+    /// wait counted in reads rather than in time added those bounds up — a
+    /// relaunch with no nest held its feed reload, and with it tui's agent,
+    /// for minutes, and the needs-the-nest refusal never painted.
+    #[test]
+    fn a_store_still_not_ready_at_the_bound_is_not_read_again() {
+        let nest = MockNest::arc();
+        nest.preferences
+            .not_ready_reads
+            .store(1_000, Ordering::SeqCst);
+        let m = mgr(nest.clone());
+
+        let answer = block_on(m.muted_words_and_factors_within(std::future::ready(())));
+
+        assert!(
+            answer.as_ref().is_err_and(|e| e.is_not_ready()),
+            "a store still not ready at the bound answers not-ready, got {:?}",
+            answer.map(|_| ()),
+        );
+        assert_eq!(
+            nest.preferences.not_ready_reads.load(Ordering::SeqCst),
+            999,
+            "the read in flight when the bound passed is the last one",
+        );
     }
 
     #[test]

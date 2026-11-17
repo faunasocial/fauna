@@ -14,6 +14,7 @@ extension Capability {
         case .dns: return .dns
         case .vps: return .vps
         case .registrar: return .registrar
+        case .zone: return .zone
         }
     }
 }

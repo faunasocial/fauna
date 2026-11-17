@@ -38,6 +38,9 @@ import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.navigation.profileRoute
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.ffi.FfiAddressbookRow
 import com.fauna.ffi.FfiCardRow
 import com.fauna.app.ui.viewmodel.ContactOverlaysVM
@@ -108,7 +111,10 @@ fun ContactsScreen(
     val knockAsk by vm.knockAsk.collectAsState()
     val wardContactRequests by vm.wardContactRequests.collectAsState()
     val knockError by vm.knockError.collectAsState()
-    val askRender = remember(knockAsk, wardContactRequests) { vm.contactAskRenderFor(knockAsk) }
+    val wardSupervision by vm.wardSupervision.collectAsState()
+    val askRender = remember(knockAsk, wardContactRequests, wardSupervision, contacts) {
+        vm.contactAskRenderFor(knockAsk)
+    }
     LaunchedEffect(knockError) {
         appMessages.showError(knockError)
     }
@@ -252,9 +258,15 @@ fun ContactsScreen(
                                 // (tui's `knock_sent`), never optimistically.
                                 val sent = knockAsk.peer == resolved.actorId && knockAsk.knockSent
                                 val inFlight = knockAsk.peer == resolved.actorId && knockAsk.knockInFlight
+                                // The ward's entry gate (contacts.md § Errors &
+                                // edge cases): the shared knock predicate over
+                                // the ward's supervision and this peer's roster edge.
+                                val knockAnswer = remember(wardSupervision, contacts, resolved.actorId) {
+                                    vm.knockAnswerFor(resolved.actorId)
+                                }
                                 Button(
                                     onClick = { vm.addContact(resolved.actorId, resolved.nestUrl) },
-                                    enabled = !sent && !inFlight,
+                                    enabled = !sent && !inFlight && knockAnswer.isPossible,
                                     modifier = Modifier.testTag(Ids.CONTACTS_ADD_BUTTON)
                                 ) {
                                     Text(stringResource(if (sent) R.string.contacts_sent else R.string.contacts_knock))
@@ -277,6 +289,12 @@ fun ContactsScreen(
                                         Text(stringResource(R.string.contacts_find_user_open_profile))
                                     }
                                 }
+                            }
+                            if (!knockAsk.knockSent) {
+                                DisabledControlReasonText(
+                                    localized(vm.knockAnswerFor(resolved.actorId).blockedReason),
+                                    modifier = Modifier.align(Alignment.End),
+                                )
                             }
                             // The pair belongs to the peer this lookup found
                             // (`knockAsk.peer`), never a previous result's.
@@ -569,6 +587,12 @@ private fun KnockItem(knock: Knock, senderLabel: String, vm: ContactsVM) {
     // family-safety.md § App surface) — the shared rule over the ward's own
     // status policy, no per-knock wire field.
     val awaitsGuardian by vm.knocksAwaitGuardian.collectAsState()
+    // Accept is blocked while the guardian decides knocks (or the status read
+    // is unresolved) — the shared accept_possibility; its reason is the
+    // `knock-guardian-pending` line the row already paints. Block and dismiss
+    // stay the ward's.
+    val supervision by vm.wardSupervision.collectAsState()
+    val acceptAnswer = remember(supervision) { vm.acceptAnswer() }
     ListItem(
         headlineContent = {
             Text(senderLabel, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -605,6 +629,7 @@ private fun KnockItem(knock: Knock, senderLabel: String, vm: ContactsVM) {
                     modifier = Modifier.padding(top = 4.dp)
                 ) {
                     TextButton(onClick = { vm.acceptKnock(knock.sender) },
+                        enabled = acceptAnswer.isPossible,
                         modifier = Modifier.testTag(Ids.CONTACTS_ACCEPT_BUTTON)) {
                         Text(stringResource(R.string.common_accept))
                     }

@@ -231,6 +231,17 @@ public partial class MainViewModel : ObservableObject
     /// it impossible for the indicator a user reads and the gate that greys their
     /// controls to disagree — and the word comes from the shared
     /// <c>ConnectionStateWord</c> export, never a C# switch over the enum.</para>
+    /// <para>The same word goes to the device's offline outbox
+    /// (<c>account-offline-mutation.md</c> § The offline-mutation contract), so a
+    /// control the gate keeps live offline is exactly a control whose gesture the
+    /// shared composer queues: a like tapped with no nest is kept in the account
+    /// store and sent when the nest is back. It goes to the process-level
+    /// <c>SetDeviceConnectionWord</c>, not through the Feed page's manager: the
+    /// outbox is one per process, and a word only a manager relayed would stay at
+    /// the outgoing client's last <c>disconnected</c> across an account change —
+    /// apple's <c>ConnectionWordFeed</c> and linux's
+    /// <c>offline_outbox::set_connection_state</c> are the twins. A manager built
+    /// before the first word is lent the outbox by <c>FeedManagerHost</c>.</para>
     private void OnConnectionStateChanged(FfiConnectionState state)
     {
         if (_detached) return;
@@ -238,7 +249,9 @@ public partial class MainViewModel : ObservableObject
         // `connection_reports` stickiness counter (a no-op outside e2e builds).
         E2eLoudSurfaces.ObserveConnectionReport(state);
         ConnectionStatus = Strings.Resolve(FaunaFfiMethods.ConnectionStateLabel(state));
-        OfflineGate.Shared.SetConnectionState(FaunaFfiMethods.ConnectionStateWord(state));
+        var word = FaunaFfiMethods.ConnectionStateWord(state);
+        OfflineGate.Shared.SetConnectionState(word);
+        FaunaFfiMethods.SetDeviceConnectionWord(word);
     }
 
     [RelayCommand]

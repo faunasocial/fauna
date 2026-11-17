@@ -60,12 +60,12 @@ Stamped 2026-11-07 at ac836c937b.
 | App | Status | Stamp |
 |---|---|---|
 | web | ✅ full | 0.1.5 docker |
-| linux | ✅ full | 0.1.6 docker |
-| windows | 🚧 unbuilt | 0.1.6 docker |
+| linux | ✅ full | 0.1.6-dev+5c83561c standalone |
+| windows | ✅ full | 0.1.6-dev+ef3fcb6a standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6 docker |
+| ios | ✅ full | 0.1.6-dev+ef3fcb6a standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6 docker |
+| tui | ✅ full | 0.1.6-dev+89d36747 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -87,6 +87,6 @@ Stamped 2026-11-07 at ac836c937b.
 | 9 | nest | `tests/e2e-unified/tests/api/test_web_folder_serving_switches.py::test_public_refuses_webdav_and_a_paywall_whichever_moves_second` | nest (linux): passed, nest (macos): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_web_folder_serving_switches.py::test_an_executable_file_is_never_served_however_it_got_into_the_folder` | nest (linux): passed, nest (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_folder_audience_reconfirm.py::test_an_unattested_public_folder_is_healed_by_the_owners_reconfirm` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 12 | app | `tests/e2e-unified/tests/test_folder_audience_control.py::test_a_public_website_folder_browses_in_media` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 12 | app | `tests/e2e-unified/tests/test_folder_audience_control.py::test_a_folder_can_be_created_already_public` — requires `folder-create-public` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_folder_audience_control.py::test_a_public_website_folder_browses_in_media` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_folder_audience_control.py::test_a_folder_can_be_created_already_public` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

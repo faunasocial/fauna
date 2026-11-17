@@ -5,6 +5,7 @@
 //! machine is the only writer of the snapshot; the UI is read-only.
 
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use fauna_core::secret::SecretBytes;
 use serde::{Deserialize, Serialize};
 
@@ -138,6 +139,16 @@ pub struct MailSettingsSnapshot {
     /// [`hydrate`]: crate::MailSettingsMachine::hydrate
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub mail_unavailable_here: bool,
+    /// The first [`hydrate`] has resolved: [`Self::enabled`] and
+    /// [`Self::mail_unavailable_here`] are the nest's answer, not the
+    /// never-read defaults. A failed hydrate leaves it `false` (its error rides
+    /// [`Self::error`]). Folded by [`Self::mail_usable`] — `ui/README.md`
+    /// § Offer only what is possible, rule 5: unknown is not possible.
+    ///
+    /// [`hydrate`]: crate::MailSettingsMachine::hydrate
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub read: bool,
     /// One entry per `MailConfig::credentials`. Order matches
     /// `MailConfig::credentials` so the per-app UI can use
     /// `connected-apps-item[N]` indexing without
@@ -172,6 +183,67 @@ pub struct MailSettingsSnapshot {
 /// Exists so that a snapshot field added later doesn't collide across every
 /// branch that hand-lists the struct: struct-update fixtures grow cleanly where
 /// exhaustive ones conflict on the grown axis.
+impl MailSettingsSnapshot {
+    /// Whether mail is usable for this account **now** — the one predicate
+    /// every mail sub-page (aliases, spam, export, import, lists, list members)
+    /// and its settings rail row is gated on at its entry
+    /// (`docs/goal/ui/mail-settings.md` § Errors & edge cases, the mail-usable
+    /// gate; `ui/README.md` § Offer only what is possible, rules 2, 4 and 6).
+    ///
+    /// - this box can never enable mail ([`Self::mail_unavailable_here`]) →
+    ///   [`Possibility::Absent`]: no step on this app makes it true;
+    /// - the first read has not resolved ([`Self::read`]) → blocked, waiting
+    ///   (rule 5);
+    /// - mail is off ([`Self::enabled`]) → blocked, naming the one step that
+    ///   unblocks it: the Mail & Calendar page's toggle (rule 3);
+    /// - otherwise possible.
+    ///
+    /// The unavailable arm is checked first: a read that resolved with the box
+    /// unable to serve mail must never offer the person a toggle that cannot
+    /// succeed.
+    pub fn mail_usable(&self) -> Possibility {
+        if self.mail_unavailable_here {
+            return Possibility::Absent;
+        }
+        if !self.read {
+            return Possibility::blocked(LocalizedText::key("mail_settings.usable_reading"));
+        }
+        if !self.enabled {
+            return Possibility::blocked(LocalizedText::key("mail_settings.usable_needs_mail_on"));
+        }
+        Possibility::Possible
+    }
+}
+
+/// [`MailSettingsSnapshot::mail_usable`] over FFI: a UniFFI record carries no
+/// methods, so the six app families read the predicate through this one
+/// function (the [`settings_status_label`] shape).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_settings_mail_usable(snapshot: MailSettingsSnapshot) -> Possibility {
+    snapshot.mail_usable()
+}
+
+/// [`MailSettingsSnapshot::mail_usable`] for an app holding no mail machine at
+/// all — its build failed (an undecodable secret), so nothing about mail can
+/// succeed on this device until it is rebuilt. Blocked, never absent: signing
+/// in again rebuilds the machine (`ui/README.md` § Offer only what is
+/// possible, rule 7 — a build failure is never left as silent controls).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_usable_unbuilt() -> Possibility {
+    Possibility::blocked(LocalizedText::key("mail_settings.usable_unbuilt"))
+}
+
+/// [`MailSettingsSnapshot::mail_usable`] for an app that has not built its mail
+/// machine YET — the build is under way (an app whose nest connection is
+/// asynchronous, the apple apps' `APIClient.mailSettingsMachine()`), so nothing
+/// has been read: the never-read default's answer, blocked while waiting
+/// (`ui/README.md` § Offer only what is possible, rule 5). Exported so such an
+/// app paints that answer instead of spelling the reason itself.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_usable_unread() -> Possibility {
+    MailSettingsSnapshot::default().mail_usable()
+}
+
 impl Default for MailSettingsSnapshot {
     fn default() -> Self {
         Self {
@@ -188,6 +260,7 @@ impl Default for MailSettingsSnapshot {
             // Nest-sourced (`fauna.setup.status`); refreshed on the first
             // `hydrate`.
             mail_unavailable_here: false,
+            read: false,
             credentials: Vec::new(),
             pending_rotation: None,
             mua: MuaInstructions::placeholder(),
@@ -697,6 +770,83 @@ pub enum MailSettingsAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reason_key(p: &Possibility) -> Option<&str> {
+        p.reason().map(|r| r.key.as_str())
+    }
+
+    #[test]
+    fn mail_usable_is_unknown_until_the_first_read() {
+        // The never-read default reads "mail off" — it must not be offered as
+        // if the nest had said so, nor enabled on a guess (rule 5).
+        let snap = MailSettingsSnapshot::default();
+        assert_eq!(
+            reason_key(&snap.mail_usable()),
+            Some("mail_settings.usable_reading")
+        );
+        let on_but_unread = MailSettingsSnapshot {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(!on_but_unread.mail_usable().is_possible());
+    }
+
+    #[test]
+    fn mail_usable_names_the_toggle_when_mail_is_off() {
+        let snap = MailSettingsSnapshot {
+            read: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            reason_key(&snap.mail_usable()),
+            Some("mail_settings.usable_needs_mail_on")
+        );
+    }
+
+    #[test]
+    fn mail_usable_is_possible_once_read_and_on() {
+        let snap = MailSettingsSnapshot {
+            read: true,
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(snap.mail_usable(), Possibility::Possible);
+        assert_eq!(mail_settings_mail_usable(snap), Possibility::Possible);
+    }
+
+    #[test]
+    fn mail_usable_is_absent_on_a_box_that_can_never_serve_mail() {
+        // Read or not, on or not: no step on this app makes it true.
+        for (read, enabled) in [(false, false), (true, false), (true, true)] {
+            let snap = MailSettingsSnapshot {
+                read,
+                enabled,
+                mail_unavailable_here: true,
+                ..Default::default()
+            };
+            assert_eq!(snap.mail_usable(), Possibility::Absent);
+        }
+    }
+
+    #[test]
+    fn a_machine_not_built_yet_reads_as_unread() {
+        assert_eq!(
+            mail_usable_unread(),
+            MailSettingsSnapshot::default().mail_usable()
+        );
+        assert_eq!(
+            reason_key(&mail_usable_unread()),
+            Some("mail_settings.usable_reading")
+        );
+    }
+
+    #[test]
+    fn an_unbuilt_machine_is_blocked_with_its_reason_never_absent() {
+        assert_eq!(
+            reason_key(&mail_usable_unbuilt()),
+            Some("mail_settings.usable_unbuilt")
+        );
+    }
 
     /// A listener the nest did not declare (an older nest, or no hatch): the
     /// host-name split decides.

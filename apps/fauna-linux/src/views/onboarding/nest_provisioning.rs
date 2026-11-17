@@ -25,6 +25,8 @@
 //! `provisioning-substep`, `provisioning-step-error`.
 //!
 //! Entry: the wizard transitions to `OnboardingStep::NestProvisioning`
+//! from the choose-providers page's Continue (`onboarding-provisioning.md`
+//! § 3d — the choices region and the price confirm then show here) or
 //! after `continue_from_vps()` succeeds. The user lands with `overall ==
 //! Idle` and reviews the price summary at the top, then clicks the
 //! `provisioning-start-button` ("Buy and set up") to actually kick the
@@ -36,7 +38,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
-use gtk::{Box, Button, Label, Orientation};
+use fauna_core::possibility::Possibility;
+use gtk::{Box, Button, CheckButton, Label, Orientation};
 
 use crate::i18n::resolve_key as resolve;
 use crate::testid::set_test_id;
@@ -154,7 +157,8 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
     // Pre-commit recap of up to two priced line items from
     // `bill_of_materials()`: the domain's one-time registration price
     // (only when buying a new domain) and the selected VPS's monthly
-    // price (always present once vps_config's Continue has been taken).
+    // price (once a server type is chosen — on vps_config, or as the default
+    // the choose-providers page's Continue writes).
     // Pure computation over already-in-state DNS/VPS data — no IO, so the
     // refresh closure below just re-derives it every tick like everything
     // else on this page (onboarding.md §6).
@@ -171,6 +175,27 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
     bom_domain_line.set_visible(false);
     price_bom.append(&bom_domain_line);
 
+    // On a run entered from the choose-providers page the price is agreed
+    // here, at the purchase: the confirm sits directly under the domain line
+    // and gates *Buy and set up* (`onboarding-provisioning.md` § 3d *The
+    // choices on the setting-things-up page*). Its label is § 4's, unchanged.
+    // A repaint's `set_active` must not read as the person agreeing, so the
+    // handler stands down while the refresh syncs it.
+    let price_confirm = CheckButton::with_label(&resolve("registrar.price_confirm"));
+    set_test_id(&price_confirm, ids::DNS_PRICE_CONFIRM_CHECKBOX);
+    price_confirm.set_visible(false);
+    let price_syncing = Rc::new(Cell::new(false));
+    {
+        let m = m.clone();
+        let price_syncing = price_syncing.clone();
+        price_confirm.connect_toggled(move |b| {
+            if !price_syncing.get() && b.is_active() {
+                m.confirm_price();
+            }
+        });
+    }
+    price_bom.append(&price_confirm);
+
     let bom_vps_line = Label::new(None);
     bom_vps_line.set_halign(gtk::Align::Start);
     set_test_id(&bom_vps_line, ids::PROVISIONING_BOM_VPS_LINE);
@@ -178,6 +203,21 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
     price_bom.append(&bom_vps_line);
 
     root.append(&price_bom);
+
+    // -- The choices region: location, server type, mail mode, update channel,
+    // SSH door — between the price summary and the start button, every one
+    // with a default, only on a run entered from the choose-providers page
+    // that has not started (`provisioning_choices_visible()`). The same
+    // widgets `vps_config` shows (§ 5's rules apply wherever they are shown).
+    let choices = super::vps_config::build_choices(m.clone());
+    let choices_region = Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(8)
+        .build();
+    choices_region.append(&choices.provider_part);
+    choices_region.append(&choices.channel_box);
+    choices_region.set_visible(false);
+    root.append(&choices_region);
 
     // -- By-continuing terms notice: below the price recap, before the charge
     // (Buy and set up is the acceptance gesture; onboarding-provisioning.md §6) --
@@ -204,6 +244,17 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
         });
     }
     root.append(&start_btn);
+
+    // Un-id'd chrome beneath the start button, rule 5: why *Buy and set up* is
+    // dead on a run entered from the choose-providers page (the price not
+    // agreed, no server type) — the machine's reason, painted by the seam.
+    let start_reason = Label::builder()
+        .visible(false)
+        .wrap(true)
+        .halign(gtk::Align::Start)
+        .css_classes(["dim-label"])
+        .build();
+    root.append(&start_reason);
 
     // -- Progress region: four step rows --
     let progress = Box::builder()
@@ -334,8 +385,30 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
         let bom_domain_line = bom_domain_line.clone();
         let bom_vps_line = bom_vps_line.clone();
         let ssh_door_command = ssh_door_command.clone();
+        let price_confirm = price_confirm.clone();
+        let start_reason = start_reason.clone();
         move || {
             let snap = m.provisioning_snapshot();
+
+            // The choices region and the price confirm (§ 3d): shown only on a
+            // run entered from the choose-providers page that has not started.
+            let choices_shown = m.provisioning_choices_visible();
+            choices_region.set_visible(choices_shown);
+            if choices_shown {
+                (choices.refresh)();
+            }
+            let cfg = m.dns_config();
+            price_confirm.set_visible(
+                choices_shown
+                    && m.bom_domain_line().is_some()
+                    && cfg.buy_domain
+                    && !cfg.set_up_later,
+            );
+            price_syncing.set(true);
+            if price_confirm.is_active() != cfg.price_agreed {
+                price_confirm.set_active(cfg.price_agreed);
+            }
+            price_syncing.set(false);
 
             // Bill-of-materials recap — pre-derived by the shared machine
             // (`resolve_nested`, not `resolve`: `{label}` carries the step's
@@ -368,17 +441,23 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
             // both Failed and soft-Cancelled (cancelled runs keep their
             // resources, retry resumes via idempotency).
             let overall = snap.overall;
-            start_btn.set_visible(overall.is_idle());
+            // *Buy and set up*: shown while idle, dead on a run entered from
+            // the choose-providers page while the machine names a reason.
+            let start_answer = if !overall.is_idle() {
+                Possibility::Absent
+            } else if m.provisioning_back_to_providers() {
+                Possibility::from_blocked_reason(m.provisioning_start_blocked_reason())
+            } else {
+                Possibility::Possible
+            };
+            crate::possible::paint(&start_btn, Some(&start_reason), start_answer);
             cancel_btn.set_visible(overall.is_running());
             retry_btn.set_visible(overall.can_retry());
-            continue_btn.set_sensitive(overall.can_continue());
-            match overall.continue_blocked_reason() {
-                Some(text) => {
-                    continue_reason.set_text(&text.resolve(crate::i18n::strings::lookup));
-                    continue_reason.set_visible(true);
-                }
-                None => continue_reason.set_visible(false),
-            }
+            crate::possible::paint(
+                &continue_btn,
+                Some(&continue_reason),
+                m.provisioning_continue_possibility(),
+            );
 
             // Elapsed: once started, show "Ns elapsed". When finished,
             // freeze on the finish time. The compute + i18n glue is

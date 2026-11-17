@@ -155,8 +155,9 @@ assistant up:
 
 Where it does act for you — posting, editing your profile — it never sees
 your key: your nest signs for it. Once it has posted, edited your profile or
-used your conversations for you, its row under **Connected apps** shows what
-it did most recently and how many such requests were answered in all.
+used your conversations for you, its row under **Connected apps** shows how
+many times Fauna acted for it in the current window, how many of its requests
+were answered in all, and what it did most recently.
 
 ## What the assistant's provider sees
 
@@ -173,8 +174,9 @@ account you mean to share.
 Open **Settings → Connected apps** in any of your Fauna apps. The row
 **Fauna for AI assistants** says what the assistant may reach, when it was
 last used, and — once it has posted, edited your profile or used your
-conversations for you — what it did most recently and how many such requests
-were answered in all.
+conversations for you — how many times Fauna acted for it in the current
+window, how many of its requests were answered in all, and what it did most
+recently.
 **Disconnect** on that row, confirm, and the very next thing the assistant
 tries is refused. Nothing on the assistant's side can undo that.
 

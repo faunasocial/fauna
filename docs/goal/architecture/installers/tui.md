@@ -34,7 +34,7 @@ These are constraints the existing goal docs already impose; they hold whichever
 
 ### A — ride the desktop packages
 
-`fauna-tui` joins the payload of each platform's existing package: `$PREFIX/bin/fauna-tui` in the five Linux methods (`install.sh`, `.deb`, Flatpak, Snap, AppImage), a component or an added binary in the macOS `.pkg` (Developer ID-signed and notarized with the rest), `fauna-tui.exe` in the Windows MSI (SignPath-signed with the rest) and, as the `store-safe` flavor, in the Store MSIX.
+`fauna-tui` joins the payload of each platform's existing package: `$PREFIX/bin/fauna-tui` in the five Linux methods (`install.sh`, `.deb`, Flatpak, Snap, AppImage), a component or an added binary in the macOS `.pkg` (Developer ID-signed and notarized with the rest), `fauna-tui.exe` in the Windows MSI (signed with the rest by the direct-download signer, [`windows.md`](windows.md) § Direct download (MSIX app + nest MSI)) and, as the `store-safe` flavor, in the Store MSIX.
 
 - For: opens no new public surface; inherits each package's signing, update path and uninstall; the sync agent is already in every one of those payloads, so the two-binary constraint is met for free; on macOS it is the only option here that gives the terminal app a stable Keychain identity.
 - Against: **does not serve the headless box** — the Linux packages install a GTK desktop app and its dependencies, and a Flatpak/Snap/AppImage sandbox is an awkward home for a terminal program launched over SSH; the terminal app on a server is the case the app was built for. Five Linux methods plus two Windows packages plus the `.pkg` is eight payload edits and eight places for the binary to drift.
@@ -44,7 +44,7 @@ These are constraints the existing goal docs already impose; they hold whichever
 `release.yml` gains `fauna-tui` and `fauna-sync-agent` in its build loop for the four targets it already builds (Linux x86_64 + aarch64, macOS x86_64 + aarch64) and the Windows job gains both arches; each pair is published to the GitHub Release as one archive per target, covered by the same `SHA256SUMS` and per-file cosign bundle as every other artifact. The user downloads, verifies, unpacks into a directory on `PATH`, and runs `fauna-tui`. A small `install.sh` in the archive (the Linux desktop leg's shape: copy two binaries into a prefix, `--uninstall` removes them) gives the witness test a real install step to run.
 
 - For: serves the headless box directly; rides a workflow, a signing scheme and a publication venue that already exist for the server binaries, so it is an extension of an existing channel rather than a new surface; one build definition for all three operating systems; ships the full flavor.
-- Against: no auto-update (the user re-downloads per release, as for the server binaries); on macOS the archive's binary is ad-hoc signed unless the macOS release job Developer ID-signs and notarizes it — without that, Gatekeeper quarantines a browser download and the Keychain re-prompts on each update; on Windows an unsigned `.exe` draws a SmartScreen warning unless it goes through the same SignPath signing as the MSI.
+- Against: no auto-update (the user re-downloads per release, as for the server binaries); on macOS the archive's binary is ad-hoc signed unless the macOS release job Developer ID-signs and notarizes it — without that, Gatekeeper quarantines a browser download and the Keychain re-prompts on each update; on Windows an unsigned `.exe` draws a SmartScreen warning unless it goes through the same signing as the MSI.
 
 ### C — a language-registry install (`cargo install`)
 
@@ -63,5 +63,5 @@ The witness, under any of these: `tests/e2e-unified/tests/artifact/test_tui_inst
 
 1. **Channel:** the recommendation — B (per-OS `fauna-tui` + `fauna-sync-agent` archives from `release.yml`) everywhere, plus the macOS `.pkg` and the Windows MSI carrying the same binary; C (`cargo install`) refused.
 2. **macOS archive signing:** Developer ID-signed and notarized before the macOS archive is published; no ad-hoc-signed interim.
-3. **Windows Store MSIX:** does not carry the terminal app.
+3. **Windows Store MSIX:** does not carry the terminal app. Neither does the direct-download MSIX bundle; the nest MSI keeps the Terminal App feature (design pass 2026-11-15, [`windows.md`](windows.md) § Direct download → *3. The terminal app*).
 4. **The cli app's `fauna-cli` rides the same channel as the archive's third member (recommended and built 2026-10-18; ratified by the owner 2026-10-20, as recommended):** the archive carries it, `install.sh` installs and removes it, and the `.pkg` component and the MSI feature that carry `fauna-tui` carry it too; an archive of its own and a desktop-package-only leg were weighed and not taken (§ The ratified channel). Refutable by the owner until their word is recorded here; a refusal reverts the payload to the pair and reopens the channel question for the cli app.

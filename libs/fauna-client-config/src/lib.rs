@@ -65,13 +65,15 @@ pub use backup_store::{
     raise_succession_destination_marks, refile_rotated_box_list,
 };
 pub use custody_leg::{
-    CUSTODY_MISMATCH_KEY, CUSTODY_UNCONFIRMED_KEY, CustodyLegReport, CustodySeedFold,
-    DeploymentSeedCustody, LinkedCustodyLeg, PlaneSeedRotationError, SEED_PUBLISH_WAIT, StoreFold,
-    SupersessionMarks, custody_leg_unattempted_warning, custody_leg_warning,
+    CUSTODY_MISMATCH_KEY, CUSTODY_STORE_SETTLE_WAIT, CUSTODY_UNCONFIRMED_KEY, CustodyLegReport,
+    CustodyLegSignal, CustodySeedFold, DeploymentSeedCustody, LinkedCustodyLeg,
+    PlaneSeedRotationError, SEED_PUBLISH_WAIT, StoreFold, SupersessionMarks,
+    custody_leg_unattempted_warning, custody_leg_warning, is_custody_leg_warning,
     rotate_deployment_seed_on_plane, run_deployment_seed_custody_leg,
-    run_deployment_seed_custody_leg_over, run_linked_deployment_seed_custody_leg,
+    run_deployment_seed_custody_leg_over, run_deployment_seed_custody_leg_settling,
+    run_linked_deployment_seed_custody_leg,
 };
-pub use dav_context::{DavStoreContext, dav_store_context};
+pub use dav_context::{DavCustody, DavStoreContext, dav_custody, dav_store_context};
 /// One muted keyword — term and weight — re-exported beside the page record
 /// that carries it.
 pub use fauna_core::data::MutedKeyword;
@@ -99,9 +101,9 @@ pub use rotate::{SeedRotation, seed_rotation_verdict};
 pub use store_seam::{
     BackgroundCustodyWrites, BackupStateStore, CustodyCeremonyStore, DeploymentSeedStore,
     FolderCustodyCut, FollowsStore, KindManifestStore, LEDGER_AWAITING_SIBLING, LEDGER_NOT_READY,
-    LEDGER_READY_WAIT, MailImportSourceStore, MailStore, NoLedgerStore, PreferenceStore,
-    PublishedLedger, ResolvingLedgerStore, SharedPreferenceStore, StoreError,
-    SuccessionLedgerStore,
+    LEDGER_READY_POLL, LEDGER_READY_WAIT, MailImportSourceStore, MailStore, NoLedgerStore,
+    PreferenceStore, PublishedLedger, ResolvingLedgerStore, SharedPreferenceStore, StoreError,
+    SuccessionLedgerStore, wait_out_not_ready,
 };
 pub use succession_aftermath::{
     BackupRegrantError, BackupRegrantOutcome, BackupRegrantProgress, regrant_nest_backup_key,

@@ -58,6 +58,8 @@ class ProfileVMActorHomeTest {
         runBlocking {
             whenever(api.subscriptionSubscribe(anyString(), anyString(), any())).thenAnswer { null }
             whenever(api.sendKnock(anyString(), anyString(), any())).thenAnswer { null }
+            whenever(api.subscriptionStatus(anyString()))
+                .thenReturn(com.fauna.ffi.FfiSubscriptionStatus(tier = null, expiresAt = null, autoApprove = false))
         }
         val args = buildMap<String, Any?> {
             put("actorId", peer)
@@ -89,6 +91,9 @@ class ProfileVMActorHomeTest {
     @Test
     fun theFollowCarriesTheSlot() {
         val h = harness(remote)
+        // The press waits on the open-time status read (profile.md § Errors &
+        // edge cases → *Unread state is not possible*).
+        h.vm.refreshFollowStatus()
         h.vm.follow()
         val follows = mockingDetails(h.api).invocations
             .filter { it.method.name == "subscriptionSubscribe" }

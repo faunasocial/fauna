@@ -17891,6 +17891,14 @@ impl crate::provider_face::ProviderEngine for SyncEngine {
         SyncEngine::holds_provisional_peer_body(self, rel)
     }
 
+    fn change_feed_state(&self) -> Result<Option<String>> {
+        self.db.provider_change_feed()
+    }
+
+    fn set_change_feed_state(&self, state: &str) -> Result<()> {
+        self.db.set_provider_change_feed(state)
+    }
+
     fn is_ignored(&self, rel: &str) -> bool {
         SyncEngine::is_ignored(self, rel)
     }

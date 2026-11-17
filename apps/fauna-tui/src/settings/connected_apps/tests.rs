@@ -266,11 +266,13 @@ fn ext_grant(lasts_until: i64, liveness: fauna_client_pair::TrustLiveness) -> Tr
                 class: "content.read".into(),
                 kind: Some("ext.example.com.notes".into()),
                 tier: None,
+                folder: None,
             },
             fauna_client_pair::TrustScope {
                 class: "content.write".into(),
                 kind: Some("ext.example.com.notes".into()),
                 tier: None,
+                folder: None,
             },
         ],
         lasts_until,

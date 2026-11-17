@@ -51,10 +51,21 @@
     type NestPlaceEdit,
     type VersionRetentionEdit,
   } from '#lib/wasm-folders';
-  import { getConversationsManager } from '#lib/conversations';
+  import { getConversationsManager, conversationsManagerIfReady, contactsRevision } from '#lib/conversations';
   import { sessionDevicesMachine } from '#lib/devices-session';
   import { parseRecipient } from '#lib/resolve';
-  import { logMessage, refusedAsNotReady } from '#lib/wasm';
+  import {
+    logMessage,
+    refusedAsNotReady,
+    folderFollowPossibility,
+    folderSharePossibility,
+    folderPaywallPossibility,
+    folderWebdavServePossibility,
+    folderWizardNextPossibility,
+    folderWizardCreatePossibility,
+  } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import { readFailed, type ReadWord } from '#lib/read-gate';
   import {
     defaultConflictPolicyGet,
     defaultConflictPolicySet,
@@ -88,7 +99,6 @@
     type FollowedFolderSummary,
     type PendingShare,
     type WizardDevice,
-    type WizardSnapshot,
   } from '#lib/devices-machine';
   import type { DevicesMachine, RowReadErrors } from '../../../static/fauna_wasm_folders.js';
   import { IDS } from '#lib/generated/uiIds';
@@ -155,7 +165,18 @@
   // them. Gates `folder-webdav-toggle` so an MSEK-less actor sees it disabled
   // with a hint instead of clicking into a NoMsek failure that would have
   // already committed the nest flag (webdav-server.md § Independent enablement).
+  // The toggle paints from the shared `webdav_serve_possibility` over where the
+  // read stands (`webdavRead`), so a pending or failed read says so instead of
+  // looking like "no mail key" (folders.md § Errors & edge cases, *Own-tier and
+  // mail gates*).
   let canServeWebdav = $state(false);
+  let webdavRead = $state<ReadWord>('pending');
+  function webdavAnswer() {
+    return folderWebdavServePossibility(webdavRead, canServeWebdav);
+  }
+  const webdavGate = $derived(
+    formGate(askPossibility(() => webdavAnswer())),
+  );
 
   // The user-global default conflict policy stamped onto NEW sets (the
   // page-level "Sync defaults" section, `sync-default-conflict-policy-select`)
@@ -197,16 +218,27 @@
   // The creator's own subscription tiers — the `folder-paywall-tier-select`
   // option set (website-enabled rows), read per page-visit off the key-bearing
   // `SubscriptionsClient::tiers_list` face (NOT the keyless DevicesMachine
-  // snapshot; folders.md § Web paywall). Empty ⇒ nothing to paywall to, so
-  // the select stays disabled with a "create a tier first" hint (mirrors
-  // `canServeWebdav`'s fail-safe-empty gate).
+  // snapshot; folders.md § Web paywall). The select paints from the shared
+  // `own_tiers_possibility` over where the read stands (`ownTiersRead`):
+  // answered with none ⇒ disabled with the "create a tier first" hint; still
+  // pending or failed ⇒ disabled with that reason, never the no-tier one
+  // (folders.md § Errors & edge cases, *Own-tier and mail gates*).
   let ownTiers = $state<SubscriptionTier[]>([]);
+  let ownTiersRead = $state<ReadWord>('pending');
+  function paywallAnswer() {
+    return folderPaywallPossibility(ownTiersRead, ownTiers.length);
+  }
+  const paywallGate = $derived(
+    formGate(askPossibility(() => paywallAnswer())),
+  );
 
   async function loadOwnTiers(secretHex: string): Promise<void> {
     try {
       ownTiers = await subscriptionsTiersList(secretHex);
+      ownTiersRead = 'resolved';
     } catch {
-      ownTiers = [];
+      // An answered list stays standing; a first read that failed says so.
+      ownTiersRead = readFailed(ownTiersRead);
     }
   }
 
@@ -299,6 +331,38 @@
   let followNameInput = $state('');
   let following = $state(false);
   let unfollowing = $state(false);
+
+  // The follow and share submits, painted from the shared form predicates
+  // (`fauna_client_folders::forms`, folders.md § Errors & edge cases): blocked
+  // with the reason on `title` while a box is blank or the app cannot run the
+  // op; each handler asks the same predicate again and refuses on
+  // `error-message`. `machineHeld` is the devices machine's arrival (it is set
+  // once the wasm core is up, so the predicates are callable from then); the
+  // share also needs the LIVE conversations session — re-read whenever the
+  // manager is built or reset (`$contactsRevision` moves on both).
+  let machineHeld = $state(false);
+  function followReady(): boolean {
+    return machineHeld && !!$identity?.secretHex;
+  }
+  function shareReady(): boolean {
+    // Touch the revision so a `$derived` over this re-reads on a build/reset.
+    void $contactsRevision;
+    return followReady() && conversationsManagerIfReady() !== null;
+  }
+  const followGate = $derived(
+    formGate(
+      machineHeld
+        ? askPossibility(() => folderFollowPossibility(followHandleInput, followNameInput, followReady()))
+        : null,
+    ),
+  );
+  const shareGate = $derived(
+    formGate(
+      machineHeld
+        ? askPossibility(() => folderSharePossibility(shareInput, shareReady()))
+        : null,
+    ),
+  );
 
   // The cross-user members a set is shared WITH (role == "member"); the owner's own
   // entry (role == "owner") is filtered out. Its length is the "Shared · N" count —
@@ -465,14 +529,16 @@
     loadSharedBadges();
   }
 
-  // A failed capability read degrades to "cannot serve" (the toggle stays
-  // disabled + hinted) rather than offering a control that cannot succeed.
+  // A failed capability read leaves the toggle disabled with the read's
+  // failure (never "set up mail first", which the read did not answer) rather
+  // than offering a control that cannot succeed.
   async function loadWebdavCapability(secretHex: string): Promise<void> {
     try {
       const mgr = await getConversationsManager();
       canServeWebdav = await mgr.foldersCanServeWebdav(secretHex);
+      webdavRead = 'resolved';
     } catch {
-      canServeWebdav = false;
+      webdavRead = readFailed(webdavRead);
     }
   }
 
@@ -491,6 +557,7 @@
       enrolledRow = await accountEnrolledDeviceRow();
       const session = await sessionDevicesMachine(id.secretHex, () => applySnapshot());
       machine = session.machine;
+      machineHeld = true;
       unlisten = session.unlisten;
       rowReads = createRowReadErrors();
       // Paint the last-known rows now; the refresh below brings them current.
@@ -844,6 +911,9 @@
     mlsGroupId: string | null | undefined,
     enable: boolean,
   ): Promise<void> {
+    // The press asks the toggle's answer again and refuses with its reason.
+    const refusal = formRefusal(askPossibility(() => webdavAnswer()));
+    if (refusal !== null) { error = refusal; return; }
     const id = $identity;
     if (!id || !machine) return;
     try {
@@ -879,6 +949,9 @@
     mlsGroupId: string | null | undefined,
     tier: string,
   ): Promise<void> {
+    // The pick asks the select's answer again and refuses with its reason.
+    const refusal = formRefusal(askPossibility(() => paywallAnswer()));
+    if (refusal !== null) { error = refusal; return; }
     const id = $identity;
     if (!id || !machine || !tier) return;
     try {
@@ -915,13 +988,19 @@
   // writer grant sends `access`.
   async function doShare(fs: FolderSummary): Promise<void> {
     const id = $identity;
-    if (!id || !machine || sharing) return;
+    if (sharing) return;
+    // A blank recipient, or no machine / identity / live session to admit them
+    // through, refuses with the shared reason and the form stays open with what
+    // was typed (folders.md § Errors & edge cases) — it closes only once the
+    // share has been issued and answered.
+    const refusal = formRefusal(askPossibility(() => folderSharePossibility(shareInput, shareReady())));
+    if (refusal !== null) { error = refusal; return; }
+    const mgr = conversationsManagerIfReady();
+    if (!id || !machine || !mgr) return; // unreachable: `shareReady()` held all three
     const raw = shareInput.trim();
-    if (!raw) return;
     sharing = true;
     try {
       const resolved = await parseRecipient(raw);
-      const mgr = await getConversationsManager();
       const own = nodeUrl();
       const access = shareAccess === 'writer' ? 'writer' : undefined;
       await mgr.foldersShareSet(
@@ -1069,15 +1148,20 @@
    */
   async function doFollow(): Promise<void> {
     const id = $identity;
-    if (!id || !machine || following) return;
-    const owner = followHandleInput.trim();
-    const name = followNameInput.trim();
+    if (following) return;
     // Refusing a blank box here rather than sending a blank address keeps the
     // nest's one-answer refusal meaningful: an empty query would come back
     // "not found" and read as "no such folder" rather than "you left a box
     // empty" (tui's `ConfirmFolderFollow` makes the same call; the recipe
-    // refuses it again — this is the UX half).
-    if (!owner || !name) return;
+    // refuses it again — this is the UX half). The refusal is the shared
+    // predicate's reason on `error-message`, never a silent return.
+    const refusal = formRefusal(
+      askPossibility(() => folderFollowPossibility(followHandleInput, followNameInput, followReady())),
+    );
+    if (refusal !== null) { error = refusal; return; }
+    if (!id || !machine) return; // unreachable: `followReady()` held both
+    const owner = followHandleInput.trim();
+    const name = followNameInput.trim();
     following = true;
     try {
       await followPublicFolder(machine, id.secretHex, owner, name);
@@ -1269,7 +1353,21 @@
   // No `wizardSetMode`: a folder has no type (slice e), so the wizard never sets
   // one. The machine still defaults new folders to `sync`, which is what the
   // `mode` column keeps until phase 3 contracts it.
+  // The wizard's Next / Create paint from, and their presses refuse by, the
+  // folders machine's shared answers over the wizard snapshot
+  // (`wizard_next_possibility` / `wizard_create_possibility`) — never a
+  // page-local read of the snapshot's enable flags.
+  const wizardNextGate = $derived(
+    formGate(snap?.wizard ? askPossibility(() => folderWizardNextPossibility(snap!.wizard!)) : null),
+  );
+  const wizardCreateGate = $derived(
+    formGate(snap?.wizard ? askPossibility(() => folderWizardCreatePossibility(snap!.wizard!)) : null),
+  );
   function wizardNext(): void {
+    const w = snap?.wizard;
+    if (!w) return;
+    const refusal = formRefusal(askPossibility(() => folderWizardNextPossibility(w)));
+    if (refusal !== null) { error = refusal; return; }
     machine?.wizard()?.next();
   }
   function wizardBack(): void {
@@ -1297,6 +1395,10 @@
     // gesture here — no explicit refresh.
   }
   async function wizardCreate(): Promise<void> {
+    const ws = snap?.wizard;
+    if (!ws) return;
+    const refusal = formRefusal(askPossibility(() => folderWizardCreatePossibility(ws)));
+    if (refusal !== null) { error = refusal; return; }
     const w = machine?.wizard();
     if (!w) return;
     // On a Public wizard `submit()` creates nothing: it arms the declassify
@@ -1352,14 +1454,6 @@
   // Three steps since phase 5 retired the scan-frequency step (file-sync.md
   // § Config, the phase-5 block).
   const STEP_NUM: Record<string, number> = { Name: 1, Devices: 2, Review: 3 };
-  function continueEnabled(w: WizardSnapshot): boolean {
-    switch (w.step) {
-      case 'Name': return w.name.continue_enabled;
-      // The place-flag step's own gate, from the machine — never re-derived.
-      case 'Devices': return w.device_places.continue_enabled;
-      default: return false;
-    }
-  }
 
   function formatTime(epoch: number | null): string {
     if (epoch == null || epoch === 0) return t.common.never;
@@ -1693,33 +1787,35 @@
                         </label>
                         <label
                           class="fs-webdav"
-                          title={canServeWebdav
-                            ? t.devices.serve_webdav_hint
-                            : t.devices.serve_webdav_needs_mail}
+                          title={webdavGate.disabled
+                            ? webdavGate.reason || undefined
+                            : t.devices.serve_webdav_hint}
                         >
                           <input
                             type="checkbox"
                             data-testid={IDS.FOLDER_WEBDAV_TOGGLE}
                             checked={fs.webdav_enabled ?? false}
-                            disabled={!canServeWebdav}
+                            disabled={webdavGate.disabled}
                             onchange={(e) => changeWebdav(fs.name, fs.mls_group_id, e.currentTarget.checked)}
                           />
                           <strong>{t.devices.serve_webdav}</strong>
-                          {#if !canServeWebdav}
-                            <span class="fs-webdav-needs-mail">{t.devices.serve_webdav_needs_mail}</span>
+                          {#if webdavGate.disabled && webdavGate.reason}
+                            <span class="fs-webdav-needs-mail">{webdavGate.reason}</span>
                           {/if}
                         </label>
                       {/if}
                       {#if fs.website_enabled}
                         <label
                           class="fs-select"
-                          title={ownTiers.length ? t.devices.paywall_tier_hint : t.devices.paywall_tier_needs_tier}
+                          title={paywallGate.disabled
+                            ? paywallGate.reason || undefined
+                            : t.devices.paywall_tier_hint}
                         >
                           <strong>{t.devices.paywall_tier}:</strong>
                           <select
                             data-testid={IDS.FOLDER_PAYWALL_TIER_SELECT}
                             value={fs.web_paywall_tier ?? ''}
-                            disabled={!ownTiers.length}
+                            disabled={paywallGate.disabled}
                             onchange={(e) => changePaywallTier(fs.name, fs.mls_group_id, e.currentTarget.value)}
                           >
                             {#if !fs.web_paywall_tier}
@@ -1729,8 +1825,15 @@
                               <option value={tier}>{tier}</option>
                             {/each}
                           </select>
-                          {#if !ownTiers.length}
-                            <span class="fs-webdav-needs-mail" data-testid={IDS.FOLDER_PAYWALL_HINT}>{t.devices.paywall_tier_needs_tier}</span>
+                          <!-- `folder-paywall-hint` is the answered-no-tier line
+                               alone (ui.yaml); a pending or failed read shows
+                               the answer's own reason without that id. -->
+                          {#if paywallGate.disabled && paywallGate.reason}
+                            {#if ownTiersRead === 'resolved'}
+                              <span class="fs-webdav-needs-mail" data-testid={IDS.FOLDER_PAYWALL_HINT}>{paywallGate.reason}</span>
+                            {:else}
+                              <span class="fs-webdav-needs-mail">{paywallGate.reason}</span>
+                            {/if}
                           {/if}
                         </label>
                       {/if}
@@ -1927,7 +2030,8 @@
                           <button
                             class="btn btn-small btn-primary"
                             data-testid={IDS.FOLDER_SHARE_CONFIRM}
-                            disabled={sharing || !shareInput.trim()}
+                            disabled={sharing || shareGate.disabled}
+                            title={shareGate.reason || undefined}
                             onclick={() => doShare(fs)}>{t.devices.share_button}</button
                           >
                           <button class="btn btn-small" onclick={cancelShare}>{t.common.cancel}</button>
@@ -2172,7 +2276,8 @@
           <button
             class="btn btn-small btn-primary"
             data-testid={IDS.FOLDER_FOLLOW_CONFIRM}
-            disabled={following || !followHandleInput.trim() || !followNameInput.trim()}
+            disabled={following || followGate.disabled}
+            title={followGate.reason || undefined}
             onclick={doFollow}>{t.devices.follow_confirm}</button
           >
           <button class="btn btn-small" onclick={cancelFollow}>{t.common.cancel}</button>
@@ -2389,14 +2494,16 @@
             <button
               class="btn btn-primary"
               data-testid={IDS.WIZARD_NEXT_BUTTON}
-              disabled={!continueEnabled(wiz)}
+              disabled={wizardNextGate.disabled}
+              title={wizardNextGate.reason || undefined}
               onclick={wizardNext}
             >{t.devices.wizard.next}</button>
           {:else}
             <button
               class="btn btn-primary"
               data-testid={IDS.WIZARD_CREATE_BUTTON}
-              disabled={!wiz.review.create_enabled || wiz.review.phase === 'Submitting'}
+              disabled={wizardCreateGate.disabled}
+              title={wizardCreateGate.reason || undefined}
               onclick={wizardCreate}
             >{wiz.review.phase === 'Submitting' ? t.common.creating : t.devices.wizard.create}</button>
           {/if}

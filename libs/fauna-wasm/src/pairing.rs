@@ -378,7 +378,15 @@ impl WasmLinkedNestsMachine {
                     Some(backup_connect),
                     crate::account_runtime::period_key_store(),
                 )
-                .with_folder_names(folder_names),
+                .with_folder_names(folder_names)
+                // The pairing-mark door: `fauna.state.pairing-mark` over the
+                // same handle, so a link or an unlink in this tab repaints a
+                // sibling's open Nests page.
+                .with_pairing_marks(std::sync::Arc::new(
+                    fauna_account_seams::pairing_marks::PlanePairingMarks::new(
+                        crate::account_runtime::handle,
+                    ),
+                )),
             ),
         })
     }

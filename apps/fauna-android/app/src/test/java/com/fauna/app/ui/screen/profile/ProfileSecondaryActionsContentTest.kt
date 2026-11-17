@@ -100,7 +100,7 @@ class ProfileSecondaryActionsContentTest {
             ProfileSecondaryActionsRow(
                 blocked = false,
                 blockWorking = false,
-                blockKnown = false,
+                blockAnswer = com.fauna.ffi.readPossibility(uniffi.fauna_core.ReadState.PENDING),
                 onStartDm = {},
                 onToggleBlock = { toggles++ },
                 blockLabel = { isBlocked -> if (isBlocked) "Unblock" else "Block" },
@@ -109,6 +109,8 @@ class ProfileSecondaryActionsContentTest {
         composeTestRule.onNodeWithTag("profile-block-button").assertIsNotEnabled()
         composeTestRule.onNodeWithTag("profile-block-button").performClick()
         assertEquals("a press before the read lands issues nothing", 0, toggles)
+        // Rule 2: the dead toggle says why.
+        composeTestRule.onNodeWithText("Still loading — try again in a moment").assertExists()
     }
 
     @Test

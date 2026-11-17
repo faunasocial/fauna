@@ -28,6 +28,11 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
   <Fragment>
+    <!-- The client-only data directory (Directories.wxs holds the shared ones). -->
+    <DirectoryRef Id="FaunaDataFolder">
+      <Directory Id="SyncDataFolder" Name="sync" />
+    </DirectoryRef>
+
     <ComponentGroup Id="SyncService" Directory="INSTALLFOLDER">
 
       <!-- fauna-sync-agent.exe.

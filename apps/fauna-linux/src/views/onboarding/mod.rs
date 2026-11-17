@@ -32,11 +32,12 @@ mod machine_glue;
 mod nat_mode_choice;
 mod nest_provisioning;
 mod nest_recovery;
+mod provider_choice;
 mod recover_selfhosted_instructions;
 mod recovery_entry;
 mod recovery_kit;
 mod trust_prompt;
-mod vps_config;
+pub(crate) mod vps_config;
 #[allow(dead_code)]
 pub(crate) mod widgets;
 
@@ -62,6 +63,7 @@ pub const STEP_IDENTITY_CHOICE: &str = "identity_choice";
 pub const STEP_IDENTITY_CREATED: &str = "identity_created";
 pub const STEP_IDENTITY_IMPORT: &str = "identity_import";
 pub const STEP_HANDLE_ENTRY: &str = "handle_entry";
+pub const STEP_PROVIDER_CHOICE: &str = "provider_choice";
 pub const STEP_DNS_CONFIG: &str = "dns_config";
 pub const STEP_VPS_CONFIG: &str = "vps_config";
 pub const STEP_DNS_POST_INSTRUCTIONS: &str = "dns_post_instructions";
@@ -113,6 +115,11 @@ fn step_to_name(step: OnboardingStep) -> Option<&'static str> {
         // 2026-08-14 (tui led it the same day), so `make_machine` declares
         // `set_renders_trust_prompt(true)` and both NAT-step exits route here.
         TrustPrompt => STEP_TRUST_PROMPT,
+        // The choose-providers page (onboarding-provisioning.md § 3d) — built
+        // on linux after tui led: `make_machine` declares
+        // `set_renders_provider_choice(true)`, so the handle check lands here
+        // in place of `dns_config` / `vps_config`.
+        ProviderChoice => STEP_PROVIDER_CHOICE,
         // The orchestrator handles `Done` separately — no stack child to swap to.
         Done => return None,
     })
@@ -196,6 +203,13 @@ fn pages(
             Box::new({
                 let m = m.clone();
                 move || handle_entry::build(m)
+            }),
+        ),
+        (
+            STEP_PROVIDER_CHOICE,
+            Box::new({
+                let m = m.clone();
+                move || provider_choice::build(m)
             }),
         ),
         (
@@ -564,6 +578,7 @@ fn persist_logged_in_terminal(
     registry: &fauna_client_accounts::AccountRegistry,
     secret_hex: Option<&str>,
     nest_url: &str,
+    reach_ipv4: Option<&str>,
     append: bool,
 ) -> Option<String> {
     if append {
@@ -583,11 +598,11 @@ fn persist_logged_in_terminal(
         // and nowhere earlier (ratified 2026-09-21).
         if let Err(e) = fauna_client_accounts::persist_logged_in(
             registry, secret_hex, nest_url, None,
-            // No reach hint on this path yet: linux reads the wizard's
-            // captured address at its own `LoggedIn` terminal only once
-            // its leg lands (`onboarding.md` § Reach hint). `None` is
-            // the honest value and behaves exactly as today.
-            None,
+            // The reach hint (`onboarding-provisioning.md` § Reach hint),
+            // read off the machine by the caller as on every app: the box
+            // this wizard provisioned, at the address its claim used, so
+            // the post-wizard launch reaches it before DNS does.
+            reach_ipv4,
         ) {
             tracing::error!("[onboarding] persisting the logged-in account failed: {e:#}");
             // Only a refusal the user can act on (the account list is full)
@@ -632,6 +647,7 @@ fn handle_wizard_done(m: &Arc<OnboardingMachine>, append: bool) -> Option<Wizard
                 &crate::account_registry(),
                 m.effective_secret().as_deref(),
                 nest_url.as_str(),
+                m.provision_reach_ipv4().as_deref(),
                 append,
             ) {
                 m.set_error_message(line);
@@ -685,6 +701,13 @@ pub fn build_onboarding_window_awaiting_dns(
     build_onboarding_window_inner(app, Some(secret_hex), false, Some(record))
 }
 
+/// The wizard window's widget name. The account-switch teardown keys on it to
+/// keep an append wizard on screen until the switched-to surface is up, and
+/// the e2e window journal (`fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY`) lists it.
+/// At sign-in the same window is renamed `fauna-main-window` when the main UI
+/// becomes its content (`app::build_main_window`).
+pub const WIZARD_WINDOW_NAME: &str = "fauna-onboarding-window";
+
 /// Build the onboarding wizard window.
 pub fn build_onboarding_window(app: &adw::Application) -> OnboardingResult {
     build_onboarding_window_inner(app, None, false, None)
@@ -721,6 +744,37 @@ fn spawn_signed_out_onboarding_reconcile() {
     );
 }
 
+/// An add-account run shows as already connected every provider whose
+/// credential the signed-in account holds in its DNS record
+/// (`onboarding-provisioning.md` § 3d *Held credentials*): the record is read
+/// through the live account runtime and the credentials passed INTO the
+/// machine, which re-runs each provider's checks before it shows the row
+/// connected (a revoked token reads as not connected). Best-effort and off the
+/// GTK thread: a failed read leaves every row unconnected, the state a
+/// first-nest run starts in anyway. The machine notifies on the seed, so the
+/// observer tick repaints the page. Mirrors tui's
+/// `App::seed_held_provider_credentials`.
+fn spawn_seed_held_provider_credentials(m: Arc<OnboardingMachine>) {
+    let Some(store) = crate::account_runtime::handle() else {
+        return;
+    };
+    crate::async_helper::run_on_tokio(
+        async move {
+            match store.dns().await {
+                Ok(dns) => {
+                    let held = fauna_onboarding_machine::HeldDnsCredential::all_from(&dns)
+                        .into_iter()
+                        .map(Into::into)
+                        .collect();
+                    m.seed_held_provider_credentials(held).await;
+                }
+                Err(e) => tracing::info!("provider_choice: DNS record read failed: {e:#}"),
+            }
+        },
+        |()| {},
+    );
+}
+
 fn build_onboarding_window_inner(
     app: &adw::Application,
     seed_secret: Option<&str>,
@@ -748,6 +802,8 @@ fn build_onboarding_window_inner(
     // capability now rather than wait for its own renewal-loop cadence.
     if !append {
         spawn_signed_out_onboarding_reconcile();
+    } else {
+        spawn_seed_held_provider_credentials(m.clone());
     }
 
     // ── Stack + per-page registry ───────────────────────────────────────
@@ -822,6 +878,7 @@ fn build_onboarding_window_inner(
         .content(&outer)
         .build();
     window.set_application(Some(app));
+    window.set_widget_name(WIZARD_WINDOW_NAME);
 
     // The app is permanently held alive by `app.hold()` in main.rs so
     // close-to-tray works on the authenticated main window. That same
@@ -1647,7 +1704,7 @@ mod tests {
         let (registry, live) = registry_with_live_account(&tmp);
         registry.set_pending_factory_reset_json(&live, "{}");
 
-        persist_logged_in_terminal(&registry, Some(ADDED_SECRET), NEST, true);
+        persist_logged_in_terminal(&registry, Some(ADDED_SECRET), NEST, None, true);
 
         assert_eq!(registry.active().as_deref(), Some(live.as_str()));
         assert_eq!(registry.list().len(), 1, "nothing registered yet");
@@ -1684,11 +1741,72 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (registry, _live) = registry_with_live_account(&tmp);
 
-        persist_logged_in_terminal(&registry, Some(ADDED_SECRET), NEST, false);
+        persist_logged_in_terminal(&registry, Some(ADDED_SECRET), NEST, None, false);
 
         let added = fauna_core::identity::ActorKeypair::from_secret_hex(ADDED_SECRET)
             .unwrap()
             .actor_id_hex();
         assert_eq!(registry.active().as_deref(), Some(added.as_str()));
+    }
+
+    /// `onboarding-provisioning.md` § Reach hint: the box this
+    /// wizard provisioned is reachable at the address the claim used while its
+    /// domain does not resolve yet, so the `LoggedIn` terminal records that
+    /// address and the post-wizard launch authenticates over it. Seen on a
+    /// manual walk at 0.1.7: the terminal passed no hint, and the launch and
+    /// session failed DNS lookup for fifteen minutes with the main window up.
+    #[tokio::test]
+    async fn the_post_wizard_launch_authenticates_over_the_provisioned_reach_hint() {
+        use fauna_launch_machine::{
+            LaunchMachine, MockAuthConnector, NullObserver, SilentChallengeOutcome,
+        };
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = crate::account_registry_in(tmp.path().join("credentials"));
+
+        persist_logged_in_terminal(
+            &registry,
+            Some(ADDED_SECRET),
+            NEST,
+            Some("203.0.113.9"),
+            false,
+        );
+
+        // The domain does not resolve; the box answers at the hint.
+        let connector = Arc::new(
+            MockAuthConnector::new()
+                .push_silent_challenge(SilentChallengeOutcome::Transient {
+                    error: "failed to lookup address information".into(),
+                })
+                .push_silent_challenge(SilentChallengeOutcome::Success(
+                    fauna_protocol::auth::VerifyReply {
+                        token: "actor.opaque".into(),
+                        token_id: "0".repeat(16),
+                        handle: "owner".into(),
+                        domain: "nest.example".into(),
+                        tier: "free".into(),
+                        expires_at: 1_700_003_600,
+                        expires_in: 3600,
+                        ..Default::default()
+                    },
+                )),
+        );
+        let launch = LaunchMachine::new_with_connector(
+            Arc::new(NullObserver),
+            Arc::new(registry.launch_persistence()),
+            connector.clone(),
+        );
+        launch.start().await;
+
+        assert_eq!(
+            connector.silent_challenge_hints(),
+            vec![None, Some("203.0.113.9".to_string())],
+            "the domain first, then the hint the terminal recorded"
+        );
+        assert!(
+            launch.current_bearer().is_some(),
+            "the post-wizard launch is signed in over the hint"
+        );
     }
 }

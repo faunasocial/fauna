@@ -11,27 +11,27 @@
     <WindowsPackageType>None</WindowsPackageType>
     <!-- The Windows App SDK auto-initializer (the bootstrapper WindowsPackageType=None
          generates) FAILS in a process that has package identity — measured 2026-09-26:
-         FaunaApp.exe exited 0x80070032 (ERROR_NOT_SUPPORTED) the moment it ran under the
-         sparse identity package that app.manifest.in's msix element now binds it to.
-         OnPackageIdentity_NoOp makes the bootstrapper succeed as a no-op there, so one
-         binary runs both ways: without identity the bootstrapper resolves the runtime as
-         before; with identity the runtime must already be in the process's package graph
-         — the self-contained release publish carries it beside the exe, and the e2e
-         harness declares the installed framework package on the identity it lends a
-         framework-dependent Debug build (tests/e2e-unified/helpers/taskbar_badge.py).
+         FaunaApp.exe exited 0x80070032 (ERROR_NOT_SUPPORTED) the moment it ran under a
+         package's identity. OnPackageIdentity_NoOp makes the bootstrapper succeed as a
+         no-op there, so one binary runs both ways: unpackaged (the archive, a dev build)
+         the bootstrapper resolves the runtime as before; inside the full MSIX (the Store
+         package, the direct-download bundle) the runtime must already be in the
+         process's package graph — the self-contained release publish carries it beside
+         the exe, and the e2e harness declares the installed framework package on the
+         package it registers around a framework-dependent Debug build
+         (tests/e2e-unified/helpers/taskbar_badge.py).
          installers/windows.md § Package identity for FaunaApp.exe. -->
     <WindowsAppSDKBootstrapAutoInitializeOptions_OnPackageIdentity_NoOp>true</WindowsAppSDKBootstrapAutoInitializeOptions_OnPackageIdentity_NoOp>
     <EnableMsixTooling>true</EnableMsixTooling>
     <RootNamespace>FaunaApp</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <!-- Embeds the app manifest (Per-Monitor v2 DPI awareness, the msix identity
-         element) into the exe. Required for this unpackaged WinUI 3 app to render
-         crisply on scaled / HiDPI RDP displays; SDK-style projects don't auto-detect
-         a manifest by filename. The embedded file is GENERATED from app.manifest.in
-         by FaunaGenerateAppManifest below, so its msix publisher comes from the one
-         build-time home (installer/PackageIdentity.props). -->
-    <ApplicationManifest>$(BaseIntermediateOutputPath)app.manifest</ApplicationManifest>
+    <!-- Embeds the app manifest (Per-Monitor v2 DPI awareness) into the exe. Required
+         for this WinUI 3 app to render crisply on scaled / HiDPI RDP displays;
+         SDK-style projects don't auto-detect a manifest by filename. It carries no
+         package-identity element: the app's identity is the full MSIX's own
+         (installers/windows.md § Package identity for FaunaApp.exe). -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- Resolve AppxPackage MSBuild tasks from VS Build Tools when building via dotnet CLI -->
     <MSBuildExtensionsPath Condition="!Exists('$(MSBuildExtensionsPath)\Microsoft\VisualStudio\v$(VisualStudioVersion)\AppxPackage')">$(MSBuildProgramFiles32)\Microsoft Visual Studio\18\BuildTools\MSBuild</MSBuildExtensionsPath>
     <!-- App icon (2026-07-20): rendered from Fauna's one brand mark via a
@@ -161,22 +161,4 @@
       <Visible>false</Visible>
     </Content>
   </ItemGroup>
-  <!-- The package-identity publisher's one build-time home, and the embedded app
-       manifest generated from it (installers/windows.md § Package identity for
-       FaunaApp.exe). The msix element's publisher must equal the identity package's
-       Identity/@Publisher exactly or the exe runs silently without identity, so it is
-       substituted here from $(FaunaPackagePublisher) rather than hand-kept in the
-       manifest. XML-escaped because a DN may quote a component. WriteOnlyWhenDifferent
-       keeps the file's timestamp, so an unchanged publisher never forces a recompile. -->
-  <Import Project="..\..\installer\PackageIdentity.props" />
-  <Target Name="FaunaGenerateAppManifest" BeforeTargets="PrepareForBuild">
-    <PropertyGroup>
-      <_FaunaPublisherXml>$(FaunaPackagePublisher.Replace('&amp;', '&amp;amp;').Replace('"', '&amp;quot;'))</_FaunaPublisherXml>
-      <_FaunaAppManifestText>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\app.manifest.in').Replace('@@Publisher@@', '$(_FaunaPublisherXml)'))</_FaunaAppManifestText>
-    </PropertyGroup>
-    <Error Condition="'$(FaunaPackagePublisher)' == ''" Text="FaunaPackagePublisher is empty — installer\PackageIdentity.props sets the default." />
-    <Error Condition="$(_FaunaAppManifestText.Contains('@@'))" Text="app.manifest.in still carries an unsubstituted @@token@@ after generation." />
-    <MakeDir Directories="$(BaseIntermediateOutputPath)" />
-    <WriteLinesToFile File="$(ApplicationManifest)" Lines="$([MSBuild]::Escape($(_FaunaAppManifestText)))" Overwrite="true" WriteOnlyWhenDifferent="true" />
-  </Target>
 </Project>

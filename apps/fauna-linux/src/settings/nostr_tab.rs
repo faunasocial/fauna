@@ -10,6 +10,8 @@ use fauna_client_config::npub_confirmation_owed_for;
 #[cfg(feature = "zaps")]
 use fauna_client_nostr::nostr::ZapSignerEntry;
 use fauna_core::localized::LocalizedText;
+#[cfg(feature = "zaps")]
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_core::qr_matrix::QrMatrix;
 use fauna_ui_ids as ids;
 use gtk::glib;
@@ -75,11 +77,11 @@ struct NostrLinkGate {
     link_row: adw::ActionRow,
     nsec_row: adw::PasswordEntryRow,
     bunker_row: adw::EntryRow,
-    /// Connected apps (NIP-46 bunker) — visible only for a linked account in
-    /// a **custodial** mode (nostr.md § Layout & flow item 6: "Rendered only
-    /// for a linked account in a custodial mode (generated/imported)"). A
-    /// `remote` (external-bunker) account has no key on this box to sign
-    /// with, so it can never itself be a bunker.
+    /// Connected apps (NIP-46 bunker) — shown from the shared
+    /// `fauna_client_bridges::connected_apps_possibility` over the linked
+    /// account's stored signing mode: absent for a `remote`/`nip07` account
+    /// or no linked account (nostr.md § Errors & edge cases, form validity;
+    /// § Layout & flow item 6). Never an app-local mode check.
     connected_apps_group: adw::PreferencesGroup,
     /// Zap signers (the NIP-57 trust root — `monetization.md` § Zap receipts
     /// — the trust model). Unlike [`Self::connected_apps_group`], gated on
@@ -94,10 +96,16 @@ struct NostrLinkGate {
 impl NostrLinkGate {
     /// `import_mode`/`remote_mode` only matter while unlinked — the mode
     /// picker itself is hidden once linked, so its selection is moot.
-    /// `custodial` is the post-link signal (the account's actual signing
+    /// `signing_mode` is the post-link signal (the account's stored signing
     /// mode once linked, not the pre-link mode-picker selection) — see
     /// [`Self::connected_apps_group`].
-    fn apply(&self, linked: bool, import_mode: bool, remote_mode: bool, custodial: bool) {
+    fn apply(
+        &self,
+        linked: bool,
+        import_mode: bool,
+        remote_mode: bool,
+        signing_mode: Option<&str>,
+    ) {
         self.pubkey_row.set_visible(linked);
         self.mode_row.set_visible(linked);
         self.unlink_row.set_visible(linked);
@@ -108,7 +116,14 @@ impl NostrLinkGate {
         self.link_row.set_visible(!linked);
         self.nsec_row.set_visible(!linked && import_mode);
         self.bunker_row.set_visible(!linked && remote_mode);
-        self.connected_apps_group.set_visible(linked && custodial);
+        crate::form_gate::paint_section(
+            &self.connected_apps_group,
+            &fauna_client_bridges::connected_apps_possibility(if linked {
+                signing_mode
+            } else {
+                None
+            }),
+        );
         #[cfg(feature = "zaps")]
         self.zap_signers_group.set_visible(linked);
     }
@@ -391,57 +406,95 @@ fn refresh_zap_signers(client: &Rc<FaunaClient>, container: &gtk::Box, empty_lab
     });
 }
 
-/// Why `nostr-zap-signer-add-btn` is dead, or `None` when it works. Mirrors
-/// tui's `designate_gate` (`apps/fauna-tui/src/nostr.rs`, the reference leg)
-/// exactly — both now call the shared `fauna_client_features::gate_reason`,
-/// which owns the three load-bearing shapes: the decision is READ off the
-/// shared `FeaturesClient::rows()` affordance, never re-composed (it already
-/// accounts for the `payments` subset edge); a `hidden` affordance still
-/// disables rather than vanishing (the *excision* story is the orthogonal
-/// compile-time `zaps` feature, not this render-time courtesy); and an
-/// un-hydrated read leaves the button LIVE — the nest, not the app, is the
-/// enforcement floor.
+/// Whether the `zaps` plane admits a designation now — the shared
+/// `fauna_client_features::gate_possibility` over this page's courtesy read
+/// (`rows` is `None` until [`refresh_zap_signer_gate`]'s read answers). Twin
+/// of tui's `designate_gate` (`apps/fauna-tui/src/nostr.rs`): before the read
+/// answers the button is blocked still loading (`ui/README.md` § Offer only
+/// what is possible, rule 5 — never offered on a guess); a loaded read with
+/// no `zaps` row, or a `hidden` one, is absent (rule 2); `disabled` is blocked
+/// with the row's own restriction. The compile-time `zaps` feature remains the
+/// orthogonal excision axis.
 #[cfg(feature = "zaps")]
-fn zap_signer_add_gate_reason(rows: &[fauna_client_features::FeatureRow]) -> Option<String> {
-    fauna_client_features::gate_reason(rows, "zaps", crate::i18n::strings::lookup)
+fn zap_signer_add_gate(rows: Option<&[fauna_client_features::FeatureRow]>) -> Possibility {
+    fauna_client_features::gate_possibility(rows, "zaps", crate::i18n::strings::lookup)
 }
 
-/// Re-fetch the gated-feature plane and apply the `zaps` verdict to the add
-/// button + its why-line — called once at initial load (when linked). Never
-/// disables eagerly before the fetch resolves, which is what makes an
-/// un-hydrated read leave the button live (see
-/// [`zap_signer_add_gate_reason`]).
+/// Re-fetch the gated-feature plane and apply the `zaps` answer to the add
+/// button — called at initial load (when linked) and on every page show. A
+/// failed read blocks the button with `common.load_failed`.
 #[cfg(feature = "zaps")]
-fn refresh_zap_signer_gate(
-    client: &Rc<FaunaClient>,
-    add_btn: &gtk::Button,
-    reason_label: &gtk::Label,
-) {
+fn refresh_zap_signer_gate(client: &Rc<FaunaClient>, add_btn: &ZapSignerAdd) {
     let features = fauna_client_features::FeaturesClient::new(client.nest_rpc().clone());
     let handle = client.runtime_handle();
     let add_btn = add_btn.clone();
-    let reason_label = reason_label.clone();
     glib::MainContext::default().spawn_local(async move {
         let result = handle.spawn(async move { features.rows().await }).await;
-        match result {
-            Ok(Ok(rows)) => {
-                let reason = zap_signer_add_gate_reason(&rows);
-                add_btn.set_sensitive(reason.is_none());
-                match &reason {
-                    Some(text) => {
-                        reason_label.set_text(text);
-                        reason_label.set_visible(true);
-                    }
-                    None => reason_label.set_visible(false),
-                }
+        let gate = match result {
+            Ok(Ok(rows)) => zap_signer_add_gate(Some(&rows)),
+            Ok(Err(e)) => {
+                tracing::error!("[settings/nostr] features fetch error: {e}");
+                Possibility::from_read(ReadState::Failed)
             }
-            Ok(Err(e)) => tracing::error!("[settings/nostr] features fetch error: {e}"),
-            Err(e) => tracing::error!("[settings/nostr] features fetch join error: {e}"),
-        }
+            Err(e) => {
+                tracing::error!("[settings/nostr] features fetch join error: {e}");
+                Possibility::from_read(ReadState::Failed)
+            }
+        };
+        add_btn.set_gate(gate);
     });
 }
 
-/// Build the "Nostr" preferences page with account linking and status.
+/// `nostr-zap-signer-add-btn` painted from ONE answer ([`Self::answer`]): the
+/// plane's gate first (it is the person's account, not the draft, that can
+/// say no), ANDed with the shared draft predicate
+/// `fauna_client_bridges::zap_signer_add_possibility`, re-decided as the
+/// pubkey is typed (nostr.md § Errors & edge cases, form validity). The
+/// reason rides the button's tooltip (linux's disabled-with-a-reason idiom,
+/// `possible.rs`); the click asks the same answer.
+#[cfg(feature = "zaps")]
+#[derive(Clone)]
+struct ZapSignerAdd {
+    btn: gtk::Button,
+    pubkey: adw::EntryRow,
+    /// The plane's gate — blocked still loading until the read answers.
+    gate: Rc<RefCell<Possibility>>,
+}
+
+#[cfg(feature = "zaps")]
+impl ZapSignerAdd {
+    fn new(btn: &gtk::Button, pubkey: &adw::EntryRow) -> Self {
+        let this = Self {
+            btn: btn.clone(),
+            pubkey: pubkey.clone(),
+            gate: Rc::new(RefCell::new(zap_signer_add_gate(None))),
+        };
+        this.repaint();
+        let again = this.clone();
+        pubkey.connect_changed(move |_| again.repaint());
+        this
+    }
+
+    /// The whole answer the button is painted from and its click asks again.
+    fn answer(&self) -> Possibility {
+        self.gate
+            .borrow()
+            .clone()
+            .and(fauna_client_bridges::zap_signer_add_possibility(
+                self.pubkey.text().trim(),
+            ))
+    }
+
+    fn set_gate(&self, gate: Possibility) {
+        *self.gate.borrow_mut() = gate;
+        self.repaint();
+    }
+
+    fn repaint(&self) {
+        crate::possible::paint(&self.btn, None, self.answer());
+    }
+}
+
 pub fn build_nostr_page() -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
         .title(nostr::TITLE)
@@ -886,7 +939,6 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         zap_signer_pubkey_row,
         zap_signer_label_row,
         zap_signer_add_btn,
-        zap_signer_gate_reason_label,
     ) = {
         let zap_signers_group = adw::PreferencesGroup::builder()
             .title(nostr::zap_signers::TITLE)
@@ -921,15 +973,6 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         zap_signers_group.add(&zap_signer_pubkey_row);
         zap_signers_group.add(&zap_signer_label_row);
 
-        // The Dim-3 courtesy why-line (`zap_signer_add_gate_reason`) — hidden
-        // until a restricted verdict actually resolves.
-        let zap_signer_gate_reason_label = gtk::Label::builder().visible(false).build();
-        zap_signer_gate_reason_label.set_halign(gtk::Align::Start);
-        zap_signer_gate_reason_label.set_wrap(true);
-        zap_signer_gate_reason_label.add_css_class("dim-label");
-        zap_signer_gate_reason_label.add_css_class("caption");
-        zap_signers_group.add(&zap_signer_gate_reason_label);
-
         page.add(&zap_signers_group);
 
         (
@@ -939,9 +982,10 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
             zap_signer_pubkey_row,
             zap_signer_label_row,
             zap_signer_add_btn,
-            zap_signer_gate_reason_label,
         )
     };
+    #[cfg(feature = "zaps")]
+    let zap_signer_add = ZapSignerAdd::new(&zap_signer_add_btn, &zap_signer_pubkey_row);
 
     // Stash widget refs for updates
     STATUS_LABEL.with(|c| *c.borrow_mut() = Some(status_row.clone()));
@@ -974,12 +1018,12 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         zap_signers_group: zap_signers_group.clone(),
     };
     let linked_state: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    // Whether the linked account is custodial (`generated`/`imported`, holds
-    // its key on this box) — distinct from `linked_state`: gates
-    // `connected_apps_group` independently of the pre-link mode-picker
-    // selection (see `NostrLinkGate::connected_apps_group`).
-    let custodial_state: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    link_gate.apply(false, false, false, false);
+    // The linked account's stored signing mode (`generated`/`imported`/
+    // `remote`/`nip07`) — distinct from `linked_state` and from the pre-link
+    // mode-picker selection: the shared `connected_apps_possibility` reads it
+    // (see `NostrLinkGate::connected_apps_group`).
+    let signing_mode_state: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    link_gate.apply(false, false, false, None);
 
     // -----------------------------------------------------------------------
     // Wire: link mode select (generate / import / remote) — nsec/bunker
@@ -988,22 +1032,58 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
     {
         let link_gate = link_gate.clone();
         let linked_state = Rc::clone(&linked_state);
-        let custodial_state = Rc::clone(&custodial_state);
+        let signing_mode_state = Rc::clone(&signing_mode_state);
         link_mode_combo.connect_selected_notify(move |combo| {
             let mode = selected_link_mode(combo);
             link_gate.apply(
                 linked_state.get(),
                 mode == MODE_IMPORT,
                 mode == MODE_REMOTE,
-                custodial_state.get(),
+                signing_mode_state.borrow().as_deref(),
             );
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Paint: the link button from the shared `link_possibility` over the
+    // picked mode and the field it needs (nostr.md § Errors & edge cases).
+    // -----------------------------------------------------------------------
+    let repaint_link: Rc<dyn Fn()> = {
+        let btn = link_btn.clone();
+        let combo = link_mode_combo.clone();
+        let nsec = nsec_row.clone();
+        let bunker = bunker_row.clone();
+        Rc::new(move || {
+            crate::form_gate::paint_submit(
+                &btn,
+                &fauna_client_bridges::link_possibility(
+                    selected_link_mode(&combo),
+                    &nsec.text(),
+                    &bunker.text(),
+                ),
+                None,
+            );
+        })
+    };
+    repaint_link();
+    {
+        let repaint = Rc::clone(&repaint_link);
+        link_mode_combo.connect_selected_notify(move |_| repaint());
+    }
+    {
+        let repaint = Rc::clone(&repaint_link);
+        nsec_row.connect_changed(move |_| repaint());
+    }
+    {
+        let repaint = Rc::clone(&repaint_link);
+        bunker_row.connect_changed(move |_| repaint());
     }
 
     // -----------------------------------------------------------------------
     // Wire: Generate/Import/Remote link button
     // -----------------------------------------------------------------------
     {
+        let repaint_link = Rc::clone(&repaint_link);
         let status_row_ref = status_row.clone();
         let pubkey_row_ref = pubkey_row.clone();
         let mode_row_ref = mode_row.clone();
@@ -1014,34 +1094,41 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         let error_label_ref = error_label.clone();
         let link_gate = link_gate.clone();
         let linked_state = Rc::clone(&linked_state);
-        let custodial_state = Rc::clone(&custodial_state);
+        let signing_mode_state = Rc::clone(&signing_mode_state);
         let npub_confirm_group_ref = npub_confirm_group.clone();
+        #[cfg(feature = "zaps")]
+        let zap_signers_container = zap_signers_container.clone();
+        #[cfg(feature = "zaps")]
+        let zap_signers_empty_label = zap_signers_empty_label.clone();
+        #[cfg(feature = "zaps")]
+        let zap_signer_add = zap_signer_add.clone();
         link_btn.connect_clicked(move |_| {
-            let Some(client) = super::get_client() else {
-                tracing::error!("[settings/nostr] link: no client available");
-                return;
-            };
             let mode = LINK_MODES
                 .get(link_mode_combo_ref.selected() as usize)
                 .copied()
                 .unwrap_or(MODE_GENERATE);
 
+            // The submit asks the predicate it is painted from and refuses
+            // with the same reason on `error-message`.
+            let nsec = nsec_row_ref.text().trim().to_string();
+            let bunker = bunker_row_ref.text().trim().to_string();
+            if crate::form_gate::refuse(
+                &fauna_client_bridges::link_possibility(mode, &nsec, &bunker),
+                &error_label_ref,
+            ) {
+                return;
+            }
             let mut fields = BTreeMap::new();
             if mode == MODE_IMPORT {
-                let nsec = nsec_row_ref.text().trim().to_string();
-                if nsec.is_empty() {
-                    super::render_error_label(
-                        &error_label_ref,
-                        Some(nostr::link_account::ENTER_NSEC),
-                    );
-                    return;
-                }
                 fields.insert("nsec".to_string(), Value::String(nsec));
             } else if mode == MODE_REMOTE {
-                let bunker = bunker_row_ref.text().trim().to_string();
                 fields.insert("bunker_url".to_string(), Value::String(bunker));
             }
             error_label_ref.set_visible(false);
+            let Some(client) = super::get_client() else {
+                tracing::error!("[settings/nostr] link: no client available");
+                return;
+            };
 
             let bridges = fauna_client_bridges::BridgesClient::new(client.nest_rpc().clone());
             let handle = client.runtime_handle();
@@ -1053,8 +1140,17 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
             let nsec_clear = nsec_row_ref.clone();
             let link_gate = link_gate.clone();
             let linked_state = Rc::clone(&linked_state);
-            let custodial_state = Rc::clone(&custodial_state);
+            let signing_mode_state = Rc::clone(&signing_mode_state);
             let npub_confirm_group_ref = npub_confirm_group_ref.clone();
+            let repaint_link = Rc::clone(&repaint_link);
+            #[cfg(feature = "zaps")]
+            let zap_signers_container = zap_signers_container.clone();
+            #[cfg(feature = "zaps")]
+            let zap_signers_empty_label = zap_signers_empty_label.clone();
+            #[cfg(feature = "zaps")]
+            let zap_signer_add = zap_signer_add.clone();
+            #[cfg(feature = "zaps")]
+            let client_for_zaps = Rc::clone(&client);
 
             sr.set_subtitle(common::LINKING);
             br.set_sensitive(false);
@@ -1085,8 +1181,28 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
                         }));
                         nsec_clear.set_text("");
                         linked_state.set(true);
-                        custodial_state.set(mode != MODE_REMOTE);
-                        link_gate.apply(true, false, false, custodial_state.get());
+                        let stored = match mode {
+                            MODE_IMPORT => "imported",
+                            MODE_REMOTE => "remote",
+                            _ => "generated",
+                        };
+                        *signing_mode_state.borrow_mut() = Some(stored.to_string());
+                        link_gate.apply(true, false, false, Some(stored));
+                        // A link made on this page is the moment the zap
+                        // section's plane read first applies: the initial
+                        // load and the page-show re-read both skip an
+                        // unlinked account, so without this the add button
+                        // stays blocked still loading until the page is
+                        // shown again.
+                        #[cfg(feature = "zaps")]
+                        {
+                            refresh_zap_signers(
+                                &client_for_zaps,
+                                &zap_signers_container,
+                                &zap_signers_empty_label,
+                            );
+                            refresh_zap_signer_gate(&client_for_zaps, &zap_signer_add);
+                        }
 
                         // A fresh (re-)link is itself the new-npub remedy
                         // (nostr.md:75): the owner just chose this key, so
@@ -1110,7 +1226,8 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
                         sr.set_subtitle(common::ERROR);
                     }
                 }
-                br.set_sensitive(true);
+                // Back to what the form now answers, never a blanket enable.
+                repaint_link();
             });
         });
     }
@@ -1129,7 +1246,7 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         let bunker_qr_matrix = bunker_qr_matrix.clone();
         let link_gate = link_gate.clone();
         let linked_state = Rc::clone(&linked_state);
-        let custodial_state = Rc::clone(&custodial_state);
+        let signing_mode_state = Rc::clone(&signing_mode_state);
         let link_mode_combo_ref = link_mode_combo.clone();
         let npub_confirm_group_ref = npub_confirm_group.clone();
         unlink_btn.connect_clicked(move |btn| {
@@ -1152,7 +1269,7 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
             let client_for_clear = Rc::clone(&client);
             let link_gate = link_gate.clone();
             let linked_state = Rc::clone(&linked_state);
-            let custodial_state = Rc::clone(&custodial_state);
+            let signing_mode_state = Rc::clone(&signing_mode_state);
             let mode = selected_link_mode(&link_mode_combo_ref);
             let npub_confirm_group_ref = npub_confirm_group_ref.clone();
 
@@ -1179,8 +1296,8 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
                         bunker_reveal_box.set_visible(false);
                         bunker_qr_matrix.replace(None);
                         linked_state.set(false);
-                        custodial_state.set(false);
-                        link_gate.apply(false, mode == MODE_IMPORT, mode == MODE_REMOTE, false);
+                        *signing_mode_state.borrow_mut() = None;
+                        link_gate.apply(false, mode == MODE_IMPORT, mode == MODE_REMOTE, None);
                         // No linked npub left to confirm — covers both a
                         // direct Unlink click and the banner's own "no /
                         // nothing is linked" button (which delegates here).
@@ -1241,6 +1358,36 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
     }
 
     // -----------------------------------------------------------------------
+    // Paint: Add relay / Add follow from their shared predicates as the
+    // fields are typed (nostr.md § Errors & edge cases).
+    // -----------------------------------------------------------------------
+    {
+        let relays_state = Rc::clone(&relays_state);
+        let btn = add_relay_btn.clone();
+        let paint = move |text: &str| {
+            crate::form_gate::paint_submit(
+                &btn,
+                &fauna_protocol::nostr_relay::add_relay_possibility(&relays_state.borrow(), text),
+                None,
+            );
+        };
+        paint(&relay_input_row.text());
+        relay_input_row.connect_changed(move |e| paint(&e.text()));
+    }
+    {
+        let btn = add_follow_btn.clone();
+        let paint = move |text: &str| {
+            crate::form_gate::paint_submit(
+                &btn,
+                &fauna_client_bridges::add_follow_possibility(text),
+                None,
+            );
+        };
+        paint(&follow_pubkey_row.text());
+        follow_pubkey_row.connect_changed(move |e| paint(&e.text()));
+    }
+
+    // -----------------------------------------------------------------------
     // Wire: Add relay / Add follow
     // -----------------------------------------------------------------------
     {
@@ -1249,19 +1396,23 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         let input = relay_input_row.clone();
         let error_label = error_label.clone();
         add_relay_btn.connect_clicked(move |_| {
+            // The shared predicate the button is painted from: blank, a
+            // malformed URL or (per F7) a private-network relay, or one
+            // already listed — each refused with its reason on
+            // `error-message`, never a silent clear.
+            let typed = input.text();
+            let answer =
+                fauna_protocol::nostr_relay::add_relay_possibility(&relays_state.borrow(), &typed);
+            if crate::form_gate::refuse(&answer, &error_label) {
+                return;
+            }
+            let Some(url) = fauna_protocol::nostr_relay::trimmed_relay_input(&typed) else {
+                return;
+            };
+            error_label.set_visible(false);
             let Some(client) = super::get_client() else {
                 return;
             };
-            let Some(url) = fauna_protocol::nostr_relay::trimmed_relay_input(&input.text()) else {
-                return;
-            };
-            // The shared predicate and its message: a malformed URL or, per
-            // F7, a private-network relay (`nostr_relay::relay_url_error`).
-            if let Some(err) = fauna_protocol::nostr_relay::relay_url_error(&url) {
-                super::render_error_label(&error_label, Some(&resolve_text(&err)));
-                return;
-            }
-            error_label.set_visible(false);
             {
                 let existing = relays_state.borrow().clone();
                 if let Some(next) =
@@ -1279,14 +1430,19 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         let pubkey_input = follow_pubkey_row.clone();
         let petname_input = follow_petname_row.clone();
         let container = follow_list_container.clone();
+        let error_label = error_label.clone();
         add_follow_btn.connect_clicked(move |_| {
+            let pubkey = pubkey_input.text().trim().to_string();
+            if crate::form_gate::refuse(
+                &fauna_client_bridges::add_follow_possibility(&pubkey),
+                &error_label,
+            ) {
+                return;
+            }
+            error_label.set_visible(false);
             let Some(client) = super::get_client() else {
                 return;
             };
-            let pubkey = pubkey_input.text().trim().to_string();
-            if pubkey.is_empty() {
-                return;
-            }
             let petname = petname_input.text().trim().to_string();
             let petname = if petname.is_empty() {
                 None
@@ -1340,21 +1496,17 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         let container = zap_signers_container.clone();
         let empty_label = zap_signers_empty_label.clone();
         let error_label = error_label.clone();
+        let zap_signer_add = zap_signer_add.clone();
         zap_signer_add_btn.connect_clicked(move |_| {
+            let pubkey = pubkey_input.text().trim().to_string();
+            // The one answer the button is painted from (the plane's gate,
+            // then the draft), refused with its reason on `error-message`.
+            if crate::form_gate::refuse(&zap_signer_add.answer(), &error_label) {
+                return;
+            }
             let Some(client) = super::get_client() else {
                 return;
             };
-            let pubkey = pubkey_input.text().trim().to_string();
-            if pubkey.is_empty() {
-                return;
-            }
-            // Client-glue validation, written straight to `error-message` like
-            // the relay check above: the nest refuses a non-64-hex key anyway,
-            // so this only spares a guaranteed round trip and names the rule.
-            if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
-                super::render_error_label(&error_label, Some(nostr::zap_signers::INVALID_PUBKEY));
-                return;
-            }
             error_label.set_visible(false);
             let label = label_input.text().trim().to_string();
             let zap_signers =
@@ -1473,12 +1625,10 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         #[cfg(feature = "zaps")]
         let zap_signers_empty_label = zap_signers_empty_label.clone();
         #[cfg(feature = "zaps")]
-        let zap_signer_add_btn = zap_signer_add_btn.clone();
-        #[cfg(feature = "zaps")]
-        let zap_signer_gate_reason_label = zap_signer_gate_reason_label.clone();
+        let zap_signer_add = zap_signer_add.clone();
         let link_gate = link_gate.clone();
         let linked_state = Rc::clone(&linked_state);
-        let custodial_state = Rc::clone(&custodial_state);
+        let signing_mode_state = Rc::clone(&signing_mode_state);
         let link_mode_combo_ref = link_mode_combo.clone();
         let npub_confirm_group_ref = npub_confirm_group.clone();
         let npub_confirm_label_ref = npub_confirm_label.clone();
@@ -1525,16 +1675,11 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
                             mr.set_subtitle(&crate::i18n::nostr_signing_mode_label(
                                 b.mode.as_deref().unwrap_or("—"),
                             ));
-                            // Connected apps (NIP-46 bunker) needs a deposited
-                            // key on this box — `remote` accounts sign
-                            // elsewhere (nostr.md § Layout & flow item 6).
-                            // Mirrors web's `mode === 'generated' || mode ===
-                            // 'imported'`: an absent/unknown mode is treated
-                            // as non-custodial (hide), not custodial.
-                            custodial_state.set(matches!(
-                                b.mode.as_deref(),
-                                Some("generated") | Some("imported")
-                            ));
+                            // The stored signing mode, for the shared
+                            // `connected_apps_possibility` (Connected apps
+                            // needs a deposited key on this box — nostr.md
+                            // § Layout & flow item 6).
+                            *signing_mode_state.borrow_mut() = b.mode.clone();
                             // Each row's default comes from the same catalog
                             // that built it, so a never-configured account
                             // paints what the nest would actually do.
@@ -1599,7 +1744,7 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
                     linked,
                     mode == MODE_IMPORT,
                     mode == MODE_REMOTE,
-                    custodial_state.get(),
+                    signing_mode_state.borrow().as_deref(),
                 );
 
                 if linked {
@@ -1611,11 +1756,7 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
                             &zap_signers_container,
                             &zap_signers_empty_label,
                         );
-                        refresh_zap_signer_gate(
-                            &client_for_zap_signer_gate,
-                            &zap_signer_add_btn,
-                            &zap_signer_gate_reason_label,
-                        );
+                        refresh_zap_signer_gate(&client_for_zap_signer_gate, &zap_signer_add);
                     }
                 }
             });
@@ -1629,18 +1770,13 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
     #[cfg(feature = "zaps")]
     {
         let linked_state = Rc::clone(&linked_state);
-        let zap_signer_add_btn = zap_signer_add_btn.clone();
-        let zap_signer_gate_reason_label = zap_signer_gate_reason_label.clone();
+        let zap_signer_add = zap_signer_add.clone();
         page.connect_map(move |_| {
             if !linked_state.get() {
                 return;
             }
             if let Some(client) = super::get_client() {
-                refresh_zap_signer_gate(
-                    &client,
-                    &zap_signer_add_btn,
-                    &zap_signer_gate_reason_label,
-                );
+                refresh_zap_signer_gate(&client, &zap_signer_add);
             }
         });
     }
@@ -1680,7 +1816,7 @@ mod tests {
         crate::testid::run_on_gtk_thread(|| {
             let gate = bare_link_gate();
 
-            gate.apply(false, false, false, false);
+            gate.apply(false, false, false, None);
             assert!(!gate.pubkey_row.is_visible());
             assert!(!gate.mode_row.is_visible());
             assert!(!gate.unlink_row.is_visible());
@@ -1693,7 +1829,7 @@ mod tests {
             assert!(gate.link_mode_combo.is_visible());
             assert!(gate.link_row.is_visible());
 
-            gate.apply(true, false, false, true);
+            gate.apply(true, false, false, Some("generated"));
             assert!(gate.pubkey_row.is_visible());
             assert!(gate.mode_row.is_visible());
             assert!(gate.unlink_row.is_visible());
@@ -1718,10 +1854,10 @@ mod tests {
         crate::testid::run_on_gtk_thread(|| {
             let gate = bare_link_gate();
 
-            gate.apply(true, false, false, false); // linked, remote (non-custodial)
+            gate.apply(true, false, false, Some("remote")); // linked, remote (non-custodial)
             assert!(gate.zap_signers_group.is_visible());
 
-            gate.apply(false, false, false, false); // not linked
+            gate.apply(false, false, false, None); // not linked
             assert!(!gate.zap_signers_group.is_visible());
         });
     }
@@ -1736,13 +1872,13 @@ mod tests {
         crate::testid::run_on_gtk_thread(|| {
             let gate = bare_link_gate();
 
-            gate.apply(true, false, false, false); // linked, remote (non-custodial)
+            gate.apply(true, false, false, Some("remote")); // linked, remote (non-custodial)
             assert!(!gate.connected_apps_group.is_visible());
 
-            gate.apply(false, false, false, true); // custodial but not linked
+            gate.apply(false, false, false, Some("generated")); // custodial but not linked
             assert!(!gate.connected_apps_group.is_visible());
 
-            gate.apply(true, false, false, true); // linked and custodial
+            gate.apply(true, false, false, Some("generated")); // linked and custodial
             assert!(gate.connected_apps_group.is_visible());
         });
     }
@@ -1752,17 +1888,17 @@ mod tests {
         crate::testid::run_on_gtk_thread(|| {
             let gate = bare_link_gate();
 
-            gate.apply(false, true, false, false); // unlinked, import mode
+            gate.apply(false, true, false, None); // unlinked, import mode
             assert!(gate.nsec_row.is_visible());
             assert!(!gate.bunker_row.is_visible());
 
-            gate.apply(false, false, true, false); // unlinked, remote mode
+            gate.apply(false, false, true, None); // unlinked, remote mode
             assert!(!gate.nsec_row.is_visible());
             assert!(gate.bunker_row.is_visible());
 
             // Linked hides both regardless of the stale mode-flag values — the
             // mode picker itself is gone, so its selection can't matter anymore.
-            gate.apply(true, true, true, true);
+            gate.apply(true, true, true, Some("generated"));
             assert!(!gate.nsec_row.is_visible());
             assert!(!gate.bunker_row.is_visible());
         });
@@ -1830,35 +1966,179 @@ mod tests {
     use fauna_client_features::test_fixtures::zaps_row;
 
     #[cfg(feature = "zaps")]
-    #[test]
-    fn zap_signer_add_gate_reason_is_none_when_available() {
-        let rows = vec![zaps_row(&[])];
-        assert_eq!(zap_signer_add_gate_reason(&rows), None);
-    }
-
-    #[cfg(feature = "zaps")]
-    #[test]
-    fn zap_signer_add_gate_reason_names_the_restriction_when_denied() {
+    fn denied_zaps_rows() -> Vec<fauna_client_features::FeatureRow> {
         let denied = fauna_core::feature_gate::FeaturePolicy {
             availability: fauna_core::feature_gate::Availability::Deny,
             ..Default::default()
         };
-        let rows = vec![zaps_row(&[(
+        vec![zaps_row(&[(
             fauna_client_features::RuleTier::Admin,
             denied,
-        )])];
-        assert!(
-            zap_signer_add_gate_reason(&rows).is_some(),
-            "a denied row must disable the button with a reason"
-        );
+        )])]
     }
 
+    /// The plane's gate is the shared `gate_possibility`: blocked still
+    /// loading before the read answers (rule 5), possible on an available
+    /// row, blocked with the restriction on a denied one, absent when the
+    /// loaded read holds no `zaps` row (rule 2).
     #[cfg(feature = "zaps")]
     #[test]
-    fn zap_signer_add_gate_reason_is_none_when_the_row_is_absent() {
-        // An un-hydrated read (no rows fetched yet, or `zaps` missing from a
-        // stale nest) must leave the button LIVE — the nest, not the app, is
-        // the enforcement floor.
-        assert_eq!(zap_signer_add_gate_reason(&[]), None);
+    fn zap_signer_add_gate_answers_from_the_read() {
+        assert_eq!(
+            zap_signer_add_gate(None),
+            Possibility::from_read(ReadState::Pending)
+        );
+        assert_eq!(
+            zap_signer_add_gate(Some(&[zaps_row(&[])])),
+            Possibility::Possible
+        );
+        assert!(matches!(
+            zap_signer_add_gate(Some(&denied_zaps_rows())),
+            Possibility::Blocked { .. }
+        ));
+        assert_eq!(zap_signer_add_gate(Some(&[])), Possibility::Absent);
+    }
+
+    /// `nostr-zap-signer-add-btn` is painted from one answer — the gate,
+    /// then the draft — with its reason on its tooltip: blocked still loading
+    /// before the read (never live on a guess), load-failed after a failed
+    /// read, the draft's reason once the plane admits it, live with a valid
+    /// key, not shown at all without the plane. The click asks the same answer
+    /// and refuses with the reason on `error-message`.
+    #[cfg(feature = "zaps")]
+    #[test]
+    fn zap_signer_add_waits_for_the_read_and_refuses_with_its_answer() {
+        crate::testid::run_on_gtk_thread(|| {
+            let btn = gtk::Button::new();
+            let pubkey = adw::EntryRow::new();
+            let error = gtk::Label::new(None);
+            let add = ZapSignerAdd::new(&btn, &pubkey);
+            let tip = || btn.tooltip_text().map(|t| t.to_string());
+            pubkey.set_text(&"a".repeat(64));
+
+            let loading = nostr_reason("common.still_loading");
+            assert!(btn.is_visible() && !btn.is_sensitive());
+            assert_eq!(tip().as_deref(), Some(loading.as_str()));
+            assert!(crate::form_gate::refuse(&add.answer(), &error));
+            assert_eq!(error.text().as_str(), loading);
+
+            add.set_gate(Possibility::from_read(ReadState::Failed));
+            let failed = nostr_reason("common.load_failed");
+            assert!(!btn.is_sensitive());
+            assert_eq!(tip().as_deref(), Some(failed.as_str()));
+            assert!(crate::form_gate::refuse(&add.answer(), &error));
+            assert_eq!(error.text().as_str(), failed);
+
+            add.set_gate(zap_signer_add_gate(Some(&denied_zaps_rows())));
+            assert!(btn.is_visible() && !btn.is_sensitive());
+            assert!(tip().is_some_and(|t| !t.is_empty() && t != loading));
+
+            add.set_gate(zap_signer_add_gate(Some(&[zaps_row(&[])])));
+            assert!(btn.is_sensitive());
+            assert_eq!(tip(), None);
+            assert!(!crate::form_gate::refuse(&add.answer(), &error));
+            pubkey.set_text("abc");
+            assert!(!btn.is_sensitive());
+            assert_eq!(
+                tip(),
+                Some(nostr_reason("nostr.zap_signers.invalid_pubkey"))
+            );
+
+            add.set_gate(zap_signer_add_gate(Some(&[])));
+            assert!(!btn.is_visible(), "no zaps row: the nest has no plane");
+        });
+    }
+
+    /// The *Connected apps* section reads the shared
+    /// `connected_apps_possibility`: a `nip07` account has no key on the box
+    /// either, so the section is absent for it as for `remote`.
+    #[test]
+    fn form_gate_connected_apps_follow_the_shared_answer() {
+        crate::testid::run_on_gtk_thread(|| {
+            let gate = bare_link_gate();
+            gate.apply(true, false, false, Some("nip07"));
+            assert!(!gate.connected_apps_group.is_visible());
+            gate.apply(true, false, false, Some("imported"));
+            assert!(gate.connected_apps_group.is_visible());
+            gate.apply(true, false, false, None);
+            assert!(!gate.connected_apps_group.is_visible());
+        });
+    }
+
+    fn nostr_reason(key: &str) -> String {
+        resolve_text(&LocalizedText::key(key))
+    }
+
+    fn nostr_found<T: IsA<gtk::Widget>>(root: &impl IsA<gtk::Widget>, id: &str) -> T {
+        crate::testid::find_by_test_id(root, id)
+            .unwrap_or_else(|| panic!("{id} not built"))
+            .downcast::<T>()
+            .unwrap_or_else(|_| panic!("{id} has another widget type"))
+    }
+
+    /// Each Nostr form submit is painted from its shared predicate (disabled
+    /// with the reason while its field is blank) and a submit anyway refuses
+    /// with the same reason on `error-message` (`ui/nostr.md` § Errors & edge
+    /// cases, form validity) — before any client is needed.
+    #[test]
+    fn form_gate_nostr_submits_are_painted_and_refuse_on_error_message() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("connected");
+            let page = build_nostr_page();
+            let error: gtk::Label = nostr_found(&page, ids::ERROR_MESSAGE);
+
+            // Link, import mode with no nsec.
+            let combo: adw::ComboRow = nostr_found(&page, ids::NOSTR_LINK_MODE);
+            let link: gtk::Button = nostr_found(&page, ids::NOSTR_LINK_BUTTON);
+            assert!(link.is_sensitive(), "generate needs nothing typed");
+            let import = LINK_MODES.iter().position(|m| *m == MODE_IMPORT).unwrap();
+            combo.set_selected(import as u32);
+            let reason = nostr_reason("nostr.link_account.enter_nsec");
+            assert!(!link.is_sensitive());
+            assert_eq!(link.tooltip_text().as_deref(), Some(reason.as_str()));
+            link.emit_clicked();
+            assert_eq!(error.text().as_str(), reason);
+            let nsec: adw::PasswordEntryRow = nostr_found(&page, ids::NOSTR_NSEC_INPUT);
+            nsec.set_text("nsec1xyz");
+            assert!(link.is_sensitive());
+
+            // Add follow with no pubkey.
+            let follow: gtk::Button = nostr_found(&page, ids::NOSTR_ADD_FOLLOW);
+            let reason = nostr_reason("nostr.follows.pubkey_required");
+            assert!(!follow.is_sensitive());
+            assert_eq!(follow.tooltip_text().as_deref(), Some(reason.as_str()));
+            follow.emit_clicked();
+            assert_eq!(error.text().as_str(), reason);
+
+            // Add relay: blank, then a malformed URL.
+            let relay: gtk::Button = nostr_found(&page, ids::NOSTR_ADD_RELAY);
+            let relay_input: adw::EntryRow = nostr_found(&page, ids::NOSTR_RELAY_INPUT);
+            let reason = nostr_reason("nostr.relays.url_required");
+            assert!(!relay.is_sensitive());
+            relay.emit_clicked();
+            assert_eq!(error.text().as_str(), reason);
+            relay_input.set_text("https://not-a-relay.example");
+            assert!(!relay.is_sensitive());
+            relay_input.set_text("wss://relay.example.com");
+            assert!(relay.is_sensitive());
+
+            // Zap signer: not 64 hex.
+            #[cfg(feature = "zaps")]
+            {
+                // Before the features read answers, the plane's gate holds it
+                // still loading, whatever is typed (rule 5); the draft's own
+                // reason is pinned by `zap_signer_add_waits_for_the_read_…`.
+                let add: gtk::Button = nostr_found(&page, ids::NOSTR_ZAP_SIGNER_ADD_BTN);
+                let input: adw::EntryRow = nostr_found(&page, ids::NOSTR_ZAP_SIGNER_PUBKEY_INPUT);
+                // `get_visible`: the section itself is hidden while unlinked.
+                assert!(add.get_visible(), "blocked, not absent, while loading");
+                assert!(!add.is_sensitive(), "never live before the read");
+                input.set_text(&"a".repeat(64));
+                assert!(!add.is_sensitive());
+                add.emit_clicked();
+                assert_eq!(error.text().as_str(), nostr_reason("common.still_loading"));
+            }
+            crate::offline_gate::reset_for_test("disconnected");
+        });
     }
 }

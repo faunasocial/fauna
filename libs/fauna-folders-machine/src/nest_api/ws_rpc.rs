@@ -278,9 +278,31 @@ mod native {
         let api: Arc<dyn FolderNestApi> = Arc::new(seam);
         FolderWizardMachine::new(observer, available_devices, api)
     }
+
+    /// The first folder's maker for Media (`ui/media.md` § Errors & edge cases
+    /// → *No folder to upload into*) over `nest`'s authenticated connection:
+    /// the same seam [`build_folder_wizard_machine`] drives, sealed at birth
+    /// under the owner root the connection's identity derives — the native
+    /// entry tui, linux and `fauna-ffi` hand `MediaMachine::set_folder_maker`.
+    pub fn build_first_folder_maker(
+        nest: Arc<NestClient>,
+        custody: Option<Arc<dyn FolderKeyStore>>,
+    ) -> Arc<dyn fauna_core::folder_create::PlainFolderMaker> {
+        let owner = nest
+            .auth()
+            .keypair()
+            .map(|kp| fauna_core::crypto::BackupKey::derive(kp.secret_bytes()));
+        let mut seam = WsRpcFolderNest::new(nest, custody);
+        if let Some(owner) = owner {
+            seam = seam.with_owner_seal_key(owner);
+        }
+        Arc::new(crate::first_folder::HeadlessFolderMaker::new(Arc::new(
+            seam,
+        )))
+    }
 }
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::build_folder_wizard_machine;
+pub use native::{build_first_folder_maker, build_folder_wizard_machine};
 
 // ── Wasm (`WsRpcClient`) ────────────────────────────────────────────────────
 #[cfg(target_arch = "wasm32")]
@@ -338,9 +360,27 @@ mod wasm {
         let api: Arc<dyn FolderNestApi> = Arc::new(seam);
         FolderWizardMachine::new(observer, available_devices, api)
     }
+
+    /// The first folder's maker for Media over the SPA's browser
+    /// `WsRpcClient` — the wasm twin of the native builder. The browser
+    /// connection carries no keypair, so the caller hands in the owner's seal
+    /// root, as it does to [`build_folder_wizard_machine`].
+    pub fn build_first_folder_maker(
+        nest: WsRpcClient,
+        custody: Option<Arc<dyn FolderKeyStore>>,
+        owner_seal: Option<fauna_core::crypto::BackupKey>,
+    ) -> Arc<dyn fauna_core::folder_create::PlainFolderMaker> {
+        let mut seam = WsRpcFolderNest::new(nest, custody);
+        if let Some(owner) = owner_seal {
+            seam = seam.with_owner_seal_key(owner);
+        }
+        Arc::new(crate::first_folder::HeadlessFolderMaker::new(Arc::new(
+            seam,
+        )))
+    }
 }
 #[cfg(target_arch = "wasm32")]
-pub use wasm::build_folder_wizard_machine;
+pub use wasm::{build_first_folder_maker, build_folder_wizard_machine};
 
 #[cfg(test)]
 mod tests {

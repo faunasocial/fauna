@@ -225,6 +225,19 @@ pub fn build_editor(host: Host, repaint: Rc<dyn Fn()>) -> Option<gtk::Box> {
         root.append(&dim_label(&view.hint.resolve(lookup)));
     }
 
+    // Save and Remove are `OnlineOnly`: the offline gate greys them from the
+    // write kind declared here. Cancel is local and stays live. The save is
+    // also painted from the draft's own validity — an unparseable cell
+    // disables it with the shared reason (`ui/README.md` § Offer only what is
+    // possible, rule 4's form case); the press asks the same `draft()`
+    // (`FeaturesClient::save`) and refuses with the same reason on the page's
+    // error banner. Built before the cells so their handlers can repaint it.
+    let save = gtk::Button::with_label(f::EDITOR_SAVE);
+    save.add_css_class("suggested-action");
+    crate::testid::set_test_id(&save, ids::FEATURE_POLICY_EDITOR_SAVE_BUTTON);
+    crate::offline_gate::declare_wire_kind(&save, host.write_kind());
+    paint_save(&save, &editor);
+
     // Shared with every entry's handler, which repaints the notes in place.
     let notes: Rc<RefCell<Vec<gtk::Label>>> = Rc::new(RefCell::new(Vec::new()));
     for (i, cell) in view.cells.iter().enumerate() {
@@ -254,26 +267,22 @@ pub fn build_editor(host: Host, repaint: Rc<dyn Fn()>) -> Option<gtk::Box> {
 
         // Connected after the seed above, so building the entry edits nothing.
         let notes = Rc::clone(&notes);
+        let save = save.clone();
         entry.connect_changed(move |entry| {
-            let view = with_state(host, |s| {
+            let edited = with_state(host, |s| {
                 let editor = s.editor.as_mut()?;
                 editor.set_cell(i, entry.text().to_string());
-                Some(editor.view())
+                Some((editor.view(), editor.clone()))
             });
-            let Some(view) = view else { return };
+            let Some((view, editor)) = edited else { return };
+            paint_save(&save, &editor);
             for (note, cell) in notes.borrow().iter().zip(view.cells.iter()) {
                 paint_note(note, editor_note_text(cell, crate::i18n::strings::lookup));
             }
         });
     }
 
-    // Save and Remove are `OnlineOnly`: the offline gate greys them from the
-    // write kind declared here. Cancel is local and stays live.
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let save = gtk::Button::with_label(f::EDITOR_SAVE);
-    save.add_css_class("suggested-action");
-    crate::testid::set_test_id(&save, ids::FEATURE_POLICY_EDITOR_SAVE_BUTTON);
-    crate::offline_gate::declare_wire_kind(&save, host.write_kind());
     save.connect_clicked(move |_| write(host, false));
     buttons.append(&save);
     if view.can_remove {
@@ -317,6 +326,16 @@ fn write(host: Host, remove: bool) {
             client.write_feature_limit(host, editor, remove);
         }
     });
+}
+
+/// Paint the editor's save from its draft — `Possible`, or `Blocked` with the
+/// shared parser's reason.
+fn paint_save(save: &gtk::Button, editor: &PolicyEditor) {
+    crate::form_gate::paint_submit(
+        save,
+        &fauna_core::possibility::Possibility::from_blocked_reason(editor.draft().err()),
+        None,
+    );
 }
 
 fn paint_note(note: &gtk::Label, text: Option<String>) {

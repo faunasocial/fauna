@@ -1,6 +1,6 @@
 use crate::dns::{DnsProvider, DnsRecord, DnsZone};
 use crate::error::ProvisionError;
-use crate::namecheap_api::{NamecheapApi, attr, elements};
+use crate::namecheap_api::{NamecheapApi, attr, elements, split_domain};
 use crate::proxy::BuildEnv;
 
 /// Namecheap DNS provider.
@@ -13,19 +13,6 @@ use crate::proxy::BuildEnv;
 /// authenticated connection.
 pub struct Namecheap {
     api: NamecheapApi,
-}
-
-/// Split a domain like "example.com" into ("example", "com"),
-/// or "example.co.uk" into ("example", "co.uk").
-fn split_domain(domain: &str) -> Result<(String, String), ProvisionError> {
-    let parts: Vec<&str> = domain.splitn(2, '.').collect();
-    if parts.len() != 2 {
-        return Err(ProvisionError::Parse(format!("Invalid domain: {domain}")));
-    }
-    if parts[0].is_empty() || parts[1].is_empty() {
-        return Err(ProvisionError::Parse(format!("Invalid domain: {domain}")));
-    }
-    Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
 /// A parsed host record from Namecheap getHosts response.
@@ -137,6 +124,7 @@ impl DnsProvider for Namecheap {
             .map(|name| DnsZone {
                 id: name.clone(),
                 name,
+                nameservers: Vec::new(),
             })
             .collect())
     }

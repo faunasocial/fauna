@@ -207,6 +207,64 @@ binary = "wix/WixToolset.Util.wixext.dll"
 files = ["wix/OSMFEULA.txt"]
 standard_texts = ["MS-RL"]
 
+# The nest MSI (apps/fauna-windows/installer/nest/Package.wxs; installers/windows.md
+# § Direct download, 1): the Nest, Bridge and Terminal App features of the
+# full-feature package above and nothing of its client — no app, so no NuGet leg,
+# no sync agent and no shell extension. Its bundled components are the
+# full-feature package's three, for the same files (the Bridge feature's
+# libunwind.dll and the mingw-w64 runtime in the mail bridge, and the WiX
+# Toolset code every MSI carries), staged the same way by
+# `just windows-nest-msi-notices`. When the release workflow ships this package
+# in place of the full-feature one, the windows-msi artifact above retires.
+[artifact.windows-nest-msi]
+name = "Fauna Nest for Windows"
+channel = "Windows nest MSI"
+rust = [
+    { packages = ["fauna-nest-service"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-bridge-service"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-tui", "fauna-cli-device"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    # the mail bridge's own FFI library (gnullvm, labeler only)
+    { packages = ["fauna-ffi"], no_default_features = true, features = ["labeler"], targets = ["x86_64-pc-windows-gnullvm", "aarch64-pc-windows-gnullvm"] },
+]
+go = { binaries = ["target/fauna-mail-bridge.exe"], module = "bins/fauna-bridges" }
+
+[artifact.windows-nest-msi.bundled]
+dir = "target"
+
+[[artifact.windows-nest-msi.bundled.components]]
+name = "libunwind"
+version = "22.1.8"
+origin = "the llvm-mingw toolchain, release 20260616"
+source = "https://github.com/mstorsjo/llvm-mingw/releases/tag/20260616"
+licence = "Apache-2.0 WITH LLVM-exception"
+binary = "libunwind.dll"
+files = ["llvm-mingw/LICENSE.TXT"]
+
+[[artifact.windows-nest-msi.bundled.components]]
+name = "mingw-w64 runtime"
+version = "20260616"
+origin = "the llvm-mingw toolchain, release 20260616"
+source = "https://github.com/mstorsjo/llvm-mingw/releases/tag/20260616"
+licence = "LicenseRef-Fedora-Public-Domain AND ZPL-2.1"
+binary = "fauna-mail-bridge.exe"
+files = [
+    "llvm-mingw/mingw32/COPYING",
+    "llvm-mingw/mingw32/COPYING.MinGW-w64-runtime.txt",
+    "llvm-mingw/mingw32/COPYING.MinGW-w64.txt",
+    "llvm-mingw/mingw32/COPYING.winpthreads.txt",
+    "llvm-mingw/mingw32/COPYING.winstorecompat.txt",
+]
+
+[[artifact.windows-nest-msi.bundled.components]]
+name = "WiX Toolset install-time code"
+version = "6.0.2"
+origin = "the WiX Toolset extensions WixToolset.Util.wixext, WixToolset.UI.wixext and WixToolset.Firewall.wixext"
+source = "https://github.com/wixtoolset/wix"
+licence = "MS-RL"
+binary = "wix/WixToolset.Util.wixext.dll"
+files = ["wix/OSMFEULA.txt"]
+standard_texts = ["MS-RL"]
+
 [artifact.windows-store]
 name = "Fauna for Windows"
 channel = "Microsoft Store package (MSIX)"

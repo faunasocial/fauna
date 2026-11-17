@@ -23,3 +23,4 @@ pub mod observables;
 pub mod painted_text_area;
 pub mod registry;
 pub mod server;
+pub mod toplevel_windows;

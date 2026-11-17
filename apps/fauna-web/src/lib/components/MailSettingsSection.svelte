@@ -12,8 +12,8 @@
   // `error-message` (no duplicate IDs) via the bindable `error`.
   // Behavior + IDs: docs/goal/ui/mail-settings.md, ui.yaml § mail-settings.
   import { identity } from '#lib/store';
+  import { sharedMailSettingsMachine } from '#lib/mail-usable';
   import {
-    mailSettingsMachine,
     setupStatus,
     forwardAllToGet,
     forwardAllToSet,
@@ -382,7 +382,10 @@
     if (!id?.secretHex) return;
     try {
       await ensureWasm();
-      machine = await mailSettingsMachine(id.secretHex);
+      // The session's ONE machine: the Settings rail's mail-usable gate reads
+      // its live snapshot, so turning mail on here lights the mail rows at once
+      // (`mail-settings.md` § Errors & edge cases, the mail-usable gate).
+      machine = await sharedMailSettingsMachine(id.secretHex);
       await machine.hydrate();
       applySnapshot();
     } catch (e) {

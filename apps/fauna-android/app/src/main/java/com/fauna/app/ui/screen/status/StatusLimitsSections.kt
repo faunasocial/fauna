@@ -271,6 +271,7 @@ private fun OwnLimitControl(
             onRemove = editor.onRemove,
             onCancel = editor.onCancel,
             modifier = Modifier.padding(start = 12.dp, top = 4.dp),
+            saveAnswer = authoring.saveAnswer,
         )
     }
 }

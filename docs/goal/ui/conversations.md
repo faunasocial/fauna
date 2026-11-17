@@ -487,20 +487,21 @@ domain). Orientation: the page composes the components `dm-compose-form`,
     leaving is a plain member's verb and the editor is where it lives, so the
     door gated the one control a member needs behind the one capability a
     member never has — caught by the leave journey, which got a 409 on a
-    member's click. The greying moved INSIDE, per control (§ Architectural
-    rules 5, which is what that rule asks for anyway): a member opening this
-    reads the room's settings with both selects, both per-participant
-    controls and Save greyed, and only `room-leave-button` live.
+    member's click. The gate moved INSIDE, per control (§ Architectural
+    rules 5): a member opening this reads the room's settings as plain
+    lines, with no select, per-participant control or Save, and
+    `room-leave-button` live (§ Errors & edge cases → *Controls this person
+    can never use*).
   - The editor, the sub-page `room_settings` of `conversations` (trigger:
     click `thread-room-settings-button`): `room-join-rule-select`
     (tokens `invite | member-invite`) and `room-history-policy-select`
     (`none | full`) — token round-trips on `select`/`get_text`, the
     `event-detail-reminder-select` contract; `room-admin-toggle[i]`
-    (indexed like the chips, `checked` attribute `true | false`; greyed
+    (indexed like the chips, `checked` attribute `true | false`; absent
     unless `capabilities.can_appoint_admins`, and never live on the owner's
     own chip); `room-owner-transfer-button[i]` (user-approved 2026-09-09;
     indexed like the chips, `checked` attribute `true | false` with at most
-    one row staged — staging a second un-stages the first; greyed unless
+    one row staged — staging a second un-stages the first; absent unless
     `capabilities.can_transfer_ownership`, never live on the owner's own
     chip; behavior owner
     [`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md)
@@ -518,9 +519,11 @@ domain). Orientation: the page composes the components `dm-compose-form`,
     § Roles and authorization → *Leaving — the mechanism*).** Built on tui
     first; the six others follow in the batched trickle-down.
     `room-leave-button` sits in the `room_settings` editor **below** Save and
-    outside its staged set, greyed unless `capabilities.can_leave_room` (§
-    Architectural rules 5: greyed, never hidden — the owner sees it dead and
-    hands the room over first, which is the remedy the copy names). It opens
+    outside its staged set, live while `capabilities.can_leave_room` holds and
+    otherwise blocked for the owner — painted dead with the hand-over as its
+    reason, the remedy the copy names — and absent where the room has no
+    walk-out (§ Errors & edge cases → *Controls this person can never use*).
+    It opens
     `room-leave-confirm`, the `thread-rename-confirm` /
     `add-participant-confirm` shape this page already uses; confirming acts
     **immediately** rather than staging, because leaving is not a policy edit.
@@ -584,7 +587,7 @@ domain). Orientation: the page composes the components `dm-compose-form`,
     `room-nest-read-toggle` in the `room_settings` editor, before Save — the
     home nest's read, painted only when the draft carries one
     (`RoomSettingsDraft::nest_read` is `Some`: a community room whose answer
-    this device has read), with a `checked` attribute, greyed unless
+    this device has read), with a `checked` attribute, absent (read as a line) unless
     `capabilities.can_set_policy`; staged, and Save commits it as a rotation
     with the nest in or out, before any hand-over.
   - **The room's labeler set (user-approved 2026-09-25 under rule A;
@@ -600,7 +603,7 @@ domain). Orientation: the page composes the components `dm-compose-form`,
     as a kind a room may name (`room_may_name_labeler_kind`: `wasm` or
     `text-model`), in catalog order, its text naming the kind and the id,
     `checked` attribute `true | false` (`RoomSettingsDraft::labeler_staged`);
-    greyed unless `capabilities.can_set_policy`, and an unchecked row
+    absent (each row read as a line) unless `capabilities.can_set_policy`, and an unchecked row
     greyed once the staged set is full (`labeler_toggle_live`, bounded at
     `MAX_ROOM_LABELERS`) so un-naming always stays open. Staged like the
     other policy controls: Save sends the whole set as one signed record,
@@ -798,9 +801,10 @@ Key types:
   per emit from the viewer's effective role by `RoomSnapshot::gate`
   ([`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md)
   § Roles and authorization) and stays **open** wherever no policy governs.
-  Apps grey `thread-add-participant-button` on `!can_invite` and the chip's
-  remove on `!can_remove_members`, and never branch on a role themselves
-  (§ Architectural rules 5). `encryption` is `E2E | TransportOnly | None |
+  Apps paint `thread-add-participant-button`, the chip's remove and the
+  room editor's controls from the `ThreadControl` answer over these
+  (§ Errors & edge cases → *Controls this person can never use*), and never
+  branch on a role themselves (§ Architectural rules 5). `encryption` is `E2E | TransportOnly | None |
   NestReadable` — the room class's render; `NestReadable` is the community
   arm, produced by no roster until the nest plane lands.
   `supports_reactions` + `supports_message_delete` are FaunaMls-only today (every
@@ -1737,6 +1741,8 @@ conformance.
   showed without its original). Only a reply with **both** an unresolvable
   `In-Reply-To` **and** a divergent subject still forks — the residual
   "Cross-side thread continuity" degraded case.
+- **Controls this person can never use (ruled 2026-11-16, applying [`README.md`](README.md) § Offer only what is possible, rules 2 and 6; built on tui, the six follow in their trickle-down).** Every thread and room control gated by the viewer's role or by the rail answers one shared predicate, `ThreadCapabilities::possibility(control, my_role) -> Possibility` (`libs/fauna-conversations/src/thread_controls.rs`; FFI twin `thread_control_possibility`), over the `ThreadControl` set: `Invite` (`thread-add-participant-button`), `RemoveMember` (the chip's remove), `SetPolicy` (`room-join-rule-select`, `room-history-policy-select`, `room-nest-read-toggle`, `room-labeler-toggle[i]`, `room-settings-save-button`), `AppointAdmins` (`room-admin-toggle[i]`), `TransferOwnership` (`room-owner-transfer-button[i]`), `LeaveRoom` (`room-leave-button`, `room-leave-confirm`), `LocalRemove` (`room-remove-button`, `room-remove-confirm`) and `Subject` (the reply bar's `topic-toggle-button`). The booleans stay — `RoomSnapshot::gate` writes them and the manager's refusals read them; the predicate only says *why* a `false` is, and the why decides the paint. **Absent** is every `false` but one: a role only the owner or an admin grants is not something this person can make true from this app, and a rail with no such act never will, so the control is not painted at all. **Blocked** is the one exception, the owner's walk-out: a room is never owner-less, the owner lifts it by handing the room over, so `room-leave-button` is shown disabled with `error.send.room_owner_cannot_leave` as its reason — the same sentence `leave_room` refuses with — and the hand-over controls stand live above it in the same editor. Rule 3's page-level highlight does not apply here: the editor's main acts (the policy edits) do not wait on the hand-over, only the walk-out does, and its reason names the step. Three shapes keep what a member still reads: the member chips stay painted as the inert roster (with their `role` attribute) when the remove is absent, since the chip *is* the roster; a viewer the policy editor is absent for reads the join rule, the history policy, the home nest's read and each labeler row as plain lines where the controls would sit; and a per-participant list that is shown keeps one row per participant, the owner's own row dead, so `[i]` stays the chip's index. Each handler asks the same predicate before it acts (tui's `open_thread_control`), and the wire refusals stay the manager's. tui declares each answer on its element (`Element::possible`), so walk invariant I8 holds it. **Implementation status today:** built in shared Rust and on tui, macos and ios (FaunaKit's `ThreadControlAnswers`, painted through `faunaPossible`), linux, android and web (web over the wasm twin `threadControlPossibility`; linux paints through its possibility seam, so its walk invariant I9 holds it); windows still paints these from the booleans (greyed) until its trickle-down row lands, so the e2e journeys accept either shape meanwhile (not offered live).
+- **The new-thread composer offers only what it can send (ruled 2026-11-16, applying [`README.md`](README.md) § Offer only what is possible, rules 4, 6 and 7; built on tui, the six follow in their trickle-down).** A thread not yet created has no `ThreadCapabilities`, so the composer's gated controls answer one shared predicate over its draft, `new_thread_possibility(compose, control) -> Possibility` (`libs/fauna-conversations/src/new_thread_controls.rs`; FFI twin `new_thread_control_possibility`), over the `NewThreadControl` set `Send` (`dm-send-button`), `Attach` (`attachment-button`) and `Topic` (`topic-toggle-button`). The rail is decided by the *deciding recipient*: the first committed chip (the one `send_new_thread` routes on), else the typed recipient the picker's probe resolved (the chip Send's flush would commit). **Send** is possible once there is anyone to send to — a committed chip, or typed text Send flushes into one (§ User actions, the `dm-send-button` row) — and blocked otherwise, with `conversations.compose.needs_recipient`; a first chip of a kind this build has no rail for blocks it with `conversations.compose.recipient_unsupported`. `send_new_thread` asks the same predicate after its flush and stamps any refusal on the draft's `send_state` (`conversations.unified.error_send`, the reason as `{message}`), the composer staying open with what was typed; a typed recipient the flush could not resolve refuses with the picker's own resolve sentence. Nothing returns silently: the returned error is never discarded by an app, and an error no draft carries is shown from its detail. **Attach and topic follow the deciding recipient's rail**: blocked with `conversations.compose.no_attachments_here` / `no_topic_here` on a rail that carries neither (`Bridged` today), a topic already open always closable. **Before any recipient decides a rail they are possible** — the rail is not unknown there, only not chosen yet: the draft holds the file and the topic whatever it turns out to be (a message is written first and addressed later, and survives a restart that way — § Persistence), so no input is spent on something that cannot be saved (rule 4), and rule 5 (a pending read) does not apply. Each handler asks the same predicate before it acts and refuses with its reason on `error-message` (tui's `new_thread_control`); tui declares each answer on its element (`Element::possible`), so walk invariant I8 holds it. A post-succession *Keep* (`thread-member-keep-button`) whose review-list write or re-read fails says so on `error-message` (`settings.recovery_kit.review_keep_failed`), the mark staying. **Implementation status today:** built in shared Rust and on tui; the other six still paint Send enabled and attach/topic from their own default until their trickle-down rows land.
 
 ## Architectural rules
 
@@ -1752,8 +1758,10 @@ conformance.
    `dm-message-text[i]`, `dm-reply-button[i]`, `recipient-picker-chip[i]`,
    `recipient-picker-suggestion[i]`, `protocol-icon[i]`) — scoped
    queries only, never global count + slice.
-5. **Capability gating.** Apps render every affordance unconditionally
-   and gray out / disable based on `capabilities.*`. They never branch
+5. **Capability gating.** Apps paint every affordance from
+   `capabilities.*` — a role- or rail-gated control from its
+   `ThreadControl` answer, absent or blocked with its reason (§ Errors &
+   edge cases → *Controls this person can never use*). They never branch
    on `rail` directly. This rule extends to the action layer (Python
    e2e) and the viewmodel — neither layer may branch on rail. Adding a
    sixth rail must be a backend change with zero app edits.

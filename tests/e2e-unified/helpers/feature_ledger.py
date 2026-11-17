@@ -98,6 +98,15 @@ REPO = Path(__file__).resolve().parents[3]
 #: make every second run dirty for a reason that says nothing about what it observed.
 LEDGER_REL = "docs/features/ledger"
 LEDGER = REPO / LEDGER_REL
+#: Every path a run writes as its OWN record, none of which is ever dirt
+#: (`tree_dirt`; feature-ledger.md § The ledger, *Dirty trees*, (c)): the ledger, and
+#: the two publish-gate files a release-candidate run's record adds its SHAs to
+#: (the release gate's allowlist and ratchet exemptions). Without the latter two,
+#: the candidate run's first half dirtied the tree its second half is refused on
+#: (0.1.7). They decide nothing a test observes — the publish gate reads them.
+RUN_RECORD_PATHS = (
+    LEDGER_REL,
+)
 #: The integration branch every landing path rebases onto and fast-forward-pushes
 #: (the merge script). A record's `base` is its commit's merge-base with THIS ref
 #: as the checkout knew it: the newest main commit in the record's own history.
@@ -482,8 +491,9 @@ def main_base(commit: str, repo: Path = REPO) -> str | None:
 
 
 def tree_dirt(repo: Path = REPO) -> list | None:
-    """`git status --porcelain` lines outside `docs/features/ledger/` — `[]` for a
-    clean tree, `None` when git cannot say (no repository, no git).
+    """`git status --porcelain` lines outside the run's own record
+    (`RUN_RECORD_PATHS`) — `[]` for a clean tree, `None` when git cannot say (no
+    repository, no git).
 
     The ONE definition of dirt (§ The ledger, *Dirty trees*): the ordinary run marks
     its records by it and the release-candidate gate refuses by it, so the two can
@@ -497,7 +507,7 @@ def tree_dirt(repo: Path = REPO) -> list | None:
     try:
         status = subprocess.run(
             ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all",
-             "--", ".", f":(exclude){LEDGER_REL}"],
+             "--", ".", *(f":(exclude){rel}" for rel in RUN_RECORD_PATHS)],
             capture_output=True, text=True, timeout=30)
     except Exception:
         return None
@@ -1404,7 +1414,13 @@ def sync_point_of(public_commit: str, public_clone: Path | None = None,
     if out.returncode != 0:
         return None, (f"public commit {public_commit[:12]} is not in {clone} "
                       "(fetch the public repository there, or pass --public-clone)")
-    found = _SYNC_POINT_RE.findall(out.stdout)
+    return sync_point_in_message(public_commit, out.stdout)
+
+
+def sync_point_in_message(public_commit: str, message: str) -> tuple:
+    """`(private short sha, reason)` — the last `Sync-Point:` trailer in the
+    commit MESSAGE of `public_commit`, wherever the message was read from."""
+    found = _SYNC_POINT_RE.findall(message or "")
     if not found:
         return None, (f"public commit {public_commit[:12]} carries no Sync-Point "
                       "trailer — `fauna-publish pr` did not make it")

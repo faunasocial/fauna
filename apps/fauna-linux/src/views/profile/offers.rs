@@ -42,6 +42,8 @@ use super::tiers::{list_box, placeholder, section_box};
 use crate::async_helper::spawn_with_snapshot;
 use crate::client::FaunaClient;
 use crate::i18n::strings::subscriptions as s;
+#[cfg(feature = "payments")]
+use crate::settings::claim_redeem::RedeemPair;
 use crate::testid::set_test_id;
 
 /// The free "followers" tier — followed via the header `profile-follow-button`,
@@ -61,11 +63,12 @@ struct Widgets {
     offer_list: gtk::Box,
     offer_placeholder: gtk::Label,
     offer_rows: RefCell<Vec<gtk::Box>>,
-    /// The redeem pair's code buffer — a local buffer, cleared only when the
-    /// nest takes the code (a refused paste stays to correct). Excises with the
-    /// `payments` plane, like the settings pair.
+    /// The redeem pair (`settings/claim_redeem.rs`) — its code buffer is a
+    /// local buffer, cleared only when the nest takes the code (a refused
+    /// paste stays to correct); its button is painted from the `payments`
+    /// gate. Excises with the `payments` plane, like the settings pair.
     #[cfg(feature = "payments")]
-    redeem_input: gtk::Entry,
+    redeem: RedeemPair,
     /// Shared page-level `error-message`, owned by the profile view (Rule 2).
     error_label: gtk::Label,
 }
@@ -123,17 +126,21 @@ pub fn build_offers_tab(
             offer_placeholder: body.offer_placeholder,
             offer_rows: RefCell::new(Vec::new()),
             #[cfg(feature = "payments")]
-            redeem_input: body.redeem.input,
+            redeem: body.redeem,
             error_label,
         },
     });
 
     #[cfg(feature = "payments")]
     {
-        let ctx = Rc::clone(&ctx);
-        body.redeem
+        // The profile open issues the features read the redeem is gated on
+        // itself — it never depends on Settings having been visited.
+        ctx.w.redeem.read_gate(client);
+        let ctx2 = Rc::clone(&ctx);
+        ctx.w
+            .redeem
             .button
-            .connect_clicked(move |btn| redeem_claim(&ctx, btn));
+            .connect_clicked(move |_| redeem_claim(&ctx2));
     }
 
     let outer = body.outer;
@@ -182,7 +189,7 @@ fn build_offers_body() -> OffersBody {
     // artifact for ELEMENT IDS.
     #[cfg(feature = "payments")]
     let redeem = {
-        let pair = build_redeem_pair();
+        let pair = RedeemPair::build();
         outer.append(&pair.section);
         pair
     };
@@ -196,49 +203,6 @@ fn build_offers_body() -> OffersBody {
     }
 }
 
-/// The redeem pair — the same ids, strings and wire-kind declaration as the
-/// `subscription-settings` page's (`settings/subscriptions.rs`).
-#[cfg(feature = "payments")]
-struct RedeemPair {
-    section: gtk::Box,
-    input: gtk::Entry,
-    button: gtk::Button,
-}
-
-#[cfg(feature = "payments")]
-fn build_redeem_pair() -> RedeemPair {
-    let section = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .accessible_role(gtk::AccessibleRole::Group)
-        .build();
-    let title = gtk::Label::new(Some(s::REDEEM_CLAIM_TITLE));
-    title.set_halign(gtk::Align::Start);
-    title.add_css_class("title-4");
-    section.append(&title);
-    let row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .build();
-    let input = gtk::Entry::builder()
-        .placeholder_text(s::CLAIM_CODE)
-        .hexpand(true)
-        .build();
-    set_test_id(&input, ids::SUBSCRIPTION_CLAIM_REDEEM_INPUT);
-    row.append(&input);
-    let button = gtk::Button::with_label(s::REDEEM);
-    button.add_css_class("suggested-action");
-    set_test_id(&button, ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON);
-    crate::offline_gate::declare_wire_kind(&button, "fauna.payments.claims.redeem");
-    row.append(&button);
-    section.append(&row);
-    RedeemPair {
-        section,
-        input,
-        button,
-    }
-}
-
 /// One press of the redeem button, resolved from the page: the trimmed code,
 /// THIS creator's id and the home the follow would carry.
 #[cfg(feature = "payments")]
@@ -249,18 +213,19 @@ struct RedeemRequest {
     home_nest_url: Option<String>,
 }
 
-/// A blank (trimmed) buffer is a no-op, never a nest round-trip (the settings
-/// pair's rule). The home is read at press time through the follow's own read.
+/// A blank (trimmed) buffer — the shared predicate's blocked answer — is never
+/// a nest round-trip (the settings pair's rule). The home is read at press
+/// time through the follow's own read.
 #[cfg(feature = "payments")]
 fn redeem_request(
     typed: &str,
     author: ActorId,
     home: &RefCell<Option<String>>,
 ) -> Option<RedeemRequest> {
-    let code = typed.trim();
-    if code.is_empty() {
+    if !fauna_client_subscriptions::forms::redeem_code_possibility(typed).is_possible() {
         return None;
     }
+    let code = typed.trim();
     Some(RedeemRequest {
         code: code.to_string(),
         author,
@@ -272,15 +237,19 @@ fn redeem_request(
 /// at the page's actor home (`PaymentsClient::claims_redeem_across_nests`),
 /// then re-read offers + status so the tier reads the nest's answer.
 #[cfg(feature = "payments")]
-fn redeem_claim(ctx: &Rc<Ctx>, btn: &gtk::Button) {
-    let Some(req) = redeem_request(&ctx.w.redeem_input.text(), ctx.author, &ctx.home) else {
+fn redeem_claim(ctx: &Rc<Ctx>) {
+    // The answer the button is painted from, asked again (rule 6).
+    if ctx.w.redeem.refuse(&ctx.w.error_label) {
+        return;
+    }
+    let Some(req) = redeem_request(&ctx.w.redeem.input.text(), ctx.author, &ctx.home) else {
         return;
     };
+    let btn = ctx.w.redeem.button.clone();
     btn.set_sensitive(false);
     let nest = ctx.client.nest_rpc().clone();
     let redeemer_secret = ctx.client.secret_bytes();
     let ctx_render = Rc::clone(ctx);
-    let btn = btn.clone();
     spawn_with_snapshot(
         &ctx.client.runtime_handle(),
         move || async move {
@@ -295,9 +264,10 @@ fn redeem_claim(ctx: &Rc<Ctx>, btn: &gtk::Button) {
                 .map_err(|e| e.to_string())
         },
         move |res| {
-            btn.set_sensitive(true);
+            // In flight it was held insensitive; the answer repaints it.
+            ctx_render.w.redeem.repaint();
             if apply_redeem_outcome(
-                &ctx_render.w.redeem_input,
+                &ctx_render.w.redeem.input,
                 &ctx_render.pending_tier,
                 &ctx_render.w.error_label,
                 res,
@@ -650,6 +620,17 @@ mod tests {
             assert!(body.offer_placeholder.is_visible(), "no offer rows");
             assert_eq!(count(&body.outer, ids::SUBSCRIPTION_CLAIM_REDEEM_INPUT), 1);
             assert_eq!(count(&body.outer, ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON), 1);
+            // Before the open's own features read answers, the redeem is
+            // blocked still loading, never live on a guess (rule 5).
+            assert!(body.redeem.button.is_visible());
+            assert!(!body.redeem.button.is_sensitive());
+            let error = gtk::Label::new(None);
+            assert!(body.redeem.refuse(&error));
+            assert_eq!(
+                error.text().as_str(),
+                fauna_core::localized::LocalizedText::key("common.still_loading")
+                    .resolve(crate::i18n::strings::lookup)
+            );
         });
         // The SELF tab's builder has no redeem pair to paint.
         let self_tab = include_str!("tiers.rs");

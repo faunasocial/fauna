@@ -134,6 +134,25 @@ pub enum StagedSave {
     Failed(fauna_core::localized::LocalizedText),
 }
 
+/// Whether the private section's Save can succeed now — the answer every app
+/// paints `profile-private-save-button` from, and the one [`save_staged`]
+/// refuses with (`docs/goal/ui/README.md` § Offer only what is possible,
+/// rules 5 and 6; `profile.md` § Errors & edge cases). `has_manager` is
+/// whether this seat hosts the account runtime the projection lives on (no:
+/// `profile.private_save_elsewhere`, saved from the tab that holds it);
+/// `has_store` whether its account store has assembled (no: still loading).
+pub fn save_possibility(
+    has_manager: bool,
+    has_store: bool,
+) -> fauna_core::possibility::Possibility {
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::Possibility;
+    if !has_manager {
+        return Possibility::blocked(LocalizedText::key("profile.private_save_elsewhere"));
+    }
+    Possibility::once_read(has_store)
+}
+
 /// The private section's whole Save, for an app that holds an
 /// `OverlayEditor`: `staged` is its `changes()`, `manager` the conversations
 /// manager the projection lives on, `store` this process's account store.
@@ -158,11 +177,12 @@ pub async fn save_staged(
         Ok(None) => return StagedSave::Saved,
         Err(text) => return StagedSave::Refused(text),
     };
-    let Some(manager) = manager else {
-        return StagedSave::NotReady(LocalizedText::key("profile.private_save_elsewhere"));
-    };
-    let Some(store) = store else {
-        return StagedSave::NotReady(LocalizedText::key("common.still_loading"));
+    let (Some(manager), Some(store)) = (manager, store) else {
+        let reason = save_possibility(manager.is_some(), store.is_some())
+            .reason()
+            .cloned()
+            .unwrap_or_else(|| LocalizedText::key("common.still_loading"));
+        return StagedSave::NotReady(reason);
     };
     match save(manager, store, actor_id_hex, OverlayWrite::Changes(changes)).await {
         Ok(OverlayWriteOutcome::Written(_) | OverlayWriteOutcome::Unchanged(_)) => {

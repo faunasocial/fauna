@@ -1,23 +1,30 @@
-"""tier_3 e2e: a web sign-out refuses while another tab serves the account.
+"""tier_3 e2e: a web sign-out refuses while another tab serves the account —
+the role holder's included, until the sibling is closed.
 
 ``docs/goal/architecture/apps/account-scoping.md`` § Concurrent instances →
 *An erase refuses while a sibling serves the account*. Sign-out erases every
 account-scoped store of the browser profile, so a tab signing out while a
 sibling tab still serves the account strands that sibling on an erased store —
 its conversations engine keeps writing a device leaf whose credentials are
-gone. Web's analogue of the native instance lock is the MLS-engine role Web
-Lock (``fauna_mls::engine_role``): a sign-out finds it free, or refuses **entirely** —
-nothing erased, no credentials wiped, still signed in — with the shared line
+gone. Web asks at two Web Locks, as native asks at two locks: the MLS-engine
+role (``fauna_mls::engine_role``) and the serving-presence lock every tab whose
+identity is the account holds shared (``fauna_client_accounts::
+web_serving_presence``; § Concurrent instances → *Web's serving-presence lock*).
+A sign-out finds both free, or refuses **entirely** — nothing erased, no
+credentials wiped, still signed in — with the shared line
 ``settings.sign_out_blocked_other_window`` on the Settings page's
 ``error-message``.
 
 **Why the witness is a pair, in one browser profile.** Refusal alone is
 satisfied by a guard that refuses everything — and the obvious probe does
-exactly that in the tab that *holds* the role, where an ``ifAvailable`` request
-meets its own lock. So the test asserts both halves against one world: tab B
-(refused the engine, tab A holds it) is refused its sign-out, and then tab A —
-the role holder, with tab B still open — signs out and erases. Pre-fix, tab B's
-sign-out erased the shared store out from under tab A.
+exactly that in a tab that *holds* a lock, where an ``ifAvailable`` request
+meets its own hold. So the test asserts every half against one world: tab B
+(refused the engine, tab A holds it) is refused its sign-out; tab A — the role
+holder — is refused too while tab B is open, because tab B holds the account's
+identity and declares it (before the serving-presence lock, the holder's
+sign-out proceeded here and tab B then won the role and ran the signed-out
+account on); and once tab B is closed tab A's sign-out proceeds and erases — so
+neither tab's own holds refuse it.
 
 The world is this module's own driver seeded through ``localStorage`` (the
 ``test_sign_out_web.py`` shape), not ``logged_in_app``: the test ends by
@@ -36,6 +43,7 @@ from actions import ActionLayer
 from common.auth import create_actor_and_register
 from common.accounts import single_account_seed
 from drivers import create_driver
+from helpers.web_tabs import lock_queue
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
 
@@ -80,7 +88,7 @@ def _error_texts(driver) -> str:
 
 
 @pytest.mark.feature("account")
-def test_web_sign_out_refuses_while_another_tab_holds_the_engine(nest_instance, spa_url):
+def test_web_sign_out_refuses_while_another_tab_serves_the_account(nest_instance, spa_url):
     actor = create_actor_and_register(
         nest_instance["port"],
         admin_signing_key=nest_instance["admin"]["signing_key"],
@@ -142,13 +150,60 @@ def test_web_sign_out_refuses_while_another_tab_holds_the_engine(nest_instance, 
             "the sign-out control must stay showing beside the refusal"
         )
 
-        # (4) Tab A — the role HOLDER — signs out with tab B still open, and it
-        # PROCEEDS. A probe that met its own lock would refuse here forever.
-        ActionLayer(tab_a).settings.sign_out()
+        # (4) Tab A — the role HOLDER — is refused too while tab B is open: tab B
+        # holds the account's identity without its role, and declares it on the
+        # serving-presence lock. Its own role and its own serving hold do not
+        # refuse it — step (5) proves that.
+        ActionLayer(tab_a).settings.press_sign_out()
+        holder_refusal = _wait_until(
+            lambda: "still signed in" in _error_texts(tab_a).lower() and _error_texts(tab_a),
+            what="tab A's sign-out refusal on error-message while tab B is open",
+        )
+        assert "another fauna window" in holder_refusal.lower(), (
+            "the holder's refusal must be the same shared line; "
+            f"error-message read {holder_refusal!r}"
+        )
+        assert _ls(tab_a, f"fauna/{actor_id}/secret") == secret, (
+            "the holder's refused sign-out must wipe no credentials beside a serving sibling"
+        )
+        assert (tab_a.get_state() or {}).get("session", {}).get("actor_id") == actor_id, (
+            "the holder's refused sign-out leaves it signed in as the same account"
+        )
+
+        # (5) Tab B closes — the browser lets its holds go — and the holder's
+        # sign-out PROCEEDS. A probe that met its own locks would refuse forever.
+        # The remedy is the whole of it: close the other tab and press the same
+        # control again — the refusal leaves the confirm button showing.
+        tab_b.teardown()
+        tab_b = None
+        # The browser lets a closed tab's holds go on its own clock: the page is
+        # gone before the lock manager has dropped its shared serving hold, and a
+        # press in between is refused again — rightly, the hold still stands. So
+        # the press waits for the origin's own record to show tab A as the one
+        # holder left (convention 14: the state, never a settle-sleep).
+        serving = f"fauna.accounts.serving/{actor_id}"
+        _wait_until(
+            lambda: lock_queue(tab_a)["held"].count(serving) == 1,
+            what=f"the browser releasing the closed tab B's {serving} hold",
+        )
+        assert tab_a.is_visible(SIGN_OUT_CONFIRM_BUTTON), (
+            "the holder's sign-out control must stay showing beside its refusal"
+        )
+        tab_a.click(SIGN_OUT_CONFIRM_BUTTON)
+        try:
+            _wait_until(
+                lambda: tab_a.is_visible("create-identity-button"),
+                what="the holder's sign-out reaching onboarding once tab B closed",
+            )
+        except AssertionError as e:
+            raise AssertionError(
+                f"{e}; error-message read {_error_texts(tab_a)!r}, "
+                f"locks held {lock_queue(tab_a)['held']!r}"
+            ) from None
         survivors = _registry_keys(tab_a)
         assert survivors == [], (
-            "the tab holding the engine role must be able to sign out (its own role "
-            f"is not another tab's); these registry keys survived: {survivors}"
+            "with no sibling open the holder must be able to sign out (its own role "
+            f"and serving hold are not another tab's); these registry keys survived: {survivors}"
         )
         assert _ls(tab_a, f"fauna/{actor_id}/secret") is None, "the holder's sign-out erased nothing"
     finally:

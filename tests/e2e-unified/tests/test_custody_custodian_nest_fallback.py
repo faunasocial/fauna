@@ -74,8 +74,15 @@ pytestmark = [
     pytest.mark.web, pytest.mark.macos, pytest.mark.ios,
 ]
 
-#: One poked pass of alice's pump, by whichever process holds it.
-_PASS_S = 120.0
+#: One poked pass of alice's pump, by whichever process holds it — a ceiling,
+#: never a timing assertion (the pass COMPLETING is the barrier). The barrier
+#: is a pass that BEGAN after the poke, so a poke landing behind a pass already
+#: in flight (the backstop tick comes due inside a long pass and runs the
+#: moment it ends) waits out two passes; with the home nest down each pass pays
+#: every leg's request deadline, about 65 s on an iOS seat — 130 s for the
+#: pair, measured 2026-11-15, which a 120 s ceiling refused. The custody
+#: ceremony journey's pump-pass ceiling.
+_PASS_S = 300.0
 
 #: Passes over which "the friend's nest was not asked" must hold.
 _QUIET_PASSES = 3

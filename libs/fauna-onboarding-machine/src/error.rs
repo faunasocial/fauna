@@ -77,6 +77,12 @@ impl From<fauna_provisioning::error::ProvisionError> for OnboardingError {
                 detail,
             },
             P::Other(message) => OnboardingError::Other { detail: message },
+            // A door the registry does not declare for this provider: the
+            // cover rule offers only declared doors, so reaching it is a bug
+            // upstream, surfaced with the operation it names.
+            unsupported @ P::Unsupported { .. } => OnboardingError::Other {
+                detail: unsupported.to_string(),
+            },
             P::Cancelled => OnboardingError::Other {
                 detail: "Cancelled".into(),
             },

@@ -822,11 +822,18 @@ func (_ FfiDestroyerDnsRecord) Destroy(value DnsRecord) {
 type DnsZone struct {
 	Id   string
 	Name string
+	// The nameservers the provider assigned the zone — filled by a provider
+	// with the zone door (`dns_creates_zones`), from `verify()` and
+	// `create_zone()` alike, so a zone the domain is not yet delegated to can
+	// be told from one it is; empty from every other adapter
+	// (`docs/goal/architecture/provisioning/registry.md` § Delegation doors).
+	Nameservers []string
 }
 
 func (r *DnsZone) Destroy() {
 	FfiDestroyerString{}.Destroy(r.Id)
 	FfiDestroyerString{}.Destroy(r.Name)
+	FfiDestroyerSequenceString{}.Destroy(r.Nameservers)
 }
 
 type FfiConverterDnsZone struct{}
@@ -841,6 +848,7 @@ func (c FfiConverterDnsZone) Read(reader io.Reader) DnsZone {
 	return DnsZone{
 		FfiConverterStringINSTANCE.Read(reader),
 		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterSequenceStringINSTANCE.Read(reader),
 	}
 }
 
@@ -855,6 +863,7 @@ func (c FfiConverterDnsZone) LowerExternal(value DnsZone) ExternalCRustBuffer {
 func (c FfiConverterDnsZone) Write(writer io.Writer, value DnsZone) {
 	FfiConverterStringINSTANCE.Write(writer, value.Id)
 	FfiConverterStringINSTANCE.Write(writer, value.Name)
+	FfiConverterSequenceStringINSTANCE.Write(writer, value.Nameservers)
 }
 
 type FfiDestroyerDnsZone struct{}
@@ -1806,6 +1815,9 @@ const (
 	SkipReasonDnsRecordAlreadyExists SkipReason = 3
 	SkipReasonPtrAlreadySet          SkipReason = 4
 	SkipReasonNestAlreadyOnline      SkipReason = 5
+	// This wizard already registered the domain (a Retry of a run that
+	// registers and publishes nothing).
+	SkipReasonDomainAlreadyRegistered SkipReason = 6
 )
 
 type FfiConverterSkipReason struct{}
@@ -1883,22 +1895,28 @@ type SubstepKey uint
 const (
 	SubstepKeyDomainCheckingAvailability SubstepKey = 1
 	SubstepKeyDomainRegistering          SubstepKey = 2
-	SubstepKeyDomainVerifyingZone        SubstepKey = 3
-	SubstepKeyServerGeneratingDkim       SubstepKey = 4
-	SubstepKeyServerCreating             SubstepKey = 5
-	SubstepKeyDnsAddingDomainRecords     SubstepKey = 6
-	SubstepKeyDnsAddingEmailRecords      SubstepKey = 7
-	SubstepKeyDnsSettingReverseDns       SubstepKey = 8
-	SubstepKeyOnlineWaiting              SubstepKey = 9
+	// DNS runs at another provider: creating the domain's zone there
+	// (`onboarding-provisioning.md` § 6).
+	SubstepKeyDomainCreatingZone SubstepKey = 3
+	// DNS runs at another provider: setting the domain's nameservers at its
+	// registrar to that zone's.
+	SubstepKeyDomainSettingNameservers SubstepKey = 4
+	SubstepKeyDomainVerifyingZone      SubstepKey = 5
+	SubstepKeyServerGeneratingDkim     SubstepKey = 6
+	SubstepKeyServerCreating           SubstepKey = 7
+	SubstepKeyDnsAddingDomainRecords   SubstepKey = 8
+	SubstepKeyDnsAddingEmailRecords    SubstepKey = 9
+	SubstepKeyDnsSettingReverseDns     SubstepKey = 10
+	SubstepKeyOnlineWaiting            SubstepKey = 11
 	// The claim that turns "built" into "built **and claimed**" — `Online`'s
 	// final substep on the standard path, run by the machine (not this crate's
 	// provider-facing orchestrator) the instant `/health` answers.
 	// `docs/goal/behavior/onboarding.md` § 6 *Provisioning = build + claim*.
-	SubstepKeyOnlineClaiming   SubstepKey = 10
-	SubstepKeyStatusSkipped    SubstepKey = 11
-	SubstepKeyStatusRetrying   SubstepKey = 12
-	SubstepKeyStatusCancelling SubstepKey = 13
-	SubstepKeyStatusCancelled  SubstepKey = 14
+	SubstepKeyOnlineClaiming   SubstepKey = 12
+	SubstepKeyStatusSkipped    SubstepKey = 13
+	SubstepKeyStatusRetrying   SubstepKey = 14
+	SubstepKeyStatusCancelling SubstepKey = 15
+	SubstepKeyStatusCancelled  SubstepKey = 16
 )
 
 type FfiConverterSubstepKey struct{}
@@ -2218,6 +2236,53 @@ type FfiDestroyerOptionalSubstepKey struct{}
 func (_ FfiDestroyerOptionalSubstepKey) Destroy(value *SubstepKey) {
 	if value != nil {
 		FfiDestroyerSubstepKey{}.Destroy(*value)
+	}
+}
+
+type FfiConverterSequenceString struct{}
+
+var FfiConverterSequenceStringINSTANCE = FfiConverterSequenceString{}
+
+func (c FfiConverterSequenceString) Lift(rb RustBufferI) []string {
+	return LiftFromRustBuffer[[]string](c, rb)
+}
+
+func (c FfiConverterSequenceString) Read(reader io.Reader) []string {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]string, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterStringINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceString) Lower(value []string) C.RustBuffer {
+	return LowerIntoRustBuffer[[]string](c, value)
+}
+
+func (c FfiConverterSequenceString) LowerExternal(value []string) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]string](c, value))
+}
+
+func (c FfiConverterSequenceString) Write(writer io.Writer, value []string) {
+	if len(value) > math.MaxInt32 {
+		panic("[]string is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterStringINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceString struct{}
+
+func (FfiDestroyerSequenceString) Destroy(sequence []string) {
+	for _, value := range sequence {
+		FfiDestroyerString{}.Destroy(value)
 	}
 }
 

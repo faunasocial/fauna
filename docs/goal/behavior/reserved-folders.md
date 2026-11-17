@@ -223,7 +223,7 @@ account switch and the e2e reset alike — capturing each rail's snapshot before
 the managers and saving it on the stop task ahead of the client's disconnect, so the erase and the
 next sign-in's restore queue behind it. tui's quit and sign-out doors share one body
 (`drafts_autosave::LeaveFlush`, each rail bounded on its own).
-**macos and ios** (2026-10-31) flush all three, bounded at 2.5 s, through `flushDraftRails` on
+**macos and ios** (2026-10-31) flush all three, bounded at the shared `LEAVE_FLUSH_BUDGET` read through `fauna-ffi` (the quit door adds a 0.5 s outer margin), through `flushDraftRails` on
 each app state: `SignOutSection` runs it behind the sign-out-blocked refusal and ahead of the push
 row's drop and the runtime stop, and `switchAccount` runs it ahead of the teardown. The teardown
 itself does not, so the identity-changed verdict skips it as linux's does. The witness is

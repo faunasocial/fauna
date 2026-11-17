@@ -25,6 +25,41 @@ import Testing
         #expect(!box.isCurrent(launch: launch))
     }
 
+    // ── `claim(resuming:)` — the sign-out gate's deferred re-entry ──────────
+    // The first launch of every process is deferred across the gate's detached
+    // finish and re-enters with the claim it was deferred with.
+
+    @Test func aFreshEntryTakesANewClaim() {
+        let box = LaunchMachineBox()
+        let launch = box.claim(resuming: nil)
+        #expect(launch != nil)
+        #expect(box.isCurrent(launch: launch!))
+    }
+
+    @Test func aDeferredReEntryKeepsItsClaimWhenNothingSupersededIt() {
+        let box = LaunchMachineBox()
+        let deferred = box.claim(resuming: nil)!
+        #expect(box.claim(resuming: deferred) == deferred)
+    }
+
+    @Test func aSessionPatchDuringTheGatesFinishRetiresTheDeferredReEntry() {
+        let box = LaunchMachineBox()
+        let deferred = box.claim(resuming: nil)!
+        // The e2e session patch's clear, landing while the finish runs and no
+        // machine was ever installed.
+        box.machine = nil
+        #expect(box.claim(resuming: deferred) == nil)
+    }
+
+    @Test func aNewerEntryDuringTheGatesFinishRetiresTheDeferredReEntry() {
+        let box = LaunchMachineBox()
+        let deferred = box.claim(resuming: nil)!
+        // A switch's teardown re-runs the launch while the first is deferred.
+        let newer = box.claim(resuming: nil)!
+        #expect(box.claim(resuming: deferred) == nil)
+        #expect(box.claim(resuming: newer) == newer)
+    }
+
     @Test func aNewerLaunchRetiresAnOlderOne() {
         let box = LaunchMachineBox()
         let older = box.beginLaunch()

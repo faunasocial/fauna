@@ -60,6 +60,40 @@ pub fn offline_affordance(kind: String, connection_state: String) -> FfiAffordan
     }
 }
 
+/// The same verdict as [`offline_affordance`], in the shared answer type every
+/// gated affordance's predicate gives: [`fauna_core::possibility::Possibility`]
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6). This is
+/// the seam the native apps fold each page's own predicate into. tui already
+/// does it in Rust: it is `Possibility::and` of the page's answer with this
+/// one, applied where the app assembles a page's elements. The enum crosses
+/// the boundary whole (`Possible` / `Blocked { reason }` / `Absent`) so an app
+/// paints enabled, disabled-with-reason or nothing from one value.
+///
+/// Gated `value-format` for the same bare-`fauna_core`-type reason as
+/// [`offline_affordance`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn offline_possibility(
+    kind: String,
+    connection_state: String,
+) -> fauna_core::possibility::Possibility {
+    fauna_protocol::offline_class::affordance(&kind, &connection_state).possibility()
+}
+
+/// The answer a read alone gives (`docs/goal/ui/README.md` § Offer only what
+/// is possible, rule 5): [`fauna_core::possibility::Possibility::from_read`] —
+/// blocked `common.still_loading` while pending, blocked `common.load_failed`
+/// when it failed, possible once resolved. A page whose affordance waits only
+/// on its own read (profile follow and block) paints from this, so no app
+/// spells the two reasons itself.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn read_possibility(
+    read: fauna_core::possibility::ReadState,
+) -> fauna_core::possibility::Possibility {
+    fauna_core::possibility::Possibility::from_read(read)
+}
+
 /// UniFFI face of [`fauna_protocol::offline_class::is_online`] — is this
 /// transport word one the offline gate treats as **online**?
 ///
@@ -99,6 +133,17 @@ pub fn connection_is_online(state: String) -> bool {
 #[cfg(all(test, feature = "value-format"))]
 mod tests {
     use super::*;
+
+    /// The read face forwards `Possibility::from_read` on every arm.
+    #[test]
+    fn the_read_face_answers_each_read_state() {
+        use fauna_core::possibility::{Possibility, ReadState};
+        for read in [ReadState::Pending, ReadState::Failed, ReadState::Resolved] {
+            assert_eq!(read_possibility(read), Possibility::from_read(read));
+        }
+        assert!(!read_possibility(ReadState::Pending).is_possible());
+        assert!(read_possibility(ReadState::Resolved).is_possible());
+    }
 
     /// The face must not restate the rule. These pin that it *forwards* — a
     /// kind of each class, in both connection directions — so a later

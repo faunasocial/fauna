@@ -99,6 +99,14 @@ pub enum ProvisionError {
     #[error("{0}")]
     Other(String),
 
+    /// The provider has no such door: an optional trait method this adapter
+    /// does not implement (`DnsProvider::create_zone`,
+    /// `Registrar::set_nameservers`). Answered before any request, and only
+    /// where the registry does not declare the door
+    /// (`docs/goal/architecture/provisioning/registry.md` § Delegation doors).
+    #[error("this provider does not support {operation}")]
+    Unsupported { operation: &'static str },
+
     /// Set on the cancel flag mid-run; the run loop returns this from its
     /// next iteration boundary or retry sleep.
     #[error("Cancelled")]

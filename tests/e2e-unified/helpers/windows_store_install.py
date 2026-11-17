@@ -169,6 +169,12 @@ class PackageFacts:
     def executable(self) -> Path:
         return Path(self.install_location) / EXECUTABLE_RELPATH
 
+    @property
+    def version(self) -> str:
+        """The package version, read off its full name (``<Name>_<Version>_<Arch>_…``;
+        a package name holds no underscore)."""
+        return self.full_name.split("_")[1]
+
 
 def _ps(script: str, timeout: float = _PS_BUDGET_S) -> tuple[int, str, str]:
     r = subprocess.run(
@@ -339,21 +345,85 @@ def layout_identity(manifest: Path) -> tuple[str, str]:
     return identity.get("Name", ""), identity.get("Publisher", "")
 
 
-def register_layout(manifest: Path, arch: str | None = None) -> PackageFacts:
+def register_layout(manifest: Path, arch: str | None = None, *, name: str = IDENTITY_NAME,
+                    force_application_shutdown: bool = False) -> PackageFacts:
     """Register a staged loose layout for this user (deployment path 3 of
     ``tests/real_session/test_store_package_registration.py``: Developer Mode, no
     signing, no elevation) and return what the catalogue then says about the
-    package of ``arch`` (default the host's own), the layout's architecture."""
-    rc, out, err = _ps(f"$ErrorActionPreference='Stop'; Add-AppxPackage -Register '{manifest}'")
+    package ``name`` of ``arch`` (default the host's own), the layout's architecture.
+
+    ``force_application_shutdown`` lets the deployment close the package's running
+    processes, what App Installer does once the user agrees to close the app: a
+    higher version of an installed family registered over a running app is refused
+    without it (``0x80073D02``, `installers/windows.md` § Direct download, 2)."""
+    flags = " -ForceApplicationShutdown" if force_application_shutdown else ""
+    rc, out, err = _ps(
+        f"$ErrorActionPreference='Stop'; Add-AppxPackage -Register '{manifest}'{flags}")
     if rc != 0:
-        raise RuntimeError(f"Add-AppxPackage -Register {manifest} failed (rc={rc}):\n{out}\n{err}")
-    facts = package_facts(arch=arch)
+        raise RuntimeError(
+            f"Add-AppxPackage -Register {manifest}{flags} failed (rc={rc}):\n{out}\n{err}")
+    facts = package_facts(name, arch=arch)
     if facts is None:
         raise RuntimeError(
-            f"Add-AppxPackage -Register {manifest} reported success but no {IDENTITY_NAME} "
-            "is installed"
+            f"Add-AppxPackage -Register {manifest} reported success but no {name} is installed"
         )
     return facts
+
+
+def next_version_layout(layout: Path, dst: Path) -> str:
+    """Copy the loose layout ``layout`` to ``dst`` as the next version of the same
+    family — its manifest's ``Identity/@Version`` with the fourth part plus one,
+    nothing else changed — and return that version. What a later release is to an
+    installed one (`installers/windows.md` § Direct download, 2: every later release
+    is a higher version and installs over the earlier one)."""
+    import re
+    import shutil
+
+    shutil.copytree(layout, dst)
+    manifest = Path(dst) / "AppxManifest.xml"
+    text = manifest.read_text(encoding="utf-8")
+    identity = re.search(r"<Identity\b[^>]*>", text, re.S)
+    if identity is None:
+        raise RuntimeError(f"{manifest} declares no <Identity>")
+    current = re.search(r'\bVersion="([^"]+)"', identity.group(0)).group(1)
+    parts = current.split(".")
+    parts[3] = str(int(parts[3]) + 1)
+    version = ".".join(parts)
+    bumped = re.sub(r'(\bVersion=")[^"]+(")', rf"\g<1>{version}\g<2>", identity.group(0), count=1)
+    manifest.write_text(text.replace(identity.group(0), bumped, 1), encoding="utf-8")
+    return version
+
+
+def process_package_full_name(pid: int) -> str | None:
+    """The package identity process ``pid`` runs with, or ``None`` when it has none
+    or cannot be read — the OS's answer (``GetPackageFullName``), the read the bridge
+    makes of the app it launches (`flaui-bridge/SessionManager.cs::PackageFullNameOf`),
+    for a process the bridge did not start (an agent the packaged app spawned)."""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wt.HANDLE
+    kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    kernel32.GetPackageFullName.restype = ctypes.c_long
+    kernel32.GetPackageFullName.argtypes = [wt.HANDLE, ctypes.POINTER(ctypes.c_uint32), wt.LPWSTR]
+    kernel32.CloseHandle.argtypes = [wt.HANDLE]
+
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        length = ctypes.c_uint32(0)
+        # 122 = ERROR_INSUFFICIENT_BUFFER, the answer for a process WITH a package;
+        # one without answers APPMODEL_ERROR_NO_PACKAGE (15700).
+        if kernel32.GetPackageFullName(handle, ctypes.byref(length), None) != 122:
+            return None
+        buf = ctypes.create_unicode_buffer(length.value)
+        if kernel32.GetPackageFullName(handle, ctypes.byref(length), buf) != 0:
+            return None
+        return buf.value
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def remove_package(name: str = IDENTITY_NAME) -> None:

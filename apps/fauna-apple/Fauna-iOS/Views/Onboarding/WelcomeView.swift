@@ -25,9 +25,15 @@ struct WelcomeView: View {
                 // (dynamic-features.md, the kids spine paragraph). The steps stay on
                 // handle entry, as on the android leg.
                 #if FAUNA_KIDS
-                case .dnsConfig, .vpsConfig, .nestProvisioning, .claimCode, .natModeChoice:
+                case .providerChoice, .dnsConfig, .vpsConfig, .nestProvisioning, .claimCode, .natModeChoice:
                     HandleEntryView(vm: vm)
                 #else
+                // The choose-providers page (onboarding-provisioning.md § 3d) — shared
+                // FaunaKit view; `setRendersProviderChoice(true)` declared at
+                // `OnboardingVM.init`, so the handle check lands here in place of
+                // dnsConfig → vpsConfig (which stay for the cloud-recovery path).
+                case .providerChoice:
+                    ProviderChoiceView(vm: vm)
                 case .dnsConfig:
                     DnsConfigView(vm: vm)
                 case .vpsConfig:

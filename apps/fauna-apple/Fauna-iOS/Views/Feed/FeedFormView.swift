@@ -197,12 +197,14 @@ struct FeedFormView: View {
                     }
                     .accessibilityIdentifier(Ids.createFeed)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!form.canCreate || vm.creatingFeed)
+                    .disabled(vm.creatingFeed)
                     .frame(maxWidth: .infinity)
                     .automationActivate(
                         Ids.createFeed,
-                        isEnabled: { form.canCreate && !vm.creatingFeed }
+                        isEnabled: { !vm.creatingFeed }
                     ) { submitCreateFeed() }
+                    .faunaPossible(form.createPossibility)
+                    FaunaPossibilityReason(form.createPossibility)
 
                     Button(role: .cancel) {
                         dismiss()
@@ -247,9 +249,13 @@ struct FeedFormView: View {
     /// logic lives).
     private func submitCreateFeed() {
         Task {
-            await vm.createFeed(name: form.name, combination: form.combination,
-                                rules: form.filterRules, factors: form.factors)
-            dismiss()
+            // Dismisses only on a saved feed: a refusal or a failed create keeps
+            // the sheet open with what was typed (`ui/README.md` § Offer only
+            // what is possible, rule 7).
+            if await vm.createFeed(name: form.name, combination: form.combination,
+                                   rules: form.filterRules, factors: form.factors) {
+                dismiss()
+            }
         }
     }
 }

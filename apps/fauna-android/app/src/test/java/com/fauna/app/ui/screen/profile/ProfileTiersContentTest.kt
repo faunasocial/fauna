@@ -20,6 +20,11 @@ import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import com.fauna.app.R
 
 /**
  * Compose-level coverage for the stateless [ProfileTiersContent] (the profile
@@ -29,7 +34,9 @@ import uniffi.fauna_core.LocalizedText
  * + save, the indexed tier / pending-request / subscriber / provider / claim
  * rows with their per-row controls, the `subscription-request-busy` indicator,
  * and the payment-verified paid badge. Renders with seeded state — no Hilt, no
- * VM, no FFI native calls.
+ * VM. The own-tier answers (`subscriptionClaimMintPossibility` /
+ * `subscriptionProviderAddPossibility`) are the real shared faces, reached over
+ * `just android-host-test`'s host-JNA wiring like `FoldersContentTest`'s.
  */
 @RunWith(FaunaRobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -37,6 +44,8 @@ class ProfileTiersContentTest {
 
     @get:Rule
     val composeTestRule = createComposeRule()
+
+    private val context: Context = ApplicationProvider.getApplicationContext()
 
     private fun tier(
         name: String = "gold",
@@ -129,6 +138,8 @@ class ProfileTiersContentTest {
         requests: List<FfiPendingRequest> = emptyList(),
         subscribers: List<FfiSubscriberEntry> = emptyList(),
         selectedTier: Int = 0,
+        // Where the tier read stands; answered by default (the ordinary case).
+        tiersRead: ReadState = ReadState.RESOLVED,
         approving: Boolean = false,
         working: Boolean = false,
         onCreate: (String, UInt, String?, String?, String?, Boolean, ULong?) -> Unit = { _, _, _, _, _, _, _ -> },
@@ -144,12 +155,22 @@ class ProfileTiersContentTest {
         onSetProvider: (String, String, String, String) -> Unit = { _, _, _, _ -> },
         onRemoveProvider: (String) -> Unit = {},
         onMintClaim: (String) -> Unit = {},
+        onFormRefused: (String) -> Unit = {},
         webhookUrl: (String) -> String = { kind -> "https://example.test/webhook/$kind" },
         returnUrl: (String) -> String? = { null },
         // FFI-free stand-in for `com.fauna.ffi.parseCount`, mirroring
         // `fauna_core::format::parse_count` exactly (`input.trim().parse::<u32>().ok()`)
         // — the TRIM is the whole point of the swap this stub covers.
         parseRank: (String) -> UInt? = { it.trim().toUIntOrNull() },
+        // FFI-free stand-in for `subscriptionTierFormPossibility`, mirroring
+        // `tier_form_possibility` (a blank name is blocked with its reason key).
+        tierFormPossibility: (String) -> Possibility = { name ->
+            if (name.isBlank()) {
+                Possibility.Blocked(LocalizedText(key = "subscriptions.tier_name_required", args = emptyMap()))
+            } else {
+                Possibility.Possible
+            }
+        },
     ) {
         composeTestRule.setContent {
             // Mirror ProfileScreen's verticalScroll so off-screen controls (the
@@ -183,9 +204,31 @@ class ProfileTiersContentTest {
                 claimStatusLabel = ::testClaimStatusLabel,
                 providerStatusLabel = ::testProviderStatusLabel,
                 parseRank = parseRank,
+                tierFormPossibility = tierFormPossibility,
+                onFormRefused = onFormRefused,
+                tiersRead = tiersRead,
             )
             }
         }
+    }
+
+    // ── The form case (profile.md § Errors & edge cases; README § Offer only
+    // what is possible, rule 4): Save painted from `tier_form_possibility`.
+
+    @Test
+    fun tierForm_aBlankNameDisablesSaveWithTheSharedReason() {
+        var created: String? = null
+        render(onCreate = { name, _, _, _, _, _, _ -> created = name })
+        composeTestRule.onNodeWithTag("subscription-tier-create-button").performClick()
+        composeTestRule.onNodeWithTag("subscription-tier-form-save")
+            .performScrollTo().assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText("Name the tier first.").assertExists()
+        assertEquals(null, created)
+        composeTestRule.onNodeWithTag("subscription-tier-form-name")
+            .performScrollTo().performTextInput("gold")
+        composeTestRule.onNodeWithTag("subscription-tier-form-save")
+            .performScrollTo().assertIsEnabled()
+        composeTestRule.onNodeWithText("Name the tier first.").assertDoesNotExist()
     }
 
     @Test
@@ -296,13 +339,53 @@ class ProfileTiersContentTest {
         assertEquals(listOf("fake", "", "gold", "plink_new"), saved)
     }
 
+    // ── A tier before what sells it (`profile.md` § Errors & edge cases): the
+    // two controls that need a tier are painted from the shared own-tier answer,
+    // and an unanswered read is never "create a tier" ─────────────────────────
+
     @Test
-    fun providerForm_saveDisabled_withNoTiers() {
+    fun providerAdd_disabledWithNoTiers_andTheFormNeverOpens() {
         render(providerKinds = listOf("fake"))
         composeTestRule.onNodeWithTag("subscription-provider-add-button")
-            .performScrollTo().performClick()
-        composeTestRule.onNodeWithTag("subscription-provider-form-save")
+            .performScrollTo().assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithTag("subscription-provider-form").assertDoesNotExist()
+        composeTestRule
+            .onNodeWithText(context.getString(R.string.subscriptions_provider_needs_tier))
+            .assertExists()
+    }
+
+    @Test
+    fun providerAdd_saysStillLoading_whileTheTierReadIsPending() {
+        render(tiers = listOf(tier(name = "gold")), providerKinds = listOf("fake"), tiersRead = ReadState.PENDING)
+        composeTestRule.onNodeWithTag("subscription-provider-add-button")
             .performScrollTo().assertIsNotEnabled()
+        composeTestRule.onAllNodesWithText(context.getString(R.string.common_still_loading))[0].assertExists()
+        composeTestRule
+            .onNodeWithText(context.getString(R.string.subscriptions_provider_needs_tier))
+            .assertDoesNotExist()
+    }
+
+    @Test
+    fun claimMint_disabledWithTheNeedsTierReason_whenTheReadAnsweredNoTier() {
+        var minted: String? = null
+        render(onMintClaim = { minted = it })
+        composeTestRule.onNodeWithTag("subscription-claim-mint-button")
+            .performScrollTo().assertIsNotEnabled().performClick()
+        assertEquals(null, minted)
+        composeTestRule
+            .onNodeWithText(context.getString(R.string.subscriptions_claim_needs_tier))
+            .assertExists()
+    }
+
+    @Test
+    fun claimMint_saysTheReadFailed_neverNeedsTier_whenTheTierReadFailed() {
+        render(tiersRead = ReadState.FAILED)
+        composeTestRule.onNodeWithTag("subscription-claim-mint-button")
+            .performScrollTo().assertIsNotEnabled()
+        composeTestRule.onAllNodesWithText(context.getString(R.string.common_load_failed))[0].assertExists()
+        composeTestRule
+            .onNodeWithText(context.getString(R.string.subscriptions_claim_needs_tier))
+            .assertDoesNotExist()
     }
 
     @Test

@@ -282,7 +282,10 @@ internal sealed class OfflineGate
         foreach (var declaration in _declared.ToArray()) Apply(declaration);
     }
 
-    /// <summary>The state word the gate is currently deciding against. Tests only.</summary>
+    /// <summary>The state word the gate is currently deciding against — read by
+    /// tests, and by <c>FeedManagerHost</c> to lend a freshly built feed manager the
+    /// device's offline outbox at the same word, so the gate and the outbox agree
+    /// from the manager's first gesture.</summary>
     internal string ConnectionState => _state;
 
     /// <summary>Every live declaration as (kind, enabled). Tests only.</summary>

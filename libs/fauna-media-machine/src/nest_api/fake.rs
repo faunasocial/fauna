@@ -682,3 +682,69 @@ impl MediaNestApi for FakeMediaNestApi {
         }
     }
 }
+
+/// What a [`FakeFolderMaker`] does with the next make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FakeMakeOutcome {
+    /// The folder lands: the paired [`FakeMediaNestApi`] lists it from the
+    /// next `list_folders()` on (made now, or by another device first — the
+    /// maker folds a duplicate-name conflict into this answer).
+    Lands,
+    /// The maker answers success but the list never carries the folder.
+    Phantom,
+    /// The create fails with this reason.
+    Fails(String),
+}
+
+/// A [`fauna_core::folder_create::PlainFolderMaker`] over a
+/// [`FakeMediaNestApi`]: records each name it is asked to make and, on
+/// [`FakeMakeOutcome::Lands`], adds an own folder of that name to the fake's
+/// folder list.
+#[derive(Debug)]
+pub struct FakeFolderMaker {
+    api: std::sync::Arc<FakeMediaNestApi>,
+    outcome: Mutex<FakeMakeOutcome>,
+    made: Mutex<Vec<String>>,
+}
+
+impl FakeFolderMaker {
+    pub fn new(api: std::sync::Arc<FakeMediaNestApi>) -> Self {
+        Self {
+            api,
+            outcome: Mutex::new(FakeMakeOutcome::Lands),
+            made: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn set_outcome(&self, outcome: FakeMakeOutcome) {
+        *self.outcome.lock().unwrap() = outcome;
+    }
+
+    /// Every name a make was asked for, in order.
+    pub fn made(&self) -> Vec<String> {
+        self.made.lock().unwrap().clone()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl fauna_core::folder_create::PlainFolderMaker for FakeFolderMaker {
+    async fn make_plain_folder(&self, name: &str) -> Result<(), String> {
+        self.made.lock().unwrap().push(name.to_string());
+        let outcome = self.outcome.lock().unwrap().clone();
+        match outcome {
+            FakeMakeOutcome::Lands => {
+                let mut folders = self.api.folders.lock().unwrap();
+                let id = folders.iter().map(|f| f.id).max().unwrap_or(0) + 1;
+                folders.push(MediaFolder {
+                    id,
+                    name: name.to_string(),
+                    ..Default::default()
+                });
+                Ok(())
+            }
+            FakeMakeOutcome::Phantom => Ok(()),
+            FakeMakeOutcome::Fails(reason) => Err(reason),
+        }
+    }
+}

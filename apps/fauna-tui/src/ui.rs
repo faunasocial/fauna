@@ -278,6 +278,29 @@ pub fn sync_agent_status_text(health: crate::sync_agent::AgentHealth) -> &'stati
 /// main loop consumes the hit regions the same way, on the next mouse event,
 /// and the painted page for everything that asks what is on screen
 /// ([`PaintedPage`]).
+/// What the frame just drawn showed at the root, for the
+/// `fauna_e2e_agent::ROOT_SURFACE_KEY` journal: the signed-in app, or the
+/// launch surface the screen is handed to (the wizard, the launch progress
+/// view, …), or `None` when the screen frame painted no title, no description
+/// line and no element — nothing a person could read. The branch is
+/// [`render`]'s own: [`App::showing_launch_surface`] decides whether the page
+/// area shows a launch surface (the append-mode wizard over a live session
+/// included), which is what [`App::page_elements`] paints.
+pub fn root_surface(app: &App, page: &PaintedPage) -> Option<&'static str> {
+    if !app.showing_launch_surface() {
+        return Some(fauna_e2e_agent::ROOT_SURFACE_APP);
+    }
+    let name = if app.wizard.retire.is_some() {
+        "nest_retire"
+    } else {
+        app.launch.root_surface_name()
+    };
+    let painted_nothing = page.elements.is_empty()
+        && app.screen_title().trim().is_empty()
+        && app.screen_description().iter().all(|l| l.trim().is_empty());
+    (!painted_nothing).then_some(name)
+}
+
 pub fn render(frame: &mut Frame, app: &App) -> DrawnFrame {
     if app.authenticated() {
         render_shell(frame, app)

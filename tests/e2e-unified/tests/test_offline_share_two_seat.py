@@ -285,9 +285,21 @@ def ceremony_seats(nest_instance, offline_share_app, request):
 
     seats = []
     try:
-        initiator, initiator_actor = _seat(
-            nest_instance, initiator_path, initiator_app, "initiator", request
-        )
+        # A phone's sharer is named LITERALLY: conftest's cross-app hoist
+        # (`_CROSS_APP_FIXTURE_APPS["ceremony_seats"]`) prebuilds that desktop
+        # app for a phone run, and its pin reads the literal here.
+        if offline_share_app == "ios":
+            initiator, initiator_actor = _seat(
+                nest_instance, initiator_path, "macos", "initiator", request
+            )
+        elif offline_share_app == "android":
+            initiator, initiator_actor = _seat(
+                nest_instance, initiator_path, "tui", "initiator", request
+            )
+        else:
+            initiator, initiator_actor = _seat(
+                nest_instance, initiator_path, initiator_app, "initiator", request
+            )
         seats.append(initiator)
         recipient, recipient_actor = _seat(
             nest_instance, recipient_path, offline_share_app, "recipient", request

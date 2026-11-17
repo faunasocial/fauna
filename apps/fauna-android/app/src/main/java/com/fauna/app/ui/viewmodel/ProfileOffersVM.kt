@@ -1,18 +1,23 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
 import com.fauna.app.payments.ClaimRedeemResult
 import com.fauna.app.payments.paymentsClaimsRedeemAcrossNests
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.ffi.FfiFeatureRow
 import com.fauna.ffi.FfiSubscribeReply
 import com.fauna.ffi.FfiTierItem
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import uniffi.fauna_core.Possibility
 
 /**
  * The profile Tiers-tab **OTHER** (subscriber-browse) state — subscriptions
@@ -32,6 +37,7 @@ import javax.inject.Inject
 @HiltViewModel
 class ProfileOffersVM @Inject constructor(
     private val api: ApiClient,
+    @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
     private val _offers = MutableStateFlow<List<FfiTierItem>>(emptyList())
@@ -68,6 +74,20 @@ class ProfileOffersVM @Inject constructor(
     internal var redeem: suspend (String, String?, String?) -> ClaimRedeemResult =
         { code, author, home -> api.paymentsClaimsRedeemAcrossNests(code, author, home) }
 
+    /** The features read, a seam only so the VM tests need no live nest. */
+    internal var readFeatures: suspend () -> List<FfiFeatureRow> = { api.fetchFeatures() }
+
+    private val _redeemAnswer = MutableStateFlow(redeemGateOver(null))
+
+    /**
+     * `subscription-claim-redeem-button`'s answer on this door — the same
+     * [redeemGateOver] the settings door paints from, over a features read
+     * THIS page issues at every [load] (never left to a Settings visit;
+     * `docs/goal/ui/README.md` § Offer only what is possible, rule 5).
+     * [redeemClaim] asks it again.
+     */
+    val redeemAnswer: StateFlow<Possibility> = _redeemAnswer.asStateFlow()
+
     fun setRedeemInput(value: String) {
         _redeemInput.value = value
     }
@@ -85,6 +105,7 @@ class ProfileOffersVM @Inject constructor(
             _redeemInput.value = ""
         }
         val seq = ++loadSeq
+        viewModelScope.launch { _redeemAnswer.value = readRedeemGate(readFeatures) }
         viewModelScope.launch {
             errorMessage.value = null
             try {
@@ -169,11 +190,17 @@ class ProfileOffersVM @Inject constructor(
      * the spent code leaves the input, offers + status are re-read, and a queued
      * grant marks its tier pending (the [subscribe] fold); a refusal (the typed
      * `fauna.payments.claim_*` / `peer_nest_outdated` errors) rides [errorMessage]
-     * to the page's `error-message` and keeps the code to correct.
+     * to the page's `error-message` and keeps the code to correct. The
+     * button's own answer is asked again first, and a refusal shows its reason
+     * there, sending nothing (rule 6).
      */
     fun redeemClaim(authorIdHex: String, authorHomeUrl: String?) {
         val code = _redeemInput.value.trim()
         if (code.isEmpty()) return
+        answerRefusal(context, _redeemAnswer.value)?.let {
+            errorMessage.value = it.reason
+            return
+        }
         viewModelScope.launch {
             errorMessage.value = null
             _working.value = true

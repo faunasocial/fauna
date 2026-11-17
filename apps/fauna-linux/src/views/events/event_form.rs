@@ -1,8 +1,10 @@
 use adw::prelude::*;
 use fauna_client_caldav::drafts::EventDrafts;
 use fauna_ui_ids as ids;
+use std::cell::RefCell;
 use std::rc::Rc;
 
+use super::calendar_view::CalendarViewState;
 use super::drafts;
 use crate::client::FaunaClient;
 use crate::i18n::strings::{common, events as events_strings};
@@ -50,8 +52,13 @@ impl PrefilledEventData {
 }
 
 /// Build the full event form dialog with fields pre-populated from `data`.
+///
+/// `state` is the page's: the submit resolves its calendar through the page's
+/// gate ([`CalendarViewState::create_target`]) at the click, not at the open,
+/// so a calendar listed or lost in between is honoured.
 pub fn build_event_form_prefilled(
     data: &PrefilledEventData,
+    state: &Rc<RefCell<CalendarViewState>>,
     client: &Rc<FaunaClient>,
 ) -> adw::Window {
     let dialog = adw::Window::builder()
@@ -205,6 +212,11 @@ pub fn build_event_form_prefilled(
     btn_row.append(&discard_btn);
     btn_row.append(&cancel_btn);
     btn_row.append(&create_btn);
+    // The form's own `error-message` (`ui/events.md` § *No calendar to hold
+    // an event*, ruling 4): a refused or failed save is said here, with the
+    // form kept open and what was typed intact.
+    let error_label = crate::form_gate::dialog_error_label();
+    form.append(&error_label);
     form.append(&btn_row);
 
     outer.append(&form);
@@ -251,8 +263,10 @@ pub fn build_event_form_prefilled(
         let desc_ref = desc_view.clone();
         let cap_ref = capacity_spin.clone();
         let mode_ref = mode_dropdown.clone();
+        let st = Rc::clone(state);
+        let error_label = error_label.clone();
 
-        create_btn.connect_clicked(move |_| {
+        create_btn.connect_clicked(move |create_btn| {
             let summary = sum_ref.text().to_string();
             // Shared input normalization (events.md § Where logic lives): pads
             // a bare `THH:MM` with `:00` seconds — the A2-regression rule — and
@@ -278,6 +292,17 @@ pub fn build_event_form_prefilled(
                 _ => "link_code",
             };
 
+            // The submit asks the gate again and resolves the calendar through
+            // the shared `event_create_target` (ruling 3): the opener's pick
+            // while it is still listed, else the page's; never an empty id.
+            let cid = match st.borrow().create_target(Some(cid.as_str())) {
+                Ok(id) => id,
+                Err(reason) => {
+                    crate::form_gate::show_error(&error_label, Some(&reason));
+                    return;
+                }
+            };
+
             // Generate a unique UID for the event (RFC 5545 UID format).
             let uid = format!("{}@fauna-desktop", uuid::Uuid::new_v4());
             let mut params = serde_json::json!({
@@ -300,8 +325,16 @@ pub fn build_event_form_prefilled(
                 params["capacity"] = serde_json::Value::Number(capacity.into());
             }
 
-            c.create_event(params);
-            d.close();
+            crate::form_gate::show_error(&error_label, None);
+            create_btn.set_sensitive(false);
+            let d = d.clone();
+            let error_label = error_label.clone();
+            let create_btn = create_btn.clone();
+            let page = Rc::clone(&c);
+            c.create_event(params, move |result| {
+                create_btn.set_sensitive(true);
+                super::event_popover::finish_compose(&d, &error_label, &page, result);
+            });
         });
     }
 

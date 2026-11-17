@@ -533,6 +533,22 @@ class AtprotoSettingsContentTest {
         assertEquals("web", method)
     }
 
+    /** The radios publish the depth rungs' vocabulary, `active` / `inactive`,
+     *  as `state` — what `get_attr(id, "state")` reads on every app (atproto 22),
+     *  never the radio's native `true`/`false`. */
+    @Test
+    fun didMethodRadiosPublishActiveAndInactiveAsTheirState() {
+        render(
+            snapshot = emptySnapshot.copy(level = "hosted_visible", showDidMethodRadio = true, didMethod = "web"),
+        )
+        composeTestRule.onNodeWithTag("atproto-did-method-web").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "active"),
+        )
+        composeTestRule.onNodeWithTag("atproto-did-method-plc").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "inactive"),
+        )
+    }
+
     @Test
     fun deletePresenceHiddenWhenShowDeletePresenceFalse() {
         render(snapshot = emptySnapshot.copy(level = "linked", showDeletePresence = false))

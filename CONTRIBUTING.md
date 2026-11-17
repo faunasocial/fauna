@@ -45,8 +45,8 @@ just mail-bridge-test
 The pinned Rust toolchain is declared in `rust-toolchain.toml` and installs
 automatically on first `cargo` run.
 
-Each app and server component has its own README with build, test, and
-layout details:
+These components each have their own README with build and test
+details:
 
 - [`apps/fauna-web`](apps/fauna-web/README.md) — web SPA (Deno + WASM)
 - [`apps/fauna-linux`](apps/fauna-linux/README.md) — Linux desktop (GTK4)
@@ -55,7 +55,7 @@ layout details:
 - [`apps/fauna-android`](apps/fauna-android/README.md) — Android (Compose; SDK/NDK setup in its [BUILD-SETUP.md](apps/fauna-android/BUILD-SETUP.md))
 - [`apps/fauna-windows`](apps/fauna-windows/README.md) — Windows (WinUI 3; build the app with MSBuild, not `dotnet build`)
 - [`bins/fauna-nest`](bins/fauna-nest/README.md) — the server
-- [`bins/fauna-bridges`](bins/fauna-bridges/README.md) — the Go mail/calendar bridge
+- [`bins/fauna-bridges`](bins/fauna-bridges/README.md) — the Go mail and calendar bridge, the AT Protocol bridge that hosts public posts, and a small sidecar that lets the nest switch the bridges on and off
 
 Cross-client e2e tests live in [`tests/e2e-unified`](tests/e2e-unified/README.md).
 See `docs/goal/` for the architecture and feature specifications, and

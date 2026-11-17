@@ -1456,6 +1456,11 @@ uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_contacts(uint64_t ptr, RustCal
 uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_conversations(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_DEPLOYMENT_SERVES_DAV_OR_MAIL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_DEPLOYMENT_SERVES_DAV_OR_MAIL
+uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_deployment_serves_dav_or_mail(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_DISCONNECT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_DISCONNECT
 uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_disconnect(uint64_t ptr
@@ -2370,6 +2375,11 @@ RustBuffer uniffi_fauna_ffi_fn_func_ios_age_attestation_app_id(RustCallStatus *o
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KIDS_APP_ELIGIBILITY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KIDS_APP_ELIGIBILITY
+RustBuffer uniffi_fauna_ffi_fn_func_kids_app_eligibility(RustBuffer latest_read, RustBuffer snapshot, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KIDS_APP_ELIGIBLE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KIDS_APP_ELIGIBLE
 int8_t uniffi_fauna_ffi_fn_func_kids_app_eligible(RustBuffer status, RustCallStatus *out_status
@@ -2394,6 +2404,11 @@ int8_t uniffi_fauna_ffi_fn_func_ward_contact_ask_pending(RustBuffer asks, RustBu
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_FEED_REQUEST_STATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_FEED_REQUEST_STATE
 RustBuffer uniffi_fauna_ffi_fn_func_ward_feed_request_state(RustBuffer asks, RustBuffer bridge_id, RustBuffer operation, RustBuffer target, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_GUARDIAN_DECIDES_CONTACT
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_GUARDIAN_DECIDES_CONTACT
+int8_t uniffi_fauna_ffi_fn_func_ward_guardian_decides_contact(int8_t status_read, RustBuffer own_policy, RustBuffer peer_status, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_KNOCKS_AWAIT_GUARDIAN
@@ -3669,6 +3684,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_ios_age_attestation_app_id(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KIDS_APP_ELIGIBILITY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KIDS_APP_ELIGIBILITY
+uint16_t uniffi_fauna_ffi_checksum_func_kids_app_eligibility(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KIDS_APP_ELIGIBLE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KIDS_APP_ELIGIBLE
 uint16_t uniffi_fauna_ffi_checksum_func_kids_app_eligible(void
@@ -3696,6 +3717,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_ward_contact_ask_pending(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_FEED_REQUEST_STATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_FEED_REQUEST_STATE
 uint16_t uniffi_fauna_ffi_checksum_func_ward_feed_request_state(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_GUARDIAN_DECIDES_CONTACT
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_GUARDIAN_DECIDES_CONTACT
+uint16_t uniffi_fauna_ffi_checksum_func_ward_guardian_decides_contact(void
     
 );
 #endif
@@ -5382,6 +5409,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_contacts(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_CONVERSATIONS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_CONVERSATIONS
 uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_conversations(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_DEPLOYMENT_SERVES_DAV_OR_MAIL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_DEPLOYMENT_SERVES_DAV_OR_MAIL
+uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_deployment_serves_dav_or_mail(void
     
 );
 #endif

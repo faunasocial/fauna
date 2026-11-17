@@ -390,6 +390,119 @@ fn the_tooltip_invariant_catches_a_widget_wearing_its_own_id() {
     });
 }
 
+/// **I9 — enabled means possible** (`enabled-means-possible`; the rule is
+/// `ui/README.md` § Offer only what is possible, rule 6). The substance of
+/// tui's I8 (`apps/fauna-tui/src/walk.rs`), under linux's next free number:
+/// linux's I8 is the tooltip invariant above.
+///
+/// Every widget painted through the possibility seam (`possible.rs`) is
+/// sensitive only while its answer is *possible*, is not shown while its
+/// answer is *absent*, and, while insensitive with a *blocked* answer, carries
+/// that reason within eyeshot: on its reason line, shown, or as its tooltip.
+/// True by construction for a page that leaves both halves to
+/// [`crate::possible::paint`]; the ways to break it are a later write past the
+/// seam (a `set_sensitive(true)` on a control the answer blocks) and a reason
+/// line hidden or rewritten by the page.
+///
+/// It reads the seam's registry rather than the widget tree, like I6, so it
+/// covers every painted widget, including one on a surface the sweep's doors
+/// do not reach (the onboarding wizard).
+fn check_enabled_means_possible(ctx: &str) -> Result<(), String> {
+    check_possibility_over(&crate::possible::declarations(), ctx)
+}
+
+/// I9's body over a given list: the walk hands it the live registry, the
+/// red-verification a filtered slice of it after a write past the seam.
+fn check_possibility_over(painted: &[crate::possible::Painted], ctx: &str) -> Result<(), String> {
+    for p in painted {
+        let id = p.widget.widget_name();
+        if p.widget.is_visible() && !p.answer.is_shown() {
+            return Err(format!(
+                "{ctx}: `{id}` is shown, but its predicate answers absent — a choice \
+                 this person can never make here is offered"
+            ));
+        }
+        if p.widget.is_sensitive() && !p.answer.is_possible() {
+            return Err(format!(
+                "{ctx}: `{id}` is enabled, but its predicate answers {:?} — an \
+                 affordance offered that cannot succeed",
+                p.answer
+            ));
+        }
+        if !p.widget.is_sensitive()
+            && let Some(reason) = p.answer.reason()
+        {
+            let text = reason.resolve(crate::i18n::strings::lookup);
+            let on_line = p
+                .reason_line
+                .as_ref()
+                .is_some_and(|line| line.is_visible() && line.text() == text);
+            let on_tooltip = p.widget.tooltip_text().as_deref() == Some(text.as_str());
+            if !on_line && !on_tooltip {
+                return Err(format!(
+                    "{ctx}: `{id}` is disabled for {:?}, and that reason is painted \
+                     nowhere beside it",
+                    reason.key
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// I9's red-verification, kept as a test: the VPS page's Continue is painted
+/// from the machine's answer, which with nothing chosen is blocked. Through
+/// the seam I9 is green; enable the button past the seam and I9 must red;
+/// hide its reason line and I9 must red again.
+#[test]
+fn enabled_means_possible_reds_on_a_widget_that_bypasses_the_seam() {
+    run_on_gtk_thread(|| {
+        use fauna_onboarding_machine::OnboardingMachine;
+        use fauna_onboarding_machine::observer::NullObserver;
+        let m = OnboardingMachine::new(std::sync::Arc::new(NullObserver));
+        let (root, refresh) = crate::views::onboarding::vps_config::build(m.clone());
+        refresh();
+        let mine = || -> Vec<crate::possible::Painted> {
+            crate::possible::declarations()
+                .into_iter()
+                .filter(|p| p.widget.is_ancestor(&root))
+                .collect()
+        };
+        let cont = mine();
+        assert_eq!(
+            cont.len(),
+            1,
+            "the VPS page paints Continue through the seam"
+        );
+        assert_eq!(cont[0].widget.widget_name(), "vps-config-continue-button");
+        assert!(
+            !cont[0].answer.is_possible(),
+            "precondition: nothing is chosen, so the predicate answers blocked"
+        );
+        check_possibility_over(&cont, "through the seam")
+            .expect("the seam disables it and paints its reason");
+
+        cont[0].widget.set_sensitive(true);
+        let err = check_possibility_over(&mine(), "bypass")
+            .expect_err("I9 must red on a blocked control left enabled");
+        assert!(
+            err.contains("vps-config-continue-button") && err.contains("enabled"),
+            "{err}"
+        );
+
+        cont[0].widget.set_sensitive(false);
+        if let Some(line) = &cont[0].reason_line {
+            line.set_visible(false);
+        }
+        let err = check_possibility_over(&mine(), "silent")
+            .expect_err("I9 must red on a block whose reason is painted nowhere");
+        assert!(err.contains("painted nowhere"), "{err}");
+
+        refresh();
+        check_possibility_over(&mine(), "repainted").expect("a refresh restores the seam");
+    });
+}
+
 /// Every invariant over one surface.
 fn check_all(
     root: &impl IsA<gtk::Widget>,
@@ -402,6 +515,7 @@ fn check_all(
     check_online_only_affordances_are_disabled(ctx)?;
     check_declared_kinds_are_registered(ctx)?;
     check_no_tooltip_restates_a_test_id(root, ctx)?;
+    check_enabled_means_possible(ctx)?;
     Ok(())
 }
 

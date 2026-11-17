@@ -17,10 +17,15 @@ just apple-ffi        # the 3-slice XCFramework (device + simulator + Mac) — P
 just apple-ffi-test   # same 3 slices WITH the e2e seams; what the iOS e2e suite needs
 ```
 
-The iOS app builds from Xcode with the `Fauna-iOS` scheme (simulator, or your
-own device with your signing), after `just apple-ffi`. Use **`apple-ffi-test`**
-instead whenever you build the app in Debug and drive it from the e2e harness —
-a Debug build compiles FaunaKit's `#if DEBUG` TestAgent, whose calls into the
+The iOS app builds from Xcode with the `Fauna-iOS` scheme of
+`Fauna.xcodeproj`, in the simulator on a Mac with Apple silicon (the shared
+core's only simulator slice is `aarch64-apple-ios-sim`). Device signing is set
+up only for the App Store, with the project's own team, its bundle identifiers
+and its app group, so a device build under another team needs those changed in
+the project and the source (`docs/guides/install.md` § iOS). Xcode's
+Run builds Debug, so run **`just apple-ffi-test`** first; `just apple-ffi` is
+for a Release build. Every Debug build needs the test flavor, the e2e harness's
+included — a Debug build compiles FaunaKit's `#if DEBUG` TestAgent, whose calls into the
 `*ForTest` UniFFI seams only resolve against the test flavor
 (`docs/goal/architecture/testing.md` § convention 15).
 

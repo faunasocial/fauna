@@ -38,9 +38,13 @@
   import { hexToBytes } from '#lib/hex';
   import { refusalText } from '#lib/guardian-refusal';
   import {
+    acceptAnswer,
     classifyKnockFailure,
     contactAskRender,
+    guardianDecides,
+    knockAnswer,
     knocksAwaitGuardian,
+    rosterStatus,
     foldContactAsked,
     foldKnockReply,
     KNOCK_SENT,
@@ -50,6 +54,7 @@
     type KnockSendResult,
   } from '#lib/ward-asks';
   import { wardAsks, refreshWardAsks, rereadAfterAsk } from '#lib/wardAsks.svelte';
+  import { paintPossibility } from '#lib/possibility';
 
   let unsubPush: (() => void) | null = null;
   let unsubReconnect: (() => void) | null = null;
@@ -271,6 +276,14 @@
   async function handleAccept(peerId: string) {
     const id = $identity;
     if (!id) return;
+    // The accept asks the predicate its button paints from first, and a
+    // refusal is never silent (ui/README.md § Offer only what is possible,
+    // rules 6 and 7).
+    const answer = acceptAnswer(wardAskRules, wardAsks());
+    if (answer.state !== 'possible') {
+      error = answer.state === 'blocked' ? resolveLocalized(answer.reason) : t.common.error;
+      return;
+    }
     try {
       const settled = await acceptKnock({
         acceptOrQueue: () => acceptKnockOrQueue(id.secretHex, peerId),
@@ -374,6 +387,13 @@
     const id = $identity;
     if (!id || !findResult || knockAsk.knockSent) return;
     const peer = findResult.actorId;
+    // The knock asks the predicate its button paints from before it sends
+    // (rules 6 and 7) — the ward's entry gate, contacts.md § Errors & edge cases.
+    const answer = knockAnswer(wardAskRules, wardAsks(), rosterStatus(localContacts, peer));
+    if (answer.state !== 'possible') {
+      error = answer.state === 'blocked' ? resolveLocalized(answer.reason) : t.common.error;
+      return;
+    }
     sendingKnock = true;
     let result: KnockSendResult;
     try {
@@ -505,11 +525,14 @@
     </button>
   </div>
   {#if findStatus === 'found' && findResult}
+    {@const peerStatus = rosterStatus(localContacts, findResult.actorId)}
+    {@const knockPaint = paintPossibility(knockAnswer(wardAskRules, wardAsks(), peerStatus))}
     {@const askRender = contactAskRender(
       wardAskRules,
       wardAsks().contact,
       findResult.actorId,
-      knockAsk.peer === findResult.actorId && knockAsk.guardianRefused,
+      guardianDecides(wardAskRules, wardAsks(), peerStatus) ||
+        (knockAsk.peer === findResult.actorId && knockAsk.guardianRefused),
       knockAsk.peer === findResult.actorId && knockAsk.askSent,
     )}
     <div class="find-result">
@@ -527,13 +550,16 @@
       <button
         data-testid={IDS.CONTACTS_ADD_BUTTON}
         class="btn primary small"
-        disabled={sendingKnock || knockAsk.knockSent}
+        disabled={sendingKnock || knockAsk.knockSent || knockPaint.disabled}
+        title={!knockAsk.knockSent && knockPaint.reason ? resolveLocalized(knockPaint.reason) : undefined}
         onclick={handleAddContact}
       >{knockAsk.knockSent ? t.contacts.sent : t.contacts.knock}</button>
       <!-- The ward's in-app ask (family-safety.md § Child-initiated contact
            requests → App affordance): the durable pending state first (the
-           ward's own status.contact_requests), else the ask — offered only
-           after the TYPED guardian refusal of a knock to this very peer. -->
+           ward's own status.contact_requests), else the ask — offered at the
+           entry when the guardian decides this peer (contacts.md § Errors &
+           edge cases), and still after the TYPED guardian refusal of a knock
+           to this very peer. -->
       {#if askRender === 'pending'}
         <span data-testid={IDS.CONTACT_REQUEST_PENDING} class="muted small">{t.contacts.contact_request_pending}</span>
       {:else if askRender === 'ask'}
@@ -575,6 +601,7 @@
     {:else}
       <div class="knock-list">
         {#each localKnocks as knock (knock.id)}
+          {@const acceptPaint = paintPossibility(acceptAnswer(wardAskRules, wardAsks()))}
           <div data-testid={IDS.KNOCK_CARD} class="knock-card">
             <div class="knock-info">
               <span data-testid={IDS.KNOCK_SENDER} class="peer-id mono">{knockNames.get(knock.sender) ?? ''}</span>
@@ -593,7 +620,16 @@
               <span class="muted small">{relativeTime(knock.created_at)}</span>
             </div>
             <div class="knock-actions">
-              <button data-testid={IDS.CONTACTS_ACCEPT_BUTTON} class="btn primary small" onclick={() => handleAccept(knock.sender)}>{t.common.accept}</button>
+              <!-- Blocked while the guardian decides knocks (or the status
+                   read is unresolved), from the shared accept_possibility;
+                   block and dismiss stay the ward's. -->
+              <button
+                data-testid={IDS.CONTACTS_ACCEPT_BUTTON}
+                class="btn primary small"
+                disabled={acceptPaint.disabled}
+                title={acceptPaint.reason ? resolveLocalized(acceptPaint.reason) : undefined}
+                onclick={() => handleAccept(knock.sender)}
+              >{t.common.accept}</button>
               <button data-testid={IDS.KNOCK_DISMISS} class="btn small" onclick={() => handleDismiss(knock.sender)}>{t.common.dismiss}</button>
               <button data-testid={IDS.CONTACTS_BLOCK_BUTTON} class="btn danger small" onclick={() => handleBlock(knock.sender)}>{t.common.block}</button>
             </div>

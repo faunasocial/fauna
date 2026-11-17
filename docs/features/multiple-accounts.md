@@ -147,7 +147,7 @@ Stamped 2026-11-07 at b844c771f6.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+646e0070 standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | 0.1.2-dev+a3582c8b.dirty standalone |
+| windows | ⚠ partial | 0.1.7-dev+35d33bf9 standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |

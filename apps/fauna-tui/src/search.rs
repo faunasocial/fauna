@@ -228,12 +228,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     match action {
         Action::Submit => {
             let manager = app.search.manager.clone()?;
-            let query = app.search.query_buffer.trim().to_string();
-            // The empty-query guard every app's search bar shares. Checked
-            // here as well as in the manager so no op is even spawned.
-            if query.is_empty() {
+            // The shared predicate the submit button is painted from: a blank
+            // query refuses with its reason on the page's error-message, never
+            // a silent no-op (`search.md` § Errors & edge cases).
+            if app.errors.refuse(
+                Page::Search,
+                &fauna_client_search::query_possibility(&app.search.query_buffer),
+            ) {
                 return None;
             }
+            app.errors.remove(&Page::Search);
+            let query = app.search.query_buffer.trim().to_string();
             let type_filter = manager.snapshot().type_filter;
             Some(Op::Run {
                 manager,
@@ -512,12 +517,15 @@ pub fn elements(app: &App) -> Vec<Element> {
             )
             .labelled(search_page::PLACEHOLDER),
         );
-        out.push(Element::gesture_button(
-            ids::SEARCH_SUBMIT_BUTTON,
-            t::SEARCH,
-            true,
-            Gesture::Search(Action::Submit),
-        ));
+        out.push(
+            Element::gesture_button(
+                ids::SEARCH_SUBMIT_BUTTON,
+                t::SEARCH,
+                true,
+                Gesture::Search(Action::Submit),
+            )
+            .possible(fauna_client_search::query_possibility(&st.query_buffer)),
+        );
         out.push(Element::gesture_button(
             ids::SEARCH_CLEAR_BUTTON,
             search_page::CLEAR,

@@ -313,6 +313,8 @@ pub(crate) fn park_on_disabled_paywall_select_for_test(state: &mut SettingsState
         }],
         ..Default::default()
     });
+    // The read answered with none — "create a tier first", not "loading".
+    state.folders.own_tiers_read = fauna_core::possibility::ReadState::Resolved;
     assert!(
         state.folders.own_tiers.is_empty(),
         "premise: no own tiers is what disables the paywall picker"
@@ -736,7 +738,7 @@ pub struct SettingsState {
     /// and renders them, and re-deriving any of it here is the documented way
     /// to get the plane wrong (`dynamic-features.md` § Implementation status
     /// item (c)).
-    features: Option<Vec<fauna_client_features::FeatureRow>>,
+    pub(crate) features: Option<Vec<fauna_client_features::FeatureRow>>,
     /// The shared Status snapshot's node leg (`ui/status.md` § State & data
     /// shape), or `None` until `fauna.nest.info` resolves on the landing op —
     /// the `quota`/`features` hydrate-gates-paint shape: the Node section does
@@ -1470,6 +1472,19 @@ impl SettingsState {
         self.mail.machine.clone()
     }
 
+    /// Whether mail is usable for this account now — the shared
+    /// `MailSettingsSnapshot::mail_usable` over the machine's LIVE snapshot (so
+    /// an enable on the Mail page counts at once), or the unbuilt answer when
+    /// the machine's build failed. Every mail sub-page's rail row and entry is
+    /// gated on it (`ui/mail-settings.md` § Errors & edge cases, the
+    /// mail-usable gate).
+    pub(crate) fn mail_usable(&self) -> fauna_core::possibility::Possibility {
+        match self.mail.machine.as_ref() {
+            Some(machine) => machine.snapshot().mail_usable(),
+            None => fauna_client_mail_settings::mail_usable_unbuilt(),
+        }
+    }
+
     /// Re-read the Mail page's painted snapshot from its machine — for a change
     /// the page did not dispatch: the aftermath's mail burn runs on this same
     /// machine in the post-store-ready pass and refreshes its snapshot, but the
@@ -2016,6 +2031,36 @@ impl SettingsState {
     pub(crate) fn identity_secret(&self) -> Option<[u8; 32]> {
         fauna_core::hex32::decode(self.secret_hex.as_str()).ok()
     }
+
+    /// Whether the folder follow/share ops have what they need from this page's
+    /// own state: the devices machine, the nest channel and the identity
+    /// secret. The share also needs the live conversations session, which
+    /// lives on the app ([`folder_share_answer`]).
+    pub(crate) fn folder_ops_ready(&self) -> bool {
+        self.devices.machine.is_some() && self.nest.is_some() && self.identity_secret().is_some()
+    }
+
+    /// `folder-follow-confirm`'s answer — the shared form predicate
+    /// (`fauna_client_folders::forms`) over the typed boxes and readiness.
+    pub(crate) fn folder_follow_answer(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_folders::forms::follow_possibility(
+            &self.folders.follow_handle_input,
+            &self.folders.follow_name_input,
+            self.folder_ops_ready(),
+        )
+    }
+
+    /// `folder-share-confirm`'s answer, with `session_ready` the app's live
+    /// conversations session.
+    pub(crate) fn folder_share_answer(
+        &self,
+        session_ready: bool,
+    ) -> fauna_core::possibility::Possibility {
+        fauna_client_folders::forms::share_possibility(
+            &self.folders.share_recipient_input,
+            self.folder_ops_ready() && session_ready,
+        )
+    }
 }
 
 /// The identity keypair the recovery ceremonies sign with, from the held
@@ -2274,6 +2319,7 @@ pub fn nav_enter_op(state: &SettingsState) -> Option<Op> {
     Some(Op::FetchLanding {
         nest: state.nest.clone()?,
         actor_id_hex: state.account_actor_id.clone(),
+        mail: state.mail.machine.clone(),
     })
 }
 
@@ -7023,13 +7069,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::ConfirmFolderFollow => {
             let handle = app.settings.folders.follow_handle_input.trim().to_string();
             let name = app.settings.folders.follow_name_input.trim().to_string();
-            if handle.is_empty() || name.is_empty() {
-                // Nothing to resolve. Refusing here rather than sending a blank
-                // address keeps the nest's one-answer refusal meaningful — an
-                // empty query would come back "not found" and read to the user
-                // as "no such folder" rather than "you left a box empty".
+            // Refusing a blank box here rather than sending a blank address
+            // keeps the nest's one-answer refusal meaningful — an empty query
+            // would come back "not found" and read as "no such folder" rather
+            // than "you left a box empty". The refusal is the shared
+            // predicate's reason on the page error, never a silent return.
+            let answer = app.settings.folder_follow_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
                 return None;
             }
+            app.errors.remove(&Page::Settings);
             Some(Op::FollowPublicFolder {
                 machine: app.settings.devices.machine.clone()?,
                 nest: app.settings.nest.clone()?,
@@ -7180,6 +7229,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::ToggleFolderWebdav(row) => {
+            // The press asks the toggle's own answer (rule 6).
+            let answer = folders::webdav_possibility(&app.settings.folders);
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let fs = app.settings.devices.snapshot.as_ref()?.folders.get(row)?;
             Some(Op::ServeSetFolder {
                 folder_keys: folder_key_door(app.settings.account_runtime.clone()),
@@ -7294,6 +7348,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             if tier.is_empty() {
                 return None;
             }
+            let answer = folders::paywall_possibility(&app.settings.folders);
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             Some(Op::PaywallSetFolder {
                 folder_keys: folder_key_door(app.settings.account_runtime.clone()),
                 grant_log: nests::ledger_door(app.settings.account_runtime.clone()),
@@ -7355,28 +7413,34 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .share_recipient_input
                 .trim()
                 .to_string();
-            // An empty picker shares nothing — linux's own guard. Leave the form
-            // open so the user can type rather than silently closing it.
-            if recipient.is_empty() {
+            let name = fs.name.clone();
+            // An empty picker, or an app with no session to admit the
+            // recipient through, shares nothing: the shared predicate refuses
+            // with its reason on the page error and the form stays open with
+            // what was typed (rule 7) — it closes only once the op is issued.
+            let session = app.conversations.real_session.clone();
+            let answer = app.settings.folder_share_answer(session.is_some());
+            if app.errors.refuse(Page::Settings, &answer) {
                 return None;
             }
-            let name = fs.name.clone();
+            app.errors.remove(&Page::Settings);
             // `None` for the Reader default (an absent role row IS reader);
             // `Some("writer")` for a read-write grant.
             let access = Some(app.settings.folders.share_access.clone()).filter(|a| a == "writer");
-            app.settings.folders.share_open = false;
-            app.settings.folders.share_recipient_input.clear();
-            Some(Op::ShareFolder {
+            let op = Op::ShareFolder {
                 folder_keys: folder_key_door(app.settings.account_runtime.clone()),
                 machine: app.settings.devices.machine.clone()?,
                 nest: app.settings.nest.clone()?,
                 secret: app.settings.identity_secret()?,
                 mail: app.settings.mail_store(),
-                session: app.conversations.real_session.clone()?,
+                session: session?,
                 name,
                 recipient,
                 access,
-            })
+            };
+            app.settings.folders.share_open = false;
+            app.settings.folders.share_recipient_input.clear();
+            Some(op)
         }
         // `folder-member-remove-button` — evict AND rotate the content key, so
         // the removed member cannot decrypt post-removal content (M2
@@ -7606,6 +7670,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // closes the wizard + refreshes the list once `submit()` reaches `Done`.
         Action::WizardCreate | Action::WizardConfirmPublic => {
             let wizard = wizard_of(&app.settings)?;
+            // Create asks the button's own answer (rule 6); answering the
+            // public confirm is the gesture that creates, so it is not refused
+            // for the confirm it answers.
+            if matches!(action, Action::WizardCreate) {
+                let answer = fauna_folders_machine::possibility::review_create_possibility(
+                    &wizard.review_snapshot(),
+                );
+                if app.errors.refuse(Page::Settings, &answer) {
+                    return None;
+                }
+            }
             let devices_machine = app.settings.devices.machine.clone()?;
             Some(Op::WizardCreate {
                 devices_machine,
@@ -8925,6 +9000,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 secret_hex: app.settings.secret_hex.clone(),
             },
         }),
+        // The answer the button is painted from, asked again (rule 6).
+        #[cfg(feature = "payments")]
+        Action::RedeemClaim
+            if app
+                .errors
+                .refuse(Page::Settings, &subscriptions::redeem_gate(&app.settings)) =>
+        {
+            None
+        }
         #[cfg(feature = "payments")]
         Action::RedeemClaim => Some(Op::SubscriptionsConsumer {
             nest: app.settings.nest.clone()?,
@@ -9709,6 +9793,11 @@ pub enum Op {
     FetchLanding {
         nest: Arc<NestClient>,
         actor_id_hex: String,
+        /// The mail machine, read beside the landing's legs so the rail's
+        /// mail sub-page rows paint the nest's answer, never a guess
+        /// ([`SettingsState::mail_usable`]; `ui/mail-settings.md` § Errors &
+        /// edge cases, the mail-usable gate). `None` when it was never built.
+        mail: Option<Arc<MailSettingsMachine>>,
     },
     /// The self host's write — save the open editor's draft or remove the
     /// bearer's own document (`fauna.features.self_limits.update`), then re-read
@@ -11502,8 +11591,10 @@ pub enum Outcome {
         /// first-listing gate ([`hydrated_conflict_policy`]): the facet then
         /// holds no value, and the page says why instead of painting "unset".
         policy_refused: Option<String>,
-        can_serve_webdav: bool,
-        own_tiers: Vec<String>,
+        /// The custody read's state and answer (`folders::load_can_serve_webdav`).
+        can_serve_webdav: (fauna_core::possibility::ReadState, bool),
+        /// The tier read's state and names (`folders::load_own_tiers`).
+        own_tiers: (fauna_core::possibility::ReadState, Vec<String>),
         pending_shares: Vec<folders::PendingShareView>,
         /// The ceremony's consent cards + landed shared sets, read on the
         /// same edge (`p2p.md` § Offline share initiation).
@@ -11904,7 +11995,11 @@ async fn list_pending_actions(
 impl Op {
     pub async fn run(self) -> Outcome {
         match self {
-            Op::FetchLanding { nest, actor_id_hex } => {
+            Op::FetchLanding {
+                nest,
+                actor_id_hex,
+                mail,
+            } => {
                 let account = AccountClient::new(Arc::clone(&nest));
                 let status = fauna_client_status::StatusClient::new(Arc::clone(&nest));
                 let conversations =
@@ -11936,10 +12031,22 @@ impl Op {
                         Ok(fauna_client_status::NodeLeg::from(&info)),
                     )
                 };
-                let (quota, (features, own_limits, node), key_packages) = tokio::join!(
+                // The mail read is the heal-free hydrate: the landing writes
+                // nothing; the Mail page's own visit heals. A failure is
+                // stamped on the snapshot, which leaves `read` unset, so the
+                // rail keeps the mail rows waiting rather than guessing.
+                let mail_read = async {
+                    if let Some(machine) = mail
+                        && let Err(e) = machine.hydrate_without_heal().await
+                    {
+                        tracing::warn!("[settings/landing] mail read: {e:?}");
+                    }
+                };
+                let (quota, (features, own_limits, node), key_packages, ()) = tokio::join!(
                     account.quota_get(),
                     identity_legs,
                     conversations.keypackage_count(actor_id_hex),
+                    mail_read,
                 );
                 Outcome::LandingLoaded {
                     quota: quota
@@ -13633,8 +13740,8 @@ impl Op {
                 // background self-fetch on a nav edge (the `LoadMutedWords` shape).
                 let mut default_conflict_policy = None;
                 let mut policy_refused = None;
-                let mut can_serve_webdav = false;
-                let mut own_tiers = Vec::new();
+                let mut can_serve_webdav = (fauna_core::possibility::ReadState::Pending, false);
+                let mut own_tiers = (fauna_core::possibility::ReadState::Pending, Vec::new());
                 let mut pending_shares = Vec::new();
                 #[cfg(feature = "p2p-share")]
                 let mut group_shares = crate::offline_share::GroupShareViews::default();
@@ -15636,8 +15743,14 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // meanwhile). The error slot is this outcome's own, set below.
             fold_devices_snapshot(app, snapshot, reread);
             app.settings.folders.default_conflict_policy = default_conflict_policy;
-            app.settings.folders.can_serve_webdav = can_serve_webdav;
-            app.settings.folders.own_tiers = own_tiers;
+            (
+                app.settings.folders.webdav_read,
+                app.settings.folders.can_serve_webdav,
+            ) = can_serve_webdav;
+            (
+                app.settings.folders.own_tiers_read,
+                app.settings.folders.own_tiers,
+            ) = own_tiers;
             app.settings.folders.pending_shares = pending_shares;
             #[cfg(feature = "p2p-share")]
             {
@@ -16839,19 +16952,33 @@ pub fn elements(app: &App) -> Vec<Element> {
         SubPage::Logs => logs_elements(state),
         SubPage::Devices => devices_elements(&state.devices),
         SubPage::Sessions => sessions::sessions_elements(state),
-        SubPage::Folders => folders_elements(state, &app.sync_agent.rendered_locations()),
+        SubPage::Folders => {
+            let mut els = folders_elements(state, &app.sync_agent.rendered_locations());
+            // The two form submits are painted from the shared form predicates
+            // (`fauna_client_folders::forms`); the share also needs the live
+            // conversations session, which the page's own state does not hold.
+            let session_ready = app.conversations.real_session.is_some();
+            for el in els.iter_mut() {
+                if el.id == fauna_ui_ids::FOLDER_FOLLOW_CONFIRM {
+                    el.possibility = Some(state.folder_follow_answer());
+                } else if el.id == fauna_ui_ids::FOLDER_SHARE_CONFIRM {
+                    el.possibility = Some(state.folder_share_answer(session_ready));
+                }
+            }
+            els
+        }
         SubPage::Atproto => atproto_elements(app, &state.atproto),
         SubPage::Nests => nests_elements(&state.nests, state.devices.custody.as_ref()),
         SubPage::MutedWords => muted_words_elements(state),
         SubPage::TaskDelegation => task_delegation_elements(state),
         SubPage::ConnectedApps => connected_apps_elements(state),
-        SubPage::MailAliases => mail_aliases_elements(state),
-        SubPage::MailSpam => mail_spam_elements(state),
-        SubPage::MailExport => mail_export_elements(state),
-        SubPage::MailImport => mail_import_elements(state),
+        SubPage::MailAliases => gate_mail_subpage(state, mail_aliases_elements(state)),
+        SubPage::MailSpam => gate_mail_subpage(state, mail_spam_elements(state)),
+        SubPage::MailExport => gate_mail_subpage(state, mail_export_elements(state)),
+        SubPage::MailImport => gate_mail_subpage(state, mail_import_elements(state)),
         SubPage::ArchiveImport => archive_import_elements(state),
-        SubPage::MailLists => mail_lists_elements(state),
-        SubPage::MailListMembers => mail_list_members_elements(state),
+        SubPage::MailLists => gate_mail_subpage(state, mail_lists_elements(state)),
+        SubPage::MailListMembers => gate_mail_subpage(state, mail_list_members_elements(state)),
         SubPage::Personalization => personalization_elements(state),
         SubPage::LabelerCatalog => labeler_catalog_elements(state),
         SubPage::Web => web::web_elements(state),
@@ -16865,6 +16992,70 @@ pub fn elements(app: &App) -> Vec<Element> {
             app.conversations.manager.as_ref(),
         ),
     }
+}
+
+/// The mail-usable gate at a mail sub-page's ENTRY (`ui/mail-settings.md`
+/// § Errors & edge cases, the mail-usable gate; `ui/README.md` § Offer only
+/// what is possible, rule 4): while [`SettingsState::mail_usable`] is not
+/// possible the page opens on its heading, the reason and Back — none of its
+/// forms or wizards, whose submit could not succeed (an export minting no
+/// session key, an import the nest refuses at Start, an alias with no
+/// domain). The rail row is gated on the same answer; this covers every
+/// other door in (the agent's nav, a page left open while mail was turned
+/// off). A box that can never serve mail paints the Mail & Calendar page's
+/// own unavailable notice, the fact the person reads there too.
+fn gate_mail_subpage(state: &SettingsState, els: Vec<Element>) -> Vec<Element> {
+    use fauna_core::possibility::Possibility;
+    let reason = match state.mail_usable() {
+        Possibility::Possible => return els,
+        Possibility::Blocked { reason } => reason.resolve(fauna_i18n::strings::lookup),
+        Possibility::Absent => fauna_i18n::strings::mail_settings::UNAVAILABLE_NOTICE.to_string(),
+    };
+    let mut gated: Vec<Element> = els
+        .iter()
+        .filter(|e| e.id == fauna_ui_ids::PAGE_HEADING)
+        .cloned()
+        .collect();
+    gated.push(Element::chrome(reason));
+    gated.extend(
+        els.into_iter()
+            .filter(|e| e.id == fauna_ui_ids::SETTINGS_NAV_BACK),
+    );
+    gated
+}
+
+#[cfg(test)]
+/// A mail machine over the shared fakes, in one of the four states the
+/// mail-usable gate tells apart: never read, read with mail off, read
+/// with mail on, read on a box that can never serve mail.
+pub(crate) fn mail_machine_in_for_test(state: &str) -> Arc<MailSettingsMachine> {
+    use fauna_client_mail_settings::testing::{
+        FakeMailStore, FakeNestClient, FakeSigner, FakeSuccessionLedgerStore,
+    };
+    let nest = FakeNestClient::new();
+    if state == "unavailable" {
+        nest.state().mail_unavailable_here = true;
+    }
+    let machine = MailSettingsMachine::new(
+        [0x11; 32],
+        Arc::new(nest),
+        Arc::new(FakeSuccessionLedgerStore::empty(ActorId([0x11; 32]))),
+        Arc::new(FakeMailStore::empty()),
+        Arc::new(FakeSigner::new([0x22; 32])),
+        fauna_client_mail_settings::MuaInstructions::placeholder(),
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    if state != "unread" {
+        rt.block_on(machine.hydrate()).expect("hydrate");
+    }
+    if state == "on" {
+        rt.block_on(machine.enable_mail_with_generated_password("Default".into()))
+            .expect("enable");
+    }
+    Arc::new(machine)
 }
 
 /// The `member_review` page's nav-edge read, for **both** doors into it.
@@ -18000,8 +18191,8 @@ mod tests {
             snapshot: Box::default(),
             default_conflict_policy: None,
             policy_refused: policy_refused.map(str::to_owned),
-            can_serve_webdav: false,
-            own_tiers: Vec::new(),
+            can_serve_webdav: Default::default(),
+            own_tiers: Default::default(),
             pending_shares: Vec::new(),
             #[cfg(feature = "p2p-share")]
             group_shares: Default::default(),
@@ -24472,8 +24663,8 @@ mod tests {
                 snapshot: Box::new(stale),
                 default_conflict_policy: Default::default(),
                 policy_refused: None,
-                can_serve_webdav: false,
-                own_tiers: Vec::new(),
+                can_serve_webdav: Default::default(),
+                own_tiers: Default::default(),
                 pending_shares: Vec::new(),
                 #[cfg(feature = "p2p-share")]
                 group_shares: Default::default(),
@@ -25219,6 +25410,136 @@ mod tests {
                 true,
             )),
         );
+    }
+
+    const MAIL_SUBPAGE_ROWS: [&str; 6] = [
+        "mail-aliases",
+        "mail-spam",
+        "mail-export",
+        "mail-import",
+        "mail-lists",
+        "mail-list-members",
+    ];
+
+    fn rail_row<'a>(els: &'a [Element], key: &str) -> Option<&'a Element> {
+        let id = format!("{}[{key}]", fauna_ui_ids::SETTINGS_NAV_ROW);
+        els.iter().find(|e| e.id == id)
+    }
+
+    /// `ui/mail-settings.md` § Errors & edge cases, the mail-usable gate: the
+    /// rail's mail sub-page rows follow the shared `mail_usable()` answer
+    /// through the possibility seam — disabled with the reason while mail is
+    /// off or unread, live once it is on, absent on a box that can never
+    /// serve mail — and the Mail & Calendar row, the one unblocking step,
+    /// stays live throughout.
+    ///
+    /// Red-verify by dropping the rows' `.possible(mail_usable.clone())`: the
+    /// "off" arm finds them enabled.
+    #[test]
+    fn the_rail_gates_every_mail_subpage_row_on_mail_usable() {
+        for (state, expect) in [
+            (
+                "unread",
+                Some(fauna_i18n::strings::mail_settings::USABLE_READING),
+            ),
+            (
+                "off",
+                Some(fauna_i18n::strings::mail_settings::USABLE_NEEDS_MAIL_ON),
+            ),
+            ("on", None),
+        ] {
+            let mut app = crate::app::tests::authed_app();
+            app.page = Page::Settings;
+            app.settings.sub = SubPage::Root;
+            app.settings
+                .set_mail_machine_for_test(mail_machine_in_for_test(state));
+            let els = app.page_elements();
+            assert!(
+                rail_row(&els, "mail-settings").is_some_and(|e| e.enabled),
+                "{state}: the Mail & Calendar row stays live"
+            );
+            for key in MAIL_SUBPAGE_ROWS {
+                let row = rail_row(&els, key).unwrap_or_else(|| panic!("{state}: {key} painted"));
+                match expect {
+                    None => assert!(row.enabled, "{state}: {key} live"),
+                    Some(reason) => {
+                        assert!(!row.enabled, "{state}: {key} disabled");
+                        assert_eq!(row.label.as_deref(), Some(reason), "{state}: {key} reason");
+                    }
+                }
+            }
+        }
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        app.settings.sub = SubPage::Root;
+        app.settings
+            .set_mail_machine_for_test(mail_machine_in_for_test("unavailable"));
+        let els = app.page_elements();
+        assert!(rail_row(&els, "mail-settings").is_some());
+        for key in MAIL_SUBPAGE_ROWS {
+            assert!(rail_row(&els, key).is_none(), "unavailable: {key} absent");
+        }
+    }
+
+    /// With no mail machine at all (its build failed) the rows are disabled
+    /// with the unbuilt reason — never silent controls whose handlers end on
+    /// a bare `machine.clone()?` (`ui/README.md` § Offer only what is
+    /// possible, rule 7).
+    #[test]
+    fn an_unbuilt_mail_machine_blocks_the_rows_with_its_reason() {
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        app.settings.sub = SubPage::Root;
+        assert!(app.settings.mail_machine().is_none());
+        let els = app.page_elements();
+        for key in MAIL_SUBPAGE_ROWS {
+            let row = rail_row(&els, key).expect("painted");
+            assert!(!row.enabled, "{key} disabled");
+            assert_eq!(
+                row.label.as_deref(),
+                Some(fauna_i18n::strings::mail_settings::USABLE_UNBUILT)
+            );
+        }
+    }
+
+    /// The gate is at the entry (rule 4): a mail sub-page opened by any other
+    /// door while mail is off paints its heading, the reason and Back — none
+    /// of its forms or wizards — and the whole page once mail is on.
+    #[test]
+    fn a_mail_subpage_entered_while_mail_is_off_opens_on_its_reason_only() {
+        for sub in [
+            SubPage::MailAliases,
+            SubPage::MailSpam,
+            SubPage::MailExport,
+            SubPage::MailImport,
+            SubPage::MailLists,
+            SubPage::MailListMembers,
+        ] {
+            let mut app = crate::app::tests::authed_app();
+            app.page = Page::Settings;
+            app.settings.sub = sub;
+            app.settings
+                .set_mail_machine_for_test(mail_machine_in_for_test("off"));
+            let ids: Vec<String> = elements(&app)
+                .into_iter()
+                .map(|e| if e.id.is_empty() { e.text } else { e.id })
+                .collect();
+            assert_eq!(
+                ids,
+                vec![
+                    fauna_ui_ids::PAGE_HEADING.to_string(),
+                    fauna_i18n::strings::mail_settings::USABLE_NEEDS_MAIL_ON.to_string(),
+                    fauna_ui_ids::SETTINGS_NAV_BACK.to_string(),
+                ],
+                "{sub:?}"
+            );
+            app.settings
+                .set_mail_machine_for_test(mail_machine_in_for_test("on"));
+            assert!(
+                elements(&app).len() > 3,
+                "{sub:?}: the whole page once mail is on"
+            );
+        }
     }
 
     /// Confirming keeps the form open, painting its progress line with the

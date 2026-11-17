@@ -3211,6 +3211,15 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextTiers);
     }
 
+    public FfiSalePriceSave NextSalePriceSave { get; set; } = new FfiSalePriceSave.Unchanged();
+
+    public Task<FfiSalePriceSave> SubscriptionSalePriceSaveAsync(FfiTierItem tier, string priceHint, string askingPrice)
+    {
+        _calls.Add($"SubscriptionSalePriceSave:{tier.name}:{priceHint}:{askingPrice}");
+        Throw();
+        return Task.FromResult(NextSalePriceSave);
+    }
+
     public Task<bool> SubscriptionTierCreateAsync(
         string name, uint rank, string? description, string? priceHint, string? paymentUrl, bool autoApprove,
         ulong? askingPriceSats)

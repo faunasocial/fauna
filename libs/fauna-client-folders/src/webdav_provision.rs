@@ -81,6 +81,75 @@ pub async fn owner_can_serve_webdav(mail: &dyn MailStore) -> Result<bool, StoreE
     Ok(can_serve_webdav(&mail.load().await?))
 }
 
+/// Blocked reason: the mail custody was read and holds no MSEK — the step is
+/// setting up mail (the first mail credential mints the key).
+pub const WEBDAV_NEEDS_MAIL: &str = "devices.serve_webdav_needs_mail";
+
+/// `folder-webdav-toggle`'s answer (`docs/goal/ui/README.md` § Offer only what
+/// is possible; the ruling is `docs/goal/ui/folders.md` § Errors & edge cases,
+/// *Own-tier and mail gates*): blocked "still loading" while the custody read
+/// [`owner_can_serve_webdav`] answers is out (or no account store exists yet to
+/// read), blocked "failed to load" when it failed, blocked "set up mail first"
+/// only when the read answered that no MSEK is held, possible otherwise. A
+/// failed or pending read is never painted as "set up mail".
+pub fn webdav_serve_possibility(
+    read: fauna_core::possibility::ReadState,
+    holds_msek: bool,
+) -> fauna_core::possibility::Possibility {
+    use fauna_core::possibility::{Possibility, ReadState};
+    match read {
+        ReadState::Resolved if !holds_msek => {
+            Possibility::blocked(fauna_core::localized::LocalizedText::key(WEBDAV_NEEDS_MAIL))
+        }
+        other => Possibility::from_read(other),
+    }
+}
+
+#[cfg(test)]
+mod webdav_serve_possibility_tests {
+    use super::*;
+    use fauna_core::possibility::ReadState;
+
+    fn key(read: ReadState, holds: bool) -> Option<String> {
+        webdav_serve_possibility(read, holds)
+            .reason()
+            .map(|r| r.key.clone())
+    }
+
+    #[test]
+    fn an_unanswered_custody_read_is_loading_not_set_up_mail() {
+        assert_eq!(
+            key(ReadState::Pending, false).as_deref(),
+            Some("common.still_loading")
+        );
+    }
+
+    #[test]
+    fn a_failed_custody_read_says_so_not_set_up_mail() {
+        assert_eq!(
+            key(ReadState::Failed, false).as_deref(),
+            Some("common.load_failed")
+        );
+        assert_eq!(
+            key(ReadState::Failed, true).as_deref(),
+            Some("common.load_failed")
+        );
+    }
+
+    #[test]
+    fn an_answered_read_without_the_key_names_the_mail_step() {
+        assert_eq!(
+            key(ReadState::Resolved, false).as_deref(),
+            Some(WEBDAV_NEEDS_MAIL)
+        );
+    }
+
+    #[test]
+    fn an_answered_read_with_the_key_is_possible() {
+        assert!(webdav_serve_possibility(ReadState::Resolved, true).is_possible());
+    }
+}
+
 /// A failure from [`reconcile_webdav_keys_blob`], generic over the transport
 /// error `E`.
 #[derive(Debug)]

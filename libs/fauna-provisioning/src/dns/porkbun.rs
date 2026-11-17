@@ -145,6 +145,7 @@ impl DnsProvider for Porkbun {
             .map(|d| DnsZone {
                 id: d.domain.clone(),
                 name: d.domain,
+                nameservers: Vec::new(),
             })
             .collect())
     }

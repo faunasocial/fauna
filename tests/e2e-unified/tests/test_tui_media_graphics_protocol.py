@@ -132,7 +132,7 @@ def _upload_image_and_wait_for_paint(driver):
     # folder to upload into. Right after sign-in the folder's rows cannot be
     # verified until the account runtime has assembled and its custody reads,
     # so the page's first listing can come back without the folder, and an
-    # upload pressed then is refused with `media.error_no_set` ("You don't have
+    # upload pressed then was refused with the since-retired `media.error_no_set` ("You don't have
     # a folder to upload into yet"). That refusal was this file's red on Windows: the
     # upload lost the race by 55 ms on one launch and won it on the next,
     # whichever terminal the driver answered as. A `before` read at that moment

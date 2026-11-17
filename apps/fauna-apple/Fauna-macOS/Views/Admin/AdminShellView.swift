@@ -76,9 +76,13 @@ struct AdminShellView: View {
         // presence so it re-runs if the client arrives after first appear (the
         // shell is recreated by ContentView's `.id(selectedSidebar)`); a one-shot
         // task could fire before the client is wired and never retry, leaving
-        // every admin load failing "AdminVM not configured".
-        .task(id: client != nil) {
-            if let api = client?.api { vm.configure(api: api) }
+        // every admin load failing "AdminVM not configured". Keyed on the
+        // signed-in actor too: it is the take-over offer's viewer.
+        .task(id: "\(client != nil)-\(appState.session.actorId ?? "")") {
+            if let api = client?.api {
+                vm.configure(api: api, viewerActorIdHex: appState.session.actorId,
+                             familyStatus: appState.familyStatus)
+            }
         }
     }
 }

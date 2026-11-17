@@ -124,5 +124,5 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 19 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_sealed_video_plays_after_its_post_unlocks` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 19 | app | `tests/e2e-unified/tests/test_tui_feed_video_external_open.py::test_a_sealed_video_hands_off_once_its_post_unlocks` | tui (linux): passed |
 | 20 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
-| 20 | app | `tests/e2e-unified/tests/test_profile_remote_read_cross_nest.py::test_a_remote_actors_profile_shows_their_name_only_once_they_open_it` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_profile_remote_read_cross_nest.py::test_a_remote_actors_profile_shows_their_name_only_once_they_open_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

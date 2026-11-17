@@ -38,14 +38,52 @@ class FeedCreateDialogTest {
         onCreate: (String, String, List<FilterRuleInput>, List<FactorWeightInput>) -> Unit = { _, _, _, _ -> },
         onDismiss: () -> Unit = {},
         fetchTrainedFactors: suspend () -> List<FfiTrainedTopicRow> = { emptyList() },
+        saved: Boolean = true,
     ) {
         composeTestRule.setContent {
             FeedCreateDialog(
                 onDismiss = onDismiss,
-                onCreate = onCreate,
+                onCreate = { n, c, r, f -> onCreate(n, c, r, f); saved },
+                onRefuse = {},
                 fetchTrainedFactors = fetchTrainedFactors,
             )
         }
+    }
+
+    // ── The form case (feed.md § Errors & edge cases): painted from
+    // `feed_create_possibility`, closed only on a saved feed.
+
+    @Test
+    fun anUnnamedFeedIsDisabledWithTheSharedReason() {
+        render()
+        composeTestRule.onNodeWithTag("create-feed").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Name the feed first.").assertExists()
+        composeTestRule.onNodeWithTag("feed-create-feed-name").performTextInput("News")
+        composeTestRule.onNodeWithText("Name the feed first.").assertDoesNotExist()
+    }
+
+    @Test
+    fun aFailedSaveKeepsTheDialogOpenAndASavedOneCloses() {
+        var dismissals = 0
+        var creates = 0
+        render(onCreate = { _, _, _, _ -> creates++ }, onDismiss = { dismissals++ }, saved = false)
+        composeTestRule.onNodeWithTag("feed-create-feed-name").performTextInput("My Feed")
+        composeTestRule.onNodeWithTag("create-feed").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(1, creates)
+        assertEquals(0, dismissals)
+        composeTestRule.onNodeWithTag("feed-create-feed-name").assertTextContains("My Feed")
+        composeTestRule.onNodeWithTag("create-feed").assertIsEnabled()
+    }
+
+    @Test
+    fun aSavedFeedClosesTheDialog() {
+        var dismissals = 0
+        render(onDismiss = { dismissals++ }, saved = true)
+        composeTestRule.onNodeWithTag("feed-create-feed-name").performTextInput("My Feed")
+        composeTestRule.onNodeWithTag("create-feed").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(1, dismissals)
     }
 
     @Test

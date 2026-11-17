@@ -424,6 +424,65 @@ pub fn kids_app_eligible(status: FfiFamilyStatus) -> bool {
     })
 }
 
+/// The three-way kids-app answer — the native face of
+/// `fauna_client_family::KidsAppEligibility` (`account-age-band.md` § The
+/// account age band → *Kids-app eligibility while it is unknown*).
+/// `Eligible` mounts the kids shell, `Ineligible` the not-supervised surface
+/// with its message, `Unknown` that surface's frame without the message.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiKidsAppEligibility {
+    Eligible,
+    Ineligible,
+    Unknown,
+}
+
+impl From<fauna_client_family::KidsAppEligibility> for FfiKidsAppEligibility {
+    fn from(e: fauna_client_family::KidsAppEligibility) -> Self {
+        use fauna_client_family::KidsAppEligibility as K;
+        match e {
+            K::Eligible => Self::Eligible,
+            K::Ineligible => Self::Ineligible,
+            K::Unknown => Self::Unknown,
+        }
+    }
+}
+
+/// Decide the kids-app answer from the run's latest **successful**
+/// `familyStatus` read (`None` until one has succeeded — never a failed one)
+/// and the account's persisted snapshot
+/// ([`crate::FfiAccountRegistry::supervision_snapshot`], `None` when absent or
+/// guardian-less). The rule itself lives in
+/// `fauna_client_family::kids_app_eligibility`.
+#[uniffi::export]
+pub fn kids_app_eligibility(
+    latest_read: Option<FfiFamilyStatus>,
+    snapshot: Option<FfiSupervisionSnapshot>,
+) -> FfiKidsAppEligibility {
+    // Both inputs are rebuilt from `supervised_by` alone — the only field the
+    // verdict reads — so the rule stays in the shared crate.
+    let read = latest_read.map(|status| FamilyStatusReply {
+        supervised_by: status.supervised_by.map(|g| FamilyGuardianInfo {
+            actor_id: g.actor_id.into(),
+            handle: g.handle,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    // A present `FfiSupervisionSnapshot` always names a guardian (its type
+    // cannot carry a guardian-less record).
+    let snap = snapshot.map(|s| {
+        fauna_client_family::SupervisionSnapshot::from_status(&FamilyStatusReply {
+            supervised_by: Some(FamilyGuardianInfo {
+                actor_id: s.supervised_by.actor_id.into(),
+                handle: s.supervised_by.handle,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    });
+    fauna_client_family::kids_app_eligibility(read.as_ref(), snap.as_ref()).into()
+}
+
 #[cfg(feature = "value-format")]
 fn ffi_composed(composed: &fauna_core::obligation::ComposedVerdict) -> FfiComposedVerdict {
     FfiComposedVerdict {
@@ -1884,6 +1943,40 @@ mod supervision_fold_tests {
         });
         assert!(!kids_app_eligible(graduated));
     }
+
+    /// The three-way native face: a supervised snapshot answers before any
+    /// read, a read naming no guardian beats it, and nothing at all is unknown.
+    #[test]
+    fn the_three_way_kids_app_answer() {
+        let supervised = FfiFamilyStatus::from(FamilyStatusReply {
+            supervised_by: Some(guardian()),
+            ..Default::default()
+        });
+        let snapshot = supervised.supervision.clone();
+        assert!(
+            snapshot.is_some(),
+            "precondition: a supervised read folds a snapshot"
+        );
+        assert_eq!(
+            kids_app_eligibility(None, snapshot.clone()),
+            FfiKidsAppEligibility::Eligible
+        );
+        assert_eq!(
+            kids_app_eligibility(
+                Some(FfiFamilyStatus::from(FamilyStatusReply::default())),
+                snapshot
+            ),
+            FfiKidsAppEligibility::Ineligible
+        );
+        assert_eq!(
+            kids_app_eligibility(Some(supervised), None),
+            FfiKidsAppEligibility::Eligible
+        );
+        assert_eq!(
+            kids_app_eligibility(None, None),
+            FfiKidsAppEligibility::Unknown
+        );
+    }
 }
 
 /// FFI mirror of [`fauna_protocol::family::FamilyContactRequestInfo`] — one
@@ -2018,6 +2111,71 @@ pub fn ward_contact_ask_pending(
 pub fn ward_knocks_await_guardian(own_policy: Option<FfiReachPolicy>) -> bool {
     let own_policy: Option<ReachPolicy> = own_policy.map(Into::into);
     fauna_client_family::knocks_await_guardian(own_policy.as_ref())
+}
+
+/// The caller's own supervision as the Contacts page's predicates take it:
+/// unread until this run's first successful `fauna.family.status` read
+/// (`status_read`), then that read's own policy.
+fn own_supervision(
+    status_read: bool,
+    own_policy: Option<&ReachPolicy>,
+) -> fauna_client_family::OwnSupervision<'_> {
+    if status_read {
+        fauna_client_family::OwnSupervision::Read(own_policy)
+    } else {
+        fauna_client_family::OwnSupervision::Unread
+    }
+}
+
+/// Whether the caller may knock a resolved peer now — what
+/// `contacts-add-button` paints from on a Find User result, and what the knock
+/// asks before it sends (`contacts.md` § Errors & edge cases). `status_read` is
+/// whether this run's family status read has succeeded; `own_policy` is that
+/// read's own `FfiFamilyStatus::policy`; `peer_status` is the caller's roster
+/// edge to the peer (`None` with none). Over the shared
+/// [`fauna_client_family::knock_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn ward_knock_possibility(
+    status_read: bool,
+    own_policy: Option<FfiReachPolicy>,
+    peer_status: Option<String>,
+) -> fauna_core::possibility::Possibility {
+    let own_policy: Option<ReachPolicy> = own_policy.map(Into::into);
+    fauna_client_family::knock_possibility(
+        own_supervision(status_read, own_policy.as_ref()),
+        peer_status.as_deref(),
+    )
+}
+
+/// Whether the caller may accept an incoming knock now — what each
+/// `contacts-accept-button[i]` paints from, and what the accept asks first.
+/// Over the shared [`fauna_client_family::accept_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn ward_accept_possibility(
+    status_read: bool,
+    own_policy: Option<FfiReachPolicy>,
+) -> fauna_core::possibility::Possibility {
+    let own_policy: Option<ReachPolicy> = own_policy.map(Into::into);
+    fauna_client_family::accept_possibility(own_supervision(status_read, own_policy.as_ref()))
+}
+
+/// Whether the guardian decides contact with this peer — when
+/// `contact-request-guardian-button` is the Find User result's one step,
+/// offered before anything is refused. Over the shared
+/// [`fauna_client_family::guardian_decides_contact`].
+#[uniffi::export]
+pub fn ward_guardian_decides_contact(
+    status_read: bool,
+    own_policy: Option<FfiReachPolicy>,
+    peer_status: Option<String>,
+) -> bool {
+    let own_policy: Option<ReachPolicy> = own_policy.map(Into::into);
+    fauna_client_family::guardian_decides_contact(
+        own_supervision(status_read, own_policy.as_ref()),
+        peer_status.as_deref(),
+    )
 }
 
 /// The live state of the ward's feed-source ask for one

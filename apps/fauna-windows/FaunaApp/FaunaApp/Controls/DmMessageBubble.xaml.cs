@@ -133,7 +133,15 @@ public record DmMessageView(
     // through the shared warmup_deferred_text (mail-deliverability.md § Enforcement at
     // submission time): the user's own sent mail the fresh-IP warm-up holds. Null — no
     // hold, or its release has passed → no dm-message-warmup-deferred row.
-    string? WarmupDeferred = null);
+    string? WarmupDeferred = null,
+    // MessageSnapshot.queued_send, worded by ConversationsPage.ToMessageView through
+    // QueuedSendLines (devices.md § Offline compose; account-offline-mutation.md § The
+    // unsent-changes surface, point 2): the dm-message-queued line under an own copy
+    // still in the device outbox, or the dm-message-unsent line (with the shared
+    // reason) under one the drain parked — that one alone offering retry and discard
+    // in the ⋯ menu. Null → no such line.
+    string? QueuedLine = null,
+    string? UnsentLine = null);
 
 /// <summary>
 /// One reaction group projected from the shared <c>MessageSnapshot.reactions</c>
@@ -244,6 +252,18 @@ public sealed partial class DmMessageBubble : UserControl
     /// re-binds this bubble showing the deleted placeholder. Mirrors
     /// <see cref="ReplyRequested"/>.</summary>
     public Action<DmMessageView>? DeleteRequested;
+
+    /// <summary>Raised by <c>dm-message-retry-button</c> on an unsent own copy
+    /// (<see cref="DmMessageView.UnsentLine"/>). The page dispatches to
+    /// <c>ConversationsManager.retry_queued_send</c>, which re-arms the parked intent; the
+    /// next thread read repaints the copy as waiting.</summary>
+    public Action<DmMessageView>? RetryQueuedRequested;
+
+    /// <summary>Raised when the user confirms <c>dm-message-discard-confirm-button</c> on an
+    /// unsent own copy. The page dispatches to
+    /// <c>ConversationsManager.discard_queued_send</c>, which deletes that one intent and
+    /// takes the copy out of the thread.</summary>
+    public Action<DmMessageView>? DiscardQueuedRequested;
 
     /// <summary>Raised when the user picks <c>dm-message-mark-as-spam-button</c> on a
     /// RECEIVED message (mail-spam.md § Wire shapes — the live <c>Insert</c> consumer).
@@ -592,6 +612,7 @@ public sealed partial class DmMessageBubble : UserControl
         RenderScanResult(msg);
         RenderUndelivered(msg);
         RenderWarmupDeferred(msg);
+        RenderQueuedSend(msg);
         RenderAdminBlockBeside(msg);
         RenderWithheldBadge(msg);
         RenderReactionPills(msg);
@@ -683,6 +704,28 @@ public sealed partial class DmMessageBubble : UserControl
         WarmupDeferredText.Visibility = Visibility.Visible;
     }
 
+    /// <summary>The queued own copy's one line (<see cref="DmMessageView.QueuedLine"/> or
+    /// <see cref="DmMessageView.UnsentLine"/>, worded through <c>QueuedSendLines</c> from the
+    /// shared <c>MessageSnapshot.queued_send</c>); both collapsed otherwise so no UIA peer
+    /// exists. Name beside the AutomationId, or FlaUI does not realize the peer.</summary>
+    private void RenderQueuedSend(DmMessageView msg)
+    {
+        PaintLine(QueuedText, msg.QueuedLine);
+        PaintLine(UnsentText, msg.UnsentLine);
+
+        static void PaintLine(TextBlock line, string? text)
+        {
+            if (text is not { Length: > 0 })
+            {
+                line.Visibility = Visibility.Collapsed;
+                return;
+            }
+            line.Text = text;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(line, text);
+            line.Visibility = Visibility.Visible;
+        }
+    }
+
     /// <summary>Collapse EVERY placeholder and every live surface — the shared prelude
     /// of all five withholding arms, so the arm that won only has to make its own
     /// placeholder visible. Bubbles are reused across Refresh re-binds, so this must
@@ -703,6 +746,8 @@ public sealed partial class DmMessageBubble : UserControl
         DeliveredToText.Visibility = Visibility.Collapsed;
         UndeliveredText.Visibility = Visibility.Collapsed;
         WarmupDeferredText.Visibility = Visibility.Collapsed;
+        QueuedText.Visibility = Visibility.Collapsed;
+        UnsentText.Visibility = Visibility.Collapsed;
         ScanResultText.Visibility = Visibility.Collapsed;
         WithheldBadgeButton.Visibility = Visibility.Collapsed;
         LoadRemoteContentButton.Visibility = Visibility.Collapsed;
@@ -875,13 +920,40 @@ public sealed partial class DmMessageBubble : UserControl
         var showDelete = msg.CanDelete;
         var showMarkAsSpam = !msg.IsOwn;
         var showReport = !msg.IsOwn && msg.CanReport;
-        var anyAction = SupportsReactions || showDelete || showMarkAsSpam || showReport;
+        // An unsent own copy (the drain parked its intent): retry and discard, on that
+        // copy only (account-offline-mutation.md § The unsent-changes surface, point 2).
+        var showUnsentActions = msg.IsOwn && msg.UnsentLine is { Length: > 0 };
+        var anyAction = SupportsReactions || showDelete || showMarkAsSpam || showReport || showUnsentActions;
         MessageActionsButton.Visibility = anyAction ? Visibility.Visible : Visibility.Collapsed;
         MessageActionsButton.Flyout = null;
         if (!anyAction) return;
 
         var menu = new MenuFlyout();
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(menu, Ids.DmMessageActionsMenu);
+
+        if (showUnsentActions)
+        {
+            var retry = new MenuFlyoutItem
+            {
+                Text = Strings.Get("conversations/detail/retry_send"),
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(retry, Ids.DmMessageRetryButton);
+            retry.Click += (_, _) =>
+            {
+                if (_message is not null) RetryQueuedRequested?.Invoke(_message);
+            };
+            menu.Items.Add(retry);
+
+            var discard = new MenuFlyoutItem
+            {
+                Text = Strings.Get("conversations/detail/discard_message"),
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(discard, Ids.DmMessageDiscardButton);
+            discard.Click += (_, _) => ShowDiscardQueuedConfirm();
+            menu.Items.Add(discard);
+
+            if (SupportsReactions || showDelete) menu.Items.Add(new MenuFlyoutSeparator());
+        }
 
         if (SupportsReactions)
         {
@@ -1061,12 +1133,43 @@ public sealed partial class DmMessageBubble : UserControl
 
     private Flyout? _moreReactionsFlyout;
     private Flyout? _deleteConfirmFlyout;
+    private Flyout? _discardQueuedConfirmFlyout;
 
     /// <summary>Open the delete-confirm step (<c>dm-message-delete-confirm-button</c>) as a
     /// sub-flyout anchored to the ⋯ button — title + a single always-enabled confirm Button
     /// that fires <see cref="DeleteRequested"/>. A flyout (not a ContentDialog) keeps the
     /// confirm button reliably UIA-realized for a FlaUI Invoke without an extra XamlRoot
     /// dance. conversations.md § Reactions &amp; message delete.</summary>
+    /// <summary>The <c>dm-message-discard-confirm-button</c> step behind
+    /// <c>dm-message-discard-button</c> — the <see cref="ShowDeleteConfirm"/> shape: one
+    /// title and one confirm, anchored to the ⋯ button. Confirmed, the page discards this
+    /// one parked intent (<see cref="DiscardQueuedRequested"/>).</summary>
+    private void ShowDiscardQueuedConfirm()
+    {
+        var panel = new StackPanel { Orientation = Orientation.Vertical, Spacing = 8, MinWidth = 180 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = Strings.Get("conversations/detail/discard_message_confirm_title"),
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap,
+        });
+        var confirm = new Button
+        {
+            Content = Strings.Get("conversations/detail/discard_message_confirm"),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(confirm, Ids.DmMessageDiscardConfirmButton);
+        confirm.Click += (_, _) =>
+        {
+            if (_message is not null) DiscardQueuedRequested?.Invoke(_message);
+            _discardQueuedConfirmFlyout?.Hide();
+        };
+        panel.Children.Add(confirm);
+
+        _discardQueuedConfirmFlyout = new Flyout { Content = panel };
+        _discardQueuedConfirmFlyout.ShowAt(MessageActionsButton);
+    }
+
     private void ShowDeleteConfirm()
     {
         var panel = new StackPanel { Orientation = Orientation.Vertical, Spacing = 8, MinWidth = 180 };

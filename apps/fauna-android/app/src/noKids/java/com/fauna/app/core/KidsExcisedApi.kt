@@ -153,6 +153,7 @@ abstract class KidsExcisedApi {
         searchManager = null
         atprotoSettingsMachine = null
         depositorAppsMachine = null
+        mailSettingsMachine = null
         archiveLinksHost.stop()
         return {
             feedMgr?.close()
@@ -404,7 +405,13 @@ abstract class KidsExcisedApi {
         feedManager?.let { return it }
         val client = api.nestClient ?: return null
         val secretBytes = api.secret?.let { HexUtil.hexToBytes(it) } ?: return null
-        val mgr = runCatching { client.feedManager(secretBytes) }
+        // The recording device — the same sync device id `conversationsSession`
+        // gets — registers the folded archive comments' source on the manager
+        // (`archive-import.md` § What each category becomes → *Placement under
+        // the owner's own post*); [FeedVM] re-reads it on every feed entry.
+        val mgr = runCatching {
+            client.feedManager(secretBytes, api.sessionAccount.resolveDeviceId())
+        }
             .onFailure { ShellLog.w("ApiClient", "feedManager build failed: ${it.message}") }
             .getOrNull() ?: return null
         mgr.addObserver(observer)
@@ -465,6 +472,27 @@ abstract class KidsExcisedApi {
         val secretBytes = api.secret?.let { HexUtil.hexToBytes(it) } ?: return null
         return com.fauna.ffi.buildMailSettingsMachine(client, secretBytes, api.nodeUrl)
     }
+
+    // The session's ONE mail-settings machine — the hub's and the mail-usable
+    // gate's (`mail-settings.md` § Errors & edge cases, the mail-usable gate:
+    // the rows read the machine's LIVE snapshot, so turning mail on in the hub
+    // lights them at once). A connection-bound singleton, same shape as
+    // [feedManager]; built lazily by [sharedMailSettingsMachine], torn down by
+    // [detachKidsExcised].
+    @Volatile
+    private var mailSettingsMachine: uniffi.fauna_client_mail_settings.MailSettingsMachine? = null
+
+    /**
+     * The session's shared [buildMailSettingsMachine]: `null` while there is no
+     * connection yet (the gate answers `mail_usable_unread()`), and it THROWS
+     * when the build fails (an undecodable secret — the gate answers
+     * `mail_usable_unbuilt()`); a failed build is not cached, so the next call
+     * tries again.
+     */
+    fun sharedMailSettingsMachine(): uniffi.fauna_client_mail_settings.MailSettingsMachine? =
+        mailSettingsMachine ?: synchronized(this) {
+            mailSettingsMachine ?: buildMailSettingsMachine()?.also { mailSettingsMachine = it }
+        }
 
     /**
      * The post-claim serving enablement (`onboarding.md` § 3b *Mechanism*) — the

@@ -4,6 +4,8 @@ import android.content.Context
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ShellLog
 import com.fauna.app.provider.FfiOnDemandSource
+import com.fauna.app.provider.buildPlacedHosts
+import com.fauna.app.provider.watchPlacedHosts
 import com.fauna.app.ui.util.resolveLocalizedNested
 import com.fauna.ffi.FfiNestClient
 import com.fauna.ffi.FfiSharePlaneListener
@@ -122,24 +124,14 @@ class SharePlaneHost @Inject constructor(
     }
 
     /** Every set the presence plan presents gets its live host (built once, the provider's own). */
-    private suspend fun buildDesiredHosts(refresh: Boolean) {
-        for (set in onDemand.sets(refresh)) {
-            runCatching { onDemand.host(set.scopedId) }
-                .onFailure { ShellLog.w(TAG, "host for ${set.scopedId} not built: ${it.message}") }
-        }
-    }
+    private suspend fun buildDesiredHosts(refresh: Boolean) =
+        onDemand.buildPlacedHosts(refresh) { id, e -> ShellLog.w(TAG, "host for $id not built: ${e.message}") }
 
     /** A set the plan adds while the plane runs (a share accepted in front) gets its host too. */
     private fun watchReplans() {
         hostWatch?.cancel()
-        hostWatch = side.launch {
-            onDemand.reconciled.collect {
-                // The held plan only: a read that re-planned would emit again.
-                for (id in onDemand.desiredScopedIds()) {
-                    runCatching { onDemand.host(id) }
-                        .onFailure { e -> ShellLog.w(TAG, "host for $id not built: ${e.message}") }
-                }
-            }
+        hostWatch = onDemand.watchPlacedHosts(side) { id, e ->
+            ShellLog.w(TAG, "host for $id not built: ${e.message}")
         }
     }
 

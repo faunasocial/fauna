@@ -242,6 +242,28 @@ pub enum LaunchAction {
 }
 
 impl LaunchSurface {
+    /// This surface's name in `fauna_e2e_agent::ROOT_SURFACE_KEY`'s journal:
+    /// its ui.yaml page, or a `launch_*` name for the one surface ui.yaml gives
+    /// no page of its own (`NeedsUpdate`). Test-agent use only, but compiled
+    /// everywhere: it is a total match, so a new surface must be named here.
+    pub fn root_surface_name(&self) -> &'static str {
+        match self {
+            LaunchSurface::Wizard => fauna_e2e_agent::ROOT_SURFACE_WIZARD,
+            LaunchSurface::Launching => fauna_e2e_agent::ROOT_SURFACE_LAUNCH_PROGRESS,
+            LaunchSurface::TransientRetry { .. } => "launch_retry",
+            LaunchSurface::NeedsUpdate { .. } => "launch_needs_update",
+            LaunchSurface::SignInRefused { .. } => "launch_sign_in_refused",
+            LaunchSurface::AccountLocked { .. } => "launch_account_locked",
+            LaunchSurface::IdentityStolenEntry { .. } => "identity_stolen_entry",
+            LaunchSurface::IdentityChanged { .. } | LaunchSurface::IdentityForked { .. } => {
+                "launch_identity_changed"
+            }
+            LaunchSurface::AccountIndexUnreadable { .. } => "launch_account_index_unreadable",
+            LaunchSurface::Unlock | LaunchSurface::CreatePassphrase => "unlock",
+            LaunchSurface::InstanceChooser { .. } => "launch_instance_chooser",
+        }
+    }
+
     /// The ordered ui.yaml element list this surface paints — the one source
     /// paint, the automation registry, and the focus ring all read.
     ///
@@ -1477,6 +1499,55 @@ fn focus_existing(app: &mut App, tx: &UnboundedSender<UiMessage>) {
         fauna_client_accounts::FocusExistingOutcome::Raised
         | fauna_client_accounts::FocusExistingOutcome::StillServedNoChannel => {
             focus_existing_and_exit(app)
+        }
+    }
+}
+
+/// The shown chooser's watch, one tick (`run`'s `chooser_watch` arm, every
+/// [`fauna_client_accounts::CHOOSER_WATCH_INTERVAL`] while the chooser is the
+/// launch surface): the shared [`fauna_client_accounts::chooser_watch_step`]
+/// re-reads the facts the chooser rests on (`account-scoping.md`
+/// § Concurrent instances → the colliding instance's surface).
+///
+/// - **freed** — the instance serving the account quit: the collision is
+///   over, so this process continues as the plain launch, [`start`] — the
+///   same continuation as [`focus_existing`]'s no-longer-served arm, with no
+///   input;
+/// - **choices** — another account opened or closed elsewhere: the list is
+///   replaced, a stale pick error with it (it named a row that may be gone).
+///
+/// The registry is re-read each tick, so an account registered meanwhile is
+/// offered too.
+pub fn watch_chooser(app: &mut App, tx: &UnboundedSender<UiMessage>) {
+    let (served, shown) = match &app.launch {
+        LaunchSurface::InstanceChooser {
+            served_actor,
+            choices,
+            ..
+        } => (served_actor.clone(), choices.clone()),
+        _ => return,
+    };
+    let Some(base) = crate::session::config_dir() else {
+        return;
+    };
+    let entries: Vec<(String, Option<String>)> = crate::session::registry(app)
+        .list()
+        .into_iter()
+        .map(|e| (e.actor_id, e.handle))
+        .collect();
+    match fauna_client_accounts::chooser_watch_step(&base, &served, &entries, &shown) {
+        fauna_client_accounts::ChooserWatchStep::Unchanged => {}
+        fauna_client_accounts::ChooserWatchStep::Freed => {
+            tracing::info!(
+                "[launch-instance-chooser] {served} is no longer served — continuing as a plain launch"
+            );
+            start(app, tx);
+        }
+        fauna_client_accounts::ChooserWatchStep::Choices(now) => {
+            if let LaunchSurface::InstanceChooser { choices, error, .. } = &mut app.launch {
+                *choices = now;
+                *error = None;
+            }
         }
     }
 }

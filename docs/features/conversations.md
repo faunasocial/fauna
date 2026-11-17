@@ -102,13 +102,13 @@ Stamped 2026-11-07 at b844c771f6.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
-| linux | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
-| windows | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| web | ⚠ partial | 0.1.7-dev+e08dc6d6 standalone |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.7-dev+e08dc6d6 standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.6-dev+c788c80c standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -162,6 +162,6 @@ Stamped 2026-11-07 at b844c771f6.
 | 25 | app | `tests/e2e-unified/tests/test_conversations_unread_by_nest_position.py::test_unread_follows_the_nests_order_never_the_senders_clock` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
 | 26 | app | `tests/e2e-unified/tests/test_conversations_rejoin_read_position.py::test_a_group_left_and_re_joined_opens_at_the_old_read_position` | windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 26 | app | `tests/e2e-unified/tests/test_conversations_rejoin_later_enrolled_device.py::test_a_device_enrolled_after_you_left_starts_the_rejoined_conversation_unread` | macos (macos): passed, tui (linux): passed |
-| 27 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_message_takes_only_my_nests_copy` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 27 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_conversation_hides_it_until_the_peer_writes_again` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 27 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_message_takes_only_my_nests_copy` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 27 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_conversation_hides_it_until_the_peer_writes_again` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

@@ -65,15 +65,17 @@ struct NotificationsView: View {
                         .automationActivate(Ids.notificationMarkRead) {
                             Task { await markAllRead() }
                         }
+                        // Waits on the page's first list read (`notifications.md` § Errors
+                        // & edge cases); applied outside `automation*` so the registry reads it.
+                        .faunaPossible(vm.markAllReadAnswer)
                         Button(L.notifications.clearAll) {
                             Task { await clearAll() }
                         }
-                        .disabled(vm.notifications.isEmpty)
                         .accessibilityIdentifier(Ids.notificationClear)
-                        .automationActivate(Ids.notificationClear,
-                                            isEnabled: { !vm.notifications.isEmpty }) {
+                        .automationActivate(Ids.notificationClear) {
                             Task { await clearAll() }
                         }
+                        .faunaPossible(vm.clearAllAnswer)
                     }
                 }
             }

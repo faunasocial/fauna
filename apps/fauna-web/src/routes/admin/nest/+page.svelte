@@ -63,7 +63,7 @@
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import {
-    offlineAffordance,
+    offlinePossibility,
     osMaintenanceStatusLabel,
     parsePort,
     adminParseRegionCode,
@@ -98,7 +98,7 @@
   // declines to encode). Declaring it would gate nothing while reading as proof
   // the control is gated — the shape `check-offline-gate-kinds.py` rule 2
   // forbids — so the opener declares nothing and its confirm carries the kind.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // admin-nest (admin.md § N Nest) — nest-wide settings that aren't a feature
   // page, introduced by the per-page-services redesign (admin.md § Admin IA

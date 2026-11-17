@@ -1,23 +1,31 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.SecureStorage
+import com.fauna.app.ui.util.answerRefusal
 import com.fauna.ffi.FfiNotifItem
 import com.fauna.ffi.actorIdFromSecret
+import com.fauna.ffi.notificationsClearAllPossibility
+import com.fauna.ffi.notificationsMarkAllReadPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import uniffi.fauna_core.MutedKeyword
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 
 @HiltViewModel
 class NotificationsVM @Inject constructor(
     private val api: ApiClient,
     private val secureStorage: SecureStorage,
+    @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
     val notifications = MutableStateFlow<List<FfiNotifItem>>(emptyList())
@@ -25,6 +33,56 @@ class NotificationsVM @Inject constructor(
     val isLoading = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
     private var cursor: Long? = null
+
+    /**
+     * Whether the page's list read has answered at least once (`ui/README.md`
+     * § List pages: loading is not empty) — what *Mark all read* and *Clear
+     * all* wait on (`notifications.md` § Errors & edge cases, *The page-wide
+     * actions wait on the first read*; tui's `NotificationsState::read`).
+     * `FAILED` after a first read that threw, until a later one succeeds; a
+     * failure after a resolved read keeps the rows shown actionable.
+     */
+    private var read = ReadState.PENDING
+
+    private val _markAllReadAnswer = MutableStateFlow(notificationsMarkAllReadPossibility(read))
+
+    /** `notification-mark-read`'s answer — the shared
+     *  `mark_all_read_possibility` over [read]; [markAllRead] asks it again. */
+    val markAllReadAnswer: StateFlow<Possibility> = _markAllReadAnswer
+
+    private val _clearAllAnswer = MutableStateFlow(notificationsClearAllPossibility(read, 0u))
+
+    /** `notification-clear`'s answer — the shared `clear_all_possibility` over
+     *  [read] and the rows the page holds (`notifications.nothing_to_clear`
+     *  on an empty page); [clearAll] asks it again. */
+    val clearAllAnswer: StateFlow<Possibility> = _clearAllAnswer
+
+    /** Re-ask both page-wide answers after the read state or the rows moved. */
+    private fun repaintAnswers() {
+        _markAllReadAnswer.value = notificationsMarkAllReadPossibility(read)
+        _clearAllAnswer.value = notificationsClearAllPossibility(read, notifications.value.size.toUInt())
+    }
+
+    /** The page's list read landed ([rows]) or threw ([rows] `null`) — folds
+     *  the read state and the rows, then re-asks the answers. Internal so the
+     *  VM tests drive it without a nest. */
+    internal fun applyRead(rows: List<FfiNotifItem>?) {
+        if (rows != null) {
+            notifications.value = rows
+            read = ReadState.RESOLVED
+        } else if (read != ReadState.RESOLVED) {
+            read = ReadState.FAILED
+        }
+        repaintAnswers()
+    }
+
+    /** Rule 6: the refusal an action's own answer gives, on `error-message`;
+     *  `true` when it refused (nothing is sent). */
+    private fun refuses(answer: Possibility): Boolean {
+        val refusal = answerRefusal(context, answer) ?: return false
+        errorMessage.value = refusal.reason
+        return true
+    }
 
     /** The process-held muted-word list ([ApiClient.mutedWords]) the rows'
      *  collapse matches against (notifications.md § Muted words). */
@@ -61,10 +119,11 @@ class NotificationsVM @Inject constructor(
             errorMessage.value = null
             try {
                 val response = api.getNotifications(actor)
-                notifications.value = response.notifications
+                applyRead(response.notifications)
                 cursor = response.cursor
                 unreadCount.value = api.getUnreadNotificationCount(actor)
             } catch (e: Exception) {
+                applyRead(null)
                 errorMessage.value = e.message
             }
             isLoading.value = false
@@ -78,6 +137,7 @@ class NotificationsVM @Inject constructor(
             try {
                 val response = api.getNotifications(actor, cursor = cur)
                 notifications.value = notifications.value + response.notifications
+                repaintAnswers()
                 cursor = response.cursor
             } catch (e: Exception) {
                 errorMessage.value = e.message
@@ -107,6 +167,7 @@ class NotificationsVM @Inject constructor(
      * security notices stay listed.
      */
     fun clearAll() {
+        if (refuses(notificationsClearAllPossibility(read, notifications.value.size.toUInt()))) return
         val upTo = notifications.value.maxOfOrNull { it.createdAt } ?: return
         viewModelScope.launch {
             try {
@@ -119,6 +180,7 @@ class NotificationsVM @Inject constructor(
     }
 
     fun markAllRead() {
+        if (refuses(notificationsMarkAllReadPossibility(read))) return
         val actor = actorId() ?: return
         viewModelScope.launch {
             try {

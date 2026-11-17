@@ -152,7 +152,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 16 | app | `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_a_same_named_shared_set_is_its_own_option_and_upload_target` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 16 | app | `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_a_namesake_made_before_the_accept_does_not_hide_the_shared_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 16 | app | `tests/e2e-unified/tests/test_media_cross_nest_writer_upload.py::test_a_writer_member_on_another_nest_uploads_and_deletes_and_a_reader_is_refused` | tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_member_pulls_offline_authored_file_from_owner_peer` — requires `share-offline-landing` (not built: web, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): failed, tui (linux): passed, tui (macos): failed, tui (windows): passed |
+| 17 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_member_pulls_offline_authored_file_from_owner_peer` — requires `share-offline-landing` (not built: web, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): failed, tui (windows): passed |
 | 17 | app | absent by design on web | — |
 | 18 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_person_the_folder_was_never_shared_with_gets_nothing_readable` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 18 | app | absent by design on web | — |
@@ -170,7 +170,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 26 | app | `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_delete_versions_and_restore_act_on_the_chosen_row_never_the_namesake` | tui (linux): passed, tui (macos): passed |
 | 27 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_pull_from_a_device_that_went_away_keeps_its_row_and_says_why` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 27 | app | absent by design on web | — |
-| 28 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_limited` — requires `share-cap-nest-hold` (test harness) (not built: web, ios, ios-kids) | linux (linux): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed, tui (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_limited` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 28 | app | absent by design on web | — |
 | 29 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_removed_member_drops_off_the_owners_transfer_list` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 29 | app | absent by design on web | — |

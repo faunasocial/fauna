@@ -47,6 +47,11 @@ type PrincipalFolders = Option<BTreeMap<[u8; 32], FolderSetNames>>;
 struct TrustReads<'a> {
     grant_log: Option<&'a SuccessionLedger>,
     folders: Option<&'a BTreeMap<[u8; 32], FolderSetNames>>,
+    /// The owner's folder id → name map a `deposit` tuple's folder is named
+    /// from ([`fauna_client_pair::name_deposit_folders`]) — `None` when no
+    /// grant in the log deposits or the owner's folders could not be read, so
+    /// a deposit folder is never guessed deleted from a map never read.
+    deposit_folders: Option<&'a BTreeMap<i64, String>>,
 }
 
 /// "Failed to load connected apps: {message}".
@@ -855,6 +860,27 @@ impl ConnectedAppsMachine {
         }
     }
 
+    /// The owner's folder names a principal's `deposit` grants are worded
+    /// with ([`TrustReads::deposit_folders`]): read only when the log holds a
+    /// deposit grant, from the same folder list the consent card's picker
+    /// reads (`connected-apps.md` § The trust facet and history lens → *The
+    /// words rule*).
+    async fn deposit_folders(
+        &self,
+        grant_log: Option<&SuccessionLedger>,
+    ) -> Option<BTreeMap<i64, String>> {
+        let deposits = grant_log?.grant_events.iter().any(|e| {
+            e.scope
+                .iter()
+                .any(|t| t.class == fauna_core::grant_event::CLASS_DEPOSIT)
+        });
+        if !deposits {
+            return None;
+        }
+        let folders = consent_folder_options(self.consent_grant_seams().as_deref()).await?;
+        Some(folders.into_iter().map(|f| (f.id, f.name)).collect())
+    }
+
     /// Which folder each principal's folder read grants cover
     /// ([`PrincipalFolders`]), read once per roster read over the log already
     /// loaded — the owner secret derives each generation's grant id
@@ -985,6 +1011,7 @@ impl ConnectedAppsMachine {
                 let folders = self
                     .principal_folders(&principals, grant_log.as_ref())
                     .await;
+                let deposit_folders = self.deposit_folders(grant_log.as_ref()).await;
                 let fresh_mail = mail.is_some();
                 let holders = principals
                     .iter()
@@ -1006,6 +1033,7 @@ impl ConnectedAppsMachine {
                     TrustReads {
                         grant_log: grant_log.as_ref(),
                         folders: folders.as_ref(),
+                        deposit_folders: deposit_folders.as_ref(),
                     },
                     external_apps_off,
                 );
@@ -1338,16 +1366,30 @@ fn principal_row(
 fn principal_trust(p: &PrincipalInfo, reads: TrustReads<'_>) -> Option<PrincipalTrust> {
     let (log, holder) = reads.grant_log.zip(holder_key(p))?;
     let names = reads.folders.and_then(|f| f.get(&holder));
+    let deposits = reads.deposit_folders;
+    let name_deposits = |scope: &mut Vec<fauna_client_pair::TrustScope>| {
+        if let Some(deposits) = deposits {
+            fauna_client_pair::name_deposit_folders(scope, deposits);
+        }
+    };
     Some(PrincipalTrust {
         lens: TrustLens::Now,
         grants: principal_trust_facet(log, &holder, now_epoch_secs())
             .grants
             .into_iter()
-            .map(|g| project_principal_grant(g, names))
+            .map(|g| {
+                let mut row = project_principal_grant(g, names);
+                name_deposits(&mut row.scope);
+                row
+            })
             .collect(),
         history: principal_history(log, &holder)
             .into_iter()
-            .map(|h| project_history(h, names))
+            .map(|h| {
+                let mut row = project_history(h, names);
+                name_deposits(&mut row.scope);
+                row
+            })
             .collect(),
     })
 }

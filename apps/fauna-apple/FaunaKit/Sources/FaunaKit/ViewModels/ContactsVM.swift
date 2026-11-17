@@ -112,6 +112,7 @@ public class ContactsVM {
 
     public func acceptKnock(peerId: String) async {
         guard let api, let actorId else { return }
+        guard admit(acceptPossibility()) else { return }
         do {
             let queued = try await api.acceptKnockOrQueue(actorId: actorId, peerId: peerId)
             guard self.api === api else { return }   // the in-flight clause
@@ -203,6 +204,7 @@ public class ContactsVM {
 
     public func addContact(actorId: String) async {
         guard let api, let myId = self.actorId else { return }
+        guard admit(knockPossibility(peerId: actorId)) else { return }
         do {
             // The knock goes to the nest the lookup resolved the actor on — the
             // lookup's URL, never a second derivation.
@@ -235,7 +237,55 @@ public class ContactsVM {
     /// (``ContactAsk/state(peer:store:)``) — the ask button after a guardian-refused
     /// knock, the pending label once one is outstanding, nothing otherwise.
     public func askState(peerId: String) -> ContactAsk.State {
-        contactAsk.state(peer: peerId, store: familyStatus)
+        let state = contactAsk.state(peer: peerId, store: familyStatus)
+        // The guardian decides this peer: the ask is the result's one step,
+        // offered before anything is refused (`ui/README.md` § Offer only what
+        // is possible, rule 3).
+        if state == .none, guardianDecides(peerId: peerId) { return .offered }
+        return state
+    }
+
+    /// The caller's roster edge to `peerId` (`nil` with none) — the shared
+    /// knock predicates' `peer_status`.
+    private func rosterStatus(peerId: String) -> String? {
+        contacts.first { $0.peerId.lowercased() == peerId.lowercased() }?.status
+    }
+
+    /// Whether the guardian decides contact with `peerId`
+    /// (`wardGuardianDecidesContact`, over the store's status read).
+    public func guardianDecides(peerId: String) -> Bool {
+        wardGuardianDecidesContact(
+            statusRead: familyStatus?.statusRead ?? false,
+            ownPolicy: familyStatus?.ownPolicy,
+            peerStatus: rosterStatus(peerId: peerId))
+    }
+
+    /// What `contacts-add-button` paints from on the Find User result, and what
+    /// ``addContact(actorId:)`` asks before it sends — the shared
+    /// `wardKnockPossibility` (`contacts.md` § Errors & edge cases). A host with
+    /// no family store has no supervision to read: the knock is possible.
+    public func knockPossibility(peerId: String) -> Possibility {
+        guard let familyStatus else { return .possible }
+        return wardKnockPossibility(
+            statusRead: familyStatus.statusRead, ownPolicy: familyStatus.ownPolicy,
+            peerStatus: rosterStatus(peerId: peerId))
+    }
+
+    /// What each `contacts-accept-button` paints from, and what
+    /// ``acceptKnock(peerId:)`` asks first — the shared `wardAcceptPossibility`.
+    public func acceptPossibility() -> Possibility {
+        guard let familyStatus else { return .possible }
+        return wardAcceptPossibility(
+            statusRead: familyStatus.statusRead, ownPolicy: familyStatus.ownPolicy)
+    }
+
+    /// Refuse a gesture whose answer is blocked, with the answer's own reason
+    /// on `error-message` (rule 6: the action asks what the paint asks; rule 7:
+    /// a refusal is never silent). `true` when the gesture may go ahead.
+    func admit(_ answer: Possibility) -> Bool {
+        guard case .blocked = answer else { return true }
+        errorMessage = answer.reasonText
+        return false
     }
 
     /// The ward's ask (`contact-request-guardian-button`): `fauna.family.contact.

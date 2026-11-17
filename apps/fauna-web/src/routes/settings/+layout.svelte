@@ -4,6 +4,10 @@
   import { IDS } from '#lib/generated/uiIds';
   import AppShellFrame from '#lib/components/AppShellFrame.svelte';
   import ConnectionStatusIndicator from '#lib/components/ConnectionStatusIndicator.svelte';
+  import { identity } from '#lib/store';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { isMailSubpage, railRowGate } from '#lib/mail-gate';
+  import { mailUsable, watchMailUsable } from '#lib/mail-usable';
 
   // The Settings shell is a vertical **sidebar-swap** (settings.md § Navigation
   // model, ratified 2026-06-03 — the same shape as the admin shell): while in
@@ -105,6 +109,23 @@
   function href(id: string): string {
     return id ? `/app/settings/${id}` : '/app/settings';
   }
+
+  // The six mail sub-page rows paint from the one shared mail-usable answer
+  // (`ui/mail-settings.md` § Errors & edge cases, the mail-usable gate): not
+  // shown where this box can never serve mail, disabled with the reason while
+  // mail is off or still being read — the Mail & Calendar row stays live, the
+  // one step that unblocks them. The watch reads the session's one mail machine
+  // from the moment the shell mounts, so the rows are decided before the person
+  // reaches them.
+  $effect(() => {
+    const secretHex = $identity?.secretHex;
+    if (!secretHex) return;
+    return watchMailUsable(secretHex);
+  });
+  function rowGate(id: string) {
+    if (!isMailSubpage(id)) return { shown: true, disabled: false, reason: null };
+    return railRowGate($mailUsable);
+  }
 </script>
 
 {#snippet sidebarContent()}
@@ -118,12 +139,23 @@
   <ConnectionStatusIndicator />
   <div class="settings-links">
     {#each railEntries as entry}
-      <a
-        href={href(entry.id)}
-        class="tab"
-        class:active={current === entry.id}
-        data-testid={entry.key ? `${IDS.SETTINGS_NAV_ROW}[${entry.key}]` : undefined}
-      >{entry.label}</a>
+      {@const gate = rowGate(entry.id)}
+      {#if !gate.shown}
+        <!-- absent: this box can never serve mail -->
+      {:else if gate.disabled}
+        <span
+          class="tab disabled"
+          aria-disabled="true"
+          data-testid={entry.key ? `${IDS.SETTINGS_NAV_ROW}[${entry.key}]` : undefined}
+        >{entry.label}{#if gate.reason}<span class="reason">{resolveLocalized(gate.reason)}</span>{/if}</span>
+      {:else}
+        <a
+          href={href(entry.id)}
+          class="tab"
+          class:active={current === entry.id}
+          data-testid={entry.key ? `${IDS.SETTINGS_NAV_ROW}[${entry.key}]` : undefined}
+        >{entry.label}</a>
+      {/if}
     {/each}
   </div>
 {/snippet}
@@ -133,6 +165,14 @@
 <AppShellFrame sidebar={sidebarContent} main={mainContent} sidebarScrollable mobileSidebarLayout="scrolling" />
 
 <style>
+  .tab.disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .tab.disabled .reason {
+    display: block;
+    font-size: 0.8em;
+  }
   .nav-back {
     display: flex;
     align-items: center;

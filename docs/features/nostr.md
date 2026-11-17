@@ -100,7 +100,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | App | Status | Stamp |
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+962dc452 standalone |
-| linux | ✅ full | 0.1.5-dev+962dc452 standalone |
+| linux | ⚠ partial | 0.1.5-dev+962dc452 standalone |
 | windows | 🚧 unbuilt | 0.1.2-dev+d6ff0673 standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+962dc452 standalone |
@@ -142,7 +142,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 20 | app | `tests/e2e-unified/tests/test_nostr_signing_mode.py::test_the_signing_mode_reads_as_its_label` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 21 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_an_empty_relay_list_publishes_nowhere` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_unlinking_disconnects_every_signer_app` | nest (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_nostr_zap_signer_gate.py::test_a_named_zap_signer_stays_removable_when_zaps_are_turned_off` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 23 | app | `tests/e2e-unified/tests/test_nostr_zap_signer_gate.py::test_a_named_zap_signer_stays_removable_when_zaps_are_turned_off` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 24 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 25 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_post_by_someone_nobody_follows_never_reaches_a_feed` | nest (linux): passed |
 | 26 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_deletion_removes_only_its_own_authors_events_from_your_nests_relay` | nest (linux): passed |

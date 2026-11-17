@@ -1,7 +1,10 @@
 //! Are a file's bytes actually **on this disk**?
 //!
-//! On an on-demand root (Windows cfapi today; a macOS File Provider or a Linux FUSE host
-//! tomorrow — `docs/goal/behavior/on-demand-files.md` § On-Demand Files) a *tracked* file can exist
+//! On an on-demand root (Windows cfapi; on apple, a bound folder inside another provider's
+//! File Provider tree — iCloud Drive, a `~/Library/CloudStorage` domain — whose evicted files are
+//! *dataless*; a Linux FUSE host tomorrow — `docs/goal/behavior/on-demand-files.md` § On-Demand
+//! Files, `docs/goal/behavior/on-demand-files-apple.md` § Apple File Provider binding) a *tracked*
+//! file can exist
 //! with the right name, size and mtime while its content lives only on the nest. That
 //! **cloud-only placeholder** is `present-but-unreadable`, and getting the distinction wrong
 //! breaks the engine in two opposite directions — both of which have bitten (2026-07-14):
@@ -36,6 +39,14 @@
 //!
 //! The hydrated and edited rows are why the guard cannot suppress the uploads two-way sync
 //! exists to deliver: once the bytes are local, neither bit is set and the file is ordinary.
+//!
+//! **On apple the same question is one `st_flags` bit.** A File Provider evicts a file by
+//! making it *dataless* — `SF_DATALESS` (`0x40000000`, `<sys/stat.h>`) set in the `stat` flags,
+//! the bytes on the provider's side. `stat` reports the flag without materializing the file;
+//! an `open` + `read` is what makes the OS download it — for a whole bound folder at the first
+//! scan, or on a peer's behalf at a serve ask. The rule is windows' unchanged: reported, never
+//! read, never absent. Userland cannot set the bit (`chflags` refuses it), so the predicate is
+//! pinned over a synthetic flags value ([`flags_are_dataless`]).
 
 /// `FILE_ATTRIBUTE_OFFLINE` — the file's data is not immediately available.
 #[cfg(windows)]
@@ -46,12 +57,26 @@ const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 
+/// `SF_DATALESS` — the file's data is held by its File Provider, not on this disk
+/// (`<sys/stat.h>`, apple only).
+#[cfg(target_vendor = "apple")]
+const SF_DATALESS: u32 = 0x4000_0000;
+
+/// True when an apple `st_flags` value marks a **dataless** file — see the module doc.
+#[cfg(target_vendor = "apple")]
+fn flags_are_dataless(flags: u32) -> bool {
+    flags & SF_DATALESS != 0
+}
+
 /// True when `meta` describes a file whose **bytes are not on this disk** — see the module doc.
 ///
-/// Always `false` off Windows: no other platform fauna ships on has a placeholder surface yet,
-/// so every file there is genuinely local. When one lands (a macOS File Provider domain, a Linux
-/// FUSE host), this is the single function that learns to recognize it, and every caller —
-/// scan, reconcile, upload — inherits the guard for free.
+/// This is the single function a platform's placeholder is taught to, and every caller —
+/// scan, reconcile, upload, the watcher, the serve's tree source — inherits the guard for free:
+/// windows reads the cfapi attribute bits, macOS and iOS the `SF_DATALESS` flag. Everywhere
+/// else (Linux, Android, the other apple OSes) it is `false`. On Linux that is the ruled
+/// answer, not a gap: fauna's own FUSE root keeps only local bytes in its underlying directory,
+/// and a bound folder inside another service's mount carries no per-file attribute to read
+/// (`docs/goal/behavior/on-demand-files-linux.md` § Linux FUSE binding).
 #[cfg(windows)]
 pub fn is_cloud_placeholder(meta: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
@@ -59,7 +84,21 @@ pub fn is_cloud_placeholder(meta: &std::fs::Metadata) -> bool {
 }
 
 /// True when `meta` describes a file whose **bytes are not on this disk** — see the module doc.
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn is_cloud_placeholder(meta: &std::fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    flags_are_dataless(meta.st_flags())
+}
+
+/// True when `meta` describes a file whose **bytes are not on this disk** — see the module doc.
+#[cfg(target_os = "ios")]
+pub fn is_cloud_placeholder(meta: &std::fs::Metadata) -> bool {
+    use std::os::ios::fs::MetadataExt;
+    flags_are_dataless(meta.st_flags())
+}
+
+/// True when `meta` describes a file whose **bytes are not on this disk** — see the module doc.
+#[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
 pub fn is_cloud_placeholder(_meta: &std::fs::Metadata) -> bool {
     false
 }
@@ -123,6 +162,38 @@ mod tests {
             path_is_cloud_placeholder(&f),
             "a file whose bytes the OS says are not here must never be hashed or uploaded"
         );
+    }
+
+    /// The `SF_DATALESS` bit marks a placeholder, alone or among the other flags a provider's
+    /// file carries — the value a File Provider leaves on an evicted file.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_dataless_flag_marks_a_placeholder() {
+        const UF_HIDDEN: u32 = 0x0000_8000;
+        const UF_TRACKED: u32 = 0x0000_0040;
+        assert!(flags_are_dataless(SF_DATALESS));
+        assert!(flags_are_dataless(SF_DATALESS | UF_TRACKED | UF_HIDDEN));
+    }
+
+    /// An ordinary flags value is no placeholder — the other user and system flags never are,
+    /// or two-way sync would silently stop uploading a hidden or tracked file.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn an_ordinary_flags_value_is_not() {
+        const UF_NODUMP: u32 = 0x0000_0001;
+        const UF_HIDDEN: u32 = 0x0000_8000;
+        const UF_TRACKED: u32 = 0x0000_0040;
+        const SF_ARCHIVED: u32 = 0x0001_0000;
+        for flags in [
+            0,
+            UF_NODUMP,
+            UF_HIDDEN,
+            UF_TRACKED,
+            SF_ARCHIVED,
+            !SF_DATALESS,
+        ] {
+            assert!(!flags_are_dataless(flags), "{flags:#x}");
+        }
     }
 
     /// A path that does not exist is not a placeholder — the caller's missing-file handling

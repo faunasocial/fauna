@@ -131,7 +131,20 @@ public struct DmComposeBar: View {
     private var canSend: Bool { capabilities?.canSend ?? true }
     private var supportsAttachments: Bool { capabilities?.supportsAttachments ?? true }
     private var supportsMarkdown: Bool { capabilities?.supportsMarkdown ?? true }
-    private var supportsSubject: Bool { capabilities?.supportsSubject ?? true }
+    /// The shared `ThreadControl.subject` answer: absent on a rail with no
+    /// subject (`ui/conversations.md` § Errors & edge cases → *Controls this
+    /// person can never use*). nil capabilities = new-thread compose, which
+    /// always can. The rail decides it, never the role, so no role is asked.
+    private var subjectPossibility: Possibility {
+        guard let capabilities else { return .possible }
+        return ThreadControlAnswers(capabilities: capabilities, myRole: nil)(.subject)
+    }
+
+    /// The handler asks the answer the paint asked (`ui/README.md` rule 6).
+    private func toggleTopic() {
+        guard subjectPossibility.isPossible else { return }
+        onToggleTopic()
+    }
     /// The editable reply "To" line shows only on rails that select recipients
     /// (mail). nil capabilities = new-thread compose, which uses the
     /// recipient-picker instead, so the To line stays hidden there.
@@ -264,11 +277,11 @@ public struct DmComposeBar: View {
 
             // Toolbar row
             HStack(spacing: 8) {
-                Button(L.conversations.unified.topicToggleAdd) { onToggleTopic() }
+                Button(L.conversations.unified.topicToggleAdd) { toggleTopic() }
                     .buttonStyle(.borderless)
-                    .disabled(!supportsSubject)
                     .accessibilityIdentifier(Ids.topicToggleButton)
-                    .automationActivate(Ids.topicToggleButton, isEnabled: { supportsSubject }) { onToggleTopic() }
+                    .automationActivate(Ids.topicToggleButton) { toggleTopic() }
+                    .faunaPossible(subjectPossibility)
 
                 markdownToolbar
 

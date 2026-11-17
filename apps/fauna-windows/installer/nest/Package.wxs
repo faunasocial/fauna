@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  Fauna Nest for Windows — the nest MSI (WiX v6): the Nest service, the Bridge
+  service and the Terminal App, for the user who hosts a nest on this PC. The app
+  and the per-user sync agent reach Windows users through the MSIX bundle, never
+  through this package (docs/goal/architecture/installers/windows.md § Direct
+  download (MSIX app + nest MSI), 1. The nest MSI's features).
+
+  Built from this file plus the fragments it shares with the full-feature package
+  one directory up (Directories, ServiceNest, ServiceBridge, TerminalApp, Notices,
+  UI). The full-feature package (../Package.wxs and its client fragments App,
+  ServiceSync, ShellExt and Protocol) is what the public release builds until the
+  release workflow's bundle leg switches to this one; the two are never linked
+  together (each build names its own files).
+
+  Build (the -ext flags are required — Util + UI + Firewall extensions):
+    wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext \
+      -ext WixToolset.Firewall.wixext \
+      -o Fauna-Nest-Setup-x64.msi installer/nest/Package.wxs \
+      installer/Directories.wxs installer/ServiceNest.wxs installer/ServiceBridge.wxs \
+      installer/TerminalApp.wxs installer/Notices.wxs installer/UI.wxs \
+      -loc installer/Strings.wxl \
+      -d NestBin=stage/x64/fauna-nest-svc.exe \
+      -d BridgeBin=stage/x64/fauna-bridge-svc.exe \
+      -d MailBridgeBin=stage/x64/fauna-mail-bridge.exe \
+      -d MailBridgeFfiDll=stage/x64/fauna_ffi.dll \
+      -d MailBridgeLibunwindDll=stage/x64/libunwind.dll \
+      -d TuiBin=stage/x64/fauna-tui.exe \
+      -d CliBin=stage/x64/fauna-cli.exe \
+      -d IconDir=stage/x64/icons/ \
+      -d NoticesDir=stage/x64/notices/
+
+  NoticesDir holds the three licence files `just windows-msi-notices <dir> <arch>
+  <bridge> windows-nest-msi` writes (Notices.wxs; the nest MSI's own manifest
+  artifact, which carries no .NET app). Every -d path must be absolute
+  (installer/README.md § Building the nest MSI).
+
+  No custom action: everything the full-feature package's custom actions did
+  served the client features (the app's and the agent's files-in-use kills, the
+  shell DLL's orphan cleanup, the sparse package, the sync-root cleanup).
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <!-- The UpgradeCode is the full-feature package's, on purpose: this package
+       replaces a full-feature install as a major upgrade (the nest, the bridge,
+       the terminal app and %ProgramData%\Fauna carry over, the client features
+       are removed), which is acceptable only inside the 0.1.x compat-free window
+       (installers/windows.md § Direct download, 1, the upgrade bullet). Version
+       is the product version, in lockstep with ../Package.wxs (the
+       product-version lockstep check reads both; product-version.md). -->
+  <!-- public-text: windows-installer-descriptions -->
+  <Package
+    Name="Fauna Nest"
+    Manufacturer="Fauna Social"
+    Version="0.1.7"
+    UpgradeCode="4a7b8c00-f1e2-4d3a-b5c6-000000000001"
+    Scope="perMachine"
+    InstallerVersion="500">
+  <!-- public-text-end: windows-installer-descriptions -->
+
+    <!-- AllowSameVersionUpgrades: the full-feature package's reason (a dev build
+         or a same-version reinstall must replace, not sit beside, the prior
+         install — one Apps & Features entry). -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Fauna is already installed."
+      AllowSameVersionUpgrades="yes"
+      Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- ── UI ── -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
+    <!-- The shared licence page (one directory up; its words are a public text). -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)..\License.rtf" />
+
+    <!-- ── Properties ── -->
+    <Property Id="REMOVE_USER_DATA" Value="0" />
+    <Icon Id="FaunaIcon" SourceFile="$(var.IconDir)AppIcon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="FaunaIcon" />
+
+    <!-- ── Features ──
+      Fauna Nest (root)
+        + Nest         (optional, default ON — the reason this package exists)
+        |   + Bridge   (optional, default off, requires Nest)
+        + TerminalApp  (optional, default ON)
+
+      Nest is on by default: the reason it was off in the full-feature package
+      (2026-06-21, "the Windows desktop is primarily a client") belonged to an
+      installer that also carried the client. Both top-level features stay
+      deselectable, so a box can take the terminal app alone. -->
+
+    <!-- public-text: windows-installer-descriptions -->
+    <Feature Id="Nest"
+             Title="Nest Service"
+             Description="Run a personal Fauna nest server on this machine."
+             Level="1"
+             AllowAbsent="yes">
+    <!-- public-text-end: windows-installer-descriptions -->
+      <ComponentGroupRef Id="NestService" />
+      <!-- The DataDir registry value + the REMOVE_USER_DATA cleanup (UI.wxs). -->
+      <ComponentGroupRef Id="DataCleanup" />
+      <!-- The three licence files ride every top-level feature (Notices.wxs). -->
+      <ComponentGroupRef Id="NoticesComponents" />
+
+      <!-- Bridge — child of Nest, default off. The requirement is the nesting
+           alone (see ../Package.wxs on why no Level condition is used). -->
+      <!-- public-text: windows-installer-descriptions -->
+      <Feature Id="Bridge"
+               Title="Bridge Service"
+               Description="Mail and calendar server components (IMAP and CalDAV) so standard mail and calendar apps can connect to this nest."
+               Level="1000"
+               AllowAbsent="yes">
+      <!-- public-text-end: windows-installer-descriptions -->
+        <ComponentGroupRef Id="BridgeService" />
+      </Feature>
+    </Feature>
+
+    <!-- Terminal App — default ON, top-level so a box can have it without the nest
+         (TerminalApp.wxs: fauna-tui.exe and fauna-cli.exe in INSTALLFOLDER and the
+         one machine PATH entry). -->
+    <!-- public-text: windows-installer-descriptions -->
+    <Feature Id="TerminalApp"
+             Title="Fauna Terminal App"
+             Description="The terminal (text-mode) Fauna app, usable over SSH, and fauna-cli, the program an AI assistant runs to work in Fauna; adds both to PATH."
+             Level="1"
+             AllowAbsent="yes">
+    <!-- public-text-end: windows-installer-descriptions -->
+      <ComponentGroupRef Id="TerminalAppComponents" />
+      <ComponentGroupRef Id="NoticesComponents" />
+    </Feature>
+
+  </Package>
+
+</Wix>

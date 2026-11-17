@@ -57,6 +57,7 @@ from types import SimpleNamespace
 import pytest
 
 import conftest
+from helpers.conftest_branches import branch_calls
 
 pytestmark = pytest.mark.tier_1
 
@@ -148,74 +149,8 @@ def test_live_mode_with_a_declared_port_is_skipped_not_dialed(monkeypatch):
 # ── 2. every environment-carrying app branch calls it ────────────────────────
 
 
-def _branch_calls(func, callee: str) -> set[str]:
-    """App names whose `app_name ==` branch in `func` contains a `callee` call.
-
-    Reads the source rather than running it: `_build_app_config` builds real
-    apps and resolves real fixtures, so calling it would be a build, not a
-    unit test. The branch structure IS what's being pinned.
-    """
-    tree = ast.parse(inspect.getsource(func))
-    calls: set[str] = set()
-
-    def is_app_name(node) -> bool:
-        """`app_name` itself, or `KIDS_PARENT.get(app_name, …)` — a kids column's
-        parent, which takes its parent's branch (the ios branch reads it so)."""
-        if isinstance(node, ast.Name):
-            return node.id == "app_name"
-        return (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "get"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "KIDS_PARENT"
-            and bool(node.args)
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id == "app_name"
-        )
-
-    def app_names(test) -> set[str]:
-        """The string literals an `app_name == "..."` test in `test` names."""
-        out = set()
-        for node in ast.walk(test):
-            if isinstance(node, ast.Compare) and is_app_name(node.left):
-                for c in node.comparators:
-                    if isinstance(c, ast.Constant) and isinstance(c.value, str):
-                        out.add(c.value)
-        return out
-
-    def calls_callee(node) -> bool:
-        return any(
-            isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Name)
-            and n.func.id == callee
-            for n in ast.walk(node)
-        )
-
-    def walk(stmts, names: set[str]) -> None:
-        # `elif` is an `If` inside `orelse`, so branches must be dispatched on
-        # the STATEMENT, never on a container's children — walking children
-        # loses each elif's own `app_name ==` test (and with it every branch
-        # past the first, which is how this walker's first draft reported
-        # linux/macos/tui as unseeded when they were wired all along).
-        for stmt in stmts:
-            if isinstance(stmt, ast.If):
-                walk(stmt.body, app_names(stmt.test) or names)
-                walk(stmt.orelse, names)
-                continue
-            if names and calls_callee(stmt):
-                calls.update(names)
-            walk(
-                [c for c in ast.iter_child_nodes(stmt) if isinstance(c, ast.stmt)],
-                names,
-            )
-
-    walk(tree.body, set())
-    return calls
-
-
 def test_every_seeded_app_branch_applies_the_trust_env():
-    seeded = _branch_calls(conftest._build_app_config, "_apply_r14_trust_env")
+    seeded = branch_calls(conftest._build_app_config, "_apply_r14_trust_env")
     missing = set(SEEDED_APPS) - seeded
     assert not missing, (
         f"_build_app_config branches {sorted(missing)} build a launch "
@@ -231,7 +166,7 @@ def test_the_declared_absence_is_still_absent():
     # Not a wish — a statement of the mechanism. If an app declared absent here
     # grows an environment path, seed it and move it into SEEDED_APPS in the
     # same change.
-    seeded = _branch_calls(conftest._build_app_config, "_apply_r14_trust_env")
+    seeded = branch_calls(conftest._build_app_config, "_apply_r14_trust_env")
     unexpected = set(DECLARED_ABSENCES) & seeded
     assert not unexpected, (
         f"{sorted(unexpected)} now seeds the R14 trust — good, but the "

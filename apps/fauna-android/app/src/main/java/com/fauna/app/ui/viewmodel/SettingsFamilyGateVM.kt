@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.AccountStores
 import com.fauna.app.core.ApiClient
+import com.fauna.ffi.familyHasSurface
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -45,8 +46,13 @@ class SettingsFamilyGateVM @Inject constructor(
             com.fauna.app.core.FamilyStatusEpoch.tick.collect {
                 try {
                     val status = api.familyStatus()
-                    hasFamilyRelationship.value =
-                        status.wards.isNotEmpty() || status.supervisedBy != null || status.incomingTransfers.isNotEmpty()
+                    // The shared `has_family_surface` over the status read —
+                    // never an app-local re-derivation of the gate.
+                    hasFamilyRelationship.value = familyHasSurface(
+                        status.supervisedBy != null,
+                        status.wards.size.toUInt(),
+                        status.incomingTransfers.size.toUInt(),
+                    )
                 } catch (_: Exception) {
                     // No information: keep the restored/last-known gate rather than
                     // hiding a supervised ward's Family entry on a reconnect blip.

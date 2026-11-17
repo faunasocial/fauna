@@ -412,12 +412,14 @@ public class TestAgent
                                 // Separates "the post-action chain hung" from "it finished
                                 // and the nav-load barrier hung".
                                 Log($"[{cmdIteration}] postAction EXIT (thread {Environment.CurrentManagedThreadId})");
-                                // A nav to an IAsyncLoadedPage armed App.PendingNavLoad with
-                                // the page's initial-load task; await it (bounded) so ready=true
-                                // means the target page finished its async Page_Loaded — not
-                                // merely that the frame-nav was kicked off. Fixes the folder
-                                // wizard-render race. Null (and no wait) for a nav to a page
-                                // without the barrier.
+                                // A nav armed App.PendingNavLoad — an IAsyncLoadedPage's
+                                // initial-load task, and the main shell's selected page's
+                                // load (App.AddNavLoad); await it (bounded) so ready=true
+                                // means the target page is loaded, its view published and
+                                // its async Page_Loaded finished — not merely that the
+                                // frame-nav was kicked off. Fixes the folder wizard-render
+                                // race and a nav read answering the page before. Null (and
+                                // no wait) for a nav that armed nothing.
                                 var navLoad = App.TakePendingNavLoad();
                                 if (navLoad is not null)
                                     await Task.WhenAny(navLoad, Task.Delay(NavReadyBudgetMs));
@@ -1617,6 +1619,24 @@ public class TestAgent
                         }
                     };
                 }
+            case "subscriptions_hold_author_drain":
+                // Hold the subscriptions author drain — shared Rust's process-wide
+                // flag (`fauna_client_subscriptions::orchestration`), which the
+                // in-process author pump reads after its queue read — so a
+                // payment-backed subscribe request stands in the author's §2 while
+                // the test reads its paid badge (`monetization.md` § Pillar 3).
+                // Pre-auth is fine: the pump a login starts reads the same flag.
+                // Twin of tui's (the reference), linux's, web's, android's and
+                // apple's arms.
+                FaunaApp.App.MachineMethodResult = null;
+                uniffi.fauna_ffi.FaunaFfiMethods.SubscriptionsHoldAuthorDrainForTest();
+                return null;
+            case "subscriptions_release_author_drain":
+                // Release the hold above; the next pump tick drains as usual. A
+                // no-op when nothing is held.
+                FaunaApp.App.MachineMethodResult = null;
+                uniffi.fauna_ffi.FaunaFfiMethods.SubscriptionsReleaseAuthorDrainForTest();
+                return null;
             case "alert_sweep_wake":
                 // Contract: `fauna_e2e_agent::ALERT_SWEEP_WAKE` — end the current
                 // identity's re-sweep WAIT so the production loop sweeps again; the

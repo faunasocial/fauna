@@ -49,11 +49,18 @@ pub fn build_snapshot_file_list(
 /// linux twin of windows' unfiltered `SnapshotFileInfo` list — and a
 /// directory/symlink click fails closed with an `error-message` from
 /// [`FaunaClient::save_snapshot_file`] rather than being hidden client-side.
+///
+/// The download's bytes ride the bulk-binary carve-out, so the button paints
+/// from the shared carve-out answer ([`paint_download`]) — blocked, with its
+/// reason, while there is no nest — and the press asks it again, refusing on
+/// `error_label` (`ui/backups.md` § Errors & edge cases → *What the page
+/// offers*).
 pub fn build_backup_file_row(
     file: &fauna_backups_machine::SnapshotFileRow,
     set: &fauna_client_snapshots::SnapshotSet,
     size: &str,
     client: &Rc<FaunaClient>,
+    error_label: &gtk::Label,
 ) -> gtk::ListBoxRow {
     let path_label = gtk::Label::new(Some(&file.path));
     path_label.set_halign(gtk::Align::Start);
@@ -67,14 +74,18 @@ pub fn build_backup_file_row(
 
     let download_btn = gtk::Button::new();
     download_btn.set_icon_name("folder-download-symbolic");
-    download_btn.set_tooltip_text(Some(backups_strings::DOWNLOAD));
     download_btn.add_css_class("flat");
     crate::testid::set_test_id(&download_btn, ids::SNAPSHOT_FILE_DOWNLOAD_BUTTON);
+    paint_download(&download_btn);
     {
         let c = Rc::clone(client);
         let file = file.clone();
         let set = set.clone();
+        let error_label = error_label.clone();
         download_btn.connect_clicked(move |btn| {
+            if !super::allowed(&error_label, &crate::offline_gate::carve_out_possibility()) {
+                return;
+            }
             let suggested_name = file
                 .path
                 .rsplit('/')
@@ -136,6 +147,16 @@ pub fn build_backup_file_row(
     row
 }
 
+/// Paint a file's download button from the carve-out answer: live with a nest,
+/// blocked with the no-nest reason without one.
+fn paint_download(button: &gtk::Button) {
+    super::paint_icon(
+        button,
+        backups_strings::DOWNLOAD,
+        crate::offline_gate::carve_out_possibility(),
+    );
+}
+
 /// Populate the snapshot file list from the machine's opened detail — one row
 /// per `SnapshotFileRow` (`path` + human-readable `size_bytes` + the download
 /// button). `None` (no row open) empties the list, which is what makes the
@@ -146,6 +167,7 @@ pub fn populate_snapshot_file_list(
     list_box: &gtk::ListBox,
     detail: Option<&fauna_backups_machine::SnapshotDetail>,
     client: &Rc<FaunaClient>,
+    error_label: &gtk::Label,
 ) {
     // Remove all existing rows.
     crate::views::layout::clear_list_box_rows(list_box);
@@ -176,7 +198,45 @@ pub fn populate_snapshot_file_list(
     );
     for file in &detail.files {
         let size = crate::i18n::byte_size(file.size_bytes.max(0) as u64);
-        let row = build_backup_file_row(file, &set, &size, client);
+        let row = build_backup_file_row(file, &set, &size, client, error_label);
         list_box.append(&row);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The download's bytes ride the carve-out, so without a nest the button is
+    /// not offered as live: it paints blocked with the no-nest reason, and a
+    /// press is refused with that reason on `error-message`. Back online, it
+    /// is live again.
+    #[test]
+    fn the_download_is_blocked_while_offline_with_its_reason() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("disconnected");
+            let button = gtk::Button::new();
+            paint_download(&button);
+            let answer = crate::offline_gate::carve_out_possibility();
+            let reason = answer
+                .reason()
+                .expect("offline, the carve-out is blocked")
+                .resolve(crate::i18n::strings::lookup);
+            assert!(!button.is_sensitive());
+            assert_eq!(button.tooltip_text().as_deref(), Some(reason.as_str()));
+            let error_label = gtk::Label::new(None);
+            assert!(!super::super::allowed(&error_label, &answer));
+            assert_eq!(error_label.text().as_str(), reason);
+
+            crate::offline_gate::reset_for_test("connected");
+            paint_download(&button);
+            assert!(button.is_sensitive());
+            assert_eq!(
+                button.tooltip_text().as_deref(),
+                Some(backups_strings::DOWNLOAD),
+                "live, the icon button is named again"
+            );
+            crate::offline_gate::reset_for_test("disconnected");
+        });
     }
 }

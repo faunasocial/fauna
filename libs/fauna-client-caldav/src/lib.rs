@@ -60,6 +60,15 @@ pub use fauna_core::ical::{
 };
 pub use fauna_protocol::bridge_routing;
 
+// The calendar read's four answers and the event-create predicate every door to
+// the compose asks (events.md § Errors & edge cases → *No calendar to hold an
+// event*). See `calendars_read.rs`.
+pub mod calendars_read;
+pub use calendars_read::{
+    CalendarsRead, CalendarsReadState, EventCreateStep, event_create_calendar,
+    event_create_possibility, event_create_step, event_create_target,
+};
+
 // Client-side read-mutate-rewrite helpers (RSVP / add-attendee / reminder /
 // iMIP-inputs) shared by all seven apps' Events shells — WASM-safe, pure,
 // lifted from the linux lead (priority #2). See `mutate.rs`.
@@ -5142,6 +5151,38 @@ mod tests {
         )
         .expect("unseal");
         assert_eq!(meta, default_personal_metadata());
+    }
+
+    /// The four-answer read: an unreadable custody and a custody with no key
+    /// answer without a call; with the key the shared load runs and a listed
+    /// calendar is *loaded* (events.md § *No calendar to hold an event*, ruling 2).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn read_calendars_answers_from_the_custody_then_the_listing() {
+        use fauna_client_config::{DavCustody, DavStoreContext};
+        let rec = std::sync::Arc::new(ScheduleRequester::new(
+            vec![cal_entry(&[3u8; 32])],
+            Default::default(),
+        ));
+        let client = CalDavClient::new(rec.clone());
+        let unreadable = DavCustody::Unreadable("store not up".into());
+        assert_eq!(
+            block_on(client.read_calendars(&unreadable)).expect("read"),
+            CalendarsRead::Unresolved
+        );
+        assert_eq!(
+            block_on(client.read_calendars(&DavCustody::NoKey)).expect("read"),
+            CalendarsRead::NoKey
+        );
+        assert_eq!(rec.count("fauna.bridges.list_calendars"), 0);
+        let ready = DavCustody::Ready(DavStoreContext {
+            actor_id: ACTOR,
+            msek: MSEK,
+            prior_mseks: Default::default(),
+        });
+        let read = block_on(client.read_calendars(&ready)).expect("read");
+        assert_eq!(read.state(), CalendarsReadState::Loaded);
+        assert_eq!(read.calendars().len(), 1);
     }
 
     /// An actor that already has a calendar is listed once, nothing provisioned.

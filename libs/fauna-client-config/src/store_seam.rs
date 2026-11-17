@@ -444,7 +444,7 @@ pub const LEDGER_AWAITING_SIBLING: &str =
 pub const LEDGER_READY_WAIT: core::time::Duration = core::time::Duration::from_secs(10);
 
 /// The poll step of [`LEDGER_READY_WAIT`].
-const LEDGER_READY_POLL: core::time::Duration = core::time::Duration::from_millis(100);
+pub const LEDGER_READY_POLL: core::time::Duration = core::time::Duration::from_millis(100);
 
 /// A [`SuccessionLedgerStore`] that resolves the host's account-store handle
 /// **per call** — the seam a feature machine built before the store is up
@@ -464,6 +464,65 @@ impl<F> ResolvingLedgerStore<F> {
     pub fn new(resolve: F) -> Self {
         Self { resolve }
     }
+}
+
+/// **Repeat `read` while it answers [`LEDGER_NOT_READY`], inside ONE bound** —
+/// the wait a caller that may wait a not-ready refusal out takes (the write
+/// door's read, [`ResolvingLedgerStore`]'s `settled`; the feed's scorer load).
+/// `pause` runs between reads; [`LEDGER_AWAITING_SIBLING`] (another device must
+/// act) and every other answer return at once.
+///
+/// **The bound is `deadline`, a time, never a count of reads.** A read of a
+/// replica that has never listed the account crosses the first-listing gate,
+/// which may itself hold the read for the gate's own bound before refusing it
+/// (`account-client-lifecycle.md` § The client-side lifecycle → *The first
+/// listing*, (2)). A wait counted in reads re-crossed that gate once per poll
+/// and the bounds added up: a relaunch with no nest held its caller for
+/// minutes. So no read starts once `deadline` has passed; the read in flight
+/// when it passes ends on its own bound, and its answer is the answer. The
+/// count of [`LEDGER_READY_WAIT`] over [`LEDGER_READY_POLL`] reads stays as the
+/// backstop for an executor with no timer, whose `deadline` never passes.
+pub async fn wait_out_not_ready<T, Read, ReadFut, Pause, PauseFut>(
+    deadline: impl core::future::Future<Output = ()>,
+    mut pause: Pause,
+    mut read: Read,
+) -> Result<T, StoreError>
+where
+    Read: FnMut() -> ReadFut,
+    ReadFut: core::future::Future<Output = Result<T, StoreError>>,
+    Pause: FnMut() -> PauseFut,
+    PauseFut: core::future::Future<Output = ()>,
+{
+    let mut deadline = core::pin::pin!(deadline);
+    // Whether the bound has passed — and, at the first ask, the start of its
+    // clock: a lazy timer (an `async fn` sleep) begins only when first polled,
+    // so asking first after a read held for the gate's bound would start the
+    // bound only then. A passed bound is remembered: a completed future is
+    // never polled again.
+    let mut done = false;
+    let mut passed = async || {
+        if !done {
+            done = core::future::poll_fn(|cx| {
+                core::task::Poll::Ready(deadline.as_mut().poll(cx).is_ready())
+            })
+            .await;
+        }
+        done
+    };
+    passed().await;
+    let polls = LEDGER_READY_WAIT.as_millis() / LEDGER_READY_POLL.as_millis();
+    for _ in 0..polls {
+        let answer = read().await;
+        match &answer {
+            Err(StoreError::Load(m) | StoreError::Save(m)) if m == LEDGER_NOT_READY => {}
+            _ => return answer,
+        }
+        if passed().await {
+            return answer;
+        }
+        pause().await;
+    }
+    read().await
 }
 
 fn not_ready(save: bool) -> StoreError {
@@ -504,17 +563,21 @@ where
     where
         Fut: core::future::Future<Output = Result<T, StoreError>>,
     {
-        let polls = LEDGER_READY_WAIT.as_millis() / LEDGER_READY_POLL.as_millis();
-        for _ in 0..polls {
-            if let Some(handle) = (self.resolve)() {
-                match call(handle).await {
-                    Err(StoreError::Load(m) | StoreError::Save(m)) if m == LEDGER_NOT_READY => {}
-                    answer => return answer,
+        let call = &call;
+        wait_out_not_ready(
+            fauna_sleep::sleep(LEDGER_READY_WAIT),
+            || fauna_sleep::sleep(LEDGER_READY_POLL),
+            || {
+                let handle = (self.resolve)();
+                async move {
+                    match handle {
+                        Some(h) => call(h).await,
+                        None => Err(not_ready(false)),
+                    }
                 }
-            }
-            fauna_sleep::sleep(LEDGER_READY_POLL).await;
-        }
-        call((self.resolve)().ok_or_else(|| not_ready(false))?).await
+            },
+        )
+        .await
     }
 }
 
@@ -968,5 +1031,85 @@ impl BackupStateStore for NoLedgerStore {
         _marks: Vec<DestinationUnattestedMark>,
     ) -> Result<Vec<DestinationUnattestedMark>, StoreError> {
         Err(StoreError::Save(LEDGER_NOT_READY.into()))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod wait_out_not_ready_tests {
+    //! The not-ready wait is ONE bound, never one per read
+    //! ([`super::wait_out_not_ready`]).
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// The first-listing gate's own bound, as a read of a never-listed replica
+    /// with a pass in flight meets it: the read is held this long, then refused.
+    const GATE_BOUND: Duration = Duration::from_secs(30);
+
+    /// A read the gate holds for its whole bound before refusing it is read
+    /// once: the wait's bound passed while it was held, so no read starts
+    /// again, and the caller is answered after one gate bound — not after one
+    /// gate bound per poll, which held a relaunch with no nest for minutes.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_the_gate_holds_past_the_bound_is_not_started_again() {
+        let reads = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let answer: Result<(), StoreError> = wait_out_not_ready(
+            fauna_sleep::sleep(LEDGER_READY_WAIT),
+            || fauna_sleep::sleep(LEDGER_READY_POLL),
+            || async {
+                reads.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(GATE_BOUND).await;
+                Err(StoreError::Load(LEDGER_NOT_READY.into()))
+            },
+        )
+        .await;
+        assert!(answer.is_err_and(|e| e.is_not_ready()));
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "one gated read, not one per poll"
+        );
+        assert_eq!(
+            started.elapsed(),
+            GATE_BOUND,
+            "answered after the one gate bound"
+        );
+    }
+
+    /// A refusal the gate answers at once is waited out inside the bound, and
+    /// the read that answers ends the wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_quick_refusal_is_waited_out_until_the_store_answers() {
+        let reads = AtomicUsize::new(0);
+        let answer = wait_out_not_ready(
+            fauna_sleep::sleep(LEDGER_READY_WAIT),
+            || fauna_sleep::sleep(LEDGER_READY_POLL),
+            || async {
+                if reads.fetch_add(1, Ordering::SeqCst) < 3 {
+                    Err(StoreError::Load(LEDGER_NOT_READY.into()))
+                } else {
+                    Ok(7)
+                }
+            },
+        )
+        .await;
+        assert_eq!(answer.ok(), Some(7));
+        assert_eq!(reads.load(Ordering::SeqCst), 4);
+    }
+
+    /// A store that refuses at once for the whole bound is answered not-ready
+    /// at the bound, not later.
+    #[tokio::test(start_paused = true)]
+    async fn a_store_never_ready_is_answered_at_the_bound() {
+        let started = tokio::time::Instant::now();
+        let answer: Result<(), StoreError> = wait_out_not_ready(
+            fauna_sleep::sleep(LEDGER_READY_WAIT),
+            || fauna_sleep::sleep(LEDGER_READY_POLL),
+            || async { Err(StoreError::Load(LEDGER_NOT_READY.into())) },
+        )
+        .await;
+        assert!(answer.is_err_and(|e| e.is_not_ready()));
+        assert!(started.elapsed() <= LEDGER_READY_WAIT + LEDGER_READY_POLL);
     }
 }

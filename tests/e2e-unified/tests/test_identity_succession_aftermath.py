@@ -1778,8 +1778,8 @@ def test_the_successor_can_read_the_corpus_it_inherited(
     ⚠ **The pre-ceremony assertions are not scaffolding — they are what stops
     this from being vacuous**, in the same family as the muted word above and
     the ``NothingStored`` trap in this file's header. An upload that silently
-    landed nowhere (a fresh actor has no folder, and the gesture then reports
-    ``media.error_no_set`` and uploads nothing) would leave the successor with
+    landed nowhere (a first-folder create that fails reports
+    ``media.error_first_folder`` and uploads nothing) would leave the successor with
     an empty Media page, and *every* assertion after the ceremony would pass by
     describing an empty corpus. Asserting the item listed **and painted** before
     the ceremony is what makes their absence afterwards mean something.

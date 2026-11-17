@@ -361,6 +361,24 @@ def test_a_seat_yielded_inside_a_pair_gets_its_own_labelled_section():
     assert "succession_member_app" in member_title
 
 
+def test_a_pairs_owner_seat_gets_its_own_section_when_it_sits_apart():
+    # android's member column: the phone plays the member and alice signs in
+    # on a tui seat of her own, carried as the pair's `owner_app`.
+    import conftest
+
+    phone = _FakeDriver("phone: bob")
+    alice_seat = _FakeDriver("tui seat: alice")
+    pair = conftest._SuccessionMember(
+        _FakeApp(phone), {"handle": "m"}, owner_app=_FakeApp(alice_seat)
+    )
+    bob_app, bob = pair
+    assert bob == {"handle": "m"}
+    sections = _attach({"app": _FakeApp(phone), "succession_member_app": pair})
+    bodies = [body for _, body in sections]
+    assert sum("phone: bob" in b for b in bodies) == 1, bodies
+    assert sum("tui seat: alice" in b for b in bodies) == 1, bodies
+
+
 def test_a_pair_holding_no_driver_adds_no_section():
     sections = _attach({
         "app": _FakeApp(_FakeDriver("primary")),

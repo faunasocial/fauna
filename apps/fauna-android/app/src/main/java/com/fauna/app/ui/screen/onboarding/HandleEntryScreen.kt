@@ -205,6 +205,9 @@ internal fun routeForStep(step: OnboardingStep): String = when (step) {
     OnboardingStep.INVITE_REQUEST -> "onboarding/invite-request"
     // Nest setup (DNS, VPS, provisioning) is not registered on the kids build, which
     // only joins a guardian's nest by invite: the step keeps the person on handle entry.
+    // The choose-providers page (onboarding-provisioning.md § 3d): reached
+    // because OnboardingHost declares setRendersProviderChoice (not on kids).
+    OnboardingStep.PROVIDER_CHOICE -> if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/provider-choice"
     OnboardingStep.DNS_CONFIG -> if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/dns-config"
     OnboardingStep.VPS_CONFIG -> if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/vps-config"
     OnboardingStep.NEST_PROVISIONING ->

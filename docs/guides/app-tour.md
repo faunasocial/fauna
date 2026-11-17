@@ -42,6 +42,12 @@ Most of the app keeps working without a connection. Writing a post, liking
 one, teaching a feed what you like, editing your profile, answering a
 subscription request, accepting a contact — all of these are yours to do
 offline; they are saved on the device and sent on as soon as your nest is back.
+Some of them wait on your nest's answer — a like, a message you send,
+accepting a contact, among others — and are listed under **Unsent changes** in
+Settings → **Account** until they reach it; the list says "Every change has
+reached your nest." once nothing is waiting. If one cannot be sent — your nest
+refused it, say — it stays on that list with the reason, and you can **Send again** or
+**Discard** it; discarding asks you to confirm with **Discard for good**.
 
 A few things genuinely cannot happen without your nest, because it is the one
 that has to decide them: paying for something, following or subscribing to
@@ -127,7 +133,7 @@ you can keep several and switch between them in the feed list.
   your own words to a quote is on the way. **Like and repost are both
   toggles**: tap once, tap again to take it back — no confirmation dance either
   way. A liked post keeps its heart lit so you can see at a glance what you
-  have already reacted to, and the count moves in both directions. A repost shows up in the timeline as a compact card of the original with a "reposted" note; open it to read and react to the original itself. When people have reacted to a post with an emoji, each emoji shows under the row of buttons with how many people chose it, and the ones you added are highlighted. Tap one to add the same reaction, or tap one of yours to take it back, again with no confirmation. There is no way yet to pick an emoji nobody has used on the post. A post from Bluesky shows no reactions, and on a post that came in over a bridge from another network, such as the Fediverse or Nostr, they show but you cannot add your own there yet.
+  have already reacted to, and the count moves in both directions. A repost shows up in the timeline as a compact card of the original with a "reposted" note; open it to read and react to the original itself. When people have reacted to a post with an emoji, each emoji shows under the row of buttons with how many people chose it, and the ones you added are highlighted. Tap one to add the same reaction, or tap one of yours to take it back, again with no confirmation. There is no way yet to pick an emoji nobody has used on the post. A post from Bluesky shows no reactions, and on a post that came in over a bridge from another network, such as the Fediverse or Nostr, they show but you cannot add your own there yet. A post you brought in from a Facebook or Instagram archive is different: you can add your own there, as on any post written in Fauna.
 - **See who tipped a post** — a post that has received tips shows the total and
   how many people sent one, right on the card. Tap the total to see who they
   were: each tip names the sender when it can, or the account it came from on
@@ -274,8 +280,7 @@ enabled), or a bridged network (Bluesky, Nostr, the Fediverse). An icon on each 
   the conversation stays in your list and everything you already read is still
   there to re-read. A conversation over a bridge has no rules to show: its
   room settings hold **Remove conversation from my nest**, described under
-  *Conversations over a bridge* above, and **Leave room**, greyed for the
-  networks your nest connects to itself.
+  *Conversations over a bridge* above, and a greyed **Leave room**.
   In a **community** room — the kind the header describes as searched and
   labelled by the home nest — the same settings also list the community
   labelers published on that nest, each with an *Inspect* button that shows
@@ -621,7 +626,7 @@ say you reached it over SSH — the page tells you so under the switch.
 ## Search
 
 Search your public posts and profile info, with a type filter to narrow
-results. Every nest answers the same way — your private content is stored encrypted on your nest, and the nest's search on this page only ever reaches what is public (a community room's own search lives in the room — see [Conversations](#conversations)), so there is no per-nest setting that changes what search can see.
+results. Every nest answers the same way — your private content is stored encrypted on your nest, and the nest's search on this page reaches only what is public (a community room's own search lives in the room — see [Conversations](#conversations)), and no setting of the nest's own changes that. The one thing that widens it is yours: ask your nest to keep your mail, calendar or contacts searchable, and its search finds those too (below).
 
 Public posts that reach you over a [bridge](bridges-bluesky-nostr.md) are
 searchable too, so something you saw from someone you follow on Bluesky or
@@ -631,7 +636,7 @@ this way. Your nest keeps a recent window of bridged posts rather than all of
 them, so very old ones eventually drop out of search while staying untouched
 on the network they came from.
 
-Much of what's yours is searched **privately, on your own devices** — and that half works differently, because that content is stored encrypted on your nest. Your apps on a computer build a private search index as content arrives — and as you send it, so a message you just wrote there is findable straight away — and the index travels between your devices encrypted, stored alongside the rest of your content; a phone searches the index your computers built rather than building its own. Your nest cannot read the index, apart from the part covering your mail, which it can open with the password of a mail, calendar, contacts or file app you connect, and only for that app's signed-in session — the session in which that app's own searches of your mail run on your nest. (The web app runs in your browser, which cannot use this private index, so there search covers public posts and profiles only.)
+Much of what's yours is searched **privately, on your own devices** — and that half works differently, because that content is stored encrypted on your nest. Your apps on a computer build a private search index as content arrives — and as you send it, so a message you just wrote there is findable straight away — and the index travels between your devices encrypted, stored alongside the rest of your content; a phone searches the index your computers built rather than building its own. Your nest cannot read the index, apart from the part covering your mail, which it can open with the password of a mail, calendar, contacts or file app you connect, and only for that app's signed-in session — the session in which that app's own searches of your mail run on your nest. (The web app runs in your browser, which cannot use this private index, so there search covers public posts and profiles only — unless you keep your mail, calendar or contacts searchable on your nest, which then finds them for the web app too; see Nests under [Settings](#settings).)
 Each search runs that index on your device and also asks your nest's own
 search, and the results appear mixed in together. A device that hasn't caught
 up yet simply shows fewer results rather than an error, and it catches up on
@@ -776,7 +781,10 @@ do. The sub-pages:
   content itself stays on your nest, and signing back in re-downloads it.
   Removing a single account from the switcher does the same for just that one
   — unless another Fauna window is using that account, in which case nothing
-  is removed and Fauna asks you to close that window first.
+  is removed and Fauna asks you to close that window first. An identity you
+  replaced when you took your account back is not removed either while it
+  still has changes waiting to move to your new identity: sign in as your new
+  identity and send or discard them first.
   **Export My Data** downloads what your nest holds for you as a single zip — your profile, contacts, messages, posts, folders, feeds and devices as JSON files. If you use your nest for mail, calendars or address books,
   the archive carries those too: your mailbox layout and which messages you had
   read, your calendars and their events, your address books and their cards,
@@ -910,10 +918,18 @@ do. The sub-pages:
   have put behind a paywall shows on its row by name, and so does each
   change to that trust in the history. To trust a nest
   with something new, pick what from the list on its row — read and filter
-  your mail, read your calendar, or serve one of your subscription tiers'
-  paywalled posts on the web — choose how long it lasts (a few hours, or 90
-  days) and confirm; the trust appears on the row immediately, ready to
-  revoke whenever you change your mind. Tick **Keep this box's trust
+  your mail, read your calendar, serve one of your subscription tiers'
+  paywalled posts on the web, or, on your home nest,
+  **Keep my mail searchable on this nest** (and the same for your calendar and
+  your contacts) — choose how long it lasts (a few hours, or 90 days; the
+  keep-searchable choices start at 90 days) and confirm; the trust appears on
+  the row immediately, ready to revoke whenever you change your mind. Before
+  you confirm one of the keep-searchable choices, the app says what it means:
+  while it is on, that nest can read that part of
+  your account and keeps a searchable copy of it on its disk, which anyone who
+  can read the disk can read too; on an honest nest, turning it off deletes
+  the copy and the nest's key to it, but it cannot undo what a hostile nest
+  already read. Tick **Keep this box's trust
   renewed** on a box you rely on, such as your home server: its 90-day trust
   then renews itself while you use Fauna, and new trust you give it defaults
   to 90 days. On a box you haven't ticked, new trust defaults to a few hours
@@ -970,7 +986,7 @@ do. The sub-pages:
   apps signed in with one of your app passwords, and the Nostr apps your nest
   signs for. Each row says what the app is, where it comes from, what it may
   reach in plain words, when it was last used and how long it lasts, and has
-  a **Disconnect** button that asks you to confirm before it acts. An app that holds keys in your account — to records it keeps there, or to a folder of yours it may read — also shows, under its row, the keys it holds: **Now** lists each one — what it opens (the app's own records by its publisher and the names it gave them, in quotes, and whether it may read and change them or only read them; or your folder by name, which it may only read), until when, and whether it is still active — and **History** lists when each was given and when it was taken back. Disconnecting the app ends them all: on an honest nest it stops the app getting keys again, though it cannot un-see what the app already read, and does not yet block content arriving after you disconnect. Turning off **Allow external apps**, just above the list, pauses every app it affects at once: they are still listed here, marked **Paused**, until you turn it back on. Above the switch, **Connect an app** is where you type the code an app on another device
+  a **Disconnect** button that asks you to confirm before it acts. An app given keys or permissions in your account — keys to records it keeps there or to a folder of yours it may read, or permission to put files into one of your folders, to post or edit your profile as you, to get short-lived Bluesky service tokens, to sign with a key your nest keeps for you, or to read or send in your conversations, among others — also shows, under its row, what it was given: **Now** lists each one — what it opens (the app's own records by its publisher and the names it gave them, in quotes, and whether it may read and change them or only read them; or your folder by name, which it may only read) or what it lets the app do, until when, and whether it is still active — and **History** lists when each was given and when it was taken back. Disconnecting the app ends them all: on an honest nest it stops the app getting keys again, though it cannot un-see what the app already read, and does not yet block content arriving after you disconnect. Turning off **Allow external apps**, just above the list, pauses every app it affects at once: they are still listed here, marked **Paused**, until you turn it back on. Above the switch, **Connect an app** is where you type the code an app on another device
   (a TV, a watch, a command-line tool) shows you; a valid code opens the same
   approval card a browser sign-in shows. An app on the same device as Fauna
   can skip the code: it hands you a link that opens Fauna straight onto its

@@ -1,0 +1,89 @@
+# The two declared lists of the possibility sweep `actuation-changes-or-reports`
+# (helpers/ui_walk_actuation.py; owner docs/goal/architecture/e2e-systematic-ui-walks.md
+# § Implementation status today, the possibility-invariants bullet).
+#
+# Every entry carries its reason. `id` is a ui.yaml element id or an fnmatch
+# pattern over ids. Both lists start as short as honesty allows: an entry here is
+# a place a violation could hide, so it is added only with a reason a reviewer
+# would accept, never to make a red run green.
+
+# ---------------------------------------------------------------------------
+# Affordances the sweep NEVER actuates: destructive and sovereign acts. The
+# first step of a two-step act (a button that opens its confirmation) is still
+# actuated — opening the confirmation is a frame change, and the confirmation is
+# then left alone, because only these patterns' confirm steps are held.
+# ---------------------------------------------------------------------------
+
+[[never_actuate]]
+id = "exit-tab"
+reason = "quits the app; the sweep would be judging a dead process"
+
+[[never_actuate]]
+id = "sign-out*"
+reason = "ends the session the whole sweep runs on"
+
+[[never_actuate]]
+id = "*confirm*"
+reason = "the confirming step of a two-step act (a deletion, a revoke, a reset); the step that opens it is judged instead"
+
+[[never_actuate]]
+id = "*delete*"
+reason = "deletes user data"
+
+[[never_actuate]]
+id = "*remove*"
+reason = "removes user data, a device, a member or a destination"
+
+[[never_actuate]]
+id = "*revoke*"
+reason = "revokes a grant, session or credential"
+
+[[never_actuate]]
+id = "*reset*"
+reason = "factory reset or a reset of learned state"
+
+[[never_actuate]]
+id = "*retire*"
+reason = "retires a nest or an account — sovereign and irreversible"
+
+[[never_actuate]]
+id = "*rotate*"
+reason = "rotates key material — sovereign"
+
+[[never_actuate]]
+id = "recovery-kit-*"
+reason = "mints, replaces or lets go of recovery key material — sovereign"
+
+[[never_actuate]]
+id = "*unlink*"
+reason = "disconnects a bridge or a linked account"
+
+[[never_actuate]]
+id = "*leave*"
+reason = "leaves a room, folder or family"
+
+[[never_actuate]]
+id = "*block-button"
+reason = "blocks a person or a peer"
+
+[[never_actuate]]
+id = "*unblock*"
+reason = "lifts a block the person set — their safety decision, never the sweep's"
+
+[[never_actuate]]
+id = "*transfer*"
+reason = "transfers ownership — sovereign"
+
+[[never_actuate]]
+id = "*restart*"
+reason = "restarts the nest or an import, taking the box away from the sweep"
+
+[[never_actuate]]
+id = "*suspend*"
+reason = "suspends an account"
+
+# ---------------------------------------------------------------------------
+# Affordances that legitimately change nothing on the frame when actuated.
+# (Empty to start: the first observing corpus decides what belongs here, each
+# with its reason.)
+# ---------------------------------------------------------------------------

@@ -37,6 +37,11 @@ public partial class SettingsViewModel : ViewModelBase
     // (settings.md § Pending actions — the same three-state distinction every
     // other app's reference implementation carries).
     [ObservableProperty] private IReadOnlyList<PendingActionRowVm>? _pendingActions;
+    // The STANDING unsent-changes section (account-offline-mutation.md § The
+    // offline-mutation contract → The unsent-changes surface, point 1) —
+    // pending actions' sibling and three-state shape: null = not read yet, empty =
+    // read with nothing unsent, rows = the device outbox's undrained intents.
+    [ObservableProperty] private IReadOnlyList<UnsentChangeRowVm>? _unsentChanges;
     [ObservableProperty] private bool _isAutoStartEnabled;
     [ObservableProperty] private bool _isCloseToTrayEnabled;
     [ObservableProperty] private int _keyPackageCount;
@@ -98,16 +103,22 @@ public partial class SettingsViewModel : ViewModelBase
     // Null on every other settings sub-page: RefreshKeyPackagesAsync no-ops.
     private readonly IConversationsManager? _keyPackageManager;
 
+    // The device outbox's unsent-changes doors (account-offline-mutation.md § The
+    // unsent-changes surface): the process outbox in production, a fake in a test.
+    private readonly IUnsentChangesDoors _unsentDoors;
+
     internal SettingsViewModel(
         INestHttpClient nest,
         INestRpcClient rpc,
         ISnapshotFileSaver? fileSaver = null,
-        IConversationsManager? keyPackageManager = null)
+        IConversationsManager? keyPackageManager = null,
+        IUnsentChangesDoors? unsentDoors = null)
     {
         _nest = nest;
         _rpc = rpc;
         _fileSaver = fileSaver;
         _keyPackageManager = keyPackageManager;
+        _unsentDoors = unsentDoors ?? new DeviceUnsentChangesDoors();
         // Seed the backing field (not the property) so the initial read doesn't
         // re-persist; a local file, available without an authed session.
         _isCloseToTrayEnabled = _appSettings.CloseToTray;
@@ -339,6 +350,92 @@ public partial class SettingsViewModel : ViewModelBase
         catch (Exception ex) { ShowError(ex); }
     }
 
+    // ── Unsent changes (account-offline-mutation.md § The offline-mutation
+    //    contract → The unsent-changes surface, point 1). Read from the
+    //    device outbox, never the nest, so it answers with the nest down; re-read
+    //    every UnsentRefresh.Interval while the page shows and after a retry or a
+    //    discard. Retry and discard are offered on a NOT-SENT row only, and
+    //    discard arms a confirm on that row first. tui's
+    //    SettingsState::unsent_changes and android's AccountSettingsVM are the twins.
+
+    // The last read, and the intent whose discard is armed
+    // (unsent-change-discard-button pressed, its confirm showing on that row).
+    private IReadOnlyList<uniffi.fauna_core.UnsentChange>? _unsentRead;
+    private string? _unsentDiscardArmed;
+
+    /// One read of the unsent changes. A failed read keeps what the last read
+    /// showed (logged, never painted: the next tick reads again). An armed discard
+    /// whose row is no longer a not-sent change is disarmed.
+    public async Task LoadUnsentChangesAsync()
+    {
+        IReadOnlyList<uniffi.fauna_core.UnsentChange> read;
+        try
+        {
+            read = await _unsentDoors.ListAsync();
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Debug(nameof(SettingsViewModel), $"unsent changes not re-read: {ex.Message}");
+            return;
+        }
+        _unsentRead = read;
+        if (_unsentDiscardArmed is { } armed
+            && !read.Any(c => c.@intentId == armed && c.@state is uniffi.fauna_core.UnsentState.Unsent))
+        {
+            _unsentDiscardArmed = null;
+        }
+        ProjectUnsentChanges();
+    }
+
+    /// <c>unsent-change-retry-button</c>: re-arm the not-sent change; it waits again
+    /// at its place in its scope and the drain starts.
+    public async Task RetryUnsentChangeAsync(string intentId)
+    {
+        _unsentDiscardArmed = null;
+        try { await _unsentDoors.RetryAsync(intentId); }
+        catch (Exception ex) { ShowError(ex); }
+        await LoadUnsentChangesAsync();
+    }
+
+    /// <c>unsent-change-discard-button</c>: arm the confirm on that row — nothing is
+    /// deleted yet.
+    public void ArmUnsentDiscard(string intentId)
+    {
+        _unsentDiscardArmed = intentId;
+        ProjectUnsentChanges();
+    }
+
+    /// <c>unsent-change-discard-confirm-button</c>: delete the not-sent change — the
+    /// one user-initiated deletion of a pending write.
+    public async Task ConfirmUnsentDiscardAsync(string intentId)
+    {
+        _unsentDiscardArmed = null;
+        try { await _unsentDoors.DiscardAsync(intentId); }
+        catch (Exception ex) { ShowError(ex); }
+        await LoadUnsentChangesAsync();
+    }
+
+    /// The rows from the last read and the armed discard. Assigned only when they
+    /// changed, so the two-second re-read repaints nothing while nothing moves.
+    private void ProjectUnsentChanges()
+    {
+        if (_unsentRead is null) return;
+        var rows = _unsentRead
+            .Select(c =>
+            {
+                var notSent = c.@state is uniffi.fauna_core.UnsentState.Unsent;
+                return new UnsentChangeRowVm(
+                    c.@intentId,
+                    UnsentChangeText.Describe(c),
+                    UnsentChangeText.Status(c),
+                    notSent,
+                    notSent && c.@intentId == _unsentDiscardArmed);
+            })
+            .ToList();
+        if (UnsentChanges is { } shown && shown.SequenceEqual(rows)) return;
+        UnsentChanges = rows;
+    }
+
     /// Settings → Account "Export My Data" (settings.md § Data export). Fetches
     /// the full archive (payload bytes included — no toggle,
     /// account-data-plane.md § Nest-side requirements item 1, Payload stores
@@ -369,3 +466,26 @@ public partial class SettingsViewModel : ViewModelBase
 /// re-listed rows compare by value.
 /// </summary>
 public sealed record PendingActionRowVm(long Id, string Description, string ExecuteAfterText);
+
+/// <summary>
+/// One <c>unsent-change-item</c> row: the intent id retry and discard round-trip, the
+/// kind and target in words (<c>unsent-change-description</c>), the state line
+/// (<c>unsent-change-status</c>, the reason appended on a not-sent row), whether it is a
+/// not-sent row (the only one offering <c>unsent-change-retry-button</c> and
+/// <c>unsent-change-discard-button</c>), and whether its discard is armed (the
+/// <c>unsent-change-discard-confirm-button</c> showing in the discard's place). Every
+/// word comes from the shared describer and state text. A record, so a re-read compares
+/// by value.
+/// </summary>
+public sealed record UnsentChangeRowVm(
+    string IntentId, string Description, string Status, bool NotSent, bool DiscardArmed)
+{
+    /// <summary>Retry shows on a not-sent row.</summary>
+    public bool ShowsRetry => NotSent;
+
+    /// <summary>Discard shows on a not-sent row until it is armed.</summary>
+    public bool ShowsDiscard => NotSent && !DiscardArmed;
+
+    /// <summary>The confirm shows in the discard's place once armed.</summary>
+    public bool ShowsDiscardConfirm => DiscardArmed;
+}

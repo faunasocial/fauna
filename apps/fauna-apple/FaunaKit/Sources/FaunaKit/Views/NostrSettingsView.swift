@@ -227,10 +227,15 @@ public struct NostrSettingsView: View {
             .automationActivate(Ids.nostrLinkButton, isEnabled: { !vm.isLoading }) {
                 Task { await vm.link() }
             }
+            // The draft's own answer (an import needs its nsec, a remote link
+            // its bunker URL), outside the automation modifier so the registry
+            // reads the same enabled-ness (`Possibility.swift`).
+            .faunaPossible(vm.linkPossibility)
             // All three link modes commit through `linkBridge` → the one kind;
             // the mode picker and the nsec/bunker fields above are buffer, and
             // stay live (the commit gates, not the buffer).
             .faunaGate("fauna.bridges.link")
+            FaunaPossibilityReason(vm.linkPossibility)
         }
     }
 
@@ -337,14 +342,16 @@ public struct NostrSettingsView: View {
                 Button(L.nostr.relays.add) {
                     Task { await vm.addRelay() }
                 }
-                .disabled(vm.relayInput.trimmingCharacters(in: .whitespaces).isEmpty)
                 .accessibilityIdentifier(Ids.nostrAddRelay)
-                .automationActivate(
-                    Ids.nostrAddRelay,
-                    isEnabled: { !vm.relayInput.trimmingCharacters(in: .whitespaces).isEmpty }
-                ) {
+                .automationActivate(Ids.nostrAddRelay) {
                     Task { await vm.addRelay() }
                 }
+                .faunaPossible(vm.addRelayPossibility)
+            }
+            // A typed draft's reason (malformed, already listed) reads under
+            // the field; an empty field's rides the control's hint/tooltip.
+            if !vm.relayInput.isEmpty {
+                FaunaPossibilityReason(vm.addRelayPossibility)
             }
 
             if vm.relays.isEmpty {
@@ -406,14 +413,11 @@ public struct NostrSettingsView: View {
                 Button(L.nostr.follows.add) {
                     Task { await vm.addFollow() }
                 }
-                .disabled(vm.followPubkey.trimmingCharacters(in: .whitespaces).isEmpty)
                 .accessibilityIdentifier(Ids.nostrAddFollow)
-                .automationActivate(
-                    Ids.nostrAddFollow,
-                    isEnabled: { !vm.followPubkey.trimmingCharacters(in: .whitespaces).isEmpty }
-                ) {
+                .automationActivate(Ids.nostrAddFollow) {
                     Task { await vm.addFollow() }
                 }
+                .faunaPossible(vm.addFollowPossibility)
             }
 
             if vm.follows.isEmpty {
@@ -485,38 +489,40 @@ public struct NostrSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            HStack {
-                TextField(L.nostr.zapSigners.pubkeyPlaceholder, text: $vm.zapSignerPubkeyInput)
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    #endif
-                    .accessibilityIdentifier(Ids.nostrZapSignerPubkeyInput)
-                    .automationField(Ids.nostrZapSignerPubkeyInput, text: $vm.zapSignerPubkeyInput)
-                TextField(L.nostr.zapSigners.labelPlaceholder, text: $vm.zapSignerLabelInput)
-                    .accessibilityIdentifier(Ids.nostrZapSignerLabelInput)
-                    .automationField(Ids.nostrZapSignerLabelInput, text: $vm.zapSignerLabelInput)
-                Button(L.nostr.zapSigners.add) {
-                    Task { await vm.addZapSigner() }
-                }
-                .disabled(
-                    vm.zapSignerPubkeyInput.trimmingCharacters(in: .whitespaces).isEmpty
-                        || vm.zapSignerAddGateReason != nil
-                )
-                .accessibilityIdentifier(Ids.nostrZapSignerAddBtn)
-                .automationActivate(
-                    Ids.nostrZapSignerAddBtn,
-                    isEnabled: {
-                        !vm.zapSignerPubkeyInput.trimmingCharacters(in: .whitespaces).isEmpty
-                            && vm.zapSignerAddGateReason == nil
+            // A nest without the `zaps` plane leaves the designate row out
+            // whole (rule 2) — its fields only feed the button. The roster
+            // below stays, so a signer designated earlier can still go.
+            if vm.zapSignerGate.isShown {
+                HStack {
+                    TextField(L.nostr.zapSigners.pubkeyPlaceholder, text: $vm.zapSignerPubkeyInput)
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        #endif
+                        .accessibilityIdentifier(Ids.nostrZapSignerPubkeyInput)
+                        .automationField(Ids.nostrZapSignerPubkeyInput, text: $vm.zapSignerPubkeyInput)
+                    TextField(L.nostr.zapSigners.labelPlaceholder, text: $vm.zapSignerLabelInput)
+                        .accessibilityIdentifier(Ids.nostrZapSignerLabelInput)
+                        .automationField(Ids.nostrZapSignerLabelInput, text: $vm.zapSignerLabelInput)
+                    Button(L.nostr.zapSigners.add) {
+                        Task { await vm.addZapSigner() }
                     }
-                ) {
-                    Task { await vm.addZapSigner() }
+                    .accessibilityIdentifier(Ids.nostrZapSignerAddBtn)
+                    .automationActivate(Ids.nostrZapSignerAddBtn) {
+                        Task { await vm.addZapSigner() }
+                    }
+                    .faunaPossible(vm.zapSignerAddAnswer)
+                    .faunaGate("fauna.nostr.zap_signers.add")
                 }
-                .faunaGate("fauna.nostr.zap_signers.add")
-            }
-            if let reason = vm.zapSignerAddGateReason {
-                Text(reason).font(.caption).foregroundStyle(.secondary)
+                if !vm.zapSignerGate.isPossible {
+                    // The plane's reason (still loading, load failed, the
+                    // row's restriction) reads within eyeshot.
+                    FaunaPossibilityReason(vm.zapSignerGate)
+                } else if !vm.zapSignerPubkeyInput.isEmpty {
+                    // A typed draft's reason (not 64 hex); an empty field's rides
+                    // the control's hint/tooltip.
+                    FaunaPossibilityReason(vm.zapSignerAddPossibility)
+                }
             }
 
             if vm.zapSigners.isEmpty {

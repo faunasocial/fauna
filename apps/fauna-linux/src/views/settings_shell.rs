@@ -238,26 +238,36 @@ pub fn build_settings_shell(
         Some("mail-settings"),
         mail_settings::TITLE,
     );
+    // The six mail sub-pages sit behind the mail-usable gate
+    // (`crate::settings::mail_gate`; `ui/mail-settings.md` § Errors & edge
+    // cases): each is wrapped so a visit while mail is not possible shows only
+    // its heading and the reason, whichever door it came through.
+    let mut mail_gated: Vec<crate::settings::mail_gate::GatedPage> = Vec::new();
+    let mut add_mail_subpage = |page: &gtk::Widget, name: &str, title: &str| {
+        let gated = crate::settings::mail_gate::GatedPage::wrap(page, title);
+        stack.add_titled(&gated.stack, Some(name), title);
+        mail_gated.push(gated);
+    };
     let (mail_aliases_page, mail_aliases_refresh) =
         crate::settings::mail_aliases::build_mail_aliases_page();
-    stack.add_titled(
-        &mail_aliases_page,
-        Some("mail-aliases"),
+    add_mail_subpage(
+        mail_aliases_page.upcast_ref(),
+        "mail-aliases",
         mail_aliases::TITLE,
     );
-    stack.add_titled(
-        &crate::settings::mail_spam::build_mail_spam_page(),
-        Some("mail-spam"),
+    add_mail_subpage(
+        crate::settings::mail_spam::build_mail_spam_page().upcast_ref(),
+        "mail-spam",
         mail_spam::TITLE,
     );
-    stack.add_titled(
-        &crate::settings::mail_export::build_mail_export_page(),
-        Some("mail-export"),
+    add_mail_subpage(
+        crate::settings::mail_export::build_mail_export_page().upcast_ref(),
+        "mail-export",
         mail_export::TITLE,
     );
-    stack.add_titled(
-        &crate::settings::mail_import::build_mail_import_page(),
-        Some("mail-import"),
+    add_mail_subpage(
+        crate::settings::mail_import::build_mail_import_page().upcast_ref(),
+        "mail-import",
         mail_import::TITLE,
     );
     // Import from other services follows Import mailbox (`settings.md`
@@ -283,10 +293,14 @@ pub fn build_settings_shell(
     };
     let (mail_lists_page, mail_lists_refresh) =
         crate::settings::mail_lists::build_mail_lists_page(on_navigate_to_members);
-    stack.add_titled(&mail_lists_page, Some("mail-lists"), mail_lists::TITLE);
-    stack.add_titled(
-        &mail_list_members_page,
-        Some("mail-list-members"),
+    add_mail_subpage(
+        mail_lists_page.upcast_ref(),
+        "mail-lists",
+        mail_lists::TITLE,
+    );
+    add_mail_subpage(
+        mail_list_members_page.upcast_ref(),
+        "mail-list-members",
         mail_lists::MEMBERS_TITLE,
     );
     let (web_page, web_refresh) = crate::settings::web::build_web_page();
@@ -662,6 +676,8 @@ pub fn build_settings_shell(
         },
     );
 
+    paint_mail_gate(&settings_sidebar, &nav, mail_gated);
+
     let handles = SettingsShellHandles {
         nav_back,
         sub_stack: stack.clone(),
@@ -672,4 +688,51 @@ pub fn build_settings_shell(
     };
 
     (content, settings_sidebar, handles)
+}
+
+/// Paint the six mail rail rows and sub-pages from the one shared mail-usable
+/// answer (`crate::settings::mail_gate`), now and whenever it changes: the
+/// answer reads the mail machine's LIVE snapshot, so turning mail on lights the
+/// rows at once (`ui/mail-settings.md` § Errors & edge cases, the mail-usable
+/// gate). The Mail & Calendar page built and hydrated the machine above, so the
+/// rows are decided before the person reaches them.
+fn paint_mail_gate(
+    rail: &gtk::Box,
+    nav: &[(&'static str, &'static str, &'static str, bool)],
+    gated: Vec<crate::settings::mail_gate::GatedPage>,
+) {
+    use crate::settings::mail_gate::{MAIL_SUBPAGES, mail_usable, paint_rail_row};
+    let list = crate::views::nav_rail::rail_list(rail);
+    let rows: Vec<gtk::ListBoxRow> = MAIL_SUBPAGES
+        .iter()
+        .filter_map(|name| nav.iter().position(|e| e.0 == *name))
+        .filter_map(|idx| list.row_at_index(idx as i32))
+        .collect();
+    debug_assert_eq!(
+        rows.len(),
+        MAIL_SUBPAGES.len(),
+        "every mail sub-page has a rail row"
+    );
+    let paint = move |answer: &fauna_core::possibility::Possibility| {
+        for row in &rows {
+            paint_rail_row(row, answer);
+        }
+        for page in &gated {
+            page.paint(answer);
+        }
+    };
+    let mut last = mail_usable();
+    paint(&last);
+    let alive = list.downgrade();
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
+        if alive.upgrade().is_none() {
+            return gtk::glib::ControlFlow::Break;
+        }
+        let now = mail_usable();
+        if now != last {
+            paint(&now);
+            last = now;
+        }
+        gtk::glib::ControlFlow::Continue
+    });
 }

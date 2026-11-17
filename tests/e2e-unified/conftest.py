@@ -155,6 +155,20 @@ def _kids_session_guardian(nest) -> str:
     return _make_user(nest)["actor_id_hex"]
 
 
+def _android_kids_run() -> bool:
+    """Whether this run's android artifact is the drivable Fauna Kids build
+    (`--app android-kids`, feature-catalog.md § Cell semantics: the `kidsDebug`
+    build type, `just android-kids-debug`). A run drives one or the other: the
+    session-cached android driver, the `android_app_path` fixture and the bridge
+    APK are each one per run (`_resolve_app_tokens` refuses the pair)."""
+    return "android-kids" in get_available_apps()
+
+
+def _android_app() -> str:
+    """The android app-axis value this run drives — `android-kids` or `android`."""
+    return "android-kids" if _android_kids_run() else "android"
+
+
 def _ios_kids_run() -> bool:
     """Whether this run's iOS artifact is the Fauna Kids build (`--app ios-kids`,
     feature-catalog.md § Cell semantics). A run drives one or the other: both
@@ -526,9 +540,75 @@ def register_simulator(udid: str) -> None:
     eviction test's `fp_device`, a named device type `simctl create`d in the
     fixture) calls it right after the create — its boot was the run's load
     read as the desktop's (2026-10-24 22:10 to 22:15, 11 to 23 cores) until it
-    did. Deleting the device stays the caller's: this registers no `atexit`."""
+    did. Deleting the device stays the caller's: this registers no `atexit`.
+
+    The first registration also takes the run's kept devices' grant
+    (`_hold_simulators_idle`), which names every device from then until the
+    run's last exit handler."""
     _E2E_SIMULATORS.append(udid)
+    _hold_simulators_idle()
     _note_simulators()
+
+
+#: The run's kept devices' grant, `(slot module, fd, pool)`, or empty: taken
+#: at the run's first device, named with every device after it, released by
+#: `_release_simulators_idle` after every device's own exit handler has
+#: parked or deleted it (mac-simulator-hold.md § Per-core tokens, *A booted
+#: device is always under a grant*).
+_E2E_SIM_IDLE: list = []
+
+
+def _hold_simulators_idle() -> None:
+    """Hold this run's booted devices under a `sim_idle` grant from its first
+    device to its exit, its note naming every device (`sims`).
+
+    A device left booted between grants (after its boot's grant went, before
+    the run's lane; after the lane went, through the device's reset, park or
+    shutdown at exit) ran under no grant, so the fleet agent read its load as
+    unslotted (36 `session` ticks of 2026-11-13..15).
+    Under this grant the device is the run's at the pool's figure, and the
+    tree hold holds it there. Taken once; a held grant is only named again.
+    The wait is bounded (`_SIM_BOOT_IN_TEST_WAIT_S`): past it the run goes on
+    without, with a loud line, and the next device asks again. A slot copy
+    predating the pool, or a machine listing none: nothing (getattr)."""
+    if _E2E_SIM_IDLE:
+        mod, fd, _pool = _E2E_SIM_IDLE[0]
+        annotate = getattr(mod, "annotate_note", None)
+        if annotate is not None:
+            annotate(fd, {"sims": list(_E2E_SIMULATORS)})
+        return
+    mod = _build_slot_module()
+    pool = getattr(mod, "SIM_IDLE_POOL", None) if mod is not None else None
+    enabled = getattr(mod, "sim_idle_enabled", None) if mod is not None else None
+    if pool is None or enabled is None or not enabled():
+        return
+    try:
+        fd = mod.acquire_slot(pool, cmd=["xcrun", "simctl", "(the run's kept devices)"],
+                              timeout_s=_SIM_BOOT_IN_TEST_WAIT_S)
+    except TimeoutError as exc:
+        print(f"[sim-idle] no room for a '{pool}' grant after "
+              f"{_SIM_BOOT_IN_TEST_WAIT_S:.0f}s — the run's devices stay unnamed between "
+              f"grants until the next device asks again ({exc})", file=sys.stderr, flush=True)
+        return
+    if fd is None:
+        return  # an ancestor's grant already holds this tree's devices
+    _E2E_SIM_IDLE.append((mod, fd, pool))
+    annotate = getattr(mod, "annotate_note", None)
+    if annotate is not None:
+        annotate(fd, {"sims": list(_E2E_SIMULATORS)})
+
+
+def _release_simulators_idle() -> None:
+    """Release the kept devices' grant (`_hold_simulators_idle`). Registered
+    with `atexit` at import, before any device's own handler, so it runs
+    after every one of them (atexit runs last-registered first): the
+    devices' reset, park and shutdown run under the grant."""
+    while _E2E_SIM_IDLE:
+        mod, fd, pool = _E2E_SIM_IDLE.pop()
+        mod.release_slot(fd, pool)
+
+
+atexit.register(_release_simulators_idle)
 
 
 def _note_simulators() -> None:
@@ -647,18 +727,32 @@ def _apple_app_build_is_fresh(package_dir: Path, product: Path, stamp: Path) -> 
     """An apple app's freshness gate, read holding no slot: the built product
     exists, the stamp records the FFI generation staged now, and no package
     source is newer than the stamp (dated at the build's slot grant)."""
-    if not product.exists() or not stamp.exists():
-        return False
+    from common.nest import _load_build_if_stale
+
+    reason = _apple_app_stale_reason(package_dir, product, stamp)
+    if reason is not None:
+        _load_build_if_stale().note_rebuild(stamp.name, reason)
+    return reason is None
+
+
+def _apple_app_stale_reason(package_dir: Path, product: Path, stamp: Path) -> str | None:
+    """Why `_apple_app_build_is_fresh` would build — `None` when it would not —
+    in the gate's own words (build-if-stale's `note_rebuild`)."""
+    for path in (product, stamp):
+        if not path.exists():
+            return f"missing {path}"
     try:
         recorded = stamp.read_text(encoding="utf-8").strip()
-    except OSError:
-        return False
+    except OSError as exc:
+        return f"stale (stamp unreadable: {exc})"
     if recorded != _apple_app_ffi_fingerprint(package_dir):
-        return False
+        return "stale (another FFI generation staged)"
     from common.nest import _load_build_if_stale
 
     newest = _load_build_if_stale()._source_newest(package_dir, _APPLE_APP_SOURCE_EXCLUDES)
-    return newest <= stamp.stat().st_mtime
+    if newest > stamp.stat().st_mtime:
+        return "stale (a source newer than the stamp)"
+    return None
 
 
 def _build_ios_app() -> str | None:
@@ -780,6 +874,8 @@ _WINDOWS_APP_SUFFIX = "Debug/net10.0-windows10.0.26100/FaunaApp.exe"
 APP_PATHS = {
     "web": None,
     "android": "apps/fauna-android/app/build/outputs/apk/debug/app-debug.apk",
+    # The drivable kids build (`kidsDebug`, `just android-kids-debug`).
+    "android-kids": "apps/fauna-android/app/build/outputs/apk/kidsDebug/app-kidsDebug.apk",
     "ios": "apps/fauna-apple/build/Build/Products/Debug-iphonesimulator/fauna-ios.app",
     # SwiftPM's own `.build/debug` symlink, never a layout path under it: the
     # classic build system points it at `arm64-apple-macosx/debug`, Swift 6.4's
@@ -956,6 +1052,14 @@ def _resolve_app_tokens(raw: str) -> list[str]:
             "--app web: web is built only on Linux, never on this machine "
             "(build-system.md § The Deno build sandbox) — run the web leg on the Linux dev machine"
         )
+    if "android" in out and "android-kids" in out:
+        # One session-cached android driver, one `android_app_path`, one bridge
+        # APK per run: refused before any build rather than half-served.
+        raise pytest.UsageError(
+            "--app android,android-kids: one run drives one android build — the "
+            "`debug` and the drivable kids `kidsDebug` build (`just android-debug` / "
+            "`just android-kids-debug`); run the android and android-kids legs as two runs"
+        )
     if "ios" in out and "ios-kids" in out:
         # Two FFI flavors through one staging slot, two apps on one setup's
         # simulator: refused before any build rather than half-served.
@@ -1046,8 +1150,13 @@ def _memoized_build(key: str, builder):
     The failure replay is deliberate: a build that failed at collection time
     must surface in the requesting fixture as the original error, not trigger
     a silent rebuild that re-queues the build slot inside the test's own
-    timeout budget (the exact bound inversion this layer removes). Failure
-    output already streamed to the log when the build ran.
+    timeout budget (the exact bound inversion this layer removes). The
+    retry of a lone failure happens INSIDE `builder()`, before this records
+    anything: every `just` builder runs through `_build_via_just`, which
+    retries once (never after a build-slot WAIT timeout) and raises with each
+    attempt's output tail quoted, so the replayed error names what failed
+    even when the log above holds nothing (a process killed silently on
+    Windows, 2026-11-14).
     """
     state = _BINARY_BUILD_MEMO.get(key)
     if state is not None:
@@ -1055,8 +1164,9 @@ def _memoized_build(key: str, builder):
         if kind == "ok":
             return value
         raise RuntimeError(
-            f"{key} already failed to build earlier in this run "
-            f"(see the build output above): {value!r}"
+            f"{key} already failed to build earlier in this run; not "
+            f"rebuilt inside this test's clock. The original failure, as "
+            f"recorded:\n{type(value).__name__}: {value}"
         )
     try:
         value = builder()
@@ -1073,9 +1183,8 @@ def _ensure_generated_files_fresh() -> None:
     here). Cheap when sources are unchanged (~50ms via build-if-stale gates)."""
 
     def build():
-        subprocess.run(
-            ["just", "i18n-generate", "providers-generate"],
-            cwd=_repo_root, check=True,
+        _build_via_just(
+            "i18n-generate providers-generate", "regenerating the i18n strings and provider registry"
         )
 
     _memoized_build("generated-files", build)
@@ -1252,7 +1361,7 @@ def _ensure_fauna_ffi_built() -> None:
         cmd = ["just", "e2e-ffi", "release"]
 
     def build():
-        subprocess.run(cmd, cwd=_repo_root, check=True)
+        _build_via_just(shlex.join(cmd[1:]), "building the fauna-ffi cdylib")
 
     _memoized_build("fauna-ffi-cdylib-build", build)
 
@@ -1280,7 +1389,7 @@ def _ensure_windows_release_ffi_built() -> None:
     than the registry: the recipe is cargo, bindgen and the staging together."""
 
     def build():
-        subprocess.run(["just", "windows-ffi-test", "release"], cwd=_repo_root, check=True)
+        _build_via_just("windows-ffi-test release", "building the windows release ffi")
 
     _memoized_build("windows-release-ffi", build)
 
@@ -1404,7 +1513,7 @@ def _ensure_web_spa_built():
     global _WEB_SPA_BUILT
     if _WEB_SPA_BUILT:
         return
-    subprocess.run(["just", "web-test"], cwd=_repo_root, check=True)
+    _build_via_just("web-test", "building the web SPA")
     _WEB_SPA_BUILT = True
 
 
@@ -1424,7 +1533,7 @@ def _ensure_wasm_panic_witness_built():
     global _WASM_PANIC_WITNESS_BUILT
     if _WASM_PANIC_WITNESS_BUILT:
         return
-    subprocess.run(["just", "wasm-panic-witness"], cwd=_repo_root, check=True)
+    _build_via_just("wasm-panic-witness", "building the wasm panic-hook witness bundles")
     _WASM_PANIC_WITNESS_BUILT = True
 
 
@@ -3842,15 +3951,9 @@ def _ensure_mail_bridge_built() -> str:
     def build():
         _ensure_generated_files_fresh()
         if _IS_WINDOWS:
-            subprocess.run(
-                ["just", "windows-mail-bridge-build"],
-                cwd=_repo_root, check=True,
-            )
+            _build_via_just("windows-mail-bridge-build", "building the mail bridge")
             return str(_repo_root / "target" / "fauna-mail-bridge.exe")
-        subprocess.run(
-            ["just", "mail-bridge-build"],
-            cwd=_repo_root, check=True,
-        )
+        _build_via_just("mail-bridge-build", "building the mail bridge")
         return str(_repo_root / "bins" / "fauna-bridges" / "fauna-mail-bridge")
 
     return _memoized_build("mail-bridge-binary", build)
@@ -3872,15 +3975,9 @@ def _ensure_mail_bridge_e2e_built() -> str:
     def build():
         _ensure_generated_files_fresh()
         if _IS_WINDOWS:
-            subprocess.run(
-                ["just", "windows-mail-bridge-build-e2e"],
-                cwd=_repo_root, check=True,
-            )
+            _build_via_just("windows-mail-bridge-build-e2e", "building the mail bridge (e2e flavor)")
             return str(_repo_root / "target" / "mail-bridge-e2e" / "fauna-mail-bridge-e2e.exe")
-        subprocess.run(
-            ["just", "mail-bridge-build-e2e"],
-            cwd=_repo_root, check=True,
-        )
+        _build_via_just("mail-bridge-build-e2e", "building the mail bridge (e2e flavor)")
         return str(_repo_root / "bins" / "fauna-bridges" / "fauna-mail-bridge-e2e")
 
     return _memoized_build("mail-bridge-e2e-binary", build)
@@ -3912,15 +4009,9 @@ def _ensure_atproto_bridge_built() -> str:
             # Windows has no rpath/LD_LIBRARY_PATH equivalent, so the recipe
             # stages the exe + its fauna_ffi.dll/libunwind.dll in target/,
             # not bins/fauna-bridges/ like the Unix flavor.
-            subprocess.run(
-                ["just", "windows-atproto-bridge-build"],
-                cwd=_repo_root, check=True,
-            )
+            _build_via_just("windows-atproto-bridge-build", "building the atproto bridge")
             return str(_repo_root / "target" / "fauna-atproto-bridge.exe")
-        subprocess.run(
-            ["just", "atproto-bridge-build"],
-            cwd=_repo_root, check=True,
-        )
+        _build_via_just("atproto-bridge-build", "building the atproto bridge")
         return str(_repo_root / "bins" / "fauna-bridges" / "fauna-atproto-bridge")
 
     return _memoized_build("atproto-bridge-binary", build)
@@ -3948,15 +4039,9 @@ def _ensure_atproto_bridge_e2e_built() -> str:
         if _IS_WINDOWS:
             # Same gnullvm-slice reasoning as the production flavor: Go's cgo
             # cannot link the MSVC-built fauna_ffi.dll.
-            subprocess.run(
-                ["just", "windows-atproto-bridge-build-e2e"],
-                cwd=_repo_root, check=True,
-            )
+            _build_via_just("windows-atproto-bridge-build-e2e", "building the atproto bridge (e2e flavor)")
             return str(_repo_root / "target" / "fauna-atproto-bridge-e2e.exe")
-        subprocess.run(
-            ["just", "atproto-bridge-build-e2e"],
-            cwd=_repo_root, check=True,
-        )
+        _build_via_just("atproto-bridge-build-e2e", "building the atproto bridge (e2e flavor)")
         return str(_repo_root / "bins" / "fauna-bridges" / "fauna-atproto-bridge-e2e")
 
     return _memoized_build("atproto-bridge-e2e-binary", build)
@@ -3969,15 +4054,9 @@ def _ensure_seal_helper_built() -> str:
     def build():
         _ensure_generated_files_fresh()
         if _IS_WINDOWS:
-            subprocess.run(
-                ["just", "windows-seal-helper-build"],
-                cwd=_repo_root, check=True,
-            )
+            _build_via_just("windows-seal-helper-build", "building the test-only seal-helper")
             return str(_repo_root / "target" / "seal-helper-testonly.exe")
-        subprocess.run(
-            ["just", "seal-helper-build"],
-            cwd=_repo_root, check=True,
-        )
+        _build_via_just("seal-helper-build", "building the test-only seal-helper")
         return str(
             _repo_root / "bins" / "fauna-bridges" / "seal-helper-testonly"
         )
@@ -4026,6 +4105,31 @@ def msi_path(request):
         return msi
     request.getfixturevalue("mail_bridge_binary")
     windows_installer.build_msi(repo)
+    os.makedirs(os.path.dirname(stamp), exist_ok=True)
+    with open(stamp, "w") as f:
+        f.write(str(current_mtime))
+    return msi
+
+
+@pytest.fixture(scope="session")
+def nest_msi_path(request):
+    """The nest MSI, `build/installer/Fauna-Nest-Setup-arm64.msi` (installers/
+    windows.md § Direct download, 1), built past a stale stamp of its own or
+    returned cached — its one door, read by
+    `tests/platform/windows/test_nest_installer_structure.py`. `msi_path`'s
+    shape: the link runs here (`helpers/windows_installer.py::build_nest_msi`),
+    its inputs built at collection time for a run that owes it
+    (`windows_installer.nest_msi_build_owed`), the bridge requested on a miss
+    only. No publish: the package carries no app."""
+    from helpers import windows_installer
+
+    repo = str(_repo_root)
+    msi, stamp = windows_installer.nest_msi_paths(repo)
+    current_mtime = windows_installer.nest_source_mtime(repo)
+    if windows_installer.nest_msi_is_cached(repo, current_mtime):
+        return msi
+    request.getfixturevalue("mail_bridge_binary")
+    windows_installer.build_nest_msi(repo)
     os.makedirs(os.path.dirname(stamp), exist_ok=True)
     with open(stamp, "w") as f:
         f.write(str(current_mtime))
@@ -5677,14 +5781,18 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
     # route the whole 127.0.0.0/8), so binding 127.0.0.2 raises EADDRNOTAVAIL on
     # a bare mac host — which would break the WHOLE mail fixture for every macos
     # mail test, not just the DANE ones. Fall back to a distinct ephemeral port
-    # on 127.0.0.1: the DANE override + TLSA pin are keyed on the MX *host*
-    # (`dane.test`) and the presented cert, not the bind IP, so routing and
-    # validation are unaffected; the distinct-IP isolation is belt-and-suspenders
-    # the Linux/CI DANE suite keeps (no macos-marked test drives the DANE path).
+    # on 127.0.0.1, routed as `localhost`: the bridge keys its TLSA lookup on
+    # the bare host of the override target, so the name keeps the DANE matcher
+    # host apart from the plaintext stub's `127.0.0.1` exactly as the distinct
+    # IP does on Linux/Windows. (Routed as `127.0.0.1` the tests' pin would key
+    # on a host the bridge never asks for, and the mismatch witness reads a
+    # delivery instead of a refusal.) The tests pin `tls_stub_mx.route_host`.
     try:
         tls_stub_mx = StubMX(bind_host="127.0.0.2", enable_starttls=True).start()
     except OSError:
-        tls_stub_mx = StubMX(bind_host="127.0.0.1", enable_starttls=True).start()
+        tls_stub_mx = StubMX(
+            bind_host="127.0.0.1", enable_starttls=True, route_host="localhost"
+        ).start()
     # A third stub on IPv6 loopback only, routed as `v6only.test`: the target
     # the IPv6-off outbound witness needs, reachable over IPv6 and never over
     # IPv4. A box without `::1` gets no route and the witness skips.
@@ -10696,6 +10804,19 @@ def _custody_rig_on_a_fleet_seat(
         teardown_fleet_seat()
 
 
+class _SuccessionMember(tuple):
+    """``succession_member_app``'s value: ``(bob_app, bob_actor)``, plus
+    ``owner_app``, the seat that plays alice (see the fixture). A tuple, so
+    every consumer's ``bob_app, bob = succession_member_app`` still unpacks;
+    ``helpers/app_log_section.py`` reads ``owner_app`` too, so a red attaches
+    alice's log when she sits on a seat of her own."""
+
+    def __new__(cls, bob_app, bob, *, owner_app):
+        seat = super().__new__(cls, (bob_app, bob))
+        seat.owner_app = owner_app
+        return seat
+
+
 @pytest.fixture
 def succession_member_app(request, succeedable_app, nest_instance):
     """bob — a second real-engine native GUI app who is a genuine **member**
@@ -10734,10 +10855,19 @@ def succession_member_app(request, succeedable_app, nest_instance):
     in its own ``BrowserContext`` (``alice_second_web_device``'s idiom) over
     the wasm ``WebSuccessionChainSource`` dial, on **macos**, whose member
     seat is a second launch with bob's own real-rail witness, on **ios**,
-    the same on a second simulator, and on
-    **windows**, whose member seat is a second launch on its own agent pipe;
-    every other ``app`` param is declared unbuilt below until its own run is
-    green.
+    the same on a second simulator, on
+    **windows**, whose member seat is a second launch on its own agent pipe,
+    and on **android**, where the roles SWAP: one emulator runs one instance
+    of the app, so the phone becomes bob — the member, this witness's subject
+    — and alice moves to a tui seat of her own identity (the
+    ``android_other_device_seat`` idiom). Every other ``app`` param is
+    declared unbuilt in ``surfaces.toml`` until its own run is green.
+
+    Yields a ``_SuccessionMember``: it unpacks as ``(bob_app, bob_actor)``, and
+    its ``owner_app`` is the seat that plays alice — ``succeedable_app``'s app
+    on every column but android, the tui seat there. A consumer drives alice
+    through ``owner_app``, never through ``succeedable_app``'s app directly,
+    or its android column would drive bob as alice.
     """
     from helpers.app_surface import require_surface
 
@@ -10773,6 +10903,15 @@ def succession_member_app(request, succeedable_app, nest_instance):
         # `_launch_second_real_faunamls_app` already proves. The
         # agent pipe is the one axis that launch does not move; it moves below.
         app_name = "windows"
+    elif alice_app.driver.is_android():
+        # One emulator runs one instance of the app, so the phone cannot hold
+        # alice AND a second seat. The roles swap instead: the phone becomes
+        # bob, the member whose own client re-points alice (what this
+        # witness is about), and alice signs in on a tui seat of her own
+        # identity — the settled android pattern (`android_other_device_seat`,
+        # `_launch_second_real_faunamls_app`'s `native_seat`). The literal
+        # "tui" below is what the prebuild hoist reads.
+        app_name = "android"
     else:
         # Only an app the registry's `succession-witness-member-seat` entry
         # declares built gets past the gate above, and each of those has its arm.
@@ -10796,6 +10935,27 @@ def succession_member_app(request, succeedable_app, nest_instance):
     conv_api.accept_contact(
         nest_instance["port"], bob, alice_user["actor_id_hex"]
     )
+
+    if app_name == "android":
+        # alice first, on the tui seat, so her identity has a live real-engine
+        # device before the phone leaves it; then the phone switches to bob,
+        # with the live-actor barrier (a declined switch would run bob's half
+        # as alice). `enable_real_faunamls()` is the launch-gate branch on
+        # android: it witnesses the phone's real rail itself.
+        owner_seat = _alice_extra_seat(
+            "tui", request, alice_user, nest_instance,
+            screenshot_tag="succession-owner-alice",
+        )
+        owner_app, _owner_driver = next(owner_seat)
+        try:
+            _login_app_as(
+                alice_app, request, nest_instance, bob, verify_live_actor=True
+            )
+            alice_app.conversations.enable_real_faunamls()
+            yield _SuccessionMember(alice_app, bob, owner_app=owner_app)
+        finally:
+            owner_seat.close()
+        return
 
     if app_name == "web":
         # The twin page owns no process: no launch config, and nothing to tear
@@ -10833,19 +10993,11 @@ def succession_member_app(request, succeedable_app, nest_instance):
             "nav": {"stack": [{"view": "feed"}]},
         })
         bob_app = ActionLayer(driver)
+        # On the launch-gate apps (macOS, iOS) this is the branch that
+        # witnesses bob's real rail from his own log, so a member seat left on
+        # the mock fails here, not as a witness that never re-points.
         bob_app.conversations.enable_real_faunamls()
-        if driver.is_macos() or driver.is_ios():
-            # On apple `enable_real_faunamls()` returns without asking bob
-            # anything (the launch-gate branch), so witness HIS real rail
-            # here, as `_launch_second_real_faunamls_app` does — a member seat
-            # left on the mock would read as a witness that never re-points.
-            from helpers import real_rail_control
-
-            real_rail_control.witness_real_rail(
-                driver,
-                context="the `succession_member_app` fixture (BOB, the member)",
-            )
-        yield bob_app, bob
+        yield _SuccessionMember(bob_app, bob, owner_app=alice_app)
     finally:
         try:
             driver.screenshot("teardown-succession-member-bob")
@@ -11089,7 +11241,7 @@ def alice_second_device(request, test_user, nest_instance):
 
 
 @pytest.fixture
-def android_other_device_seat(request, test_user, nest_instance):
+def android_other_device_seat(request):
     """alice's OTHER device on an android run — a tui seat — for a journey that
     swaps roles so the phone is the device the outcome is about (the one that
     adopts a finished export, hears a read, …) and the tui seat does the
@@ -11097,8 +11249,11 @@ def android_other_device_seat(request, test_user, nest_instance):
     for android. Unlike ``alice_second_device`` it is DECLARED, so the hoist
     below builds the tui binary outside the test's own budget, and it is
     launched BEFORE the phone's counterpart acts, not after. Yields ``launch(tag)`` returning ``(seat_app, driver)``
-    on android (``launch(tag, identity=None)``: pass a dedicated actor's dict
-    when the phone is signed in as one), and ``None`` on every other app (whose second device is
+    on android (``launch(tag, identity=None, nest=None)``: pass a dedicated actor's dict
+    when the phone is signed in as one, and a dedicated nest's dict when the phone
+    is signed in on one — ``test_user`` and ``nest_instance`` are resolved only
+    when left out, so a journey on a dedicated nest starts no shared one), and
+    ``None`` on every other app (whose second device is
     ``alice_second_device``, requested after the first device routed mail).
 
     **Declare it in the test's signature, never ``getfixturevalue`` it** — only
@@ -11113,13 +11268,18 @@ def android_other_device_seat(request, test_user, nest_instance):
         return
     live: list = []
 
-    def launch(tag="mail-export-runner", identity=None):
+    def launch(tag="mail-export-runner", identity=None, nest=None):
         # `identity` is the user dict the seat logs in as; a journey on a
         # DEDICATED actor (`dedicated_actor_app`) passes its actor, since the
-        # phone under test is not signed in as the shared `test_user`.
+        # phone under test is not signed in as the shared `test_user`. `nest`
+        # likewise: a journey on a dedicated nest (`atproto_hosted_nest`)
+        # passes it, since the phone is not signed in on `nest_instance`.
+        if identity is None:
+            identity = request.getfixturevalue("test_user")
+        if nest is None:
+            nest = request.getfixturevalue("nest_instance")
         gen = _alice_extra_seat(
-            "tui", request, identity if identity is not None else test_user,
-            nest_instance, screenshot_tag=tag,
+            "tui", request, identity, nest, screenshot_tag=tag,
         )
         seat = next(gen)
         live.append(gen)
@@ -11423,7 +11583,7 @@ def caldav_mailbox_less_attendee_app(request, app, dedicated_caldav_only_nest):
         # to tear down but the page itself (handled below).
         driver = app.driver.open_twin_page()
         node_url = request.getfixturevalue("spa_proxy_for")(nest["url"])
-    elif app_name == "android":
+    elif KIDS_PARENT.get(app_name, app_name) == "android":
         # The session-cached driver: re-pointed, never launched or torn down
         # here (the `_driver_cache` owns its life). The relaunch seam opens the
         # device's reverse to this nest and trusts it — before `set_state`.
@@ -11469,7 +11629,7 @@ def caldav_mailbox_less_attendee_app(request, app, dedicated_caldav_only_nest):
             driver.screenshot("teardown-caldav-mailbox-less-carol")
         except Exception:
             pass
-        if app_name != "android":
+        if KIDS_PARENT.get(app_name, app_name) != "android":
             driver.teardown()
 
 
@@ -13664,6 +13824,10 @@ def _build_app_via_just(app_name: str) -> None:
         # compiles the app under the kids conditions over it.
         "ios-kids": "apple-ffi-kids-test-sim",
         "android": "android-debug",
+        # The kids column's (feature-catalog.md § Cell semantics): the drivable
+        # `kidsDebug` build over the kids flavor plus the seams
+        # (`android-ffi-kids-test`), its bridge APK beside it.
+        "android-kids": "android-kids-debug",
         "tui": "tui-debug",
     }
     recipe = recipes.get(app_name)
@@ -13706,6 +13870,14 @@ def _strip_drain_pipes_tag(line: str) -> str:
     return line
 
 
+#: A `build` acquire the slot tool REFUSED (`scripts/build-slot.py`'s
+#: `REFUSE_EXIT_CODE` and the text every `SlotRefusedError` of a `build` acquire
+#: carries — refuse mode under a held lane, or the preflight's plan probe):
+#: deterministic for as long as the caller's refusal is set, so never retried.
+_SLOT_REFUSED_EXIT = 75
+_SLOT_REFUSED_PHRASE = "refused a 'build' slot"
+
+
 def _build_via_just(recipe: str, what: str) -> None:
     """Run `just <recipe>`, streaming its output, and raise with a bounded tail
     on failure. `what` names the caller's intent for the error message.
@@ -13731,7 +13903,9 @@ def _build_via_just(recipe: str, what: str) -> None:
     the first ruling correctly flagged. Every other failure, including the
     actual 2026-07-29 signature, is retried once; a genuine compile error
     fails the same way both times and still raises, with both attempts'
-    tails quoted so they can be compared.
+    tails quoted so they can be compared. A `build` acquire the slot REFUSED
+    (`_SLOT_REFUSED_EXIT` with `_SLOT_REFUSED_PHRASE`) is not retried either:
+    the refusal holds for the caller's whole refuse mode or plan probe.
     """
     # Announce WHAT is being built before building it. Without this line a
     # warm build is textually invisible, so a log reader cannot tell
@@ -13774,6 +13948,7 @@ def _build_via_just(recipe: str, what: str) -> None:
 
     failed_attempts = []
     skip_reason = None
+    skip_note = ""
     for attempt in (1, 2):
         label = "" if attempt == 1 else " (retry)"
         print(f"[build] {what} -> just {recipe}{label}", flush=True)
@@ -13833,6 +14008,28 @@ def _build_via_just(recipe: str, what: str) -> None:
                     "the failure was a build-slot WAIT timeout, not a compile "
                     "break — retrying would only queue another long wait"
                 )
+                skip_note = (
+                    "transient build-slot contention is unlikely here — this was a "
+                    "WAIT timeout, so check who is holding both machine-wide build "
+                    "slots."
+                )
+            # A REFUSED acquire is not contention either: refuse mode (a held
+            # e2e lane) or the preflight's plan probe refuses every `build`
+            # acquire for as long as it is set, so the retry is refused on the
+            # spot and only doubles the recipe's wall — every stale job of a
+            # `--plan` run twice, measured on Windows 2026-11-16. The slot tool
+            # exits `REFUSE_EXIT_CODE` with its `SlotRefusedError` text.
+            elif rc == _SLOT_REFUSED_EXIT and any(_SLOT_REFUSED_PHRASE in line for line in recent):
+                skip_reason = (
+                    "the build slot REFUSED the acquire (refuse mode or the "
+                    "preflight's plan probe) — the retry would be refused the "
+                    "same way; nothing was built"
+                )
+                skip_note = (
+                    "this is no break: the caller asked the slot to refuse a "
+                    "compile, and the recipe would have compiled."
+                )
+            if skip_reason:
                 print(
                     f"[build] {what} FAILED (exit {rc}) — {skip_reason}, so "
                     f"NOT retrying",
@@ -13874,11 +14071,7 @@ def _build_via_just(recipe: str, what: str) -> None:
         )
     if skip_reason:
         summary = f"{what} failed and was NOT retried: {skip_reason}.\n"
-        repro_note = (
-            f"transient build-slot contention is unlikely here — this was a "
-            f"WAIT timeout, so check who is holding both machine-wide build "
-            f"slots."
-        )
+        repro_note = skip_note
     else:
         summary = f"{what} failed on BOTH the original attempt and the retry.\n"
         repro_note = (
@@ -14470,10 +14663,12 @@ def _apply_acme_pebble_env(env: dict, request) -> None:
     the `test-hooks` nest's own launch environment (`_nest_launch_seed_env`),
     whose relayed probe and challenge mirror read it.
 
-    **A box with no docker seeds nothing** and keeps production's constant: this
-    runs at every launch of the selection, marked test or not, so asking for the
-    stack here would fail each of them. The marked tests themselves skip before
-    any fixture (`_skip_acme_pebble_without_docker`).
+    **A harness that cannot reach the shared venue seeds nothing** and keeps
+    production's constant (`e2e-gated-seeds.md` § The ACME directory seed →
+    *The shared venue*, decision 7): this runs at every launch of the selection,
+    marked test or not, so asking for the stack here would fail each of them.
+    The marked tests themselves skip, or on the Linux dev VM fail, before any fixture
+    (`_skip_acme_pebble_without_venue`).
     """
     seed = _acme_pebble_seed(request)
     if seed:
@@ -14481,14 +14676,14 @@ def _apply_acme_pebble_env(env: dict, request) -> None:
 
 
 def _acme_pebble_seed(request) -> dict:
-    """The pebble stack's seed when this session selects an `acme_pebble`-marked
-    test on a box with docker, else ``{}`` — the one gate both readings share
+    """The shared venue's seed when this session selects an `acme_pebble`-marked
+    test and the venue answers, else ``{}`` — the one gate both readings share
     (the app's launch environment and the nest's)."""
     from helpers import acme_pebble
 
     if not any(item.get_closest_marker("acme_pebble") for item in request.session.items):
         return {}
-    if not acme_pebble.docker_usable():
+    if not acme_pebble.venue_ready()[0]:
         return {}
     return request.getfixturevalue("acme_pebble").env()
 
@@ -14521,27 +14716,46 @@ def _nest_launch_seed_env(request) -> dict:
     The session nest and every other dedicated nest name none, so their check
     never runs and no request reaches a release host."""
     seed = _acme_pebble_seed(request)
-    return {k: seed[k] for k in _NEST_LAUNCH_SEED_KEYS if seed.get(k)}
+    out = {k: seed[k] for k in _NEST_LAUNCH_SEED_KEYS if seed.get(k)}
+    # The nest's name-server reading is loopback-only (it panics on anything
+    # else) and serves web alone, which runs on the Linux dev VM with the venue's
+    # loopback reach. A private-address seed — every macOS/Windows run, and the
+    # `--acme-venue-reach private` proof on Linux — is the native apps' alone:
+    # handed to a nest it would end every nest of the run at startup
+    # (`e2e-gated-seeds.md` § The ACME directory seed → *The shared venue*).
+    ns = out.get("FAUNA_E2E_ACME_NAMESERVER")
+    if ns and ns.rsplit(":", 1)[0] != "127.0.0.1":
+        del out["FAUNA_E2E_ACME_NAMESERVER"]
+    return out
 
 
-def _skip_acme_pebble_without_docker(item) -> None:
-    """An `acme_pebble`-marked test on a box with no docker is an environment
-    skip, taken in `pytest_runtest_setup` so it costs no app launch."""
+def _skip_acme_pebble_without_venue(item) -> None:
+    """An `acme_pebble`-marked test whose harness cannot reach the shared venue,
+    decided in `pytest_runtest_setup` so it costs no app launch (`e2e-gated-seeds.md`
+    § The ACME directory seed → *The shared venue*, decision 7): on the Linux dev VM, the
+    venue's own machine, a venue still down after `venue_ready`'s ensure is a
+    FAILURE — the box that should hold it does not; on the macOS and Windows VMs it is an
+    environment skip naming the venue."""
     from helpers import acme_pebble
     from helpers.app_surface import skip_environment
 
-    if item.get_closest_marker("acme_pebble") and not acme_pebble.docker_usable():
-        skip_environment(
-            "the acme_pebble stack needs docker, which this box does not have"
-        )
+    if not item.get_closest_marker("acme_pebble"):
+        return
+    ok, why = acme_pebble.venue_ready()
+    if ok:
+        return
+    if acme_pebble.host_os() == acme_pebble.VENUE_OS:
+        pytest.fail(why, pytrace=False)
+    skip_environment(why)
 
 
 @pytest.fixture(scope="session")
 def acme_pebble():
-    """The pebble ACME CA + fake name server stack (`helpers/acme_pebble.py`),
-    for the session. Requested by `_apply_acme_pebble_env` when a selected test
-    carries the `acme_pebble` marker, and by that test to publish the challenge
-    TXT the admin would paste."""
+    """The shared venue's pebble ACME CA + fake name server
+    (`helpers/acme_pebble.py`), as this session sees it: reached, its authority
+    read. Requested by `_apply_acme_pebble_env` when a selected test carries the
+    `acme_pebble` marker, and by that test to publish the challenge TXT the
+    admin would paste. Its teardown leaves the venue standing."""
     from helpers.acme_pebble import AcmePebble
 
     stack = AcmePebble().start()
@@ -14867,7 +15081,10 @@ PLACE_ACCEPTS_HELD_LINE = "place does not accept remote changes;"
 
 def _apply_place_accepts_log_env(env: dict) -> None:
     """Turn on the engine's held-pass line in the direct-spawned agent, which
-    inherits this env. `local-folder-sync` outcome 15's journey counts it: a
+    inherits this env (windows' detached agent too: the spawner passes the
+    app's env down). Every app branch that runs the hold journey calls this; a
+    branch that forgets reds the journey with the hold in force, since the line
+    is debug on its own target. `local-folder-sync` outcome 15's journey counts it: a
     pass that declined AFTER the held files reached the nest is the
     state-defined moment at which "this device stopped receiving them" can be
     asserted (convention 14), with no wall clock. One line per declined pass,
@@ -15193,8 +15410,17 @@ def _macos_spawns_a_real_sync_agent(items) -> bool:
     """Whether a run's macos launches spawn a real agent — the session-wide
     `real_sync_agent` posture `_apply_real_sync_agent_env` turns on — so the
     prebuild builds `macos_sync_agent_binary`, which the launch reaches only
-    through `request.getfixturevalue` and no item's closure names."""
-    return any(item.get_closest_marker("real_sync_agent") for item in items)
+    through `request.getfixturevalue` and no item's closure names.
+
+    A seat that pins its own agent (`sync_seats.pin_macos_seat_sync_agent`, or a
+    test reaching `macos_sync_agent_binary` itself) spawns one the same invisible
+    way, with no marker: its module source names the one or the other."""
+    return any(
+        item.get_closest_marker("real_sync_agent")
+        or _item_module_names(item, "pin_macos_seat_sync_agent")
+        or _item_module_names(item, "macos_sync_agent_binary")
+        for item in items
+    )
 
 
 @pytest.fixture(scope="session")
@@ -15499,6 +15725,12 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
         _apply_release_feed_env(env, request)
         _apply_acme_pebble_env(env, request)
         _apply_apple_opener_env(env, request)
+        # The share plane's knobs — iOS runs the plane through the FFI host in
+        # the app (the File Provider extension is its state writer), like
+        # macOS. Missing here until 2026-11-15, so an iOS member pumped at the
+        # production 60 s cadence and its kept log carried no share-pump debug
+        # line: the iOS cap journey's empty pass could not name its `since`.
+        _apply_share_plane_env(env, app_name)
         node = getattr(request, "node", None)
         if node is not None and node.get_closest_marker("ios_file_provider_app"):
             # The seat installs the appex-embedding app (`_ios_seat_app_path`),
@@ -15734,6 +15966,14 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # The share plane's knobs — windows runs the plane through the FFI
             # host, like macOS (see the macOS branch for what their absence cost).
             _apply_share_plane_env(env, app_name)
+            # The engine's held-pass line. The detached agent inherits this env
+            # (`WindowsDetachedSpawner` hands the app's own down), so the line
+            # lands in the agent's log, where outcome 15's journey counts it.
+            # Missing here until 2026-11-16: the windows arm of
+            # `test_folder_place_accepts_hold.py` went red with the hold in
+            # force, because a debug line on a target nothing enabled reads
+            # exactly like a seat that never declined.
+            _apply_place_accepts_log_env(env)
             # The actuation gate (convention 11 one layer down), same two flags as
             # apple, linux and tui. Refusal is windows' DEFAULT since 2026-09-14
             # (`flaui-bridge/ActuationGate.cs::
@@ -15817,8 +16057,8 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             _apply_release_feed_env(config["environment"], request)
             _apply_acme_pebble_env(config["environment"], request)
             _apply_drafts_autosave_window_env(config["environment"], request)
-        elif app_name == "android":
-            config["app_path"] = str(_repo_root / APP_PATHS["android"])
+        elif KIDS_PARENT.get(app_name, app_name) == "android":
+            config["app_path"] = str(_repo_root / APP_PATHS[app_name])
             # The bridge APK and the run's device (`--device-serial` /
             # `E2E_DEVICE_SERIAL`), from the one home the launch harness reads
             # too (`helpers/android_device.run_launch_facts`). The driver has
@@ -15826,7 +16066,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # one attached device".
             from helpers import android_device
 
-            config.update(android_device.run_launch_facts(_repo_root))
+            config.update(android_device.run_launch_facts(_repo_root, app_name))
             # Real-conversations launch gate (the `real_conversations` marker):
             # forwarded over the bridge's /session POST as an
             # FAUNA_E2E_REAL_CONVERSATIONS intent extra -- android's twin of the
@@ -15866,14 +16106,13 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # multi-nest run that are known at launch time. A nest started after
             # the app launched takes `AndroidBridgeDriver.ensure_reverse`.
             # Pebble's ACME directory rides the same list: the app's order
-            # reaches it only as the device's own loopback, and in a venue run
-            # its port is a free port like a nest's
-            # (`helpers/acme_pebble.free_directory_port`). The seed's fake name
-            # server rides it too: it is published to loopback on a free port
-            # of its own (`free_name_server_port`), and the propagation probe's
-            # TCP retry is what crosses the TCP-only reverse
-            # (`e2e-automation-surface-gating.md` § The ACME directory seed →
-            # *The name server's reach*).
+            # reaches it only as the device's own loopback, and its port is the
+            # shared venue's fixed directory port on the Linux dev VM's loopback
+            # (`helpers/acme_pebble.VENUE_DIRECTORY_PORT`). The seed's fake name
+            # server rides it too, on the venue's fixed name-server port, and
+            # the propagation probe's TCP retry is what crosses the TCP-only
+            # reverse (`e2e-gated-seeds.md` § The ACME directory seed → *The
+            # name server's reach*, *The shared venue*).
             from helpers.acme_pebble import directory_port, name_server_port
 
             # The mail-import seeds ride it too: the Microsoft authority and the
@@ -17582,7 +17821,7 @@ def empty_media_app(request, app, nest_instance):
 
     Dedicated (NOT the shared session ``test_user``) because such a test
     **creates a folder**, and the shared user's emptiness is load-bearing for
-    ``test_media_upload_no_set_error`` — mutating it would make that test's
+    ``test_media_first_upload_makes_the_first_folder`` — mutating it would make that test's
     verdict depend on execution order."""
     user = _make_user(nest_instance)
     _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
@@ -18006,16 +18245,27 @@ def android_app_path():
     step can provide."""
     from helpers.app_surface import skip_environment
 
-    path = _repo_root / APP_PATHS["android"]
+    # `--app android-kids`: the drivable kids build (`_android_app`).
+    app = _android_app()
+    path = _repo_root / APP_PATHS[app]
     if not path.exists():
+        recipe = "android-kids-debug" if app == "android-kids" else "android-debug"
         skip_environment(
-            "android: the Android debug APK is not on this box — "
-            "run 'just android-debug' first"
+            f"{app}: the Android debug APK is not on this box — "
+            f"run 'just {recipe}' first"
         )
     return str(path)
 
 
 def pytest_addoption(parser):
+    parser.addoption("--acme-venue-reach", action="store", default=None,
+                     choices=("loopback", "private"),
+                     help="Which address of the shared ACME venue (on the Linux dev VM) the harness seeds "
+                          "for an acme_pebble-marked walk: `loopback` (the default on Linux) "
+                          "or `private`, the venue VM's address on the VMs' private network (the "
+                          "default on macOS and Windows). Verifier wiring, not a product knob "
+                          "(e2e-gated-seeds.md § The ACME directory seed → *The shared "
+                          "venue*).")
     parser.addoption("--app", action="store", default=None,
                      help="Comma-separated list of apps to test (e.g. --app ios,web). "
                           "When set, deselects tests that don't exercise the chosen app(s). "
@@ -18327,8 +18577,17 @@ def pytest_configure(config):
     # registry and phase wrappers, not a raise at the close).
     if not config.pluginmanager.has_plugin(app_deaths.PLUGIN_NAME):
         config.pluginmanager.register(app_deaths, app_deaths.PLUGIN_NAME)
+    # A refused collection must reach the user as itself (`_COLLECTION_REFUSED`).
+    if not config.pluginmanager.has_plugin(_COLLECTION_REFUSAL_PLUGIN):
+        config.pluginmanager.register(_CollectionRefusalNote(), _COLLECTION_REFUSAL_PLUGIN)
     app_surface.set_strict_app(bool(config.getoption("strict_app")))
     nest_surface.set_strict_nest(bool(config.getoption("strict_nest")))
+    # The shared ACME venue's reach (`helpers/acme_pebble.py`): derived from
+    # the machine unless the run names one — the hook-less call sites
+    # (`_acme_pebble_seed`, the skip) read it from the module.
+    from helpers import acme_pebble as _acme_pebble_mod
+
+    _acme_pebble_mod.set_reach_override(config.getoption("acme_venue_reach"))
     # The artifact mode is read by `_build_app_via_just` and
     # `_build_app_config`, neither of which is handed the pytest `config`
     # (the first takes only a client name; the second is memoized behind the
@@ -18872,7 +19131,7 @@ def pytest_runtest_setup(item):
     # recorded as nothing.
     _apply_host_platform_markers(item)
     _apply_surface_markers(item, param_apps)
-    _skip_acme_pebble_without_docker(item)
+    _skip_acme_pebble_without_venue(item)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -18950,7 +19209,7 @@ def _pass_hold_mark(report) -> bool:
         return False
     if marks.is_marked(report.nodeid):
         return True
-    if not report.failed:
+    if report.outcome != "failed":
         return False
     from helpers import last_green, pass_hold
 
@@ -19703,13 +19962,15 @@ def _prewarm_prebuilds(session) -> list:
         flush=True,
     )
     started = time.time()
+    web_rebuilt = False
     try:
-        _prebuild_web_spa(session)
+        web_rebuilt = _noting_rebuilds("web SPA", lambda: _prebuild_web_spa(session))
     except Exception as exc:
         print(f"[prebuild] warm pass: web SPA build FAILED ({exc}); retried in the hold", flush=True)
         failed.append(f"web SPA: {exc}")
-    _prebuild_binaries(session, prewarm=True)
+    ran, rebuilt = _prebuild_binaries(session, prewarm=True) or (0, 0)
     _print_kache_report(started)
+    print(_warm_pass_wall_line(time.time() - started, ran + 1, rebuilt + web_rebuilt), flush=True)
     for key, (kind, value) in list(_BINARY_BUILD_MEMO.items()):
         if kind == "ok":
             if key not in _WARM_KEPT_MEMO_KEYS:
@@ -19759,11 +20020,18 @@ def _plan_probe_job(mod, builder: str, args) -> str:
     """One prebuild job's state, from its own freshness gate: the builder runs
     with every `build` acquire refused (`PLAN_PROBE_ENV`), so a warm job returns
     after its stamp read and a stale one is refused at the slot, naming the
-    command it would have compiled. Nothing compiles and no slot is taken."""
+    command it would have compiled. Nothing compiles and no slot is taken.
+
+    A refusal the builder memoized (`_memoized_build` records it as a failure)
+    is forgotten as the probe ends: another job reaching the same memo key —
+    `windows`'s `windows_app_path` and `app[windows]` — asks its own gate
+    instead of replaying this probe's refusal as an `error` (measured on Windows
+    2026-11-16, the warm-up then read `unknown`)."""
     marker_fd, marker = tempfile.mkstemp(prefix="e2e-plan-probe-", suffix=".txt")
     os.close(marker_fd)
     os.environ[mod.REFUSE_BUILD_ENV] = marker
     os.environ[mod.PLAN_PROBE_ENV] = "1"
+    memo_before = set(_BINARY_BUILD_MEMO)
     error: Exception | None = None
     try:
         globals()[builder](*args)
@@ -19772,6 +20040,9 @@ def _plan_probe_job(mod, builder: str, args) -> str:
     finally:
         os.environ.pop(mod.REFUSE_BUILD_ENV, None)
         os.environ.pop(mod.PLAN_PROBE_ENV, None)
+        for key, (kind, _value) in list(_BINARY_BUILD_MEMO.items()):
+            if kind == "failed" and key not in memo_before:
+                del _BINARY_BUILD_MEMO[key]
         try:
             with open(marker, encoding="utf-8") as fh:
                 refused = [line.strip() for line in fh if line.strip()]
@@ -19841,13 +20112,20 @@ def _plan_header(session, mod, e2e_pool: str, apps) -> None:
         print(f"{PLAN_PREFIX} lane {e2e_pool}: {line.strip()}", flush=True)
     jobs = _web_spa_jobs(session) + _prebuild_jobs(session)
     unavailable = _plan_probe_unavailable(mod)
+    # One probe per (builder, arguments): a fixture's job and an app's job can be
+    # one build (`windows_app_path` and `app[windows]`), and on Windows every probe
+    # is a `just` start or several.
+    probed: dict = {}
     for label, builder, args in jobs:
         if builder in _PLAN_UNPROBED_BUILDERS:
             state = "would run (session setup — the plan does not run it)"
         elif unavailable:
             state = f"unknown ({unavailable})"
         else:
-            state = _plan_probe_job(mod, builder, args)
+            key = (builder, repr(tuple(args)))
+            if key not in probed:
+                probed[key] = _plan_probe_job(mod, builder, args)
+            state = probed[key]
             if state.startswith("stale"):
                 state += f" — {_prebuild_donor.cold_cost(label)}"
         print(f"{PLAN_PREFIX} job {label}: {state}", flush=True)
@@ -19860,12 +20138,59 @@ def _plan_header(session, mod, e2e_pool: str, apps) -> None:
     _forget_prebuilds_for_retry()
 
 
+#: Set when a `pytest_collection_modifyitems` implementation raised: pytest calls
+#: `pytest_collection_finish` from a `finally`, so without this the finish hook
+#: ran over the UNFILTERED items and its own refusal replaced the real one — a
+#: `--release-candidate` dirty-tree refusal surfaced as the drafts-collision
+#: error over the whole suite, the `-m` deselection never having run (0.1.7).
+_COLLECTION_REFUSED = pytest.StashKey[BaseException]()
+_COLLECTION_REFUSAL_PLUGIN = "fauna-collection-refusal-note"
+
+
+class _CollectionRefusalNote:
+    """A plugin of its own (registered in `pytest_configure`), because this module's
+    `pytest_collection_modifyitems` name is taken by the hook it wraps: a wrapper
+    around EVERY implementation — this conftest's and pytest's own `-m`/`-k`
+    deselection alike — that notes a refusal and re-raises it unchanged."""
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_collection_modifyitems(self, config, items):
+        try:
+            return (yield)
+        except BaseException as exc:
+            config.stash[_COLLECTION_REFUSED] = exc
+            raise
+
+
+def _collection_refused(session) -> bool:
+    config = getattr(session, "config", None)
+    stash = getattr(config, "stash", None)
+    return stash is not None and _COLLECTION_REFUSED in stash
+
+
 def pytest_collection_finish(session):
     """Warm the prebuilds, then acquire this run's machine-wide e2e lane, then
     re-check the prebuilds inside the hold — when this run drives real
-    drivers/nests."""
+    drivers/nests. A collection a `pytest_collection_modifyitems` hook refused
+    does none of it: that refusal is the run's answer and must reach the user
+    as itself (`_COLLECTION_REFUSED`). Nor does a collection with an error in it:
+    pytest's run loop interrupts on it before the first test, so a warm pass
+    and a lane would buy nothing — on Windows one module-level `import pwd` once
+    cost a tier_1 run 85 minutes of prebuild before its exit 2."""
     global _E2E_SLOT
     if session.config.option.collectonly:
+        return
+    if _collection_refused(session):
+        return
+    collect_errors = getattr(session, "testsfailed", 0)
+    if collect_errors and not getattr(
+        session.config.option, "continue_on_collection_errors", False
+    ):
+        _phase(
+            "collect",
+            f"{collect_errors} collection error(s) — the run ends before its first "
+            "test, so nothing is warmed and no lane is taken",
+        )
         return
     _phase("collect", f"{len(session.items)} items collected")
     _refuse_drafts_window_collision(session)
@@ -20735,6 +21060,9 @@ _CROSS_APP_FIXTURE_APPS = {
     # The tui seat that runs a mail export the android phone adopts
     # (`test_mail_export.py`'s another-device journeys).
     "android_other_device_seat": {"android": "tui"},
+    # alice's seat on the succession member witness's android column, where
+    # the phone plays bob (one emulator runs one app instance).
+    "succession_member_app": {"android": "tui"},
     # The user's other computer on a viewer column (web and the mobiles make no
     # index pin and never build): `test_task_delegation.py::_Seats` launches tui.
     "delegation_seats": "tui",
@@ -20750,6 +21078,12 @@ _CROSS_APP_FIXTURE_APPS = {
     # The linux seat that fills the mailbox on web's mail-export archive column
     # (web cannot start a fresh import; `test_mail_export_archive.py`).
     "mail_export_import_seat": {"web": "linux"},
+    # The co-present ceremony's desktop SHARER of a phone recipient
+    # (`test_offline_share_two_seat.py::_PHONE_SHARER`): one simulator or
+    # emulator hosts one seat, so an `[ios]` item launches macOS and an
+    # `[android]` one tui. Without it every warm-only `e2e:ios` run naming the
+    # file ended `notwarm` on the sharer's `just mac-debug` (2026-11-16).
+    "ceremony_seats": {"ios": "macos", "android": "tui"},
 }
 
 
@@ -20867,6 +21201,18 @@ def _prebuild_app_set(session, requested: set) -> set:
         else:
             seats = {implied}
         apps.update(seats & machine_apps)
+    # `helpers.fleet.SiblingSeats` launches a tui seat beside whatever app the
+    # item is parametrized by, from a module-local fixture no shared name can
+    # key, so it is read off the module's source like the room seats. Bounded by
+    # the SELECTION (`available`), unlike the table above: SiblingSeats skips
+    # unless tui is in `--app`, so a run without it never launches the seat. The
+    # background tester runs such a key as a `tui,<app>` shard, and without this
+    # its warm step left `tui-debug` unbuilt and the warm-only guard ended every
+    # `[macos]`/`[ios]` run of the file at the seat's launch (2026-11-15).
+    if "tui" in available and "tui" in machine_apps and any(
+        _item_module_names(item, "SiblingSeats") for item in session.items
+    ):
+        apps.add("tui")
     # The installer full-journey suite drives the MSI-INSTALLED app — never
     # prebuild the dev app it won't launch (mirrors _build_app_config).
     if "windows" in apps and any(
@@ -21012,7 +21358,7 @@ def _prebuild_binaries(session, *, prewarm: bool = False):
     no longer charged to any test's clock. Proofs:
     test_harness_self_termination.py § 5.
     """
-    _run_prebuild_jobs(_prebuild_jobs(session), prewarm=prewarm)
+    return _run_prebuild_jobs(_prebuild_jobs(session), prewarm=prewarm)
 
 
 def _prebuild_jobs(session) -> list:
@@ -21108,7 +21454,8 @@ def _prebuild_jobs(session) -> list:
     # asks for it through `getfixturevalue` on a cache miss only, invisible to the
     # closure scan. Its release binaries are registry entries behind the same gate.
     msi_inputs_owed = _helper_bins.windows_msi_inputs_owed(session.items)
-    if msi_inputs_owed:
+    # The nest MSI's door asks for the same bridge the same way (`nest_msi_path`).
+    if msi_inputs_owed or _helper_bins.windows_nest_msi_inputs_owed(session.items):
         requested.add("mail_bridge_binary")
 
     jobs = [
@@ -21221,13 +21568,16 @@ def _prebuild_jobs(session) -> list:
 _PREBUILD_TARGET_STATE = None
 
 
-def _run_prebuild_jobs(jobs, *, prewarm: bool) -> None:
+def _run_prebuild_jobs(jobs, *, prewarm: bool) -> tuple[int, int]:
     """Run `_prebuild_binaries`' jobs — `(label, builder name, args)` each — in
     order, one `[e2e-phase] prebuild` line per job it runs (the warm pass skips
-    `_NOT_PREWARMED_BUILDERS`). A failure is printed and memoized by the builder,
-    never raised; a session-setup builder's time is charged to the hold."""
+    `_NOT_PREWARMED_BUILDERS`), and one `[prebuild] rebuilt` line per job whose
+    gate built (`_noting_rebuilds`). A failure is printed and memoized by the
+    builder, never raised; a session-setup builder's time is charged to the
+    hold. Returns (jobs run, jobs rebuilt)."""
     global _PREBUILD_SETUP_S, _PREBUILD_TARGET_STATE
     prewarm_only = prewarm and bool(os.environ.get(PREWARM_ONLY_ENV))
+    ran = rebuilt = 0
     for label, builder, args in jobs:
         if prewarm and builder in _NOT_PREWARMED_BUILDERS:
             continue
@@ -21247,8 +21597,10 @@ def _run_prebuild_jobs(jobs, *, prewarm: bool) -> None:
         )
         started = time.monotonic()
         ok = False
+        ran += 1
+        reasons: list[str] = []
         try:
-            globals()[builder](*args)
+            _noting_rebuilds(label, lambda: globals()[builder](*args), reasons)
             ok = True
         except Exception as exc:
             print(
@@ -21257,11 +21609,72 @@ def _run_prebuild_jobs(jobs, *, prewarm: bool) -> None:
                 flush=True,
             )
         finally:
+            rebuilt += bool(reasons)
             if builder in _SESSION_SETUP_BUILDERS:
                 _PREBUILD_SETUP_S += time.monotonic() - started
             else:
                 state, commit = _PREBUILD_TARGET_STATE
                 _prebuild_donor.record_job(label, commit, state, time.monotonic() - started, ok)
+    return ran, rebuilt
+
+
+#: build-if-stale.py's `REASON_LOG_ENV`: each stamp gate that decides to build
+#: appends `<gate>\t<reason>` to the file it names (e2e-warm-pass.md, *The warm
+#: pass names every rebuild*).
+REBUILD_REASON_ENV = "FAUNA_BUILD_REASON_LOG"
+REBUILT_PREFIX = "[prebuild] rebuilt"
+WARM_WALL_PREFIX = "[prebuild] warm pass wall:"
+
+
+def _rebuilt_line(label: str, entries: list[str]) -> str:
+    """`[prebuild] rebuilt <label>: <gate> <reason>; …` — the job's gates' own
+    words, in the order they decided, each `<gate>\t<reason>` log entry once."""
+    seen: list[str] = []
+    for entry in entries:
+        gate, _, reason = entry.partition("\t")
+        text = f"{gate} {reason}".strip() if reason else gate
+        if text not in seen:
+            seen.append(text)
+    return f"{REBUILT_PREFIX} {label}: {'; '.join(seen)}"
+
+
+def _warm_pass_wall_line(wall_s: float, ran: int, rebuilt: int) -> str:
+    minutes, seconds = divmod(int(round(wall_s)), 60)
+    return (f"{WARM_WALL_PREFIX} {minutes} min {seconds:02d} s — "
+            f"{rebuilt} of {ran} job(s) rebuilt")
+
+
+def _noting_rebuilds(label: str, fn, reasons: list | None = None) -> bool:
+    """Run `fn()` with a fresh rebuild-reason log named in `REBUILD_REASON_ENV`
+    (inherited by every `just` recipe the job runs), then print one
+    `_rebuilt_line` when any gate built — nothing for a warm job. The reasons
+    land in `reasons` too, and are printed even when `fn` raises. Returns
+    whether the job rebuilt. A job nested in another keeps its own log, and the
+    outer one is restored after it."""
+    fd, path = tempfile.mkstemp(prefix="e2e-rebuild-reasons-", suffix=".txt")
+    os.close(fd)
+    outer = os.environ.get(REBUILD_REASON_ENV)
+    os.environ[REBUILD_REASON_ENV] = path
+    entries = reasons if reasons is not None else []
+    try:
+        fn()
+    finally:
+        if outer is None:
+            os.environ.pop(REBUILD_REASON_ENV, None)
+        else:
+            os.environ[REBUILD_REASON_ENV] = outer
+        try:
+            with open(path, encoding="utf-8") as fh:
+                entries.extend(line.rstrip("\n") for line in fh if line.strip())
+        except OSError:
+            pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        if entries:
+            print(_rebuilt_line(label, entries), flush=True)
+    return bool(entries)
 
 
 def _login_admin_as(app, request, nest, *, spa_url_fixture: str, fixture_name: str) -> None:
@@ -21780,6 +22193,7 @@ _CLIENT_INDEPENDENT_FILES = {
     "test_android_emu.py",  # tier_1 pins for the android emulator's constants, generated blocks and probe — no driver/app
     "test_windows_driver_infobar_text.py",  # tier_1 pins of the windows driver's InfoBar-text strip against a canned read — no driver/app
     "test_win_kache_wrapper_scope.py",  # tier_1 pins of win's dev-loop-only kache wiring (cargo-win-kache.cmd + build-slot.py _kache_env) — no driver/app
+    "test_place_accepts_log_env.py",  # tier_1 source pin: every hold-journey app branch turns on the held-pass log target — no driver/app
     "test_win_pass_exit_watch.py",  # tier_1 pins of the Windows gate-check pass's exit watch — no driver/app
     "test_mac_kache_wrapper_scope.py",  # tier_1 pins of mac's dev-loop kache decision (build-slot.py _kache_env) — no driver/app
     "test_linux_kache_wrapper_scope.py",  # tier_1 pins of the Linux dev-loop kache decision, the bwrap launcher and its live egress witness — no driver/app

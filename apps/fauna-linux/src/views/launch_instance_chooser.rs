@@ -41,6 +41,9 @@ use gtk::{Button, Label, Orientation};
 use crate::i18n::strings as i18n;
 use crate::testid::set_test_id;
 
+/// Replaces the offered `(actor_id, display label)` rows in place.
+pub type SetChoices = Rc<dyn Fn(&[(String, String)])>;
+
 /// Handles the chooser exposes to its caller.
 pub struct InstanceChooserView {
     pub window: adw::ApplicationWindow,
@@ -51,6 +54,9 @@ pub struct InstanceChooserView {
     /// tearing the chooser down: both callers' failures (`account_taken`,
     /// `no_running_instance`) leave every other choice still valid.
     pub show_error: Rc<dyn Fn(&str)>,
+    /// Replace the offered list in place — the chooser's watch calls it when
+    /// an account opens or closes elsewhere while the chooser is shown.
+    pub set_choices: SetChoices,
 }
 
 /// Build the chooser window.
@@ -109,6 +115,7 @@ where
         window,
         error_label: content.error_label,
         show_error: content.show_error,
+        set_choices: content.set_choices,
     }
 }
 
@@ -121,6 +128,7 @@ pub(crate) struct ChooserContent {
     pub root: gtk::Box,
     pub error_label: Label,
     pub show_error: Rc<dyn Fn(&str)>,
+    pub set_choices: SetChoices,
 }
 
 pub(crate) fn build_chooser_content<P, F, A>(
@@ -190,37 +198,25 @@ where
     center.append(&subtitle);
 
     // ── The pickable accounts ─────────────────────────────────────────
-    if choices.is_empty() {
-        // Every registered account is served somewhere. The list is replaced
-        // rather than rendered empty: an empty listbox reads as a loading
-        // state, and the user needs to know there is nothing to pick.
-        let none = Label::new(Some(i18n::onboarding::instance_chooser::NONE_AVAILABLE));
-        none.set_wrap(true);
-        none.set_justify(gtk::Justification::Center);
-        none.set_max_width_chars(52);
-        none.add_css_class("dim-label");
-        none.set_margin_top(8);
-        center.append(&none);
-    } else {
-        let group = adw::PreferencesGroup::builder()
-            .title(i18n::onboarding::instance_chooser::CHOOSE_ACCOUNT)
-            .build();
-        group.set_margin_top(8);
-
-        let on_pick = Rc::new(on_pick);
-        for (actor_id, label) in choices {
-            let row = adw::ActionRow::builder()
-                .title(label)
-                .activatable(true)
-                .build();
-            set_test_id(&row, ids::LAUNCH_INSTANCE_CHOOSER_ITEM);
-            let actor_for_pick = actor_id.clone();
-            let on_pick = on_pick.clone();
-            row.connect_activated(move |_| on_pick(&actor_for_pick));
-            group.add(&row);
-        }
-        center.append(&group);
-    }
+    // In a slot of its own, so the chooser's watch can replace the list when
+    // an account opens or closes elsewhere (`set_choices`; the shared
+    // `fauna_client_accounts::chooser_watch_step`).
+    let list_slot = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .build();
+    center.append(&list_slot);
+    let on_pick: Rc<dyn Fn(&str)> = Rc::new(on_pick);
+    let set_choices: SetChoices = {
+        let list_slot = list_slot.clone();
+        Rc::new(move |choices: &[(String, String)]| {
+            while let Some(child) = list_slot.first_child() {
+                list_slot.remove(&child);
+            }
+            fill_choices(&list_slot, choices, &on_pick);
+        })
+    };
+    set_choices(choices);
 
     // ── The two exits ─────────────────────────────────────────────────
     let buttons = gtk::Box::builder()
@@ -260,7 +256,42 @@ where
         root: outer,
         error_label,
         show_error,
+        set_choices,
     }
+}
+
+/// The offered rows — or, with none, the explanation that replaces them —
+/// into the list slot.
+fn fill_choices(slot: &gtk::Box, choices: &[(String, String)], on_pick: &Rc<dyn Fn(&str)>) {
+    if choices.is_empty() {
+        // Every registered account is served somewhere. The list is replaced
+        // rather than rendered empty: an empty listbox reads as a loading
+        // state, and the user needs to know there is nothing to pick.
+        let none = Label::new(Some(i18n::onboarding::instance_chooser::NONE_AVAILABLE));
+        none.set_wrap(true);
+        none.set_justify(gtk::Justification::Center);
+        none.set_max_width_chars(52);
+        none.add_css_class("dim-label");
+        none.set_margin_top(8);
+        slot.append(&none);
+        return;
+    }
+    let group = adw::PreferencesGroup::builder()
+        .title(i18n::onboarding::instance_chooser::CHOOSE_ACCOUNT)
+        .build();
+    group.set_margin_top(8);
+    for (actor_id, label) in choices {
+        let row = adw::ActionRow::builder()
+            .title(label)
+            .activatable(true)
+            .build();
+        set_test_id(&row, ids::LAUNCH_INSTANCE_CHOOSER_ITEM);
+        let actor_for_pick = actor_id.clone();
+        let on_pick = on_pick.clone();
+        row.connect_activated(move |_| on_pick(&actor_for_pick));
+        group.add(&row);
+    }
+    slot.append(&group);
 }
 
 #[cfg(test)]
@@ -365,6 +396,28 @@ mod tests {
             ] {
                 assert!(names.iter().any(|n| n == id), "missing exit {id:?}");
             }
+        });
+    }
+
+    /// The watch's refill: `set_choices` replaces the offered rows in place,
+    /// down to the explanation when none is left and back again.
+    #[test]
+    fn set_choices_replaces_the_offered_rows() {
+        crate::testid::run_on_gtk_thread(|| {
+            let content = content_with(&choices());
+            let count = |c: &ChooserContent| {
+                widget_names(&c.root)
+                    .into_iter()
+                    .filter(|n| n == "launch-instance-chooser-item")
+                    .count()
+            };
+            assert_eq!(count(&content), 2);
+            (content.set_choices)(&choices()[..1]);
+            assert_eq!(count(&content), 1);
+            (content.set_choices)(&[]);
+            assert_eq!(count(&content), 0);
+            (content.set_choices)(&choices());
+            assert_eq!(count(&content), 2);
         });
     }
 

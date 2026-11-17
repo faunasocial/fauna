@@ -11,6 +11,7 @@ import com.fauna.ffi.FfiCborValue
 import com.fauna.ffi.FfiCreateBunkerInviteReply
 import com.fauna.ffi.FfiFeatureRow
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -120,7 +121,7 @@ class NostrContentTest {
         follows: List<FfiBridgeFollow> = emptyList(),
         bunkerInvite: FfiCreateBunkerInviteReply? = null,
         zapSigners: List<ZapSignerItem> = emptyList(),
-        zapSignerGateRow: FfiFeatureRow? = null,
+        zapSignerGate: Possibility = Possibility.Possible,
         onLink: (String, Map<String, String>) -> Unit = { _, _ -> },
         onUnlink: () -> Unit = {},
         onUpdateSetting: (String, FfiCborValue) -> Unit = { _, _ -> },
@@ -139,7 +140,7 @@ class NostrContentTest {
                 follows = follows,
                 bunkerInvite = bunkerInvite,
                 zapSigners = zapSigners,
-                zapSignerGateRow = zapSignerGateRow,
+                zapSignerGate = zapSignerGate,
                 onLink = onLink,
                 onUnlink = onUnlink,
                 onUpdateSetting = onUpdateSetting,
@@ -194,6 +195,48 @@ class NostrContentTest {
         composeTestRule.onNodeWithTag("nostr-link-button").performClick()
         assertEquals("generate", calledMode)
         assertEquals(emptyMap<String, String>(), calledFields)
+    }
+
+    // ── The form case (nostr.md § Errors & edge cases; README § Offer only
+    // what is possible, rule 4): each submit painted from its shared predicate,
+    // disabled with the reason beside it while the draft cannot go.
+
+    @Test
+    fun importModeWithNoNsecIsDisabledWithTheSharedReason() {
+        render(bridge = unlinkedBridge())
+        composeTestRule.onNodeWithTag("nostr-link-mode").performClick()
+        composeTestRule.onNodeWithText("Import nsec").performClick()
+        composeTestRule.onNodeWithTag("nostr-link-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Please enter an nsec key").assertExists()
+        composeTestRule.onNodeWithTag("nostr-nsec-input").performTextInput("nsec1xyz")
+        composeTestRule.onNodeWithTag("nostr-link-button").assertIsEnabled()
+    }
+
+    @Test
+    fun aBlankRelayIsDisabledAndADuplicateIsRefusedNotCleared() {
+        render(bridge = linkedBridge(relayListJson = "[\"wss://relay.one\"]"))
+        composeTestRule.onNodeWithTag("nostr-add-relay").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Type a relay address first.").assertExists()
+        composeTestRule.onNodeWithTag("nostr-relay-input").performTextInput("wss://relay.one")
+        composeTestRule.onNodeWithTag("nostr-add-relay").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("This relay is already in your list.").assertExists()
+        composeTestRule.onNodeWithTag("nostr-relay-input").assertTextContains("wss://relay.one")
+    }
+
+    @Test
+    fun aBlankFollowIsDisabledWithTheSharedReason() {
+        render(bridge = linkedBridge())
+        composeTestRule.onNodeWithTag("nostr-add-follow").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Type the npub or hex pubkey to follow first.").assertExists()
+    }
+
+    @Test
+    fun aMalformedSignerPubkeyIsDisabledWithTheSharedReason() {
+        render(bridge = linkedBridge())
+        composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText("signer pubkey first.", substring = true).assertExists()
+        composeTestRule.onNodeWithTag("nostr-zap-signer-pubkey-input").performScrollTo().performTextInput("abc")
+        composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn").performScrollTo().assertIsNotEnabled()
     }
 
     @Test
@@ -432,24 +475,67 @@ class NostrContentTest {
     // ── The Dim-3 courtesy gate on the add button (never re-derived — read
     // straight off the shared FeatureRow; removal is never gated).
 
+    /** The VM's answer over the features read, as `NostrVM.zapSignerGate`
+     *  computes it: the live shared gate (`featuresGatePossibility`). */
+    private fun gateOver(vararg rows: FfiFeatureRow): Possibility =
+        com.fauna.ffi.featuresGatePossibility(rows.toList(), "zaps")
+
     @Test
-    fun addButtonIsEnabledWhenTheGateRowIsAbsent() {
-        // An un-hydrated read (no rows fetched yet) must leave the button
-        // LIVE — the nest, not the app, is the enforcement floor.
-        render(bridge = linkedBridge(), zapSignerGateRow = null)
-        composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn").assertIsEnabled()
+    fun addButtonWaitsForTheFeaturesReadWithItsReason() {
+        // Unknown is not possible (`ui/README.md` § Offer only what is
+        // possible, rule 5): before the read answers the button is blocked,
+        // still loading — never live on a guess — with its reason in eyeshot.
+        render(bridge = linkedBridge(), zapSignerGate = com.fauna.ffi.featuresGatePossibility(null, "zaps"))
+        typeValidSignerPubkey()
+        composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Still loading — try again in a moment").assertExists()
+    }
+
+    @Test
+    fun addButtonSaysWhenTheFeaturesReadFailed() {
+        render(
+            bridge = linkedBridge(),
+            zapSignerGate = com.fauna.ffi.readPossibility(uniffi.fauna_core.ReadState.FAILED),
+        )
+        typeValidSignerPubkey()
+        composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Failed to load").assertExists()
+    }
+
+    /** A 64-hex draft, so the add button's draft half (`zap_signer_add_possibility`)
+     *  is satisfied and the assertion is about the Dim-3 gate alone. */
+    private fun typeValidSignerPubkey() {
+        composeTestRule.onNodeWithTag("nostr-zap-signer-pubkey-input")
+            .performScrollTo().performTextInput("ab".repeat(32))
     }
 
     @Test
     fun addButtonIsEnabledWhenTheZapsRowIsAvailable() {
-        render(bridge = linkedBridge(), zapSignerGateRow = featureRow("zaps", "available"))
+        render(bridge = linkedBridge(), zapSignerGate = gateOver(featureRow("zaps", "available")))
+        typeValidSignerPubkey()
         composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn").assertIsEnabled()
     }
 
     @Test
-    fun addButtonIsDisabledWithAReasonWhenTheZapsRowIsRestricted() {
-        render(bridge = linkedBridge(), zapSignerGateRow = featureRow("zaps", "hidden"))
+    fun addButtonIsDisabledWhenTheZapsRowIsRestricted() {
+        render(bridge = linkedBridge(), zapSignerGate = gateOver(featureRow("zaps", "disabled")))
+        typeValidSignerPubkey()
         composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn").assertIsNotEnabled()
+    }
+
+    @Test
+    fun theDesignateRowIsAbsentWithoutTheZapsPlane() {
+        // A hidden row, and a loaded read naming no `zaps` row, both mean the
+        // nest has no plane: the designate row is not shown (rule 2).
+        render(bridge = linkedBridge(), zapSignerGate = gateOver(featureRow("zaps", "hidden")))
+        composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("nostr-zap-signer-pubkey-input").assertDoesNotExist()
+    }
+
+    @Test
+    fun aLoadedReadWithNoZapsRowLeavesTheDesignateRowOut() {
+        render(bridge = linkedBridge(), zapSignerGate = gateOver())
+        composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn").assertDoesNotExist()
     }
 
     @Test
@@ -460,7 +546,7 @@ class NostrContentTest {
         render(
             bridge = linkedBridge(),
             zapSigners = listOf(zapSigner(id = 1)),
-            zapSignerGateRow = featureRow("zaps", "hidden"),
+            zapSignerGate = gateOver(featureRow("zaps", "disabled")),
         )
         composeTestRule.onNodeWithTag("nostr-zap-signer-remove").assertIsEnabled()
     }

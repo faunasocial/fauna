@@ -24,6 +24,7 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.viewmodel.SubscriptionSettingsVM
 import com.fauna.ffi.FfiMineSubscription
 import social.fauna.generated.Ids
+import uniffi.fauna_core.Possibility
 
 /**
  * The consumer-side **`subscription-settings`** page (subscriptions Slice B —
@@ -52,6 +53,7 @@ fun SubscriptionSettingsScreen(
     val working by vm.working.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val claimRedeemed by vm.claimRedeemed.collectAsState()
+    val redeemAnswer by vm.redeemAnswer.collectAsState()
     val appMessages = LocalAppMessages.current
 
     LaunchedEffect(errorMessage) { errorMessage?.let { appMessages.showError(it) } }
@@ -75,6 +77,8 @@ fun SubscriptionSettingsScreen(
         onBack = { navController.popBackStack() },
         onUnsubscribe = vm::unsubscribe,
         onRedeemClaim = vm::redeemClaim,
+        onRedeemRefused = { vm.errorMessage.value = it },
+        redeemAnswer = redeemAnswer,
     )
 }
 
@@ -88,9 +92,14 @@ fun SubscriptionSettingsContent(
     onBack: () -> Unit,
     onUnsubscribe: (FfiMineSubscription) -> Unit,
     onRedeemClaim: (String) -> Unit = {},
+    /** The redeem's refusal reason (shared `redeem_code_possibility`), for the page's `error-message`. */
+    onRedeemRefused: (String) -> Unit = {},
     // The `subscription-mine-author` text; the stateful caller resolves it
     // through the overlay projection, so this Content stays FFI-free.
     authorLabel: (FfiMineSubscription) -> String = { it.authorDisplay },
+    // The redeem button's answer, the VM's (`SubscriptionSettingsVM.redeemAnswer`);
+    // the default is for the stateless harness only.
+    redeemAnswer: Possibility = Possibility.Possible,
 ) {
     Scaffold(
         topBar = {
@@ -168,6 +177,8 @@ fun SubscriptionSettingsContent(
                     onCodeChange = { claimCode = it },
                     working = working,
                     onRedeem = { onRedeemClaim(claimCode) },
+                    onRefuse = onRedeemRefused,
+                    answer = redeemAnswer,
                 )
             }
         }

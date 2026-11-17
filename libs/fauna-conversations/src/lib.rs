@@ -42,6 +42,9 @@ pub mod manager;
 /// spell it, so nothing is lost by keeping the module itself out of the glob.
 mod member_review;
 pub mod message;
+/// The possibility answer of the new-thread composer's Send, attach and topic
+/// (`ui/README.md` § Offer only what is possible).
+pub mod new_thread_controls;
 pub mod notification;
 pub mod observer;
 /// MLS offline compose: the plaintext intent a send made with no nest becomes
@@ -63,6 +66,9 @@ pub mod snapshot;
 pub mod state_json;
 pub mod store;
 pub mod thread;
+/// The possibility answer of every thread and room control gated by role or
+/// rail (`ui/README.md` § Offer only what is possible).
+pub mod thread_controls;
 
 #[cfg(feature = "client-display")]
 pub use address::typed_address_display;
@@ -88,6 +94,9 @@ pub use message::{
     AttachmentSnapshot, BodyFormat, DeleteClaim, MessageBadges, MessageId, MessageSnapshot,
     QueuedSendState, attachment_blocks,
 };
+pub use new_thread_controls::{
+    NewThreadControl, new_thread_control_possibility, new_thread_possibility,
+};
 pub use notification::{
     MessageNotificationTracker, ThreadActivity, banner_pass_completed, banner_pass_started,
     record_fired_banner,
@@ -112,6 +121,7 @@ pub use snapshot::{
     next_sort_order, sum_unread,
 };
 pub use thread::{ThreadFlavor, ThreadId};
+pub use thread_controls::{ThreadControl, thread_control_possibility};
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();

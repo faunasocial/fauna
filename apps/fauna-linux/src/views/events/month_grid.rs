@@ -497,12 +497,20 @@ mod tests {
     struct Page {
         drilled: RefCell<Vec<(i32, u32, u32)>>,
         composed: RefCell<Vec<(i32, u32, u32)>>,
+        /// What the page does on top of recording a compose — a real popover,
+        /// for the test that needs the popup's pointer grab.
+        on_compose: RefCell<Option<Box<dyn Fn()>>>,
     }
 
     /// The real production cell, in a real stack whose other page is the real
     /// day timeline — the geometry that makes the fall-through available.
     #[allow(clippy::type_complexity)]
     fn month_page() -> (gtk::Window, gtk::Button, gtk::Stack, Rc<Page>) {
+        month_page_with(TEST_WINDOW)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn month_page_with(window: Duration) -> (gtk::Window, gtk::Button, gtk::Stack, Rc<Page>) {
         let _ = adw::init();
         let page = Rc::new(Page::default());
         let stack = gtk::Stack::new();
@@ -533,8 +541,11 @@ mod tests {
                 }),
                 open_quick_create: Rc::new(move |date| {
                     composed_page.composed.borrow_mut().push(date);
+                    if let Some(open) = composed_page.on_compose.borrow().as_ref() {
+                        open();
+                    }
                 }),
-                presses: Rc::new(RefCell::new(day_cell_press::DayCellPress::new(TEST_WINDOW))),
+                presses: Rc::new(RefCell::new(day_cell_press::DayCellPress::new(window))),
             }
         };
 
@@ -709,6 +720,215 @@ mod tests {
                 "no compose was asked for"
             );
 
+            window.destroy();
+        });
+    }
+
+    /// A real pointer on the private Xvfb, through the XTEST extension.
+    ///
+    /// The tests above emit the gestures' signals directly, which is exactly
+    /// the door that cannot see what a popover's pointer grab does to the cell
+    /// underneath: GTK's crossing bookkeeping runs only for events the display
+    /// server delivers. libX11 and libXtst are the system's own (they ship with
+    /// the X stack the private display already needs), opened at run time so
+    /// the crate gains no dependency.
+    type XDisplay = *mut std::ffi::c_void;
+    type XOpenDisplayFn = unsafe extern "C" fn(*const libc::c_char) -> XDisplay;
+    type XTestFakeMotionEventFn = unsafe extern "C" fn(XDisplay, i32, i32, i32, u64) -> i32;
+    type XTestFakeButtonEventFn = unsafe extern "C" fn(XDisplay, u32, i32, u64) -> i32;
+    type XSyncFn = unsafe extern "C" fn(XDisplay, i32) -> i32;
+
+    struct XPointer {
+        dpy: XDisplay,
+        motion: XTestFakeMotionEventFn,
+        button: XTestFakeButtonEventFn,
+        sync: XSyncFn,
+    }
+
+    impl XPointer {
+        /// Connect to `display` — the GTK test thread's private Xvfb.
+        fn open(display: &str) -> Self {
+            // SAFETY: plain C entry points of the system's libX11/libXtst,
+            // looked up by name and called with the signatures their headers
+            // declare; each pointer is checked before it is used.
+            unsafe {
+                let x11 = libc::dlopen(c"libX11.so.6".as_ptr(), libc::RTLD_NOW);
+                let xtst = libc::dlopen(c"libXtst.so.6".as_ptr(), libc::RTLD_NOW);
+                assert!(
+                    !x11.is_null() && !xtst.is_null(),
+                    "libX11.so.6 / libXtst.so.6 not loadable — the real-pointer \
+                     tests need the X stack the private display runs on"
+                );
+                let sym = |lib: *mut std::ffi::c_void, name: &std::ffi::CStr| {
+                    let f = libc::dlsym(lib, name.as_ptr());
+                    assert!(!f.is_null(), "missing X symbol {name:?}");
+                    f
+                };
+                let open = std::mem::transmute::<*mut std::ffi::c_void, XOpenDisplayFn>(sym(
+                    x11,
+                    c"XOpenDisplay",
+                ));
+                let name = std::ffi::CString::new(display).expect("display name");
+                let dpy = open(name.as_ptr());
+                assert!(!dpy.is_null(), "XOpenDisplay({display}) failed");
+                XPointer {
+                    dpy,
+                    motion: std::mem::transmute::<*mut std::ffi::c_void, XTestFakeMotionEventFn>(
+                        sym(xtst, c"XTestFakeMotionEvent"),
+                    ),
+                    button: std::mem::transmute::<*mut std::ffi::c_void, XTestFakeButtonEventFn>(
+                        sym(xtst, c"XTestFakeButtonEvent"),
+                    ),
+                    sync: std::mem::transmute::<*mut std::ffi::c_void, XSyncFn>(sym(x11, c"XSync")),
+                }
+            }
+        }
+
+        /// Move the pointer to root coordinates `(x, y)`.
+        fn move_to(&self, x: i32, y: i32) {
+            // SAFETY: `dpy` is the live connection `open` checked.
+            unsafe {
+                (self.motion)(self.dpy, -1, x, y, 0);
+                (self.sync)(self.dpy, 0);
+            }
+        }
+
+        /// Press (`down`) or release the primary button.
+        fn button(&self, down: bool) {
+            // SAFETY: as `move_to`.
+            unsafe {
+                (self.button)(self.dpy, 1, i32::from(down), 0);
+                (self.sync)(self.dpy, 0);
+            }
+        }
+    }
+
+    /// **No tint is left on the day after the compose opens from it**
+    /// (`docs/goal/ui/events.md` § *No calendar to hold an event*, ruling 4: a
+    /// failed save is reported in the compose and nowhere else — a day that
+    /// looks touched is a report of an event that does not exist).
+    ///
+    /// The tests above emit the gestures' signals straight at the widgets, so
+    /// they cannot see what the compose's pointer grab does to GTK's crossing
+    /// bookkeeping. This one drives a real double click through the display
+    /// server, opens a real autohide popover the way `show_quick_create` does —
+    /// anchored to a separate header button, as production anchors it to
+    /// `new-event-btn` — moves the pointer away as a person reaching for the
+    /// compose does, and reads the cell's state flags once each step has
+    /// settled.
+    ///
+    /// What it measured: the cell's `:hover` (`PRELIGHT`) and `:active` are both
+    /// clear. A popover's grab DOES strand `:hover` — on the popover's *parent*
+    /// and its ancestors, not on the widget that was pressed — so this cell
+    /// stays clean exactly as long as the compose is not parented to it (with
+    /// the cell as the parent, the cell stayed hovered with the pointer gone,
+    /// 2 of 2 runs). Hence the assertion on the anchor too: it is the witness
+    /// that the grab really was taken, so a green cell is not a vacuous one.
+    #[test]
+    fn a_real_double_click_leaves_no_hover_or_press_on_the_day() {
+        crate::testid::run_on_gtk_thread(|| {
+            // Production's own window: GTK reports `n_press == 2` only inside
+            // `gtk-double-click-time`, so the chain must be at least as long.
+            let (window, cell, stack, page) =
+                month_page_with(day_cell_press::desktop_double_click_window());
+            let month = stack
+                .child_by_name("month")
+                .and_then(|w| w.downcast::<gtk::Box>().ok())
+                .expect("the month page is a box");
+            let anchor = gtk::Button::with_label("New Event");
+            anchor.set_halign(gtk::Align::Start);
+            month.prepend(&anchor);
+
+            let popover = gtk::Popover::new();
+            popover.set_parent(&anchor);
+            popover.set_autohide(true);
+            popover.set_child(Some(&gtk::Entry::new()));
+            {
+                let popover = popover.clone();
+                *page.on_compose.borrow_mut() = Some(Box::new(move || popover.popup()));
+            }
+
+            let display = gtk::gdk::Display::default()
+                .expect("the GTK test thread has its display")
+                .name()
+                .to_string();
+            let pointer = XPointer::open(&display);
+            assert!(
+                pump_until(|| window.width() > 0 && cell.width() > 0 && anchor.width() > 0),
+                "the test window was never allocated"
+            );
+            let bounds = cell.compute_bounds(&window).expect("the cell is allocated");
+            // The undecorated test window sits at the root origin.
+            let (cx, cy) = (
+                (bounds.x() + bounds.width() / 2.0) as i32,
+                (bounds.y() + bounds.height() / 2.0) as i32,
+            );
+            let has = |w: &gtk::Button, f: gtk::StateFlags| w.state_flags().contains(f);
+            let hover = gtk::StateFlags::PRELIGHT;
+            let press = gtk::StateFlags::ACTIVE;
+
+            // A crossing can clear a flag and set it again in the same burst
+            // (measured: `:hover` read clear 0.3 ms after the leave and set
+            // again by 200 ms), so every reading is taken after a causal
+            // barrier — a timeout that has fired — never at the first instant a
+            // condition holds.
+            let settle = || {
+                let fired = Rc::new(Cell::new(false));
+                {
+                    let fired = Rc::clone(&fired);
+                    gtk::glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                        fired.set(true)
+                    });
+                }
+                assert!(pump_until(|| fired.get()), "the settle barrier never fired");
+            };
+
+            pointer.move_to(cx, cy);
+            assert!(
+                pump_until(|| has(&cell, hover)),
+                "the pointer never reached the cell — the harness, not the product"
+            );
+
+            // A real double click, in the display server's own order.
+            pointer.button(true);
+            assert!(pump_until(|| has(&cell, press)));
+            pointer.button(false);
+            assert!(pump_until(|| !has(&cell, press)));
+            pointer.button(true);
+            assert!(
+                pump_until(|| !page.composed.borrow().is_empty() && popover.is_visible()),
+                "a real double click never opened the compose"
+            );
+            pointer.button(false);
+            settle();
+
+            // The person reaches for the compose (here: off the window, so no
+            // ordinary crossing can put the hover back).
+            pointer.move_to(1000, 900);
+            settle();
+            assert!(
+                has(&anchor, hover),
+                "the compose's grab was never taken (its anchor did not keep the \
+                 stranded hover), so the cell reading below would prove nothing"
+            );
+            assert!(
+                !has(&cell, hover) && !has(&cell, press),
+                "with the compose open and the pointer gone, the day reads {:?} — \
+                 tinted as if an event had been added",
+                cell.state_flags()
+            );
+
+            // The compose closes.
+            popover.popdown();
+            settle();
+            assert!(
+                !has(&cell, hover) && !has(&cell, press),
+                "after the compose closed, the day reads {:?}",
+                cell.state_flags()
+            );
+            assert!(page.drilled.borrow().is_empty(), "the pair never drills");
+
+            popover.unparent();
             window.destroy();
         });
     }

@@ -93,7 +93,11 @@ struct MacContactListView: View {
                         .accessibilityIdentifier(Ids.contactsAddButton)
                         // Same add the Button runs. Env-gated no-op.
                         .automationActivate(Ids.contactsAddButton) { Task { await vm.addContact(actorId: result.actorId) } }
+                        // The ward's entry gate: painted from the one shared answer
+                        // the knock asks again before it sends.
+                        .faunaPossible(vm.knockPossibility(peerId: result.actorId))
                     }
+                    FaunaPossibilityReason(vm.knockPossibility(peerId: result.actorId))
                     .padding(.vertical, 2)
                     .tag(result.actorId)
                     // The ward's in-app ask (`family-safety.md` § Child-initiated
@@ -151,6 +155,7 @@ struct MacContactListView: View {
                                 .automationActivate(Ids.contactsAcceptButton) {
                                     Task { await vm.acceptKnock(peerId: knock.sender) }
                                 }
+                                .faunaPossible(vm.acceptPossibility())
 
                                 Button(L.common.dismiss) {
                                     Task { await vm.dismissKnock(peerId: knock.sender) }

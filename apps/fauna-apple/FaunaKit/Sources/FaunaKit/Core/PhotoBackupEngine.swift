@@ -78,6 +78,11 @@ public class PhotoBackupEngine {
     public private(set) var passesStarted = 0
     public private(set) var passesCompleted = 0
 
+    /// Requests the single-flight gate refused because a pass was in flight
+    /// (`PhotoBackupPassGate.coalescedRequests`, mirrored here so the funnel reads
+    /// it synchronously). Monotonic; published as `requests_coalesced`.
+    public private(set) var requestsCoalesced = 0
+
     /// The Photos authorization this device granted, as of the last pass —
     /// `"authorized"`, `"limited"`, `"denied"`, `"restricted"`, `"notDetermined"`.
     /// The one datum that separates "the library is empty" from "we are only
@@ -179,7 +184,12 @@ public class PhotoBackupEngine {
 
         // Refused because a pass is already in flight — which the gate has now
         // asked to run again on its way out, so this caller's photos are not lost.
-        guard await gate.claim() else { return 0 }
+        guard await gate.claim() else {
+            // A plain field, not a read of the actor: the funnel reads synchronously
+            // (convention 11 — never a round trip). Mirrors the gate's own count.
+            requestsCoalesced += 1
+            return 0
+        }
 
         isBackingUp = true
         var uploadedAcrossPasses = 0
@@ -454,12 +464,19 @@ actor PhotoBackupPassGate {
     private var running = false
     private var wanted = false
 
+    /// Every request `claim()` refused because a pass was in flight — monotonic,
+    /// never reset. The same count android's gate keeps (`coalescedRequests`); the
+    /// coalescing witness reads it as positive state ("the second request reached
+    /// the gate mid-pass") before it releases the parked pass.
+    private(set) var coalescedRequests = 0
+
     /// Claim the right to run a pass. `false` ⇒ a pass is already in flight and has
     /// now been asked to run again when it finishes, so the caller must return
     /// rather than start a second one.
     func claim() -> Bool {
         if running {
             wanted = true
+            coalescedRequests += 1
             return false
         }
         running = true

@@ -61,6 +61,9 @@ class PhotoBackupEngine @Inject constructor(
 
     private val gate = PhotoBackupPassGate()
 
+    /** [PhotoBackupPassGate.coalescedRequests], for the e2e state key only. */
+    val coalescedRequests: Int get() = gate.coalescedRequests
+
     private val _uploadedCount = MutableStateFlow(0)
     val uploadedCount: StateFlow<Int> = _uploadedCount
 

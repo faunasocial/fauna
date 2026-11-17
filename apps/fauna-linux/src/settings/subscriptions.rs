@@ -21,7 +21,9 @@
 //! queue — a success re-reads the mine list, where the queued grant renders
 //! exactly like a queued subscribe (a "pending" row). Typed errors
 //! (`fauna.payments.claim_{not_found,already_redeemed,voided}`) surface via
-//! the page `error-message`.
+//! the page `error-message`. The redeem block is painted from the `payments`
+//! features gate (`settings/claim_redeem.rs`), read by this page itself on
+//! every show; its press asks the same answer and refuses on `error-message`.
 //!
 //! Observer-free, like the profile Tiers tab: a manual re-read on mount and
 //! whenever the page becomes visible (the refresh closure the settings shell
@@ -61,7 +63,7 @@ struct Widgets {
     /// build has no claim to redeem, so the field, its section and the
     /// `redeem_claim` handler all compile away together.
     #[cfg(feature = "payments")]
-    claim_input: gtk::Entry,
+    claim: super::claim_redeem::RedeemPair,
     error_label: gtk::Label,
 }
 
@@ -135,35 +137,15 @@ pub fn build_subscriptions_page() -> (gtk::Box, Rc<dyn Fn()>) {
     // `dynamic-features.md` § What "completely compiled away" means is a
     // `strings`-grep for ELEMENT IDS, so a section that merely never fires
     // would still ship `subscription-claim-redeem-input`/`-button`.
+    //
+    // The block is painted from the `payments` gate (`claim_redeem.rs`):
+    // blocked still loading until this page's own features read answers, left
+    // out whole on a nest without the plane.
     #[cfg(feature = "payments")]
-    let (claim_input, claim_button) = {
-        let claim_section = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(8)
-            .accessible_role(gtk::AccessibleRole::Group)
-            .build();
-        let claim_title = gtk::Label::new(Some(s::REDEEM_CLAIM_TITLE));
-        claim_title.set_halign(gtk::Align::Start);
-        claim_title.add_css_class("title-4");
-        claim_section.append(&claim_title);
-        let claim_row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .build();
-        let claim_input = gtk::Entry::builder()
-            .placeholder_text(s::CLAIM_CODE)
-            .hexpand(true)
-            .build();
-        set_test_id(&claim_input, ids::SUBSCRIPTION_CLAIM_REDEEM_INPUT);
-        claim_row.append(&claim_input);
-        let claim_button = gtk::Button::with_label(s::REDEEM);
-        claim_button.add_css_class("suggested-action");
-        set_test_id(&claim_button, ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON);
-        crate::offline_gate::declare_wire_kind(&claim_button, "fauna.payments.claims.redeem");
-        claim_row.append(&claim_button);
-        claim_section.append(&claim_row);
-        outer.append(&claim_section);
-        (claim_input, claim_button)
+    let claim = {
+        let pair = super::claim_redeem::RedeemPair::build();
+        outer.append(&pair.section);
+        pair
     };
 
     let widgets = Widgets {
@@ -171,7 +153,7 @@ pub fn build_subscriptions_page() -> (gtk::Box, Rc<dyn Fn()>) {
         mine_placeholder,
         mine_rows: RefCell::new(Vec::new()),
         #[cfg(feature = "payments")]
-        claim_input,
+        claim,
         error_label,
     };
 
@@ -182,20 +164,32 @@ pub fn build_subscriptions_page() -> (gtk::Box, Rc<dyn Fn()>) {
                 rt: client.runtime_handle(),
                 w: widgets,
             });
-            refresh_mine(&ctx);
+            refresh(&ctx);
             #[cfg(feature = "payments")]
             {
-                let ctx = Rc::clone(&ctx);
-                claim_button.connect_clicked(move |_| redeem_claim(&ctx));
+                let ctx2 = Rc::clone(&ctx);
+                ctx.w
+                    .claim
+                    .button
+                    .connect_clicked(move |_| redeem_claim(&ctx2));
             }
             let ctx = Rc::clone(&ctx);
-            Rc::new(move || refresh_mine(&ctx))
+            Rc::new(move || refresh(&ctx))
         }
         // No client (unit test / pre-auth): the page stays at its placeholder.
         None => Rc::new(|| {}),
     };
 
     (outer, refresh)
+}
+
+/// The page's reads, on mount and on every show: the mine list, and the
+/// features courtesy read the redeem block is gated on (so a policy flip
+/// lands on the next visit).
+fn refresh(ctx: &Rc<Ctx>) {
+    refresh_mine(ctx);
+    #[cfg(feature = "payments")]
+    ctx.w.claim.read_gate(&ctx.client);
 }
 
 /// Read the caller's subscriptions (`mine.list`) on the tokio runtime, then
@@ -228,7 +222,11 @@ fn refresh_mine(ctx: &Rc<Ctx>) {
 /// page error label.
 #[cfg(feature = "payments")]
 fn redeem_claim(ctx: &Rc<Ctx>) {
-    let code = ctx.w.claim_input.text().trim().to_string();
+    // The answer the button is painted from, asked again (rule 6).
+    if ctx.w.claim.refuse(&ctx.w.error_label) {
+        return;
+    }
+    let code = ctx.w.claim.input.text().trim().to_string();
     if code.is_empty() {
         return;
     }
@@ -250,7 +248,7 @@ fn redeem_claim(ctx: &Rc<Ctx>) {
         move |res| match res {
             Ok(()) => {
                 clear_error(&ctx_render.w);
-                ctx_render.w.claim_input.set_text("");
+                ctx_render.w.claim.input.set_text("");
                 refresh_mine(&ctx_render);
             }
             Err(msg) => show_error(&ctx_render.w, &msg),
@@ -368,7 +366,18 @@ mod tests {
         crate::testid::run_on_gtk_thread(|| {
             // No registered client → the page stays at its static placeholder, but
             // it must still build with every ui.yaml ID present.
-            let (_page, _refresh) = build_subscriptions_page();
+            let (page, _refresh) = build_subscriptions_page();
+            // No features read has answered: the redeem is shown but blocked
+            // still loading (`ui/README.md` § Offer only what is possible,
+            // rule 5), never live on a guess.
+            #[cfg(feature = "payments")]
+            {
+                let button =
+                    crate::testid::find_by_test_id(&page, ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON)
+                        .expect("the redeem button is built");
+                assert!(button.is_visible() && !button.is_sensitive());
+            }
+            let _ = page;
         });
     }
 }

@@ -138,6 +138,8 @@ fn adapter_label(capability: Capability) -> &'static str {
         Capability::Dns => "dns",
         Capability::Vps => "vps",
         Capability::Registrar => "registrar",
+        // A field kind only — never in `capabilities`, so never asked.
+        Capability::Zone => "zone",
     }
 }
 

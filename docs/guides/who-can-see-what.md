@@ -141,9 +141,16 @@ for visitors to see anything:
 | Public | anyone can read it |
 
 **There is a third switch, in another place, and it is off until you turn it
-on.** Your site is served at your own web address, and that address is opt-in: switch on **Publish my website** in **Settings → Web**. Until it is on, visitors to your address get
-the nest's own placeholder page rather than your site — so if you have published
-a folder and see a "Fauna Nest" page instead of your own, that switch is why.
+on.** Your site is served at your own web address, and that address is opt-in: switch on **Publish my website** in **Settings → Web**. Until it is on, your nest has no
+security certificate for your address, so a visitor's browser warns about it
+(opened with `http://`, it shows a plain "not found" page instead), and past
+the warning is the nest's front page: the member's website your admin chose for
+it, or the built-in info page titled "Fauna nest". Right after you switch it
+on, the warning, or the "not found" page, can stay for a few minutes while
+your nest gets the certificate. So if
+you have published a folder and your address shows a certificate warning, a
+"not found" page or one of those pages instead of your own, check that switch
+first.
 
 You can turn the folder switch on first and make the folder public later; the
 app tells you the site is not visible yet rather than hiding the switch. Two combinations

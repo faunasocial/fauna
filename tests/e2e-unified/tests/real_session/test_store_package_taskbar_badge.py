@@ -3,29 +3,28 @@ own identity puts the unread count on record for `<StorePFN>!FaunaApp`.
 
 The windows home-screen widget is the taskbar badge (`docs/goal/architecture/apps/
 windows.md` § Home-screen widget), keyed on the app's AUMID, so it exists only for a
-process with package identity. Two channels give FaunaApp one
-(`installers/windows.md` § Package identity for FaunaApp.exe): the MSI through the
-sparse identity package — witnessed by `tests/test_home_screen_widget_taskbar_badge.py`,
-which lends a build that identity — and the Store package, a full MSIX whose
-identity is native. This file is the Store leg: the same badge read, with the app
-running inside a Store-shape package registered from the loose layout the real
-packer stages.
+process with package identity, which FaunaApp has as a full MSIX
+(`installers/windows.md` § Package identity for FaunaApp.exe). Two channels ship
+one, from one template and one packer: the direct-download bundle — witnessed by
+`tests/test_home_screen_widget_taskbar_badge.py` — and the Store package. This file
+is the Store leg: the same badge read, with the app running inside a Store package
+registered from the loose layout the real packer stages.
 
-What makes it the Store leg rather than a re-run of the sparse one
-------------------------------------------------------------------
-* **The package is the Store package.** Its manifest is the Store template rendered by
-  `scripts/build-store-package.py`'s own `render_manifest`, and its layout is staged by
-  the packer's own `_stage` — the same two functions a Store build runs — then
-  registered with `Add-AppxPackage -Register` (deployment path 3,
-  `test_store_package_registration.py`'s module docstring: Developer Mode, no admin).
-  The `makeappx` container is out of scope, as it is there.
+What makes it the Store leg
+---------------------------
+* **The package is the Store package.** `helpers/taskbar_badge.py::registered_package`
+  renders the Store template with `scripts/build-store-package.py`'s own
+  `render_manifest` and stages its layout with the packer's own `_stage` — the same
+  two functions a Store build runs — then registers it with `Add-AppxPackage
+  -Register` (deployment path 3, `test_store_package_registration.py`'s module
+  docstring: Developer Mode, no admin). The `makeappx` container is out of scope, as
+  it is there.
 * **The identity is the package's.** A process started directly from a registered
   package's folder has NO identity (measured on Windows 2026-09-28:
   `GetPackageFullName` → `APPMODEL_ERROR_NO_PACKAGE`); the bridge therefore starts
   the app in the package's context (`flaui-bridge/SessionManager.cs::
   StartInPackageContext`), and the test asserts the premise — the running process
-  reports THIS package — before it reads a badge. The exe's embedded `msix` element
-  (the sparse channel's binding) plays no part: the sparse package is not registered.
+  reports THIS package — before it reads a badge.
 * **The AUMID is the Store one**: `<PFN>!FaunaApp`, the Application Id both channel
   manifests share, so the reader is keyed on this package's family name.
 
@@ -35,10 +34,10 @@ The badge moves when a message arrives, and planting one goes through the e2e se
 (the app's TestAgent + the driver), which is compiled out of release artifacts
 (convention 15). So `App/` is the framework-dependent Debug build — which needs the
 Windows App SDK framework in the package graph under identity (the csproj's
-`OnPackageIdentity_NoOp`), declared on the package exactly as the sparse witness's
-lent identity declares it (`helpers/taskbar_badge.py::declare_windows_app_runtime`).
-The sync agent and shell DLL are placeholders: nothing here runs them, and the
-sibling registration test covers them against the real payload.
+`OnPackageIdentity_NoOp`), declared on the package by the helper
+(`taskbar_badge.declare_windows_app_runtime`). The sync agent, the shell DLL and the
+licence files are placeholders: nothing here runs them, and the sibling
+registration test covers them against the real payload.
 
 Real-session category: registering mutates the box's per-user package catalogue.
 Borrow and give back — the package is registered under a test-only identity and
@@ -48,10 +47,8 @@ every read polls the OS's own store for the value it expects, up to a budget.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
-import subprocess
 import sys
 import uuid
 
@@ -69,9 +66,9 @@ pytestmark = [
     pytest.mark.windows,
 ]
 
-# Test-only identity, distinct from the sibling registration test's and from any real
-# build's, so it can neither collide with nor be mistaken for one. Plain DN in the
-# signed namespace — what `-Register` wants.
+# Test-only identity, distinct from the sibling registration test's, the direct
+# leg's and any real build's, so it can neither collide with nor be mistaken for
+# one. Plain DN in the signed namespace — what `-Register` wants.
 TEST_IDENTITY = "FaunaSocialTest.FaunaStoreBadge"
 TEST_PUBLISHER = "CN=Fauna Social (Real Session Test)"
 APP_ID = taskbar_badge.APPLICATION_ID
@@ -80,40 +77,11 @@ _FEED = {"nav": {"stack": [{"view": "feed"}]}}
 _ON_SCREEN = "feed-tab"
 
 
-def _repo_root() -> str:
-    here = os.path.dirname(os.path.abspath(__file__))
-    out = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, check=True, cwd=here,
-    ).stdout.strip()
-    if out.startswith("/"):
-        out = out[1].upper() + ":" + out[2:]
-    return os.path.normpath(out)
-
-
-def _store_packer(repo: str):
-    """`scripts/build-store-package.py`, imported so the test stages with the real
-    `render_manifest` / `_stage` rather than a copy of them."""
-    spec = importlib.util.spec_from_file_location(
-        "build_store_package", os.path.join(repo, "scripts", "build-store-package.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 @pytest.fixture
-def unvirtualized_dir(request):
-    """Scratch the PACKAGED app writes and the test reads.
-
-    The Store package leaves only `%LocalAppData%\\Fauna` unvirtualized, so a packaged
-    process's writes anywhere else under `%LocalAppData%` (pytest's `tmp_path`
-    included) are redirected into the package's private LocalCache and never seen
-    here. The repo tree is outside it — the sibling registration test's convention.
-    """
-    base = os.path.join(_repo_root(), "build", "store-badge",
-                        f"{request.node.name}-{os.getpid()}")
-    shutil.rmtree(base, ignore_errors=True)
-    os.makedirs(base)
+def unvirtualized_dir():
+    """Scratch the PACKAGED app writes and the test reads, outside the `%LocalAppData%`
+    write virtualization (`taskbar_badge.unvirtualized_scratch`)."""
+    base = taskbar_badge.unvirtualized_scratch("store-badge")
     try:
         yield base
     finally:
@@ -124,42 +92,12 @@ def unvirtualized_dir(request):
 def store_package(windows_app_path, unvirtualized_dir):
     """The Store package, staged around the Debug build and registered; yields its
     family name and the exe inside it. Give-back is unconditional."""
-    repo = _repo_root()
-    packer = _store_packer(repo)
-    arch = "arm64" if os.environ.get("PROCESSOR_ARCHITECTURE", "").upper() == "ARM64" else "x64"
-
-    payload = os.path.join(unvirtualized_dir, "payload")
-    shutil.copytree(os.path.dirname(os.path.abspath(str(windows_app_path))),
-                    os.path.join(payload, "App"))
-    for placeholder in ("fauna-sync-agent.exe", "fauna_shell.dll"):
-        with open(os.path.join(payload, placeholder), "wb") as fh:
-            fh.write(b"placeholder: the badge leg never runs it")
-
-    with open(os.path.join(packer.STORE, "AppxManifest.xml.in"), encoding="utf-8") as fh:
-        manifest = packer.render_manifest(
-            fh.read(), TEST_IDENTITY, TEST_PUBLISHER, packer._product_version(), arch)
-    manifest = taskbar_badge.declare_windows_app_runtime(manifest)
-    layout = os.path.join(unvirtualized_dir, "layout")
-    # The Debug build carries the e2e agent by design, so this dev package opts out
-    # of the packer's automation-surface refusal — it is registered, never uploaded.
-    packer._stage(layout, payload, manifest, allow_test_surface=True)
-    shutil.rmtree(payload, ignore_errors=True)
-
-    rc, out, err = taskbar_badge._ps(
-        "$ErrorActionPreference='Stop'; "
-        f"Get-AppxPackage -Name '{TEST_IDENTITY}' | Remove-AppxPackage -ErrorAction SilentlyContinue; "
-        f"Add-AppxPackage -Register '{os.path.join(layout, 'AppxManifest.xml')}'; "
-        f"(Get-AppxPackage -Name '{TEST_IDENTITY}').PackageFamilyName",
-        timeout=600,
-    )
     try:
-        assert rc == 0 and out, (
-            f"Add-AppxPackage -Register of the Store layout failed (rc={rc}):\n{out}\n{err}"
-        )
-        yield {"pfn": out.splitlines()[-1].strip(),
-               "exe": os.path.join(layout, "App", "FaunaApp.exe")}
+        yield taskbar_badge.registered_package(
+            str(windows_app_path), unvirtualized_dir, TEST_IDENTITY,
+            publisher=TEST_PUBLISHER, channel="store")
     finally:
-        taskbar_badge.remove_identity(TEST_IDENTITY)
+        taskbar_badge.remove_package(TEST_IDENTITY)
 
 
 def _total_unread(conv: ConversationsActions) -> int:

@@ -401,16 +401,14 @@ instead the D4 convergence direction (file-sync onto scope families, charter
     adopted) and the uninvited-initiator refusal. The `ceremony_seats` fixture
     is parametrized over tui/linux (2026-08-20, row 334) rather than
     hardcoded to tui, so linux's leg is proven the same way.
-  - **v1 stops at ADMISSION, not at bytes.** The machinery is adopted and the
-    scope lists; content transfer waits on the group serve door, which still
-    checks the folder family only (§ Cross-user shared-set transfer; the group
-    content-kind sealing slice). **That slice is designed (2026-10-29):**
-    [`group-set.md`](group-set.md) § Build design —
-    the group set owns it — path state as `GenerationTip`-sealed entries of
-    the scope, bytes over the share doors under the scope id, the feed on
-    the share serve set, a location bound under the scope through the
-    agent; its plane half is built, the feed and the seat are not — its
-    status line there.
+  - **The ceremony itself stops at ADMISSION; the bytes are the group set's, and
+    they are built.** The machinery is adopted and the scope lists; content
+    transfer is the group set's ([`group-set.md`](group-set.md) § Build
+    design — path state as `GenerationTip`-sealed entries of the scope,
+    bytes over the share doors under the scope id, the feed on the share
+    serve set, a location bound under the scope through the agent), built
+    on tui, linux, windows and macos with the two-seat witness green on all
+    four — its status line there.
   - ⛔ **And it does not run yet at all** — the dial has no addressing
     information. See the next bullet.
 

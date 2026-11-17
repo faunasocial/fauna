@@ -716,6 +716,13 @@ pages:
       - refused-change-item        # view, indexed — one refused change
       - refused-change-title       # text, indexed — what was tried, to which event
       - refused-change-author      # text, indexed — the ATTESTED sender (never read off the .ics)
+      # The calendar list's empty state (declared 2026-11-16, events.md
+      # § Errors & edge cases → No calendar to hold an event, ruling 3).
+      # Present only while no calendar can hold an event, which a working
+      # account never rests in — so optional. The step id is present only
+      # when the reason names a step this person takes on another page.
+      - calendar-list-empty-state  # text — why no event can be made yet
+      - calendar-list-empty-state-step # button — one-press jump to the step's place
       - refused-change-reason      # text, indexed — why it was refused
       - refused-change-time        # text, indexed — when it was last attempted
       - refused-change-dismiss     # button, indexed — the row's only control
@@ -4005,8 +4012,9 @@ pages:
     elements:
       - kids-ineligible-message         # text — explains the app is for supervised accounts
       - sign-out-button                 # button — the ordinary sign-out; returns to onboarding
-      - error-message                   # text — a failed sign-out
+      - error-message                   # text — a failed or refused sign-out; while unknown, a failed eligibility read
     notes:
+      states: "Unknown (account-age-band.md § Kids-app eligibility while it is unknown): no successful read yet and no supervised snapshot — the frame WITHOUT kids-ineligible-message, sign-out-button live, error-message once a read has failed. Never the kids shell on a guess."
       android: "Kids build type only (BuildConfig.KIDS); replaces the tab shell."
       ios: "Kids target only; on android's approved ids."
 
@@ -4575,6 +4583,14 @@ onboarding:
       # case below so recovery never falls through to Done/LoggedIn.
       - { on: "click handle-entry-continue-button",
           condition: "outcome.already-on-nest && recovery-intent", to: "nest_recovery" }
+      # The set-up path lands on provider_choice (onboarding-provisioning.md
+      # § 3d) on an app that renders it (the machine's
+      # set_renders_provider_choice); the dns_config rows below are the path of
+      # an app whose trickle-down has not landed, removed with page dns_config.
+      - { on: "click handle-entry-continue-button",
+          condition: "outcome.domain-available && renders-provider-choice", to: "provider_choice" }
+      - { on: "click handle-entry-continue-button",
+          condition: "outcome.registered-no-nest && checkbox-on && renders-provider-choice", to: "provider_choice" }
       - { on: "click handle-entry-continue-button",
           condition: "outcome.domain-available",                  to: "dns_config" }
       - { on: "click handle-entry-continue-button",
@@ -4587,6 +4603,56 @@ onboarding:
           condition: "outcome.unregistered-unclaimed-nest",       to: "claim_code" }
       - { on: "click handle-entry-back-button", condition: "came-from-create", to: "identity_created" }
       - { on: "click handle-entry-back-button", condition: "came-from-import", to: "identity_import" }
+
+  # -------------------------------------------------------------------------
+  # Stage 4d: Choose providers (onboarding-provisioning.md § 3d; element IDs
+  # answered by the owner 2026-11-16, no objection to the list)
+  # -------------------------------------------------------------------------
+
+  provider_choice:
+    # One page between the handle check and nest_provisioning: the goals of
+    # the set-up at the top (registration only while a domain is bought, DNS,
+    # a server), each covered or open and by whom; below, one row per
+    # providers.yaml entry plus the manual row, each opening its own dialog
+    # (the sign-in pop-up) whose Connect runs every check of the provider's
+    # capabilities. Every rule — coverage, the assignment, the Continue
+    # predicate and its status line — is OnboardingMachine's (§ 3d *Where
+    # logic lives*).
+    elements:
+      - provider-goal-row             # keyed [domain|dns|vps]; state covered/open, the covering provider, on domain the price; domain only while buying
+      - provider-row                  # keyed [<provider-id>|manual]; state connected/available, capability labels as text; an un-id'd cannot-cover reason line beneath
+      - provider-choice-status-text   # what is still open while Continue is dead (rule 5)
+      - provider-choice-back-button
+      - provider-choice-continue-button
+    optional_elements:
+      - provider-goal-select          # keyed [domain|dns|vps]; only when more than one connected provider can cover the goal
+      - dns-buy-domain-checkbox       # moved from dns_config; only when the handle check found the domain unregistered
+      - dns-no-provider-message       # moved from dns_config; § 4's rule
+      - provider-dialog               # only while a provider row is open
+      - provider-dialog-link
+      - provider-dialog-open-browser-button
+      - provider-dialog-help-text
+      - provider-credentials-form     # fields provider-credentials-form-{field.id}, generated from providers.yaml
+      - provider-connect-button
+      - provider-disconnect-button    # only on a connected provider
+      - provider-dialog-status-text
+      - provider-dialog-close-button
+      - dns-registrar-notes-text      # moved from dns_config, inside provider-dialog
+      - dns-contact-form              # moved from dns_config, inside provider-dialog
+      - dns-contact-first-name-input
+      - dns-contact-last-name-input
+      - dns-contact-email-input
+      - dns-contact-phone-input
+      - dns-contact-address1-input
+      - dns-contact-city-input
+      - dns-contact-state-input
+      - dns-contact-postal-code-input
+      - dns-contact-country-input
+    generated_from: i18n/providers.yaml
+    errors: [error-message]
+    transitions:
+      - { on: "click provider-choice-continue-button", success: true, to: "nest_provisioning" }
+      - { on: "click provider-choice-back-button", to: "handle_entry" }
 
   # -------------------------------------------------------------------------
   # Stage 5: Configure DNS
@@ -4691,6 +4757,17 @@ onboarding:
       - provisioning-ssh-door-command # only after a successful door run, on the device that ran it (owner-approved 2026-10-20 under rule A; tui first)
     optional_elements:
       - provisioning-bom-domain-line # only when buying a new domain (dns_config's buy-domain path)
+      # The choices region (onboarding-provisioning.md § 3d *The choices on the
+      # setting-things-up page*): between the price summary and the start
+      # button, only on a run entered from provider_choice that has not
+      # started (or failed / was cancelled). Every control has a default.
+      - vps-location-picker
+      - vps-server-type-radio
+      - vps-config-mail-mode-toggle
+      - vps-config-update-channel-row
+      - vps-config-ssh-door-toggle
+      - vps-config-ssh-door-warning   # only while the door is on
+      - dns-price-confirm-checkbox    # moved from dns_config: under the domain line when the run registers a domain; gates provisioning-start-button
     platform_elements:
       # The apps with no ~/.ssh hand the door key over once (onboarding-provisioning.md § 5).
       ios: [provisioning-ssh-door-save-key-button]
@@ -4707,6 +4784,7 @@ onboarding:
       # (onboarding.md § 6 *Provisioning = build + claim*, ratified 2026-08-29.)
       - { on: "click provisioning-continue-button", condition: "succeeded-buy", to: "nat_mode_choice" }
       - { on: "click provisioning-continue-button", success: true, condition: "succeeded-no-dns", to: "dns_post_instructions" }
+      - { on: "click provisioning-back-button", condition: "from-provider-choice", to: "provider_choice" }
       - { on: "click provisioning-back-button", to: "vps_config" }
 
   dns_post_instructions:
@@ -5131,7 +5209,7 @@ components:
       linux: "Sidebar icon+label pair mirroring connection_status_icon/connection_status_label, plus a dim version/uptime subtitle line (apps/fauna-linux/src/app.rs) — built 2026-07-20."
       tui: "Sidebar status header, second line under connection-status, with the version/uptime subtitle dim beneath it (apps/fauna-tui/src/ui.rs::render_sidebar) — built 2026-07-23, and on windows too since 2026-07-24 (the shared client resolves the per-SID named pipe through fauna_ipc::endpoint)."
       windows: "The canonical, AutomationId-bearing location is the always-visible sidebar per this component (matches linux/macOS). StatusPage's existing VersionText/UptimeText/SyncDot/SyncStatusText fields have no ui.yaml/AutomationId presence and read the wrong source today (DirectNestClient.GetServiceStatusAsync(), a nest-reachability proxy, not the local agent) — repoint them at the real GetServiceStatus pipe op as part of this work (StatusPage's own dedicated IDs are a separate, optional follow-up, not required for this rider)."
-      macos: "No existing competing concept to reconcile — new."
+      macos: "Top of the sidebar column under connection-status (both left-aligned, one block), outside SidebarView so the Settings/Admin rail swap keeps them, with the dim version/uptime line beneath (apps/fauna-apple/Fauna-macOS/Views/MainWindow/ContentView.swift, statusIndicators); with the sidebar collapsed both move to the top of the detail column. Real layout, never a safe-area inset over the split view."
 
   markdown-toolbar:
     description: "Toolbar with text formatting buttons (bold, italic, code, link; heading/list optional)"
@@ -8116,6 +8194,55 @@ elements:
     type: text
   handle-control-checkbox:
     description: "Hidden checkbox: 'I control this domain'. Visible only on RegisteredNoNest."
+    type: button
+  # Choose providers: provider_choice (onboarding-provisioning.md § 3d)
+  provider-goal-row:
+    description: "Keyed goal line at the top of provider_choice — [domain] (only while a domain is bought; states the covering registrar's price, first year and renewal), [dns], [vps]. State covered/open and the covering provider's name, from OnboardingMachine::goal_rows()."
+    type: text
+    indexed: true
+  provider-goal-select:
+    description: "Keyed per goal [domain|dns|vps]: the choice among the connected providers that can cover the goal, shown only when there is more than one (on dns the manual row is one of them). Forwards to select_goal_cover()."
+    type: button
+    indexed: true
+  provider-row:
+    description: "Keyed provider row on provider_choice — one per providers.yaml entry plus [manual] ('I will set DNS up later', DNS only). State connected/available; its text names the capabilities (register domains, run DNS, rent servers). Pressing it opens provider-dialog; an un-id'd line beneath says why it cannot cover a goal."
+    type: button
+    indexed: true
+  provider-dialog:
+    description: "The provider's own dialog (the sign-in pop-up) on provider_choice, present only while a provider row is open: link, open-in-browser, help, credential fields (DNS and server always, registrar while buying), Connect / Disconnect, the registrar note or contact form, its status line and Close."
+    type: view
+  provider-dialog-link:
+    description: "Link inside provider-dialog to the provider's sign-up page."
+    type: button
+  provider-dialog-open-browser-button:
+    description: "Button inside provider-dialog that opens the provider's sign-up page in the system browser."
+    type: button
+  provider-dialog-help-text:
+    description: "The provider's help text inside provider-dialog."
+    type: text
+  provider-credentials-form:
+    description: "Container of the provider's credential fields inside provider-dialog; each field is provider-credentials-form-{field.id}, a hosted-auth field a sign-in button. From OnboardingMachine::visible_provider_fields()."
+    type: view
+  provider-connect-button:
+    description: "Connect inside provider-dialog: runs every check of the provider's capabilities with the one credential set (connect_provider). Enabled by can_connect_provider()."
+    type: button
+  provider-disconnect-button:
+    description: "Disconnect inside provider-dialog, on a connected provider: drops the credential from the wizard and uncovers any goal it covered."
+    type: button
+  provider-dialog-status-text:
+    description: "The dialog's status line: connected, connecting, or the provider's own error from a failed check."
+    type: text
+  provider-dialog-close-button:
+    description: "Closes provider-dialog, back to the provider list."
+    type: button
+  provider-choice-status-text:
+    description: "Status line on provider_choice naming what is still open while Continue is disabled (providers_continue_blocked_reason())."
+    type: text
+  provider-choice-back-button:
+    description: "Back on provider_choice, to handle_entry."
+    type: button
+  provider-choice-continue-button:
+    description: "Continue on provider_choice, straight to nest_provisioning (continue_from_providers). Enabled when every goal is covered and the covering registrar has its contact."
     type: button
   # Stage 5: dns_config
   dns-buy-domain-checkbox:
@@ -11705,6 +11832,14 @@ elements:
     description: "Per-calendar show/hide display filter (beside calendar-item)"
     type: toggle
     indexed: true
+  # Declared 2026-11-16 (rule A, an additive id the goal doc designs:
+  # events.md § Errors & edge cases → No calendar to hold an event, ruling 3).
+  calendar-list-empty-state:
+    description: "The calendar list's empty state while no calendar can hold an event: the reason fauna_client_caldav::event_create_possibility answers (no key / provision failed / not served here). Never painted while the calendar read is still unresolved (the page's loading state) and never the bare 'No calendars yet.'"
+    type: text
+  calendar-list-empty-state-step:
+    description: "Beside calendar-list-empty-state: the one-press jump to the place the reason's step is taken (fauna_client_caldav::event_create_step — Settings → Mail & Calendar, or the admin Calendar page). Absent when the reason names no such step"
+    type: button
   # Calendar-level .ics import/export (user-approved 2026-09-25, UI-consistency
   # rule A; placement confirmed calendar-level, beside the calendar list, shown
   # while a calendar is selected). Behavior: goal/ui/events.md § Import / Export.

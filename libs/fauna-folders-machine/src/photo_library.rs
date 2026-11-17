@@ -39,10 +39,10 @@ use std::sync::Arc;
 
 use fauna_core::folder_keys::FolderRef;
 
-use crate::machine::FolderWizardMachine;
+use crate::headless::{HeadlessCreate, create_headless};
 use crate::nest_api::{FolderApiError, FolderNestApi, FolderRow};
 use crate::observer::FolderWizardObserver;
-use crate::state::{DeviceOption, FolderWizardStep, PHOTO_LIBRARY_RETENTION};
+use crate::state::{DeviceOption, PHOTO_LIBRARY_RETENTION};
 
 /// The wizard-preset name for a fresh install's photo-library set. User-visible
 /// (it renders as an ordinary set on the Folders and Media pages).
@@ -144,43 +144,18 @@ pub async fn ensure_photo_library_set(
     };
 
     // The ordinary wizard, driven headlessly — the same machine, the same
-    // `fauna.folders.create` + `places.set`, just with no sheet on screen.
-    let device_count = devices.len();
-    let wizard = FolderWizardMachine::new(observer, devices, Arc::clone(&api));
-    wizard.set_name(name.clone());
-    wizard.set_retention(Some(PHOTO_LIBRARY_RETENTION));
-    wizard.next(); // Name -> Devices
-    let archive = fauna_protocol::folders::PlaceFlags::archive_place();
-    for i in 0..device_count {
-        let i = i as u32;
-        wizard.toggle_device_member(i);
-        wizard.set_device_flags(
-            i,
-            archive.originates,
-            archive.accepts,
-            archive.applies_deletes,
-        );
-    }
-    wizard.next(); // Devices -> Review
-
-    // `submit()` is non-throwing: failure lands on the review snapshot.
-    if wizard.submit().await != FolderWizardStep::Done {
-        let review = wizard.review_snapshot();
-        return Err(FolderApiError::Transient {
-            detail: review
-                .error
-                .map(|e| e.log_line())
-                .unwrap_or_else(|| format!("could not create the '{name}' folder")),
-        });
-    }
-
-    // The created row's id comes from the list, not the create reply.
-    let created = api.list_folder_rows().await?;
-    created
-        .iter()
-        .find(|row| row.name == name)
-        .map(PhotoLibrarySet::of_row)
-        .ok_or_else(|| FolderApiError::Transient {
-            detail: format!("the '{name}' folder was created but the nest does not list it"),
-        })
+    // `fauna.folders.create` + `places.set`, just with no sheet on screen; the
+    // devices sit at the archive point (`ui/folders.md` § Photo backup).
+    let created = create_headless(
+        api,
+        observer,
+        HeadlessCreate {
+            name,
+            retention: Some(PHOTO_LIBRARY_RETENTION),
+            devices,
+            flags: fauna_protocol::folders::PlaceFlags::archive_place(),
+        },
+    )
+    .await?;
+    Ok(PhotoLibrarySet::of_row(&created))
 }

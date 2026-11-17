@@ -364,7 +364,6 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
     let nat_mode = nat.map(|s| s.selected_mode);
     let public = nat_mode == Some(NodeMode::Public);
     let private = nat_mode == Some(NodeMode::Private);
-    let nat_submit_enabled = nat.map(|s| s.submit_enabled).unwrap_or(true);
     let nat_status = nat
         .map(|s| localized(&s.message))
         .unwrap_or_else(|| t::nest_page::NAT_MODE_LOADING.to_string());
@@ -423,7 +422,8 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
             Gesture::Admin(Action::SaveServingPort),
         ),
         // NAT mode — a one-of-N `Radio` pair (vocabulary rule 1), a save
-        // (enabled per the machine's `submit_enabled`), and the machine-owned
+        // (live per the machine's `save_possibility`, which the shell's read
+        // gate declares — `super::action_possibility`), and the machine-owned
         // status line. The radios' `select` is local (no network); save signs
         // the commit. Both unmarked until the mode has actually loaded.
         Element::radio_gesture(
@@ -443,7 +443,7 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
         Element::gesture_button(
             ids::ADMIN_NEST_NAT_MODE_SAVE_BUTTON,
             t::nest_page::NAT_MODE_SAVE,
-            nat_submit_enabled,
+            true,
             Gesture::Admin(Action::SaveNatMode),
         ),
         Element::label(ids::ADMIN_NEST_NAT_MODE_STATUS, nat_status),

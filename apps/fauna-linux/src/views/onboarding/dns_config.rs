@@ -408,7 +408,20 @@ fn build_provider_section(parent: &gtk::Box, m: Arc<OnboardingMachine>) -> Provi
 
     // Contact form: built ONCE; refresh closure handles visibility +
     // pre-fill from cfg.contact each tick. ui.yaml `optional_elements`.
-    let (contact_form, contact_refresh) = build_contact_form(m.clone());
+    let (contact_form, contact_refresh) = build_contact_form(
+        {
+            let m = m.clone();
+            Rc::new(move |c| m.set_contact(c))
+        },
+        {
+            let m = m.clone();
+            Rc::new(move || m.should_show_contact_form())
+        },
+        {
+            let m = m.clone();
+            Rc::new(move || m.dns_config().contact)
+        },
+    );
     parent.append(&contact_form);
 
     ProviderSection {
@@ -475,7 +488,7 @@ fn apply_provider_change(s: &ProviderSection, pid: Option<&str>, m: Arc<Onboardi
         &s.form,
         &m.visible_dns_fields(),
         m.clone(),
-        "dns",
+        &super::generic_provider_form::CredTarget::Dns,
     );
     *s.hosted_auth_buttons.borrow_mut() = handles;
     // notes / price / price_confirm / contact_form visibility is decided by
@@ -534,26 +547,37 @@ fn update_provider_section_state(s: &ProviderSection, m: Arc<OnboardingMachine>)
     super::generic_provider_form::refresh_hosted_auth_buttons(
         &s.hosted_auth_buttons.borrow(),
         &m,
-        "dns",
+        &super::generic_provider_form::CredTarget::Dns,
     );
 
     (s.contact_refresh)();
 }
 
+/// The contact form's three hooks into the machine: write the form's
+/// snapshot, whether the form shows, and the contact to pre-fill from.
+type ContactPush = Rc<dyn Fn(fauna_provisioning::registrar::ContactInfo)>;
+type ContactVisible = Rc<dyn Fn() -> bool>;
+type ContactCurrent = Rc<dyn Fn() -> Option<fauna_provisioning::registrar::ContactInfo>>;
+
 /// Build the WHOIS contact form. Returns the container plus a per-tick
-/// refresh closure that updates visibility and pre-fills entries from
-/// `cfg.contact` when set by `verify_dns()` via `fetch_default_contact()`.
+/// refresh closure that updates visibility and pre-fills entries from the
+/// machine's contact (`dns_config`: `cfg.contact`, set by `verify_dns()` via
+/// `fetch_default_contact()`; a provider dialog on the choose-providers page:
+/// `provider_contact(id)`).
 ///
-/// Visibility: the caller (per-provider rebuild) sets `set_visible(false)`
-/// up front; the refresh closure flips it true iff the provider requires
-/// per-registration contact (`registrar_requires_contact == Some(true)`)
-/// AND the current `provider_status()` is `UnregisteredBuyable`.
+/// One form, two homes (`onboarding-provisioning.md` § 3d: the form's rules
+/// unchanged, only its place): `visible` is the machine's predicate —
+/// `should_show_contact_form()` here, `provider_shows_contact_form(id)` in the
+/// dialog — and `push` its setter, so the form never decides either itself.
 ///
 /// On every entry edit the form snapshots all 9 fields into a fresh
-/// `ContactInfo` and calls `m.set_contact(c)` so the machine state stays
-/// in sync — `can_continue_dns` reads `dns.contact.is_some()` and gates
-/// the Continue button on it for `requires_contact` registrars.
-fn build_contact_form(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
+/// `ContactInfo` and hands it to `push` so the machine state stays in sync —
+/// the Continue predicates read the stored contact.
+pub(super) fn build_contact_form(
+    push: ContactPush,
+    visible: ContactVisible,
+    current: ContactCurrent,
+) -> (gtk::Box, Rc<dyn Fn()>) {
     use fauna_provisioning::registrar::ContactInfo;
 
     let container = gtk::Box::builder()
@@ -632,7 +656,7 @@ fn build_contact_form(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     // (no debounce; GTK Entry changed is cheap and the machine mutate is a
     // single Arc<RwLock> write).
     let snapshot_and_push = {
-        let m = m.clone();
+        let push = push.clone();
         let entries = (
             first_name.clone(),
             last_name.clone(),
@@ -656,7 +680,7 @@ fn build_contact_form(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
                 postal_code: entries.7.text().to_string(),
                 country: entries.8.text().to_string(),
             };
-            m.set_contact(c);
+            push(c);
         })
     };
 
@@ -696,18 +720,17 @@ fn build_contact_form(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
             postal,
             country,
         );
-        let m = m.clone();
+        let (visible, current) = (visible.clone(), current.clone());
         let last_prefilled = last_prefilled.clone();
         move || {
-            let visible = m.should_show_contact_form();
-            container.set_visible(visible);
+            let shown = visible();
+            container.set_visible(shown);
 
-            if !visible {
+            if !shown {
                 return;
             }
 
-            let cfg = m.dns_config();
-            if let Some(c) = cfg.contact.as_ref() {
+            if let Some(c) = current().as_ref() {
                 let prev = last_prefilled.borrow().clone();
                 if prev.as_ref() != Some(c) {
                     entries.0.set_text(&c.first_name);

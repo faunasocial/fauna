@@ -23,7 +23,11 @@ import com.fauna.app.core.UndenyDecide
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.stringResourceFmt
@@ -40,6 +44,9 @@ import com.fauna.ffi.FfiReachPolicy
 import com.fauna.ffi.FfiScreenTimePolicy
 import com.fauna.ffi.ageBandLine
 import com.fauna.ffi.contentNoticeLine
+import com.fauna.ffi.familyContactAddPossibility
+import com.fauna.ffi.familyPolicySavePossibility
+import com.fauna.ffi.familyTransferPossibility
 import com.fauna.ffi.feedSourcesLabel
 import com.fauna.ffi.feedSourcesOptions
 import com.fauna.ffi.formatTimeOfDay
@@ -50,7 +57,6 @@ import com.fauna.ffi.unknownPeerDmLabel
 import com.fauna.ffi.unknownPeerDmOptions
 import com.fauna.ffi.unknownSenderLabel
 import com.fauna.ffi.unknownSenderOptions
-import com.fauna.ffi.validateScreenTime
 import com.fauna.ffi.usageTodayLine
 import social.fauna.generated.Ids
 
@@ -325,8 +331,13 @@ private fun GuardianSection(
             FeatureLimitsGuardianSection(authoring = featureAuthoring, editor = featureEditor)
             DeviceMarkSection(ward = selectedWard, onMarkDevice = onMarkDevice)
             BlockedPeersSection(ward = selectedWard, onAllow = onAllowBlockedPeer)
-            ContactAddRow(supervisedActorId = selectedWard.actorId, onAddContact = onAddContact)
-            TransferSection(ward = selectedWard, onProposeTransfer = onProposeTransfer, onCancelTransfer = onCancelTransfer)
+            ContactAddRow(supervisedActorId = selectedWard.actorId, onAddContact = onAddContact, onRefuse = onSaveError)
+            TransferSection(
+                ward = selectedWard,
+                onProposeTransfer = onProposeTransfer,
+                onCancelTransfer = onCancelTransfer,
+                onRefuse = onSaveError,
+            )
             GraduateSection(ward = selectedWard, onGraduate = onGraduate)
         }
 
@@ -609,24 +620,39 @@ private fun PolicyEditor(
         )
         // A policy the nest enforces is written online
         // (`account-offline-mutation.md` § The offline-mutation contract).
-        val saveGate = faunaGate("fauna.family.policy.update")
+        // The draft half is the shared `policy_save_possibility` over the three
+        // screen-time cells (family-safety.md § Errors & edge cases; README §
+        // Offer only what is possible, rule 4): those inputs are the one place
+        // a guardian can type something the policy cannot hold, so a half-set
+        // window, start==end or a non-numeric budget disables Save with the
+        // shared reason, and a press asks the same predicate first and refuses
+        // with that reason on `error-message`. The page's predicate handed to
+        // the gate is the draft's, so the offline reason shows only when the
+        // outage is what closed an otherwise-valid save.
+        val context = LocalContext.current
+        val policyDraft = askForm {
+            familyPolicySavePossibility(screenWindowStart, screenWindowEnd, screenDailyMinutes)
+        }
+        val saveGate = faunaGate("fauna.family.policy.update", enabled = policyDraft.isPossible)
+        val saveSubmit = faunaFormGate(policyDraft, saveGate)
         Button(
             onClick = {
-                // Fallible ONLY because of screen time: the three text inputs
-                // are the one place a guardian can type something the policy
-                // cannot hold. The per-field parse ([parseTimeOfDay] /
-                // [parseDailyMinutes]) and then the cross-field rules
-                // ([validateScreenTime]: bounds come in pairs, start==end is
-                // ambiguous) run through the SAME shared code the nest runs at
-                // `policy.update`, so a save that would be refused never leaves
-                // the client and the guardian sees why locally — mirrors
-                // linux's `editor_policy`.
+                val asked = askForm {
+                    familyPolicySavePossibility(screenWindowStart, screenWindowEnd, screenDailyMinutes)
+                }
+                formRefusal(context, asked)?.let { refusal ->
+                    refusal.reason?.let(onSaveError)
+                    return@Button
+                }
+                // Parsed by the SAME shared code the nest runs at
+                // `policy.update` ([parseTimeOfDay] / [parseDailyMinutes]); the
+                // predicate above has already said every cell parses.
                 val screenTime = try {
                     FfiScreenTimePolicy(
                         windowStart = parseTimeOfDay(screenWindowStart),
                         windowEnd = parseTimeOfDay(screenWindowEnd),
                         dailyMinutes = parseDailyMinutes(screenDailyMinutes),
-                    ).also { validateScreenTime(it) }
+                    )
                 } catch (e: Exception) {
                     onSaveError(e.message ?: "invalid screen-time input")
                     return@Button
@@ -661,10 +687,10 @@ private fun PolicyEditor(
                     ),
                 )
             },
-            enabled = saveGate.enabled,
+            enabled = saveSubmit.enabled,
             modifier = Modifier.testTag(Ids.FAMILY_POLICY_SAVE_BUTTON),
         ) { Text(stringResource(R.string.family_policy_save_button)) }
-        DisabledControlReasonText(saveGate.reason)
+        DisabledControlReasonText(saveSubmit.reason)
     }
 }
 
@@ -904,39 +930,46 @@ private fun PolicySelectDropdown(
     }
 }
 
+/**
+ * `family-contact-add-button`, painted from the shared `contact_add_possibility`
+ * (family-safety.md § Errors & edge cases; README § Offer only what is
+ * possible, rule 4): a blank or non-hex box disables it with the shared reason
+ * beside it, and a press asks the same predicate first and refuses with that
+ * reason on `error-message` ([onRefuse]) — never a silent no-op, never an
+ * app-local hex check.
+ */
 @Composable
-private fun ContactAddRow(supervisedActorId: ByteArray, onAddContact: (ByteArray, ByteArray) -> Unit) {
+private fun ContactAddRow(
+    supervisedActorId: ByteArray,
+    onAddContact: (ByteArray, ByteArray) -> Unit,
+    onRefuse: (String) -> Unit,
+) {
+    val context = LocalContext.current
     var input by remember { mutableStateOf("") }
-    var invalid by remember { mutableStateOf(false) }
+    val submit = faunaFormGate(askForm { familyContactAddPossibility(input) })
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             value = input,
-            onValueChange = { input = it; invalid = false },
+            onValueChange = { input = it },
             singleLine = true,
             label = { Text(stringResource(R.string.family_contact_add_placeholder)) },
-            isError = invalid,
             modifier = Modifier.weight(1f).testTag(Ids.FAMILY_CONTACT_ADD_INPUT),
         )
         Button(
             onClick = {
-                val bytes = runCatching { HexUtil.hexToBytes(input) }.getOrNull()
-                if (bytes == null) {
-                    invalid = true
-                } else {
-                    onAddContact(supervisedActorId, bytes)
-                    input = ""
+                formRefusal(context, askForm { familyContactAddPossibility(input) })?.let { refusal ->
+                    refusal.reason?.let(onRefuse)
+                    return@Button
                 }
+                val bytes = runCatching { HexUtil.hexToBytes(input.trim()) }.getOrNull() ?: return@Button
+                onAddContact(supervisedActorId, bytes)
+                input = ""
             },
+            enabled = submit.enabled,
             modifier = Modifier.testTag(Ids.FAMILY_CONTACT_ADD_BUTTON),
         ) { Text(stringResource(R.string.family_contact_add_button)) }
     }
-    if (invalid) {
-        Text(
-            stringResource(R.string.family_contact_add_invalid_actor_id),
-            color = MaterialTheme.colorScheme.error,
-            style = MaterialTheme.typography.bodySmall,
-        )
-    }
+    DisabledControlReasonText(submit.reason)
 }
 
 /**
@@ -950,7 +983,9 @@ private fun TransferSection(
     ward: FfiFamilyWardInfo,
     onProposeTransfer: (ByteArray, ByteArray) -> Unit,
     onCancelTransfer: (ByteArray) -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     val pending = ward.pendingTransfer
     if (pending != null) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -971,32 +1006,37 @@ private fun TransferSection(
         }
     } else {
         var input by remember(HexUtil.bytesToHex(ward.actorId)) { mutableStateOf("") }
-        var invalid by remember { mutableStateOf(false) }
         // The commit gates, not the buffer: the guardian's hex id can be typed
-        // and its validity flagged with no nest — only the proposal itself
-        // needs one. This control carries NO predicate of its own (validity is
-        // checked in the click handler, which is why a bad hex sets `invalid`
-        // rather than grewing the button), so the verdict is its only author.
-        val proposeGate = faunaGate("fauna.family.transfer")
+        // with no nest — only the proposal itself needs one. The draft half is
+        // the shared `transfer_possibility` (its OWN reasons, never the
+        // contact-add words); the page's predicate handed to the gate is the
+        // draft's, so the offline reason shows only when the outage is what
+        // closed an otherwise-valid proposal.
+        val transferDraft = askForm { familyTransferPossibility(input) }
+        val proposeGate = faunaGate("fauna.family.transfer", enabled = transferDraft.isPossible)
+        val proposeSubmit = faunaFormGate(transferDraft, proposeGate)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = input,
-                onValueChange = { input = it; invalid = false },
+                onValueChange = { input = it },
                 singleLine = true,
                 label = { Text(stringResource(R.string.family_transfer_placeholder)) },
-                isError = invalid,
                 modifier = Modifier.weight(1f).testTag(Ids.FAMILY_TRANSFER_INPUT),
             )
             Button(
                 onClick = {
-                    val bytes = runCatching { HexUtil.hexToBytes(input) }.getOrNull()
-                    if (bytes == null) invalid = true else onProposeTransfer(ward.actorId, bytes)
+                    formRefusal(context, askForm { familyTransferPossibility(input) })?.let { refusal ->
+                        refusal.reason?.let(onRefuse)
+                        return@Button
+                    }
+                    val bytes = runCatching { HexUtil.hexToBytes(input.trim()) }.getOrNull() ?: return@Button
+                    onProposeTransfer(ward.actorId, bytes)
                 },
-                enabled = proposeGate.enabled,
+                enabled = proposeSubmit.enabled,
                 modifier = Modifier.testTag(Ids.FAMILY_TRANSFER_BUTTON),
             ) { Text(stringResource(R.string.family_transfer_button)) }
         }
-        DisabledControlReasonText(proposeGate.reason)
+        DisabledControlReasonText(proposeSubmit.reason)
     }
 }
 

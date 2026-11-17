@@ -5,14 +5,15 @@
 // The *verdict* is not tested here and must never be re-derived in TypeScript:
 // `fauna_protocol::offline_class::affordance` owns the three rulings (only
 // class 3 desensitizes; an unregistered kind stays available; only the known
-// offline words count as offline) and is pinned Rust-side. `fakeAffordance`
+// offline words count as offline) and is pinned Rust-side. `fakePossibility`
 // below stands in for it so these tests exercise the part that IS web's own —
 // how a reactive tree composes that verdict with the call site's own predicate,
 // and what happens to the reason text — without loading wasm/`$app/paths`
 // (see `offline-gate.ts`'s doc comment on why the deps are injected).
 
 import { makeOfflineGate } from './offline-gate.ts';
-import type { Affordance, GateableNode } from './offline-gate.ts';
+import type { GateableNode } from './offline-gate.ts';
+import type { Possibility } from './possibility.ts';
 
 function eq<T>(actual: T, expected: T, msg: string) {
   if (actual !== expected) {
@@ -38,13 +39,13 @@ function node(
   };
 }
 
-/** Stands in for `fauna_protocol::offline_class::affordance` over wasm: one
- *  online-only kind, everything else available. */
-function fakeAffordance(kind: string, state: string): Affordance {
+/** Stands in for `fauna_protocol::offline_class::affordance(..).possibility()`
+ *  over wasm: one online-only kind, everything else possible. */
+function fakePossibility(kind: string, state: string): Possibility {
   if (kind === 'fauna.pair.add' && state !== 'connected') {
-    return { available: false, reason: { key: 'common.needs_nest' } };
+    return { state: 'blocked', reason: { key: 'common.needs_nest' } };
   }
-  return { available: true };
+  return { state: 'possible' };
 }
 
 /** A hand-driven stand-in for `connectionStatus.subscribe`: returns a setter so
@@ -63,7 +64,7 @@ const NEEDS_NEST = 'Needs a connection to your nest';
 
 Deno.test('an online-only control desensitizes with no nest, and says why on itself', () => {
   const state = fakeState('disconnected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node();
   gate(btn, { kind: 'fauna.pair.add' });
   eq(btn.disabled, true, 'online-only control with no nest');
@@ -72,7 +73,7 @@ Deno.test('an online-only control desensitizes with no nest, and says why on its
 
 Deno.test('the same control is live while the nest IS reachable', () => {
   const state = fakeState('connected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node();
   gate(btn, { kind: 'fauna.pair.add' });
   eq(btn.disabled, false, 'gating a connected control would be the gate over-claiming');
@@ -83,7 +84,7 @@ Deno.test('an offline-capable sibling stays live with no nest', () => {
   // The direction a blanket disable fails. Classes 1 and 2 are precisely what
   // works without a nest; greying them strands the user.
   const state = fakeState('disconnected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node();
   gate(btn, { kind: 'fauna.account.state.put' });
   eq(btn.disabled, false, 'an offline-safe kind must not desensitize');
@@ -91,7 +92,7 @@ Deno.test('an offline-capable sibling stays live with no nest', () => {
 
 Deno.test('a control issuing no wire kind at all is never gated', () => {
   const state = fakeState('disconnected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node();
   gate(btn, { kind: null });
   eq(btn.disabled, false, 'pure local UI (a cancel button) needs no nest');
@@ -104,7 +105,7 @@ Deno.test('binding the action stamps GET /registry\'s declared-marker, even for 
   // attribute, not the tag, so a plain unbound <button> stays distinguishable
   // from one this action was actually applied to.
   const state = fakeState('disconnected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node();
   eq(btn.attrs['data-offline-gate-declared'], undefined, 'unbound — no marker yet');
   gate(btn, { kind: null });
@@ -113,7 +114,7 @@ Deno.test('binding the action stamps GET /registry\'s declared-marker, even for 
 
 Deno.test("the call site's own predicate still disables, and the gate never overrides it", () => {
   const state = fakeState('connected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node();
   gate(btn, { kind: 'fauna.pair.add', disabled: true });
   eq(btn.disabled, true, "the page's own intent is stronger than 'the nest is reachable'");
@@ -124,7 +125,7 @@ Deno.test('a reconnect restores the page\'s intent, never a blanket enable', () 
   // writing `false` would enable a control the page had disabled for its own
   // reason.
   const state = fakeState('disconnected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node();
   const handle = gate(btn, { kind: 'fauna.pair.add', disabled: true });
   eq(btn.disabled, true, 'disabled by both');
@@ -136,7 +137,7 @@ Deno.test('a reconnect restores the page\'s intent, never a blanket enable', () 
 
 Deno.test('the gate closes and reopens as the connection flips', () => {
   const state = fakeState('connected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node();
   gate(btn, { kind: 'fauna.pair.add' });
   eq(btn.disabled, false, 'live to start');
@@ -150,7 +151,7 @@ Deno.test('the gate closes and reopens as the connection flips', () => {
 
 Deno.test('the gate never clobbers a reason the call site wrote', () => {
   const state = fakeState('disconnected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node("this nest is already linked");
   gate(btn, { kind: 'fauna.pair.add' });
   eq(btn.disabled, true, 'still gated');
@@ -159,7 +160,7 @@ Deno.test('the gate never clobbers a reason the call site wrote', () => {
 
 Deno.test("the gate withdraws only the title it wrote itself", () => {
   const state = fakeState('disconnected');
-  const gate = makeOfflineGate(fakeAffordance, state.subscribe);
+  const gate = makeOfflineGate(fakePossibility, state.subscribe);
   const btn = node('this nest is already linked');
   gate(btn, { kind: 'fauna.pair.add' });
   state.set('connected');
@@ -190,7 +191,7 @@ Deno.test('destroy releases the connection-state subscription', () => {
       released = true;
     };
   };
-  const gate = makeOfflineGate(fakeAffordance, subscribe);
+  const gate = makeOfflineGate(fakePossibility, subscribe);
   const btn = node();
   gate(btn, { kind: 'fauna.pair.add' }).destroy();
   eq(released, true, 'a component teardown must not leak a store subscription');

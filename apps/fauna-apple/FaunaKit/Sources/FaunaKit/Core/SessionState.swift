@@ -138,7 +138,8 @@ public class SessionState {
     /// (the apple idiom of linux's `ActionResult::Failed` toast). Rendered by the
     /// shared `RecoveryCustodyBanner` at each app's root; `nil` ⇒ nothing shown
     /// (custodied, idempotent re-claim, or expected multi-nest no-op). Tap-to-dismiss
-    /// clears it.
+    /// clears it, and so does a later custody run's cleared mark (only while this
+    /// still shows a custody warning).
     public var recoveryCustodyWarning: String?
 
     /// What a sign-out's erase could not remove — set by `StatusVM.signOut`

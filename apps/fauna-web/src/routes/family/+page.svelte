@@ -25,7 +25,10 @@
   } from '#lib/rpc';
   import {
     ensureWasm,
-    offlineAffordance,
+    offlinePossibility,
+    familyContactAddPossibility,
+    familyTransferPossibility,
+    familyPolicySavePossibility,
     type AuthoredRow,
     type PolicyEditorHandle,
     type RuleEditorHandle,
@@ -63,6 +66,7 @@
   import { IDS } from '#lib/generated/uiIds';
   import { connectionStatus } from '#lib/store';
   import { makeOfflineGate } from '#lib/offline-gate';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import RuleEditor from '#lib/components/RuleEditor.svelte';
   import FeaturePolicyEditor from '#lib/components/FeaturePolicyEditor.svelte';
 
@@ -96,7 +100,7 @@
   // rows (shared Rust's `AuthoredRow[]`, null until read) and the one open
   // editor — which is one ward's, so it closes when the selection changes.
   // The page paints; no feature document is read or composed here.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
   let featureRows = $state<AuthoredRow[] | null>(null);
   let featureEditor = $state<PolicyEditorHandle | null>(null);
   let featureEditorFor = $state<string | null>(null);
@@ -139,6 +143,18 @@
   // hex-actor-id input convention as contact-add; the pending proposal renders
   // from the selected ward's `pending_transfer` (nest-confirmed, never local).
   let transferInput = $state('');
+  // The three family form submits, painted from their shared draft-validity
+  // answers (`fauna_client_family::forms`, family-safety.md § Errors & edge
+  // cases): disabled with the reason on `title`, re-asked as the guardian
+  // types; each handler asks the same predicate again before it runs. Read once
+  // the wasm core is up (`wasmUp`); before that, disabled.
+  let wasmUp = $state(false);
+  const contactAddGate = $derived(
+    formGate(wasmUp ? askPossibility(() => familyContactAddPossibility(contactAddInput)) : null),
+  );
+  const transferGate = $derived(
+    formGate(wasmUp ? askPossibility(() => familyTransferPossibility(transferInput)) : null),
+  );
   // Graduation is reveal-then-confirm (the established cross-app shape):
   // `family-graduate-confirm-button` is not in the DOM until the reveal.
   let isConfirmingGraduate = $state(false);
@@ -205,6 +221,17 @@
   let policyScreenWindowStart = $state('');
   let policyScreenWindowEnd = $state('');
   let policyScreenDailyMinutes = $state('');
+  // `family-policy-save-button` — the screen-time cells' shared answer
+  // (`policy_save_possibility`, the very rule the nest refuses by).
+  const policySaveGate = $derived(
+    formGate(
+      wasmUp
+        ? askPossibility(() =>
+            familyPolicySavePossibility(policyScreenWindowStart, policyScreenWindowEnd, policyScreenDailyMinutes),
+          )
+        : null,
+    ),
+  );
 
   let unknownSenderOptionLabels = $state<string[]>([]);
   let feedSourcesOptionLabels = $state<string[]>([]);
@@ -388,6 +415,7 @@
   onMount(async () => {
     try {
       await ensureWasm();
+      wasmUp = true;
       unknownSenderOptionLabels = unknownSenderOptions().map((o) => resolveLocalized(o.label));
       feedSourcesOptionLabels = feedSourcesOptions().map((o) => resolveLocalized(o.label));
       unknownPeerDmOptionLabels = unknownPeerDmOptions().map((o) => resolveLocalized(o.label));
@@ -403,6 +431,14 @@
   async function savePolicy() {
     const s = secret();
     if (!s || !selectedWard) return;
+    // An entry the policy cannot hold refuses with the painted reason on
+    // `error-message`, before any RPC (family-safety.md § Errors & edge cases).
+    const refusal = formRefusal(
+      askPossibility(() =>
+        familyPolicySavePossibility(policyScreenWindowStart, policyScreenWindowEnd, policyScreenDailyMinutes),
+      ),
+    );
+    if (refusal !== null) { actionError = refusal; return; }
     actionError = '';
     try {
       // Screen time is parsed + cross-field validated through shared Rust
@@ -491,11 +527,11 @@
   async function addContact() {
     const s = secret();
     if (!s || !selectedWard) return;
-    const peer = actorIdFromHex(contactAddInput);
-    if (!peer) {
-      actionError = t.family.contact_add_invalid_actor_id;
-      return;
-    }
+    // A blank or malformed id refuses with the shared predicate's reason.
+    const refusal = formRefusal(askPossibility(() => familyContactAddPossibility(contactAddInput)));
+    if (refusal !== null) { actionError = refusal; return; }
+    const peer = actorIdFromHex(contactAddInput.trim());
+    if (!peer) return; // unreachable: the predicate parsed the same id
     actionError = '';
     try {
       // Sent or queued with no nest (a queued pre-approval folds nothing).
@@ -526,11 +562,11 @@
   async function proposeTransfer() {
     const s = secret();
     if (!s || !selectedWard) return;
-    const target = actorIdFromHex(transferInput);
-    if (!target) {
-      actionError = t.family.contact_add_invalid_actor_id;
-      return;
-    }
+    // Its own reason keys (`family.transfer_*`), never the contact-add string.
+    const refusal = formRefusal(askPossibility(() => familyTransferPossibility(transferInput)));
+    if (refusal !== null) { actionError = refusal; return; }
+    const target = actorIdFromHex(transferInput.trim());
+    if (!target) return; // unreachable: the predicate parsed the same id
     actionError = '';
     try {
       await familyTransfer(s, toBytes(selectedWard.actor_id), target);
@@ -854,7 +890,8 @@
           <p class="caveat" data-testid={IDS.FAMILY_POLICY_SCREEN_HINT}>{t.family.policy_screen_caveat}</p>
 
           <button class="btn primary" data-testid={IDS.FAMILY_POLICY_SAVE_BUTTON}
-            use:offlineGate={{ kind: 'fauna.family.policy.update' }} onclick={savePolicy}
+            use:offlineGate={{ kind: 'fauna.family.policy.update', disabled: policySaveGate.disabled }}
+            title={policySaveGate.reason || undefined} onclick={savePolicy}
             >{t.family.policy_save_button}</button>
 
           <!-- `family-policy-feature-limits-section` — the guardian host of the
@@ -959,6 +996,7 @@
               bind:value={contactAddInput}
             />
             <button class="btn" data-testid={IDS.FAMILY_CONTACT_ADD_BUTTON} onclick={addContact}
+              disabled={contactAddGate.disabled} title={contactAddGate.reason || undefined}
               >{t.family.contact_add_button}</button>
           </div>
 
@@ -982,6 +1020,7 @@
                 bind:value={transferInput}
               />
               <button class="btn" data-testid={IDS.FAMILY_TRANSFER_BUTTON} onclick={proposeTransfer}
+                disabled={transferGate.disabled} title={transferGate.reason || undefined}
                 >{t.family.transfer_button}</button>
             {/if}
           </div>

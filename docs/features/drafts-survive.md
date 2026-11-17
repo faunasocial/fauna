@@ -72,13 +72,13 @@ Stamped 2026-09-19 at 8ac16765e4.
 |---|---|---|
 | web | ✅ full | 0.1.5 docker |
 | linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ⚠ partial | 0.1.6 docker |
+| windows | ⚠ partial | 0.1.7 docker |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6 docker |
+| ios | ✅ full | 0.1.7 docker |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+859d84e8 standalone |
 | android-kids |  no run recorded | |
-| ios-kids | ⚠ partial | 0.1.6 docker |
+| ios-kids | ⚠ partial | 0.1.7 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

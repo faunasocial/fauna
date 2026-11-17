@@ -34,7 +34,10 @@ Split verbatim out of [`account-runtime.md`](account-runtime.md) on 2026-10-14 �
   keyed on the actor because web has one MLS device leaf per (origin,
   account) and no per-app `mls_state.db` to key on), and the keyless
   origin-wide `fauna.accounts.migrate` (the registry mutation section,
-  `fauna_client_accounts`). The conversations-engine role and this election
+  `fauna_client_accounts`) — and, ruled and built 2026-11-15,
+  `fauna.accounts.serving/<actor-id-hex>`, the one SHARED hold among them
+  (the account serving lock's web twin; owner `apps/account-scoping.md`
+  § Concurrent instances → *Web's serving-presence lock*). The conversations-engine role and this election
   are two Web Locks held side by side in the one tab that hosts an
   account's runtime, and that is the uniform shape, not a web deviation:
   natively they are two sections in two files (`engine.lock` in the store

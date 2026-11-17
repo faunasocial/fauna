@@ -339,6 +339,9 @@ fn decode_pubkey(pubkey_hex: &str) -> Result<Vec<u8>, DispatchError> {
 pub struct BridgeApprovalMachine {
     nest: Arc<dyn BridgeApprovalNest>,
     inner: Mutex<BridgeApprovalSnapshot>,
+    /// Where the page's bridge list read stands (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 5).
+    read: Mutex<fauna_core::possibility::ReadState>,
 }
 
 // `new` takes `Arc<dyn BridgeApprovalNest>` (not an FFI type), so it stays in a
@@ -350,6 +353,43 @@ impl BridgeApprovalMachine {
         Self {
             nest,
             inner: Mutex::new(BridgeApprovalSnapshot::empty()),
+            read: Mutex::new(fauna_core::possibility::ReadState::Pending),
+        }
+    }
+
+    /// Where the pending and approved list read stands — the page paints its
+    /// empty state only once it resolved (an unread list is not an empty one).
+    pub fn read_state(&self) -> fauna_core::possibility::ReadState {
+        *self.read.lock().expect("read mutex")
+    }
+
+    /// The confirm press's synchronous half: mark the armed act in flight so
+    /// [`Self::confirm_possibility`] answers blocked from this moment, before
+    /// the `Confirm` dispatch that follows has run. `false` (nothing changes)
+    /// when the confirm is not possible.
+    pub fn begin_confirm(&self) -> bool {
+        if !self.confirm_possibility().is_possible() {
+            return false;
+        }
+        self.set_status(BridgeApprovalStatus::Working);
+        true
+    }
+
+    /// Whether the open dialog's confirm (reject or rotate) is live: something
+    /// is armed and no act is on its way. A second press after the first took
+    /// the arm is refused with this reason, never reaching the nest; the press
+    /// asks the same answer (`docs/goal/ui/README.md` § Offer only what is
+    /// possible, rules 6 and 7).
+    pub fn confirm_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::localized::LocalizedText;
+        use fauna_core::possibility::Possibility;
+        let snap = self.inner.lock().expect("snapshot mutex");
+        if snap.status != BridgeApprovalStatus::Idle {
+            Possibility::blocked(LocalizedText::key("common.in_flight"))
+        } else if snap.armed.is_none() {
+            Possibility::blocked(LocalizedText::key("common.nothing_to_confirm"))
+        } else {
+            Possibility::Possible
         }
     }
 
@@ -358,6 +398,20 @@ impl BridgeApprovalMachine {
     }
 
     async fn refresh(&self) -> Result<(), DispatchError> {
+        match self.read_bridges().await {
+            Ok(()) => {
+                *self.read.lock().expect("read mutex") =
+                    fauna_core::possibility::ReadState::Resolved;
+                Ok(())
+            }
+            Err(e) => {
+                crate::bool_toggle_policy::note_read_failed(&self.read);
+                Err(e)
+            }
+        }
+    }
+
+    async fn read_bridges(&self) -> Result<(), DispatchError> {
         self.set_status(BridgeApprovalStatus::Loading);
         let pending = self.nest.list_pending_bridges().await?;
         // The approved roster (running-phase bridges) — the rotate affordance's
@@ -753,6 +807,27 @@ mod tests {
 
     /// Both confirms are one shape held by the machine: arming opens the
     /// dialog and reaches no nest; `Confirm` disarms and runs the armed act.
+    #[tokio::test]
+    async fn the_confirm_is_live_only_while_armed_and_idle() {
+        let key =
+            |m: &BridgeApprovalMachine| m.confirm_possibility().reason().map(|r| r.key.clone());
+        let m = machine_with(vec![bridge(0x22, "mda", "pending")]);
+        assert_eq!(m.read_state(), fauna_core::possibility::ReadState::Pending);
+        m.hydrate().await.unwrap();
+        assert_eq!(m.read_state(), fauna_core::possibility::ReadState::Resolved);
+        assert_eq!(key(&m), Some("common.nothing_to_confirm".to_string()));
+
+        let pubkey_hex = m.snapshot().pending[0].pubkey_hex.clone();
+        m.arm(BridgeConfirm::Reject { pubkey_hex });
+        assert!(m.confirm_possibility().is_possible());
+        assert!(m.begin_confirm());
+        assert_eq!(key(&m), Some("common.in_flight".to_string()));
+        assert!(!m.begin_confirm(), "a second press is refused");
+        m.dispatch(BridgeApprovalAction::Confirm).await.unwrap();
+        // The first press took the arm: a second is refused with a reason.
+        assert_eq!(key(&m), Some("common.nothing_to_confirm".to_string()));
+    }
+
     #[tokio::test]
     async fn an_armed_confirm_runs_its_act_only_on_confirm() {
         let m = machine_with(vec![

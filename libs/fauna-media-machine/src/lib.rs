@@ -53,6 +53,8 @@ pub use fauna_core::followed_media::{
 pub use folder_keys::{FolderKeyResolver, ResolvedCustody, ResolvedFolderKeys};
 pub use machine::{FolderChannelOwners, MediaMachine, MlsQuery, SettlePolicy};
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub use nest_api::fake::{FakeFolderMaker, FakeMakeOutcome};
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use nest_api::{FakeMediaNestApi, MediaNestCall};
 pub use nest_api::{ForeignListing, MediaApiError, MediaNestApi};
 #[cfg(feature = "rpc-glue")]

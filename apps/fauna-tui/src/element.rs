@@ -120,6 +120,11 @@ pub enum Gesture {
         home: Option<String>,
     },
     Events(crate::events::Action),
+    /// `calendar-list-empty-state-step` — the jump to the place the Events
+    /// page's blocked reason names (`crate::events::go_to_create_step`). It
+    /// carries its target and crosses pages, so it sits outside
+    /// `crate::events::Action` like [`Self::OpenSearchResult`].
+    EventsCreateStep(fauna_client_caldav::EventCreateStep),
     /// A Settings-shell gesture (`crate::settings`) — sub-page nav
     /// (`OpenTuiSettings` / `NavBack`) or the external-media select. All local,
     /// so both actuation paths dispatch it synchronously (no network op).
@@ -283,7 +288,8 @@ impl Gesture {
             | Gesture::OpenRoomSearchHit(_)
             | Gesture::SelectCalendar(_)
             | Gesture::ToggleCalendarVisibility(_)
-            | Gesture::OpenEventDetail(_) => None,
+            | Gesture::OpenEventDetail(_)
+            | Gesture::EventsCreateStep(_) => None,
             // The pre-authentication surfaces. A launch/wizard/unlock screen is
             // reached precisely when there is no session yet, so gating it on
             // "no live nest" would desensitize the controls whose whole job is
@@ -323,6 +329,10 @@ pub enum SelectTarget {
     /// cross-app `select(id, label)` contract is one shape.
     ComposeGateTier,
     VpsLocation,
+    /// `provider-goal-select[<goal>]` on `provider_choice` — a raw-value
+    /// picker: the covering provider's id (or `manual`) is what `get_text`
+    /// returns and `select` takes; the provider's name rides `display_value`.
+    ProviderGoalCover(fauna_onboarding_machine::ProviderGoal),
     RuleType,
     Combination,
     Factor,
@@ -845,6 +855,14 @@ impl SelectTarget {
         match self {
             SelectTarget::VpsLocation => {
                 Gesture::Wizard(crate::wizard::Action::SelectVpsLocationByName(value))
+            }
+            SelectTarget::ProviderGoalCover(goal) => {
+                let cover = if value == crate::wizard::provider_choice::MANUAL {
+                    fauna_onboarding_machine::GoalCover::Manual
+                } else {
+                    fauna_onboarding_machine::GoalCover::Provider { provider_id: value }
+                };
+                Gesture::Wizard(crate::wizard::Action::SelectGoalCover(goal, cover))
             }
             SelectTarget::RuleType => Gesture::Feed(crate::feed::Action::SetRuleType(value)),
             SelectTarget::Combination => Gesture::Feed(crate::feed::Action::SetCombination(value)),
@@ -1459,9 +1477,33 @@ pub struct Element {
     /// dwell to another whenever the window changed between the two reads — the
     /// mid-rebuild misattribution `fauna_feed::CueRow::post_id` forbids.
     pub cue: Option<crate::feed::cues::CueSubject>,
+    /// The shared-Rust predicate's answer for this affordance, set via
+    /// [`Element::possible`]: may it succeed now, and if not, why
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6).
+    ///
+    /// **A declaration, never a decision.** The page states the answer its
+    /// predicate gave; [`crate::app::App::page_elements`] is the one seam that
+    /// acts on it, folding it with the offline gate: `Blocked` disables the
+    /// element (the reason painted), `Absent` drops it from the list. The
+    /// builder deliberately leaves [`Self::enabled`] alone, so a page that
+    /// builds its elements past the seam leaves a blocked control enabled, and
+    /// the walk invariant I8 (`crate::walk`) reds on it.
+    ///
+    /// In-process only, like [`observation`](Self::observation): no `attrs`
+    /// entry. A driver reads the decision through `is_enabled` and the painted
+    /// reason, never the declaration.
+    pub possibility: Option<fauna_core::possibility::Possibility>,
 }
 
 impl Element {
+    /// Declare the shared predicate's answer for this affordance (see
+    /// [`Self::possibility`]). The seam in
+    /// [`crate::app::App::page_elements`] applies it; this only records it.
+    pub fn possible(mut self, answer: fauna_core::possibility::Possibility) -> Self {
+        self.possibility = Some(answer);
+        self
+    }
+
     /// Declare that this element paints the body of `record` — the T1
     /// observation the shell reports once the element is really on screen.
     ///
@@ -1733,6 +1775,7 @@ impl Element {
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1812,6 +1855,7 @@ impl Element {
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1856,6 +1900,7 @@ impl Element {
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1914,6 +1959,7 @@ impl Element {
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1938,6 +1984,7 @@ impl Element {
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1970,6 +2017,7 @@ impl Element {
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -2013,6 +2061,7 @@ impl Element {
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -2043,6 +2092,7 @@ impl Element {
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -2080,6 +2130,7 @@ impl Element {
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 

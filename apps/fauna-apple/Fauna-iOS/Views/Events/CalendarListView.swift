@@ -133,6 +133,25 @@ struct CalendarListView: View {
                                         }
                                     }
 
+                                    CalendarListEmptyState(vm: vm) { step in
+                                        #if !FAUNA_KIDS
+                                        switch step {
+                                        case .addCredential:
+                                            appState.selectedSettingsPage = .mail
+                                            appState.moreSelectedView = "settings"
+                                            appState.selectedTab = "more"
+                                        case .adminEnableCalendar:
+                                            appState.selectedAdminPage = .calendar
+                                            appState.inAdmin = true
+                                        }
+                                        #else
+                                        // The kids flavor excises both places a
+                                        // step leads to; the empty state offers
+                                        // no step there.
+                                        _ = step
+                                        #endif
+                                    }
+
                                     ForEach(vm.calendars) { cal in
                                         HStack {
                                             Button {
@@ -300,14 +319,16 @@ struct CalendarListView: View {
                         .accessibilityIdentifier(Ids.newCalendarBtn)
                         .automationActivate(Ids.newCalendarBtn) { vm.showNewCalendar.toggle() }
 
-                        // Always shown (matching macOS' toolbar) so a new event can
-                        // be created without a prior calendar select — createEvent
-                        // falls back to the first available calendar.
-                        Button { vm.showNewEvent.toggle() } label: {
+                        // Shown without a prior calendar select — createEvent falls
+                        // back to the first loaded calendar — but painted from the
+                        // shared create predicate (ruling 3): disabled with the
+                        // reason while no calendar can hold an event.
+                        Button { vm.toggleNewEvent() } label: {
                             Image(systemName: "plus")
                         }
                         .accessibilityIdentifier(Ids.newEventBtn)
-                        .automationActivate(Ids.newEventBtn) { vm.showNewEvent.toggle() }
+                        .automationActivate(Ids.newEventBtn) { vm.toggleNewEvent() }
+                        .faunaPossible(vm.showNewEvent ? .possible : vm.createPossibility)
                     }
                 }
             }

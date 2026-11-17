@@ -315,21 +315,31 @@ struct FolderShareSheet: View {
                 // `folder-share-confirm` — commit the picked recipient.
                 Button(L.devices.shareButton) { Task { await confirm() } }
                     .buttonStyle(.borderedProminent)
-                    .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty)
                     .accessibilityIdentifier(Ids.folderShareConfirm)
-                    .automationActivate(
-                        Ids.folderShareConfirm,
-                        isEnabled: { !input.trimmingCharacters(in: .whitespaces).isEmpty }
-                    ) { Task { await confirm() } }
+                    .automationActivate(Ids.folderShareConfirm) { Task { await confirm() } }
+                    // The draft's shared answer (`fauna_client_folders::forms`),
+                    // outside the automation modifier so the registry reads it.
+                    .faunaPossible(sharePossibility)
             }
+            FaunaPossibilityReason(sharePossibility)
         }
         .padding(20)
         .frame(minWidth: 360)
     }
 
+    private var sharePossibility: Possibility { vm.folderSharePossibility(recipient: input) }
+
+    /// The sheet closes only once the share is issued (`folders.md` § Errors &
+    /// edge cases): a refusal — blank recipient, no session to admit them
+    /// through — lands on `error-message` and the sheet stays open with what
+    /// was typed.
     private func confirm() async {
         let handle = input.trimmingCharacters(in: .whitespaces)
-        guard !handle.isEmpty else { return }
+        guard sharePossibility.isPossible else {
+            // The verb asks the same predicate and puts its reason on the page.
+            _ = await vm.shareFolder(name: folder.name, recipientInput: handle)
+            return
+        }
         resolveState = .resolving
         if await vm.shareFolder(
             name: folder.name, recipientInput: handle, access: access == "writer" ? "writer" : nil

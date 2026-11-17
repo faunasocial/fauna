@@ -516,7 +516,7 @@ class MediaActions:
         so we set the file on the input (Playwright ``set_input_files``) rather than
         typing it (platform branch lives in the action layer, never the test).
         ``upload-button`` runs the shared ``MediaMachine::upload_selected`` gesture —
-        resolve the target set (or the ``media.error_no_set`` policy), seal under the
+        resolve the target set (making a folderless account's first folder), seal under the
         owner BackupKey, POST the blob, record the manifest member, then refresh.
         ``path`` is a local filesystem path.
 

@@ -117,6 +117,26 @@ pub trait Registrar: Send + Sync {
         contact: Option<&ContactInfo>,
     ) -> Result<RegistrationResult, ProvisionError>;
 
+    /// The nameserver door: replace the delegation of `domain`, registered on
+    /// this account, with `nameservers`. A replace, so repeating it is
+    /// harmless. Declared per provider as `registrar_sets_nameservers` in
+    /// `i18n/providers.yaml`; the default answers
+    /// [`ProvisionError::Unsupported`] before any request, and
+    /// `tests/delegation_doors.rs` holds the declaration and the override
+    /// together (`docs/goal/architecture/provisioning/registry.md`
+    /// § Delegation doors).
+    async fn set_nameservers(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), ProvisionError> {
+        let _ = (client, domain, nameservers);
+        Err(ProvisionError::Unsupported {
+            operation: "setting a domain's nameservers",
+        })
+    }
+
     /// Whether this registrar's API accepts WHOIS contact fields per
     /// registration. Default true. Porkbun overrides to false — Porkbun's
     /// API uses account-level contacts set via their web dashboard. UIs

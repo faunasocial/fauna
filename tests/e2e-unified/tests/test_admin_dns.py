@@ -522,9 +522,18 @@ def test_admin_dns_toggle_managed_without_credential_shows_error(admin_app, nest
         ),
     )
 
-    # Flip the first domain to Fauna-managed. No held credential covers it →
-    # SetMode rejects with InvalidState → DnsSnapshot.error → error-message.
-    admin_app.admin.toggle_domain_mode(index=0)
+    # Ask to flip the seeded domain to Fauna-managed. No held credential covers
+    # it, so an app on the shared `set_mode_possibility` does not offer the
+    # switch at all (`dns-management.md` § Errors & edge cases) — the disabled
+    # control is the refusal; an app not yet lifted refuses on the press with
+    # the same reason on error-message. Either way the domain stays manual.
+    index = admin_app.admin.dns_domain_names().index(_DOMAIN)
+    if not admin_app.admin.try_toggle_domain_mode(index=index):
+        assert admin_app.admin.dns_domain_modes()[index] == S.admin.dns.mode_manual, (
+            "a mode switch that is not offered must leave the domain manual; got "
+            f"{admin_app.admin.dns_domain_modes()!r}"
+        )
+        return
 
     def _err_text():
         if admin_app.driver.count("error-message") == 0:

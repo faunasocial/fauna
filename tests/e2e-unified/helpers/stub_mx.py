@@ -126,7 +126,8 @@ class StubMX:
                  enable_starttls: bool = False, require_starttls: bool = False,
                  tls_context: "ssl.SSLContext | None" = None,
                  out_dir: str | None = None,
-                 on_message: "callable | None" = None) -> None:
+                 on_message: "callable | None" = None,
+                 route_host: str | None = None) -> None:
         # An IPv6 literal (`::1`) binds an IPv6-only listener: the address
         # family is what the IPv6-off outbound witness tells apart.
         family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
@@ -138,6 +139,12 @@ class StubMX:
         self._sock.bind((bind_host, port))
         self._sock.listen(8)
         self.host, self.port = self._sock.getsockname()[:2]
+        # The host the bridge is routed to (`target`) and so the bare host it
+        # keys a DANE/TLSA lookup on. Defaults to the bind address; a caller
+        # that must keep its matcher host apart from another stub's on the
+        # same bind address names it here (a name that resolves to that
+        # address, e.g. `localhost` for 127.0.0.1).
+        self.route_host = route_host or self.host
         # When set, every accepted message is also written to `out_dir/<seq>.eml`
         # (atomically via a temp-file rename). The in-process fixture leaves this
         # None and reads `messages()`; a sidecar container sets it to a mounted
@@ -200,9 +207,9 @@ class StubMX:
     def target(self) -> str:
         """`host:port` string for the operator-hatch `mta_mx_override` value
         (`[host]:port` for an IPv6 listener, the form Go's `SplitHostPort` reads)."""
-        if ":" in self.host:
-            return f"[{self.host}]:{self.port}"
-        return f"{self.host}:{self.port}"
+        if ":" in self.route_host:
+            return f"[{self.route_host}]:{self.port}"
+        return f"{self.route_host}:{self.port}"
 
     def start(self) -> "StubMX":
         self._thread.start()

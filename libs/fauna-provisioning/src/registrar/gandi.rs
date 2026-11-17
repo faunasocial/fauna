@@ -144,6 +144,27 @@ impl Registrar for GandiRegistrar {
         Ok(())
     }
 
+    /// `PUT /domain/domains/{domain}/nameservers` with the `nameservers` list
+    /// (registry.md § Delegation doors).
+    async fn set_nameservers(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), ProvisionError> {
+        let resp = client
+            .put(format!(
+                "{}/domain/domains/{domain}/nameservers",
+                self.api_base
+            ))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "nameservers": nameservers }))
+            .send()
+            .await?;
+        ensure_success(resp).await?;
+        Ok(())
+    }
+
     async fn check(
         &self,
         client: &reqwest::Client,

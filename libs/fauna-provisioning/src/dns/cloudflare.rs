@@ -63,6 +63,10 @@ fn tlsa_data_object(rdata: &str) -> Option<serde_json::Value> {
 pub struct Cloudflare {
     pub token: String,
     api_base: String,
+    /// The `account-id` credential (field kinds `[registrar, zone]`) — only
+    /// the zone door needs it: `POST /zones` names the account the zone is
+    /// created in. Record calls address a zone by id and never read it.
+    account_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +81,27 @@ struct ZonesResponse {
 struct CloudflareZone {
     id: String,
     name: String,
+    #[serde(default)]
+    name_servers: Vec<String>,
+}
+
+impl From<CloudflareZone> for DnsZone {
+    fn from(z: CloudflareZone) -> Self {
+        DnsZone {
+            id: z.id,
+            name: z.name,
+            nameservers: z.name_servers,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateZoneResponse {
+    success: bool,
+    #[serde(default)]
+    result: Option<CloudflareZone>,
+    #[serde(default)]
+    errors: Vec<CloudflareError>,
 }
 
 #[derive(Deserialize)]
@@ -108,7 +133,18 @@ impl Cloudflare {
     /// Test-only constructor that lets the conformance harness point the
     /// adapter at a wiremock server.
     pub fn with_base_url(token: String, api_base: String) -> Self {
-        Self { token, api_base }
+        Self {
+            token,
+            api_base,
+            account_id: None,
+        }
+    }
+
+    /// Carry the `account-id` credential the zone door names (dispatch sets it
+    /// whenever the bag holds one).
+    pub fn with_account_id(mut self, account_id: String) -> Self {
+        self.account_id = Some(account_id);
+        self
     }
 
     /// The API base this adapter will call.
@@ -165,14 +201,46 @@ impl DnsProvider for Cloudflare {
             return Err(ProvisionError::Other(format!("Cloudflare error: {msg}")));
         }
 
-        Ok(data
-            .result
-            .into_iter()
-            .map(|z| DnsZone {
-                id: z.id,
-                name: z.name,
-            })
-            .collect())
+        Ok(data.result.into_iter().map(DnsZone::from).collect())
+    }
+
+    /// `POST /zones` with `name` and `account.id`, answered with the zone's
+    /// `name_servers`; the zone stays `pending` until Cloudflare sees the
+    /// delegation (registry.md § Delegation doors).
+    async fn create_zone(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+    ) -> Result<DnsZone, ProvisionError> {
+        let account_id = self
+            .account_id
+            .as_deref()
+            .filter(|a| !a.trim().is_empty())
+            .ok_or_else(|| {
+                ProvisionError::Other(
+                    "Cloudflare zone creation needs the account-id credential".into(),
+                )
+            })?;
+        let resp = client
+            .post(format!("{}/zones", self.api_base))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "name": domain, "account": { "id": account_id } }))
+            .send()
+            .await?;
+        let resp = ensure_success(resp).await?;
+        let data: CreateZoneResponse = resp.json().await.map_err(ProvisionError::parse)?;
+        match (data.success, data.result) {
+            (true, Some(zone)) => Ok(zone.into()),
+            _ => {
+                let msg = data
+                    .errors
+                    .into_iter()
+                    .map(|e| e.message)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Err(ProvisionError::Other(format!("Cloudflare error: {msg}")))
+            }
+        }
     }
 
     async fn create_record(

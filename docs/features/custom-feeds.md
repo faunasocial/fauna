@@ -59,11 +59,11 @@ Stamped 2026-11-07 at b844c771f6.
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+1c9a6a26 standalone |
 | linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
-| windows | ✅ full | 0.1.6 docker |
+| windows | ✅ full | 0.1.7 docker |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.6 docker |
+| ios | ⚠ partial | 0.1.7 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6 docker |
+| tui | ✅ full | 0.1.7 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

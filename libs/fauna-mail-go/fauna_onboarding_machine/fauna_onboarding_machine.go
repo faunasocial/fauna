@@ -1360,6 +1360,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_continue_possibility()
+		})
+		if checksum != 17967 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_continue_possibility: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_in_progress()
 		})
 		if checksum != 21474 {
@@ -1374,6 +1383,15 @@ func uniffiCheckChecksums() {
 		if checksum != 15252 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_snapshot: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_start_refused()
+		})
+		if checksum != 36712 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_start_refused: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1810,6 +1828,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_renders_provider_choice()
+		})
+		if checksum != 6572 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_renders_provider_choice: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_renders_recovery_kit()
 		})
 		if checksum != 46752 {
@@ -2001,7 +2028,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_toggle_buy_domain()
 		})
-		if checksum != 65207 {
+		if checksum != 13964 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_toggle_buy_domain: UniFFI API checksum mismatch")
 		}
@@ -2098,6 +2125,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_vps_continue_possibility()
+		})
+		if checksum != 31739 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_vps_continue_possibility: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_webdav_enable_requested()
 		})
 		if checksum != 38207 {
@@ -2130,6 +2166,249 @@ func uniffiCheckChecksums() {
 		if checksum != 41033 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_wizard_submit_invite_request: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_can_connect_provider()
+		})
+		if checksum != 987 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_can_connect_provider: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_can_continue_providers()
+		})
+		if checksum != 23010 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_can_continue_providers: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_can_offer_buy_domain()
+		})
+		if checksum != 37960 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_can_offer_buy_domain: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_connect_provider()
+		})
+		if checksum != 22921 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_connect_provider: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_continue_from_providers()
+		})
+		if checksum != 50196 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_continue_from_providers: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_disconnect_provider()
+		})
+		if checksum != 28853 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_disconnect_provider: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_goal_rows()
+		})
+		if checksum != 14367 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_goal_rows: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_contact()
+		})
+		if checksum != 25654 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_contact: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_goal_domain()
+		})
+		if checksum != 27826 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_goal_domain: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_begin()
+		})
+		if checksum != 14089 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_begin: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_button_text()
+		})
+		if checksum != 12512 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_button_text: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_can_begin()
+		})
+		if checksum != 53201 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_can_begin: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_state()
+		})
+		if checksum != 30804 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_state: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_wait()
+		})
+		if checksum != 8544 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_hosted_auth_wait: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_registrar_notes_key()
+		})
+		if checksum != 30602 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_registrar_notes_key: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_rows()
+		})
+		if checksum != 6465 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_rows: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_shows_contact_form()
+		})
+		if checksum != 17167 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provider_shows_contact_form: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_providers_continue_blocked_reason()
+		})
+		if checksum != 6779 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_providers_continue_blocked_reason: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_back_to_providers()
+		})
+		if checksum != 59815 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_back_to_providers: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_choices_visible()
+		})
+		if checksum != 27765 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_choices_visible: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_start_blocked_reason()
+		})
+		if checksum != 12418 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provisioning_start_blocked_reason: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_seed_held_provider_credentials()
+		})
+		if checksum != 48730 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_seed_held_provider_credentials: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_seed_held_provider_credentials_json()
+		})
+		if checksum != 30292 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_seed_held_provider_credentials_json: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_select_goal_cover()
+		})
+		if checksum != 8212 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_select_goal_cover: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provider_contact()
+		})
+		if checksum != 53282 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provider_contact: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provider_cred()
+		})
+		if checksum != 5883 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provider_cred: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_visible_provider_fields()
+		})
+		if checksum != 43270 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_visible_provider_fields: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -4331,6 +4610,10 @@ type OnboardingMachineInterface interface {
 	// blocked `OverallStatus` (idle/running/failed/cancelled), because the
 	// user's next act differs: start, wait, retry.
 	ProvisioningContinueBlockedReason() *fauna_core.LocalizedText
+	// `provisioning-continue-button`'s answer in the shared possibility type —
+	// [`Self::provisioning_continue_blocked_reason`] as one value, so an app
+	// stops re-deriving enabled from `overall != Succeeded` beside it.
+	ProvisioningContinuePossibility() fauna_core.Possibility
 	// Cancel button is shown — provisioning is actively running. Also gates
 	// the elapsed-time ticker.
 	ProvisioningInProgress() bool
@@ -4344,6 +4627,10 @@ type OnboardingMachineInterface interface {
 	// the outgoing clone — never on the live mutated state, which the
 	// `set_cancelled` path mutates outside `with_step` (see `recompute_display`).
 	ProvisioningSnapshot() fauna_provisioning.ProvisioningSnapshot
+	// *Buy and set up* is refused on a run entered from the choose-providers
+	// page while [`Self::provisioning_start_blocked_reason`] names a reason
+	// (the `vps_config` path enforced both conditions at its Continues).
+	ProvisioningStartRefused() bool
 	RecheckInviteStatus() OnboardingStep
 	// Polls the freshly-provisioned nest from the post-provisioning
 	// "Almost ready" surface. The client calls this on a timer while
@@ -4713,6 +5000,14 @@ type OnboardingMachineInterface interface {
 	// `nest_actor_id`s cross; the seed stays in custody. A selection that is
 	// no longer in the new list is cleared.
 	SetRecoveryBoxes(boxes []string)
+	// App capability declaration: this app has the `provider_choice` page
+	// built (`onboarding-provisioning.md` § 3d). Call once at wizard
+	// construction; the handle check's Continue then lands on
+	// [`OnboardingStep::ProviderChoice`] instead of `DnsConfig`. Apps that
+	// never call it keep the `dns_config` → `vps_config` path — the
+	// batched-trickle-down parity gap. Survives [`Self::reset`] as
+	// [`Self::set_renders_recovery_kit`] does.
+	SetRendersProviderChoice(renders bool)
 	// App capability declaration: this app has the `recovery_kit` onboarding
 	// screen built (`onboarding.md` § 1 Identity). Call once at wizard
 	// construction; the machine then routes `confirm_generated_identity`
@@ -4872,6 +5167,10 @@ type OnboardingMachineInterface interface {
 	// mints once. `false` when the user skipped, never asked, or already
 	// handed off.
 	TakeTrustPromptGranted() bool
+	// `dns-buy-domain-checkbox`. Ticking it is refused unless the handle
+	// check found the domain unregistered ([`Self::can_offer_buy_domain`]):
+	// a registered domain cannot be bought (`onboarding-provisioning.md`
+	// § 3d).
 	ToggleBuyDomain(on bool)
 	ToggleSameProviderForVps(on bool)
 	// The i18n key of `channel`'s row description: the no-build wording when
@@ -4927,6 +5226,14 @@ type OnboardingMachineInterface interface {
 	// user's next act differs in each: pick, verify, choose where, choose how
 	// big).
 	VpsContinueBlockedReason() *fauna_core.LocalizedText
+	// `vps-config-continue-button`'s answer in the shared possibility type
+	// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6): the
+	// same shortfall [`Self::vps_continue_blocked_reason`] names, as one
+	// value, so a native app paints enabled-or-blocked-with-reason from a
+	// single call and never pairs [`Self::can_continue_vps`] with the reason
+	// getter itself. Never [`Possibility::Absent`]: every app shows the
+	// button.
+	VpsContinuePossibility() fauna_core.Possibility
 	// Whether the deployment's **files (WebDAV)** subsystem should be enabled
 	// at claim. Machine-derived sibling of [`Self::carddav_enable_requested`] —
 	// same two-axis derivation (handle locality AND NAT axis), no checkbox
@@ -4947,6 +5254,117 @@ type OnboardingMachineInterface interface {
 	// `docs/goal/behavior/onboarding.md` §3a.
 	WizardSubmitClaimCode(code string) OnboardingStep
 	WizardSubmitInviteRequest() OnboardingStep
+	// *Connect* is pressable: every required visible field is filled and no
+	// connect of this provider is in flight.
+	CanConnectProvider(providerId string) bool
+	// Continue is live: every goal on the page is covered and the covering
+	// registrar has the contact it requires.
+	CanContinueProviders() bool
+	// Whether `dns-buy-domain-checkbox` is offered: exactly when the handle
+	// check found the domain unregistered (`DomainAvailable`, either
+	// reading) and this wizard has not registered it since — a registered
+	// domain cannot be bought.
+	CanOfferBuyDomain() bool
+	// *Connect*: run every check the provider's capabilities allow with the
+	// one credential set — the DNS check that lists the account's zones, the
+	// registrar's quote for an unregistered domain, the server check that
+	// lists locations and the offers of the first — and mark it connected.
+	// A failed check leaves it unconnected with the provider's own error.
+	ConnectProvider(providerId string) error
+	// Continue: write the covering providers, their credentials, the contact
+	// and the defaults (the server's default location with its offers
+	// listed, the cheapest offer the mail gate permits) into the `dns` /
+	// `vps` state the provisioning run already reads, then land on
+	// `nest_provisioning` — nothing is bought or changed here, and the
+	// price is agreed there. A manual DNS cover takes the deferred-DNS path.
+	ContinueFromProviders() error
+	// *Disconnect*: drop the provider's credential from the wizard; any goal
+	// it covered is uncovered (and reassigned when another provider can).
+	DisconnectProvider(providerId string)
+	// The goal lines in page order: registration (only while buying, with
+	// the covering registrar's price), DNS, the server.
+	GoalRows() []GoalRow
+	// The contact form's values: the account's default contact *Connect*
+	// fetched, or what the person entered.
+	ProviderContact(providerId string) *fauna_provisioning.ContactInfo
+	// The domain the goal lines name (*Register `<domain>`*, *DNS for
+	// `<domain>`*): the handle's domain, empty before a handle is typed.
+	ProviderGoalDomain() string
+	// Sign in at the provider for one `hosted-auth` field of its dialog
+	// (the device-authorization flow [`Self::hosted_auth_begin`] runs).
+	ProviderHostedAuthBegin(providerId string, fieldId string) (HostedAuthPrompt, error)
+	// The sign-in button's label for one field of a provider's dialog.
+	ProviderHostedAuthButtonText(providerId string, fieldId string) string
+	// Whether a provider dialog's sign-in button is pressable.
+	ProviderHostedAuthCanBegin(providerId string, fieldId string) bool
+	// Where a `hosted-auth` field of a provider's dialog stands (the button
+	// label source, as [`Self::hosted_auth_state`] is for the built forms).
+	ProviderHostedAuthState(providerId string, fieldId string) HostedAuthState
+	// Wait for that sign-in; the token lands in the dialog's credential.
+	ProviderHostedAuthWait(providerId string, fieldId string) error
+	// The registrar's note for the dialog (`dns-registrar-notes-text`) while
+	// a domain is bought: the registry's `registrar_notes_key`, for a
+	// registrar that uses the contact on its own account.
+	ProviderRegistrarNotesKey(providerId string) *string
+	// One row per registry provider, registry order, then the manual row
+	// ([`MANUAL_ROW_ID`], no capabilities, never connected), each with its
+	// per-goal cannot-cover reason from the one can-cover computation. The
+	// registration reason is `None` while nothing is bought.
+	ProviderRows() []ProviderRow
+	// The dialog shows the WHOIS contact form (`dns-contact-form`): a domain
+	// is bought, the provider is connected, quotes it as buyable and its
+	// registrar `requires_contact()`.
+	ProviderShowsContactForm(providerId string) bool
+	// Why Continue is dead, naming the first open goal in page order or the
+	// registrar whose contact is missing (`ui/README.md` § Copy
+	// comprehensibility rule 5) — `None` when it is live. Paired with
+	// [`Self::can_continue_providers`] over one computation.
+	ProvidersContinueBlockedReason() *fauna_core.LocalizedText
+	// Back from `nest_provisioning` returns to the choose-providers page
+	// (`true`) rather than `vps_config` — the routing decision as data until
+	// the page's `OnboardingStep` lands with the page itself.
+	ProvisioningBackToProviders() bool
+	// `nest_provisioning` shows its choices region (location, server type,
+	// mail mode, update channel, SSH door): the run was entered from this
+	// page's Continue — not from cloud recovery, which chose on `vps_config`
+	// — and has not started or succeeded (Retry after a failed or cancelled
+	// run reads the choices afresh).
+	ProvisioningChoicesVisible() bool
+	// Why *Buy and set up* is dead, for the un-id'd line beneath it — `None`
+	// when it is live: a domain bought through a provider whose price is not
+	// yet agreed (`dns-price-confirm-checkbox`), or no server type selected.
+	// `start_provisioning` refuses while it is `Some` on a run entered from
+	// this page (the `vps_config` path enforces both at its own Continues).
+	ProvisioningStartBlockedReason() *fauna_core.LocalizedText
+	// The credentials signed-in accounts on this device hold (an add-account
+	// run), passed in by the app. Each is re-checked: one whose checks pass
+	// reads connected (held); one that fails is dropped, so a revoked token
+	// reads as not connected. A provider the person already connected in this
+	// run is left alone. The server check runs only when the provider's
+	// server fields are among the fields held.
+	SeedHeldProviderCredentials(held []HeldProviderCredential)
+	// The binding faces' form of [`Self::seed_held_provider_credentials`]: the
+	// index-paired provider ids and JSON field bags `retire_held_inputs` reads
+	// off the account's DNS record — the same pair `set_held_dns_json` takes on
+	// the retire page — so no app projects the credential bag itself.
+	SeedHeldProviderCredentialsJson(providerIds []string, credsJson []string)
+	// The person's pick on a goal row (`provider-goal-select`), or the manual
+	// row for DNS (always allowed, a bought domain included). Refused for a
+	// cover that cannot cover the goal: the manual row on registration or the
+	// server; a pick on registration while nothing is bought, or once this
+	// wizard bought the domain (the goal is fixed); a provider that is not
+	// connected or cannot cover it.
+	SelectGoalCover(goal ProviderGoal, cover GoalCover) error
+	// The contact form's submit; Continue writes the registration cover's
+	// contact into `dns` state.
+	SetProviderContact(providerId string, contact fauna_provisioning.ContactInfo)
+	// One field of a provider's dialog. A changed credential un-connects the
+	// provider until *Connect* runs again (as `set_dns_cred` un-verifies).
+	SetProviderCred(providerId string, fieldId string, value string)
+	// The fields a provider's dialog shows: DNS and server fields always,
+	// registrar fields when the domain is being bought — so a provider is
+	// connected once, whole. Empty for an unknown id.
+	VisibleProviderFields(providerId string) []FieldMetaPlain
 }
 
 // The single shared onboarding wizard state machine. Each app holds
@@ -6624,6 +7042,20 @@ func (_self *OnboardingMachine) ProvisioningContinueBlockedReason() *fauna_core.
 	}))
 }
 
+// `provisioning-continue-button`'s answer in the shared possibility type —
+// [`Self::provisioning_continue_blocked_reason`] as one value, so an app
+// stops re-deriving enabled from `overall != Succeeded` beside it.
+func (_self *OnboardingMachine) ProvisioningContinuePossibility() fauna_core.Possibility {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return fauna_core.FfiConverterPossibilityINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provisioning_continue_possibility(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
 // Cancel button is shown — provisioning is actively running. Also gates
 // the elapsed-time ticker.
 func (_self *OnboardingMachine) ProvisioningInProgress() bool {
@@ -6652,6 +7084,18 @@ func (_self *OnboardingMachine) ProvisioningSnapshot() fauna_provisioning.Provis
 			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provisioning_snapshot(
 				_pointer, _uniffiStatus),
 		}
+	}))
+}
+
+// *Buy and set up* is refused on a run entered from the choose-providers
+// page while [`Self::provisioning_start_blocked_reason`] names a reason
+// (the `vps_config` path enforced both conditions at its Continues).
+func (_self *OnboardingMachine) ProvisioningStartRefused() bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provisioning_start_refused(
+			_pointer, _uniffiStatus)
 	}))
 }
 
@@ -7629,6 +8073,23 @@ func (_self *OnboardingMachine) SetRecoveryBoxes(boxes []string) {
 	})
 }
 
+// App capability declaration: this app has the `provider_choice` page
+// built (`onboarding-provisioning.md` § 3d). Call once at wizard
+// construction; the handle check's Continue then lands on
+// [`OnboardingStep::ProviderChoice`] instead of `DnsConfig`. Apps that
+// never call it keep the `dns_config` → `vps_config` path — the
+// batched-trickle-down parity gap. Survives [`Self::reset`] as
+// [`Self::set_renders_recovery_kit`] does.
+func (_self *OnboardingMachine) SetRendersProviderChoice(renders bool) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_set_renders_provider_choice(
+			_pointer, FfiConverterBoolINSTANCE.Lower(renders), _uniffiStatus)
+		return false
+	})
+}
+
 // App capability declaration: this app has the `recovery_kit` onboarding
 // screen built (`onboarding.md` § 1 Identity). Call once at wizard
 // construction; the machine then routes `confirm_generated_identity`
@@ -8078,6 +8539,10 @@ func (_self *OnboardingMachine) TakeTrustPromptGranted() bool {
 	}))
 }
 
+// `dns-buy-domain-checkbox`. Ticking it is refused unless the handle
+// check found the domain unregistered ([`Self::can_offer_buy_domain`]):
+// a registered domain cannot be bought (`onboarding-provisioning.md`
+// § 3d).
 func (_self *OnboardingMachine) ToggleBuyDomain(on bool) {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -8297,6 +8762,24 @@ func (_self *OnboardingMachine) VpsContinueBlockedReason() *fauna_core.Localized
 	}))
 }
 
+// `vps-config-continue-button`'s answer in the shared possibility type
+// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6): the
+// same shortfall [`Self::vps_continue_blocked_reason`] names, as one
+// value, so a native app paints enabled-or-blocked-with-reason from a
+// single call and never pairs [`Self::can_continue_vps`] with the reason
+// getter itself. Never [`Possibility::Absent`]: every app shows the
+// button.
+func (_self *OnboardingMachine) VpsContinuePossibility() fauna_core.Possibility {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return fauna_core.FfiConverterPossibilityINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_vps_continue_possibility(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
 // Whether the deployment's **files (WebDAV)** subsystem should be enabled
 // at claim. Machine-derived sibling of [`Self::carddav_enable_requested`] —
 // same two-axis derivation (handle locality AND NAT axis), no checkbox
@@ -8393,6 +8876,465 @@ func (_self *OnboardingMachine) WizardSubmitInviteRequest() OnboardingStep {
 	)
 
 	return res
+}
+
+// *Connect* is pressable: every required visible field is filled and no
+// connect of this provider is in flight.
+func (_self *OnboardingMachine) CanConnectProvider(providerId string) bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_can_connect_provider(
+			_pointer, FfiConverterStringINSTANCE.Lower(providerId), _uniffiStatus)
+	}))
+}
+
+// Continue is live: every goal on the page is covered and the covering
+// registrar has the contact it requires.
+func (_self *OnboardingMachine) CanContinueProviders() bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_can_continue_providers(
+			_pointer, _uniffiStatus)
+	}))
+}
+
+// Whether `dns-buy-domain-checkbox` is offered: exactly when the handle
+// check found the domain unregistered (`DomainAvailable`, either
+// reading) and this wizard has not registered it since — a registered
+// domain cannot be bought.
+func (_self *OnboardingMachine) CanOfferBuyDomain() bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_can_offer_buy_domain(
+			_pointer, _uniffiStatus)
+	}))
+}
+
+// *Connect*: run every check the provider's capabilities allow with the
+// one credential set — the DNS check that lists the account's zones, the
+// registrar's quote for an unregistered domain, the server check that
+// lists locations and the offers of the first — and mark it connected.
+// A failed check leaves it unconnected with the provider's own error.
+func (_self *OnboardingMachine) ConnectProvider(providerId string) error {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*OnboardingError](
+		FfiConverterOnboardingErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_onboarding_machine_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_connect_provider(
+			_pointer, FfiConverterStringINSTANCE.Lower(providerId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Continue: write the covering providers, their credentials, the contact
+// and the defaults (the server's default location with its offers
+// listed, the cheapest offer the mail gate permits) into the `dns` /
+// `vps` state the provisioning run already reads, then land on
+// `nest_provisioning` — nothing is bought or changed here, and the
+// price is agreed there. A manual DNS cover takes the deferred-DNS path.
+func (_self *OnboardingMachine) ContinueFromProviders() error {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*OnboardingError](FfiConverterOnboardingError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_continue_from_providers(
+			_pointer, _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// *Disconnect*: drop the provider's credential from the wizard; any goal
+// it covered is uncovered (and reassigned when another provider can).
+func (_self *OnboardingMachine) DisconnectProvider(providerId string) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_disconnect_provider(
+			_pointer, FfiConverterStringINSTANCE.Lower(providerId), _uniffiStatus)
+		return false
+	})
+}
+
+// The goal lines in page order: registration (only while buying, with
+// the covering registrar's price), DNS, the server.
+func (_self *OnboardingMachine) GoalRows() []GoalRow {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterSequenceGoalRowINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_goal_rows(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// The contact form's values: the account's default contact *Connect*
+// fetched, or what the person entered.
+func (_self *OnboardingMachine) ProviderContact(providerId string) *fauna_provisioning.ContactInfo {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalContactInfoINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_contact(
+				_pointer, FfiConverterStringINSTANCE.Lower(providerId), _uniffiStatus),
+		}
+	}))
+}
+
+// The domain the goal lines name (*Register `<domain>`*, *DNS for
+// `<domain>`*): the handle's domain, empty before a handle is typed.
+func (_self *OnboardingMachine) ProviderGoalDomain() string {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_goal_domain(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// Sign in at the provider for one `hosted-auth` field of its dialog
+// (the device-authorization flow [`Self::hosted_auth_begin`] runs).
+func (_self *OnboardingMachine) ProviderHostedAuthBegin(providerId string, fieldId string) (HostedAuthPrompt, error) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*OnboardingError](
+		FfiConverterOnboardingErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_fauna_onboarding_machine_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) HostedAuthPrompt {
+			return FfiConverterHostedAuthPromptINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_hosted_auth_begin(
+			_pointer, FfiConverterStringINSTANCE.Lower(providerId), FfiConverterStringINSTANCE.Lower(fieldId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// The sign-in button's label for one field of a provider's dialog.
+func (_self *OnboardingMachine) ProviderHostedAuthButtonText(providerId string, fieldId string) string {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_hosted_auth_button_text(
+				_pointer, FfiConverterStringINSTANCE.Lower(providerId), FfiConverterStringINSTANCE.Lower(fieldId), _uniffiStatus),
+		}
+	}))
+}
+
+// Whether a provider dialog's sign-in button is pressable.
+func (_self *OnboardingMachine) ProviderHostedAuthCanBegin(providerId string, fieldId string) bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_hosted_auth_can_begin(
+			_pointer, FfiConverterStringINSTANCE.Lower(providerId), FfiConverterStringINSTANCE.Lower(fieldId), _uniffiStatus)
+	}))
+}
+
+// Where a `hosted-auth` field of a provider's dialog stands (the button
+// label source, as [`Self::hosted_auth_state`] is for the built forms).
+func (_self *OnboardingMachine) ProviderHostedAuthState(providerId string, fieldId string) HostedAuthState {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterHostedAuthStateINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_hosted_auth_state(
+				_pointer, FfiConverterStringINSTANCE.Lower(providerId), FfiConverterStringINSTANCE.Lower(fieldId), _uniffiStatus),
+		}
+	}))
+}
+
+// Wait for that sign-in; the token lands in the dialog's credential.
+func (_self *OnboardingMachine) ProviderHostedAuthWait(providerId string, fieldId string) error {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*OnboardingError](
+		FfiConverterOnboardingErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_onboarding_machine_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_hosted_auth_wait(
+			_pointer, FfiConverterStringINSTANCE.Lower(providerId), FfiConverterStringINSTANCE.Lower(fieldId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// The registrar's note for the dialog (`dns-registrar-notes-text`) while
+// a domain is bought: the registry's `registrar_notes_key`, for a
+// registrar that uses the contact on its own account.
+func (_self *OnboardingMachine) ProviderRegistrarNotesKey(providerId string) *string {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_registrar_notes_key(
+				_pointer, FfiConverterStringINSTANCE.Lower(providerId), _uniffiStatus),
+		}
+	}))
+}
+
+// One row per registry provider, registry order, then the manual row
+// ([`MANUAL_ROW_ID`], no capabilities, never connected), each with its
+// per-goal cannot-cover reason from the one can-cover computation. The
+// registration reason is `None` while nothing is bought.
+func (_self *OnboardingMachine) ProviderRows() []ProviderRow {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterSequenceProviderRowINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_rows(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// The dialog shows the WHOIS contact form (`dns-contact-form`): a domain
+// is bought, the provider is connected, quotes it as buyable and its
+// registrar `requires_contact()`.
+func (_self *OnboardingMachine) ProviderShowsContactForm(providerId string) bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provider_shows_contact_form(
+			_pointer, FfiConverterStringINSTANCE.Lower(providerId), _uniffiStatus)
+	}))
+}
+
+// Why Continue is dead, naming the first open goal in page order or the
+// registrar whose contact is missing (`ui/README.md` § Copy
+// comprehensibility rule 5) — `None` when it is live. Paired with
+// [`Self::can_continue_providers`] over one computation.
+func (_self *OnboardingMachine) ProvidersContinueBlockedReason() *fauna_core.LocalizedText {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalLocalizedTextINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_providers_continue_blocked_reason(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// Back from `nest_provisioning` returns to the choose-providers page
+// (`true`) rather than `vps_config` — the routing decision as data until
+// the page's `OnboardingStep` lands with the page itself.
+func (_self *OnboardingMachine) ProvisioningBackToProviders() bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provisioning_back_to_providers(
+			_pointer, _uniffiStatus)
+	}))
+}
+
+// `nest_provisioning` shows its choices region (location, server type,
+// mail mode, update channel, SSH door): the run was entered from this
+// page's Continue — not from cloud recovery, which chose on `vps_config`
+// — and has not started or succeeded (Retry after a failed or cancelled
+// run reads the choices afresh).
+func (_self *OnboardingMachine) ProvisioningChoicesVisible() bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provisioning_choices_visible(
+			_pointer, _uniffiStatus)
+	}))
+}
+
+// Why *Buy and set up* is dead, for the un-id'd line beneath it — `None`
+// when it is live: a domain bought through a provider whose price is not
+// yet agreed (`dns-price-confirm-checkbox`), or no server type selected.
+// `start_provisioning` refuses while it is `Some` on a run entered from
+// this page (the `vps_config` path enforces both at its own Continues).
+func (_self *OnboardingMachine) ProvisioningStartBlockedReason() *fauna_core.LocalizedText {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalLocalizedTextINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provisioning_start_blocked_reason(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// The credentials signed-in accounts on this device hold (an add-account
+// run), passed in by the app. Each is re-checked: one whose checks pass
+// reads connected (held); one that fails is dropped, so a revoked token
+// reads as not connected. A provider the person already connected in this
+// run is left alone. The server check runs only when the provider's
+// server fields are among the fields held.
+func (_self *OnboardingMachine) SeedHeldProviderCredentials(held []HeldProviderCredential) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_onboarding_machine_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_seed_held_provider_credentials(
+			_pointer, FfiConverterSequenceHeldProviderCredentialINSTANCE.Lower(held)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_free_void(handle)
+		},
+	)
+
+}
+
+// The binding faces' form of [`Self::seed_held_provider_credentials`]: the
+// index-paired provider ids and JSON field bags `retire_held_inputs` reads
+// off the account's DNS record — the same pair `set_held_dns_json` takes on
+// the retire page — so no app projects the credential bag itself.
+func (_self *OnboardingMachine) SeedHeldProviderCredentialsJson(providerIds []string, credsJson []string) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_onboarding_machine_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_seed_held_provider_credentials_json(
+			_pointer, FfiConverterSequenceStringINSTANCE.Lower(providerIds), FfiConverterSequenceStringINSTANCE.Lower(credsJson)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_free_void(handle)
+		},
+	)
+
+}
+
+// The person's pick on a goal row (`provider-goal-select`), or the manual
+// row for DNS (always allowed, a bought domain included). Refused for a
+// cover that cannot cover the goal: the manual row on registration or the
+// server; a pick on registration while nothing is bought, or once this
+// wizard bought the domain (the goal is fixed); a provider that is not
+// connected or cannot cover it.
+func (_self *OnboardingMachine) SelectGoalCover(goal ProviderGoal, cover GoalCover) error {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*OnboardingError](FfiConverterOnboardingError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_select_goal_cover(
+			_pointer, FfiConverterProviderGoalINSTANCE.Lower(goal), FfiConverterGoalCoverINSTANCE.Lower(cover), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// The contact form's submit; Continue writes the registration cover's
+// contact into `dns` state.
+func (_self *OnboardingMachine) SetProviderContact(providerId string, contact fauna_provisioning.ContactInfo) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_set_provider_contact(
+			_pointer, FfiConverterStringINSTANCE.Lower(providerId),
+			CFromRustBuffer(fauna_provisioning.FfiConverterContactInfoINSTANCE.LowerExternal(contact)), _uniffiStatus)
+		return false
+	})
+}
+
+// One field of a provider's dialog. A changed credential un-connects the
+// provider until *Connect* runs again (as `set_dns_cred` un-verifies).
+func (_self *OnboardingMachine) SetProviderCred(providerId string, fieldId string, value string) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_set_provider_cred(
+			_pointer, FfiConverterStringINSTANCE.Lower(providerId), FfiConverterStringINSTANCE.Lower(fieldId), FfiConverterStringINSTANCE.Lower(value), _uniffiStatus)
+		return false
+	})
+}
+
+// The fields a provider's dialog shows: DNS and server fields always,
+// registrar fields when the domain is being bought — so a provider is
+// connected once, whole. Empty for an unknown id.
+func (_self *OnboardingMachine) VisibleProviderFields(providerId string) []FieldMetaPlain {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterSequenceFieldMetaPlainINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_visible_provider_fields(
+				_pointer, FfiConverterStringINSTANCE.Lower(providerId), _uniffiStatus),
+		}
+	}))
 }
 func (object *OnboardingMachine) Destroy() {
 	runtime.SetFinalizer(object, nil)
@@ -9344,6 +10286,81 @@ func (_ FfiDestroyerFieldMetaPlain) Destroy(value FieldMetaPlain) {
 	value.Destroy()
 }
 
+// One goal line at the top of the page.
+type GoalRow struct {
+	Goal ProviderGoal
+	// `None` = open.
+	Cover *GoalCover
+	// The connected providers that can cover this goal, registry order; the
+	// goal row offers the choice when there is more than one (never on DNS
+	// while buying: it follows the registration goal's cover).
+	Candidates []string
+	// The registration row only: the covering registrar's quote, first year
+	// and renewal, so a person choosing between two registrars chooses on
+	// the price. `None` on the other rows and while the goal is open.
+	PriceCents   *uint64
+	RenewalCents *uint64
+	Currency     *string
+	// The DNS row only: a note on its cover — that the domain does not point
+	// at the covering provider's zone yet (§ 3d → *A zone the domain does not
+	// point at*). `None` otherwise.
+	Note *fauna_core.LocalizedText
+}
+
+func (r *GoalRow) Destroy() {
+	FfiDestroyerProviderGoal{}.Destroy(r.Goal)
+	FfiDestroyerOptionalGoalCover{}.Destroy(r.Cover)
+	FfiDestroyerSequenceString{}.Destroy(r.Candidates)
+	FfiDestroyerOptionalUint64{}.Destroy(r.PriceCents)
+	FfiDestroyerOptionalUint64{}.Destroy(r.RenewalCents)
+	FfiDestroyerOptionalString{}.Destroy(r.Currency)
+	FfiDestroyerOptionalLocalizedText{}.Destroy(r.Note)
+}
+
+type FfiConverterGoalRow struct{}
+
+var FfiConverterGoalRowINSTANCE = FfiConverterGoalRow{}
+
+func (c FfiConverterGoalRow) Lift(rb RustBufferI) GoalRow {
+	return LiftFromRustBuffer[GoalRow](c, rb)
+}
+
+func (c FfiConverterGoalRow) Read(reader io.Reader) GoalRow {
+	return GoalRow{
+		FfiConverterProviderGoalINSTANCE.Read(reader),
+		FfiConverterOptionalGoalCoverINSTANCE.Read(reader),
+		FfiConverterSequenceStringINSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalLocalizedTextINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterGoalRow) Lower(value GoalRow) C.RustBuffer {
+	return LowerIntoRustBuffer[GoalRow](c, value)
+}
+
+func (c FfiConverterGoalRow) LowerExternal(value GoalRow) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[GoalRow](c, value))
+}
+
+func (c FfiConverterGoalRow) Write(writer io.Writer, value GoalRow) {
+	FfiConverterProviderGoalINSTANCE.Write(writer, value.Goal)
+	FfiConverterOptionalGoalCoverINSTANCE.Write(writer, value.Cover)
+	FfiConverterSequenceStringINSTANCE.Write(writer, value.Candidates)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.PriceCents)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.RenewalCents)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.Currency)
+	FfiConverterOptionalLocalizedTextINSTANCE.Write(writer, value.Note)
+}
+
+type FfiDestroyerGoalRow struct{}
+
+func (_ FfiDestroyerGoalRow) Destroy(value GoalRow) {
+	value.Destroy()
+}
+
 type HandleCheckSnapshot struct {
 	Phase                  HandleCheckPhase
 	Outcome                HandleCheckOutcome
@@ -9412,6 +10429,54 @@ func (c FfiConverterHandleCheckSnapshot) Write(writer io.Writer, value HandleChe
 type FfiDestroyerHandleCheckSnapshot struct{}
 
 func (_ FfiDestroyerHandleCheckSnapshot) Destroy(value HandleCheckSnapshot) {
+	value.Destroy()
+}
+
+// A provider credential a signed-in account on this device already holds in
+// its DNS record, passed **into** the machine by the app (the machine never
+// reads account state — `nest-retirement.md` § Credential stance (b)); the
+// machine re-checks it before the provider reads connected.
+type HeldProviderCredential struct {
+	ProviderId string
+	Fields     map[string]fauna_core.SecretString
+}
+
+func (r *HeldProviderCredential) Destroy() {
+	FfiDestroyerString{}.Destroy(r.ProviderId)
+	FfiDestroyerMapStringSecretString{}.Destroy(r.Fields)
+}
+
+type FfiConverterHeldProviderCredential struct{}
+
+var FfiConverterHeldProviderCredentialINSTANCE = FfiConverterHeldProviderCredential{}
+
+func (c FfiConverterHeldProviderCredential) Lift(rb RustBufferI) HeldProviderCredential {
+	return LiftFromRustBuffer[HeldProviderCredential](c, rb)
+}
+
+func (c FfiConverterHeldProviderCredential) Read(reader io.Reader) HeldProviderCredential {
+	return HeldProviderCredential{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterMapStringSecretStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterHeldProviderCredential) Lower(value HeldProviderCredential) C.RustBuffer {
+	return LowerIntoRustBuffer[HeldProviderCredential](c, value)
+}
+
+func (c FfiConverterHeldProviderCredential) LowerExternal(value HeldProviderCredential) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[HeldProviderCredential](c, value))
+}
+
+func (c FfiConverterHeldProviderCredential) Write(writer io.Writer, value HeldProviderCredential) {
+	FfiConverterStringINSTANCE.Write(writer, value.ProviderId)
+	FfiConverterMapStringSecretStringINSTANCE.Write(writer, value.Fields)
+}
+
+type FfiDestroyerHeldProviderCredential struct{}
+
+func (_ FfiDestroyerHeldProviderCredential) Destroy(value HeldProviderCredential) {
 	value.Destroy()
 }
 
@@ -9871,6 +10936,83 @@ func (c FfiConverterPendingInviteSlot) Write(writer io.Writer, value PendingInvi
 type FfiDestroyerPendingInviteSlot struct{}
 
 func (_ FfiDestroyerPendingInviteSlot) Destroy(value PendingInviteSlot) {
+	value.Destroy()
+}
+
+// One row of the providers list: what the provider can do, whether it is
+// connected, and — per goal — why it cannot cover it (`None` = it can, or
+// could once connected).
+type ProviderRow struct {
+	ProviderId   string
+	Capabilities []CapabilityPlain
+	Connected    bool
+	Connecting   bool
+	Held         bool
+	// The provider's own error from the last failed *Connect*.
+	Error *string
+	// `None` too while no domain is bought (the goal is not on the page).
+	DomainReason *fauna_core.LocalizedText
+	DnsReason    *fauna_core.LocalizedText
+	VpsReason    *fauna_core.LocalizedText
+}
+
+func (r *ProviderRow) Destroy() {
+	FfiDestroyerString{}.Destroy(r.ProviderId)
+	FfiDestroyerSequenceCapabilityPlain{}.Destroy(r.Capabilities)
+	FfiDestroyerBool{}.Destroy(r.Connected)
+	FfiDestroyerBool{}.Destroy(r.Connecting)
+	FfiDestroyerBool{}.Destroy(r.Held)
+	FfiDestroyerOptionalString{}.Destroy(r.Error)
+	FfiDestroyerOptionalLocalizedText{}.Destroy(r.DomainReason)
+	FfiDestroyerOptionalLocalizedText{}.Destroy(r.DnsReason)
+	FfiDestroyerOptionalLocalizedText{}.Destroy(r.VpsReason)
+}
+
+type FfiConverterProviderRow struct{}
+
+var FfiConverterProviderRowINSTANCE = FfiConverterProviderRow{}
+
+func (c FfiConverterProviderRow) Lift(rb RustBufferI) ProviderRow {
+	return LiftFromRustBuffer[ProviderRow](c, rb)
+}
+
+func (c FfiConverterProviderRow) Read(reader io.Reader) ProviderRow {
+	return ProviderRow{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterSequenceCapabilityPlainINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalLocalizedTextINSTANCE.Read(reader),
+		FfiConverterOptionalLocalizedTextINSTANCE.Read(reader),
+		FfiConverterOptionalLocalizedTextINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterProviderRow) Lower(value ProviderRow) C.RustBuffer {
+	return LowerIntoRustBuffer[ProviderRow](c, value)
+}
+
+func (c FfiConverterProviderRow) LowerExternal(value ProviderRow) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ProviderRow](c, value))
+}
+
+func (c FfiConverterProviderRow) Write(writer io.Writer, value ProviderRow) {
+	FfiConverterStringINSTANCE.Write(writer, value.ProviderId)
+	FfiConverterSequenceCapabilityPlainINSTANCE.Write(writer, value.Capabilities)
+	FfiConverterBoolINSTANCE.Write(writer, value.Connected)
+	FfiConverterBoolINSTANCE.Write(writer, value.Connecting)
+	FfiConverterBoolINSTANCE.Write(writer, value.Held)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.Error)
+	FfiConverterOptionalLocalizedTextINSTANCE.Write(writer, value.DomainReason)
+	FfiConverterOptionalLocalizedTextINSTANCE.Write(writer, value.DnsReason)
+	FfiConverterOptionalLocalizedTextINSTANCE.Write(writer, value.VpsReason)
+}
+
+type FfiDestroyerProviderRow struct{}
+
+func (_ FfiDestroyerProviderRow) Destroy(value ProviderRow) {
 	value.Destroy()
 }
 
@@ -10536,6 +11678,10 @@ const (
 	CapabilityPlainDns       CapabilityPlain = 1
 	CapabilityPlainVps       CapabilityPlain = 2
 	CapabilityPlainRegistrar CapabilityPlain = 3
+	// A field kind only, never a provider capability: a field the zone door
+	// needs (`docs/goal/architecture/provisioning/registry.md` § Delegation
+	// doors).
+	CapabilityPlainZone CapabilityPlain = 4
 )
 
 type FfiConverterCapabilityPlain struct{}
@@ -10956,6 +12102,73 @@ func (FfiConverterFieldTypePlain) Write(writer io.Writer, value FieldTypePlain) 
 type FfiDestroyerFieldTypePlain struct{}
 
 func (_ FfiDestroyerFieldTypePlain) Destroy(value FieldTypePlain) {
+}
+
+// What covers a goal: a connected provider, or — for the DNS goal only — the
+// manual row (*I will set DNS up later*, today's deferred-DNS path).
+type GoalCover interface {
+	Destroy()
+}
+type GoalCoverProvider struct {
+	ProviderId string
+}
+
+func (e GoalCoverProvider) Destroy() {
+	FfiDestroyerString{}.Destroy(e.ProviderId)
+}
+
+type GoalCoverManual struct {
+}
+
+func (e GoalCoverManual) Destroy() {
+}
+
+type FfiConverterGoalCover struct{}
+
+var FfiConverterGoalCoverINSTANCE = FfiConverterGoalCover{}
+
+func (c FfiConverterGoalCover) Lift(rb RustBufferI) GoalCover {
+	return LiftFromRustBuffer[GoalCover](c, rb)
+}
+
+func (c FfiConverterGoalCover) Lower(value GoalCover) C.RustBuffer {
+	return LowerIntoRustBuffer[GoalCover](c, value)
+}
+
+func (c FfiConverterGoalCover) LowerExternal(value GoalCover) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[GoalCover](c, value))
+}
+func (FfiConverterGoalCover) Read(reader io.Reader) GoalCover {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return GoalCoverProvider{
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	case 2:
+		return GoalCoverManual{}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterGoalCover.Read()", id))
+	}
+}
+
+func (FfiConverterGoalCover) Write(writer io.Writer, value GoalCover) {
+	switch variant_value := value.(type) {
+	case GoalCoverProvider:
+		writeInt32(writer, 1)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.ProviderId)
+	case GoalCoverManual:
+		writeInt32(writer, 2)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterGoalCover.Write", value))
+	}
+}
+
+type FfiDestroyerGoalCover struct{}
+
+func (_ FfiDestroyerGoalCover) Destroy(value GoalCover) {
+	value.Destroy()
 }
 
 type HandleCheckOutcome interface {
@@ -12125,11 +13338,21 @@ const (
 	// a lock returns to `IdentityChoice`, a refusal stays here.
 	OnboardingStepEmergencyLockoutEntry OnboardingStep = 6
 	OnboardingStepHandleEntry           OnboardingStep = 7
-	OnboardingStepDnsConfig             OnboardingStep = 8
-	OnboardingStepVpsConfig             OnboardingStep = 9
-	OnboardingStepNestProvisioning      OnboardingStep = 10
-	OnboardingStepDnsPostInstructions   OnboardingStep = 11
-	OnboardingStepInviteRequest         OnboardingStep = 12
+	// The choose-providers page (`onboarding-provisioning.md` § 3d): the
+	// goals of the set-up and the providers that cover them, between the
+	// handle check and [`Self::NestProvisioning`] in place of
+	// [`Self::DnsConfig`] and [`Self::VpsConfig`] on the set-up path.
+	// Entered from `submit_handle_check_continue` **only when the app
+	// declared `set_renders_provider_choice(true)`** — apps whose page
+	// hasn't landed keep going to `DnsConfig`, a per-app parity gap, not
+	// drift. Continue (`continue_from_providers`) lands on
+	// `NestProvisioning`; Back returns to `HandleEntry`.
+	OnboardingStepProviderChoice      OnboardingStep = 8
+	OnboardingStepDnsConfig           OnboardingStep = 9
+	OnboardingStepVpsConfig           OnboardingStep = 10
+	OnboardingStepNestProvisioning    OnboardingStep = 11
+	OnboardingStepDnsPostInstructions OnboardingStep = 12
+	OnboardingStepInviteRequest       OnboardingStep = 13
 	// Reached only when handle-check returns
 	// `HandleCheckOutcome::UnregisteredUnclaimedNest` — the nest is
 	// running but `setup-status.claimed == false`. Mutually exclusive
@@ -12137,7 +13360,7 @@ const (
 	// the user's only path forward is the one-time claim code printed
 	// by the nest's bootstrap process. See
 	// `docs/goal/behavior/onboarding.md` §3a.
-	OnboardingStepClaimCode OnboardingStep = 13
+	OnboardingStepClaimCode OnboardingStep = 14
 	// The `nat_mode_choice` page — the **single, terminal** admin-path setup
 	// step: the admin confirms the nest's NAT axis (`public` / `private`).
 	// Reached **directly on claim completion** — there is no storage-mode
@@ -12147,7 +13370,7 @@ const (
 	// kind and exits to `Done` with `wizard_outcome() == LoggedIn`;
 	// `defer_nat_mode_choice` exits the same way keeping the seeded value. Per
 	// `docs/goal/behavior/onboarding.md` § 3b-bis.
-	OnboardingStepNatModeChoice OnboardingStep = 14
+	OnboardingStepNatModeChoice OnboardingStep = 15
 	// The one-tap "trust this box" offer (`onboarding.md` § 3b-ter; ui.yaml
 	// page `onboarding.trust_prompt`) — an **optional interstitial before
 	// LoggedIn, not a setup step**: it configures nothing nest-side, so
@@ -12167,7 +13390,7 @@ const (
 	// parity gap, not drift. A returning `AlreadyOnNest` sign-in is NOT such
 	// a route and never reaches here. Grant and skip both land on
 	// [`Self::Done`] with the same `LoggedIn` outcome.
-	OnboardingStepTrustPrompt OnboardingStep = 15
+	OnboardingStepTrustPrompt OnboardingStep = 16
 	// Total-box-loss recovery hub (`box-recovery.md` § Recovery UI, step 4;
 	// ui.yaml page `nest_recovery`). Lists the admin's custodied boxes
 	// (`fauna.state.deployment-seeds`, read via the shared `deploymentSeeds()`
@@ -12175,18 +13398,18 @@ const (
 	// self-hosted). Reached from two entries: `launch-recover-button` on
 	// `launch_retry` (surviving device) and `recover-lost-box-button` on
 	// `identity_choice` → `identity_import` (recovery intent) → here.
-	OnboardingStepNestRecovery OnboardingStep = 16
+	OnboardingStepNestRecovery OnboardingStep = 17
 	// Self-hosted recovery instructions (`box-recovery.md` § Recovery UI,
 	// step 4; ui.yaml page `recover_selfhosted_instructions`). Shows the
 	// installer invocation / `.env` line carrying `FAUNA_DEPLOYMENT_SEED` (the
 	// client-custodied seed for the selected box) so `docker compose up` boots
 	// the box with the same `nest_actor_id`. An out-of-band step — the box
 	// isn't up yet, so continuing exits the wizard.
-	OnboardingStepRecoverSelfhostedInstructions OnboardingStep = 17
+	OnboardingStepRecoverSelfhostedInstructions OnboardingStep = 18
 	// Sentinel: the wizard finished. App router should swap to the
 	// authenticated UI. Caller may also query `wizard_outcome()` for the
 	// terminal `WizardOutcome` and route to the main app.
-	OnboardingStepDone OnboardingStep = 18
+	OnboardingStepDone OnboardingStep = 19
 )
 
 type FfiConverterOnboardingStep struct{}
@@ -12568,6 +13791,46 @@ func (_ FfiDestroyerProbeError) Destroy(value *ProbeError) {
 		_ = variantValue
 		panic(fmt.Sprintf("invalid error value `%v` in FfiDestroyerProbeError.Destroy", value))
 	}
+}
+
+// One of the things a nest needs before the wizard builds it, in page order:
+// registering the handle's domain (a goal of the run only while it is being
+// bought), DNS for it, and a server.
+type ProviderGoal uint
+
+const (
+	ProviderGoalDomain ProviderGoal = 1
+	ProviderGoalDns    ProviderGoal = 2
+	ProviderGoalVps    ProviderGoal = 3
+)
+
+type FfiConverterProviderGoal struct{}
+
+var FfiConverterProviderGoalINSTANCE = FfiConverterProviderGoal{}
+
+func (c FfiConverterProviderGoal) Lift(rb RustBufferI) ProviderGoal {
+	return LiftFromRustBuffer[ProviderGoal](c, rb)
+}
+
+func (c FfiConverterProviderGoal) Lower(value ProviderGoal) C.RustBuffer {
+	return LowerIntoRustBuffer[ProviderGoal](c, value)
+}
+
+func (c FfiConverterProviderGoal) LowerExternal(value ProviderGoal) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ProviderGoal](c, value))
+}
+func (FfiConverterProviderGoal) Read(reader io.Reader) ProviderGoal {
+	id := readInt32(reader)
+	return ProviderGoal(id)
+}
+
+func (FfiConverterProviderGoal) Write(writer io.Writer, value ProviderGoal) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerProviderGoal struct{}
+
+func (_ FfiDestroyerProviderGoal) Destroy(value ProviderGoal) {
 }
 
 // Per-provider DNS-config status surfaced to the wizard's UI. Computed
@@ -13970,6 +15233,47 @@ func (_ FfiDestroyerOptionalBoxRecoveryEntry) Destroy(value *BoxRecoveryEntry) {
 	}
 }
 
+type FfiConverterOptionalGoalCover struct{}
+
+var FfiConverterOptionalGoalCoverINSTANCE = FfiConverterOptionalGoalCover{}
+
+func (c FfiConverterOptionalGoalCover) Lift(rb RustBufferI) *GoalCover {
+	return LiftFromRustBuffer[*GoalCover](c, rb)
+}
+
+func (_ FfiConverterOptionalGoalCover) Read(reader io.Reader) *GoalCover {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterGoalCoverINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalGoalCover) Lower(value *GoalCover) C.RustBuffer {
+	return LowerIntoRustBuffer[*GoalCover](c, value)
+}
+
+func (c FfiConverterOptionalGoalCover) LowerExternal(value *GoalCover) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*GoalCover](c, value))
+}
+
+func (_ FfiConverterOptionalGoalCover) Write(writer io.Writer, value *GoalCover) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterGoalCoverINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalGoalCover struct{}
+
+func (_ FfiDestroyerOptionalGoalCover) Destroy(value *GoalCover) {
+	if value != nil {
+		FfiDestroyerGoalCover{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalIdentityOrigin struct{}
 
 var FfiConverterOptionalIdentityOriginINSTANCE = FfiConverterOptionalIdentityOrigin{}
@@ -14498,6 +15802,100 @@ func (FfiDestroyerSequenceFieldMetaPlain) Destroy(sequence []FieldMetaPlain) {
 	}
 }
 
+type FfiConverterSequenceGoalRow struct{}
+
+var FfiConverterSequenceGoalRowINSTANCE = FfiConverterSequenceGoalRow{}
+
+func (c FfiConverterSequenceGoalRow) Lift(rb RustBufferI) []GoalRow {
+	return LiftFromRustBuffer[[]GoalRow](c, rb)
+}
+
+func (c FfiConverterSequenceGoalRow) Read(reader io.Reader) []GoalRow {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]GoalRow, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterGoalRowINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceGoalRow) Lower(value []GoalRow) C.RustBuffer {
+	return LowerIntoRustBuffer[[]GoalRow](c, value)
+}
+
+func (c FfiConverterSequenceGoalRow) LowerExternal(value []GoalRow) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]GoalRow](c, value))
+}
+
+func (c FfiConverterSequenceGoalRow) Write(writer io.Writer, value []GoalRow) {
+	if len(value) > math.MaxInt32 {
+		panic("[]GoalRow is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterGoalRowINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceGoalRow struct{}
+
+func (FfiDestroyerSequenceGoalRow) Destroy(sequence []GoalRow) {
+	for _, value := range sequence {
+		FfiDestroyerGoalRow{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceHeldProviderCredential struct{}
+
+var FfiConverterSequenceHeldProviderCredentialINSTANCE = FfiConverterSequenceHeldProviderCredential{}
+
+func (c FfiConverterSequenceHeldProviderCredential) Lift(rb RustBufferI) []HeldProviderCredential {
+	return LiftFromRustBuffer[[]HeldProviderCredential](c, rb)
+}
+
+func (c FfiConverterSequenceHeldProviderCredential) Read(reader io.Reader) []HeldProviderCredential {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]HeldProviderCredential, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterHeldProviderCredentialINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceHeldProviderCredential) Lower(value []HeldProviderCredential) C.RustBuffer {
+	return LowerIntoRustBuffer[[]HeldProviderCredential](c, value)
+}
+
+func (c FfiConverterSequenceHeldProviderCredential) LowerExternal(value []HeldProviderCredential) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]HeldProviderCredential](c, value))
+}
+
+func (c FfiConverterSequenceHeldProviderCredential) Write(writer io.Writer, value []HeldProviderCredential) {
+	if len(value) > math.MaxInt32 {
+		panic("[]HeldProviderCredential is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterHeldProviderCredentialINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceHeldProviderCredential struct{}
+
+func (FfiDestroyerSequenceHeldProviderCredential) Destroy(sequence []HeldProviderCredential) {
+	for _, value := range sequence {
+		FfiDestroyerHeldProviderCredential{}.Destroy(value)
+	}
+}
+
 type FfiConverterSequenceLeftoverLine struct{}
 
 var FfiConverterSequenceLeftoverLineINSTANCE = FfiConverterSequenceLeftoverLine{}
@@ -14589,6 +15987,53 @@ type FfiDestroyerSequenceManagedServerRow struct{}
 func (FfiDestroyerSequenceManagedServerRow) Destroy(sequence []ManagedServerRow) {
 	for _, value := range sequence {
 		FfiDestroyerManagedServerRow{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceProviderRow struct{}
+
+var FfiConverterSequenceProviderRowINSTANCE = FfiConverterSequenceProviderRow{}
+
+func (c FfiConverterSequenceProviderRow) Lift(rb RustBufferI) []ProviderRow {
+	return LiftFromRustBuffer[[]ProviderRow](c, rb)
+}
+
+func (c FfiConverterSequenceProviderRow) Read(reader io.Reader) []ProviderRow {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]ProviderRow, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterProviderRowINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceProviderRow) Lower(value []ProviderRow) C.RustBuffer {
+	return LowerIntoRustBuffer[[]ProviderRow](c, value)
+}
+
+func (c FfiConverterSequenceProviderRow) LowerExternal(value []ProviderRow) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]ProviderRow](c, value))
+}
+
+func (c FfiConverterSequenceProviderRow) Write(writer io.Writer, value []ProviderRow) {
+	if len(value) > math.MaxInt32 {
+		panic("[]ProviderRow is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterProviderRowINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceProviderRow struct{}
+
+func (FfiDestroyerSequenceProviderRow) Destroy(sequence []ProviderRow) {
+	for _, value := range sequence {
+		FfiDestroyerProviderRow{}.Destroy(value)
 	}
 }
 

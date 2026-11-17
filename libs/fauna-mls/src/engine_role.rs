@@ -49,8 +49,11 @@
 //! build in the same tab (an abandoned build's replacement), released by the
 //! tab's one teardown ([`release_conversations_engine_role`] /
 //! [`release_all_conversations_engine_roles`]) together with the runtime it
-//! hosts — that pairing is what lets the erase's one probe suffice — and by the
-//! browser for free when the tab closes. **The own hold is consulted, never
+//! hosts — so the role answers for the tab that hosts the runtime, though not
+//! for a tab that holds the account's identity without it, which the erase
+//! asks the serving-presence lock about
+//! (`fauna_client_accounts::web_serving_presence`) — and by the browser for
+//! free when the tab closes. **The own hold is consulted, never
 //! probed**: an `ifAvailable` request beside this tab's own hold would meet its
 //! reflection and refuse every sign-out in the elected tab (the case native
 //! closes by putting its own lock down for the probe); holding the role *is*

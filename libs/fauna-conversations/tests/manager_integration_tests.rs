@@ -1277,6 +1277,42 @@ async fn send_new_thread_flushes_uncommitted_recipient() {
     );
 }
 
+#[tokio::test]
+async fn send_new_thread_with_no_recipient_refuses_on_send_state() {
+    // `dm-send-button` paints blocked with no recipient
+    // (`fauna_conversations::new_thread_controls`); the action asks the same
+    // predicate and, refused, stamps the draft's `send_state` so the refusal
+    // reaches `error-message` instead of reading as a dropped click
+    // (`ui/README.md` § Offer only what is possible, rules 6 and 7).
+    let sink = Arc::new(CapturingSink::default());
+    let m = ConversationsManager::new();
+    m.register_backend(Arc::new(SmtpBackend::new(sink.clone(), "alice@localhost")));
+    m.start_new_conversation();
+    m.set_new_thread_body("Nobody to send to".into());
+
+    let sent = m
+        .send_new_thread()
+        .await
+        .expect("a refusal is not an error");
+    assert!(sent.is_none(), "nothing is sent with no recipient");
+    assert!(sink.calls.lock().unwrap().is_empty());
+    let compose = m
+        .snapshot()
+        .new_thread_compose
+        .expect("the composer stays open with the author's words");
+    assert_eq!(compose.body_draft, "Nobody to send to");
+    match compose.send_state {
+        fauna_conversations::compose::SendState::Failed { reason } => {
+            assert_eq!(reason.key, "conversations.unified.error_send");
+            assert_eq!(
+                reason.args.get("message").map(String::as_str),
+                Some(fauna_i18n::strings::conversations::compose::NEEDS_RECIPIENT),
+            );
+        }
+        other => panic!("the refusal must be stamped on send_state, got {other:?}"),
+    }
+}
+
 /// A sink that always rejects — models the nest refusing `fauna.email.send`
 /// (e.g. mail not provisioned, so the actor lacks the `fauna.email.send`
 /// permission — `bins/fauna-nest/src/email_handlers.rs`).

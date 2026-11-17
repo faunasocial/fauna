@@ -180,6 +180,11 @@ impl Registry {
                     "editable": e.field.is_some(),
                     "scope": scope,
                     "text": e.text,
+                    "attrs": e
+                        .attrs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect::<serde_json::Map<_, _>>(),
                 })
             })
             .collect();
@@ -1037,6 +1042,9 @@ fn state_json(app: &App, machine_result: Option<String>, device_id: Option<&str>
     // `painted-text-has-area` (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`).
     // Measured by the render loop; a field read here. TOP-level.
     state[fauna_e2e_agent::PAINTED_TEXT_AREA_KEY] = app.painted_text_area.json();
+    // What each drawn frame showed at the root — the in-place witness's journal
+    // (`fauna_e2e_agent::ROOT_SURFACE_KEY`). TOP-level.
+    state[fauna_e2e_agent::ROOT_SURFACE_KEY] = app.root_surface.json();
     // The admin Held-Custody page's `{answered, row_count}` — whether the
     // registry read has ANSWERED, read off the loop while the nav's awaited
     // read is held at the nest (`admin::custody_hosting::state_json`).
@@ -3754,6 +3762,22 @@ mod tests {
         }
     }
 
+    /// `GET /registry` publishes each element's automation attributes, so a
+    /// whole-frame before/after comparison (the possibility sweep's
+    /// `actuation-changes-or-reports`) sees a state change that leaves the
+    /// text alone; an element with none publishes an empty map.
+    #[test]
+    fn snapshot_publishes_attrs() {
+        let registry = Registry::of([
+            crate::element::Element::label("toggle", "Dark").attr("state", "on"),
+            crate::element::Element::label("plain", "Text"),
+        ]);
+        let snap = registry.snapshot_json();
+        let els = snap["elements"].as_array().expect("elements");
+        assert_eq!(els[0]["attrs"], json!({"state": "on"}));
+        assert_eq!(els[1]["attrs"], json!({}));
+    }
+
     fn frame_registry(app: &App) -> Registry {
         let mut registry = Registry::default();
         crate::ui::register_listed(app, &mut registry);
@@ -3777,6 +3801,10 @@ mod tests {
         app.connection = fauna_ws_substrate::supervisor::ConnectionState::Disconnected;
         app.page = crate::pages::Page::Settings;
         app.settings.sub = crate::settings::SubPage::MailSpam;
+        // The page's entry is gated on mail being usable (`ui/mail-settings.md`
+        // § Errors & edge cases, the mail-usable gate): mail is on here.
+        app.settings
+            .set_mail_machine_for_test(crate::settings::mail_machine_in_for_test("on"));
         app
     }
 
@@ -5281,8 +5309,8 @@ mod tests {
     /// The `select` route, third of the three that were ungated.
     ///
     /// A DIFFERENT disabling mechanism on purpose: `folder-paywall-tier-select`
-    /// is disabled by an explicit `.enabled(!own_tiers.is_empty())` capability
-    /// check, not by the offline gate, so the two pins together prove the arm
+    /// is disabled by its own declared answer (the shared own-tier
+    /// `Possibility`, no tier owned), not by the offline gate, so the two pins together prove the arm
     /// consults `entry.enabled` itself rather than some connection-state proxy.
     #[test]
     fn selecting_on_a_disabled_picker_is_refused() {

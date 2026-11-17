@@ -183,12 +183,40 @@ public enum MailEnableGlue {
     /// it raises the banner too.
     @MainActor
     public static func selfHealDeploymentSeedCustody(api: APIClient, session: SessionState) async {
-        let warning = await api.selfHealDeploymentSeedCustody()
-        if let warning {
-            logMessage(level: .warn, target: "fauna.recoveryglue",
-                       message: "deployment-seed custody unconfirmed: \(warning.key)")
+        await api.selfHealDeploymentSeedCustody(sink: CustodyWarningSink(session: session))
+    }
+
+    /// Show a custody warning on the banner (the sink's `onWarning`, on the main actor).
+    @MainActor
+    static func applyCustodyWarning(_ warning: LocalizedText, session: SessionState) {
+        logMessage(level: .warn, target: "fauna.recoveryglue",
+                   message: "deployment-seed custody unconfirmed: \(warning.key)")
+        session.recoveryCustodyWarning = renderLocalizedText(warning)
+    }
+
+    /// The cleared mark: take the banner down **only** while it still shows a custody
+    /// warning (the shared `custody_leg_warning` texts, rendered by this app's
+    /// resolver) — never an unrelated warning shown since. The twin of android's
+    /// `AppMessages.clearWarningIf`.
+    @MainActor
+    static func applyCustodyCleared(session: SessionState) {
+        guard let shown = session.recoveryCustodyWarning else { return }
+        if deploymentSeedCustodyWarnings().map(renderLocalizedText).contains(shown) {
+            session.recoveryCustodyWarning = nil
         }
-        session.recoveryCustodyWarning = warning.map(renderLocalizedText)
+    }
+
+    /// The custody leg's callback sink. Called on a runtime thread, so each mark hops
+    /// to the main actor before touching `SessionState`.
+    final class CustodyWarningSink: FfiCustodyLegSink, @unchecked Sendable {
+        private let session: SessionState
+        init(session: SessionState) { self.session = session }
+        func onWarning(warning: LocalizedText) {
+            Task { @MainActor [session] in MailEnableGlue.applyCustodyWarning(warning, session: session) }
+        }
+        func onCleared() {
+            Task { @MainActor [session] in MailEnableGlue.applyCustodyCleared(session: session) }
+        }
     }
 
     /// The full post-auth glue sequence, in the fixed order both shells' launch

@@ -771,6 +771,9 @@ fauna-credential-store = { workspace = true, features = ["no-live-keyring"] }
 # `registry_census` — the shared source scan `account_registry_census_test`
 # pins the registry choke point with (same census tui runs).
 fauna-client-accounts = { workspace = true, features = ["test-helpers"] }
+# `FakeLabelerCatalogNestApi` — the catalog double the room editor's tests
+# build its labeler section over (no nest).
+fauna-labeler-catalog-machine = { path = "../../libs/fauna-labeler-catalog-machine", features = ["rpc-glue", "test-helpers"] }
 # `app_settings` round-trips its JSON store through a scratch dir rather than
 # the real `$XDG_CONFIG_HOME`.
 tempfile = { workspace = true }
@@ -801,4 +804,11 @@ fauna-media = { path = "../../libs/fauna-media", features = ["test-fixtures"] }
 # without a transport, mirroring the crate's own dev-dependency self-forward.
 fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = [
     "test-helpers",
+] }
+# `FakeMediaNestApi`/`NullObserver` — so the Media page's possibility pins
+# (`views::media`) paint from a real `MediaMachine` without a transport, the
+# shape fauna-tui's media tests build.
+fauna-media-machine = { path = "../../libs/fauna-media-machine", features = [
+    "test-helpers",
+    "test-observer",
 ] }

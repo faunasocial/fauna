@@ -14,8 +14,7 @@ the radios is untagged chrome, so the test reads the identity summary the mint
 produces, never that line.
 
 tui first, then linux and web (web through a proxy onto this dedicated nest —
-`_login_app_as`'s `spa_url`), the apple apps and windows; android follows in
-its own queue.
+`_login_app_as`'s `spa_url`), the apple apps, windows and android.
 """
 import pytest
 
@@ -71,6 +70,7 @@ def _handle_preview(nest, user) -> str:
 @pytest.mark.web
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.windows
 @pytest.mark.feature("atproto")
 @pytest.mark.parametrize("method", ["plc", "web"])

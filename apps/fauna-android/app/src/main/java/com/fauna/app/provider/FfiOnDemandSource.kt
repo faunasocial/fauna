@@ -37,7 +37,9 @@ import uniffi.fauna_folders_machine.SetPark
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
@@ -165,6 +167,10 @@ class FfiOnDemandSource @Inject constructor(
      * emits, so a read that re-planned would feed its own trigger.
      */
     fun desiredScopedIds(): List<String> = desired.keys.toList()
+
+    /** [watchPlacedHosts] over this source's own re-plan ticks and held plan. */
+    fun watchPlacedHosts(scope: CoroutineScope, onHostFailure: (String, Throwable) -> Unit): Job =
+        watchPlacedHosts(scope, reconciled, ::desiredScopedIds, onHostFailure)
 
     override suspend fun host(scopedId: String): OnDemandSetHost? {
         hosts[scopedId]?.let { return it }

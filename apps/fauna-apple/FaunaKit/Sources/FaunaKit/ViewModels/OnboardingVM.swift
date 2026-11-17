@@ -63,6 +63,11 @@ public final class OnboardingVM {
         // Identity) — the same capability-flag shape; `RecoveryKitOfferView`
         // renders it, and the handoff below registers the confirmed kit.
         machine.setRendersRecoveryKit(renders: true)
+        // The choose-providers page (onboarding-provisioning.md § 3d) — the
+        // handle check lands on `.providerChoice` instead of `.dnsConfig`, and
+        // Back from nest_provisioning returns there. One flag for macOS and iOS;
+        // `ProviderChoiceView` renders it (Fauna Kids keeps its handle-entry arm).
+        machine.setRendersProviderChoice(renders: true)
         // Re-root the machine's own store reads (the recovery floor's custody map
         // is read from the device's store, `box-recovery.md` § The plane-era
         // recovery floor) at the sandbox-shared container on iOS; `nil` on macOS.
@@ -759,6 +764,33 @@ public final class OnboardingVM {
     /// then pop the wizard one stage. Referenced by both the `Button` and its
     /// `automationActivate` so they never diverge (apple-e2e-automation.md §
     /// Resolved design point).
+    /// "Add account" → a fresh wizard in append mode: reset the machine, then
+    /// show as already connected every provider whose credential the signed-in
+    /// account holds in its DNS record (`onboarding-provisioning.md` § 3d *Held
+    /// credentials*). The record is read through the live account runtime (the
+    /// shared `retireHeldInputs` read, bounded in Rust) and the credentials are
+    /// passed INTO the machine, which re-runs each provider's checks before it
+    /// shows the row connected. Best-effort: a failed read leaves every row
+    /// unconnected, the state a first-nest run starts in anyway. tui's
+    /// `App::seed_held_provider_credentials` twin.
+    public func beginAddAccount() {
+        machine.reset()
+        let machine = self.machine
+        Task {
+            let held = await retireHeldInputs(waitForRuntime: true)
+            let creds: [HeldProviderCredential] = zip(
+                held.heldDnsProviderIds, held.heldDnsCredsJson
+            ).compactMap { pid, json in
+                guard let data = json.data(using: .utf8),
+                      let fields = try? JSONDecoder().decode([String: String].self, from: data)
+                else { return nil }
+                return HeldProviderCredential(providerId: pid, fields: fields)
+            }
+            guard !creds.isEmpty else { return }
+            await machine.seedHeldProviderCredentials(held: creds)
+        }
+    }
+
     public func provisioningBack() {
         machine.clearError()
         machine.back()
@@ -1060,11 +1092,13 @@ public final class OnboardingVM {
         if !append {
             do {
                 _ = try registry.persistLoggedIn(
-                    // The reach hint (onboarding.md § Reach hint) is read off
-                    // the machine at this terminal once apple's leg lands;
-                    // nil keeps today's behaviour — the account waits for DNS.
+                    // The reach hint (onboarding-provisioning.md § Reach
+                    // hint), read off the machine at this terminal as on every
+                    // app: the box this wizard provisioned, at the address its
+                    // claim used, so the launch reaches it before DNS does.
+                    // nil on every path that provisioned nothing.
                     secretHex: secretHex, nestUrl: nodeUrl, deviceId: deviceId,
-                    reachIpv4: nil)
+                    reachIpv4: machine.provisionReachIpv4())
             } catch {
                 logMessage(level: .error, target: "fauna.onboarding", message: "[OnboardingVM] persist_logged_in failed: \(error)")
             }

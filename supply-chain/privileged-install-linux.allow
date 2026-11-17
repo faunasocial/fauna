@@ -1,0 +1,71 @@
+# The second brake's allowlist on the Linux dev machine — the tracked source of /etc/fauna/privileged-install.allow
+# (docs/goal/architecture/tool-installs.md § Carrying out an approved bump, the bullet
+# *The second brake*). The deployed copy is the owner's alone: the fleet never widens it, and a
+# line added here reaches the machine only by the owner's own copy.
+#
+# One line per binary package: `<package> <repository label>`. The label is the signed Release
+# file's label as apt's own simulation names the version's repository (`Inst <pkg> [<old>]
+# (<new> <label>:<suite> [<arch>])`), read on the machine 2026-11-16 with `apt-cache policy`. A
+# foreign-architecture copy (`libc6:amd64`) is covered by its base name.
+#
+# Never here (the helper's tests refuse them): the kernel, the boot loader,
+# ZFS, sudo, the SSH server, systemd, apt and dpkg.
+
+# python3-system — source python3.14 (Ubuntu)
+python3.14 Ubuntu
+python3.14-minimal Ubuntu
+python3.14-gdbm Ubuntu
+libpython3.14 Ubuntu
+libpython3.14-minimal Ubuntu
+libpython3.14-stdlib Ubuntu
+
+# git — source git (Ubuntu)
+git Ubuntu
+git-man Ubuntu
+
+# curl — source curl (Ubuntu)
+curl Ubuntu
+libcurl4t64 Ubuntu
+libcurl3t64-gnutls Ubuntu
+
+# jq — source jq (Ubuntu)
+jq Ubuntu
+libjq1 Ubuntu
+
+# openjdk — source openjdk-21 (Ubuntu)
+openjdk-21-jre-headless Ubuntu
+openjdk-21-jdk-headless Ubuntu
+
+# clang — source llvm-toolchain-21 (Ubuntu)
+clang-21 Ubuntu
+clang-tools-21 Ubuntu
+libclang1-21 Ubuntu
+libclang-common-21-dev Ubuntu
+libclang-cpp21 Ubuntu
+libclang-rt-21-dev Ubuntu
+libllvm21 Ubuntu
+llvm-21 Ubuntu
+llvm-21-dev Ubuntu
+llvm-21-linker-tools Ubuntu
+llvm-21-runtime Ubuntu
+llvm-21-tools Ubuntu
+
+# os:glibc — source glibc (Ubuntu); libc6 and libc-gconv-modules-extra are installed for amd64 too
+libc6 Ubuntu
+libc6-dev Ubuntu
+libc6-dbg Ubuntu
+libc-bin Ubuntu
+libc-dev-bin Ubuntu
+libc-gconv-modules-extra Ubuntu
+locales Ubuntu
+
+# docker — Docker's own repository: the engine, its CLI and the packages the suite moves with it
+docker-ce Docker CE
+docker-ce-cli Docker CE
+docker-ce-rootless-extras Docker CE
+containerd.io Docker CE
+docker-buildx-plugin Docker CE
+docker-compose-plugin Docker CE
+
+# gh — GitHub's own repository
+gh gh

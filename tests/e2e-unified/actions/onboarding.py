@@ -672,6 +672,7 @@ class OnboardingActions:
         Uses a non-routable IANA-reserved test domain that the machine's
         DoH probe reliably reports as Unregistered / DomainAvailable.
         """
+        self.require_old_setup_path()
         # Use a domain with a valid TLD that the handle-check probe will
         # return as DomainAvailable (unregistered). The `.example` TLD is
         # rejected by the probe as TldInvalid. Use `.io` which is in the
@@ -723,6 +724,29 @@ class OnboardingActions:
         # page is rendered. The two-checkbox row is unique to dns_config
         # and uses CheckButton, which has a definite accessible role.
         self.driver.wait_for("dns-buy-domain-checkbox", timeout=15)
+
+    def renders_provider_choice(self) -> bool:
+        """Whether this app's set-up path walks the choose-providers page
+        (``onboarding-provisioning.md`` § 3d) instead of ``dns_config`` →
+        ``vps_config`` — the ``provider-choice`` surface."""
+        from helpers.app_surface import app_name, surface_built
+
+        return surface_built("provider-choice", app_name(self.driver))
+
+    def require_old_setup_path(self) -> None:
+        """Skip, declared, on an app whose set-up path no longer has
+        ``dns_config`` / ``vps_config``: the choose-providers page replaced
+        both there (``vps_config`` stays for cloud recovery alone), and its
+        journeys are ``test_provider_choice.py``."""
+        if self.renders_provider_choice():
+            from helpers.app_surface import declared_absence
+
+            declared_absence(
+                self.driver,
+                capability="dns_config / vps_config on the set-up path "
+                "(the choose-providers page replaces both)",
+                doc="onboarding-provisioning.md § 3d *What becomes of §§ 4, 5 and 6*",
+            )
 
     def fill_dns_contact(self, contact: dict[str, str]) -> None:
         """Type a WHOIS contact into the dns_config contact form.
