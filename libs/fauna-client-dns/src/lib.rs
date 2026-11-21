@@ -103,6 +103,8 @@ use fauna_protocol::{MaybeSendSync, RpcErrorClass, RpcRequester};
 // Mirrors `fauna-client-mail-settings`'s `state.rs` snapshot derives.
 use serde::{Deserialize, Serialize};
 
+pub mod affordances;
+
 mod error;
 pub use error::{DnsDispatchError, DnsNestError, DnsProviderError, StoreError};
 
@@ -2507,15 +2509,18 @@ impl DnsManagementMachine {
         let config = self.require_config()?.clone();
         self.set_status(DnsStatus::Working);
         let (dns, ()) = update_dns(config.as_ref(), |dns| {
+            // The same coverage test and reason the page paints the switch from
+            // (`affordances::DnsSnapshot::set_mode_possibility`), so what is
+            // offered and what is accepted cannot disagree.
             if managed
-                && !dns
-                    .credentials
-                    .iter()
-                    .any(|c| c.zones.iter().any(|z| zone_covers(&z.name, &domain)))
+                && !dns.credentials.iter().any(|c| {
+                    affordances::credential_covers(c.zones.iter().map(|z| z.name.as_str()), &domain)
+                })
             {
-                return Err(DnsDispatchError::InvalidState(format!(
-                    "no held DNS credential covers {domain}; add one before enabling managed mode"
-                )));
+                return Err(DnsDispatchError::InvalidState(
+                    fauna_core::localized::LocalizedText::key(affordances::MODE_NEEDS_CREDENTIAL)
+                        .resolve(fauna_i18n::strings::lookup),
+                ));
             }
             if managed {
                 dns.managed_domains.insert(domain.clone());

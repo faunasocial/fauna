@@ -770,6 +770,20 @@ public class APIClient {
         }
     }
 
+    /// The Events page's calendar read in the shared four answers
+    /// (`FfiCaldavClient.readCalendars`): custody not readable yet, no key and
+    /// a refused lazy `Personal` stay apart instead of reading as `[]`.
+    public func readCalendars() async throws -> CalendarsLoad {
+        let read = try await caldavClient().readCalendars()
+        var calendars: [FaunaCalendar] = []
+        if case .loaded(let rows, _) = read {
+            calendars = rows.map {
+                FaunaCalendar(id: $0.id, name: $0.name, color: $0.color.isEmpty ? nil : $0.color)
+            }
+        }
+        return CalendarsLoad(read: read, calendars: calendars)
+    }
+
     public func createCalendar(name: String) async throws {
         try await caldavClient().createCalendar(name: name)
     }
@@ -3385,13 +3399,14 @@ public class APIClient {
     /// replacing the mail/CalDAV/CardDAV/WebDAV per-step firing (priority #2).
     /// Same `secret` + `nodeUrl` idiom as `mailSettingsMachine()` above; the
     /// shared step resolves `am_i_admin` itself over `nest`, so this vends no
-    /// admin flag. Each step logs its own failure nest-side, so this only
-    /// throws on an undecodable `secret`.
+    /// admin flag. Returns the page's `error-message` text when a step was
+    /// refused for good (`onboarding.md` § 3b *The step completes; it is not
+    /// fired once*), else `nil`; throws only on an undecodable `secret`.
     public func applyPostClaimServingEnablement(
         email: Bool, caldav: Bool, carddav: Bool, webdav: Bool
-    ) async throws {
+    ) async throws -> String? {
         guard let secret else { throw APIError.ffiError("No secret for post-claim serving enablement") }
-        try await FaunaFFISwift.applyPostClaimServingEnablement(
+        return try await FaunaFFISwift.applyPostClaimServingEnablement(
             nest: try await ensureNestConnected(), secret: hex_to_data(secret),
             nodeUrl: nodeUrl.absoluteString,
             email: email, caldav: caldav, carddav: carddav, webdav: webdav
@@ -3612,25 +3627,29 @@ public class APIClient {
     // MARK: - Deployment-seed custody leg (box-recovery.md § The plane-era recovery floor)
 
     /// The custody leg's post-auth entry — thin accessor over the shared
-    /// `self_heal_deployment_seed_custody` free fn (capture at store-ready, the
-    /// co-admin hand-off self-heal and the warning it owes all live in shared Rust;
-    /// the caller only renders the answer onto the recovery-custody banner). `nil`
-    /// when nothing is owed. A leg that cannot even be reached (no secret, no
-    /// connection) answers the shared "not attempted" warning, never a key chosen
-    /// here.
-    public func selfHealDeploymentSeedCustody() async -> LocalizedText? {
-        guard let secret else { return FaunaFFISwift.deploymentSeedCustodyUnattemptedWarning() }
+    /// `self_heal_deployment_seed_custody_signalled` free fn (capture at store-ready,
+    /// the co-admin hand-off self-heal and the signal it owes all live in shared
+    /// Rust). Every run — the first and each reconnect retry — reports to `sink`: a
+    /// warning while custody is unconfirmed, the cleared mark once it is. A leg that
+    /// cannot even be reached (no secret, no connection) signals the shared "not
+    /// attempted" warning, never a key chosen here.
+    public func selfHealDeploymentSeedCustody(sink: FfiCustodyLegSink) async {
+        guard let secret else {
+            sink.onWarning(warning: FaunaFFISwift.deploymentSeedCustodyUnattemptedWarning())
+            return
+        }
         let nest: FfiNestClient
         do {
             nest = try await ensureNestConnected()
         } catch {
             logMessage(level: .warn, target: "fauna.recoveryglue",
                        message: "deployment-seed custody leg not attempted: \(error)")
-            return FaunaFFISwift.deploymentSeedCustodyUnattemptedWarning()
+            sink.onWarning(warning: FaunaFFISwift.deploymentSeedCustodyUnattemptedWarning())
+            return
         }
-        return await FaunaFFISwift.selfHealDeploymentSeedCustody(
+        await FaunaFFISwift.selfHealDeploymentSeedCustodySignalled(
             nest: nest, ownerSecret: hex_to_data(secret),
-            appDataDir: Self.recoveryConfigDataDir)
+            appDataDir: Self.recoveryConfigDataDir, sink: sink)
     }
 
     // MARK: - Deployment-seed rotation (admin.md § N Nest → Deployment-identity rotation, apps row 245)
@@ -4832,6 +4851,14 @@ public class APIClient {
         try await ensureNestConnected().features()
     }
 
+    /// The features courtesy read (the shared `FeaturesClient::rows`) — what
+    /// every per-feature gate answers from (``featureGateAnswer(rows:failed:feature:)``:
+    /// the zap-signer designate, the claim redeem). One seam, so the unit
+    /// tests script the rows without a nest.
+    public func featureRows() async throws -> [FfiFeatureRow] {
+        try await featuresClient().rows()
+    }
+
     /// The Status snapshot's node read (`fauna.nest.info`) over the shared
     /// connection — `docs/goal/ui/status.md` § State & data shape. Public so
     /// the shared `StatusVM` loads the node leg off it.
@@ -5150,6 +5177,13 @@ public class APIClient {
             manager: manager, person: person)
     }
 
+    /// Whether Remove's eviction has a conversations session to run through —
+    /// the input of `member_review_remove_possibility`. Awaits a session still
+    /// being built; `false` only when none was started or the build failed.
+    func memberReviewConversationsReady() async -> Bool {
+        await sharedConversationsSession()?.manager() != nil
+    }
+
     // MARK: - Folder cross-user Sharing (owner side)
     //
     // The owner-side "Shared with" surface on each `folder-row`
@@ -5188,6 +5222,23 @@ public class APIClient {
     /// The flow collects no nest url: an empty `home_nest_url` means *homed on
     /// the caller's own nest*, and the address a user types is a handle, not a
     /// nest — the recipe's own ⚠ paragraph owns why.
+    /// The `ready` input of `folder_follow_possibility`: this client holds the
+    /// identity secret the follow write signs with (the machine and the nest
+    /// are the caller's half — `DevicesMachineVM` holds this client only once
+    /// the session's nest client exists).
+    public var folderFollowReady: Bool { secret != nil }
+
+    /// The `ready` input of `folder_share_possibility`: the identity secret and
+    /// a conversations session to admit the recipient through — live, cached,
+    /// or being built for this session (``awaitSharedConversationsSession()``
+    /// returns it once built). With none of the three, the share would refuse.
+    public var folderShareReady: Bool {
+        guard let secret else { return false }
+        return Self.liveConversationsSession.session(for: secret) != nil
+            || conversationsSessionCache != nil
+            || conversationsSessionTask != nil
+    }
+
     public func followPublicFolder(owner: String, folderName: String) async throws
         -> [FfiFollowedFolder]
     {

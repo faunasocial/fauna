@@ -46,7 +46,7 @@ is a bound inversion, so the fallback preserves the pre-existing behaviour.
 """
 
 __all__ = [
-    "LAZY_RESOLUTION_ATTR", "MAIL_VENUE_BINARIES", "is_real_fixture",
+    "LAZY_HELPER_MODULES", "LAZY_RESOLUTION_ATTR", "MAIL_VENUE_BINARIES", "is_real_fixture",
     "lazily_resolved", "real_fixture_closure", "resolves_lazily",
 ]
 
@@ -116,13 +116,76 @@ def resolves_lazily(*fixture_names):
     return mark
 
 
+#: Harness helper modules that build a binary themselves when a caller hands
+#: them no fixture for it — module name → the build fixtures they resolve.
+#: `helpers/recipient_seal_key.py` falls back to the session's seal helper
+#: (`_session_seal_helper` → `conftest._ensure_seal_helper_built`) for a caller
+#: that passes no ``run_seal_helper``, which about thirty tests and their module
+#: helpers do. That build sits in no closure and on no fixture, so the warm step
+#: never foresaw it: on a cold tree the first such test built the seal helper
+#: inside its own clock, and under the background tester's warm-only lane the
+#: build was refused and the shard ended `notwarm`, unanswered, at every seam
+#: (measured 2026-11-16 on `test_connected_apps.py`'s bare-folder test, the
+#: web and linux verify shards). A test module that imports one of these
+#: modules — anywhere in its source, a function-local import included — is read
+#: as resolving the builds listed; a spurious build of a helper some of its
+#: tests never call is wasted work, a missing one a refused shard.
+LAZY_HELPER_MODULES = {
+    "helpers.recipient_seal_key": ("seal_helper_binary",),
+}
+
+_module_lazy_cache: dict = {}
+
+
+def _module_lazy_builds(path) -> tuple:
+    """The builds `LAZY_HELPER_MODULES` assigns to the module at ``path``."""
+    key = str(path)
+    if key in _module_lazy_cache:
+        return _module_lazy_cache[key]
+    import ast
+
+    found: list = []
+    try:
+        text = open(key, encoding="utf-8").read()
+    except (OSError, ValueError):
+        text = ""
+    # Any import of a listed module spells its last name (`import
+    # helpers.recipient_seal_key`, `from helpers import recipient_seal_key`), so
+    # a module spelling none is parsed for nothing: this runs for every
+    # collected module, and a parse of them all is most of a minute on Windows.
+    if any(name.rsplit(".", 1)[-1] in text for name in LAZY_HELPER_MODULES):
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            tree = None
+    else:
+        tree = None
+    for node in ast.walk(tree) if tree is not None else ():
+        if isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+            if node.module == "helpers":
+                names += [f"helpers.{a.name}" for a in node.names]
+        elif isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        else:
+            continue
+        for name in names:
+            found.extend(LAZY_HELPER_MODULES.get(name, ()))
+    _module_lazy_cache[key] = tuple(dict.fromkeys(found))
+    return _module_lazy_cache[key]
+
+
 def lazily_resolved(item) -> set:
-    """The build fixtures this item's real closure resolves lazily — the union of
-    every ``@resolves_lazily`` declaration on the fixtures it will run."""
+    """The build fixtures this item resolves lazily — the union of every
+    ``@resolves_lazily`` declaration on the fixtures its real closure will run,
+    and the builds of every `LAZY_HELPER_MODULES` module its test module imports."""
     info = getattr(item, "_fixtureinfo", None)
     name2defs = getattr(info, "name2fixturedefs", {}) if info is not None else {}
     out: set = set()
     for name in real_fixture_closure(item):
         for fixturedef in name2defs.get(name, ()) or ():
             out.update(getattr(getattr(fixturedef, "func", None), LAZY_RESOLUTION_ATTR, ()))
+    path = getattr(item, "path", None) or getattr(item, "fspath", None)
+    if path is not None:
+        out.update(_module_lazy_builds(path))
     return out

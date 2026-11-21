@@ -73,6 +73,7 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.app_surface import require_surface
+from helpers.mail_client_ui import turn_mail_on
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -100,6 +101,14 @@ def _android_leg_is_a_static_review_not_a_run(logged_in_app):
     execution: this self-clears the day someone runs this file `--app android`
     against a real device and deletes the call below."""
     require_surface(logged_in_app.driver, "mail-lists")
+
+
+@pytest.fixture(autouse=True)
+def _mail_on(_android_leg_is_a_static_review_not_a_run, logged_in_app):
+    """Every test here opens a mail sub-page on the session-shared account, and
+    each opens behind the mail-usable gate — see `helpers.mail_client_ui.turn_mail_on`.
+    After the surface check, so a leg it skips pays nothing."""
+    turn_mail_on(logged_in_app)
 
 
 def _user_client(nest_instance, user):

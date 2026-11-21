@@ -167,6 +167,13 @@ where
             .map_err(|e| SyncControlError(format!("deposit retire failed: {e}")))?;
         Ok(reply.retired)
     }
+
+    async fn do_nest_capabilities(&self) -> Result<Vec<String>, SyncControlError> {
+        let reply = fauna_protocol::read_nest_info(&self.nest)
+            .await
+            .map_err(|e| SyncControlError(format!("nest info read failed: {e}")))?;
+        Ok(reply.capabilities)
+    }
 }
 
 // The trait impl is on the CONCRETE `WsRpcSyncControl<Arc<NestClient>>`, not on
@@ -223,5 +230,9 @@ impl SyncControlApi for WsRpcSyncControl<std::sync::Arc<fauna_client::NestClient
         req: FolderDepositsRetireRequest,
     ) -> Result<bool, SyncControlError> {
         self.do_retire_deposit(req).await
+    }
+
+    async fn nest_capabilities(&self) -> Result<Vec<String>, SyncControlError> {
+        self.do_nest_capabilities().await
     }
 }

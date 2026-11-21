@@ -2,7 +2,7 @@
 
 > **Status — this guide describes Fauna as it is taking shape.** Most of it is
 > built and tested; the [table at the end](#where-this-stands-today) says
-> exactly what is available now, what is landing, and what is planned.
+> exactly what is available now. The admin area is built to be the same on every app, though a few controls are on some apps only.
 
 ---
 
@@ -31,8 +31,9 @@ admin console, no config files, no command line to administer people from.
 Some structural facts worth knowing on day one:
 
 - **There can be more than one admin.** You can grant the role to another
-  member and share the job. The nest refuses to remove the *last* admin — a
-  box with nobody at the wheel is a state Fauna doesn't allow you to reach.
+  member and share the job. The nest refuses to remove its last admin with
+  full rights — make another user an admin first. A box with nobody at the
+  wheel is a state Fauna doesn't allow you to reach.
 - **An admin account can't be evicted, suspended, or deleted while it holds
   the role.** To retire an admin, remove their role first; then they're a
   regular member like any other.
@@ -40,7 +41,7 @@ Some structural facts worth knowing on day one:
 
 ## Letting people in
 
-Who can join is your choice, on the admin **Users** page. Under **Who may create an account**, pick **Nobody — only I can admit people** (where a new nest starts), **Only people with an invite code**, or **Anyone** — who can then sign up on their own, at the free tier. **Limit free accounts** stops people joining on their own at the free tier — with no code, or with a free-tier invite code — once the nest holds that many free accounts; people you admit yourself are never refused by it. Leave **Accept only signups carrying app age verification** off: while it is on, nobody can join on their own, with or without a code, because no app can verify an age yet. Apart from **Anyone**, nobody joins your nest without you, and whichever door they come through, your real decision is the same: which **tier** (capacity level) the new account gets. There are three doors, all on the same page:
+Who can join is your choice, on the admin **Users** page. Under **Who may create an account**, pick **Nobody — only I can admit people** (where a new nest starts), **Only people with an invite code**, or **Anyone** — who can then sign up on their own, at the free tier. **Limit free accounts** stops people joining on their own at the free tier — with no code, or with a free-tier invite code — once the nest holds that many free accounts; people you admit yourself are never refused by it. Leave **Accept only signups carrying app age verification** off: while it is on, nobody can join on their own, with or without a code, because no app can verify an age today. Apart from **Anyone**, nobody joins your nest without you, and whichever door they come through, your real decision is the same: which **tier** (capacity level) the new account gets. There are three doors, all on the same page:
 
 - **Invite codes.** Mint a code, choose the tier it grants and how many times
   it may be used, and hand it over however you like — chat, e-mail, paper.
@@ -133,7 +134,7 @@ nest: the child's row under **Users** names their guardian, and
 **Take over**, then **Confirm take-over**, makes you the guardian at once. Any
 hand-over the guardian had proposed is withdrawn, and the child's account then
 appears on your own Family page, where you manage its settings, hand it on to
-someone else or graduate it.
+someone else or graduate it. The Windows app does not offer **Take over**.
 The guardian controls who can reach the child, can set content rules — by category, keywords or a labeler — that block flagged posts and messages or hide them behind a warning on the child's own device, and can set usable hours and a daily time budget that lock Fauna on the child's devices outside those hours or once the budget is spent. The model,
 its transparency rules, and its current honest status are covered in
 [Sharing files and running a family nest § Parental controls](cloud-sharing-family.md#parental-controls).

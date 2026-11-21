@@ -396,4 +396,14 @@ windows = { workspace = true, features = [
     "UI_Notifications",
     "Data_Xml_Dom",
     "Win32_System_Registry",
+    # The answer to the system's request to close (close_request.rs;
+    # `installers/windows.md` § Direct download, 2): a hidden top-level window
+    # on a thread of its own, its class registered against this module's
+    # handle (`WNDCLASSW` carries a background brush, hence GDI's types), and
+    # the window types they take. Feature flags on this existing dependency —
+    # no new crate.
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
 ] }

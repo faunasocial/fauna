@@ -62,13 +62,13 @@ Stamped 2026-11-07 at ac836c937b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+b7384d11 standalone |
-| linux | ✅ full | 0.1.5-dev+b7384d11 standalone |
+| web | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
+| linux | ✅ full | 0.1.5-dev+37e2409c standalone |
 | windows | ✅ full | 0.1.5-dev+5e765178.dirty standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+b7384d11 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+cab1c46a standalone |
+| tui | ✅ full | 0.1.7-dev+e08dc6d6 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -78,16 +78,16 @@ Stamped 2026-11-07 at ac836c937b.
 | 2 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_report_is_stored_and_listed_never_delivered` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_report_is_stored_and_listed_never_delivered` | nest (linux): passed, nest (macos): passed |
 | 4 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_oversize_report_keeps_an_envelope_for_triage_and_retention_prunes_it` | nest (linux): passed, nest (macos): passed |
-| 4 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_tuned_retention_drives_the_prune_and_the_oversize_envelope_goes_with_it` | nest (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_dmarc_policy_save_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_tuned_retention_drives_the_prune_and_the_oversize_envelope_goes_with_it` | nest (linux): passed, nest (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_dmarc_policy_save_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_forensic_opt_in_asks_peers_for_reports_in_the_expected_record` | nest (linux): passed, nest (macos): passed |
-| 7 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_dmarc_policy_save_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_dmarc_policy_save_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 8 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_forensic_report_is_stored_without_recipients_in_the_index` | nest (linux): passed, nest (macos): passed |
-| 9 | app | `tests/e2e-unified/tests/test_admin_mail_reports.py::test_mail_reports_page_shows_a_mailed_in_report` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_outbound_dmarc_reports_switch_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_deployment_dmarc_setting_is_every_domains_base_and_a_per_domain_reject_stands` | nest (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_policy_save_asking_the_impossible_is_refused` | nest (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_no_forensic_report_is_kept_while_forensic_reports_are_not_opted_in` | nest (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_daily_report_goes_only_where_allowed_and_never_counts_our_own_domains` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_peer_mail_the_perimeter_refuses_is_counted_with_disposition_reject` | nest (linux): passed, nest (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_admin_mail_reports.py::test_mail_reports_page_shows_a_mailed_in_report` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_outbound_dmarc_reports_switch_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_deployment_dmarc_setting_is_every_domains_base_and_a_per_domain_reject_stands` | nest (linux): passed, nest (macos): passed |
+| 12 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_policy_save_asking_the_impossible_is_refused` | nest (linux): passed, nest (macos): passed |
+| 13 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_no_forensic_report_is_kept_while_forensic_reports_are_not_opted_in` | nest (linux): passed, nest (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_daily_report_goes_only_where_allowed_and_never_counts_our_own_domains` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_peer_mail_the_perimeter_refuses_is_counted_with_disposition_reject` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 <!-- features-render:end -->

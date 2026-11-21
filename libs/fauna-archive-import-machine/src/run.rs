@@ -270,13 +270,22 @@ impl ArchiveImportMachine {
                 "confirm the import first".into(),
             ));
         }
+        // The answer the Start button paints from, asked again.
+        let answer = self
+            .inner
+            .lock()
+            .expect("snapshot mutex")
+            .start_possibility();
+        if let Some(reason) = answer.reason() {
+            return Err(crate::machine::refusal(reason.clone()));
+        }
         // The marker's `raw_file_name` is derived from `archive_path` while
         // the raw upload sends `self.source`, so the two must name the same
         // archive: a path change forgets the source (`machine::set_archive_path`),
         // which is exactly what makes refusing here sufficient.
         if self.source.lock().expect("source mutex").is_none() {
             return Err(ArchiveImportDispatchError::InvalidState(
-                "open the archive first".into(),
+                crate::machine::archive_needed_sentence(),
             ));
         }
         let summary = self
@@ -285,7 +294,7 @@ impl ArchiveImportMachine {
             .expect("summary mutex")
             .clone()
             .ok_or_else(|| {
-                ArchiveImportDispatchError::InvalidState("open the archive first".into())
+                ArchiveImportDispatchError::InvalidState(crate::machine::archive_needed_sentence())
             })?;
         let (archive_path, scope, total) = {
             let snap = self.inner.lock().expect("snapshot mutex");
@@ -446,7 +455,7 @@ impl ArchiveImportMachine {
             .expect("source mutex")
             .clone()
             .ok_or_else(|| {
-                ArchiveImportDispatchError::InvalidState("open the archive first".into())
+                ArchiveImportDispatchError::InvalidState(crate::machine::archive_needed_sentence())
             })?;
 
         // Phase: the raw zip — ground truth, kept forever (§ Storage).

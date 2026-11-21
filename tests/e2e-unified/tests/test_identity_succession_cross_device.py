@@ -15,7 +15,7 @@ because a second seat is what proves a merge."
 
 **The shape.** Seat A is the app under test: it enrolls a destination, runs
 the ceremony and becomes the successor. Seat B is a second device of that
-successor, brought up the only way a device can join an identity it was never
+successor (on android a tui seat — one emulator holds one install), brought up the only way a device can join an identity it was never
 told about — the recovery kit the ceremony's closing act showed (the restore
 door ``test_recovery_kit_restore.py`` drives). Both seats then read the same
 inherited row raised; seat A keeps it; seat B, re-reading, shows it settled.
@@ -78,38 +78,56 @@ _ADJUDICATION_S = 120.0
 _LIST_HYDRATION_S = 15.0
 
 
-@contextmanager
-def _a_fresh_seat(request, app, nest_instance):
-    """One more seat of the app under test with nothing on it — a new device.
+@pytest.fixture
+def succession_fresh_seat(request, nest_instance):
+    """Opens one more device of the successor with nothing on it — a new device.
 
-    Built directly (as ``test_account_instance_lock_tui.py`` builds its
-    seats), not through ``_alice_extra_seat``: that launcher signs the seat in
-    with a seed, and the device this journey needs holds no seed at all until
-    the user types the kit into it. A native app's new device is a second
-    launch with its own fresh state root (convention 10), isolated per app by
-    ``_second_seat_config`` (macOS's own home, iOS's second simulator); web's
-    is a twin page
-    in its own ``BrowserContext`` — fresh ``localStorage`` and IndexedDB, the
-    browser's analogue of a second machine (``WebBridgeDriver.open_twin_page``,
-    the idiom ``succession_member_app`` seats its web member with).
+    Yields ``open_seat(app)``, a context manager over that seat's
+    ``ActionLayer``. Built directly (as ``test_account_instance_lock_tui.py``
+    builds its seats), not through ``_alice_extra_seat``: that launcher signs
+    the seat in with a seed, and the device this journey needs holds no seed at
+    all until the user types the kit into it. A native app's new device is a
+    second launch with its own fresh state root (convention 10), isolated per
+    app by ``_second_seat_config`` (macOS's own home, iOS's second simulator);
+    web's is a twin page in its own ``BrowserContext`` — fresh
+    ``localStorage`` and IndexedDB, the browser's analogue of a second machine
+    (``WebBridgeDriver.open_twin_page``, the idiom ``succession_member_app``
+    seats its web member with).
+
+    **android's new device is a tui seat** — one emulator holds one install of
+    the package, so a second launch there would be the same device restarted,
+    which proves nothing about a merge. The phone is seat A (it enrolls the
+    destination, runs the ceremony and answers Keep) and the desktop-class tui
+    seat beside it is seat B — the suite's standing android pairing
+    (``android_other_device_seat``, ``alice_builder_seats``). The fixture is
+    DECLARED, never ``getfixturevalue``-d, so the prebuild hoist
+    (``_CROSS_APP_FIXTURE_APPS``) builds the tui binary outside the test's
+    budget; the literal ``"tui"`` below is what the hoist pin reads.
     """
     from conftest import ActionLayer, _second_seat_config, create_driver
     from helpers.app_surface import app_name
 
-    name = app_name(app.driver)
-    if name == "web":
-        driver = app.driver.open_twin_page()
-    else:
-        driver = create_driver(name)
-        driver.launch(_second_seat_config(name, nest_instance, request))
-    try:
-        yield ActionLayer(driver)
-    finally:
+    @contextmanager
+    def open_seat(app):
+        name = app_name(app.driver)
+        if name == "web":
+            driver = app.driver.open_twin_page()
+        elif name == "android":
+            driver = create_driver("tui")
+            driver.launch(_second_seat_config("tui", nest_instance, request))
+        else:
+            driver = create_driver(name)
+            driver.launch(_second_seat_config(name, nest_instance, request))
         try:
-            driver.screenshot("teardown-succession-second-device")
-        except Exception:  # noqa: BLE001 — teardown must not mask the result
-            pass
-        driver.teardown()
+            yield ActionLayer(driver)
+        finally:
+            try:
+                driver.screenshot("teardown-succession-second-device")
+            except Exception:  # noqa: BLE001 — teardown must not mask the result
+                pass
+            driver.teardown()
+
+    yield open_seat
 
 
 def _reopen_backups(app) -> None:
@@ -147,18 +165,19 @@ def _raised(app) -> bool:
 @pytest.mark.web
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("take-your-account-back")
 def test_a_keep_on_one_device_is_settled_on_the_other(
-    request, ungranted_app, nest_instance, second_nest
+    request, ungranted_app, nest_instance, second_nest, succession_fresh_seat
 ):
     """enroll a destination → succeed on A → B joins from the kit → both read
     it raised → Keep on A → B reads it settled.
 
-    Seat B is a fresh seat of the app under test (``_a_fresh_seat``): a
+    Seat B is a fresh device of the successor (``succession_fresh_seat``): a
     second launch on tui, linux and macos, a launch on a second simulator on
-    ios, a twin page on web. android joins when its
-    column can hold two seats of the app at once (one emulator holds one
-    install of the package).
+    ios, a twin page on web, and on android a tui seat beside the emulator —
+    one emulator holds one install of the package, so the phone is seat A
+    (it is raised and answers Keep) and the tui seat reads the row settled.
     """
     app = ungranted_app
     app.backups.require_destination_management_supported()
@@ -249,7 +268,7 @@ def test_a_keep_on_one_device_is_settled_on_the_other(
         ),
     )
 
-    with _a_fresh_seat(request, app, nest_instance) as seat_b:
+    with succession_fresh_seat(app) as seat_b:
         # ── B joins the successor from the kit ──────────────────────────────
         lose_every_device_and_open_restore(seat_b, nest_instance)
         seat_b.onboarding.restore_from_recovery_kit(successor_kit, account=account)

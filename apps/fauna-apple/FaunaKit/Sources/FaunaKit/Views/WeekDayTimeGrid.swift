@@ -235,6 +235,7 @@ public struct WeekDayTimeGrid: View {
         return Color.clear
             .frame(height: CalendarLayout.quarterHourPx)
             .contentShape(Rectangle())
+            .faunaActsOnClick()
             .onTapGesture { onEmptySlot(start) }
             .accessibilityIdentifier(id)
             .automationActivate(id, text: { "" }) { onEmptySlot(start) }

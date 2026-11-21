@@ -138,8 +138,17 @@ public class SessionState {
     /// (the apple idiom of linux's `ActionResult::Failed` toast). Rendered by the
     /// shared `RecoveryCustodyBanner` at each app's root; `nil` ⇒ nothing shown
     /// (custodied, idempotent re-claim, or expected multi-nest no-op). Tap-to-dismiss
-    /// clears it.
+    /// clears it, and so does a later custody run's cleared mark (only while this
+    /// still shows a custody warning).
     public var recoveryCustodyWarning: String?
+
+    /// The post-claim serving enablement's refusal-for-good text
+    /// (`onboarding.md` § 3b *The step completes; it is not fired once*): set
+    /// by `MailEnableGlue.applyPostClaimServingEnablement` when the nest refused
+    /// a step for good, painted as the `error-message` on the page the person
+    /// is on by the shared `ServingEnablementRefusalBanner` at each app's
+    /// authed root; tap-to-dismiss clears it. `nil` ⇒ nothing shown.
+    public var servingEnablementRefusal: String?
 
     /// What a sign-out's erase could not remove — set by `StatusVM.signOut`
     /// when either half of the erase left something (`account-scoping.md`

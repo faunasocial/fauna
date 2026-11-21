@@ -3,10 +3,13 @@ import { registerIdentityStoreChunk } from './identity-store';
 import type { WasmContactOverlays, WsRpcClient, WasmUploadPayload } from '../../static/fauna_wasm.js';
 import type { LocalizedText } from '#lib/i18n/localized';
 import type { ImportTotals } from '#lib/mail-import-confirm';
+import type { Possibility } from '#lib/possibility';
+import type { WizardSnapshot } from '#lib/devices-machine';
 // Type-only (erased at build, so no runtime cycle with rpc.ts, which imports this
 // module): `ObligationAction` is the `fauna.moderation.actions` wire row and stays
 // owned by its rpc module — the merge below takes it as the queue's server half.
 import type {
+  AdminPendingAction,
   AdminUser,
   ObligationAction,
   StolenOutcome,
@@ -16,6 +19,7 @@ import type {
   MutedKeywordLevel,
   NodeLeg,
   FamilyApprovalEntry,
+  FeatureRow,
 } from '#lib/rpc';
 import type {
   IssuerForcedArm,
@@ -24,7 +28,6 @@ import type {
   IssuerKeyView,
 } from '#lib/admin-oauth-keys';
 import type { MdDecoration, MdRevealRange, ComposeMarkerPlan } from '#lib/markdown-decorations';
-import type { Affordance } from '#lib/offline-gate';
 import type { OverlayFace } from '#lib/contact-overlay';
 import type { AskRules, FeedRequestState } from '#lib/ward-asks';
 import type { DeadGenerations, LetGoOutcome } from '#lib/recovery-let-go';
@@ -108,6 +111,8 @@ export type ServingEnablement = {
     actor_id: string;
     decided: { email: boolean; caldav: boolean; carddav: boolean; webdav: boolean };
     completed: boolean;
+    outcome: "running" | "succeeded" | "refused" | "abandoned";
+    refused: { step: string; message: string }[];
   }[];
 };
 export function servingEnablement(): ServingEnablement {
@@ -173,11 +178,27 @@ export async function signOutFinishRecorded(eraseRefused: boolean): Promise<Sign
  *  `conversationsManager` takes before any engine exists, whose model and two
  *  postures `fauna_mls::engine_role` owns (`#lib/conversations` and
  *  `#lib/accounts` are their callers). The accounts among `actorIds` whose
- *  role ANOTHER tab of this browser holds right now: the erase's question,
- *  this tab's own hold consulted, never probed; degrades open. */
+ *  role ANOTHER tab of this browser holds — or whose serving-presence lock
+ *  another tab declares — right now: the erase's question, this tab's own
+ *  holds never counted; degrades open. */
 export async function actorsServedByAnotherTab(actorIds: readonly string[]): Promise<string[]> {
   await ensureWasm();
   return await wasm().actorsServedByAnotherTab([...actorIds]);
+}
+/** The serving-presence lock's faces over `fauna-wasm` (model:
+ *  `fauna_client_accounts::web_serving_presence`): this tab declares the
+ *  account its identity is — a queued SHARED Web Lock, skipped without a lock
+ *  manager — so an erase in a sibling tab sees it whether or not this tab runs
+ *  the account's engine. `store.ts`'s one identity subscription is the caller. */
+export async function takeServingPresence(actorId: string): Promise<void> {
+  await ensureWasm();
+  await wasm().takeServingPresence(actorId);
+}
+/** Withdraw this tab's serving declaration for `actorId` (every account with
+ *  none). */
+export async function releaseServingPresence(actorId?: string): Promise<void> {
+  await ensureWasm();
+  await wasm().releaseServingPresence(actorId);
 }
 /** Why a remove-account refuses, or `null` when it may proceed. */
 export type RemoveAccountBlock = 'this_tab' | 'other_tab' | 'carry_owed' | null;
@@ -726,6 +747,21 @@ export function paintedTextAreaForTest(): unknown {
   return fn ? JSON.parse((fn as () => string)()) : null;
 }
 
+/** Record what one painted frame showed at the root (`null` for nothing) in the
+ *  shared journal — see `#lib/e2e-root-surface`. A no-op where the bundle has
+ *  no leg (the observable then reads `null`). */
+export function rootSurfaceObserveForTest(showing: string | null): void {
+  const fn = coreTestExport('rootSurfaceObserveForTest');
+  if (fn) (fn as (showing: string | undefined) => void)(showing ?? undefined);
+}
+
+/** The `root_surface` observable (`fauna_e2e_agent::ROOT_SURFACE_KEY`), or
+ *  `null` where this bundle has no leg. */
+export function rootSurfaceForTest(): unknown {
+  const fn = coreTestExport('rootSurfaceForTest');
+  return fn ? JSON.parse((fn as () => string)()) : null;
+}
+
 export function actorIdFromSecret(secretHex: string): string {
   return wasm().actor_id_from_secret(secretHex);
 }
@@ -834,6 +870,15 @@ export function logRows(entries: LogEntry[], tzOffsetSecs: number): LogRow[] {
  *  (`fauna_log::format::rendered_text`). */
 export function logRenderedText(entries: LogEntry[], tzOffsetSecs: number): string {
   return wasm().logRenderedText(entries, tzOffsetSecs);
+}
+
+/** Whether `log-copy-button` / `log-clear-button` can do anything with `shown`
+ *  entries painted — blocked by the page's own empty line (`emptyReasonKey`:
+ *  `logs.empty` on the device page, `admin.logs_page.empty` on the admin one)
+ *  when none are (`fauna_log::format::ring_action_possibility`). The paint and
+ *  both handlers ask this one answer (`#lib/ring-actions`). */
+export function logRingActionPossibility(shown: number, emptyReasonKey: string): Possibility {
+  return wasm().logRingActionPossibility(shown, emptyReasonKey) as Possibility;
 }
 
 /** Emit one log line into the shared `fauna_log` ring from TypeScript — the WASM
@@ -1071,6 +1116,11 @@ export const wardAskRules: AskRules = {
     (wasm().wardFeedRequestState(asks, bridgeId, operation, target) as FeedRequestState | undefined) ??
       null,
   knocksAwaitGuardian: (policy) => wasm().wardKnocksAwaitGuardian(policy),
+  knockPossibility: (statusRead, policy, peerStatus) =>
+    wasm().wardKnockPossibility(statusRead, policy, peerStatus ?? undefined) as Possibility,
+  acceptPossibility: (statusRead, policy) => wasm().wardAcceptPossibility(statusRead, policy) as Possibility,
+  guardianDecidesContact: (statusRead, policy, peerStatus) =>
+    wasm().wardGuardianDecidesContact(statusRead, policy, peerStatus ?? undefined),
 };
 
 /** The feed-source operations' wire names, from the shared
@@ -2260,6 +2310,24 @@ export function spamThresholdBand(threshold: number): SpamThresholdBandKey {
   return wasm().spamThresholdBand(threshold) as SpamThresholdBandKey;
 }
 
+/** `save-spam-prefs`: `fauna_client_spam::possibility::save_preferences_possibility`
+ *  — blocked while the preferences read is out (`pending`/`failed`) and while
+ *  both sliders hold what the nest last confirmed (`common.nothing_to_save`). */
+export function spamSavePreferencesPossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  saved: { spam_threshold: number; phishing_threshold: number } | null,
+  spam: number,
+  phishing: number,
+): Possibility {
+  return wasm().spamSavePreferencesPossibility(
+    read,
+    saved?.spam_threshold,
+    saved?.phishing_threshold,
+    spam,
+    phishing,
+  ) as Possibility;
+}
+
 // Shared probability→per-mille conversion. `fauna_protocol::spam::probability_to_per_mille`
 // (over wasm) is the SAME clamp+round math the nest and native apps use for a
 // 0.0–1.0 spam/phishing threshold — web stops hand-rolling `Math.round(x * 1000)`.
@@ -2610,6 +2678,29 @@ export function subscriptionsSetAuthorDrainHeldForTest(held: boolean): void {
   (fn as () => void)();
 }
 
+/** Test-only: hold (`true`) or release (`false`) the Folders page's
+ *  mail-custody reads — the wasm half of the `folders_hold_custody_reads` /
+ *  `folders_release_custody_reads` e2e commands (`#lib/folders-custody-e2e`),
+ *  so `folder-webdav-toggle` is read while that read is out (`ui/folders.md`
+ *  § Errors & edge cases, *Own-tier and mail gates*). The gate is shared Rust's,
+ *  parked in by `foldersCanServeWebdav`.
+ *
+ *  Same two-flavor discipline as `subscriptionsSetAuthorDrainHeldForTest`
+ *  above: the export exists only in the `wasm-core-test` chunk, so it is
+ *  reached off the module record and THROWS on a production bundle
+ *  (convention 11). */
+export function foldersSetCustodyReadsHeldForTest(held: boolean): void {
+  const name = 'foldersSetCustodyReadsHeldForTest';
+  const fn = (wasm() as unknown as Record<string, unknown>)[name];
+  if (typeof fn !== 'function') {
+    throw new Error(
+      `${name} is absent: this SPA is running the PRODUCTION ` +
+        'wasm flavor, which compiles the e2e seams out. Build with `just web-test`.',
+    );
+  }
+  (fn as (h: boolean) => void)(held);
+}
+
 /** Test-only: move the submission-token refresh's clock (the 7-day re-mint
  *  cadence and each re-minted token's `issued_at`; never the bearer clock) — the
  *  wasm half of the `mail_token_refresh_advance_clock` e2e command
@@ -2906,6 +2997,43 @@ export function legalTakedownTombstone(reference: string): LocalizedText {
  *  weight itself (`content-moderation-and-ranking.md` § Composition). */
 export function mutedKeywordLevel(weight: number): MutedKeywordLevel {
   return wasm().mutedKeywordLevel(weight) as MutedKeywordLevel;
+}
+
+// The personal form submits' answers (`docs/goal/ui/settings.md` § Errors &
+// edge cases, *Personal form submits paint from their draft*): each submit is
+// painted from its shared answer and its press asks it again (`#lib/form-gate`).
+
+/** `muted-word-add-button`: `fauna_client_config::muted_word_add_possibility`
+ *  — a term to mute, and no change still on its way. */
+export function mutedWordAddPossibility(term: string, busy: boolean): Possibility {
+  return wasm().mutedWordAddPossibility(term, busy) as Possibility;
+}
+
+/** `personalization-trained-factor-create-button` (create and save-name):
+ *  `fauna_client_personalization::drafts::factor_name_possibility`. */
+export function trainedFactorNamePossibility(name: string, busy: boolean): Possibility {
+  return wasm().trainedFactorNamePossibility(name, busy) as Possibility;
+}
+
+/** `personalization-trained-factor-publish-button` on one row:
+ *  `drafts::publish_open_possibility` — absent with no addressable model,
+ *  blocked while the live feed manager is not up. */
+export function trainedFactorPublishOpenPossibility(
+  hasFactorKey: boolean,
+  managerReady: boolean,
+  busy: boolean,
+): Possibility {
+  return wasm().trainedFactorPublishOpenPossibility(hasFactorKey, managerReady, busy) as Possibility;
+}
+
+/** `personalization-trained-factor-publish-submit-button`:
+ *  `drafts::publish_submit_possibility`. */
+export function trainedFactorPublishSubmitPossibility(
+  name: string,
+  anyKept: boolean,
+  busy: boolean,
+): Possibility {
+  return wasm().trainedFactorPublishSubmitPossibility(name, anyKept, busy) as Possibility;
 }
 
 /** `fauna_core::scoring::muted_keywords_collapse` — does a decrypted
@@ -3238,6 +3366,123 @@ export function removeConfirmTitle(domain: string): LocalizedText {
 // (`fauna_client_mail_settings::local_domains::remove_confirm_body` over wasm).
 export function removeConfirmBody(domain: string): LocalizedText {
   return wasm().removeConfirmBody(domain) as LocalizedText;
+}
+
+// ── admin-dns `Possibility` faces (`docs/goal/ui/README.md` § Offer only what
+// is possible; the ruling is `dns-management.md` § Errors & edge cases) ──────
+// Each forwards one shared answer (`fauna_client_dns::affordances`,
+// `fauna_client_mail_settings::domain_forms`) over the snapshot JSON the page
+// already holds (`null` until that read resolved), so the page paints and
+// refuses from the same answer tui and the native apps read — never a
+// TypeScript re-derivation.
+
+/** `admin-dns-domain-mode` on `domain`, switching to `managed`. */
+export function dnsSetModePossibility(dns: unknown, domain: string, managed: boolean): Possibility {
+  return wasm().dnsSetModePossibility(dns, domain, managed) as Possibility;
+}
+
+/** `admin-dns-manage-all-toggle`, switching to `managed`, over the DNS read
+ *  and the active domain names (`null` = that read has not resolved). */
+export function dnsManageAllPossibility(
+  dns: unknown,
+  activeDomains: string[] | null,
+  managed: boolean,
+): Possibility {
+  return wasm().dnsManageAllPossibility(dns, activeDomains, managed) as Possibility;
+}
+
+/** `admin-dns-add-credential-submit-button`: a provider picked and what has
+ *  been typed into each of its DNS fields. */
+export function dnsCredentialDraftPossibility(providerPicked: boolean, values: string[]): Possibility {
+  return wasm().dnsCredentialDraftPossibility(providerPicked, values) as Possibility;
+}
+
+/** `admin-dns-cert-issue-button` on `domain`, over the snapshot's `pending_cert`. */
+export function dnsCertIssuePossibility(pendingCert: unknown, domain: string): Possibility {
+  return wasm().dnsCertIssuePossibility(pendingCert, domain) as Possibility;
+}
+
+/** `admin-dns-cert-delegate-button`: blocked until a held credential covers
+ *  a zone to delegate to. */
+export function dnsDelegatePossibility(credentialZones: string[]): Possibility {
+  return wasm().dnsDelegatePossibility(credentialZones) as Possibility;
+}
+
+/** `admin-dns-add-domain-submit-button`. */
+export function localDomainAddPossibility(domains: unknown, draft: string): Possibility {
+  return wasm().localDomainAddPossibility(domains, draft) as Possibility;
+}
+
+/** `admin-dns-domain-remove-button` on one `active` row. */
+export function localDomainRemovePossibility(row: unknown): Possibility {
+  return wasm().localDomainRemovePossibility(row) as Possibility;
+}
+
+/** `admin-dns-domain-rename-button` (the primary row). */
+export function localDomainRenamePossibility(domains: unknown): Possibility {
+  return wasm().localDomainRenamePossibility(domains) as Possibility;
+}
+
+/** `admin-dns-domain-promote-button` (a non-primary row). */
+export function localDomainPromotePossibility(domains: unknown): Possibility {
+  return wasm().localDomainPromotePossibility(domains) as Possibility;
+}
+
+/** `admin-dns-rename-submit-button`. */
+export function localDomainRenameDraftPossibility(
+  domains: unknown,
+  target: string,
+  graceDays: string,
+): Possibility {
+  return wasm().localDomainRenameDraftPossibility(domains, target, graceDays) as Possibility;
+}
+
+/** `admin-dns-rename-extend-button`. */
+export function localDomainExtendDraftPossibility(days: string): Possibility {
+  return wasm().localDomainExtendDraftPossibility(days) as Possibility;
+}
+
+// The mail, calendar and aliases forms' draft-validity answers (`admin.md`
+// § Errors & edge cases → *A form's submit is live only for a draft the nest
+// would accept*; `fauna_client_mail_settings`), folded after the page's read
+// gate, painted with `formGate` and asked again at the press.
+
+/** A mail group's save: every `u32` draft (`counts`), `u64` draft
+ *  (`countsU64`) and one-number-per-line list (`lists`) of the group parses —
+ *  a blank or malformed number is refused, never sent as the stored value. */
+export function mailKnobsDraftPossibility(
+  counts: string[],
+  countsU64: string[],
+  lists: string[],
+): Possibility {
+  return wasm().mailKnobsDraftPossibility(counts, countsU64, lists) as Possibility;
+}
+
+/** `admin-mail-microsoft-save-button`: the client id and tenant drafts. */
+export function mailMicrosoftDraftPossibility(clientId: string, tenant: string): Possibility {
+  return wasm().mailMicrosoftDraftPossibility(clientId, tenant) as Possibility;
+}
+
+/** The CalDAV port save: the port draft (1..65535). */
+export function caldavPortDraftPossibility(draft: string): Possibility {
+  return wasm().caldavPortDraftPossibility(draft) as Possibility;
+}
+
+/** The aliases page's forwarder add: domain picked, local part and
+ *  destination typed. */
+export function forwarderCreateDraftPossibility(
+  domain: string,
+  pattern: string,
+  target: string,
+): Possibility {
+  return wasm().forwarderCreateDraftPossibility(domain, pattern, target) as Possibility;
+}
+
+/** The day count a grace or extend draft names; `null` for a blank draft (the
+ *  nest's default). Ask the draft's answer first: an invalid draft is refused
+ *  there, never silently defaulted here. */
+export function localDomainRenameDays(draft: string): number | null {
+  return (wasm().localDomainRenameDays(draft) as number | undefined) ?? null;
 }
 
 // The shared DMARC-report window picker (`fauna_client_mail_settings::
@@ -3634,6 +3879,9 @@ export interface LabelerChoice {
 
 export interface RuleEditorHandle {
   view(): RuleEditorView;
+  /** `rule-editor-save-button`'s answer (`RuleEditor::save_possibility`, a
+   *  `Possibility`): the paint and the save read it, never `view().can_save`. */
+  savePossibility(): Possibility;
   addRule(kind: RuleKind): number | undefined;
   removeRule(index: number): boolean;
   setKind(index: number, kind: RuleKind): boolean;
@@ -3768,6 +4016,9 @@ export interface PolicyEditorVerdict {
 /** The open editor — `WasmPolicyEditor`. */
 export interface PolicyEditorHandle {
   view(): PolicyEditorView;
+  /** Save's paint — the draft's own validity (a `Possibility`, the form
+   *  predicates' serde form); the shared `save` refuses with the same reason. */
+  savePossibility(): Possibility;
   setOn(on: boolean): void;
   setCell(index: number, text: string): void;
   save(client: WsRpcClient): Promise<PolicyEditorVerdict>;
@@ -3834,6 +4085,9 @@ export interface AuditLogView {
 export interface AuditLogHandle {
   load(): Promise<AuditLogView>;
   more(): Promise<AuditLogView>;
+  /** `admin-audit-more-button`'s answer over the held view: blocked, saying
+   *  so, once the whole record is shown (`audit_more_possibility`). */
+  morePossibility(): Possibility;
   free(): void;
 }
 
@@ -4345,6 +4599,186 @@ export function adminPickerOption(user: AdminUser): string {
   return wasm().adminPickerOption(user) as string;
 }
 
+// The users page's offer-only-what-is-possible answers (admin.md § 2 → *What a
+// row offers*, § 3 → *Removing a tier*) — each one shared `fauna_client_admin`
+// predicate over wasm, painted with `formGate` and asked again at the click.
+
+/** `admin-users-remove-admin-button`: absent without the role, blocked on the
+ *  nest's last superadmin. Pass the WHOLE row. */
+export function adminRemoveAdminPossibility(user: AdminUser): Possibility {
+  return wasm().adminRemoveAdminPossibility(user) as Possibility;
+}
+
+/** The admin entry points (`admin-tab`, the Bridges hosted-plugin section):
+ *  absent for a non-admin (`admin.md` § Errors & edge cases, *Role and state
+ *  gates answer one `Possibility` too*). */
+export function adminEntryPossibility(isAdmin: boolean): Possibility {
+  return wasm().adminEntryPossibility(isAdmin) as Possibility;
+}
+
+/** A users-row control the shared row decision offers or leaves absent. */
+export type AdminUserRowControl = 'suspend' | 'evict' | 'restore' | 'make_admin' | 'take_over';
+
+/** One users-row control's answer — the `AdminUserRowControls::*_possibility`
+ *  sibling over the row decision `adminUserRowControls` makes. Pass the WHOLE
+ *  row and the viewing admin's raw actor id. */
+export function adminUserRowControlPossibility(
+  user: AdminUser,
+  viewer: Uint8Array | undefined,
+  control: AdminUserRowControl,
+): Possibility {
+  return wasm().adminUserRowControlPossibility(user, viewer, control) as Possibility;
+}
+
+/** `admin-nest-web-app-origin-*`: settable only where the shared view says
+ *  so, blocked by its status sentence; `null` (before the read) is blocked
+ *  "still loading". `draft`, when given, is the mode the save would write: a
+ *  `central` draft is blocked with the nest's own refusal while the view's
+ *  `central_possibility` is not possible. */
+export function adminWebAppOriginSetPossibility(
+  view: unknown,
+  draft?: 'bundled' | 'central' | null,
+): Possibility {
+  return wasm().adminWebAppOriginSetPossibility(view ?? null, draft ?? undefined) as Possibility;
+}
+
+/** `admin-nest-update-channel-*`: the same contract as the origin's. */
+export function adminUpdateChannelSetPossibility(view: unknown): Possibility {
+  return wasm().adminUpdateChannelSetPossibility(view ?? null) as Possibility;
+}
+
+/** `admin-mail-enabled-toggle`: blocked by the unavailable notice only for a
+ *  turn-on on a box that cannot enable mail. */
+export function mailEnableTogglePossibility(
+  mailEnabled: boolean,
+  mailUnavailableHere: boolean,
+): Possibility {
+  return wasm().mailEnableTogglePossibility(mailEnabled, mailUnavailableHere) as Possibility;
+}
+
+/** `mail-lists-add-sheet-submit-button`: the shared `list_submit_possibility`
+ *  over the draft — create needs the local part and a domain; a typed
+ *  per-send cap must be a whole number. */
+export function mailListSubmitPossibility(
+  editing: boolean,
+  localPart: string,
+  domain: string,
+  perSendCap: string,
+): Possibility {
+  return wasm().mailListSubmitPossibility(editing, localPart, domain, perSendCap) as Possibility;
+}
+
+/** `mail-list-members-add-sheet-submit-button`: an address typed. */
+export function mailListMemberAddPossibility(address: string): Possibility {
+  return wasm().mailListMemberAddPossibility(address) as Possibility;
+}
+
+/** `mail-list-members-import-sheet-submit-button`: a non-blank line pasted. */
+export function mailListMemberImportPossibility(paste: string): Possibility {
+  return wasm().mailListMemberImportPossibility(paste) as Possibility;
+}
+
+/** `device-p2p-participation-toggle` over the row's published paint. */
+export function p2pParticipationPossibility(paint: unknown): Possibility {
+  return wasm().p2pParticipationPossibility(paint) as Possibility;
+}
+
+/** The primary-domain rename banner's controls: absent outside the states
+ *  that take them. Pass the snapshot's whole `active_rename` view. */
+export function primaryDomainRenamePossibility(
+  view: unknown,
+  control: 'complete' | 'extend' | 'abort',
+): Possibility {
+  return wasm().primaryDomainRenamePossibility(view, control) as Possibility;
+}
+
+/** `admin-pending-action-approve-button`: absent on the viewer's own
+ *  scheduled action and on one no longer pending. Pass the WHOLE row. */
+export function adminPendingApprovePossibility(
+  action: AdminPendingAction,
+  viewer: Uint8Array,
+): Possibility {
+  return wasm().adminPendingApprovePossibility(action, viewer) as Possibility;
+}
+
+/** The admit and invite forms' age-band selects: blocked until a guardian is
+ *  picked. */
+export function adminAgeBandPossibility(guardianSelected: boolean): Possibility {
+  return wasm().adminAgeBandPossibility(guardianSelected) as Possibility;
+}
+
+/** `admin-settings-tier-delete-button`: absent on `free`. */
+export function adminTierDeletePossibility(tier: string): Possibility {
+  return wasm().adminTierDeletePossibility(tier) as Possibility;
+}
+
+/** `admin-users-admit-button`, `create-invite-code-btn` and
+ *  `create-invite-confirm-btn`: blocked, naming the Tiers page, while the tier
+ *  select offers none. `tiers` is the names the select offers. */
+export function adminTierPickPossibility(tiers: string[]): Possibility {
+  return wasm().adminTierPickPossibility(tiers) as Possibility;
+}
+
+/** `admin-users-prev-page` (`forward` false) / `admin-users-next-page`
+ *  (`forward` true): blocked at page 1 / the last page, saying so. */
+export function adminUsersPageStepPossibility(
+  offset: number,
+  total: number,
+  pageSize: number,
+  forward: boolean,
+): Possibility {
+  return wasm().adminUsersPageStepPossibility(offset, total, pageSize, forward) as Possibility;
+}
+
+/** `admin-settings-membership-clear-button`: blocked, saying nothing is set,
+ *  while the row holds no persisted designation. */
+export function adminMembershipClearPossibility(hasExisting: boolean): Possibility {
+  return wasm().adminMembershipClearPossibility(hasExisting) as Possibility;
+}
+
+// The admin forms' draft-validity answers (`admin.md` § Errors & edge cases →
+// *A form's submit is live only for a draft the nest would accept*) — each one
+// shared `fauna_client_admin` predicate over what has been typed. The page
+// folds the answer after its read gate (`andPossibility`), paints the submit
+// with `formGate` and asks again at the press (`formRefusal`).
+
+/** `admin-users-registration-save-button`: the free-account ceiling draft
+ *  (blank or a whole number). */
+export function adminRegistrationCeilingPossibility(raw: string): Possibility {
+  return wasm().adminRegistrationCeilingPossibility(raw) as Possibility;
+}
+
+/** `admin-users-admit-button`: the account-key draft (64 hex). */
+export function adminAdmitActorPossibility(raw: string): Possibility {
+  return wasm().adminAdmitActorPossibility(raw) as Possibility;
+}
+
+/** A tier row's save: the five cap drafts (inbox, storage, devices, blob
+ *  size, feeds). */
+export function adminTierCapsPossibility(caps: string[]): Possibility {
+  return wasm().adminTierCapsPossibility(caps) as Possibility;
+}
+
+/** The add-a-tier form: the name and the five cap drafts. */
+export function adminTierCreatePossibility(name: string, caps: string[]): Possibility {
+  return wasm().adminTierCreatePossibility(name, caps) as Possibility;
+}
+
+/** A membership row's save: the admitted-at tier picked. */
+export function adminMembershipSavePossibility(adminTier: string): Possibility {
+  return wasm().adminMembershipSavePossibility(adminTier) as Possibility;
+}
+
+/** `admin-nest-serving-port-save-button`: the port draft (1..65535). */
+export function adminServingPortPossibility(raw: string): Possibility {
+  return wasm().adminServingPortPossibility(raw) as Possibility;
+}
+
+/** The region save: the region draft. */
+export function adminRegionPossibility(raw: string): Possibility {
+  return wasm().adminRegionPossibility(raw) as Possibility;
+}
+
 // Shared admin Users `admin-users-mail-serving-status` label.
 // `fauna_core::format::mail_serving_status_label` (over wasm) owns the enabled→label map
 // (`admin.users_page.serving_here` when the user's `mail_serving_enabled` flag is set, else
@@ -4477,17 +4911,27 @@ export function mediaSortDirectionLabel(descending: boolean): LocalizedText {
 // The SPA must NEVER test a class itself: the rule makes three rulings that are
 // easy to get backwards (only class 3 desensitizes; an *unregistered* kind stays
 // available; only the *known* offline words count as offline), and re-deriving
-// them here is the per-app copy priority #2 exists to prevent. `reason` is
-// `undefined` exactly when `available` is true.
+// them here is the per-app copy priority #2 exists to prevent. The answer is
+// the shared `Possibility` (`docs/goal/ui/README.md` § Offer only what is
+// possible, rule 6): `possible`, or `blocked` with the reason to paint.
 //
 // Consumers do not call this directly — they bind it into the `use:offlineGate`
 // action (`#lib/offline-gate`), which owns how a reactive tree obeys the verdict.
-export function offlineAffordance(kind: string, connectionState: string): Affordance {
-  return wasm().offlineAffordance(kind, connectionState) as Affordance;
+export function offlinePossibility(kind: string, connectionState: string): Possibility {
+  return wasm().offlinePossibility(kind, connectionState) as Possibility;
+}
+
+// `fauna_protocol::offline_class::carve_out_affordance` — the offline answer for
+// a fetch that has NO wire kind but still needs the nest (the bulk-binary
+// carve-out: the mail export's Download GET). Same offline words and reason as
+// `offlinePossibility`, so the SPA never passes a made-up kind there nor tests
+// the state word itself (`mail-export.md` § Download flow).
+export function carveOutPossibility(connectionState: string): Possibility {
+  return wasm().carveOutPossibility(connectionState) as Possibility;
 }
 
 // `fauna_protocol::offline_class::is_online` — the same rule as
-// `offlineAffordance` above, for a caller holding a connection state but no
+// `offlinePossibility` above, for a caller holding a connection state but no
 // kind: is this transport word one the gate treats as ONLINE?
 //
 // ⚠ Never replace a call to this with `state === 'connected'`. The gate's
@@ -4618,6 +5062,17 @@ export function isUnifiedBridgesPageBridge(id: string): boolean {
 export type BridgeLinkBlock =
   | { kind: 'provider_error'; message: string }
   | { kind: 'no_applicable_mode' };
+
+/** `bridge-action-button` (Link): blocked by the reason
+ *  `bridge-link-blocked-reason` paints (`bridges.md` § Errors & edge cases,
+ *  rule 4). */
+export function bridgeLinkPossibility(
+  linked: boolean,
+  error: string | null,
+  applicableModes: number,
+): Possibility {
+  return wasm().bridgeLinkPossibility(linked, error ?? undefined, applicableModes) as Possibility;
+}
 
 export function bridgeLinkBlock(
   linked: boolean,
@@ -4756,6 +5211,11 @@ export function transferTiming(
 // The `mail-import` wizard's two picker vocabularies, from the same shared map
 // every other app reads (`import_source_kind_label` / `import_tls_mode_label`)
 // — the export twin's precedent, so a seventh app cannot hand-roll a sixth copy.
+// The source picker's kinds in painted order (`fauna_client_mail_settings::
+// SOURCE_KINDS`), the snapshot's `source_kind` words — never a TS copy.
+export function importSourceKinds(): string[] {
+  return wasm().importSourceKinds() as string[];
+}
 export function importSourceKindLabel(kind: string): LocalizedText {
   return wasm().importSourceKindLabel(kind) as LocalizedText;
 }
@@ -4806,6 +5266,294 @@ export function settingsStatusLabel(status: unknown, enabled: boolean): Localize
   return wasm().settingsStatusLabel(status, enabled) as LocalizedText;
 }
 
+// `fauna_client_mail_settings::mail_usable_unbuilt` (over wasm): the mail-usable
+// answer for an SPA whose mail machine failed to build — blocked with its own
+// reason (`docs/goal/ui/mail-settings.md` § Errors & edge cases, the
+// mail-usable gate; `mail-usable.ts`).
+export function mailUsableUnbuilt(): Possibility {
+  return wasm().mailUsableUnbuilt() as Possibility;
+}
+
+// `fauna_client_mail_settings::mail_usable_unread` (over wasm): the answer
+// while the session's mail machine is still being built — blocked with the
+// shared "checking" reason (`mail-usable.ts`).
+export function mailUsableUnread(): Possibility {
+  return wasm().mailUsableUnread() as Possibility;
+}
+
+// The read-state answers (`docs/goal/ui/README.md` § Offer only what is
+// possible, rule 5: unknown is not possible). The read word is the one the
+// page tracks its read with (`#lib/read-gate`'s `ReadWord`); the reasons
+// (`common.still_loading`, `common.load_failed`, …) are the shared crates', so
+// the SPA never spells them. Painted and asked again through `#lib/form-gate`.
+
+/** `fauna_core::possibility::Possibility::from_read` — the answer a read alone
+ *  gives (profile follow and block). */
+export function readPossibility(read: 'pending' | 'failed' | 'resolved'): Possibility {
+  return wasm().readPossibility(read) as Possibility;
+}
+
+/** `personalization-share-signals-toggle`'s answer —
+ *  `fauna_client_personalization::engagement::share_signals_possibility`:
+ *  blocked feed-not-ready while the tab's feed manager is not up, then the
+ *  `signal_share.status` read's answer (`engagement-cues.md` § Layer B). */
+export function engagementShareSignalsPossibility(
+  managerReady: boolean,
+  read: 'pending' | 'failed' | 'resolved',
+): Possibility {
+  return wasm().engagementShareSignalsPossibility(managerReady, read) as Possibility;
+}
+
+/** `personalization-clear-engagement-data-button`'s answer —
+ *  `clear_engagement_possibility`: blocked while the feed manager is not up. */
+export function engagementClearPossibility(managerReady: boolean): Possibility {
+  return wasm().engagementClearPossibility(managerReady) as Possibility;
+}
+
+/** `member-review-remove-button`'s answer —
+ *  `fauna_core::data::member_review_remove_possibility`: blocked until the
+ *  tab's conversations session is up (`succession-propagation.md`
+ *  § Propagation). */
+export function memberReviewRemovePossibility(conversationsReady: boolean): Possibility {
+  return wasm().memberReviewRemovePossibility(conversationsReady) as Possibility;
+}
+
+/** `fauna_core::possibility::Possibility::for_write` — the answer a control
+ *  that WRITES what a page's own read decides gives (`admin.md` § Errors &
+ *  edge cases, *Controls wait for their read*): the read's answer first, then
+ *  `common.in_flight` while the control's own change is on its way (`idle`
+ *  false). admin-nest's reflective read and admin-settings' tier read. */
+export function writeAfterReadPossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  idle: boolean,
+): Possibility {
+  return wasm().writeAfterReadPossibility(read, idle) as Possibility;
+}
+
+/** `fauna_client_features::gate_possibility` over the `featuresStatus` rows the
+ *  page holds (`null` until that read answered) — the zap-signer designate and
+ *  the claim redeem. A blocked reason carries a nested i18n key: paint it with
+ *  `resolveLocalizedNested`. */
+export function featuresGatePossibility(rows: FeatureRow[] | null, feature: string): Possibility {
+  return wasm().featuresGatePossibility(rows, feature) as Possibility;
+}
+
+/** `notification-mark-read`: `fauna_client_notifications::mark_all_read_possibility`
+ *  over the first read and the unread count the badge renders. */
+export function notificationsMarkAllReadPossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  unread: number,
+): Possibility {
+  return wasm().notificationsMarkAllReadPossibility(read, unread) as Possibility;
+}
+
+/** `notification-clear`: `fauna_client_notifications::clear_all_possibility`
+ *  over the first read and the rows the page shows. */
+export function notificationsClearAllPossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  rows: number,
+): Possibility {
+  return wasm().notificationsClearAllPossibility(read, rows) as Possibility;
+}
+
+// The form-validity predicates (`docs/goal/ui/README.md` § Offer only what is
+// possible, rule 4's form case; `feed.md`, `search.md`, `nostr.md` § Errors &
+// edge cases): one shared predicate per form submit, painted and asked again
+// on submit through `#lib/form-gate`. The native twins are
+// `libs/fauna-ffi/src/forms.rs`.
+
+/** `post-submit-button`: `fauna_feed::forms::post_submit_possibility`. */
+export function feedPostSubmitPossibility(text: string): Possibility {
+  return wasm().feedPostSubmitPossibility(text) as Possibility;
+}
+
+/** `feed-reply-submit-button`: `fauna_feed::forms::reply_submit_possibility`. */
+export function feedReplySubmitPossibility(text: string): Possibility {
+  return wasm().feedReplySubmitPossibility(text) as Possibility;
+}
+
+/** `create-feed`: `fauna_feed::forms::create_feed_possibility`. */
+export function feedCreatePossibility(name: string): Possibility {
+  return wasm().feedCreatePossibility(name) as Possibility;
+}
+
+/** `bridge-form-subscribe-button`: `fauna_feed::forms::bridge_subscribe_possibility`. */
+export function feedBridgeSubscribePossibility(kind: string, uri: string): Possibility {
+  return wasm().feedBridgeSubscribePossibility(kind, uri) as Possibility;
+}
+
+/** `search-submit-button`: `fauna_client_search::query_possibility`. */
+export function searchQueryPossibility(query: string): Possibility {
+  return wasm().searchQueryPossibility(query) as Possibility;
+}
+
+/** `nostr-link-button`: `fauna_client_bridges::link_possibility` over the
+ *  picker's link-request mode and the typed fields. */
+export function nostrLinkPossibility(mode: string, nsec: string, bunkerUrl: string): Possibility {
+  return wasm().nostrLinkPossibility(mode, nsec, bunkerUrl) as Possibility;
+}
+
+/** `bridge-add-follow-button`: `fauna_client_bridges::bridge_forms::bridge_follow_possibility`. */
+export function bridgeFollowPossibility(id: string): Possibility {
+  return wasm().bridgeFollowPossibility(id) as Possibility;
+}
+
+/** `bridge-plugin-install-submit`: `fauna_client_bridges::bridge_forms::plugin_install_possibility`. */
+export function bridgePluginInstallPossibility(documentUrl: string): Possibility {
+  return wasm().bridgePluginInstallPossibility(documentUrl) as Possibility;
+}
+
+/** `custody-mint-button`: `fauna_client_conversations::custody_mint_possibility`
+ *  over the candidates the page read (`null` before the read). */
+export function custodyMintPossibility(candidates: unknown[] | null): Possibility {
+  return wasm().custodyMintPossibility(candidates) as Possibility;
+}
+
+/** `custody-mint-confirm-button`: `custody_mint_confirm_possibility`. */
+export function custodyMintConfirmPossibility(hostPicked: boolean): Possibility {
+  return wasm().custodyMintConfirmPossibility(hostPicked) as Possibility;
+}
+
+/** `nests-add-submit-button`: `fauna_client_pair::link_input_possibility`. */
+export function linkInputPossibility(raw: string): Possibility {
+  return wasm().linkInputPossibility(raw) as Possibility;
+}
+
+/** `nest-trust-mint-confirm-button`: `fauna_client_pair::mint_draft_possibility`
+ *  over the picked option (`null` before one) and the holder pick. */
+export function mintDraftPossibility(o: TrustMintOptionShape | null, picked: string | null): Possibility {
+  return wasm().mintDraftPossibility(o, picked || undefined) as Possibility;
+}
+
+/** `fauna_client_pair::mint_holder` — the holder a mint of `o` targets, or
+ *  `null` until a still-listed one is picked among several. */
+export function mintHolder(o: TrustMintOptionShape, picked: string | null): string | null {
+  return (wasm().mintHolder(o, picked || undefined) ?? null) as string | null;
+}
+
+/** `nostr-add-follow`: `fauna_client_bridges::add_follow_possibility`. */
+export function nostrAddFollowPossibility(pubkey: string): Possibility {
+  return wasm().nostrAddFollowPossibility(pubkey) as Possibility;
+}
+
+/** `nostr-zap-signer-add-btn`'s draft half:
+ *  `fauna_client_bridges::zap_signer_add_possibility`. */
+export function nostrZapSignerAddPossibility(pubkey: string): Possibility {
+  return wasm().nostrZapSignerAddPossibility(pubkey) as Possibility;
+}
+
+/** The Nostr page's *Connected apps* (NIP-46 bunker) section, over the stored
+ *  signing mode (`undefined` with no linked account):
+ *  `fauna_client_bridges::connected_apps_possibility`. */
+export function nostrConnectedAppsPossibility(signingMode?: string): Possibility {
+  return wasm().nostrConnectedAppsPossibility(signingMode) as Possibility;
+}
+
+/** `nostr-add-relay`: `fauna_protocol::nostr_relay::add_relay_possibility`
+ *  over the relays already listed and the typed draft. */
+export function nostrAddRelayPossibility(existing: string[], input: string): Possibility {
+  return wasm().nostrAddRelayPossibility(existing, input) as Possibility;
+}
+
+// The family, folders and profile form predicates (`family-safety.md`,
+// `folders.md`, `profile.md` § Errors & edge cases) — the same rule-4 form case,
+// painted and asked again on submit through `#lib/form-gate`.
+
+/** `family-contact-add-button`: `fauna_client_family::forms::contact_add_possibility`. */
+export function familyContactAddPossibility(input: string): Possibility {
+  return wasm().familyContactAddPossibility(input) as Possibility;
+}
+
+/** `family-transfer-button`: `fauna_client_family::forms::transfer_possibility`
+ *  (its own reason keys, never the contact-add string). */
+export function familyTransferPossibility(input: string): Possibility {
+  return wasm().familyTransferPossibility(input) as Possibility;
+}
+
+/** `family-policy-save-button`: `fauna_client_family::forms::policy_save_possibility`
+ *  over the three screen-time cells (an empty cell is "unset"). */
+export function familyPolicySavePossibility(windowStart: string, windowEnd: string, daily: string): Possibility {
+  return wasm().familyPolicySavePossibility(windowStart, windowEnd, daily) as Possibility;
+}
+
+/** The Family tab gate: `fauna_client_family::forms::has_family_surface` —
+ *  supervised, guarding a ward, or named on an incoming transfer. */
+export function familyHasSurface(supervised: boolean, wards: number, incomingTransfers: number): boolean {
+  return wasm().familyHasSurface(supervised, wards, incomingTransfers) as boolean;
+}
+
+/** `folder-follow-confirm`: `fauna_client_folders::forms::follow_possibility`
+ *  (`ready` = the devices machine and the identity secret held). */
+export function folderFollowPossibility(handle: string, name: string, ready: boolean): Possibility {
+  return wasm().folderFollowPossibility(handle, name, ready) as Possibility;
+}
+
+/** `folder-share-confirm`: `fauna_client_folders::forms::share_possibility`
+ *  (`ready` = those AND the live conversations session). */
+export function folderSharePossibility(recipient: string, ready: boolean): Possibility {
+  return wasm().folderSharePossibility(recipient, ready) as Possibility;
+}
+
+/** `subscription-tier-form-save`: `fauna_client_subscriptions::forms::tier_form_possibility`. */
+export function subscriptionTierFormPossibility(name: string): Possibility {
+  return wasm().subscriptionTierFormPossibility(name) as Possibility;
+}
+
+/** `subscription-claim-redeem-button`'s draft half:
+ *  `fauna_client_subscriptions::forms::redeem_code_possibility`. */
+export function subscriptionRedeemCodePossibility(code: string): Possibility {
+  return wasm().subscriptionRedeemCodePossibility(code) as Possibility;
+}
+
+// The own-tier and mail gates (`docs/goal/ui/folders.md` § Errors & edge
+// cases, *Own-tier and mail gates*; `docs/goal/ui/profile.md` § Errors & edge
+// cases, *A tier before what sells it*): the read crosses as the page's
+// `ReadWord`, so a pending or failed read answers still loading / the failure,
+// never "no tier" / "no mail key". The native twins are
+// `libs/fauna-ffi/src/forms.rs`.
+
+/** `folder-paywall-tier-select`: `own_tiers_possibility`, use `Paywall`. */
+export function folderPaywallPossibility(read: 'pending' | 'failed' | 'resolved', ownTiers: number): Possibility {
+  return wasm().folderPaywallPossibility(read, ownTiers) as Possibility;
+}
+
+/** `subscription-claim-mint-button`: `own_tiers_possibility`, use `ClaimCode`. */
+export function subscriptionClaimMintPossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  ownTiers: number,
+): Possibility {
+  return wasm().subscriptionClaimMintPossibility(read, ownTiers) as Possibility;
+}
+
+/** `subscription-provider-add-button`: `own_tiers_possibility`, use
+ *  `PaymentProvider` — the provider form never opens unless possible. */
+export function subscriptionProviderAddPossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  ownTiers: number,
+): Possibility {
+  return wasm().subscriptionProviderAddPossibility(read, ownTiers) as Possibility;
+}
+
+/** `folder-webdav-toggle`: `fauna_client_folders::webdav_provision::webdav_serve_possibility`
+ *  over the mail-custody read (`holdsMsek` is read only once it resolved). */
+export function folderWebdavServePossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  holdsMsek: boolean,
+): Possibility {
+  return wasm().folderWebdavServePossibility(read, holdsMsek) as Possibility;
+}
+
+/** `wizard-next-button`: the folders machine's `wizard_next_possibility` over
+ *  the wizard snapshot the Devices machine handed the page. */
+export function folderWizardNextPossibility(wizard: WizardSnapshot): Possibility {
+  return wasm().folderWizardNextPossibility(wizard) as Possibility;
+}
+
+/** `wizard-create-button`: the folders machine's `wizard_create_possibility`. */
+export function folderWizardCreatePossibility(wizard: WizardSnapshot): Possibility {
+  return wasm().folderWizardCreatePossibility(wizard) as Possibility;
+}
+
 // Web-content authoring view projections — `fauna_client_web::subdomain_view` +
 // `fauna_core::web::apex_url` over wasm. The reserved-label rule + the
 // `<handle>.<domain>` / apex URLs live in shared Rust (one source of truth with
@@ -4841,6 +5589,23 @@ export function webApexUrl(domain: string): string {
   return wasm().webApexUrl(domain) as string;
 }
 
+/** The `admin-web-apex-info` line (`fauna_client_web::apex_info_text`): where
+ *  the apex serves, or why there is no address — never `https:///`. */
+export function webApexInfoText(domain: string): LocalizedText {
+  return wasm().webApexInfoText(domain) as LocalizedText;
+}
+
+/** `web-settings-subdomain-toggle`'s answer
+ *  (`fauna_client_web::subdomain_toggle_possibility`): not enabled before the
+ *  read resolves, absent on a nest with no serving domain, blocked with the
+ *  step on no or a reserved handle; switching off is always possible. */
+export function webSubdomainTogglePossibility(
+  read: 'pending' | 'failed' | 'resolved',
+  view: SubdomainView | null,
+): Possibility {
+  return wasm().webSubdomainTogglePossibility(read, view ?? null) as Possibility;
+}
+
 // ── Published-post management: the link surface (web-content-hosting.md
 //    § Published-post management) — shared by the `web-settings`
 //    Published-posts section and the feed ⋯-overflow verbs. ────────────────
@@ -4867,6 +5632,12 @@ export function webSiteLinkView(
   domain: string,
 ): SiteLinkView {
   return wasm().webSiteLinkView(domains, subdomainEnabled, handle ?? undefined, domain) as SiteLinkView;
+}
+
+/** Both published-post copy buttons' answer
+ *  (`fauna_client_web::site_link_copy_possibility`) over a `webSiteLinkView`. */
+export function webSiteLinkCopyPossibility(link: SiteLinkView): Possibility {
+  return wasm().webSiteLinkCopyPossibility(link) as Possibility;
 }
 
 /** The public page URL for a published post — the *Copy web link* value. */
@@ -5111,6 +5882,14 @@ export function nextSortOrder(current: string | undefined): string {
   return wasm().nextSortOrder(current) as string;
 }
 
+// The order in force, named — `SortOrder::label` over wasm, a `LocalizedText` for
+// `resolveLocalized`. Pass the snapshot's `sort` serde variant name verbatim; an
+// unknown/absent value reads as the default order. `conversation-sort` paints it as its
+// tooltip so a cycle names the value in force (e2e-systematic-ui-walks.md, layer (c)).
+export function sortOrderLabel(current: string | undefined): { key: string; args?: Record<string, string> } {
+  return wasm().sortOrderLabel(current) as { key: string; args?: Record<string, string> };
+}
+
 // The reaction quick-set, in the one shared order — `fauna_conversations::QUICKSET_EMOJIS`
 // over wasm, the twin of the UniFFI face the native apps read. Web used to re-type the six
 // emoji in `conversations/+page.svelte`; the ORDER is a cross-app contract
@@ -5181,6 +5960,59 @@ export function roomRoleAttrToken(role: string): string {
 // owner/admin mark on a governed room. `null` role → the bare display name.
 export function roomMemberChipText(display: string, role: string | null): string {
   return wasm().roomMemberChipText(display, role) as string;
+}
+
+// The `fauna_conversations::ThreadControl` set: every thread and room control
+// a role or the rail decides (`ui/conversations.md` § Errors & edge cases →
+// *Controls this person can never use*).
+export type ThreadControl =
+  | 'invite'
+  | 'remove_member'
+  | 'set_policy'
+  | 'appoint_admins'
+  | 'transfer_ownership'
+  | 'leave_room'
+  | 'local_remove'
+  | 'subject';
+
+// `ThreadCapabilities::possibility(control, my_role)`: the one answer the
+// paint and the handler both ask for a role- or rail-gated control.
+// `capabilities` is the thread detail's `capabilities`, `myRole` the room's
+// `my_role` (`null`/`undefined` on a policy-less thread). No capabilities (no
+// detail read yet) → absent: nothing is offered on a guess.
+export function threadControlPossibility(
+  capabilities: unknown,
+  control: ThreadControl,
+  myRole: string | null | undefined,
+): Possibility {
+  if (!capabilities) return { state: 'absent' };
+  return wasm().threadControlPossibility(capabilities, control, myRole ?? null) as Possibility;
+}
+
+// `ThreadCapabilities::send_possibility`: whether the reply bar
+// (`dm-text-field`, `dm-send-button`) can send now — blocked by the room
+// notice's own sentence (`conversations.unified.room_notice_bridge_disconnected`)
+// when the rail cannot take a send. `capabilities` is the thread detail's
+// `capabilities` as the snapshot ships it.
+export function threadSendPossibility(capabilities: unknown): Possibility {
+  return wasm().threadSendPossibility(capabilities) as Possibility;
+}
+
+// The `fauna_conversations::NewThreadControl` set: the new-thread composer's
+// controls whose possibility follows the recipient (`ui/conversations.md`
+// § Errors & edge cases → *The new-thread composer offers only what it can
+// send*): `dm-send-button`, `attachment-button`, `topic-toggle-button`.
+export type NewThreadControl = 'send' | 'attach' | 'topic';
+
+// `new_thread_possibility(compose, control)`: the one answer the paint and the
+// handler both ask for a new-thread composer control. `compose` is the
+// snapshot's `new_thread_compose` (`null`/`undefined` with no composer open →
+// absent).
+export function newThreadControlPossibility(
+  compose: unknown,
+  control: NewThreadControl,
+): Possibility {
+  return wasm().newThreadControlPossibility(compose ?? null, control) as Possibility;
 }
 
 // `room-join-rule-select`'s options, in the one order all seven editors offer.
@@ -5646,6 +6478,15 @@ export function pan(
   forward: boolean,
 ): CalDate {
   return wasm().pan(mode, year, month, day, forward) as CalDate;
+}
+
+/** `caltime::pan_possibility` — whether the pan pair can do anything in `mode`:
+ *  blocked with `events.pan_none_in_agenda` in the date-unfiltered agenda,
+ *  possible in month/week/day. Paint it with `paintPossibility`; the pan action
+ *  asks it again (ui/README § Offer only what is possible, rule 6). Throws on an
+ *  unknown `mode`. */
+export function panPossibility(mode: CalendarViewMode): Possibility {
+  return wasm().panPossibility(mode) as Possibility;
 }
 
 /** `caltime::visible_days` — the dates `mode` shows for the anchor: the month
@@ -6167,11 +7008,34 @@ export function sessionsLockoutConfirmWord(): string {
   return wasm().sessionsLockoutConfirmWord() as string;
 }
 
+/** `sessions-revoke-others-button`'s answer —
+ *  `sessions_view::revoke_others_possibility` over the page painted last
+ *  (`null` before the first load resolved) and whether an act is in flight
+ *  (`docs/goal/ui/sessions.md` § Errors & edge cases): still loading, failed
+ *  to load, no other sign-ins to end, or in flight. The button paints from it;
+ *  the arm and the confirm ask it again. */
+export function sessionsRevokeOthersPossibility(
+  snapshot: SessionsSnapshot | null,
+  busy: boolean,
+): Possibility {
+  return wasm().sessionsRevokeOthersPossibility(snapshot ?? null, busy) as Possibility;
+}
+
 /** `identity-stolen-button` on the locked launch surface — the stolen-identity
  *  ceremony with NO session, over an anonymous connection of its own
  *  (`devices.md` § The two panic buttons, point 5). `nestUrl` is the nest the
  *  successor's row is bound to, `dialUrl` where the sockets go — as for
  *  `succeedIdentityWithHeldKit`. */
+/** `identity-stolen-button`'s draft answer over the pasted kit and the typed
+ *  confirm word — `fauna_client_recovery::ceremony::stolen_entry_possibility`
+ *  (the kit first, then the word). Both surfaces of the ceremony (Settings and
+ *  the locked door) paint the button from it and ask it again before the
+ *  ceremony starts; neither compares the word itself. Throws until
+ *  `ensureWasm()` resolves — ask it through `#lib/form-gate`'s `askPossibility`. */
+export function stolenEntryPossibility(phrase: string, confirmWord: string): Possibility {
+  return wasm().stolenEntryPossibility(phrase, confirmWord) as Possibility;
+}
+
 export function succeedStolenIdentityLockedWasm(
   secretHex: string,
   phrase: string,
@@ -6179,4 +7043,29 @@ export function succeedStolenIdentityLockedWasm(
   dialUrl: string,
 ): Promise<StolenOutcome> {
   return wasm().succeedStolenIdentityLocked(secretHex, phrase, nestUrl, dialUrl) as Promise<StolenOutcome>;
+}
+
+/** `fauna_client_caldav::event_create_possibility` over the page's calendar
+ *  read (`caldavReadCalendars`): can a compose open now? (events.md § Errors &
+ *  edge cases → *No calendar to hold an event*, ruling 3). */
+export function eventCreatePossibility(read: unknown): Possibility {
+  return wasm().eventCreatePossibility(read) as Possibility;
+}
+
+/** `fauna_client_caldav::calendar_write_possibility` over the page's calendar
+ *  read: can a calendar be created, or an `.ics` imported, now? (events.md
+ *  § Errors & edge cases → *The other calendar writes*). */
+export function calendarWritePossibility(read: unknown): Possibility {
+  return wasm().calendarWritePossibility(read) as Possibility;
+}
+
+/** `fauna_client_caldav::event_create_target`: the calendar the create goes to
+ *  (`{ id }`), or the reason it is refused (`{ reason }`). */
+export function eventCreateTarget(
+  read: unknown,
+  selected: string | null,
+): { id: string } | { reason: LocalizedText } {
+  return wasm().eventCreateTarget(read, selected ?? undefined) as
+    | { id: string }
+    | { reason: LocalizedText };
 }

@@ -39,6 +39,7 @@ use fauna_archive_import_machine::{
     SOURCE_KINDS,
 };
 use fauna_core::localized::ComposedText;
+use fauna_core::possibility::Possibility;
 use fauna_i18n::strings::archive_import as t;
 
 use super::{Action, SettingsField, SettingsState};
@@ -137,6 +138,37 @@ impl ArchiveImportState {
             ArchiveImportAction::Next,
         ]
     }
+
+    /// The machine's snapshot with the scope step's date drafts folded in —
+    /// what it will hold once Next commits them.
+    fn projected(&self) -> Option<ArchiveImportSnapshot> {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.with_scope_drafts(&self.date_from_input, &self.date_to_input))
+    }
+
+    /// `wizard-next-button`'s answer (`ArchiveImportSnapshot::next_possibility`
+    /// — no archive opened, a bad range); not possible before the machine's
+    /// first snapshot (rule 5).
+    pub(crate) fn next_answer(&self) -> Possibility {
+        self.projected()
+            .map_or_else(|| Possibility::once_read(false), |s| s.next_possibility())
+    }
+
+    /// `archive-import-start-button`'s answer (`start_possibility`).
+    pub(crate) fn start_answer(&self) -> Possibility {
+        self.projected()
+            .map_or_else(|| Possibility::once_read(false), |s| s.start_possibility())
+    }
+
+    /// `archive-import-profile-prefill-button`'s answer
+    /// (`profile_prefill_possibility`).
+    pub(crate) fn prefill_answer(&self) -> Possibility {
+        self.snapshot.as_ref().map_or_else(
+            || Possibility::once_read(false),
+            |s| s.profile_prefill_possibility(),
+        )
+    }
 }
 
 /// The picker's option text — the crate's canonical platform label (a brand
@@ -194,7 +226,7 @@ pub(super) fn archive_import_elements(state: &SettingsState) -> Vec<Element> {
         ArchiveImportStep::Source => els.extend(source_step_elements(snapshot, &text)),
         ArchiveImportStep::Archive => els.extend(archive_step_elements(e, &text)),
         ArchiveImportStep::Scope => els.extend(scope_step_elements(e, snapshot, &text)),
-        ArchiveImportStep::Confirm => els.extend(confirm_step_elements(&text)),
+        ArchiveImportStep::Confirm => els.extend(confirm_step_elements(e, &text)),
         ArchiveImportStep::Progress => els.extend(progress_step_elements(e, snapshot, &text)),
         ArchiveImportStep::Done => els.extend(done_step_elements(e, snapshot, &text)),
     }
@@ -212,13 +244,16 @@ fn nav_back() -> Element {
     .nav_back()
 }
 
-fn next_button() -> Element {
+fn next_button(answer: Possibility) -> Element {
     Element::gesture_button(
         ids::WIZARD_NEXT_BUTTON,
         t::NEXT,
         true,
         Gesture::Settings(Action::ArchiveImportNext),
     )
+    // The machine's own answer: the seam disables Next with its reason
+    // (`archive-import.md` § Wizard steps).
+    .possible(answer)
 }
 
 fn back_button() -> Element {
@@ -278,7 +313,7 @@ fn source_step_elements(
             true,
             Gesture::Settings(Action::ArchiveImportOpenExportPage),
         ),
-        next_button(),
+        next_button(Possibility::Possible),
     ]
 }
 
@@ -306,7 +341,7 @@ fn archive_step_elements(e: &ArchiveImportState, text: &ArchiveImportPageText) -
         ));
     }
     els.push(back_button());
-    els.push(next_button());
+    els.push(next_button(e.next_answer()));
     els
 }
 
@@ -383,12 +418,12 @@ fn scope_step_elements(
         .labelled(t::SCOPE_DATE_TO_PLACEHOLDER),
     );
     els.push(back_button());
-    els.push(next_button());
+    els.push(next_button(e.next_answer()));
     els
 }
 
 /// Step 4 — totals and the durable commit.
-fn confirm_step_elements(text: &ArchiveImportPageText) -> Vec<Element> {
+fn confirm_step_elements(e: &ArchiveImportState, text: &ArchiveImportPageText) -> Vec<Element> {
     vec![
         Element::chrome(t::CONFIRM_TITLE),
         Element::label(
@@ -401,7 +436,8 @@ fn confirm_step_elements(text: &ArchiveImportPageText) -> Vec<Element> {
             t::START_BUTTON,
             true,
             Gesture::Settings(Action::ArchiveImportStart),
-        ),
+        )
+        .possible(e.start_answer()),
     ]
 }
 
@@ -525,15 +561,21 @@ fn done_step_elements(
             snapshot.map(|s| s.skip_log.join("\n")).unwrap_or_default(),
         ));
     }
-    // Offered, never applied silently: enabled while the run's end found a
-    // profile in the archive and the tap has not applied it yet.
-    let offered = snapshot.is_some_and(|s| s.archive_profile.is_some() && !s.profile_applied);
-    els.push(Element::gesture_button(
+    // Offered, never applied silently: the shared answer is blocked, with its
+    // reason as the button's label, when the run's end found no profile in
+    // the archive and once the tap has applied it
+    // (`profile_prefill_possibility`).
+    let prefill = e.prefill_answer();
+    let mut button = Element::gesture_button(
         ids::ARCHIVE_IMPORT_PROFILE_PREFILL_BUTTON,
         t::PROFILE_PREFILL_BUTTON,
-        offered,
+        prefill.is_possible(),
         Gesture::Settings(Action::ArchiveImportProfilePrefill),
-    ));
+    );
+    if let Some(reason) = prefill.reason() {
+        button = button.labelled(crate::wizard::localized(reason));
+    }
+    els.push(button.possible(prefill));
     els.push(Element::gesture_button(
         ids::ARCHIVE_IMPORT_FOLDER_LINK,
         composed(&text.folder_link),

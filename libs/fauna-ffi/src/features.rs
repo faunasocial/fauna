@@ -180,6 +180,99 @@ impl From<FeatureRow> for FfiFeatureRow {
     }
 }
 
+/// The way back across the boundary, for [`features_gate_possibility`]: an app
+/// hands the rows it holds back to the one shared predicate rather than
+/// reading `affordance` itself. Destructured field by field, like the forward
+/// mirror, so a new shared field is a compile error here too.
+impl From<FfiFeatureRow> for FeatureRow {
+    fn from(r: FfiFeatureRow) -> Self {
+        let FfiFeatureRow {
+            feature,
+            name,
+            availability,
+            denied_by,
+            cells,
+            per_operation_max,
+            per_operation_max_tier,
+            unit,
+            affordance,
+            restriction,
+            status,
+        } = r;
+        FeatureRow {
+            feature,
+            name,
+            availability,
+            denied_by,
+            cells: cells.into_iter().map(RowCell::from).collect(),
+            per_operation_max,
+            per_operation_max_tier,
+            unit,
+            affordance,
+            restriction,
+            status,
+        }
+    }
+}
+
+impl From<FfiLimitCell> for RowCell {
+    fn from(c: FfiLimitCell) -> Self {
+        let FfiLimitCell {
+            dimension,
+            window,
+            limit,
+            observed,
+            remaining,
+            tier,
+            tier_label,
+            exhausted,
+            label,
+            value,
+            magnitudes,
+        } = c;
+        RowCell {
+            dimension,
+            window,
+            limit,
+            observed,
+            remaining,
+            tier,
+            tier_label,
+            exhausted,
+            label,
+            value,
+            magnitudes: magnitudes.map(|m| {
+                let FfiCellMagnitudes { remaining, limit } = m;
+                CellMagnitudes { remaining, limit }
+            }),
+        }
+    }
+}
+
+/// Whether `feature`'s own affordance (the zap-signer designate, the claim
+/// redeem) can succeed now — [`fauna_client_features::gate_possibility`] over
+/// the rows the app holds (`docs/goal/ui/README.md` § Offer only what is
+/// possible, rules 2, 5 and 6). `rows` is `None` until the features read has
+/// answered: still loading. A loaded read with no row for `feature`, or a
+/// `hidden` one, is absent; `disabled` is blocked with the row's restriction;
+/// `available` is possible. The app paints from the answer and its action asks
+/// it again before running.
+///
+/// The restriction's `{window}` argument is itself an i18n key, and Rust holds
+/// no string table, so it crosses unresolved: resolve a blocked reason
+/// **nested** (android `localizedNested`, the C# and Swift twins of
+/// `LocalizedText::resolve_nested`). A reason with no nested key resolves the
+/// same either way.
+#[uniffi::export]
+pub fn features_gate_possibility(
+    rows: Option<Vec<FfiFeatureRow>>,
+    feature: String,
+) -> fauna_core::possibility::Possibility {
+    let rows: Option<Vec<FeatureRow>> =
+        rows.map(|rows| rows.into_iter().map(FeatureRow::from).collect());
+    fauna_client_features::gate_possibility(rows.as_deref(), &feature, |_| None::<String>)
+}
+
 // ── The authoring half (dynamic-features.md § Authoring surfaces) ─────
 
 /// FFI mirror of [`fauna_client_features::AuthoredRow`] — one member's row on
@@ -353,6 +446,16 @@ impl FfiPolicyEditor {
     /// Everything the editor paints, derived by the shared view-model.
     pub fn view(&self) -> FfiPolicyEditorView {
         self.editor.lock().expect("editor lock").view().into()
+    }
+
+    /// `feature-policy-editor-save-button`'s paint: the draft's own validity
+    /// (`ui/README.md` § Offer only what is possible, rule 4's form case) —
+    /// `Blocked` with the unparseable cell's reason, the same reason
+    /// [`Self::save`] refuses with as `invalid`.
+    pub fn save_possibility(&self) -> fauna_core::possibility::Possibility {
+        fauna_core::possibility::Possibility::from_blocked_reason(
+            self.editor.lock().expect("editor lock").draft().err(),
+        )
     }
 
     /// `feature-policy-editor-on-radio` (`true`) / `-off-radio` (`false`).
@@ -564,6 +667,54 @@ mod tests {
 
     fn mirror(it: &FeatureStatusItem, caps: &[String]) -> FfiFeatureRow {
         FfiFeatureRow::from(feature_row(it, caps))
+    }
+
+    /// The gate face forwards the shared predicate: no read yet is still
+    /// loading, a missing row is absent, a denied member is blocked with its
+    /// restriction (the window key left for the app's nested resolve) and an
+    /// allowed one is possible.
+    #[test]
+    fn the_gate_face_answers_the_shared_predicate() {
+        use fauna_core::possibility::Possibility;
+        let caps = [capability::P2P_SHARE.to_string()];
+        let allowed = mirror(&item(GatedFeature::P2pShare, &[]), &caps);
+        assert_eq!(
+            features_gate_possibility(None, "p2p-share".into()),
+            Possibility::blocked(LocalizedText::key("common.still_loading"))
+        );
+        assert_eq!(
+            features_gate_possibility(Some(vec![]), "p2p-share".into()),
+            Possibility::Absent
+        );
+        assert_eq!(
+            features_gate_possibility(Some(vec![allowed.clone()]), "p2p-share".into()),
+            Possibility::Possible
+        );
+        let mut disabled = allowed;
+        disabled.affordance = "disabled".into();
+        disabled.restriction = Some(LocalizedText::key_args(
+            "features.restriction_exhausted",
+            [("window".to_string(), "features.window_day".to_string())],
+        ));
+        let answer = features_gate_possibility(Some(vec![disabled.clone()]), "p2p-share".into());
+        assert_eq!(
+            answer,
+            Possibility::blocked(disabled.restriction.clone().unwrap())
+        );
+        let mut hidden = disabled;
+        hidden.affordance = "hidden".into();
+        assert_eq!(
+            features_gate_possibility(Some(vec![hidden]), "p2p-share".into()),
+            Possibility::Absent
+        );
+    }
+
+    /// The way back is lossless, so the predicate reads the row the app holds.
+    #[test]
+    fn the_mirror_round_trips() {
+        let caps = [capability::P2P_SHARE.to_string()];
+        let row = feature_row(&item(GatedFeature::P2pShare, &[]), &caps);
+        assert_eq!(FeatureRow::from(FfiFeatureRow::from(row.clone())), row);
     }
 
     /// The mirror must carry the attribution across the boundary — a row that

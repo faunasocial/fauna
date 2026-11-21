@@ -915,7 +915,7 @@ async fn drain_resumes_bound_content_key_upload_by_ciphertext_store_key() {
         .expect("uploaded manifest present in the store");
     let manifest: fauna_core::chunk::ChunkManifest =
         fauna_core::encoding::canonical_decode(&manifest_bytes).expect("decode manifest");
-    let store_keys = manifest.store_keys();
+    let store_keys = manifest.store_keys().unwrap();
     assert!(
         store_keys.len() >= 2,
         "need a multi-chunk file to exercise the drain map"
@@ -1046,7 +1046,7 @@ async fn drain_after_rotation_requeues_prior_generation_chunks_under_current() {
         .expect("uploaded manifest present in the store");
     let manifest: fauna_core::chunk::ChunkManifest =
         fauna_core::encoding::canonical_decode(&manifest_bytes).expect("decode manifest");
-    let store_keys = manifest.store_keys();
+    let store_keys = manifest.store_keys().unwrap();
     assert!(
         store_keys.len() >= 2,
         "need a multi-chunk file to exercise the drain map"
@@ -1120,7 +1120,7 @@ async fn drain_after_rotation_requeues_prior_generation_chunks_under_current() {
     )
     .expect("decode new manifest");
     let uploaded = store.chunks.lock().unwrap();
-    for sk in new_manifest.store_keys() {
+    for sk in new_manifest.store_keys().unwrap() {
         assert!(
             !store_keys.contains(&sk),
             "a gen-2 store key must differ from every gen-1 key (different generation root)"
@@ -3000,6 +3000,7 @@ async fn manifest_from_future_format_gives_honest_error() {
         stored_hashes: None,
         sealed_hashes: None,
         min_reader: Some(fauna_core::chunk::MANIFEST_READER_VERSION + 1),
+        pages: None,
     };
     let bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
     let hash = ContentHash::of_raw(&bytes);
@@ -5250,6 +5251,7 @@ fn store_sealed_parts_fixture(
         stored_hashes: Some(stored_hashes),
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     let manifest_bytes =
         fauna_core::encoding::canonical_encode(&manifest.wire_form(Some(root)).unwrap()).unwrap();

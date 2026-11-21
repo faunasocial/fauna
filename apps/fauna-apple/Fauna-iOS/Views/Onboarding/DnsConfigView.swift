@@ -18,17 +18,17 @@ struct DnsConfigView: View {
                 dnsConfigFields(vm: vm)
 
                 Button(L.common.continue) {
-                    try? vm.machine.continueFromDns()
+                    vm.machine.surface { try $0.continueFromDns() }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .frame(maxWidth: .infinity)
-                .disabled(!vm.machine.canContinueDns())
                 .accessibilityIdentifier(Ids.dnsConfigContinueButton)
-                .automationActivate(Ids.dnsConfigContinueButton,
-                                    isEnabled: { vm.machine.canContinueDns() }) {
-                    try? vm.machine.continueFromDns()
+                .automationActivate(Ids.dnsConfigContinueButton) {
+                    vm.machine.surface { try $0.continueFromDns() }
                 }
+                // The machine's answer; its reason is the status line above.
+                .faunaPossible(vm.machine.dnsContinuePossibility())
             }
             .padding()
         }

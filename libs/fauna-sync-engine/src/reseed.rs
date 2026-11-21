@@ -150,6 +150,10 @@ impl BlobPushSink for SyncClientSink<'_> {
     async fn put_manifest(&self, manifest_bytes: &[u8]) -> Result<()> {
         self.client.upload_manifest(manifest_bytes).await
     }
+
+    async fn put_manifest_page(&self, page_bytes: &[u8]) -> Result<()> {
+        self.client.upload_manifest_page(page_bytes).await
+    }
 }
 
 /// The pieces both delivery legs share — the report a pass counts in, the
@@ -1060,6 +1064,14 @@ mod tests {
             self.manifests.lock().unwrap().push(manifest_bytes.to_vec());
             Ok(())
         }
+
+        async fn put_manifest_page(&self, page_bytes: &[u8]) -> Result<()> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("page {}", hex_of(&ContentHash::of_raw(page_bytes))));
+            Ok(())
+        }
     }
 
     struct FakeNest {
@@ -1102,6 +1114,7 @@ mod tests {
             self.records.lock().unwrap().push(req);
             let reply = serde_json::to_vec(&SyncChangeRecordReply {
                 seq: 0,
+                prev_set_seq: None,
                 extra: Default::default(),
             })?;
             Ok(serde_json::from_slice(&reply)?)
@@ -1722,6 +1735,55 @@ mod tests {
         assert_ne!(
             held.manifest_bytes,
             as_the_device_holds_it(&plain).manifest_bytes
+        );
+    }
+
+    /// **A held paged root is delivered with its pages, in order** (`file-sync.md`
+    /// § Paged manifests → *Transport and order*, *Compatibility*): the as-is
+    /// read walks the root over the store's own manifest files, and the shared
+    /// push sends every chunk, then every page, then the root, then the
+    /// custody record — so the target never holds a root whose pages are not
+    /// at rest, and a target without the page door refuses before any root.
+    #[tokio::test]
+    async fn a_held_paged_root_is_delivered_chunks_then_pages_then_the_root() {
+        let rig = Rig::new();
+        let set = folder_set(7);
+        let leaf = path_hash_hex(0x6B);
+        let held = crate::custodian_store::paged_mirror_for_test(100, &[0x5E; 32]);
+        rig.store
+            .put_folder_row(
+                &held_path(&set, &leaf),
+                &held,
+                SourceFacts {
+                    size_bytes: held.manifest.total_size,
+                    record_count: 1,
+                },
+                Some(hex::encode(b"sealed-name-blob")),
+                100,
+            )
+            .await
+            .unwrap();
+
+        let report = rig.delivery().run_covered_folders().await.unwrap();
+        assert_eq!(report.delivered_paths, vec![format!("{set}/{leaf}")]);
+
+        let mut expected: Vec<String> = held
+            .chunks
+            .iter()
+            .map(|(key, _)| format!("chunk {}", hex_of(key)))
+            .collect();
+        expected.extend(
+            held.pages
+                .iter()
+                .map(|(page, _)| format!("page {}", hex_of(page))),
+        );
+        expected.push(format!("manifest {}", hex_of(&held.manifest_hash)));
+        expected.push(format!("record {leaf}"));
+        assert_eq!(rig.log(), expected);
+        assert_eq!(
+            rig.sink.chunks.lock().unwrap().clone(),
+            held.chunks,
+            "the mirror's chunk bodies cross untouched"
         );
     }
 
@@ -2387,6 +2449,7 @@ mod tests {
                         self.records.lock().unwrap().push(wire(&payload)?);
                         wire(&SyncChangeRecordReply {
                             seq: 0,
+                            prev_set_seq: None,
                             extra: Default::default(),
                         })
                     }
@@ -2489,6 +2552,7 @@ mod tests {
                     }),
                     "fauna.sync.changes.record" => wire(&SyncChangeRecordReply {
                         seq: 0,
+                        prev_set_seq: None,
                         extra: Default::default(),
                     }),
                     other => Err(FakeErr(format!(

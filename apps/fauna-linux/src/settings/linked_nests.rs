@@ -107,6 +107,21 @@ struct Ctx {
     /// A restore from a custodian nest is in flight — the submit stays
     /// disabled until it answers.
     restore_running: Cell<bool>,
+    /// The open trust mint form and its picks (`ui/nests.md` § Errors & edge
+    /// cases): the rows rebuild on every snapshot, so the form's state lives
+    /// here — it closes only once its mint went through, and a refused or
+    /// failed mint re-renders it open with what was picked.
+    mint_open: RefCell<Option<MintDraft>>,
+}
+
+/// One nest's open mint form: the scope, holder and duration selects'
+/// positions (scope 0 is the placeholder).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MintDraft {
+    nest_id: String,
+    scope: u32,
+    holder: u32,
+    duration: u32,
 }
 
 /// The page-level restore block's widgets — tui's `push_custody_restore`.
@@ -308,6 +323,7 @@ fn wire_machine(widgets: Widgets) -> impl Fn() + 'static {
         custody_rows: RefCell::new(Vec::new()),
         escrow_holders: RefCell::new(Vec::new()),
         restore_running: Cell::new(false),
+        mint_open: RefCell::new(None),
     });
 
     // Hydrate on mount: list the owner's pairings + the home nest's trust facet.
@@ -345,6 +361,25 @@ fn wire_machine(widgets: Widgets) -> impl Fn() + 'static {
         ctx.w.cancel_button.clone().connect_clicked(move |_| {
             ctx.w.form_group.set_visible(false);
         });
+    }
+
+    // `nests-add-submit-button` paints from the shared
+    // `link_input_possibility` as the draft is typed (`ui/nests.md` § Errors &
+    // edge cases): a blank draft leaves it insensitive with the reason.
+    {
+        let submit = ctx.w.submit_button.clone();
+        let paint = move |text: &str| {
+            crate::form_gate::paint_submit(
+                &submit,
+                &fauna_client_pair::link_input_possibility(text),
+                None,
+            );
+        };
+        paint(&ctx.w.add_input.text());
+        ctx.w
+            .add_input
+            .clone()
+            .connect_changed(move |e| paint(&e.text()));
     }
 
     // Submit (button or Enter in the entry) → Link.
@@ -550,6 +585,14 @@ fn restore_from_custodian(ctx: &Rc<Ctx>, url: String) {
 /// success; the form closes only when no error came back.
 fn submit_link(ctx: &Rc<Ctx>) {
     let raw = ctx.w.add_input.text().trim().to_string();
+    // The submit asks the answer its button was painted from, and refuses
+    // with the same reason on `error-message`.
+    if crate::form_gate::refuse(
+        &fauna_client_pair::link_input_possibility(&raw),
+        &ctx.w.error_label,
+    ) {
+        return;
+    }
     let action = match fauna_client_pair::classify_link_input(&raw) {
         fauna_client_pair::LinkInput::NestUrl { nest_url } => LinkedNestsAction::LinkBoth {
             other_nest_url: nest_url,
@@ -1250,30 +1293,61 @@ fn build_mint_flow(ctx: &Rc<Ctx>, row: &LinkedNestRow) -> gtk::Box {
 
     let confirm_btn = gtk::Button::with_label(S::MINT_CONFIRM);
     confirm_btn.add_css_class("suggested-action");
-    confirm_btn.set_sensitive(false);
     set_test_id(&confirm_btn, ids::NEST_TRUST_MINT_CONFIRM_BUTTON);
     crate::offline_gate::declare_wire_kind(&confirm_btn, "fauna.capabilities.mint");
     form.append(&confirm_btn);
     mint_box.append(&form);
 
+    // The confirm paints from the shared `mint_draft_possibility` over the
+    // picks (`ui/nests.md` § Errors & edge cases): blocked with its reason
+    // until a use — and, for a use several services can hold, a holder — is
+    // picked.
+    let paint_confirm = {
+        let options = row.mint_options.clone();
+        let scope_dd = scope_dd.clone();
+        let holder_dd = holder_dd.clone();
+        let confirm_btn = confirm_btn.clone();
+        move || {
+            let (option, picked) = mint_picks(&options, &scope_dd, &holder_dd);
+            crate::form_gate::paint_submit(
+                &confirm_btn,
+                &fauna_client_pair::mint_draft_possibility(option, picked),
+                None,
+            );
+        }
+    };
+    paint_confirm();
+
     {
         let form = form.clone();
+        let ctx = Rc::clone(ctx);
+        let nest_id = row.nest_id.clone();
+        let duration_dd = duration_dd.clone();
         mint_btn.connect_clicked(move |_| {
+            *ctx.mint_open.borrow_mut() = Some(MintDraft {
+                nest_id: nest_id.clone(),
+                scope: 0,
+                holder: 0,
+                duration: duration_dd.selected(),
+            });
             form.set_visible(true);
         });
     }
     {
+        let paint_confirm = paint_confirm.clone();
+        holder_dd.connect_selected_notify(move |_| paint_confirm());
+    }
+    {
         let options = row.mint_options.clone();
         let holder_dd = holder_dd.clone();
-        let confirm_btn = confirm_btn.clone();
         let note_lbl = note_lbl.clone();
         let duration_dd = duration_dd.clone();
         let row_default = row.mint_default_duration;
+        let paint_confirm = paint_confirm.clone();
         scope_dd.connect_selected_notify(move |dd| {
             let idx = dd.selected();
             let picked = (idx != gtk::INVALID_LIST_POSITION && idx > 0)
                 .then(|| &options[(idx - 1) as usize]);
-            confirm_btn.set_sensitive(picked.is_some());
             match picked.and_then(fauna_client_pair::mint_option_note) {
                 Some(note) => {
                     note_lbl.set_label(&note.resolve(crate::i18n::strings::lookup));
@@ -1301,7 +1375,23 @@ fn build_mint_flow(ctx: &Rc<Ctx>, row: &LinkedNestRow) -> gtk::Box {
                 }
                 _ => holder_dd.set_visible(false),
             }
+            paint_confirm();
         });
+    }
+    // A form the last mint left open (refused or failed) re-renders open
+    // with its picks.
+    let reopen = ctx
+        .mint_open
+        .borrow()
+        .clone()
+        .filter(|d| d.nest_id == row.nest_id);
+    if let Some(draft) = reopen {
+        form.set_visible(true);
+        scope_dd.set_selected(draft.scope);
+        if holder_dd.is_visible() {
+            holder_dd.set_selected(draft.holder);
+        }
+        duration_dd.set_selected(draft.duration);
     }
     {
         let ctx = Rc::clone(ctx);
@@ -1310,36 +1400,80 @@ fn build_mint_flow(ctx: &Rc<Ctx>, row: &LinkedNestRow) -> gtk::Box {
         let scope_dd = scope_dd.clone();
         let default_duration = row.mint_default_duration;
         confirm_btn.connect_clicked(move |_| {
-            let idx = scope_dd.selected();
-            if idx == gtk::INVALID_LIST_POSITION || idx == 0 {
+            // The confirm asks the answer it was painted from, and refuses
+            // with the same reason on `error-message`.
+            let (option, picked) = mint_picks(&options, &scope_dd, &holder_dd);
+            let answer = fauna_client_pair::mint_draft_possibility(option.clone(), picked.clone());
+            if crate::form_gate::refuse(&answer, &ctx.w.error_label) {
                 return;
             }
-            let option = &options[(idx - 1) as usize];
-            // Derived holder: the single candidate; ambiguity → the holder
-            // select's pick (visible iff >1 candidate).
-            let holder_bridge_id = if option.holder_candidates.len() > 1 {
-                let h = holder_dd.selected();
-                if h == gtk::INVALID_LIST_POSITION {
-                    return;
-                }
-                option.holder_candidates[h as usize].clone()
-            } else {
-                option.holder_candidates[0].clone()
+            let (Some(option), Some(holder_bridge_id)) = (
+                option.clone(),
+                option.and_then(|o| fauna_client_pair::mint_holder(&o, picked)),
+            ) else {
+                return;
             };
-            dispatch_and_render(
+            *ctx.mint_open.borrow_mut() = Some(MintDraft {
+                nest_id: nest_id.clone(),
+                scope: scope_dd.selected(),
+                holder: holder_dd.selected(),
+                duration: duration_dd.selected(),
+            });
+            dispatch_mint(
                 &ctx,
                 LinkedNestsAction::Mint {
                     nest_id: nest_id.clone(),
                     holder_bridge_id,
-                    scope: option.scope.clone(),
+                    scope: option.scope,
                     // The owner's pick — the row's default until they choose.
                     duration: Some(selected_duration(&duration_dd, default_duration)),
                 },
-                false,
             );
         });
     }
     mint_box
+}
+
+/// The mint form's picks: the chosen option (`None` on the placeholder) and
+/// the holder select's pick when it is shown (an option several services can
+/// hold).
+fn mint_picks(
+    options: &[fauna_client_pair::TrustMintOption],
+    scope_dd: &gtk::DropDown,
+    holder_dd: &gtk::DropDown,
+) -> (Option<fauna_client_pair::TrustMintOption>, Option<String>) {
+    let idx = scope_dd.selected();
+    let option = (idx != gtk::INVALID_LIST_POSITION && idx > 0)
+        .then(|| options.get((idx - 1) as usize).cloned())
+        .flatten();
+    let picked = option.as_ref().and_then(|o| {
+        let h = holder_dd.selected();
+        (o.holder_candidates.len() > 1 && h != gtk::INVALID_LIST_POSITION)
+            .then(|| o.holder_candidates.get(h as usize).cloned())
+            .flatten()
+    });
+    (option, picked)
+}
+
+/// Dispatch a mint, then render: the form closes (its draft forgotten) only
+/// once the mint went through — a refused or failed mint re-renders it open
+/// with its picks, the failure on `error-message`.
+fn dispatch_mint(ctx: &Rc<Ctx>, action: LinkedNestsAction) {
+    let machine = Arc::clone(&ctx.machine);
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            let went = machine.dispatch(action).await.is_ok();
+            (went, machine.snapshot())
+        },
+        move |(went, snap)| {
+            if went && snap.error.is_none() {
+                ctx_render.mint_open.borrow_mut().take();
+            }
+            render(&ctx_render, &snap);
+        },
+    );
 }
 
 /// How long the new trust lasts (`nest-trust-mint-duration-select`, `nests.md`
@@ -2012,6 +2146,7 @@ mod tests {
                 class: "content.read".into(),
                 kind: Some("folder".into()),
                 tier: None,
+                folder: None,
             }],
             lasts_until: 1_700_000_000,
             liveness: TrustLiveness::Active,
@@ -2048,6 +2183,7 @@ mod tests {
                 class: "content.read".into(),
                 kind: Some("mail".into()),
                 tier: None,
+                folder: None,
             }],
             lasts_until: 1_700_000_000,
             liveness: TrustLiveness::Active,

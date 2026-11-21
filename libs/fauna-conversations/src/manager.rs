@@ -450,6 +450,17 @@ pub struct ConversationsManager {
     /// [`Self::page_error`], for the reason [`Self::engine_served_elsewhere`]
     /// gives: a standing condition must not be cleared by an unrelated gesture.
     receive_stopped_generation: std::sync::atomic::AtomicU64,
+    /// The identity this manager's room list has **loaded** for, as
+    /// `identity_epoch + 1` (`0` for never) — written by
+    /// [`Self::mark_rooms_loaded`] when a receive loop's first full sweep reads
+    /// every rail without an error (a sweep with a failed read marks nothing),
+    /// read by [`Self::rooms_loaded`] and published as
+    /// `ConversationsSnapshot::loaded`. Before it, an empty
+    /// thread list means "not read yet", never "no conversations"
+    /// (`ui/README.md` § List pages: loading is not empty). Keyed by the epoch
+    /// rather than reset by the wipe, so a sweep the outgoing account began
+    /// that ends after a switch can never mark the incoming one loaded.
+    rooms_loaded_epoch: std::sync::atomic::AtomicU64,
     /// The `(mailbox, uid)`s of received mail records this process could not
     /// open under the account's complete standing key set and skipped past —
     /// written by the receive path ([`Self::note_unopenable_mail`]), retired
@@ -564,6 +575,34 @@ impl ConversationsManager {
         if self.receive_stopped() {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.notify()));
         }
+    }
+
+    /// Whether this manager's room list has loaded for the identity it serves
+    /// now — a receive loop's full sweep over every rail has returned since
+    /// that identity's state was set up. Monotonic within an identity; an
+    /// identity change ([`Self::clear_for_identity_change`]) starts it over.
+    /// The conversations oracle's door refuses a room listing before it
+    /// rather than answer an empty list (`apps/cli.md` § A tool that cannot
+    /// run, rule 4).
+    pub fn rooms_loaded(&self) -> bool {
+        let loaded = self
+            .rooms_loaded_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        loaded != 0 && loaded == self.identity_epoch().wrapping_add(1)
+    }
+
+    /// Record that a full receive sweep which began under identity `epoch`
+    /// ([`Self::identity_epoch`], read before the sweep's first rail) has
+    /// returned. A sweep that began before an identity change marks nothing
+    /// for the incoming identity. The receive loop is the production caller;
+    /// public so a test can stand a loaded page up without a loop.
+    pub fn mark_rooms_loaded(&self, epoch: u64) {
+        if epoch != self.identity_epoch() || self.rooms_loaded() {
+            return;
+        }
+        self.rooms_loaded_epoch
+            .store(epoch.wrapping_add(1), std::sync::atomic::Ordering::SeqCst);
+        self.notify();
     }
 
     /// Record that the receive path skipped `(mailbox, uid)` because it would
@@ -1032,6 +1071,7 @@ impl ConversationsManager {
             engine_state_needs_newer_app: RwLock::new(false),
             receive_loop_generation: std::sync::atomic::AtomicU64::new(0),
             receive_stopped_generation: std::sync::atomic::AtomicU64::new(0),
+            rooms_loaded_epoch: std::sync::atomic::AtomicU64::new(0),
             unopenable_mail: RwLock::new(std::collections::BTreeSet::new()),
             room_invitations: RwLock::new(Vec::new()),
             identity_epoch: RwLock::new(0),
@@ -1167,6 +1207,7 @@ impl ConversationsManager {
             error: self.page_error.read().unwrap().clone(),
             launch_floor_ms: self.threads.launch_floor_ms(),
             bridges: self.bridge_identities(),
+            loaded: self.rooms_loaded(),
             room_invitations: self
                 .room_invitations
                 .read()
@@ -4768,19 +4809,83 @@ impl ConversationsManager {
         let Some(compose) = self.drafts.new_thread() else {
             return Ok(None);
         };
-        let Some(picker) = compose.recipient_picker.clone() else {
+        // The same predicate `dm-send-button` paints from
+        // (`crate::new_thread_controls`, `ui/README.md` § Offer only what is
+        // possible, rule 6), asked after the flush: a typed recipient the probe
+        // could not resolve leaves no chip, and a chip of a kind this build does
+        // not name (one carried in from a newer device's drafts blob) has no
+        // rail to send on. Either refusal is stamped on the draft's
+        // `send_state`, so it reaches `error-message` and never reads as a
+        // dropped click (rule 7).
+        let flushed_without_chip = has_pending_recipient
+            && compose
+                .recipient_picker
+                .as_ref()
+                .is_some_and(|p| p.chips.is_empty());
+        let refusal = if flushed_without_chip {
+            Some(Self::unresolved_recipient_reason(&compose))
+        } else {
+            match crate::new_thread_controls::send_possibility(&compose) {
+                fauna_core::possibility::Possibility::Blocked { reason } => Some(reason),
+                _ => None,
+            }
+        };
+        if let Some(reason) = refusal {
+            let unsupported = reason.key == crate::new_thread_controls::RECIPIENT_UNSUPPORTED_KEY;
+            let mut stamped = compose.clone();
+            stamped.send_state = SendState::failed(reason.resolve(fauna_i18n::strings::lookup));
+            self.drafts.set_new_thread(Some(stamped));
+            self.notify();
+            // `None` keeps its meaning — nothing was sent because no one was
+            // named; a recipient this build cannot send to is an error.
+            return if unsupported {
+                Err(BackendError::NotSupported)
+            } else {
+                Ok(None)
+            };
+        }
+        let Some(mut picker) = compose.recipient_picker.clone() else {
             return Ok(None);
         };
-        if picker.chips.is_empty() {
-            return Ok(None);
-        }
-        let participants = picker.chips.clone();
-        // A chip of a kind this build does not name (one carried in from a
-        // newer device's drafts blob) has no rail to send on: refuse rather
-        // than guess one.
-        let Some(rail) = participants[0].rail() else {
+        let Some(rail) = picker.chips[0].rail() else {
             return Err(BackendError::NotSupported);
         };
+
+        // **Each chip is opened on its rail before the thread is keyed**
+        // (`ui/conversations.md` § Errors & edge cases → *The picker tells the
+        // truth*, rule 4 (b)). The identity on every rail but the bridged one,
+        // whose keystroke probe answered the spelling as typed: there the room
+        // is opened now, and the thread keys on the stable far id the nest
+        // answered. A refusal sends nothing, makes no thread and keeps the chip.
+        let mut participants = Vec::with_capacity(picker.chips.len());
+        for chip in &picker.chips {
+            let backend = chip
+                .rail()
+                .and_then(|r| self.backends.read().unwrap().get(&r).cloned());
+            let opened = match backend {
+                Some(backend) => backend.open_recipient(chip.clone()).await,
+                None => Ok(chip.clone()),
+            };
+            match opened {
+                Ok(addr) => participants.push(addr),
+                Err(e) => {
+                    tracing::warn!(error = %e, "new thread's recipient could not be opened");
+                    // Re-read after the await, so an edit made meanwhile is kept.
+                    let mut stamped = self.drafts.new_thread().unwrap_or(compose);
+                    stamped.send_state = SendState::failed(e.user_detail());
+                    self.drafts.set_new_thread(Some(stamped));
+                    self.notify();
+                    return Err(e);
+                }
+            }
+        }
+        if participants != picker.chips {
+            picker.chips = participants.clone();
+            if let Some(mut current) = self.drafts.new_thread() {
+                current.recipient_picker = Some(picker.clone());
+                self.drafts.set_new_thread(Some(current));
+            }
+        }
 
         // **A community room is founded, not bootstrapped.** The home-nest
         // choice seats the nest, so the room is one the nest reads
@@ -6781,10 +6886,9 @@ impl ConversationsManager {
     async fn probe_address(&self, raw: &str) -> ResolveResult {
         let ordered: Vec<Arc<dyn RailBackend>> = {
             // A fixed order, never the map's: the bridged rail goes LAST
-            // because its resolve is the only one with an effect — it asks
-            // the nest, which opens the room for an address a bridge's grammar
-            // admits (`rooms.open`) — so a string a format-only rail claims
-            // never reaches it.
+            // because it is the only one that asks the nest (the effect-free
+            // `conversation.address.admit`), so a string a format-only rail
+            // claims is claimed there without a round trip.
             let map = self.backends.read().unwrap();
             [Rail::FaunaMls, Rail::Smtp, Rail::Bridged]
                 .iter()
@@ -6813,6 +6917,20 @@ impl ConversationsManager {
     }
 
     // `refresh_list_send` lives in the exported block above, next to `send`.
+
+    /// Why Send's flush of a typed recipient committed no chip: the picker's
+    /// own resolve status, the same sentence `recipient-resolve-status` shows.
+    fn unresolved_recipient_reason(compose: &ComposeState) -> LocalizedText {
+        let state = compose.recipient_picker.as_ref().map(|p| p.resolve_state);
+        LocalizedText::key(match state {
+            Some(ResolveState::NotFound) => "conversations.unified.recipient_resolve_not_found",
+            Some(ResolveState::NotReachable) => {
+                "conversations.unified.recipient_resolve_not_reachable"
+            }
+            Some(ResolveState::Error) => "conversations.unified.recipient_resolve_error",
+            _ => crate::new_thread_controls::NEEDS_RECIPIENT_KEY,
+        })
+    }
 
     fn set_send_state(&self, id: &ThreadId, state: SendState) {
         let mut s = self.drafts.get(id);

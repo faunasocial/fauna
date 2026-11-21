@@ -211,6 +211,9 @@ class ProfileActions:
         self.driver.click("profile-label-suggestion", index)
 
     def save_private(self) -> None:
+        """Save the private section. Waits for Save to be enabled: it is held
+        disabled until the account store has assembled."""
+        self.driver.wait_until_enabled("profile-private-save-button", timeout=30.0)
         self.driver.click("profile-private-save-button")
 
     def private_nickname(self) -> str:
@@ -346,6 +349,8 @@ class ProfileActions:
         → *Which nest an in-app redeem binds on*). Typed refusals surface via
         ``error-message``; a taken code leaves the input."""
         self.driver.clear_and_type("subscription-claim-redeem-input", code)
+        # Held disabled until the features read the open issues has answered.
+        self.driver.wait_until_enabled("subscription-claim-redeem-button", timeout=30.0)
         self.driver.click("subscription-claim-redeem-button")
 
     def redeem_input_text(self) -> str:
@@ -568,6 +573,11 @@ class ProfileActions:
         return self.is_edit_button_visible()
 
     def follow(self) -> None:
+        """Tap the Follow ⇄ Following toggle. Waits for it to be enabled
+        first: before the open-time status read answers, the app does not know
+        which way the press goes and holds the toggle disabled (``profile.md``
+        § Errors & edge cases, *Unread state is not possible*)."""
+        self.driver.wait_until_enabled("profile-follow-button", timeout=30.0)
         self.driver.click("profile-follow-button")
 
     def follow_label(self) -> str:

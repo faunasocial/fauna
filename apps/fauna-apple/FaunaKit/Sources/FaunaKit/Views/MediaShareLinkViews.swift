@@ -19,23 +19,32 @@ import SwiftUI
 /// in-process automation tree (`apple-e2e-automation.md` registration rule 3)
 /// — the `MediaItemDetailView` idiom.
 
-/// `share-link-button` — present only when the machine says the file is
-/// eligible (`MediaItemSummary.shareLinkEligible`, already `false` for a
-/// followed browse scope's items); ABSENT otherwise, never painted-but-inert
-/// (`share-links.md` § Which files can be linked).
+/// `share-link-button` — painted from the shared `share_link_possibility`
+/// answer over the machine's verdict (`MediaItemSummary.shareLinkEligible`,
+/// already `false` for a followed browse scope's items): possible where the
+/// nest will serve the link, ABSENT otherwise, never painted-but-inert
+/// (`share-links.md` § Which files can be linked; tui's `media` detail).
 struct ShareLinkDetailButton: View {
     let vm: MediaMachineVM
     let item: MediaItemSummary
 
-    var body: some View {
-        if item.shareLinkEligible {
-            Button(L.shareLink.button) { open() }
-                .accessibilityIdentifier(Ids.shareLinkButton)
-                .automationActivate(Ids.shareLinkButton) { open() }
-        }
+    /// The one answer the paint and the press both read.
+    static func answer(_ item: MediaItemSummary) -> Possibility {
+        shareLinkPossibility(eligible: item.shareLinkEligible)
     }
 
+    var body: some View {
+        let answer = Self.answer(item)
+        Button(L.shareLink.button) { open() }
+            .accessibilityIdentifier(Ids.shareLinkButton)
+            .automationActivate(Ids.shareLinkButton) { open() }
+            .faunaPossible(answer)
+    }
+
+    /// The press asks the answer again (`ui/README.md` § Offer only what is
+    /// possible, rule 7); an absent answer was never on screen.
     private func open() {
+        guard Self.answer(item).isPossible else { return }
         vm.openShareCreate(folder: item.folder, path: item.path)
     }
 }

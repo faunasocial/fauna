@@ -518,6 +518,7 @@ fn build_offer_card(
 /// an EXISTING 1:1 conversation, so the options are those conversations.
 pub struct MintFlow {
     pub container: gtk::Box,
+    open: gtk::Button,
     flow: gtk::Box,
     host_select: gtk::DropDown,
     confirm: gtk::Button,
@@ -533,6 +534,13 @@ impl MintFlow {
         let open = gtk::Button::with_label(strings::devices::CUSTODY_MINT_BUTTON);
         open.set_halign(gtk::Align::Start);
         set_test_id(&open, ids::CUSTODY_MINT_BUTTON);
+        // Not enabled before the page has read the candidates
+        // (`paint_entry`): unknown is not possible.
+        crate::form_gate::paint_submit(
+            &open,
+            &fauna_client_conversations::custody_mint_possibility::<CustodyMintCandidateView>(None),
+            None,
+        );
         {
             let on = Rc::clone(on);
             open.connect_clicked(move |_| on(CustodyGesture::MintOpen));
@@ -567,12 +575,14 @@ impl MintFlow {
         set_test_id(&cancel, ids::CUSTODY_MINT_CANCEL_BUTTON);
 
         let candidates: Rc<std::cell::RefCell<Vec<CustodyMintCandidateView>>> = Rc::default();
-        // Index 0 is the placeholder: confirm is live only once a real host is
-        // chosen (a control that cannot succeed is not offered).
+        // Index 0 is the placeholder: confirm paints from the shared
+        // `custody_mint_confirm_possibility` — blocked with its reason until a
+        // real host is chosen (`ui/devices.md` § Errors & edge cases).
+        paint_mint_confirm(&confirm, false);
         {
             let confirm = confirm.clone();
             host_select.connect_selected_notify(move |d| {
-                confirm.set_sensitive(d.selected() >= 1);
+                paint_mint_confirm(&confirm, d.selected() >= 1);
             });
         }
         {
@@ -611,11 +621,23 @@ impl MintFlow {
         container.append(&flow);
         Self {
             container,
+            open,
             flow,
             host_select,
             confirm,
             candidates,
         }
+    }
+
+    /// Paint `custody-mint-button` from the shared
+    /// `custody_mint_possibility` over the candidates the page read (`None`
+    /// before it has): gated at the entry, never refused on click.
+    pub fn paint_entry(&self, candidates: Option<&[CustodyMintCandidateView]>) {
+        crate::form_gate::paint_submit(
+            &self.open,
+            &fauna_client_conversations::custody_mint_possibility(candidates),
+            None,
+        );
     }
 
     /// Reveal the flow over `candidates` (non-empty — the page answers an
@@ -627,7 +649,7 @@ impl MintFlow {
         self.host_select
             .set_model(Some(&gtk::StringList::new(&refs)));
         self.host_select.set_selected(0);
-        self.confirm.set_sensitive(false);
+        paint_mint_confirm(&self.confirm, false);
         self.candidates.replace(candidates);
         self.flow.set_visible(true);
     }
@@ -636,6 +658,16 @@ impl MintFlow {
     pub fn close(&self) {
         self.flow.set_visible(false);
     }
+}
+
+/// Paint `custody-mint-confirm-button` from the shared
+/// `custody_mint_confirm_possibility`.
+fn paint_mint_confirm(confirm: &gtk::Button, host_picked: bool) {
+    crate::form_gate::paint_submit(
+        confirm,
+        &fauna_client_conversations::custody_mint_confirm_possibility(host_picked),
+        None,
+    );
 }
 
 fn card_box(orientation: gtk::Orientation) -> gtk::Box {

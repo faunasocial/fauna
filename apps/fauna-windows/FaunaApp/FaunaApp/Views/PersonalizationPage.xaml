@@ -157,7 +157,8 @@
                     <TextBox x:Name="PublishNameInput"
                              AutomationProperties.AutomationId="{x:Bind ids:Ids.PersonalizationTrainedFactorPublishNameInput}"
                              PlaceholderText="{loc:Localize Key=personalization/publish_name_placeholder}"
-                             HorizontalAlignment="Stretch" />
+                             HorizontalAlignment="Stretch"
+                             KeyDown="PublishNameInput_KeyDown" />
 
                     <!-- List kind's review body — visible by default (the
                          sheet always opens on List, topic-factors.md §

@@ -618,13 +618,19 @@ class AppLaunchVMTest {
         val f = makeVm(secretHex = SECRET, nestUrl = NEST)
         var called = false
         f.vm.succeedLocked = { _, _, _ -> called = true; error("must not run") }
+        // The shared draft answer, asked again: the word's prompt for a wrong
+        // word, the kit's line for a blank kit (kit first).
         assertEquals(
-            AppLaunchVM.LockedCeremonyResult.NotArmed,
-            f.vm.succeedStolenLocked("held-kit", "succeed"),
+            "settings.recovery_kit.stolen_confirm_placeholder",
+            (f.vm.succeedStolenLocked("held-kit", "succeed") as AppLaunchVM.LockedCeremonyResult.Blocked).reason?.key,
         )
         assertEquals(
-            AppLaunchVM.LockedCeremonyResult.NoPhrase,
-            f.vm.succeedStolenLocked("", RecoveryKitVM.STOLEN_CONFIRM_WORD),
+            "settings.recovery_kit.kit_phrase_required",
+            (f.vm.succeedStolenLocked("", "succeed") as AppLaunchVM.LockedCeremonyResult.Blocked).reason?.key,
+        )
+        assertEquals(
+            "settings.recovery_kit.kit_phrase_required",
+            (f.vm.succeedStolenLocked("", RecoveryKitVM.STOLEN_CONFIRM_WORD) as AppLaunchVM.LockedCeremonyResult.Blocked).reason?.key,
         )
         assertEquals(false, called)
     }
@@ -753,6 +759,7 @@ class AppLaunchVMTest {
         secretHex: String? = null,
         nestUrl: String? = null,
         hold: com.fauna.app.core.StolenCeremonyHold = com.fauna.app.core.StolenCeremonyHold(),
+        apiClient: ApiClient = mock(ApiClient::class.java),
     ): Fixture {
         val store = mock(SessionAccount::class.java)
         whenever(store.secretHex).thenReturn(secretHex)
@@ -765,7 +772,6 @@ class AppLaunchVMTest {
         val observer = mock(LaunchObserverImpl::class.java)
         val snapshots = MutableStateFlow(bootSnapshot())
         whenever(observer.snapshot).thenReturn(snapshots)
-        val apiClient = mock(ApiClient::class.java)
         val actorScope = mock(com.fauna.app.core.ActorScope::class.java)
         val registry = mock(com.fauna.ffi.FfiAccountRegistry::class.java)
         val secureStorage = mock(com.fauna.app.core.SecureStorage::class.java)
@@ -780,6 +786,58 @@ class AppLaunchVMTest {
             vm, host, store, persistence, snapshots, apiClient, registry, actorScope, machine,
             currency, accountStores,
         )
+    }
+
+    // ── The finished wizard holds until the session is signed in
+    //    (`onboarding.md` § Wizard exit handling) ──────────────────────────
+
+    /** A mock [ApiClient] whose `authenticate` throws (a suspend fun, so the
+     *  failure is answered by method name rather than stubbed per argument). */
+    private fun refusingApiClient(): ApiClient =
+        mock(ApiClient::class.java) { inv ->
+            if (inv.method.name == "authenticate") throw IllegalStateException("bearer mint refused")
+            org.mockito.Mockito.RETURNS_DEFAULTS.answer(inv)
+        }
+
+    /** A session start that throws never leaves the progress view up: it reads as
+     *  failed, the NavHost routes to the retry screen, and Retry runs a fresh
+     *  launch (which ends in the same session start). */
+    @Test
+    fun aThrowingSessionStartRoutesToRetry_andRetryRunsAFreshLaunch() = runTest {
+        val f = makeVm(secretHex = SECRET, nestUrl = NEST, apiClient = refusingApiClient())
+
+        assertFalse(f.vm.connectActiveSession())
+        assertTrue(f.vm.sessionStartFailed.value)
+
+        f.vm.retry()
+        assertFalse(f.vm.sessionStartFailed.value)
+        verify(f.machine).start()
+        verify(f.machine, never()).retrySilentChallenge()
+    }
+
+    /** The first-run wizard's exit is a launch: a fresh machine is started over
+     *  the persisted identity (never the shell mounted with none), a stale
+     *  session-start failure is cleared, and the session itself is not touched
+     *  until the machine's `Online` routes to `Authenticated`. */
+    @Test
+    fun theFirstRunWizardExitRunsALaunch() = runTest {
+        val f = makeVm(secretHex = SECRET, nestUrl = NEST, apiClient = refusingApiClient())
+        assertFalse(f.vm.connectActiveSession())
+
+        f.vm.launchAfterWizard()
+
+        verify(f.machine).start()
+        assertFalse(f.vm.sessionStartFailed.value)
+        assertEquals(AppLaunchVM.NavTarget.Authenticated, f.vm.navTargetFor(LaunchPhase.Online))
+        assertNull(f.vm.navTargetFor(LaunchPhase.Boot))
+    }
+
+    /** A session start that lands reads as signed in, with nothing to retry. */
+    @Test
+    fun aLandedSessionStartReadsAsSignedIn() = runTest {
+        val f = makeVm(secretHex = SECRET, nestUrl = NEST)
+        assertTrue(f.vm.connectActiveSession())
+        assertFalse(f.vm.sessionStartFailed.value)
     }
 
     // ── The cold boot's sign-out finish (`account-scoping.md` § Erasure follows

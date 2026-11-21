@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * Self-hosted install instructions for total-box-loss recovery

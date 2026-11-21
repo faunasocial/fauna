@@ -44,9 +44,9 @@ Stamped 2026-11-07 at b844c771f6.
    - `tests/e2e-unified/tests/test_folder_agent_content_sync.py::test_windows_writer_member_decrypts_owner_upload`
 4. [app] A folder shared from another nest shows in your folders list once accepted — `docs/goal/ui/folders.md` § Sharing a folder (cross-user)
    - `tests/e2e-unified/tests/test_folder_cross_nest_foreign_row.py::test_cross_nest_shared_folder_renders_as_a_foreign_row`
-5. [app] A folder can be served to standard file apps, and the switch waits until mail is set up — `docs/goal/behavior/webdav-server.md` § Independent enablement
+5. [app] A folder can be served to standard file apps, on an account that never set up mail too — `docs/goal/behavior/webdav-server.md` § Independent enablement
    - `tests/e2e-unified/tests/test_folder_webdav_toggle.py::test_folder_webdav_toggle_serves_and_unserves_a_sync_set`
-   - `tests/e2e-unified/tests/test_folder_webdav_toggle.py::test_folder_webdav_toggle_is_disabled_until_mail_is_set_up`
+   - `tests/e2e-unified/tests/test_folder_webdav_toggle.py::test_folder_webdav_toggle_serves_on_an_account_with_no_mail`
 6. [app] You can leave a folder someone shared with you, and it stops appearing in your list — `docs/goal/ui/folders.md` § Sharing a folder (cross-user)
    - `tests/e2e-unified/tests/test_folders.py::test_folder_pending_share_accept_decline`
 7. [app] A folder shared by someone you already know simply appears in your list; only a stranger's share waits for your answer — `docs/goal/ui/folders.md` § Sharing a folder (cross-user)
@@ -87,6 +87,7 @@ Stamped 2026-11-07 at b844c771f6.
     - `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files`
     - `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_former_writers_files_stay_listed_and_open_for_a_web_owner`
     - `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_former_writers_files_stay_listed_and_open_for_an_ios_owner`
+    - `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_former_writers_files_stay_listed_and_open_for_an_android_owner`
 23. [app] After the owner takes their account back, a member still opens the folder's files from before, and a file the stolen key writes afterwards is refused — `docs/goal/architecture/succession-cut.md` § Implementation status today
    - `tests/e2e-unified/tests/test_folder_succession_member_reader.py::test_after_the_owner_takes_the_account_back_a_member_keeps_the_old_files_and_refuses_the_stolen_key`
 24. [app] A folder shared with you from another nest names who shared it by their full handle, on the pending share and on the folder — `docs/goal/architecture/federation-shared-folders.md` § Implementation status today
@@ -105,6 +106,8 @@ Stamped 2026-11-07 at b844c771f6.
     - `tests/e2e-unified/tests/test_tui_media_foreign_versions.py::test_a_member_on_another_nest_reads_a_shared_files_whole_history`
 31. [app] A member whose copy of the folder could not follow the owner's new identity is told so and drops off the owner's list, and the owner sharing the folder again catches them up — `docs/goal/architecture/federation-shared-folders.md` § Cross-nest shared folders + channel append
    - `tests/e2e-unified/tests/test_folder_succession_member_reader.py::test_a_member_whose_copy_could_not_follow_the_owners_new_identity_is_re_shared_and_catches_up`
+32. [app] The share form's confirm is disabled and says why while the recipient is blank or the app has no live session to admit them through, and the form closes and clears only once the share is issued — `docs/goal/ui/folders.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_share_webdav_redeem_offer_only_possible.py::test_the_share_confirm_asks_for_a_recipient_and_the_form_closes_once_the_share_is_issued`
 
 ## Status
 
@@ -134,7 +137,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 3 | app | `tests/e2e-unified/tests/test_folder_agent_content_sync.py::test_windows_writer_member_decrypts_owner_upload` | windows (windows): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_folder_cross_nest_foreign_row.py::test_cross_nest_shared_folder_renders_as_a_foreign_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_folder_webdav_toggle.py::test_folder_webdav_toggle_serves_and_unserves_a_sync_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_folder_webdav_toggle.py::test_folder_webdav_toggle_is_disabled_until_mail_is_set_up` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_folder_webdav_toggle.py::test_folder_webdav_toggle_serves_on_an_account_with_no_mail` | tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_pending_share_accept_decline` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 7 | app | `tests/e2e-unified/tests/test_folders.py::test_a_known_persons_share_appears_and_only_a_strangers_waits` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 8 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_member_role_and_cap_editing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
@@ -152,7 +155,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 16 | app | `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_a_same_named_shared_set_is_its_own_option_and_upload_target` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 16 | app | `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_a_namesake_made_before_the_accept_does_not_hide_the_shared_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 16 | app | `tests/e2e-unified/tests/test_media_cross_nest_writer_upload.py::test_a_writer_member_on_another_nest_uploads_and_deletes_and_a_reader_is_refused` | tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_member_pulls_offline_authored_file_from_owner_peer` — requires `share-offline-landing` (not built: web, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): failed, tui (linux): passed, tui (macos): failed, tui (windows): passed |
+| 17 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_member_pulls_offline_authored_file_from_owner_peer` — requires `share-offline-landing` (not built: web, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 17 | app | absent by design on web | — |
 | 18 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_person_the_folder_was_never_shared_with_gets_nothing_readable` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 18 | app | absent by design on web | — |
@@ -164,16 +167,18 @@ Stamped 2026-11-07 at b844c771f6.
 | 22 | app | `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 22 | app | `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_former_writers_files_stay_listed_and_open_for_a_web_owner` | web (linux): passed, tui (linux): passed |
 | 22 | app | `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_former_writers_files_stay_listed_and_open_for_an_ios_owner` | ios (macos): passed, tui (macos): passed |
-| 23 | app | `tests/e2e-unified/tests/test_folder_succession_member_reader.py::test_after_the_owner_takes_the_account_back_a_member_keeps_the_old_files_and_refuses_the_stolen_key` — requires `succession-witness-member-seat` (test harness) (not built: android, android-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): failed |
+| 22 | app | `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_former_writers_files_stay_listed_and_open_for_an_android_owner` | — |
+| 23 | app | `tests/e2e-unified/tests/test_folder_succession_member_reader.py::test_after_the_owner_takes_the_account_back_a_member_keeps_the_old_files_and_refuses_the_stolen_key` — requires `succession-witness-member-seat` (test harness) (not built: android, android-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 24 | app | `tests/e2e-unified/tests/test_folder_cross_nest_foreign_row.py::test_a_cross_nest_share_names_the_sharer_by_full_handle` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 25 | app | `tests/e2e-unified/tests/test_folder_cross_nest_member_reads.py::test_a_member_on_another_nest_opens_a_metadata_only_file_and_loses_it_when_removed` | tui (linux): passed, tui (macos): passed |
 | 26 | app | `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_delete_versions_and_restore_act_on_the_chosen_row_never_the_namesake` | tui (linux): passed, tui (macos): passed |
 | 27 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_pull_from_a_device_that_went_away_keeps_its_row_and_says_why` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 27 | app | absent by design on web | — |
-| 28 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_limited` — requires `share-cap-nest-hold` (test harness) (not built: web, ios, ios-kids) | linux (linux): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed, tui (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_limited` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 28 | app | absent by design on web | — |
 | 29 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_removed_member_drops_off_the_owners_transfer_list` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 29 | app | absent by design on web | — |
-| 30 | app | `tests/e2e-unified/tests/test_tui_media_foreign_versions.py::test_a_member_on_another_nest_reads_a_shared_files_whole_history` | tui (linux): passed |
-| 31 | app | `tests/e2e-unified/tests/test_folder_succession_member_reader.py::test_a_member_whose_copy_could_not_follow_the_owners_new_identity_is_re_shared_and_catches_up` — requires `succession-witness-member-seat` (test harness) (not built: android, android-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): failed |
+| 30 | app | `tests/e2e-unified/tests/test_tui_media_foreign_versions.py::test_a_member_on_another_nest_reads_a_shared_files_whole_history` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 31 | app | `tests/e2e-unified/tests/test_folder_succession_member_reader.py::test_a_member_whose_copy_could_not_follow_the_owners_new_identity_is_re_shared_and_catches_up` — requires `succession-witness-member-seat` (test harness) (not built: android, android-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 32 | app | `tests/e2e-unified/tests/test_share_webdav_redeem_offer_only_possible.py::test_the_share_confirm_asks_for_a_recipient_and_the_form_closes_once_the_share_is_issued` — requires `blocked-reason-read` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

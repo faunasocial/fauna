@@ -63,7 +63,7 @@ public final class ModerationQueueVM {
     /// The client half of the queue — `nil` when no conversations session is
     /// active yet, matching linux's `active_session()` → `None` (the queue is then
     /// the server rows alone).
-    private var conversationsSession: ConversationsSession?
+    private var conversationsSession: (any ModerationLocalDetections)?
     /// The sealed spam-model client-write path (1d — mail-spam.md § Encrypted-mode
     /// interaction). `nil` ⇒ no sealed-write path ⇒ every correction takes the
     /// server-side / flag-removal route unchanged (e.g. mail not enabled).
@@ -123,6 +123,12 @@ public final class ModerationQueueVM {
     #endif
 
     #if DEBUG
+    /// Unit-test seam: stand in for the conversations session's local-detection
+    /// half (the retained text and the client-side flag).
+    func seedLocalDetectionsForTest(_ store: (any ModerationLocalDetections)?) {
+        conversationsSession = store
+    }
+
     /// Unit-test seam: stand in for a completed load, which a real one cannot be
     /// offline (it dials the nest). Never called by production — mirrors
     /// `AddressBookVM.seedForTest`.
@@ -237,24 +243,38 @@ public final class ModerationQueueVM {
     /// always — so every correction reaches report capture. The Kids build has no
     /// mail machine and runs the nest half alone. A **local** row (blank action)
     /// has no server obligation to train against — the content is client-only —
-    /// so the correction removes the client-side flag and, when the sealed write
-    /// path is available, additionally feeds the retained post-decrypt text to the
-    /// tier-1 model as a ham correction. The queue is enforcement *history*, so the
-    /// row stays server-side; only a failure surfaces.
+    /// so the correction feeds the retained post-decrypt text to the tier-1 model
+    /// as a ham correction FIRST (when the sealed write path is available) and only
+    /// then removes the client-side flag: a train dispatch that FAILED keeps the
+    /// flag and says so on `error-message`, so the person can try the correction
+    /// again rather than lose it; a degraded outcome (an `Ok` no-op) stays silent
+    /// (`moderation.md` § Errors & edge cases; `ui/README.md` § Offer only what is
+    /// possible, rule 7; tui's `Op::Correct`). The queue is enforcement *history*,
+    /// so the row stays server-side; only a failure surfaces.
     public func correct(row: QueueRow) async {
         // The identity this correction is issued under. Every await below can suspend
         // across a switch, and a correction is a WRITE — so each step re-checks before
         // taking the next one, not merely before painting (the in-flight clause).
         let issuedApi = api
         if row.source == .local {
-            let text = conversationsSession?.moderationMessageBody(contentId: row.contentId)
-            _ = conversationsSession?.moderationRemoveLocalDetection(contentId: row.contentId)
+            guard let session = conversationsSession else { await load(); return }
+            // Read the retained plaintext BEFORE dropping the flag; `nil` once the
+            // message aged out of the bounded store (flag removal only, then).
+            let text = session.moderationMessageBody(contentId: row.contentId)
             #if !FAUNA_KIDS
-            if let mailSettings, let text, !text.isEmpty {
-                _ = try? await mailSettings.trainSpamModelClient(text: text, isSpam: false)
+            if let mailSettings, let text,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                do {
+                    _ = try await mailSettings.trainSpamModelClient(text: text, isSpam: false)
+                } catch {
+                    guard self.api === issuedApi else { return }
+                    errorMessage = DisplayError.message(error)
+                    return
+                }
             }
             #endif
             guard self.api === issuedApi else { return }
+            _ = session.moderationRemoveLocalDetection(contentId: row.contentId)
             await load()
             return
         }
@@ -395,6 +415,20 @@ protocol ModerationTraining: Sendable {
 }
 
 extension MailSettingsMachine: ModerationTraining {}
+#endif
+
+/// The conversations session's local-detection half the queue drives — a seam so
+/// the local-row correction's order (train first, then drop the flag) is
+/// unit-testable without a live MLS session.
+protocol ModerationLocalDetections: AnyObject {
+    func moderationLocalDetections() -> [LocalDetection]
+    func moderationMessageBody(contentId: String) -> String?
+    func moderationRemoveLocalDetection(contentId: String) -> Bool
+}
+
+extension ConversationsSession: ModerationLocalDetections {}
+
+#if !FAUNA_KIDS
 
 /// A server-row correction with no mail-settings machine to run the shared flow.
 enum ModerationCorrectionError: Error, CustomStringConvertible {

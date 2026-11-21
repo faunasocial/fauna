@@ -31,7 +31,7 @@
     classifyLinkInput,
     shortNestId,
     grantBoundNote,
-    offlineAffordance,
+    offlinePossibility,
     grantScopeLabels,
     type TrustFolder,
     statusLabel as wasmStatusLabel,
@@ -46,7 +46,11 @@
     shortId,
     accountRestoreFromCustodian,
     accountEscrowHolders,
+    linkInputPossibility,
+    mintDraftPossibility,
+    mintHolder as wasmMintHolder,
   } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import { readRestoreAnswer, restoreRunningText, type RestoreReading } from '#lib/nests-custody-restore';
   import { sessionDevicesMachine } from '#lib/devices-session';
   import { custodyDegradedBadgeKey, custodyFacetLoad, custodyRevoke } from '#lib/wasm-folders';
@@ -74,7 +78,7 @@
   // W4 (account-data-plane.md § Workstreams) phase 4's UI desensitizing (`account-data-plane.md` § The
   // offline-mutation contract). The verdict is the shared rule's, never a class
   // test written here; `#lib/offline-gate` owns how a reactive tree obeys it.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // The parent settings page owns the single error surface (its MessageBanner /
   // `error-message`); Nests-page dispatch errors flow into it.
@@ -521,11 +525,20 @@
     addFormOpen = false;
     addInput = '';
   }
+  // `nests-add-submit-button` paints from the shared `link_input_possibility`
+  // (`ui/nests.md` § Errors & edge cases); the submit asks it again, and the
+  // form closes only once the link went through — a refused or failed link
+  // keeps it open with what was typed, the failure on `error-message`.
+  const addGate = $derived(formGate(askPossibility(() => linkInputPossibility(addInput))));
   async function submitAdd(): Promise<void> {
     const raw = addInput.trim();
-    if (!raw || !machine) return;
-    addFormOpen = false;
-    addInput = '';
+    const refusal = formRefusal(askPossibility(() => linkInputPossibility(raw)));
+    if (refusal !== null) {
+      error = refusal;
+      return;
+    }
+    if (!machine) return;
+    error = '';
     try {
       // Shell-side classify (shared `classify_link_input`, identical on every
       // app): a 64-hex value is a nest **identity** → single-end `Link`; any
@@ -543,20 +556,29 @@
         });
       }
       applySnapshot();
+      if (!error) {
+        addFormOpen = false;
+        addInput = '';
+      }
     } catch (e) {
       applySnapshot();
       if (!error) error = e instanceof Error ? e.message : String(e);
     }
   }
 
-  async function dispatch(action: unknown): Promise<void> {
-    if (!machine) return;
+  /** Run one action and apply the snapshot; `true` when it went through (no
+   *  throw, no error on the snapshot) — a form closes only then. */
+  async function dispatch(action: unknown): Promise<boolean> {
+    if (!machine) return false;
+    error = '';
     try {
       await machine.dispatch(action);
       applySnapshot();
+      return !error;
     } catch (e) {
       applySnapshot();
       if (!error) error = e instanceof Error ? e.message : String(e);
+      return false;
     }
   }
   const unlink = (nestId: string) => dispatch({ Unlink: { nest_id: nestId } });
@@ -623,26 +645,33 @@
   // ⇒ direct; >1 ⇒ the holder select's pick), dispatch `Mint`, collapse the
   // form. Scope crosses back as the same `{class,kind,tier}` tuples the row
   // carried — a straight round-trip into `Vec<TrustScope>`.
+  // `nest-trust-mint-confirm-button` paints from the shared
+  // `mint_draft_possibility` (`ui/nests.md` § Errors & edge cases): blocked
+  // until a use — and, for a use several services can hold, its holder — is
+  // picked. The confirm asks it again, and the form closes only once the mint
+  // went through.
+  function mintGate(row: NestRow) {
+    return formGate(
+      askPossibility(() => mintDraftPossibility(chosenMintOption(row), mintHolder[row.nest_id] || null)),
+    );
+  }
   async function confirmMint(row: NestRow): Promise<void> {
     const option = chosenMintOption(row);
-    if (!option) return;
-    let holderBridgeId: string;
-    if (option.holder_candidates.length > 1) {
-      const picked = mintHolder[row.nest_id];
-      if (!picked) return;
-      holderBridgeId = picked;
-    } else {
-      holderBridgeId = option.holder_candidates[0];
+    const picked = mintHolder[row.nest_id] || null;
+    const refusal = formRefusal(askPossibility(() => mintDraftPossibility(option, picked)));
+    if (refusal !== null) {
+      error = refusal;
+      return;
     }
+    if (!option) return;
+    const holderBridgeId = wasmMintHolder(option, picked);
+    if (!holderBridgeId) return;
     // The owner's pick, mapped back from its label; the row's default until
     // they choose.
     const duration =
       mintDurationOptions().find((d) => durationText(d) === mintDuration[row.nest_id]) ??
       row.mint_default_duration;
-    mintOpen[row.nest_id] = false;
-    mintScopeLabel[row.nest_id] = '';
-    mintHolder[row.nest_id] = '';
-    await dispatch({
+    const minted = await dispatch({
       Mint: {
         nest_id: row.nest_id,
         holder_bridge_id: holderBridgeId,
@@ -650,6 +679,11 @@
         duration,
       },
     });
+    if (minted) {
+      mintOpen[row.nest_id] = false;
+      mintScopeLabel[row.nest_id] = '';
+      mintHolder[row.nest_id] = '';
+    }
   }
 
   // The per-nest blessing (`nest-trust-blessed-toggle`): a `fauna.state.blessed-nests` write
@@ -688,7 +722,8 @@
           class="btn primary"
           data-testid={IDS.NESTS_ADD_SUBMIT_BUTTON}
           onclick={submitAdd}
-          use:offlineGate={{ kind: 'fauna.pair.add', disabled: addInput.trim() === '' }}
+          title={addGate.reason || undefined}
+          use:offlineGate={{ kind: 'fauna.pair.add', disabled: addGate.disabled }}
         >
           {t.nests.add_submit}
         </button>
@@ -1050,7 +1085,8 @@
                       <button
                         class="btn primary"
                         data-testid={IDS.NEST_TRUST_MINT_CONFIRM_BUTTON}
-                        disabled={!opt}
+                        disabled={mintGate(p).disabled}
+                        title={mintGate(p).reason || undefined}
                         onclick={() => confirmMint(p)}
                       >{t.nests.mint_confirm}</button>
                     </div>

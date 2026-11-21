@@ -28,6 +28,7 @@ struct MacInviteRequestView: View {
                     Button(L.onboarding.invite.requestButton) { vm.submitInviteRequest() }
                     .accessibilityIdentifier(Ids.inviteRequestSubmitButton)
                     .automationActivate(Ids.inviteRequestSubmitButton) { vm.submitInviteRequest() }
+                    .faunaPossible(vm.machine.inviteSubmitPossibility())
 
                     if snap.recheckVisible {
                         Button(L.onboarding.invite.recheckButton) { vm.recheckInvite() }
@@ -55,11 +56,12 @@ struct MacInviteRequestView: View {
                         .automationField(Ids.inviteCodeInput, text: $oobCode)
                         .disableAutocorrection(true)
                     Button(L.common.check) { vm.checkOobCode(oobCode) }
-                    .disabled(oobCode.isEmpty)
                     .accessibilityIdentifier(Ids.inviteCodeCheckButton)
-                    .automationActivate(Ids.inviteCodeCheckButton,
-                                        isEnabled: { !oobCode.isEmpty }) { vm.checkOobCode(oobCode) }
+                    .automationActivate(Ids.inviteCodeCheckButton) { vm.checkOobCode(oobCode) }
+                    // Painted from the shared draft answer; `checkOobCode` re-asks it.
+                    .faunaPossible(vm.inviteCodePossibility(oobCode))
                 }
+                FaunaPossibilityReason(vm.inviteCodePossibility(oobCode))
 
                 Text(renderLocalizedText(snap.oobMessage))
                     .font(.callout)
@@ -85,12 +87,11 @@ struct MacInviteRequestView: View {
 
                 Button(L.common.continue) { vm.submitInviteContinue() }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!vm.inviteContinueEnabled())
                 .accessibilityIdentifier(Ids.inviteRequestContinueButton)
-                .automationActivate(Ids.inviteRequestContinueButton,
-                                    isEnabled: { vm.inviteContinueEnabled() }) {
+                .automationActivate(Ids.inviteRequestContinueButton) {
                     vm.submitInviteContinue()
                 }
+                .faunaPossible(vm.machine.inviteContinuePossibility())
             }
         }
         .padding()

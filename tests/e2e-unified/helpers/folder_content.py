@@ -259,35 +259,10 @@ def bind_location_under_set(app, set_name: str, location: Path, *, seat: str) ->
     """
     b = app.backups
     b.navigate_folders()
-    deadline = time.monotonic() + 60
-    while True:
-        # The row may already be open (the owner's, from the share gesture).
-        idx = b.open_folder(set_name)
-        try:
-            app.driver.type_text("folder-location-path-input", str(location))
-            app.driver.click("folder-location-add-button")
-            break
-        except LookupError:
-            if time.monotonic() >= deadline:
-                pytest.fail(
-                    f"[{seat}] {set_name!r}'s binding form never held still long "
-                    f"enough to take the path (60s of re-opens); "
-                    f"error={app.error_text()!r}"
-                )
-            time.sleep(0.3)  # sleep-ok: bounded poll cadence inside the deadline
-
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if app.driver.count("folder-location-row", scope=f"folder-row[{idx}]") >= 1:
-            return idx
-        if not app.driver.is_visible("folder-location-path-input"):
-            # A rebuild shut the row after the add: open it again to read it.
-            idx = b.open_folder(set_name)
-        time.sleep(0.3)
-    pytest.fail(
-        f"[{seat}] bound location never rendered as a folder-location-row under "
-        f"{set_name!r}; error={app.error_text()!r}"
-    )
+    try:
+        return b.bind_location_here(set_name, str(location))
+    except AssertionError as exc:
+        pytest.fail(f"[{seat}] {exc}")
 
 
 def open_bound_row(app, set_name: str, *, diagnose=None) -> str:

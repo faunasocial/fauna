@@ -191,3 +191,32 @@ def test_an_update_with_compressed_names_is_applied(fake):
     msg = header + zone + struct.pack(">HH", _SOA, _IN) + rr
     assert _rcode(_tcp(dns.port, msg)) == 0
     assert _txt_values(_udp(dns.port, _query("_acme-challenge.c.test"))) == ["tok"]
+
+
+def test_the_txt_query_count_is_served_under_the_reserved_label_and_is_never_counted(fake):
+    """The shared venue (`e2e-gated-seeds.md` § The ACME directory seed → *The
+    shared venue*, decision 6): a remote harness cannot read `docker logs`, so
+    the fake counts the TXT queries it answers per name and serves the count as
+    a TXT answer under `_fake-dns-queries.<name>` — over either transport, the
+    count query itself never counted."""
+    dns, _ = fake
+    probe = "_fake-dns-queries._acme-challenge.count.test"
+    assert _txt_values(_udp(dns.port, _query(probe))) == ["0"]
+    _udp(dns.port, _query("_acme-challenge.count.test"))
+    _tcp(dns.port, _query("_acme-challenge.count.test"))
+    _udp(dns.port, _query("other.count.test"))
+    assert _txt_values(_tcp(dns.port, _query(probe))) == ["2"]
+    assert _txt_values(_udp(dns.port, _query(probe))) == ["2"], "a count query is not counted"
+
+
+def test_an_rrset_delete_then_add_replaces_the_value(fake):
+    """`AcmePebble.publish_txt` replaces a name's value as the records-file write
+    did: one UPDATE carrying a delete-RRset (class ANY) and an add."""
+    dns, _ = fake
+    _tcp(dns.port, _update("r.test", adds=[("r.test", "old")]))
+    rrset_delete = _name("r.test") + struct.pack(">HHIH", _TXT, 255, 0, 0)
+    add = _txt_rr("r.test", "new", _IN, 60)
+    msg = (struct.pack(">HHHHHH", 9, 5 << 11, 1, 0, 2, 0) + _name("r.test")
+           + struct.pack(">HH", _SOA, _IN) + rrset_delete + add)
+    assert _rcode(_tcp(dns.port, msg)) == 0
+    assert _txt_values(_udp(dns.port, _query("r.test"))) == ["new"]

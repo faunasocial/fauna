@@ -321,8 +321,9 @@ pub(crate) fn install(
                     crate::succession_aftermath::spawn_ledger_pass(ledger_nest, &ledger_pass);
                     // The deployment-seed custody leg's store-ready edge —
                     // the other is the app's post-auth
-                    // `self_heal_deployment_seed_custody` call, which answers
-                    // "retried" while no handle exists; whichever lands second
+                    // `self_heal_deployment_seed_custody_signalled` call (or
+                    // its one-shot form), which answers "retried" while no
+                    // handle exists; whichever lands second
                     // runs the leg (`box-recovery.md` § The plane-era recovery
                     // floor, *(c) The writes*). `nest` is the authenticated
                     // connection this runtime was assembled over. The seat has
@@ -334,7 +335,7 @@ pub(crate) fn install(
                             if let Some(warning) =
                                 fauna_client_account_runtime::deployment_seeds::run_custody_leg(
                                     &custody_nest,
-                                    &handle,
+                                    handle,
                                 )
                                 .await
                             {

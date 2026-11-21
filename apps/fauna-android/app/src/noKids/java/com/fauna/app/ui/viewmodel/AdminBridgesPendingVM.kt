@@ -1,9 +1,13 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ShellLog
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.app.ui.util.machinePossibility
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -12,6 +16,8 @@ import uniffi.fauna_client_mail_settings.BridgeApprovalMachine
 import uniffi.fauna_client_mail_settings.BridgeApprovalSnapshot
 import uniffi.fauna_client_mail_settings.BridgeApprovalStatus
 import uniffi.fauna_client_mail_settings.BridgeConfirm
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import javax.inject.Inject
 
 /**
@@ -26,6 +32,7 @@ import javax.inject.Inject
 @HiltViewModel
 class AdminBridgesPendingVM @Inject constructor(
     private val api: ApiClient,
+    @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
     private val machine: BridgeApprovalMachine? = api.buildBridgeApprovalMachine()
@@ -33,8 +40,34 @@ class AdminBridgesPendingVM @Inject constructor(
     val snapshot = MutableStateFlow(machine?.snapshot() ?: EMPTY_SNAPSHOT)
     val errorMessage = MutableStateFlow<String?>(null)
 
+    /** Where the pending and approved list read stands — the shared
+     *  `BridgeApprovalMachine::read_state` (admin.md § Errors & edge cases,
+     *  *Controls wait for their read*): each section says it is loading (or
+     *  failed) until the read resolves, never its empty text. A machine that
+     *  could not be built never reads. */
+    val listRead = MutableStateFlow(machine?.readState() ?: ReadState.FAILED)
+
+    /** The open confirm's answer — `confirm_possibility`: live only while
+     *  something is armed and no act is on its way. */
+    val confirmAnswer = MutableStateFlow(confirmNow())
+
+    private fun confirmNow(): Possibility = machinePossibility(machine) { it.confirmPossibility() }
+
+    /** A return by Back to this page reads it again (`AdminEntryReread`). */
+    val entryReread = AdminEntryReread(::hydrate)
+
     init {
         hydrate()
+        // A read that has not answered is read again when the nest connection
+        // comes back (`docs/goal/behavior/admin.md` § Errors & edge cases,
+        // *Controls wait for their read*; tui's `reconnect_reread_op`): only
+        // while the shared machine's `read_state` is unresolved, so a draft
+        // over an answered page survives.
+        viewModelScope.rereadOnReconnect(
+            api.reconnectTick,
+            answered = { machine?.readState() == ReadState.RESOLVED },
+            reread = ::hydrate,
+        )
     }
 
     /** Load the pending-bridge feed; retry while the socket comes up. */
@@ -74,8 +107,23 @@ class AdminBridgesPendingVM @Inject constructor(
         publish(m)
     }
 
-    /** The open confirm's confirm button: the machine runs the armed act. */
-    fun confirm() = dispatch(BridgeApprovalAction.Confirm)
+    /**
+     * The open confirm's confirm button: the press asks `confirm_possibility`
+     * and takes the arm with `begin_confirm` before dispatching, so the
+     * confirm paints in flight at once and a second press is refused with
+     * *still saving* (or *nothing to confirm*) on `error-message` — never the
+     * machine's raw invalid-state error — and nothing reaches the nest.
+     */
+    fun confirm() {
+        val m = machine
+        if (m == null || !m.beginConfirm()) {
+            answerRefusal(context, confirmNow())?.reason?.let { errorMessage.value = it }
+            return
+        }
+        // Paint the in-flight answer now, before the act's round trip.
+        publish(m)
+        dispatch(BridgeApprovalAction.Confirm)
+    }
 
     private fun dispatch(action: BridgeApprovalAction) {
         val m = machine ?: return
@@ -93,6 +141,8 @@ class AdminBridgesPendingVM @Inject constructor(
         val snap = m.snapshot()
         snapshot.value = snap
         errorMessage.value = snap.error
+        listRead.value = m.readState()
+        confirmAnswer.value = m.confirmPossibility()
     }
 
     private companion object {

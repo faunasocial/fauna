@@ -62,7 +62,7 @@ com.fauna.app/
 ├── provider/       Content providers
 ├── age/            StoreAgeClaim (Play Age Signals + Play Integrity), StoreConsentRound (`behavior/account-age-band.md`)
 ├── p2pshare/ payments/   offline-share rows; payments row models (the payments client glue is in per-build-type twins, below)
-├── testing/        Test support (lives in the `debug` / `noAgent` source sets, not `src/main`)
+├── testing/        Test support (lives in the `agent` / `noAgent` source sets, not `src/main`)
 ├── ui/navigation/  Compose NavHost, drawer navigation
 ├── ui/screen/      Screen composables (incl. onboarding/ wizard screens)
 ├── ui/viewmodel/   Hilt-injected ViewModels (incl. AppLaunchVM)
@@ -95,19 +95,20 @@ The binding is **not checked in**: after rebasing onto a `libs/fauna-ffi` change
 | `just android-ffi-test` | `test-helpers` | `app/src/debug/` | `android-debug` (e2e), `android-host-test` |
 | `just android-ffi-store-safe` | `--no-default-features --features store-safe` | `app/src/storeSafe/` | `android-store-safe` — the payments-excised APK (`storeSafe` buildType, `initWith(release)`) |
 | `just android-ffi-kids` | `--no-default-features --features kids-safe,kids-floor` (plus the file-provider host; `build.gradle.kts` is the authority) | `app/src/kids/` | the `kids` buildType (`initWith(storeSafe)`; built by `just android-kids`) |
+| `just android-ffi-kids-test` | `--no-default-features --features kids-safe,kids-floor,test-helpers` | `app/src/kidsDebug/` | the `kidsDebug` buildType — the drivable kids build for `--app android-kids` (`initWith(debug)`, the kids identity and shell, the e2e agent; built by `just android-kids-debug`, never shipped) |
 | `just android-ffi-foss` | *(none — same as `android-ffi`)* | `app/src/foss/` | `android-foss` — the F-Droid / direct-download APK (`foss` buildType, `initWith(release)`, no `com.google.android.play` class; witness `just android-foss-check`) |
 
 (The android-only `tunnel` feature was dropped 2026-08-25 along with the dead `P2PTunnelService` — see § Background Services.)
 
 Gradle picks the source set by buildType, so `assembleRelease` structurally cannot see the `test-helpers` seams, `assembleStoreSafe` structurally cannot see any payments FFI symbol, and `assembleDebug` always can — correctness does not depend on which recipe ran last. The production bindgen asserts zero `*ForTest` exports in the tree it just generated, so a newly added ungated seam fails the build rather than shipping. `just android-store-safe-check` is the two-column witness (unpacks the APK and greps `classes*.dex` + `lib/*/*.so`, since a `strings` scan over the compressed archive finds nothing).
 
-Kotlin has no inline compile-time exclusion, so the `payments`-plane glue (`FfiPaymentsClient`/`FfiProviderItem`/`FfiClaimItem`/`paymentsKnownKinds`/`paymentsWebhookUrl`/`FfiFeedManager.resolvePostTips`) lives in per-build-type twins — `app/src/payments/` (debug+release+foss) and `app/src/noPayments/` (storeSafe+kids); the same polarity pairs exist for the p2p-share ceremony half (`src/p2pShare` / `src/noP2pShare`), the store-age arm (`src/storeAge` / `src/noStoreAge` — foss alone takes the no-op), and the kids excision (`src/noKids` taken by the four other build types, `src/kids` holding only the inert twin of what `src/main` still names) — rather than a runtime branch, since a store-safe build's generated bindings have nothing for such a branch's body to typecheck against; the render side (§4/§5 provider/claim UI, the claim-redeem input, the feed tip surface) is gated by the `BuildConfig.PAYMENTS` constant, folded by R8. The same twin shape now also covers the store-age arm's two Play IPC shims (Play Integrity + Play Age Signals — behavior owner: [`../../behavior/account-age-band.md`](../../behavior/account-age-band.md) § The account age band): `app/src/storeAge/` (real, on the three Play-distributed build types) and `app/src/noStoreAge/` (inert, `foss` only).
+Kotlin has no inline compile-time exclusion, so the `payments`-plane glue (`FfiPaymentsClient`/`FfiProviderItem`/`FfiClaimItem`/`paymentsKnownKinds`/`paymentsWebhookUrl`/`FfiFeedManager.resolvePostTips`) lives in per-build-type twins — `app/src/payments/` (debug+release+foss) and `app/src/noPayments/` (storeSafe+kids); the same polarity pairs exist for the p2p-share ceremony half (`src/p2pShare` / `src/noP2pShare`), the store-age arm (`src/storeAge` / `src/noStoreAge` — foss alone takes the no-op), and the kids excision (`src/noKids` taken by the four other build types, `src/kidsTwin` holding only the inert twin of what `src/main` still names, taken by `kids` and `kidsDebug`) — rather than a runtime branch, since a store-safe build's generated bindings have nothing for such a branch's body to typecheck against; the render side (§4/§5 provider/claim UI, the claim-redeem input, the feed tip surface) is gated by the `BuildConfig.PAYMENTS` constant, folded by R8. The same twin shape now also covers the store-age arm's two Play IPC shims (Play Integrity + Play Age Signals — behavior owner: [`../../behavior/account-age-band.md`](../../behavior/account-age-band.md) § The account age band): `app/src/storeAge/` (real, on the three Play-distributed build types) and `app/src/noStoreAge/` (inert, `foss` only).
 
 Three hand-written source sets follow from the buildType split:
 
 | Path | Holds |
 |---|---|
-| `app/src/debug/java/…/testing/TestAgent.kt` | the real e2e agent — the only hand-written code that names a `*ForTest` seam |
+| `app/src/agent/java/…/testing/TestAgent.kt` | the real e2e agent — the only hand-written code that names a `*ForTest` seam; taken by `debug` and the drivable kids `kidsDebug`, never by a shipping build type |
 | `app/src/noAgent/java/…/testing/TestAgent.kt` | an inert same-signature twin taken by all four shipping flavors (`release`, `storeSafe`, `foss`, `kids`), so the handful of `src/main` files that mention the agent still type-check there |
 | `app/src/testDebug/java/…/testing/` | the agent's own Robolectric tests — `testDebug`, not `test`, because `testReleaseUnitTest` compiles against the twin |
 

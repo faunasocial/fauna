@@ -498,6 +498,7 @@ impl<R: RpcRequester> FamilyClient<R> {
 }
 
 pub mod content_rules;
+pub mod forms;
 pub mod kids;
 pub mod row_text;
 pub mod store_consent;
@@ -505,7 +506,7 @@ pub mod supervision_snapshot;
 pub mod ward_asks;
 
 pub use content_rules::ward_policy_with_content_document;
-pub use kids::kids_app_eligible;
+pub use kids::{KidsAppEligibility, kids_app_eligibility, kids_app_eligible};
 pub use store_consent::{
     StoreConsentInput, StoreConsentRound, StoreConsentVerdict, store_consent_lock_message,
     store_consent_round,
@@ -513,7 +514,8 @@ pub use store_consent::{
 
 pub use supervision_snapshot::{SnapshotGuardian, SupervisionSnapshot};
 pub use ward_asks::{
-    FeedRequestState, contact_ask_pending, feed_request_state, knocks_await_guardian,
+    FeedRequestState, OwnSupervision, accept_possibility, contact_ask_pending, feed_request_state,
+    guardian_decides_contact, knock_possibility, knocks_await_guardian,
 };
 
 /// The outbox FIFO scope of one approvals-queue item: the ward plus every key

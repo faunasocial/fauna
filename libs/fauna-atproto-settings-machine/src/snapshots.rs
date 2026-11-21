@@ -296,6 +296,31 @@ pub struct FolderPicker {
     pub none_eligible: Option<LocalizedText>,
 }
 
+/// The reason a folder card's Approve gives while no folder is chosen.
+pub const CONSENT_FOLDER_REQUIRED_KEY: &str = "atproto_settings.consent_folder_required";
+
+impl ConsentCardRow {
+    /// `connected-apps-request-approve`'s answer (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rules 2 and 4; the ruling is
+    /// `docs/goal/ui/connected-apps.md` § Errors & edge cases): a card with no
+    /// folder picker approves as it stands; a folder card approves once a
+    /// folder is chosen — blocked by the picker's own no-eligible-folder
+    /// reason when none can be, else by *choose a folder first*. Decline and
+    /// Block are never gated.
+    pub fn approve_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        match &self.folder_picker {
+            Some(picker) if picker.chosen.is_none() => Possibility::blocked(
+                picker
+                    .none_eligible
+                    .clone()
+                    .unwrap_or_else(|| LocalizedText::key(CONSENT_FOLDER_REQUIRED_KEY)),
+            ),
+            _ => Possibility::Possible,
+        }
+    }
+}
+
 /// One folder the picker offers: its row id (the option key, in decimal on
 /// the automation surface) and the owner's name for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

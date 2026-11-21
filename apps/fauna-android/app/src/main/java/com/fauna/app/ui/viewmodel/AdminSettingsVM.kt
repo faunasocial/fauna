@@ -13,6 +13,8 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import javax.inject.Inject
 
 /**
@@ -64,11 +66,56 @@ class AdminSettingsVM @Inject constructor(
     private val _actionError = MutableStateFlow<String?>(null)
     val actionError: StateFlow<String?> = _actionError
 
+    /**
+     * Where the page's own `tiers.list` read stands (admin.md § Errors & edge
+     * cases, *Controls wait for their read*): pending until the first answer,
+     * failed after a refused first read, resolved once one read succeeded — a
+     * re-read that fails after that keeps the earlier answer, as the shared
+     * machines' `note_read_failed` does.
+     */
+    private var tiersRead = ReadState.PENDING
+
+    // The tier add form waits for that read: the shared
+    // `write_after_read_possibility` over it, plus the create on its way.
+    private val addTierWrite = ReadGatedWrite(appContext) {
+        com.fauna.ffi.writeAfterReadPossibility(tiersRead, true)
+    }
+
+    /** What the tier add form (name, caps, submit) is painted from. */
+    val addTierAnswer: StateFlow<Possibility> = addTierWrite.answer
+
+    private fun noteTiersRead(ok: Boolean) {
+        tiersRead = when {
+            ok -> ReadState.RESOLVED
+            tiersRead == ReadState.RESOLVED -> ReadState.RESOLVED
+            else -> ReadState.FAILED
+        }
+        addTierWrite.refresh()
+    }
+
+    init {
+        // A read that has not answered is read again when the nest connection
+        // comes back (`docs/goal/behavior/admin.md` § Errors & edge cases,
+        // *Controls wait for their read*; tui's `reconnect_reread_op`): only
+        // while `tiers.list` is unresolved, so a tier draft over an answered
+        // page survives. The entry read is the screen's `LaunchedEffect`.
+        viewModelScope.rereadOnReconnect(
+            api.reconnectTick,
+            answered = { tiersRead == ReadState.RESOLVED },
+            reread = ::refresh,
+        )
+    }
+
     fun refresh() {
         viewModelScope.launch {
             _actionError.value = null
             try {
-                _tiers.value = api.adminTiersList()
+                _tiers.value = try {
+                    api.adminTiersList().also { noteTiersRead(true) }
+                } catch (e: Exception) {
+                    noteTiersRead(false)
+                    throw e
+                }
                 _ownMembershipTierNames.value = api.subscriptionTiersList().map { it.name }
                 _membershipTiers.value = api.adminMembershipTiersList()
             } catch (e: Exception) {
@@ -116,6 +163,10 @@ class AdminSettingsVM @Inject constructor(
         maxBlobSize: Long,
         maxFeeds: Long,
     ) {
+        // The press asks the add answer live: a press racing the `tiers.list`
+        // read, or a second one while the first create is on its way, is
+        // refused with its reason on `error-message` and nothing is sent.
+        if (!addTierWrite.begin { _actionError.value = it }) return
         viewModelScope.launch {
             _actionError.value = null
             try {
@@ -128,6 +179,7 @@ class AdminSettingsVM @Inject constructor(
                     e.message ?: "",
                 )
             }
+            addTierWrite.end()
         }
     }
 

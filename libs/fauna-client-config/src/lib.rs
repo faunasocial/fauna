@@ -53,11 +53,13 @@ mod test_nest;
 
 pub use backup_enroll::{
     CustodianEnrollError, CustodianEnrollment, DEFAULT_BACKUP_FOLDER, DeregisterError, EnrollError,
-    FolderCoverageError, FolderDestinationPlace, ReconcileError, ResolvedDestination,
-    StatusReadError, attach_folder_to_destination, custodian_reenrollment,
-    deregister_backup_destination, detach_folder_from_destination, enroll_backup_destination,
-    enroll_client_custodian, keep_backup_destination_at_rest, list_folder_destinations,
-    read_backup_status, reconcile_backup_enrollment, reenroll_custodian_after_reseed,
+    FOLDER_DESTINATION_NEEDS_DESTINATION, FolderCoverageError, FolderDestinationPlace,
+    FolderDestinationStep, ReconcileError, ResolvedDestination, StatusReadError,
+    attach_folder_to_destination, custodian_reenrollment, deregister_backup_destination,
+    detach_folder_from_destination, enroll_backup_destination, enroll_client_custodian,
+    folder_destination_attach_possibility, folder_destination_step,
+    keep_backup_destination_at_rest, list_folder_destinations, read_backup_status,
+    reconcile_backup_enrollment, reenroll_custodian_after_reseed,
     reenroll_nest_destination_after_reseed,
 };
 pub use backup_store::{
@@ -65,13 +67,15 @@ pub use backup_store::{
     raise_succession_destination_marks, refile_rotated_box_list,
 };
 pub use custody_leg::{
-    CUSTODY_MISMATCH_KEY, CUSTODY_UNCONFIRMED_KEY, CustodyLegReport, CustodySeedFold,
-    DeploymentSeedCustody, LinkedCustodyLeg, PlaneSeedRotationError, SEED_PUBLISH_WAIT, StoreFold,
-    SupersessionMarks, custody_leg_unattempted_warning, custody_leg_warning,
+    CUSTODY_MISMATCH_KEY, CUSTODY_STORE_SETTLE_WAIT, CUSTODY_UNCONFIRMED_KEY, CustodyLegReport,
+    CustodyLegSignal, CustodySeedFold, DeploymentSeedCustody, LinkedCustodyLeg,
+    PlaneSeedRotationError, SEED_PUBLISH_WAIT, StoreFold, SupersessionMarks,
+    custody_leg_unattempted_warning, custody_leg_warning, is_custody_leg_warning,
     rotate_deployment_seed_on_plane, run_deployment_seed_custody_leg,
-    run_deployment_seed_custody_leg_over, run_linked_deployment_seed_custody_leg,
+    run_deployment_seed_custody_leg_over, run_deployment_seed_custody_leg_settling,
+    run_linked_deployment_seed_custody_leg,
 };
-pub use dav_context::{DavStoreContext, dav_store_context};
+pub use dav_context::{DavCustody, DavStoreContext, dav_custody, dav_store_context};
 /// One muted keyword — term and weight — re-exported beside the page record
 /// that carries it.
 pub use fauna_core::data::MutedKeyword;
@@ -89,7 +93,7 @@ pub use mutate::{
     detach_backup_destination_folder, edit_backup_destination, keep_backup_destination,
     normalize_muted_keywords, refresh_backup_destination_folder_labels, remove_backup_destination,
 };
-pub use muted_words::MutedWordsSnapshot;
+pub use muted_words::{MUTED_WORD_TERM_REQUIRED, MutedWordsSnapshot, muted_word_add_possibility};
 pub use nostr_npub_confirm::{npub_confirmation_owed, npub_confirmation_owed_for};
 pub use recovery::{
     RecoverableBox, recoverable_box_ids_in, recoverable_boxes_in, selfhosted_recovery_command,
@@ -99,9 +103,9 @@ pub use rotate::{SeedRotation, seed_rotation_verdict};
 pub use store_seam::{
     BackgroundCustodyWrites, BackupStateStore, CustodyCeremonyStore, DeploymentSeedStore,
     FolderCustodyCut, FollowsStore, KindManifestStore, LEDGER_AWAITING_SIBLING, LEDGER_NOT_READY,
-    LEDGER_READY_WAIT, MailImportSourceStore, MailStore, NoLedgerStore, PreferenceStore,
-    PublishedLedger, ResolvingLedgerStore, SharedPreferenceStore, StoreError,
-    SuccessionLedgerStore,
+    LEDGER_READY_POLL, LEDGER_READY_WAIT, MailImportSourceStore, MailStore, NEEDS_NEST_KEY,
+    NEEDS_OTHER_DEVICE_KEY, NoLedgerStore, PreferenceStore, PublishedLedger, ResolvingLedgerStore,
+    SharedPreferenceStore, StoreError, SuccessionLedgerStore, wait_out_not_ready,
 };
 pub use succession_aftermath::{
     BackupRegrantError, BackupRegrantOutcome, BackupRegrantProgress, regrant_nest_backup_key,

@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
@@ -15,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import com.fauna.app.R
 import com.fauna.ffi.faunaFfiTermsUrl
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The terms-and-content-guidelines link: label `settings.terms_link`, opens the

@@ -19,6 +19,31 @@ thread_local! {
     /// ([`paint_switch_refusal`]). Weak — the page owns its label.
     static ACCOUNT_ERROR_LABEL: std::cell::RefCell<Option<gtk::glib::WeakRef<gtk::Label>>> =
         const { std::cell::RefCell::new(None) };
+    /// The live launch surface's `error-message`, for a switch started from
+    /// `launch_retry`'s `account-switcher-list` (`views::launch`). Preferred
+    /// over the Account page while its window is on screen. Weak — the launch
+    /// window owns its label.
+    static LAUNCH_ERROR_LABEL: std::cell::RefCell<Option<gtk::glib::WeakRef<gtk::Label>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Register the launch surface's `error-message` as the place a refused switch
+/// is said while that surface is on screen (`onboarding.md` § Wizard exit
+/// handling → *The finished wizard holds*: "a refused switch is said in
+/// `error-message` and the surface stays").
+pub(crate) fn set_launch_error_label(label: &gtk::Label) {
+    LAUNCH_ERROR_LABEL.with(|cell| *cell.borrow_mut() = Some(label.downgrade()));
+}
+
+/// Where a refusal is painted: the launch surface's label while its window is
+/// mapped, else the Account page's.
+fn switch_refusal_label() -> Option<gtk::Label> {
+    let launch = LAUNCH_ERROR_LABEL
+        .with(|cell| cell.borrow().as_ref().and_then(|w| w.upgrade()))
+        .filter(|l| l.root().is_some_and(|r| r.is_mapped()));
+    launch.or_else(|| {
+        ACCOUNT_ERROR_LABEL.with(|cell| cell.borrow().as_ref().and_then(|w| w.upgrade()))
+    })
 }
 
 /// Paint a switch the registry refused (`set_active` — the device cannot sign
@@ -40,9 +65,9 @@ pub fn paint_switch_refusal(actor_id: &str, err: &fauna_client_accounts::Account
     let line = fauna_client_accounts::switch_refused_copy(err, &label)
         .resolve(crate::i18n::strings::lookup);
     tracing::error!("[account-switch] refused: {err}");
-    match ACCOUNT_ERROR_LABEL.with(|cell| cell.borrow().as_ref().and_then(|w| w.upgrade())) {
+    match switch_refusal_label() {
         Some(error_label) => super::render_account_error_label(&error_label, Some(&line)),
-        None => tracing::warn!("[account-switch] no Account page to paint the refusal on"),
+        None => tracing::warn!("[account-switch] no surface to paint the refusal on"),
     }
 }
 
@@ -64,7 +89,7 @@ pub fn paint_switch_refusal(actor_id: &str, err: &fauna_client_accounts::Account
 ///
 /// **Declining is a pure no-op** (ratified): no registry mutation, no teardown, no
 /// error banner — the user stays on the account they were already using.
-fn request_switch_account(actor_id: String, from: &gtk::Widget) {
+pub(crate) fn request_switch_account(actor_id: String, from: &gtk::Widget) {
     let registry = crate::account_registry();
     let entry = registry.list().into_iter().find(|a| a.actor_id == actor_id);
     if !entry

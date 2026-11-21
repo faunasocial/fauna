@@ -77,9 +77,17 @@ public struct SubscriptionSettingsView: View {
     /// `(creator, tier)` the caller subscribes to.
     private var mineSection: some View {
         Section(L.subscriptions.mySubscriptions) {
-            if vm.subscriptions.isEmpty {
+            // Three-state: loading is not empty, and a failed first read
+            // (said on `error-message`) paints neither.
+            switch vm.mineRead.state {
+            case .pending:
+                Text(L.common.loading)
+                    .font(.caption).foregroundStyle(.secondary)
+            case .resolved where vm.subscriptions.isEmpty:
                 Text(L.subscriptions.noSubscriptions)
                     .font(.caption).foregroundStyle(.secondary)
+            default:
+                EmptyView()
             }
             // Index-keyed (not by `authorId`): a caller may subscribe to one
             // creator at multiple tiers (ui.yaml "one row per (creator, tier)"),
@@ -119,9 +127,16 @@ public struct SubscriptionSettingsView: View {
     /// binding): paste a post-payment claim code → the entitlement binds to
     /// this actor and lands as a queued grant in the section above. Mirrors
     /// linux `apps/fauna-linux/src/settings/subscriptions.rs`'s claim section.
+    @ViewBuilder
     private var claimRedeemSection: some View {
-        Section(L.subscriptions.redeemClaimTitle) {
-            ClaimRedeemRow(code: $vm.claimCodeInput) { Task { await vm.redeemClaim() } }
+        // A nest without the `payments` plane leaves the section out whole,
+        // title included (`ui/README.md` § Offer only what is possible, rule 2).
+        if vm.redeemAnswer.isShown {
+            Section(L.subscriptions.redeemClaimTitle) {
+                ClaimRedeemRow(code: $vm.claimCodeInput, answer: vm.redeemAnswer) {
+                    Task { await vm.redeemClaim() }
+                }
+            }
         }
     }
     #endif

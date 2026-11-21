@@ -93,7 +93,7 @@ Stamped 2026-11-07 at 925fa56976.
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.5-dev+a73ed62e.dirty standalone |
 | macos | ✅ full | 0.1.6-dev+2f2257c1 standalone |
-| ios | ✅ full | 0.1.5-dev+f83e3033 standalone |
+| ios | ✅ full | 0.1.6-dev+2f2257c1 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+2f2257c1 standalone |
 | android-kids | — absent | |

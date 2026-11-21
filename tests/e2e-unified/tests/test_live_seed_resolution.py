@@ -54,7 +54,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import nest_mode
+from helpers import nest_mode, source_scan
 from helpers.live_box_door import marks_live_box
 
 pytestmark = pytest.mark.tier_1
@@ -117,9 +117,10 @@ def _tree(rel: str) -> ast.Module:
 
 def test_every_live_module_naming_the_seed_is_classified():
     found = set()
-    for path in sorted((_ROOT / "tests").rglob("test_*.py")):
-        text = path.read_text()
-        if _SEED_VAR in text and marks_live_box(ast.parse(text)):
+    # The tree's text is read once per process (`helpers/source_scan.py`).
+    for path, text in source_scan.spelling(
+            {_SEED_VAR}, root=_ROOT, within=("tests",), pattern="test_*.py"):
+        if marks_live_box(ast.parse(text)):
             found.add(path.relative_to(_ROOT).as_posix())
     undeclared = found - set(_SEED_MODULES)
     assert not undeclared, (

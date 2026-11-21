@@ -16,6 +16,24 @@ public final class SessionsVM {
     public private(set) var revokeOthersArmed = false
     public var lockWord = ""
     public private(set) var busy = false
+    /// A refused press, or a pass that could not start, for the page's
+    /// `error-message` — the shared fold's own error lives on the snapshot;
+    /// this is what the app itself refused (`ui/README.md` § Offer only what
+    /// is possible, rule 7: never a silent return).
+    public private(set) var refusal: String?
+
+    /// `sessions-revoke-others-button`'s answer, and the confirm's: the shared
+    /// `revoke_others_possibility` over the painted page and whether an act is
+    /// in flight (`ui/sessions.md` § Errors & edge cases).
+    public var revokeOthersAnswer: Possibility {
+        sessionsRevokeOthersPossibility(snapshot: snapshot, busy: busy)
+    }
+
+    /// What the page's `error-message` says: this app's refusal first, else
+    /// the fold's error.
+    public var errorMessage: String? {
+        refusal ?? snapshot?.error.map(renderLocalizedText)
+    }
 
     /// The lock's word, `LOCK`, from shared Rust — the render's enable check
     /// only; the face re-checks what was typed in its action arm.
@@ -54,8 +72,13 @@ public final class SessionsVM {
         }
     }
 
-    /// `sessions-revoke-others-button` — the first press only arms the confirm.
-    public func armRevokeOthers() { revokeOthersArmed = true }
+    /// `sessions-revoke-others-button` — the first press only arms the confirm,
+    /// and only when the shared answer is possible.
+    public func armRevokeOthers() {
+        if refusePress(revokeOthersAnswer, errorMessage: &refusal) { return }
+        refusal = nil
+        revokeOthersArmed = true
+    }
 
     /// `sessions-revoke-others-cancel-button`.
     public func cancelRevokeOthers() { revokeOthersArmed = false }
@@ -63,6 +86,7 @@ public final class SessionsVM {
     /// `sessions-revoke-others-confirm-button` — the second press.
     public func confirmRevokeOthers(_ ctx: Context) async {
         revokeOthersArmed = false
+        if refusePress(revokeOthersAnswer, errorMessage: &refusal) { return }
         await run(ctx) { try await ctx.api.sessionsRevokeOthers(devices: ctx.devices, ownDeviceId: ctx.ownDeviceId, previous: $0) }
     }
 
@@ -80,13 +104,16 @@ public final class SessionsVM {
         guard !busy else { return }
         busy = true
         defer { busy = false }
+        refusal = nil
         let page: FfiSessionsPage
         do {
             page = try await call(snapshot)
         } catch {
             // Only "not connected" reaches here — every pass answers a page.
+            // Said on `error-message`, never a silent return.
             logMessage(level: .warn, target: "fauna.sessions",
                        message: "[sessions] the pass could not start: \(error.localizedDescription)")
+            refusal = DisplayError.message(error)
             return
         }
         snapshot = page.snapshot

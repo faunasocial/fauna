@@ -43,6 +43,9 @@ public sealed partial class ConversationsPage : Page
 #endif
 
     private ConversationsViewModel? _vm;
+    // The queued-sends re-read while this page shows (UnsentRefresh): started in
+    // Page_Loaded, stopped in Page_Unloaded.
+    private FaunaApp.Core.Helpers.UnsentRefresh? _unsentRefresh;
     // The shared-Rust conversations session built at login (owns the wired
     // FaunaMls-backed manager); null in E2E / when no session exists, in which
     // case the page falls back to ConversationsManagerHost.Instance.
@@ -253,6 +256,15 @@ public sealed partial class ConversationsPage : Page
         // shape now, App.FeedDrafts, restored once per session manager).
         Refresh();
 
+        // The queued own copy's lines (account-offline-mutation.md § The unsent-changes
+        // surface, point 2): the MLS drain tells the page nothing, so while it shows, the
+        // manager re-reads the device outbox's sends every two seconds and notifies on a
+        // change. Stopped in Page_Unloaded.
+        var unsentVm = _vm;
+        _unsentRefresh?.Dispose();
+        _unsentRefresh = FaunaApp.Core.Helpers.UnsentRefresh.Start(
+            "conversations", unsentVm.RefreshUnsentSendsAsync);
+
         // The Archive rail is re-read on every visit (archive-import.md § What each
         // category becomes), so an import finished since login lists with no
         // re-login; the read notifies the manager's observer, which repaints.
@@ -337,6 +349,8 @@ public sealed partial class ConversationsPage : Page
         // Persist the just-flushed draft set to the nest now (draft-persistence v2),
         // in case the debounce window hadn't elapsed — fire-and-forget, best-effort.
         _ = App.ConvDrafts?.SaveNowAsync();
+        _unsentRefresh?.Dispose();
+        _unsentRefresh = null;
         if (_vm is not null) _vm.PropertyChanged -= Vm_PropertyChanged;
         if (_rpc is not null) _rpc.StoreChanged -= OnStoreChanged;
         FaunaApp.Core.Services.ContentPolicyCache.HiddenContentChanged -= OnHiddenContentChanged;
@@ -935,6 +949,11 @@ public sealed partial class ConversationsPage : Page
             if (_vm?.SelectedThreadId is { } tid)
                 _ = _vm.DeleteMessageAsync(tid, msg.Id);
         };
+        // dm-message-retry-button / dm-message-discard-confirm-button on an unsent own
+        // copy → manager.retry_queued_send / discard_queued_send (account-offline-mutation.md
+        // § The unsent-changes surface, point 2); the next thread read repaints the copy.
+        bubble.RetryQueuedRequested += msg => _ = _vm?.RetryQueuedSendAsync(msg.Id);
+        bubble.DiscardQueuedRequested += msg => _ = _vm?.DiscardQueuedSendAsync(msg.Id);
         // dm-message-mark-as-spam-button → ConversationsViewModel.MarkMessageSpamAsync
         // (mail-spam.md § Wire shapes — the live Insert consumer). The
         // retained decrypted body + subject line aren't carried on the bubble's
@@ -2427,7 +2446,12 @@ public sealed partial class ConversationsPage : Page
             WarmupDeferred: m.warmupHold is { } hold
                 ? uniffi.fauna_conversations.FaunaConversationsMethods.WarmupDeferredText(
                     hold, DateTimeOffset.UtcNow.ToUnixTimeSeconds())
-                : null);
+                : null,
+            // The queued own copy (devices.md § Offline compose): the shared
+            // MessageSnapshot.queued_send worded once here, painted as
+            // dm-message-queued or dm-message-unsent.
+            QueuedLine: FaunaApp.Core.Helpers.QueuedSendLines.Queued(m.queuedSend),
+            UnsentLine: FaunaApp.Core.Helpers.QueuedSendLines.Unsent(m.queuedSend));
     }
 }
 

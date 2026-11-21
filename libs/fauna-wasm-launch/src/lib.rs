@@ -380,6 +380,12 @@ impl LaunchMachine {
     /// `IdentityChanged` can never be retried into.
     #[wasm_bindgen(js_name = retrySilentChallenge)]
     pub fn retry_silent_challenge(&self) -> js_sys::Promise {
+        // Each attempt dials through the override the harness holds NOW: one
+        // installed while the launch stood on `launch_retry` (a finished
+        // wizard's held launch, which no reload may restart) reaches this
+        // Retry, as on native, where the override is read at every dial.
+        #[cfg(all(target_arch = "wasm32", feature = "test-helpers"))]
+        seed_nest_dial_override_from_storage();
         let m = self.0.clone();
         wasm_bindgen_futures::future_to_promise(async move {
             m.retry_silent_challenge().await;
@@ -398,6 +404,12 @@ impl LaunchMachine {
     /// silent re-pin, ever).
     #[wasm_bindgen(js_name = trustNestIdentity)]
     pub fn trust_nest_identity(&self) -> js_sys::Promise {
+        // Each attempt dials through the override the harness holds NOW: one
+        // installed while the launch stood on `launch_retry` (a finished
+        // wizard's held launch, which no reload may restart) reaches this
+        // Retry, as on native, where the override is read at every dial.
+        #[cfg(all(target_arch = "wasm32", feature = "test-helpers"))]
+        seed_nest_dial_override_from_storage();
         let m = self.0.clone();
         wasm_bindgen_futures::future_to_promise(async move {
             m.trust_nest_identity().await;
@@ -478,8 +490,9 @@ fn seed_launch_clock_from_storage() {
 // `NEST_DIAL_OVERRIDE_KEY`, written at module load from the harness's query
 // param, before this constructor can run); it is read here for the same
 // reasons the clock seed is — synchronously, ahead of `start()`, and again
-// after any reload that re-instantiates this module. Compile-gated like the
-// clock (convention 15).
+// after any reload that re-instantiates this module — and at every Retry and
+// Trust, so an override installed with no reload reaches the next attempt.
+// Compile-gated like the clock (convention 15).
 
 /// The `sessionStorage` key `#lib/api` keeps the dial override under.
 #[cfg(all(target_arch = "wasm32", feature = "test-helpers"))]

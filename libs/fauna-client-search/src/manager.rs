@@ -165,14 +165,32 @@ impl<R: RpcRequester + Clone> SearchManager<R> {
     /// `query` is the app's **live** query-field buffer — the field is plain
     /// local state on every app and submit reads it explicitly, so a
     /// keystroke never implies network work (§ Where logic lives — *Search
-    /// debouncing*: submit-driven, no debounce). A blank query is a no-op on
-    /// every app's search bar, and leaves the page untouched — not searched,
-    /// not errored.
+    /// debouncing*: submit-driven, no debounce). A blank query never errors;
+    /// the `type_filter` it carries is never dropped (`search.md` § User
+    /// actions, `search-type-filter`):
+    ///
+    /// - nothing searched yet → nothing fires and the page stays un-searched,
+    ///   but the token is COMMITTED (observers told), so a type chosen before
+    ///   any text is typed holds for the next submit, which reads the
+    ///   snapshot's filter;
+    /// - a search already fired (the field cleared since) → the **last fired**
+    ///   query re-runs under the new token, so the committed filter always
+    ///   describes the rows on screen.
+    ///
+    /// Every app's filter change therefore calls this whatever the buffer
+    /// holds; the blank-query refusal on `search-submit-button` is the app's,
+    /// painted before it gets here.
     pub async fn run_query(&self, query: &str, type_filter: &str) {
-        let q = query.trim();
+        let mut q = query.trim().to_string();
         if q.is_empty() {
-            return;
+            let last_fired = self.state.read().unwrap().query.clone();
+            if last_fired.is_empty() {
+                self.hold_type_filter(type_filter);
+                return;
+            }
+            q = last_fired;
         }
+        let q = q.as_str();
         let limit = {
             let mut p = self.paging.write().unwrap();
             p.reset();
@@ -218,6 +236,20 @@ impl<R: RpcRequester + Clone> SearchManager<R> {
     }
 
     // ── Internals ────────────────────────────────────────────────
+
+    /// Commit a chosen filter token on a page nothing has been searched on —
+    /// no query, no fetch — notifying only when the token actually moved.
+    fn hold_type_filter(&self, type_filter: &str) {
+        let changed = {
+            let mut s = self.state.write().unwrap();
+            let changed = s.type_filter != type_filter;
+            s.type_filter = type_filter.to_string();
+            changed
+        };
+        if changed {
+            self.notify();
+        }
+    }
 
     /// Open a query: commit the question, clear the last error, mark in-flight.
     /// Returns the generation the reply must still match to commit.
@@ -1231,6 +1263,70 @@ mod tests {
         assert!(!snap.in_flight);
     }
 
+    /// Counts `on_changed` calls — the observer every app's page re-reads from.
+    #[derive(Default)]
+    struct CountingObserver(std::sync::atomic::AtomicU64);
+    impl CountingObserver {
+        fn count(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+    impl SearchSnapshotObserver for CountingObserver {
+        fn on_changed(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A type chosen over a blank field HOLDS: nothing fires and the page stays
+    /// un-searched, but the token is committed, observers are told, and the
+    /// next submit — which reads the snapshot's filter — runs under it
+    /// (`search.md` § User actions, `search-type-filter`).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_type_chosen_over_a_blank_query_holds_for_the_next_search() {
+        let nest = Arc::new(FakeNest::default());
+        let m = manager_with(nest.clone(), None);
+        let seen = Arc::new(CountingObserver::default());
+        m.add_observer(seen.clone());
+
+        m.run_query("", "post").await;
+
+        assert!(
+            nest.calls.lock().unwrap().is_empty(),
+            "nothing may be fired"
+        );
+        let snap = m.snapshot();
+        assert!(!snap.searched());
+        assert!(!snap.no_results);
+        assert!(!snap.in_flight);
+        assert_eq!(snap.type_filter, "post", "the chosen token is committed");
+        assert!(seen.count() > 0, "the select repaints from the snapshot");
+
+        let filter = m.snapshot().type_filter;
+        m.run_query("hello", &filter).await;
+        let (_, content_type, _) = nest.calls.lock().unwrap()[0].clone();
+        assert_eq!(content_type, Some("post".to_string()));
+    }
+
+    /// A type chosen over a blank field AFTER a search re-runs the last fired
+    /// query under it, so the committed filter never describes rows fetched
+    /// under another token.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_type_chosen_over_a_cleared_field_refires_the_last_query() {
+        let nest = Arc::new(FakeNest::default());
+        let m = manager_with(nest.clone(), None);
+
+        m.run_query("hello", "all").await;
+        m.run_query("  ", "post").await;
+
+        let calls = nest.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "the filter change re-fires");
+        assert_eq!(calls[1].0, "hello", "under the last fired query");
+        assert_eq!(calls[1].1, Some("post".to_string()));
+        let snap = m.snapshot();
+        assert_eq!(snap.query, "hello");
+        assert_eq!(snap.type_filter, "post");
+    }
+
     /// Searched-and-found-nothing is a distinct state from not-searched-yet.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn an_empty_result_set_is_the_no_results_state_not_the_pre_search_one() {
@@ -1327,20 +1423,13 @@ mod tests {
     /// `on_changed` sees the opening in-flight state AND the settled one.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn observers_are_notified_on_open_and_on_settle() {
-        #[derive(Default)]
-        struct Counter(std::sync::atomic::AtomicU64);
-        impl SearchSnapshotObserver for Counter {
-            fn on_changed(&self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        let obs = Arc::new(Counter::default());
+        let obs = Arc::new(CountingObserver::default());
         let m = manager_with(Arc::new(FakeNest::default()), None);
         m.add_observer(obs.clone());
 
         m.run_query("hello", "all").await;
         assert_eq!(
-            obs.0.load(Ordering::SeqCst),
+            obs.count(),
             2,
             "one notification opening the query, one committing it"
         );

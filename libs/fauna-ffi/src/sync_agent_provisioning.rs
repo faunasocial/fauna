@@ -1437,11 +1437,11 @@ impl FfiSyncAgentProvisioner {
 /// the per-file desktop-notification surface (`sync-agent.md` § Control plane
 /// split, seam op 3 "pushed events"; the macOS parity of linux's
 /// `notify_sync_complete`). The Synced filter runs in shared Rust
-/// (`fauna_ipc::events::synced_filename`), so this only ever sees basenames of
+/// (`fauna_ipc::events::uploaded_filename`), so this only ever sees basenames of
 /// completed uploads.
 #[uniffi::export(with_foreign)]
 pub trait FfiSyncCompleteObserver: Send + Sync {
-    /// A file finished uploading (`FileStatusChanged{Synced}`); `filename` is
+    /// A file finished uploading (`UploadComplete`); `filename` is
     /// the basename. Called from the listener's background thread — hop to the
     /// main actor yourself if the surface needs it (`UNUserNotificationCenter`
     /// does not).
@@ -1887,7 +1887,7 @@ mod tests {
     /// its socket `tests` (unix).
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pushed_synced_event_reaches_the_ffi_observer() {
+    async fn pushed_upload_complete_event_reaches_the_ffi_observer() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sync-agent.sock");
 
@@ -1923,9 +1923,8 @@ mod tests {
         // Push until the listener (connect + park in the blocking read) has one.
         for _ in 0..200 {
             let _ = event_tx.send(fauna_ipc::sync::Event {
-                event: fauna_ipc::sync::EventKind::FileStatusChanged {
+                event: fauna_ipc::sync::EventKind::UploadComplete {
                     path: "/Users/alice/Fauna/sub/report.bin".into(),
-                    status: fauna_ipc::sync::FileStatus::Synced,
                 },
             });
             if !observer.0.lock().unwrap().is_empty() {

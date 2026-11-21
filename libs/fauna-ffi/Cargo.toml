@@ -1131,6 +1131,10 @@ test-helpers = [
     # command's anchor for a standing paid request (`e2e_seams.rs`), in the
     # release-profile `*-ffi-test` flavors too (convention 15).
     "fauna-client-subscriptions/test-helpers",
+    # `hold_custody_reads_for_test` — the `folders_hold_custody_reads`
+    # command's hold on the Folders page's mail-custody read (`e2e_seams.rs`,
+    # `folders.md` § Errors & edge cases), in the release-profile flavors too.
+    "fauna-client-folders/test-helpers",
     # The Feed-page snapshot injection seam (FfiFeedManager::inject_posts_for_test
     # over fauna_feed::test_support + set_feed_snapshot_for_test) — the windows/apple
     # e2e twin of the conversations inject seam, driving the unverified-source-badge
@@ -1801,9 +1805,13 @@ fauna-client-region = { path = "../fauna-client-region", features = [
 # `chunk_seal::FramedChunk::arbitrary_for_fixtures` — the fixtures-only door
 # src/mail.rs's `webdav_open_file` tests use to reproduce a file the Go WebDAV
 # MDA sealed UNFRAMED before 2026-09-03, a shape no production writer can
-# produce any more. Dev-only: the release FFI cannot reach it.
+# produce any more. Dev-only: the release FFI cannot reach it. `test-util`
+# opens `PagingRule::with_thresholds`, the small paging rule the paged-manifest
+# tests of `webdav_seal_file` / `webdav_open_file` seal under (production uses
+# the hard-coded `PagingRule::STANDARD`, `file-sync.md` § Paged manifests).
 fauna-core = { path = "../fauna-core", default-features = false, features = [
     "test-helpers",
+    "test-util",
 ] }
 # `locks::ServingLock` — src/erase_guard.rs's tests stand in for a sibling APP
 # declared only at the shared store root, and read the root back to prove the

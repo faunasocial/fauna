@@ -17,7 +17,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.carveOutAnswer
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.shareFileBytes
 import com.fauna.app.ui.util.stringResourceFmt
@@ -102,8 +108,8 @@ fun SnapshotDetailScreen(
                                 // A REGULAR-FILE gesture only: a directory row gets no
                                 // dead affordance (tui's ruling, inherited).
                                 if (file.fileType == "regular") {
-                                    IconButton(
-                                        onClick = {
+                                    SnapshotFileDownloadButton(
+                                        onDownload = {
                                             scope.launch {
                                                 val bytes = vm.downloadSnapshotFile(snapshotId, file.path)
                                                 if (bytes != null) {
@@ -115,13 +121,8 @@ fun SnapshotDetailScreen(
                                                 }
                                             }
                                         },
-                                        modifier = Modifier.testTag(Ids.SNAPSHOT_FILE_DOWNLOAD_BUTTON)
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Download,
-                                            contentDescription = stringResource(R.string.backups_download)
-                                        )
-                                    }
+                                        onRefuse = { appMessages.showError(it) },
+                                    )
                                 }
                             }
                         )
@@ -146,6 +147,45 @@ fun SnapshotDetailScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * `snapshot-file-download-button`: a CARVE-OUT fetch (it reads sealed bytes
+ * back from the nest and issues no wire kind of its own), so it paints from the
+ * shared carve-out answer ([carveOutAnswer] —
+ * `fauna_protocol::offline_class::carve_out_affordance`): disabled with
+ * `common.needs_nest` beside it while the connection word is offline. The
+ * gesture asks the same answer again and refuses with its reason on the page's
+ * `error-message` ([onRefuse]) rather than starting a fetch that cannot land.
+ * Split out so the gate is provable under Robolectric without a Hilt VM.
+ */
+@Composable
+internal fun SnapshotFileDownloadButton(onDownload: () -> Unit, onRefuse: (String) -> Unit) {
+    val context = LocalContext.current
+    val answer = carveOutAnswer()
+    // Read at click time from the same composition: the answer is recomputed
+    // on every connection change, so the handler's ask is the current one.
+    val current by rememberUpdatedState(answer)
+    Column(horizontalAlignment = Alignment.End) {
+        IconButton(
+            onClick = {
+                val refusal = answerRefusal(context, current)
+                if (refusal != null) {
+                    refusal.reason?.let(onRefuse)
+                } else {
+                    onDownload()
+                }
+            },
+            enabled = answer.isPossible,
+            modifier = Modifier.testTag(Ids.SNAPSHOT_FILE_DOWNLOAD_BUTTON)
+        ) {
+            Icon(
+                Icons.Default.Download,
+                contentDescription = stringResource(R.string.backups_download)
+            )
+        }
+        DisabledControlReasonText(localized(answer.blockedReason))
     }
 }
 

@@ -10,6 +10,7 @@ use fauna_client_mail_settings::bridge_approval::{
     ApprovedBridgeView, BridgeApprovalSnapshot, BridgeConfirm, PendingBridgeView,
 };
 use fauna_client_mail_settings::local_domains::LocalDomainsSnapshot;
+use fauna_core::possibility::Possibility;
 
 use fauna_log::LogEntry;
 
@@ -24,6 +25,9 @@ type CustodyHostingRowKey = (String, Vec<u8>);
 
 /// Widget handles for admin sub-pages that need dynamic updates.
 pub struct AdminHandles {
+    /// Whether `fauna.admin.users.list` has answered — what the Users page's
+    /// reconnect re-read asks (`crate::admin_reread`).
+    pub users_read: Rc<std::cell::Cell<bool>>,
     /// `admin-nav-back` — the shell-header "leave admin" button (admin.md
     /// § Navigation model). Click handler is wired in `app.rs` (it owns the
     /// main stack + sidebar needed to switch back to the non-admin app).
@@ -51,7 +55,7 @@ pub struct AdminHandles {
     /// next-page button (disabled when `offset + page >= total`).
     pub users_total: Rc<std::cell::Cell<i64>>,
     /// Prev/next page buttons — kept so `update_users_page` can reflect the
-    /// at-bounds state via `set_sensitive` (the click handlers also guard).
+    /// shared `users_page_step_possibility` (the click handlers ask it again).
     pub users_prev_page: gtk::Button,
     pub users_next_page: gtk::Button,
     /// Page-position indicator (`admin-users-pagination`) — a `gtk::Label` (a
@@ -61,7 +65,6 @@ pub struct AdminHandles {
     pub users_pagination: gtk::Label,
     // Section "Invite": mint-a-code form + codes list + copy button.
     pub invite_codes_list: gtk::ListBox,
-    pub create_invite_btn: gtk::Button,
     /// Admit-section guardian picker (`admin-users-admit-guardian-select`): the
     /// guardian the directly admitted account is supervised by, default "None".
     /// Repopulated alongside the mint-form picker (`refresh_guardian_pickers`).
@@ -92,6 +95,9 @@ pub struct AdminHandles {
     /// page cycles through these. Seeded with the nest defaults so the pickers
     /// work before `AdminTiersLoaded` lands; overwritten on arrival.
     pub tier_names: Rc<RefCell<Vec<String>>>,
+    /// The admit and invite controls' tier gate, repainted when the tier
+    /// names arrive ([`update_tiers`]).
+    pub tier_gate: Rc<TierGate>,
     /// The admin take-over's armed confirm (`admin-users-take-over-confirm-*`,
     /// `family-safety.md` § App surface → *Admin take-over*): which ward is
     /// armed, and the rendered rows' take-over widgets it toggles.
@@ -176,10 +182,10 @@ pub struct AdminHandles {
     /// port entry (seeded from `fauna.setup.status` reply `serving_port` by
     /// `set_nest_serving_port`; the save button drives `fauna.admin.set_serving_port`).
     pub serving_port_entry: gtk::Entry,
-    /// `admin-nest-serving-port-save-button` + the read-only hint label —
-    /// `set_nest_serving_port` desensitizes the entry+button and reveals the hint
-    /// when `fauna.setup.status` reports `fronted_by_router` (router-fronted nest).
-    pub serving_port_save: gtk::Button,
+    /// The read-only hint label — `set_nest_serving_port` desensitizes the
+    /// entry and reveals the hint when `fauna.setup.status` reports
+    /// `fronted_by_router` (router-fronted nest); the save button
+    /// (`admin-nest-serving-port-save-button`) is painted by [`NestDraftGates`].
     pub serving_port_hint: gtk::Label,
     /// Declared region (`admin-nest-region-*`, `fauna.admin.region.{get,set}`)
     /// — the deployment's legal situs, the region tier's one human choice
@@ -206,15 +212,18 @@ pub struct AdminHandles {
     /// absent, which also retires the previous region's feature-policy
     /// document nest-side.
     pub region_withdraw: gtk::Button,
+    /// The serving-port and region saves' draft gates ([`NestDraftGates`]),
+    /// repainted on every keystroke and on every read that seeds them.
+    pub nest_drafts: NestDraftGates,
     /// Web-app origin (`admin-nest-web-app-origin-*`,
-    /// `fauna.admin.web_app_origin.{get,set}`) — every sentence and the
-    /// `can_set` verdict are the shared `admin_web_app_origin_view` fold;
+    /// `fauna.admin.web_app_origin.{get,set}`) — every sentence, the
+    /// `can_set` verdict and whether the section and its central radio exist
+    /// are the shared `admin_web_app_origin_view` fold;
     /// `set_nest_web_app_origin` paints exactly what it hands back.
-    pub web_origin_bundled: gtk::CheckButton,
-    pub web_origin_central: gtk::CheckButton,
-    pub web_origin_status: gtk::Label,
-    pub web_origin_scope: gtk::Label,
-    pub web_origin_save: gtk::Button,
+    pub web_origin: WebOriginWidgets,
+    /// The view the section was last painted from — a radio toggle re-asks
+    /// the save's answer over it with the new draft.
+    pub web_origin_view: Rc<RefCell<Option<fauna_client_admin::AdminWebAppOriginView>>>,
     /// Update channel (`admin-nest-update-channel-*`,
     /// `fauna.admin.update_channel.{get,set}`) — the radios and their
     /// descriptions in `UpdateChannel::ALL` order (stable, test, dev); every
@@ -243,6 +252,9 @@ pub struct AdminHandles {
     /// The bridges-pending page's `error-message` label — shows
     /// `BridgeApprovalSnapshot.error` when a fetch/approve/reject/rotate fails.
     pub pending_bridges_error: gtk::Label,
+    /// The two section headings and empty placeholders, painted from where
+    /// the list read stands ([`BridgesReadGate`]).
+    pub bridges_read_gate: BridgesReadGate,
     // --- DNS sub-page (`admin-dns`) — the unified domain-management surface ---
     /// Per-domain DNS sections (`admin-dns-domain`, indexed) + the soft-deleted
     /// `admin-dns-removed-domain` rows. Rebuilt on every snapshot update.
@@ -277,6 +289,10 @@ pub struct AdminHandles {
     pub dns_add_domain_warning: gtk::Label,
     pub dns_add_domain_form: gtk::Box,
     pub dns_adding_first_domain: Rc<std::cell::Cell<bool>>,
+    /// The `admin-dns` forms' submits, the page refusal and the empty-state
+    /// placeholder ([`DnsPageUi`]), painted from the shared answers on every
+    /// render and closed by [`close_dns_form`] only once a save succeeded.
+    pub dns_page_ui: DnsPageUi,
     /// Latest local-domains snapshot (active + soft-deleted + `is_primary`),
     /// from `fauna.bridges.list_local_domains`. The admin-dns page renders the
     /// domain list + CRUD from this; records are overlaid from `last_dns` by
@@ -305,6 +321,8 @@ pub struct AdminHandles {
     /// The page's dedicated `admin-aliases-action-error` label (admin.md
     /// § Errors). Carries `ForwardersSnapshot.error`.
     pub forwarders_action_error: gtk::Label,
+    /// The forwarder add form's gate, repainted on every forwarders read.
+    pub forwarder_form: ForwarderForm,
     // --- Logs (`admin-logs`) — the nest's fauna-log ring over WS-RPC
     // (observability.md § Surfaces). ---
     /// Render state for the admin Logs page; `update_admin_logs` refreshes its
@@ -806,13 +824,27 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
 
     // --- Bridges-pending sub-page (I3 Phase H: admin approves enrolled mail
     // bridges; child name `admin-bridges-pending` is the nav-by-id target). ---
-    let (bridges_pending_page, pending_bridges_list, approved_bridges_list, pending_bridges_error) =
-        build_bridges_pending_page();
+    let (
+        bridges_pending_page,
+        pending_bridges_list,
+        approved_bridges_list,
+        pending_bridges_error,
+        bridges_read_gate,
+    ) = build_bridges_pending_page();
     stack.add_titled(
         &bridges_pending_page,
         Some("admin-bridges-pending"),
         admin::bridges_pending::TITLE,
     );
+    {
+        // A visit re-reads the two lists, as the DNS page below does: the
+        // sub-page outlives its first visit, so a list read that failed while
+        // the nest was away would otherwise leave both sections saying *failed
+        // to load* for good (admin.md § Errors & edge cases, *Controls wait for
+        // their read*, Bridges).
+        let client = Rc::clone(client);
+        pending_bridges_list.connect_map(move |_| client.fetch_pending_bridges());
+    }
 
     // --- DNS sub-page (unified DNS-management + domain-management page; child
     // name `admin-dns` is the nav-by-id target). The per-domain record matrix +
@@ -822,6 +854,10 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
     // Managed-mode controls are client-held: the manage-all master switch + the
     // held DNS-provider credential block drive the shared DnsManagementMachine
     // (`client-holds-provider-keys-not-nest`). ---
+    // The page's two reads, shared with the forms built below so each submit
+    // repaints from the same snapshots `render_admin_dns` paints the rows from.
+    let last_local_domains: Rc<RefCell<Option<LocalDomainsSnapshot>>> = Rc::new(RefCell::new(None));
+    let last_dns: Rc<RefCell<Option<DnsSnapshot>>> = Rc::new(RefCell::new(None));
     let (
         dns_page,
         dns_records_list,
@@ -833,7 +869,8 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         dns_add_domain_warning,
         dns_add_domain_form,
         dns_adding_first_domain,
-    ) = build_dns_page(client);
+        dns_page_ui,
+    ) = build_dns_page(client, &last_local_domains, &last_dns);
     stack.add_titled(&dns_page, Some("admin-dns"), admin::dns::TITLE);
     {
         // `render_admin_dns` leaves the rows alone while the page is off screen,
@@ -845,7 +882,7 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
     // --- Aliases sub-page (`admin-aliases`): the admin-tier alias surface —
     // external forwarders (Kind 7) + (deferred) catch-all designation
     // (admin.md § 4). Child name `admin-aliases` is the nav-by-id target. ---
-    let aliases = build_admin_aliases_page(client);
+    let aliases = build_admin_aliases_page(client, &stack);
     stack.add_titled(
         &aliases.page,
         Some("admin-aliases"),
@@ -1037,7 +1074,79 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         },
     );
 
+    // Every entry to the Users, Settings and Aliases pages reads them again
+    // (`admin.md` § Errors & edge cases, *Controls wait for their read*): the
+    // shell edge (`refresh_admin_shell`) reads them only when the shell itself
+    // is entered, never on a switch between its pages.
+    let users_read = Rc::new(std::cell::Cell::new(false));
+    {
+        let reread: Rc<dyn Fn()> = {
+            let client = Rc::clone(client);
+            let offset = Rc::clone(&hub.users_offset);
+            Rc::new(move || {
+                client.fetch_admin_users_page(offset.get());
+                client.fetch_admin_invite_codes();
+                client.fetch_admin_invite_requests();
+                client.fetch_admin_pending_actions();
+                client.fetch_registration_mode();
+            })
+        };
+        let on_map = Rc::clone(&reread);
+        hub.page.connect_map(move |_| on_map());
+        let read = Rc::clone(&users_read);
+        crate::admin_reread::register_widget(
+            "users",
+            &hub.page,
+            move || read.get(),
+            move || reread(),
+        );
+    }
+    {
+        let reread: Rc<dyn Fn()> = {
+            let client = Rc::clone(client);
+            Rc::new(move || {
+                client.fetch_admin_tiers();
+                client.fetch_admin_membership_tiers();
+                client.fetch_own_membership_tier_names();
+            })
+        };
+        let on_map = Rc::clone(&reread);
+        settings_page.connect_map(move |_| on_map());
+        let read = Rc::clone(&tier_add_form.read);
+        crate::admin_reread::register_widget(
+            "settings",
+            &settings_page,
+            move || read.get(),
+            move || reread(),
+        );
+    }
+    {
+        let client_map = Rc::clone(client);
+        aliases
+            .page
+            .connect_map(move |_| client_map.fetch_forwarders());
+        let read = Rc::clone(&aliases.forwarder_form.read);
+        let client = Rc::clone(client);
+        crate::admin_reread::register_widget(
+            "admin-aliases",
+            &aliases.page,
+            move || crate::admin_reread::resolved(read.get()),
+            move || client.fetch_forwarders(),
+        );
+    }
+    {
+        let read = Rc::clone(&bridges_read_gate.read);
+        let client = Rc::clone(client);
+        crate::admin_reread::register_widget(
+            "admin-bridges-pending",
+            &bridges_pending_page,
+            move || crate::admin_reread::resolved(read.get()),
+            move || client.fetch_pending_bridges(),
+        );
+    }
+
     let handles = AdminHandles {
+        users_read,
         nav_back,
         sub_stack: stack.clone(),
         dashboard_stats_group: dashboard_handles.stats_group,
@@ -1051,7 +1160,6 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         users_next_page: hub.users_next_page,
         users_pagination: hub.users_pagination,
         invite_codes_list: hub.invite_codes_list,
-        create_invite_btn: hub.create_invite_btn,
         admit_guardian_select: hub.admit_guardian_select,
         invite_guardian_select: hub.invite_guardian_select,
         invite_copy_btn: hub.invite_copy_btn,
@@ -1061,6 +1169,7 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         last_invite_requests: Rc::new(RefCell::new(None)),
         users_take_over: Rc::new(TakeOverArm::default()),
         tier_names: hub.tier_names,
+        tier_gate: hub.tier_gate,
         users_action_error: hub.users_action_error,
         registration_readonly_label: hub.registration_readonly_label,
         registration_editable_box: hub.registration_editable_box,
@@ -1077,18 +1186,15 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         svc_pairing_status: nest.pairing_status,
         svc_pairing_guard: nest.pairing_guard,
         serving_port_entry: nest.serving_port_entry,
-        serving_port_save: nest.serving_port_save,
         serving_port_hint: nest.serving_port_hint,
         region_status: nest.region_status,
         region_authority: nest.region_authority,
         region_staleness: nest.region_staleness,
         region_entry: nest.region_entry,
         region_withdraw: nest.region_withdraw,
-        web_origin_bundled: nest.web_origin_bundled,
-        web_origin_central: nest.web_origin_central,
-        web_origin_status: nest.web_origin_status,
-        web_origin_scope: nest.web_origin_scope,
-        web_origin_save: nest.web_origin_save,
+        nest_drafts: nest.drafts,
+        web_origin: nest.web_origin,
+        web_origin_view: nest.web_origin_view,
         update_channel_radios: nest.update_channel_radios,
         update_channel_descs: nest.update_channel_descs,
         update_channel_status: nest.update_channel_status,
@@ -1114,6 +1220,7 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         pending_bridges_list,
         approved_bridges_list,
         pending_bridges_error,
+        bridges_read_gate,
         dns_records_list,
         dns_records_error,
         dns_credentials_list,
@@ -1123,12 +1230,14 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         dns_add_domain_warning,
         dns_add_domain_form,
         dns_adding_first_domain,
-        last_local_domains: Rc::new(RefCell::new(None)),
-        last_dns: Rc::new(RefCell::new(None)),
+        dns_page_ui,
+        last_local_domains,
+        last_dns,
         picker_users: Rc::new(RefCell::new(None)),
         forwarders_list: aliases.forwarders_list,
         forwarder_add_domain: aliases.forwarder_add_domain,
         forwarders_action_error: aliases.forwarders_action_error,
+        forwarder_form: aliases.forwarder_form,
         admin_logs_ctx: admin_logs.ctx,
         admin_logs_error: admin_logs.error_label,
         admin_audit_ctx: admin_logs.audit,
@@ -1167,7 +1276,6 @@ struct UsersHubHandles {
     users_next_page: gtk::Button,
     users_pagination: gtk::Label,
     invite_codes_list: gtk::ListBox,
-    create_invite_btn: gtk::Button,
     admit_guardian_select: GuardianSelect,
     invite_guardian_select: GuardianSelect,
     invite_copy_btn: gtk::Button,
@@ -1175,6 +1283,7 @@ struct UsersHubHandles {
     invite_requests_list: gtk::ListBox,
     pending_actions: super::admin_pending_actions::PendingActionsSection,
     tier_names: Rc<RefCell<Vec<String>>>,
+    tier_gate: Rc<TierGate>,
     users_action_error: gtk::Label,
     registration_readonly_label: gtk::Label,
     registration_editable_box: gtk::Box,
@@ -1349,15 +1458,38 @@ impl AgeBandSelect {
     /// `not-set` whenever the guardian is cleared, so a stale band can never
     /// ride a now-unsupervised admission.
     fn follow_guardian(&self, guardian: &GuardianSelect, enabled: bool) {
-        self.dd
-            .set_sensitive(enabled && guardian.selected().is_some());
+        self.paint(enabled, guardian.selected().is_some());
         let band = self.clone();
         guardian.connect_changed(move |selected| {
             if !selected {
                 band.set_value(fauna_client_admin::AGE_BAND_NOT_SET_VALUE);
             }
-            band.dd.set_sensitive(enabled && selected);
+            band.paint(enabled, selected);
         });
+    }
+
+    /// Paint the picker from the shared answer
+    /// (`fauna_client_admin::age_band_possibility`; `admin.md` § 2 → *What a
+    /// row offers*): blocked, its reason on the tooltip, until a guardian is
+    /// picked. A decided request row (`enabled` false) stays inert on top.
+    fn paint(&self, enabled: bool, guardian_selected: bool) {
+        crate::possible::paint(
+            &self.dd,
+            None,
+            fauna_client_admin::age_band_possibility(guardian_selected),
+        );
+        if !enabled {
+            self.dd.set_sensitive(false);
+        }
+    }
+
+    /// The band an admission sends, asking the shared answer again: `None`
+    /// unless a guardian is picked (the nest refuses a band without one).
+    fn asked(&self, guardian_selected: bool) -> Option<fauna_protocol::age::AgeBand> {
+        fauna_client_admin::age_band_possibility(guardian_selected)
+            .is_possible()
+            .then(|| self.selected())
+            .flatten()
     }
 
     fn widget(&self) -> &gtk::DropDown {
@@ -1701,11 +1833,29 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
     registration_section.append(&registration_editable_box);
     scroll_body.append(&registration_section);
 
-    // Save → validate the cap client-side (blank or digits-only, mirroring web's
-    // `capIsValid`/`saveRegistration`), then dispatch mode + cap TOGETHER — the
-    // nest re-read after success (`RegistrationModeSaved` →
-    // `fetch_registration_mode`) is the only confirmation (admin.md § 2 specifies
-    // no separate confirmation element).
+    // The save is painted from the shared draft predicate over the cap draft
+    // (`admin.md` § Errors & edge cases, *A form's submit is live only for a
+    // draft the nest would accept*): blank or a whole number. The section's
+    // read gate is its visibility — the editable box shows only once the
+    // posture read resolved. Repainted on every keystroke, the seed included.
+    {
+        let save = registration_save.clone();
+        let paint = move |entry: &gtk::Entry| {
+            crate::possible::paint(
+                &save,
+                None,
+                fauna_client_admin::registration_ceiling_possibility(&entry.text()),
+            );
+        };
+        paint(&registration_max_free_users_input);
+        registration_max_free_users_input.connect_changed(paint);
+    }
+
+    // Save → ask the same predicate again (a refusal reads on
+    // `admin-users-action-error`, nothing is sent), then dispatch mode + cap
+    // TOGETHER — the nest re-read after success (`RegistrationModeSaved` →
+    // `fetch_registration_mode`) is the only confirmation (admin.md § 2
+    // specifies no separate confirmation element).
     {
         let client_ref = Rc::clone(client);
         let mode_dd = registration_mode_select.clone();
@@ -1723,23 +1873,14 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
                 return;
             };
             let raw_cap = cap_entry.text();
-            let trimmed = raw_cap.trim();
-            // `u64::from_str` alone enforces "blank or digits-only": it rejects a
-            // sign, a decimal point, or any non-digit character, matching web's
-            // `/^\d+$/` regex without a separate character-class check.
-            let cap: Option<u64> = if trimmed.is_empty() {
-                None
-            } else {
-                match trimmed.parse::<u64>() {
-                    Ok(n) => Some(n),
-                    Err(_) => {
-                        render_page_error(
-                            &error_label,
-                            Some(admin::users_page::MAX_FREE_USERS_HINT),
-                        );
-                        return;
-                    }
-                }
+            if crate::possible::refused_at_press(
+                &fauna_client_admin::registration_ceiling_possibility(&raw_cap),
+                &error_label,
+            ) {
+                return;
+            }
+            let Ok(cap) = fauna_client_admin::parse_registration_ceiling(&raw_cap) else {
+                return;
             };
             render_page_error(&error_label, None);
             // The knob rides this save only when it changed — an unchanged
@@ -1836,19 +1977,22 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
         let guardian_dd = admit_guardian_select.clone();
         let band_dd = admit_age_band_select.clone();
         let error_label = users_action_error.clone();
+        let asked_tiers = Rc::clone(&tier_names);
         admit_button.connect_clicked(move |_| {
+            // The tier gate, asked again (`TierGate`).
+            if !fauna_client_admin::tier_pick_possibility(&asked_tiers.borrow()).is_possible() {
+                return;
+            }
+            // The draft gate, asked again: a malformed key reads on
+            // `admin-users-action-error` and nothing is sent.
             let raw = actor_entry.text();
-            let trimmed = raw.trim();
-            let actor: Option<Vec<u8>> = (trimmed.len() == 64)
-                .then(|| {
-                    (0..trimmed.len())
-                        .step_by(2)
-                        .map(|i| u8::from_str_radix(trimmed.get(i..i + 2)?, 16).ok())
-                        .collect::<Option<Vec<u8>>>()
-                })
-                .flatten();
-            let Some(actor) = actor else {
-                render_page_error(&error_label, Some(admin::users_page::ADMIT_ACTOR_HINT));
+            if crate::possible::refused_at_press(
+                &fauna_client_admin::admit_actor_possibility(&raw),
+                &error_label,
+            ) {
+                return;
+            }
+            let Some(actor) = fauna_client_admin::parse_admit_actor(&raw) else {
                 return;
             };
             let handle = {
@@ -1863,7 +2007,7 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
             // The band rides only beside a guardian (the select is disabled
             // without one; this is the belt to that brace).
             let guardian = guardian_dd.selected();
-            let age_band = guardian.as_ref().and_then(|_| band_dd.selected());
+            let age_band = band_dd.asked(guardian.is_some());
             client_ref.admit_user(actor, tier, handle, guardian, age_band);
         });
     }
@@ -1967,6 +2111,20 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
     invite_section.append(&btn_box);
     scroll_body.append(&invite_section);
 
+    let tier_gate = Rc::new(TierGate {
+        tier_names: Rc::clone(&tier_names),
+        admit: admit_button.clone(),
+        admit_actor: admit_actor_input.clone(),
+        open: create_btn.clone(),
+        confirm: confirm_btn.clone(),
+    });
+    tier_gate.paint();
+    // The admit button also follows its account-key draft.
+    {
+        let gate = Rc::clone(&tier_gate);
+        admit_actor_input.connect_changed(move |_| gate.paint());
+    }
+
     let minted_code = Rc::new(RefCell::new(String::new()));
 
     // Create → reveal form + confirm/cancel.
@@ -1974,7 +2132,11 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
         let form = create_form.clone();
         let confirm_ref = confirm_btn.clone();
         let cancel_ref = cancel_btn.clone();
+        let asked_tiers = Rc::clone(&tier_names);
         create_btn.connect_clicked(move |btn| {
+            if !fauna_client_admin::tier_pick_possibility(&asked_tiers.borrow()).is_possible() {
+                return;
+            }
             btn.set_visible(false);
             form.set_visible(true);
             confirm_ref.set_visible(true);
@@ -2003,13 +2165,17 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
         let uses_entry = invite_max_uses.clone();
         let guardian_dd = invite_guardian_select.clone();
         let band_dd = invite_age_band_select.clone();
+        let asked_tiers = Rc::clone(&tier_names);
         confirm_btn.connect_clicked(move |btn| {
+            if !fauna_client_admin::tier_pick_possibility(&asked_tiers.borrow()).is_possible() {
+                return;
+            }
             let tier = dropdown_tier(&tier_dd).unwrap_or_else(|| DEFAULT_TIERS[0].to_string());
             let uses = uses_entry.text().trim().parse::<i64>().unwrap_or(1).max(1);
             let guardian = guardian_dd.selected();
             // The band rides only beside a guardian (the select is disabled
             // without one; this is the belt to that brace).
-            let age_band = guardian.as_ref().and_then(|_| band_dd.selected());
+            let age_band = band_dd.asked(guardian.is_some());
             client_ref.create_admin_invite_code(tier, uses, guardian, age_band);
             btn.set_visible(false);
             form.set_visible(false);
@@ -2021,11 +2187,10 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
     // Copy → write the last minted token to the clipboard.
     {
         let minted = Rc::clone(&minted_code);
-        copy_btn.connect_clicked(move |_| {
+        let action_error = users_action_error.clone();
+        copy_btn.connect_clicked(move |btn| {
             let code = minted.borrow().clone();
-            if !code.is_empty() {
-                crate::clipboard::copy_text(&code);
-            }
+            copy_minted_code(btn, &action_error, &code, crate::clipboard::try_copy_text);
         });
     }
 
@@ -2054,17 +2219,10 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
     users_section.append(&users_list_box);
 
     // Pagination controls (admin.md § Users — prev/next over `users.list`
-    // `limit`/`offset`). `update_users_page` reflects the bounds with
-    // `set_sensitive` (offset > 0 for prev; offset + page < total for next) —
-    // that is the guard the USER meets. The click handlers additionally check
-    // the same bounds, which is now pure defence in depth rather than the
-    // primary guard: the old comment here justified keeping the buttons
-    // sensitive on the grounds that "a reliable disabled-state read isn't
-    // available on the Linux AT-SPI bridge", and that is no longer true —
-    // `find::is_enabled` reads GTK's effective `is_sensitive()` and the
-    // convention-11 actuation gate is built on it. Keep both: the handler guard
-    // costs nothing and makes the bound safe even if a future refactor forgets
-    // a `set_sensitive` call. The `admin-users-pagination` container id rides
+    // `limit`/`offset`). `update_users_page` paints both from the shared
+    // `fauna_client_admin::users_page_step_possibility` through the
+    // possibility seam (blocked at a bound, the reason on the tooltip), and
+    // each click asks that answer again before stepping. The `admin-users-pagination` container id rides
     // the page-indicator `gtk::Label` (a bare `gtk::Box` doesn't surface its id
     // to AT-SPI — the section-anchor idiom).
     let pagination_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -2077,8 +2235,20 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
     {
         let client = Rc::clone(client);
         let offset = Rc::clone(&users_offset);
+        let total = Rc::clone(&users_total);
         users_prev_page.connect_clicked(move |_| {
             let cur = offset.get();
+            // The painted answer, asked again; the step is the same bound.
+            if !fauna_client_admin::users_page_step_possibility(
+                cur,
+                total.get(),
+                USERS_PAGE_SIZE,
+                false,
+            )
+            .is_possible()
+            {
+                return;
+            }
             if let Some(next) = fauna_core::format::prev_page_offset(cur, USERS_PAGE_SIZE) {
                 offset.set(next);
                 client.fetch_admin_users_page(next);
@@ -2101,6 +2271,16 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
         let total = Rc::clone(&users_total);
         users_next_page.connect_clicked(move |_| {
             let cur = offset.get();
+            if !fauna_client_admin::users_page_step_possibility(
+                cur,
+                total.get(),
+                USERS_PAGE_SIZE,
+                true,
+            )
+            .is_possible()
+            {
+                return;
+            }
             if let Some(next) =
                 fauna_core::format::next_page_offset(cur, total.get(), USERS_PAGE_SIZE)
             {
@@ -2110,6 +2290,14 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
         });
     }
     pagination_box.append(&users_next_page);
+    // Before the first read: page 1 of nothing, both steps blocked.
+    for (button, forward) in [(&users_prev_page, false), (&users_next_page, true)] {
+        crate::possible::paint(
+            button,
+            None,
+            fauna_client_admin::users_page_step_possibility(0, 0, USERS_PAGE_SIZE, forward),
+        );
+    }
     users_section.append(&pagination_box);
 
     scroll_body.append(&users_section);
@@ -2141,7 +2329,6 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
         users_next_page,
         users_pagination,
         invite_codes_list,
-        create_invite_btn: create_btn,
         admit_guardian_select,
         invite_guardian_select,
         invite_copy_btn: copy_btn,
@@ -2149,6 +2336,7 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
         invite_requests_list,
         pending_actions,
         tier_names,
+        tier_gate,
         users_action_error,
         registration_readonly_label,
         registration_editable_box,
@@ -2278,7 +2466,7 @@ fn build_invite_request_row(
         let band_dd = age_band_select.clone();
         approve_btn.connect_clicked(move |_| {
             let guardian = guardian_dd.selected();
-            let age_band = guardian.as_ref().and_then(|_| band_dd.selected());
+            let age_band = band_dd.asked(guardian.is_some());
             client.approve_invite_request(id, dropdown_tier(&tier_dd), guardian, age_band);
         });
     }
@@ -2369,6 +2557,10 @@ pub fn update_tiers(
     reply: &fauna_client_admin::admin::AdminTiersListReply,
     client: &Rc<FaunaClient>,
 ) {
+    // The add form waits for this read (`admin.md` § Errors & edge cases,
+    // *Controls wait for their read*).
+    handles.tier_add_form.read.set(true);
+    handles.tier_add_form.paint();
     if reply.tiers.is_empty() {
         // Reply arrived with no tier definitions: swap the loading placeholder
         // for the empty-state (`admin.settings_page.no_tiers`), matching web's
@@ -2386,6 +2578,7 @@ pub fn update_tiers(
         return;
     }
     *handles.tier_names.borrow_mut() = reply.tiers.iter().map(|t| t.name.clone()).collect();
+    handles.tier_gate.paint();
 
     // Settings page: one `admin-settings-tier-item` row per definition, with the
     // tier name + an editable raw-i64 input per cap + a save button (the tier
@@ -2462,20 +2655,37 @@ fn build_tier_definition_row(
     crate::testid::set_test_id(&save, ids::ADMIN_SETTINGS_TIER_SAVE_BUTTON);
     // tui's `admin::Action::SaveTier`.
     crate::offline_gate::declare_wire_kind(&save, "fauna.admin.tiers.update");
+    // The save is painted from the shared `tier_caps_possibility` over the five
+    // cap drafts (`admin.md` § Errors & edge cases, draft validity), repainted
+    // on every keystroke; the row exists only once the tiers read resolved.
+    let caps = [inbox, storage, devices, blob_size, feeds];
+    paint_tier_caps_save(&save, &caps);
+    for cap in &caps {
+        let save = save.clone();
+        let caps = caps.clone();
+        cap.connect_changed(move |_| paint_tier_caps_save(&save, &caps));
+    }
     {
         let client = Rc::clone(client);
-        // The save replaces *all* caps for the named tier; an unparseable field
-        // falls back to the value the row was rendered with (no silent zeroing).
+        // The save replaces *all* caps for the named tier; a cap that does not
+        // parse refuses the save on `error-message` — never sent with the value
+        // the row was rendered with.
         let name = tier.name.clone();
-        let prev = tier.clone();
         save.connect_clicked(move |_| {
+            if let Some(reason) = crate::possible::reason_text(&tier_caps_answer(&caps)) {
+                client.report_localized_error(reason);
+                return;
+            }
+            let Some([inbox, storage, devices, blob_size, feeds]) = read_caps(&caps) else {
+                return;
+            };
             let req = fauna_client_admin::admin::AdminTierUpdateRequest {
                 name: name.clone(),
-                max_inbox_bytes: parse_cap(&inbox, prev.max_inbox_bytes),
-                max_storage_bytes: parse_cap(&storage, prev.max_storage_bytes),
-                max_devices: parse_cap(&devices, prev.max_devices),
-                max_blob_size: parse_cap(&blob_size, prev.max_blob_size),
-                max_feeds: parse_cap(&feeds, prev.max_feeds),
+                max_inbox_bytes: inbox,
+                max_storage_bytes: storage,
+                max_devices: devices,
+                max_blob_size: blob_size,
+                max_feeds: feeds,
                 extra: Default::default(),
             };
             client.update_admin_tier(req);
@@ -2483,17 +2693,28 @@ fn build_tier_definition_row(
     }
     vbox.append(&save);
 
-    // `admin-settings-tier-delete-button` on every row, `free`'s included (which
-    // tier is removable is the nest's call); no confirm. tui's
+    // `admin-settings-tier-delete-button`, painted from the shared answer
+    // (`admin.md` § 3 → *Removing a tier*): absent on `free`, which the nest
+    // always refuses; a still-referenced tier's refusal reads on the page's
+    // error line. No confirm; the click asks again. tui's
     // `admin::Action::DeleteTier`.
     let delete = gtk::Button::with_label(admin::settings_page::DELETE_TIER);
     delete.set_halign(gtk::Align::Start);
     crate::testid::set_test_id(&delete, ids::ADMIN_SETTINGS_TIER_DELETE_BUTTON);
+    crate::possible::paint(
+        &delete,
+        None,
+        fauna_client_admin::tier_delete_possibility(&tier.name),
+    );
     crate::offline_gate::declare_wire_kind(&delete, "fauna.admin.tiers.delete");
     {
         let client = Rc::clone(client);
         let name = tier.name.clone();
-        delete.connect_clicked(move |_| client.delete_admin_tier(name.clone()));
+        delete.connect_clicked(move |_| {
+            if fauna_client_admin::tier_delete_possibility(&name).is_possible() {
+                client.delete_admin_tier(name.clone());
+            }
+        });
     }
     vbox.append(&delete);
 
@@ -2522,16 +2743,39 @@ fn build_cap_entry(parent: &gtk::Box, label: &str, test_id: &str, value: i64) ->
     entry
 }
 
-/// Parse a cap entry's text as a non-negative `i64`; fall back to `prev` on an
-/// empty/unparseable value so a stray edit never silently zeroes a cap. The
-/// trim/parse/clamp lives in the shared validator `fauna_core::format::parse_cap`
-/// (one source of truth across all seven apps — see
-/// `docs/goal/behavior/value-formatting.md` § Tier cap validation); this thin
-/// wrapper just adapts the `gtk::Entry` to its `&str` input. Byte-identical to the
-/// old local parse: a persisted `prev` is always ≥ 0, so the shared fn's
-/// clamp-on-parse matches the old clamp-on-result.
-fn parse_cap(entry: &gtk::Entry, prev: i64) -> i64 {
-    fauna_core::format::parse_cap(&entry.text()).unwrap_or(prev)
+/// A tier row's save answer: the shared `tier_caps_possibility` over its five
+/// cap drafts (`[inbox, storage, devices, blob_size, feeds]`).
+fn tier_caps_answer(caps: &[gtk::Entry; 5]) -> Possibility {
+    let texts = caps.each_ref().map(|c| c.text());
+    fauna_client_admin::tier_caps_possibility(texts.each_ref().map(|t| t.as_str()))
+}
+
+/// Paint a tier row's save from [`tier_caps_answer`].
+fn paint_tier_caps_save(save: &gtk::Button, caps: &[gtk::Entry; 5]) {
+    crate::possible::paint(save, None, tier_caps_answer(caps));
+}
+
+/// A membership row's save answer: the shared `membership_save_possibility`
+/// over the picked admitted-at tier (blank while none is picked).
+fn membership_save_answer(admin_tier_select: &gtk::DropDown) -> Possibility {
+    fauna_client_admin::membership_save_possibility(
+        &dropdown_tier(admin_tier_select).unwrap_or_default(),
+    )
+}
+
+/// Paint a membership row's save from [`membership_save_answer`].
+fn paint_membership_save(save: &gtk::Button, admin_tier_select: &gtk::DropDown) {
+    crate::possible::paint(save, None, membership_save_answer(admin_tier_select));
+}
+
+/// The five caps as the shared validator `fauna_core::format::parse_cap`
+/// reads them (`docs/goal/behavior/value-formatting.md` § Tier cap
+/// validation); `None` when any does not parse — never a stored fallback.
+fn read_caps(caps: &[gtk::Entry; 5]) -> Option<[i64; 5]> {
+    let [a, b, c, d, e] = caps
+        .each_ref()
+        .map(|cap| fauna_core::format::parse_cap(&cap.text()));
+    Some([a?, b?, c?, d?, e?])
 }
 
 /// Re-render the membership section (`admin-settings-membership-item`,
@@ -2652,12 +2896,28 @@ fn build_membership_row(
     crate::testid::set_test_id(&save, ids::ADMIN_SETTINGS_MEMBERSHIP_SAVE_BUTTON);
     // tui's `admin::Action::SaveMembership`.
     crate::offline_gate::declare_wire_kind(&save, "fauna.admin.membership_tiers.set");
+    // Painted from the shared `membership_save_possibility` over the picked
+    // admitted-at tier, repainted on every pick (`admin.md` § Errors & edge
+    // cases, draft validity).
+    paint_membership_save(&save, &admin_tier_select);
+    {
+        let save = save.clone();
+        admin_tier_select.connect_selected_notify(move |dd| paint_membership_save(&save, dd));
+    }
     {
         let client = Rc::clone(client);
         let tier_select = tier_select.clone();
         let admin_tier_select = admin_tier_select.clone();
         let lapse_tier_select = lapse_tier_select.clone();
         save.connect_clicked(move |_| {
+            // The painted answer, asked again: a refusal reads on
+            // `error-message` and nothing is sent.
+            if let Some(reason) =
+                crate::possible::reason_text(&membership_save_answer(&admin_tier_select))
+            {
+                client.report_localized_error(reason);
+                return;
+            }
             let Some(tier_name) = dropdown_tier(&tier_select) else {
                 return;
             };
@@ -2677,13 +2937,24 @@ fn build_membership_row(
 
     let clear = gtk::Button::with_label(admin::settings_page::MEMBERSHIP_CLEAR);
     crate::testid::set_test_id(&clear, ids::ADMIN_SETTINGS_MEMBERSHIP_CLEAR_BUTTON);
-    clear.set_sensitive(existing.is_some());
+    // Blocked, saying nothing is set, while the row holds no persisted
+    // designation (the shared `membership_clear_possibility`); the click asks
+    // again.
+    crate::possible::paint(
+        &clear,
+        None,
+        fauna_client_admin::membership_clear_possibility(existing.is_some()),
+    );
     // tui's `admin::Action::ClearMembership`.
     crate::offline_gate::declare_wire_kind(&clear, "fauna.admin.membership_tiers.clear");
     {
         let client = Rc::clone(client);
         let tier_name = tier_name.to_string();
+        let has_existing = existing.is_some();
         clear.connect_clicked(move |_| {
+            if !fauna_client_admin::membership_clear_possibility(has_existing).is_possible() {
+                return;
+            }
             client.clear_membership_tier(tier_name.clone());
         });
     }
@@ -2700,7 +2971,8 @@ fn build_membership_row(
 /// re-seed doesn't clobber an in-progress edit.
 ///
 /// `fronted` (`fauna.setup.status` `fronted_by_router`) renders the field
-/// read-only on a router-fronted nest: the entry + save button are desensitized
+/// read-only on a router-fronted nest: the entry is desensitized, the save is
+/// blocked with the hint as its reason ([`NestDraftGates`]),
 /// and the "served on 443 by this deployment" hint is revealed (the chosen port
 /// is inert behind the :443 SNI router, and the nest rejects a write). On a
 /// direct listener (the default) the field stays editable. nest/common.md
@@ -2710,9 +2982,9 @@ pub fn set_nest_serving_port(handles: &AdminHandles, port: u16, fronted: bool) {
     if handles.serving_port_entry.text() != text {
         handles.serving_port_entry.set_text(&text);
     }
-    handles.serving_port_entry.set_sensitive(!fronted);
-    handles.serving_port_save.set_sensitive(!fronted);
     handles.serving_port_hint.set_visible(fronted);
+    handles.nest_drafts.serving_port_fronted.set(Some(fronted));
+    handles.nest_drafts.paint_serving_port();
 }
 
 /// Seed the declared-region section from `fauna.admin.region.get`'s reply,
@@ -2756,60 +3028,226 @@ pub fn set_nest_region(handles: &AdminHandles, view: &fauna_client_admin::AdminR
         }
     }
     handles.region_withdraw.set_visible(view.can_withdraw);
+    handles.nest_drafts.region_read.set(true);
+    handles.nest_drafts.paint_region();
+}
+
+/// The NAT-mode radios' answer (`admin.md` § Errors & edge cases, *Controls
+/// wait for their read*): the shared `select_possibility` over
+/// `fauna.setup.status` — still loading, or failed to load — then still
+/// saving while a save is on its way.
+fn nat_select_answer(
+    machine: &fauna_onboarding_machine::AdminNatModeMachine,
+    inflight: bool,
+) -> Possibility {
+    machine.select_possibility().and(if inflight {
+        Possibility::blocked(fauna_core::localized::LocalizedText::key(
+            "common.in_flight",
+        ))
+    } else {
+        Possibility::Possible
+    })
+}
+
+/// The Nest page's two draft-gated saves (`admin.md` § Errors & edge cases,
+/// *A form's submit is live only for a draft the nest would accept*): each
+/// save's answer is its read gate first, then the shared draft predicate over
+/// what is typed — `serving_port_possibility` and `region_possibility`. The
+/// press asks the same answer and refuses on the page's `error-message`.
+#[derive(Clone)]
+pub struct NestDraftGates {
+    serving_port_entry: gtk::Entry,
+    serving_port_save: gtk::Button,
+    /// `None` until `fauna.setup.status` lands; then whether the nest is
+    /// router-fronted (the port is inert there and the nest refuses a write).
+    serving_port_fronted: Rc<std::cell::Cell<Option<bool>>>,
+    region_entry: gtk::Entry,
+    region_save: gtk::Button,
+    /// Whether `fauna.admin.region.get` has answered.
+    region_read: Rc<std::cell::Cell<bool>>,
+    /// `admin-service-pairing-toggle`, painted from [`Self::pairing_answer`].
+    pairing_toggle: gtk::Switch,
+    /// Whether `fauna.admin.services.list` has answered.
+    pairing_read: Rc<std::cell::Cell<bool>>,
+}
+
+impl NestDraftGates {
+    /// The serving-port save's answer: still loading before the status read,
+    /// blocked with the fronted hint on a router-fronted nest, else the port
+    /// draft's answer.
+    fn serving_port_answer(&self) -> Possibility {
+        match self.serving_port_fronted.get() {
+            None => Possibility::once_read(false),
+            Some(true) => Possibility::blocked(fauna_core::localized::LocalizedText::key(
+                "admin.nest_page.serving_port_fronted_hint",
+            )),
+            Some(false) => {
+                fauna_client_admin::serving_port_possibility(&self.serving_port_entry.text())
+            }
+        }
+    }
+
+    /// The serving-port input's answer: still loading before the status
+    /// read, blocked with the fronted hint on a router-fronted nest (the port
+    /// is inert there). The port draft never reaches the input it is typed in.
+    fn serving_port_entry_answer(&self) -> Possibility {
+        match self.serving_port_fronted.get() {
+            None => Possibility::once_read(false),
+            Some(true) => Possibility::blocked(fauna_core::localized::LocalizedText::key(
+                "admin.nest_page.serving_port_fronted_hint",
+            )),
+            Some(false) => Possibility::Possible,
+        }
+    }
+
+    /// The pairing toggle's answer: the reflective services read (`admin.md`
+    /// § Errors & edge cases, *Controls wait for their read*).
+    fn pairing_answer(&self) -> Possibility {
+        Possibility::once_read(self.pairing_read.get())
+    }
+
+    fn paint_pairing(&self) {
+        crate::possible::paint(&self.pairing_toggle, None, self.pairing_answer());
+    }
+
+    /// The region save's answer: the region read first, then the code draft.
+    fn region_answer(&self) -> Possibility {
+        Possibility::once_read(self.region_read.get()).and(fauna_client_admin::region_possibility(
+            &self.region_entry.text(),
+        ))
+    }
+
+    fn paint_serving_port(&self) {
+        crate::possible::paint(
+            &self.serving_port_entry,
+            None,
+            self.serving_port_entry_answer(),
+        );
+        crate::possible::paint(&self.serving_port_save, None, self.serving_port_answer());
+    }
+
+    fn paint_region(&self) {
+        crate::possible::paint(&self.region_save, None, self.region_answer());
+    }
+
+    /// Paint both saves now and on every keystroke in their entries.
+    fn connect(&self) {
+        self.paint_serving_port();
+        self.paint_region();
+        self.paint_pairing();
+        let gates = self.clone();
+        self.serving_port_entry
+            .connect_changed(move |_| gates.paint_serving_port());
+        let gates = self.clone();
+        self.region_entry
+            .connect_changed(move |_| gates.paint_region());
+    }
+}
+
+/// The web-app origin section's widgets (`admin-nest-web-app-origin-*`).
+#[derive(Clone)]
+pub struct WebOriginWidgets {
+    /// `admin-nest-web-app-origin-section` — the whole section, shown only
+    /// where the view's `section_possibility` is.
+    pub section: gtk::Box,
+    pub bundled: gtk::CheckButton,
+    /// Shown only where the view's `central_possibility` is.
+    pub central: gtk::CheckButton,
+    pub status: gtk::Label,
+    pub scope: gtk::Label,
+    pub save: gtk::Button,
 }
 
 /// Paint the web-app origin section from `fauna.admin.web_app_origin.get`'s
 /// reply (or `.set`'s own reply — the save repaints with no second read), via
 /// the shared `fauna_client_admin::AdminWebAppOriginView` fold (tui's
-/// `admin/nest.rs`, the reference leg — this file words nothing). The radios are
-/// live only while `can_set`; a `None` selection leaves neither marked rather
-/// than state a choice the nest does not hold.
+/// `admin/nest.rs`, the reference leg — this file words nothing).
 pub fn set_nest_web_app_origin(
     handles: &AdminHandles,
     view: &fauna_client_admin::AdminWebAppOriginView,
 ) {
-    use fauna_client_admin::WebAppOrigin;
+    *handles.web_origin_view.borrow_mut() = Some(view.clone());
+    paint_web_app_origin(&handles.web_origin, view);
+}
+
+/// Whether the section and its central radio exist are the view's
+/// `section_possibility` / `central_possibility` (`web-content-hosting.md`
+/// § Same-origin security model → *While the central origin is not live, the
+/// choice is not offered*, rule 5) — nothing is re-derived here. The radios are
+/// painted from the shared `set_possibility` answer — blocked by the status
+/// sentence where the origin cannot be set (`admin.md` § Errors & edge cases);
+/// the save from the same answer asked with the marked radio's mode as the
+/// draft, so a `central` draft the nest would refuse is never saveable. A
+/// `None` selection leaves neither radio marked rather than state a choice the
+/// nest does not hold.
+fn paint_web_app_origin(w: &WebOriginWidgets, view: &fauna_client_admin::AdminWebAppOriginView) {
+    use fauna_client_admin::{WebAppOrigin, web_app_origin_set_possibility};
+    use fauna_core::possibility::Possibility;
     let lookup = crate::i18n::strings::lookup;
-    handles.web_origin_bundled.set_sensitive(view.can_set);
-    handles.web_origin_central.set_sensitive(view.can_set);
+    crate::possible::paint(&w.section, None, view.section_possibility.clone());
+    let answer = web_app_origin_set_possibility(Some(view), None);
+    crate::possible::paint(&w.bundled, None, answer.clone());
+    let central = if view.central_possibility.is_shown() {
+        answer
+    } else {
+        Possibility::Absent
+    };
+    crate::possible::paint(&w.central, None, central);
     match view.selected {
-        Some(WebAppOrigin::Bundled) => handles.web_origin_bundled.set_active(true),
-        Some(WebAppOrigin::Central) => handles.web_origin_central.set_active(true),
+        Some(WebAppOrigin::Bundled) => w.bundled.set_active(true),
+        Some(WebAppOrigin::Central) => w.central.set_active(true),
         None => {
-            handles.web_origin_bundled.set_active(false);
-            handles.web_origin_central.set_active(false);
+            w.bundled.set_active(false);
+            w.central.set_active(false);
         }
     }
-    handles
-        .web_origin_central
+    w.central
         .set_label(Some(&view.central_label.resolve(lookup)));
-    handles
-        .web_origin_status
-        .set_text(&view.status.resolve(lookup));
-    handles
-        .web_origin_scope
-        .set_text(&view.scope.resolve(lookup));
-    handles.web_origin_scope.set_visible(true);
-    handles.web_origin_save.set_sensitive(
-        view.can_set
-            && (handles.web_origin_bundled.is_active() || handles.web_origin_central.is_active()),
-    );
+    w.status.set_text(&view.status.resolve(lookup));
+    w.scope.set_text(&view.scope.resolve(lookup));
+    w.scope.set_visible(true);
+    paint_web_app_origin_save(w, view);
+}
+
+/// The save's paint: the shared answer asked with the marked radio's mode, and
+/// insensitive while nothing is marked (nothing to save). Re-run on every
+/// radio toggle.
+fn paint_web_app_origin_save(
+    w: &WebOriginWidgets,
+    view: &fauna_client_admin::AdminWebAppOriginView,
+) {
+    use fauna_client_admin::WebAppOrigin;
+    let draft = if w.central.is_active() {
+        Some(WebAppOrigin::Central)
+    } else if w.bundled.is_active() {
+        Some(WebAppOrigin::Bundled)
+    } else {
+        None
+    };
+    let answer = fauna_client_admin::web_app_origin_set_possibility(Some(view), draft);
+    crate::possible::paint(&w.save, None, answer);
+    if draft.is_none() {
+        w.save.set_sensitive(false);
+    }
 }
 
 /// Paint the update-channel section from `fauna.admin.update_channel.get`'s
 /// read (or the fresh read after `.set`), via the shared
 /// `fauna_client_admin::AdminUpdateChannelView` fold (tui's `admin/nest.rs`,
-/// the reference leg — this file words nothing). The radios are live only while
-/// `can_set`; a `None` selection leaves none marked rather than state a choice
+/// the reference leg — this file words nothing). The radios and save are
+/// painted from the shared `set_possibility` answer — blocked by the status
+/// sentence where the channel cannot be set (`admin.md` § Errors & edge
+/// cases); a `None` selection leaves none marked rather than state a choice
 /// the nest does not hold.
 pub fn set_nest_update_channel(
     handles: &AdminHandles,
     view: &fauna_client_admin::AdminUpdateChannelView,
 ) {
     let lookup = crate::i18n::strings::lookup;
+    let answer = fauna_client_admin::update_channel_set_possibility(Some(view));
     for (i, option) in view.options.iter().enumerate().take(3) {
         let radio = &handles.update_channel_radios[i];
-        radio.set_sensitive(view.can_set);
+        crate::possible::paint(radio, None, answer.clone());
         radio.set_label(Some(&option.label.resolve(lookup)));
         handles.update_channel_descs[i].set_text(&option.description.resolve(lookup));
         radio.set_active(view.selected == Some(option.channel));
@@ -2817,13 +3255,15 @@ pub fn set_nest_update_channel(
     handles
         .update_channel_status
         .set_text(&view.status.resolve(lookup));
-    handles.update_channel_save.set_sensitive(
-        view.can_set
-            && handles
-                .update_channel_radios
-                .iter()
-                .any(|radio| radio.is_active()),
-    );
+    crate::possible::paint(&handles.update_channel_save, None, answer);
+    // The draft half: settable, but nothing marked yet → nothing to save.
+    if !handles
+        .update_channel_radios
+        .iter()
+        .any(|radio| radio.is_active())
+    {
+        handles.update_channel_save.set_sensitive(false);
+    }
 }
 
 /// Render the host-OS-maintenance indicator from `fauna.setup.status`'s `os_*`
@@ -2857,6 +3297,31 @@ pub fn set_nest_os_maintenance(
         handles.os_updates_count.set_visible(false);
     }
     handles.os_restart_now_button.set_visible(reboot_pending);
+}
+
+/// `admin-users-invite-code-copy-btn`'s press: write the minted `code` through
+/// `write` ([`crate::clipboard::try_copy_text`] in production) and record the
+/// outcome — confirmed on the button with the code as its `copied` attr (the
+/// `account-actor-id-copy-btn` contract), a failure said on
+/// `admin-users-action-error` (`common.copy_failed`). No code minted, nothing
+/// to copy.
+fn copy_minted_code(
+    btn: &gtk::Button,
+    action_error: &gtk::Label,
+    code: &str,
+    write: impl FnOnce(&str) -> Result<(), String>,
+) {
+    if code.is_empty() {
+        return;
+    }
+    let outcome = write(code);
+    crate::clipboard::record_copy_outcome(
+        btn,
+        action_error,
+        admin::users_page::COPY_CODE,
+        code,
+        outcome,
+    );
 }
 
 /// Surface a freshly minted invite-code token copyable: stash it for the copy
@@ -2951,6 +3416,39 @@ pub struct TierAddForm {
     /// `[inbox, storage, devices, blob_size, feeds]` — the wire order of
     /// `fauna_client_admin::tier_create_request`.
     caps: [gtk::Entry; 5],
+    /// `admin-settings-tier-add-button`, painted from [`Self::answer`].
+    add: gtk::Button,
+    /// Whether `fauna.admin.tiers.list` has answered: the form waits for it
+    /// (`admin.md` § Errors & edge cases, *Controls wait for their read*).
+    read: Rc<std::cell::Cell<bool>>,
+}
+
+impl TierAddForm {
+    /// The fields' answer: the tiers read alone (the drafts never reach the
+    /// inputs they are typed into).
+    fn read_answer(&self) -> Possibility {
+        Possibility::once_read(self.read.get())
+    }
+
+    /// The add button's answer: the tiers read first, then the shared
+    /// `tier_create_possibility` over the name and the five cap drafts.
+    fn answer(&self) -> Possibility {
+        let texts = self.caps.each_ref().map(|c| c.text());
+        self.read_answer()
+            .and(fauna_client_admin::tier_create_possibility(
+                &self.name.text(),
+                texts.each_ref().map(|t| t.as_str()),
+            ))
+    }
+
+    fn paint(&self) {
+        let read = self.read_answer();
+        crate::possible::paint(&self.name, None, read.clone());
+        for cap in &self.caps {
+            crate::possible::paint(cap, None, read.clone());
+        }
+        crate::possible::paint(&self.add, None, self.answer());
+    }
 }
 
 /// Clear the add-a-tier form (after `fauna.admin.tiers.create` succeeded).
@@ -3026,32 +3524,39 @@ fn build_tier_add_form(client: &Rc<FaunaClient>) -> (gtk::Box, TierAddForm) {
     crate::testid::set_test_id(&add, ids::ADMIN_SETTINGS_TIER_ADD_BUTTON);
     // tui's `admin::Action::AddTier`.
     crate::offline_gate::declare_wire_kind(&add, "fauna.admin.tiers.create");
+    let form = TierAddForm {
+        name,
+        caps,
+        add,
+        read: Rc::new(std::cell::Cell::new(false)),
+    };
+    // Painted from the shared `tier_create_possibility` on every keystroke in
+    // the name or a cap (the clear after a create included).
+    form.paint();
+    for entry in std::iter::once(&form.name).chain(form.caps.iter()) {
+        let form = form.clone();
+        entry.connect_changed(move |_| form.paint());
+    }
     {
         let client = Rc::clone(client);
-        let name = name.clone();
-        let caps = caps.clone();
-        add.connect_clicked(move |_| {
-            let texts = caps.each_ref().map(|c| c.text());
+        let form = form.clone();
+        form.add.clone().connect_clicked(move |_| {
+            // The painted answer, asked again: a refusal reads on
+            // `error-message` with its own sentence and nothing is sent.
+            if let Some(reason) = crate::possible::reason_text(&form.answer()) {
+                client.report_localized_error(reason);
+                return;
+            }
+            let texts = form.caps.each_ref().map(|c| c.text());
             let drafts = texts.each_ref().map(|t| t.as_str());
-            match fauna_client_admin::tier_create_request(&name.text(), drafts) {
-                Ok(req) => client.add_admin_tier(req),
-                Err(refusal) => client.report_localized_error(
-                    match refusal {
-                        fauna_client_admin::TierCreateRefusal::EmptyName => {
-                            admin::settings_page::ADD_TIER_ERROR_EMPTY_NAME
-                        }
-                        fauna_client_admin::TierCreateRefusal::InvalidCap => {
-                            admin::settings_page::ADD_TIER_ERROR_INVALID_CAP
-                        }
-                    }
-                    .to_string(),
-                ),
+            if let Ok(req) = fauna_client_admin::tier_create_request(&form.name.text(), drafts) {
+                client.add_admin_tier(req);
             }
         });
     }
-    vbox.append(&add);
+    vbox.append(&form.add);
 
-    (vbox, TierAddForm { name, caps })
+    (vbox, form)
 }
 
 fn build_settings_page(
@@ -3317,9 +3822,6 @@ struct NestPage {
     /// port entry (seeded by `set_nest_serving_port` once `fauna.setup.status`
     /// lands; the save button drives `fauna.admin.set_serving_port`).
     serving_port_entry: gtk::Entry,
-    /// `admin-nest-serving-port-save-button` — desensitized alongside the entry
-    /// when the deployment is router-fronted (`set_nest_serving_port`).
-    serving_port_save: gtk::Button,
     /// Read-only hint shown only on a router-fronted nest (`set_nest_serving_port`
     /// flips its visibility from `fronted_by_router`).
     serving_port_hint: gtk::Label,
@@ -3330,13 +3832,11 @@ struct NestPage {
     region_staleness: gtk::Label,
     region_entry: gtk::Entry,
     region_withdraw: gtk::Button,
-    /// Web-app origin (`admin-nest-web-app-origin-*`) — see [`AdminHandles`]'s
-    /// fields of the same name.
-    web_origin_bundled: gtk::CheckButton,
-    web_origin_central: gtk::CheckButton,
-    web_origin_status: gtk::Label,
-    web_origin_scope: gtk::Label,
-    web_origin_save: gtk::Button,
+    drafts: NestDraftGates,
+    /// Web-app origin (`admin-nest-web-app-origin-*`) — see
+    /// [`AdminHandles::web_origin`].
+    web_origin: WebOriginWidgets,
+    web_origin_view: Rc<RefCell<Option<fauna_client_admin::AdminWebAppOriginView>>>,
     /// Update channel (`admin-nest-update-channel-*`) — see [`AdminHandles`]'s
     /// fields of the same name.
     update_channel_radios: [gtk::CheckButton; 3],
@@ -3625,6 +4125,11 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
         outer.connect_map(move |_| {
             client.fetch_nest_os_maintenance();
             client.fetch_oauth_issuer_keys();
+            // The pairing toggle's reflective read, like every other read
+            // this page's controls wait for: every entry asks it again
+            // (`admin.md` § Errors & edge cases, *Controls wait for their
+            // read*).
+            client.fetch_admin_services();
         });
     }
 
@@ -3636,6 +4141,14 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
         let client = Rc::clone(client);
         os_restart_now_button.connect_clicked(move |_| client.request_host_restart());
     }
+
+    // Per-page `error-message` (rule #2): the page-level error surface for a
+    // failed `services.{list,update}` on the pairing toggle path, a press
+    // refused before its read (pairing, NAT mode), the client-side
+    // invalid-serving-port message, and the client-side invalid-region
+    // message. Built first so every handler can target it; appended last to
+    // sit at the page tail.
+    let error_label = build_error_label();
 
     // ── Pairing (fauna.admin.services.update name="pairing") ─────────────────
     // The admin nest-level master switch for user-initiated nest pairing
@@ -3652,12 +4165,26 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
     // One `services.update` row, so one kind (tui's `admin::Action::TogglePairing`).
     crate::offline_gate::declare_wire_kind(&pairing_toggle, "fauna.admin.services.update");
     let pairing_guard = Rc::new(std::cell::Cell::new(false));
+    // Whether `fauna.admin.services.list` has answered: the toggle waits for
+    // it (`admin.md` § Errors & edge cases, *Controls wait for their read*),
+    // never flipping a guessed `false`.
+    let pairing_read = Rc::new(std::cell::Cell::new(false));
     {
         let client = Rc::clone(client);
         let guard = Rc::clone(&pairing_guard);
+        let read = Rc::clone(&pairing_read);
+        let err = error_label.clone();
         pairing_toggle.connect_active_notify(move |sw| {
             if guard.get() {
                 return; // reflective sync from update_services, not a user click
+            }
+            if crate::possible::refused_toggle(
+                sw,
+                &Possibility::once_read(read.get()),
+                &err,
+                &guard,
+            ) {
+                return;
             }
             client.set_service("pairing".into(), sw.is_active());
         });
@@ -3803,7 +4330,7 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
 
     // Wiring: dispatch-style — await an action on the worker runtime, then
     // re-render from the snapshot (the nat_mode_choice.rs idiom).
-    {
+    let (nat_machine, nat_rehydrate): (_, Rc<dyn Fn()>) = {
         let machine = client.admin_nat_mode_machine();
         let nat_updating = Rc::new(std::cell::Cell::new(false));
 
@@ -3828,10 +4355,15 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
                     _ => {}
                 }
                 updating.set(false);
-                save.set_sensitive(snap.submit_enabled);
+                // The radios and the save wait for `fauna.setup.status`
+                // (`admin.md` § Errors & edge cases, *Controls wait for their
+                // read*): a failed read leaves them blocked, never saving the
+                // pre-selected `public` over a mode the page never read.
                 let inflight = snap.state == NatModeState::Submitting;
-                public_radio.set_sensitive(!inflight);
-                private_radio.set_sensitive(!inflight);
+                let select = nat_select_answer(&machine, inflight);
+                crate::possible::paint(&public_radio, None, select.clone());
+                crate::possible::paint(&private_radio, None, select);
+                crate::possible::paint(&save, None, machine.save_possibility());
                 status.set_text(&snap.message.resolve(crate::i18n::strings::lookup));
             }
         });
@@ -3841,11 +4373,19 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
             let machine = machine.clone();
             let updating = Rc::clone(&nat_updating);
             let refresh = Rc::clone(&nat_refresh);
+            let err = error_label.clone();
             nat_public_radio.connect_toggled(move |r| {
                 if updating.get() || !r.is_active() {
                     return;
                 }
-                machine.select(fauna_onboarding_machine::NodeMode::Public);
+                // Refused before the read: the reason on `error-message`, and
+                // the refresh puts the radios back on the machine's mode.
+                let inflight =
+                    machine.snapshot().state == fauna_onboarding_machine::NatModeState::Submitting;
+                if !crate::possible::refused_at_press(&nat_select_answer(&machine, inflight), &err)
+                {
+                    machine.select(fauna_onboarding_machine::NodeMode::Public);
+                }
                 refresh();
             });
         }
@@ -3853,11 +4393,19 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
             let machine = machine.clone();
             let updating = Rc::clone(&nat_updating);
             let refresh = Rc::clone(&nat_refresh);
+            let err = error_label.clone();
             nat_private_radio.connect_toggled(move |r| {
                 if updating.get() || !r.is_active() {
                     return;
                 }
-                machine.select(fauna_onboarding_machine::NodeMode::Private);
+                // Refused before the read: the reason on `error-message`, and
+                // the refresh puts the radios back on the machine's mode.
+                let inflight =
+                    machine.snapshot().state == fauna_onboarding_machine::NatModeState::Submitting;
+                if !crate::possible::refused_at_press(&nat_select_answer(&machine, inflight), &err)
+                {
+                    machine.select(fauna_onboarding_machine::NodeMode::Private);
+                }
                 refresh();
             });
         }
@@ -3866,7 +4414,11 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
         {
             let machine = machine.clone();
             let refresh = Rc::clone(&nat_refresh);
+            let err = error_label.clone();
             nat_save.connect_clicked(move |_| {
+                if crate::possible::refused_at_press(&machine.save_possibility(), &err) {
+                    return;
+                }
                 let m = machine.clone();
                 let refresh = Rc::clone(&refresh);
                 crate::async_helper::run_on_tokio(async move { m.submit().await }, move |()| {
@@ -3877,33 +4429,43 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
 
         // Hydrate on every page show: pre-select the current node_mode from
         // fauna.setup.status (the mode can change from another client).
-        {
+        let rehydrate: Rc<dyn Fn()> = {
+            let machine = machine.clone();
             let refresh = Rc::clone(&nat_refresh);
-            outer.connect_map(move |_| {
+            Rc::new(move || {
                 let m = machine.clone();
                 let refresh = Rc::clone(&refresh);
                 crate::async_helper::run_on_tokio(async move { m.hydrate().await }, move |()| {
                     refresh()
                 });
-            });
+            })
+        };
+        {
+            let rehydrate = Rc::clone(&rehydrate);
+            outer.connect_map(move |_| rehydrate());
         }
 
         nat_refresh();
-    }
+        (machine, rehydrate)
+    };
 
     // ── Web-app origin (fauna.admin.web_app_origin.{get,set}) ────────────────
     // What this nest's own address answers: the app it ships, or a redirect to
     // the central origin (`admin.md` § N Nest → *Web-app origin*), directly
-    // after NAT mode and mirroring its radio shape. Paint only: every sentence
-    // and the `can_set` verdict are the shared `admin_web_app_origin_view` fold
-    // (tui's `admin/nest.rs`, the reference leg). Until the read lands nothing
-    // is settable and neither radio is marked — pre-marking bundled would state
-    // a choice the nest may not hold. The radios are a local selection; the
-    // save commits it and repaints from the set's own reply.
+    // after NAT mode and mirroring its radio shape. Paint only: every sentence,
+    // the `can_set` verdict and whether the section and its central radio
+    // exist are the shared `admin_web_app_origin_view` fold (tui's
+    // `admin/nest.rs`, the reference leg). The radios are a local selection;
+    // the save commits it and repaints from the set's own reply.
     let web_origin_section = build_section(
         "admin-nest-web-app-origin-section",
         admin::nest_page::WEB_APP_ORIGIN_LABEL,
     );
+    // Not painted until the read lands: whether the section exists is the
+    // read's answer (`section_possibility`), never a guess withdrawn.
+    web_origin_section.set_visible(false);
+    let web_origin_view: Rc<RefCell<Option<fauna_client_admin::AdminWebAppOriginView>>> =
+        Rc::new(RefCell::new(None));
 
     let web_origin_desc = gtk::Label::new(Some(admin::nest_page::WEB_APP_ORIGIN_DESC));
     web_origin_desc.set_halign(gtk::Align::Start);
@@ -3978,15 +4540,24 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
 
     outer.append(&web_origin_section);
 
-    // Picking a radio is local: it only arms the save.
+    let web_origin = WebOriginWidgets {
+        section: web_origin_section,
+        bundled: web_origin_bundled.clone(),
+        central: web_origin_central.clone(),
+        status: web_origin_status,
+        scope: web_origin_scope,
+        save: web_origin_save.clone(),
+    };
+
+    // Picking a radio is local: it only re-asks the save's answer with the
+    // newly marked mode as the draft, over the view last painted.
     for radio in [&web_origin_bundled, &web_origin_central] {
-        let save = web_origin_save.clone();
-        let bundled = web_origin_bundled.clone();
-        let central = web_origin_central.clone();
+        let w = web_origin.clone();
+        let held = Rc::clone(&web_origin_view);
         radio.connect_toggled(move |_| {
-            save.set_sensitive(
-                (bundled.is_active() || central.is_active()) && bundled.is_sensitive(),
-            );
+            if let Some(view) = held.borrow().as_ref() {
+                paint_web_app_origin_save(&w, view);
+            }
         });
     }
 
@@ -3995,8 +4566,12 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
         let client = Rc::clone(client);
         let bundled = web_origin_bundled.clone();
         let central = web_origin_central.clone();
-        web_origin_save.connect_clicked(move |_| {
+        web_origin_save.connect_clicked(move |save| {
             use fauna_client_admin::WebAppOrigin;
+            // The press asks the answer the save was painted from again.
+            if !crate::possible::painted_possible(save) {
+                return;
+            }
             if central.is_active() {
                 client.set_web_app_origin(WebAppOrigin::Central);
             } else if bundled.is_active() {
@@ -4123,7 +4698,11 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
     {
         let client = Rc::clone(client);
         let radios = update_channel_radios.clone();
-        update_channel_save.connect_clicked(move |_| {
+        update_channel_save.connect_clicked(move |save| {
+            // The press asks the answer the save was painted from again.
+            if !crate::possible::painted_possible(save) {
+                return;
+            }
             if let Some(i) = radios.iter().position(|radio| radio.is_active()) {
                 client.set_update_channel(fauna_client_admin::UpdateChannel::ALL[i]);
             }
@@ -4810,52 +5389,78 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
     // Moved off Settings (admin.md § Admin IA redesign): a nest-wide concern.
     outer.append(&build_factory_reset_section());
 
-    // Per-page `error-message` (rule #2): the page-level error surface for a
-    // failed `services.{list,update}` on the pairing toggle path, the
-    // client-side invalid-serving-port message, and the client-side
-    // invalid-region message. Built here so the serving-port + region save
-    // handlers can target it; appended last to sit at the page tail.
-    let error_label = build_error_label();
+    let drafts = NestDraftGates {
+        serving_port_entry: serving_port_entry.clone(),
+        serving_port_save: serving_port_save.clone(),
+        serving_port_fronted: Rc::new(std::cell::Cell::new(None)),
+        region_entry: region_entry.clone(),
+        region_save: region_save.clone(),
+        region_read: Rc::new(std::cell::Cell::new(false)),
+        pairing_toggle: pairing_toggle.clone(),
+        pairing_read: Rc::clone(&pairing_read),
+    };
+    drafts.connect();
 
-    // Serving-port save → validate via fauna_core::format::parse_port (a u16 in
-    // [1, 65535], invalid → error-message, no dispatch), else `set_serving_port`
-    // (mirrors the admin_calendar CalDAV-port save).
+    // The reconnect re-read (`admin.md` § Errors & edge cases, *Controls wait
+    // for their read*): with the page on screen and any of the reads its
+    // controls wait for unanswered — the services list (pairing), the status
+    // read (NAT mode, serving port) or the region — every one of them is
+    // asked again, as an entry would; an answered page keeps its drafts.
+    {
+        let gates = drafts.clone();
+        let client = Rc::clone(client);
+        crate::admin_reread::register_widget(
+            "admin-nest",
+            &outer,
+            move || {
+                gates.pairing_read.get()
+                    && gates.region_read.get()
+                    && gates.serving_port_fronted.get().is_some()
+                    && nat_machine.select_possibility().is_possible()
+            },
+            move || {
+                client.fetch_admin_services();
+                client.fetch_nest_serving_port();
+                client.fetch_nest_region();
+                nat_rehydrate();
+            },
+        );
+    }
+
+    // Serving-port save → the painted answer asked again (the shared
+    // `serving_port_possibility`: a port in [1, 65535]; a refusal reads on
+    // error-message, no dispatch), else `set_serving_port` (mirrors the
+    // admin_calendar CalDAV-port save).
     {
         let client = Rc::clone(client);
-        let entry = serving_port_entry.clone();
+        let gates = drafts.clone();
         let err = error_label.clone();
         serving_port_save.connect_clicked(move |_| {
-            match fauna_core::format::parse_port(&entry.text()) {
-                Some(port) => {
-                    err.set_visible(false);
-                    client.set_serving_port(port);
-                }
-                None => {
-                    err.set_text(admin::nest_page::SERVING_PORT_INVALID);
-                    err.set_visible(true);
-                }
+            if crate::possible::refused_at_press(&gates.serving_port_answer(), &err) {
+                return;
+            }
+            if let Some(port) = fauna_core::format::parse_port(&gates.serving_port_entry.text()) {
+                err.set_visible(false);
+                client.set_serving_port(port);
             }
         });
     }
 
-    // Region save → validate via the shared `fauna_client_admin::parse_region_code`
-    // (declared, never detected — no case-fold; region-blocking.md), invalid →
-    // error-message, no dispatch — the serving-port shape. Mirrors tui's
-    // `Action::SaveRegion`.
+    // Region save → the painted answer asked again (the shared
+    // `region_possibility` over `parse_region_code`; declared, never detected —
+    // no case-fold; region-blocking.md), a refusal on error-message, no
+    // dispatch — the serving-port shape. Mirrors tui's `Action::SaveRegion`.
     {
         let client = Rc::clone(client);
-        let entry = region_entry.clone();
+        let gates = drafts.clone();
         let err = error_label.clone();
         region_save.connect_clicked(move |_| {
-            match fauna_client_admin::parse_region_code(&entry.text()) {
-                Ok(region) => {
-                    err.set_visible(false);
-                    client.set_region(Some(region));
-                }
-                Err(_) => {
-                    err.set_text(admin::nest_page::REGION_INVALID);
-                    err.set_visible(true);
-                }
+            if crate::possible::refused_at_press(&gates.region_answer(), &err) {
+                return;
+            }
+            if let Ok(region) = fauna_client_admin::parse_region_code(&gates.region_entry.text()) {
+                err.set_visible(false);
+                client.set_region(Some(region));
             }
         });
     }
@@ -4877,18 +5482,15 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
         pairing_status,
         pairing_guard,
         serving_port_entry,
-        serving_port_save,
         serving_port_hint,
         region_status,
         region_authority,
         region_staleness,
         region_entry,
         region_withdraw,
-        web_origin_bundled,
-        web_origin_central,
-        web_origin_status,
-        web_origin_scope,
-        web_origin_save,
+        drafts,
+        web_origin: web_origin.clone(),
+        web_origin_view,
         update_channel_radios,
         update_channel_descs,
         update_channel_status,
@@ -5990,6 +6592,8 @@ pub fn update_services(
         &handles.svc_pairing_guard,
         reply.services.pairing,
     );
+    handles.nest_drafts.pairing_read.set(true);
+    handles.nest_drafts.paint_pairing();
 }
 
 // ── admin Logs page (`admin-logs`) — the nest's fauna-log ring over WS-RPC ────
@@ -6005,6 +6609,8 @@ pub fn update_services(
 /// Public name, opaque fields — app.rs only ever passes it back to the render.
 pub struct AdminLogsCtx {
     filter: gtk::DropDown,
+    copy_button: gtk::Button,
+    error_label: gtk::Label,
     list_group: adw::PreferencesGroup,
     placeholder_row: adw::ActionRow,
     rows: RefCell<Vec<adw::ActionRow>>,
@@ -6034,8 +6640,9 @@ pub struct AdminAuditCtx {
 }
 
 /// Rebuild the section from the held fold: one `admin-audit-entry` per row
-/// (newest first), the integrity line, and `admin-audit-more-button` enabled
-/// iff the record has an older page.
+/// (newest first), the integrity line, and `admin-audit-more-button` painted
+/// from the shared `audit_more_possibility` (blocked, saying so, once the
+/// whole record is shown).
 fn render_admin_audit(ctx: &AdminAuditCtx) {
     let view = ctx.log.borrow().view();
     let mut rows = ctx.rows.borrow_mut();
@@ -6059,14 +6666,30 @@ fn render_admin_audit(ctx: &AdminAuditCtx) {
     }
     ctx.status
         .set_text(&view.integrity_text.resolve(crate::i18n::strings::lookup));
-    ctx.more.set_sensitive(view.more_before_id.is_some());
+    crate::possible::paint(
+        &ctx.more,
+        None,
+        fauna_client_admin::audit_more_possibility(&view),
+    );
 }
 
 /// Re-render the list from the held source at the active filter (client-side).
 fn render_admin_logs(ctx: &Rc<AdminLogsCtx>) {
-    let min = fauna_log::format::level_for_index(ctx.filter.selected());
-    let entries = fauna_log::format::filter_entries(&ctx.source.borrow(), min);
+    let entries = admin_logs_shown(ctx);
     logs_view::populate(&ctx.list_group, &ctx.placeholder_row, &ctx.rows, &entries);
+    // Copy acts only on what the filter shows; the page's own empty line is
+    // the reason when it shows nothing.
+    logs_view::paint_ring_actions(
+        &[&ctx.copy_button],
+        entries.len(),
+        logs_view::ADMIN_EMPTY_KEY,
+    );
+}
+
+/// The fetched entries the active filter shows (oldest-first).
+fn admin_logs_shown(ctx: &AdminLogsCtx) -> Vec<LogEntry> {
+    let min = fauna_log::format::level_for_index(ctx.filter.selected());
+    fauna_log::format::filter_entries(&ctx.source.borrow(), min)
 }
 
 fn build_admin_logs_page(client: &Rc<FaunaClient>) -> AdminLogsPage {
@@ -6136,7 +6759,6 @@ fn build_admin_logs_page(client: &Rc<FaunaClient>) -> AdminLogsPage {
     let audit_more = gtk::Button::builder()
         .label(admin::logs_page::AUDIT_MORE)
         .halign(gtk::Align::Start)
-        .sensitive(false)
         .build();
     crate::testid::set_test_id(&audit_more, ids::ADMIN_AUDIT_MORE_BUTTON);
     audit_group.add(&audit_more);
@@ -6153,7 +6775,11 @@ fn build_admin_logs_page(client: &Rc<FaunaClient>) -> AdminLogsPage {
         let audit = Rc::clone(&audit);
         let client = Rc::clone(client);
         audit_more.connect_clicked(move |_| {
-            if let Some(id) = audit.log.borrow().view().more_before_id {
+            let view = audit.log.borrow().view();
+            if !fauna_client_admin::audit_more_possibility(&view).is_possible() {
+                return;
+            }
+            if let Some(id) = view.more_before_id {
                 client.fetch_admin_audit(Some(id));
             }
         });
@@ -6161,6 +6787,8 @@ fn build_admin_logs_page(client: &Rc<FaunaClient>) -> AdminLogsPage {
 
     let ctx = Rc::new(AdminLogsCtx {
         filter: filter.clone(),
+        copy_button: copy_button.clone(),
+        error_label: error_label.clone(),
         list_group,
         placeholder_row,
         rows: RefCell::new(Vec::new()),
@@ -6176,12 +6804,13 @@ fn build_admin_logs_page(client: &Rc<FaunaClient>) -> AdminLogsPage {
     {
         let ctx = Rc::clone(&ctx);
         copy_button.connect_clicked(move |btn| {
-            let min = fauna_log::format::level_for_index(ctx.filter.selected());
-            let entries = fauna_log::format::filter_entries(&ctx.source.borrow(), min);
-            btn.clipboard().set_text(&fauna_log::format::rendered_text(
-                &entries,
-                logs_view::local_offset_secs(),
-            ));
+            logs_view::copy_shown(
+                btn,
+                &ctx.error_label,
+                &admin_logs_shown(&ctx),
+                logs_view::ADMIN_EMPTY_KEY,
+                crate::clipboard::try_copy_text,
+            );
         });
     }
 
@@ -6259,7 +6888,62 @@ fn bridges_roster_list(placeholder: &adw::StatusPage) -> gtk::ListBox {
     list_box
 }
 
-fn build_bridges_pending_page() -> (gtk::Box, gtk::ListBox, gtk::ListBox, gtk::Label) {
+/// The bridges page's read gate (`admin.md` § Errors & edge cases, *Controls
+/// wait for their read*, Bridges): until the pending-and-approved list read
+/// resolves, each section's placeholder says it is loading — or that the read
+/// failed — instead of its empty text, and each section heading publishes the
+/// same reason as its `reason` automation attr (none once read; tui's
+/// `admin/bridges.rs`, apple's `AdminBridgesPendingView.sectionHeader`). An
+/// unread list is not an empty one.
+#[derive(Clone)]
+pub struct BridgesReadGate {
+    /// Where the list read stands across reads (a failure after a success
+    /// keeps the earlier answer) — what the reconnect re-read asks.
+    read: Rc<std::cell::Cell<fauna_core::possibility::ReadState>>,
+    pending_section: gtk::Label,
+    approved_section: gtk::Label,
+    pending_placeholder: adw::StatusPage,
+    approved_placeholder: adw::StatusPage,
+}
+
+impl BridgesReadGate {
+    fn paint(&self, read: fauna_core::possibility::ReadState) {
+        self.read.set(
+            self.read
+                .get()
+                .after(read == fauna_core::possibility::ReadState::Resolved),
+        );
+        let reason = crate::possible::reason_text(&Possibility::from_read(read));
+        for section in [&self.pending_section, &self.approved_section] {
+            crate::testid::set_test_attr_text(section, "reason", reason.as_deref().unwrap_or(""));
+        }
+        match reason.as_deref() {
+            Some(text) => {
+                for placeholder in [&self.pending_placeholder, &self.approved_placeholder] {
+                    placeholder.set_title(text);
+                    placeholder.set_description(None);
+                }
+            }
+            None => {
+                self.pending_placeholder
+                    .set_title(admin::bridges_pending::EMPTY);
+                self.pending_placeholder
+                    .set_description(Some(admin::bridges_pending::EMPTY_DESC));
+                self.approved_placeholder
+                    .set_title(admin::bridges_pending::APPROVED_EMPTY);
+                self.approved_placeholder.set_description(None);
+            }
+        }
+    }
+}
+
+fn build_bridges_pending_page() -> (
+    gtk::Box,
+    gtk::ListBox,
+    gtk::ListBox,
+    gtk::Label,
+    BridgesReadGate,
+) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
     let heading = gtk::Label::new(Some(admin::bridges_pending::TITLE));
@@ -6282,10 +6966,11 @@ fn build_bridges_pending_page() -> (gtk::Box, gtk::ListBox, gtk::ListBox, gtk::L
     // scroll (admin.md § Approved-bridges roster).
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
-    content.append(&bridges_section_label(
+    let pending_section = bridges_section_label(
         admin::bridges_pending::PENDING_SECTION,
         ids::ADMIN_BRIDGES_PENDING_SECTION,
-    ));
+    );
+    content.append(&pending_section);
     let pending_placeholder = adw::StatusPage::builder()
         .title(admin::bridges_pending::EMPTY)
         .description(admin::bridges_pending::EMPTY_DESC)
@@ -6294,10 +6979,11 @@ fn build_bridges_pending_page() -> (gtk::Box, gtk::ListBox, gtk::ListBox, gtk::L
     let pending_list = bridges_roster_list(&pending_placeholder);
     content.append(&pending_list);
 
-    content.append(&bridges_section_label(
+    let approved_section = bridges_section_label(
         admin::bridges_pending::APPROVED_SECTION,
         ids::ADMIN_BRIDGES_APPROVED_SECTION,
-    ));
+    );
+    content.append(&approved_section);
     let approved_placeholder = adw::StatusPage::builder()
         .title(admin::bridges_pending::APPROVED_EMPTY)
         .icon_name("network-server-symbolic")
@@ -6318,7 +7004,19 @@ fn build_bridges_pending_page() -> (gtk::Box, gtk::ListBox, gtk::ListBox, gtk::L
     let error_label = build_error_label();
     outer.append(&error_label);
 
-    (outer, pending_list, approved_list, error_label)
+    let read_gate = BridgesReadGate {
+        read: Rc::new(std::cell::Cell::new(
+            fauna_core::possibility::ReadState::Pending,
+        )),
+        pending_section,
+        approved_section,
+        pending_placeholder,
+        approved_placeholder,
+    };
+    // Unread until the first `AdminPendingBridgesLoaded`.
+    read_gate.paint(fauna_core::possibility::ReadState::Pending);
+
+    (outer, pending_list, approved_list, error_label, read_gate)
 }
 
 /// One labelled field row inside an approval card. The testid sits on the value
@@ -6364,6 +7062,7 @@ fn format_first_seen(epoch_millis: u64) -> String {
 fn build_pending_bridge_card(
     view: &PendingBridgeView,
     client: &Rc<FaunaClient>,
+    error_label: &gtk::Label,
 ) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     row.set_selectable(false);
@@ -6432,10 +7131,12 @@ fn build_pending_bridge_card(
     {
         let client_ref = Rc::clone(client);
         let pubkey_hex = view.pubkey_hex.clone();
+        let err = error_label.clone();
         reject_btn.connect_clicked(move |btn| {
             open_bridge_confirm(
                 btn,
                 &client_ref,
+                &err,
                 BridgeConfirm::Reject {
                     pubkey_hex: pubkey_hex.clone(),
                 },
@@ -6473,6 +7174,7 @@ fn build_pending_bridge_card(
 fn build_approved_bridge_card(
     view: &ApprovedBridgeView,
     client: &Rc<FaunaClient>,
+    error_label: &gtk::Label,
 ) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     row.set_selectable(false);
@@ -6534,10 +7236,12 @@ fn build_approved_bridge_card(
     {
         let client_ref = Rc::clone(client);
         let pubkey_hex = view.pubkey_hex.clone();
+        let err = error_label.clone();
         rotate_btn.connect_clicked(move |btn| {
             open_bridge_confirm(
                 btn,
                 &client_ref,
+                &err,
                 BridgeConfirm::Rotate {
                     pubkey_hex: pubkey_hex.clone(),
                 },
@@ -6560,7 +7264,12 @@ fn build_approved_bridge_card(
 /// `mail-bridge-lifecycle.md` § Service-user re-keying); the reject dialog says
 /// the bridge cannot connect again until an admin re-approves a fresh keypair
 /// (§ Pending approval).
-fn open_bridge_confirm(anchor: &gtk::Button, client: &Rc<FaunaClient>, confirm: BridgeConfirm) {
+fn open_bridge_confirm(
+    anchor: &gtk::Button,
+    client: &Rc<FaunaClient>,
+    error_label: &gtk::Label,
+    confirm: BridgeConfirm,
+) {
     let (warning_text, warning_id, title, confirm_label, cancel_label, ids3) = match confirm {
         BridgeConfirm::Reject { .. } => (
             admin::bridges_reject::WARNING,
@@ -6600,6 +7309,7 @@ fn open_bridge_confirm(anchor: &gtk::Button, client: &Rc<FaunaClient>, confirm: 
     client.arm_bridge_confirm(confirm);
     let confirm_client = Rc::clone(client);
     let decline_client = Rc::clone(client);
+    let err = error_label.clone();
     crate::confirm_dialog::present_confirm(
         anchor,
         crate::confirm_dialog::ConfirmSpec::new(
@@ -6613,8 +7323,32 @@ fn open_bridge_confirm(anchor: &gtk::Button, client: &Rc<FaunaClient>, confirm: 
         .with_confirm_id(confirm_id)
         .with_cancel_id(cancel_id)
         .with_declined(move || decline_client.disarm_bridge_confirm()),
-        move || confirm_client.confirm_bridge(),
+        // The press takes the armed act at once (`begin_confirm`); a press
+        // while an act is on its way is refused with the machine's answer
+        // (`common.in_flight`) on `error-message`, never its raw
+        // invalid-state error, and nothing reaches the nest.
+        move || {
+            if let Err(answer) = confirm_client.confirm_bridge() {
+                crate::possible::refused_at_press(&answer, &err);
+            }
+        },
     );
+}
+
+/// The confirm press's synchronous half (`admin.md` § Errors & edge cases,
+/// *Controls wait for their read*, Bridges): claim the armed act through the
+/// shared `begin_confirm`, so the confirm answers *still saving* from this
+/// moment; refused — an act already on its way, or nothing armed — the
+/// machine's own `confirm_possibility` answer comes back for the page's error
+/// line, never the dispatch's raw invalid-state error.
+pub(crate) fn begin_bridge_confirm(
+    machine: &fauna_client_mail_settings::BridgeApprovalMachine,
+) -> Result<(), Possibility> {
+    if machine.begin_confirm() {
+        Ok(())
+    } else {
+        Err(machine.confirm_possibility())
+    }
 }
 
 /// Render the bridge rosters from a [`BridgeApprovalSnapshot`]: the pending
@@ -6625,17 +7359,19 @@ fn open_bridge_confirm(anchor: &gtk::Button, client: &Rc<FaunaClient>, confirm: 
 pub fn update_pending_bridges(
     handles: &AdminHandles,
     snapshot: &BridgeApprovalSnapshot,
+    read: fauna_core::possibility::ReadState,
     client: &Rc<FaunaClient>,
 ) {
     render_page_error(&handles.pending_bridges_error, snapshot.error.as_deref());
+    handles.bridges_read_gate.paint(read);
     clear_list_box(&handles.pending_bridges_list);
     for view in &snapshot.pending {
-        let row = build_pending_bridge_card(view, client);
+        let row = build_pending_bridge_card(view, client, &handles.pending_bridges_error);
         handles.pending_bridges_list.append(&row);
     }
     clear_list_box(&handles.approved_bridges_list);
     for view in &snapshot.approved {
-        let row = build_approved_bridge_card(view, client);
+        let row = build_approved_bridge_card(view, client, &handles.pending_bridges_error);
         handles.approved_bridges_list.append(&row);
     }
 }
@@ -6981,6 +7717,118 @@ struct AdminAliasesPage {
     forwarders_list: gtk::ListBox,
     forwarder_add_domain: gtk::DropDown,
     forwarders_action_error: gtk::Label,
+    forwarder_form: ForwarderForm,
+}
+
+/// The forwarder add form's gate (`admin.md` § 4, *A forwarder needs a hosted
+/// domain*; `ui/README.md` § Offer only what is possible, rules 2–4): the
+/// domain picker and the two text fields are painted from the shared
+/// `forwarder_form_possibility`, the submit from `forwarder_create_possibility`
+/// over the picked domain, each over the hosted local domains the last read
+/// holds; with none hosted the reason names DNS and the step that opens it
+/// (`admin-aliases-forwarder-add-domains-step`) is offered. Before the first
+/// read resolves the whole form is blocked with *still loading* (or *failed to
+/// load*) — an unread list is not an empty one — and the submit asks again
+/// before it creates, so an empty `local_domain` never reaches the nest.
+#[derive(Clone)]
+pub struct ForwarderForm {
+    domain: gtk::DropDown,
+    pattern: gtk::Entry,
+    target: gtk::Entry,
+    submit: gtk::Button,
+    domains_step: gtk::Button,
+    /// The form's reason line, under it (the fields keep their own
+    /// descriptive tooltips).
+    reason: gtk::Label,
+    /// The last read's hosted local domains; `None` until it resolves.
+    local_domains: Rc<RefCell<Option<Vec<String>>>>,
+    /// Where the forwarder and local-domain read stands (`admin.md` § Errors
+    /// & edge cases, *Controls wait for their read*); a re-read that fails
+    /// after one succeeded keeps the earlier answer (`ReadState::after`).
+    read: Rc<std::cell::Cell<fauna_core::possibility::ReadState>>,
+    /// A create sent and its reply not back yet (still saving).
+    busy: Rc<std::cell::Cell<bool>>,
+}
+
+impl ForwarderForm {
+    /// The submit's answer now: pending before a read, then the picked domain
+    /// against the hosted ones, then the drafts (`admin.md` § Errors & edge
+    /// cases, draft validity — a domain picked and a non-blank local part and
+    /// destination, the shared `ForwarderMachine::create_draft_possibility`).
+    fn create_answer(&self) -> Possibility {
+        let domain = dropdown_selected_string(&self.domain).unwrap_or_default();
+        self.add_answer()
+            .and(match self.local_domains.borrow().as_deref() {
+                Some(domains) => {
+                    fauna_client_mail_settings::forwarders::forwarder_create_possibility(
+                        domains, &domain,
+                    )
+                    .and(
+                        fauna_client_mail_settings::ForwarderMachine::create_draft_possibility(
+                            &domain,
+                            &self.pattern.text(),
+                            &self.target.text(),
+                        ),
+                    )
+                }
+                None => Possibility::from_read(fauna_core::possibility::ReadState::Pending),
+            })
+    }
+
+    /// The whole form's read gate (`admin.md` § Errors & edge cases,
+    /// *Controls wait for their read*): still loading before the forwarder and
+    /// local-domain read, failed to load after it failed, still saving while a
+    /// create is on its way — the shape of the shared
+    /// `ForwarderMachine::add_possibility`, over this page's own copy of the
+    /// read (linux reads through a fresh machine per call).
+    fn add_answer(&self) -> Possibility {
+        Possibility::for_write(self.read.get(), !self.busy.get())
+    }
+
+    /// Repaint the submit alone (a pick or a keystroke).
+    fn repaint_submit(&self) {
+        crate::possible::paint(&self.submit, Some(&self.reason), self.create_answer());
+    }
+
+    /// A create was sent: the form paints still saving until its reply.
+    fn begin_create(&self) {
+        self.busy.set(true);
+        self.repaint();
+    }
+
+    /// Paint the form from a read's `local_domains` and where that read
+    /// stands. A failed read keeps the domains an earlier read resolved.
+    fn paint(&self, local_domains: &[String], read: fauna_core::possibility::ReadState) {
+        use fauna_core::possibility::ReadState;
+        self.busy.set(false);
+        self.read
+            .set(self.read.get().after(read == ReadState::Resolved));
+        if read == ReadState::Resolved {
+            *self.local_domains.borrow_mut() = Some(local_domains.to_vec());
+        }
+        self.repaint();
+    }
+
+    /// Paint every control of the form from the state held now: the read gate
+    /// first, then (once read) whether a hosted domain exists.
+    fn repaint(&self) {
+        let gate = self.add_answer();
+        let domains = self.local_domains.borrow().clone();
+        let form = gate.clone().and(match domains.as_deref() {
+            Some(domains) => {
+                fauna_client_mail_settings::forwarders::forwarder_form_possibility(domains)
+            }
+            None => Possibility::from_read(fauna_core::possibility::ReadState::Pending),
+        });
+        // The DNS step unblocks only a resolved read with no hosted domain.
+        self.domains_step
+            .set_visible(gate.is_possible() && !form.is_possible());
+        let line = Some(&self.reason);
+        crate::possible::paint(&self.domain, line, form.clone());
+        crate::possible::paint(&self.pattern, line, form.clone());
+        crate::possible::paint(&self.target, line, form);
+        crate::possible::paint(&self.submit, line, self.create_answer());
+    }
 }
 
 /// The selected display string of a plain `gtk::DropDown` (its `StringObject`),
@@ -6998,7 +7846,7 @@ fn dropdown_selected_string(dd: &gtk::DropDown) -> Option<String> {
 /// deferred slice (needs a `set_catch_all_actor` nest RPC). The add form is
 /// built once; the list + the domain picker's options are repopulated on every
 /// `AdminForwardersLoaded` (`set_forwarders_snapshot`).
-fn build_admin_aliases_page(client: &Rc<FaunaClient>) -> AdminAliasesPage {
+fn build_admin_aliases_page(client: &Rc<FaunaClient>, stack: &gtk::Stack) -> AdminAliasesPage {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
     let heading = gtk::Label::new(Some(admin::aliases_page::TITLE));
@@ -7076,21 +7924,82 @@ fn build_admin_aliases_page(client: &Rc<FaunaClient>) -> AdminAliasesPage {
     crate::offline_gate::declare_wire_kind(&submit_btn, "fauna.bridges.create_forwarder");
     add_form.append(&submit_btn);
 
+    // The one step that unblocks the form: the jump to the DNS page, where a
+    // domain is added — offered only once the read resolved with none hosted
+    // (tui's `Action::Open(AdminPage::Dns)`).
+    let domains_step = gtk::Button::with_label(admin::aliases_page::OPEN_DOMAINS);
+    domains_step.set_halign(gtk::Align::Start);
+    domains_step.set_visible(false);
+    crate::testid::set_test_id(&domains_step, ids::ADMIN_ALIASES_FORWARDER_ADD_DOMAINS_STEP);
+    {
+        let stack = stack.downgrade();
+        domains_step.connect_clicked(move |_| {
+            if let Some(stack) = stack.upgrade() {
+                crate::views::nav_rail::set_visible_child_forced(&stack, "admin-dns");
+            }
+        });
+    }
+
+    let form_reason = gtk::Label::new(None);
+    form_reason.add_css_class("dim-label");
+    form_reason.set_wrap(true);
+    form_reason.set_halign(gtk::Align::Start);
+    form_reason.set_visible(false);
+
+    let forwarder_form = ForwarderForm {
+        domain: domain_select.clone(),
+        pattern: pattern_entry.clone(),
+        target: target_entry.clone(),
+        submit: submit_btn.clone(),
+        domains_step: domains_step.clone(),
+        reason: form_reason.clone(),
+        local_domains: Rc::new(RefCell::new(None)),
+        read: Rc::new(std::cell::Cell::new(
+            fauna_core::possibility::ReadState::Pending,
+        )),
+        busy: Rc::new(std::cell::Cell::new(false)),
+    };
+    // Painted before the first read: an unread form says it is loading.
+    forwarder_form.repaint();
+    {
+        // The submit's answer follows the picked domain and both drafts.
+        let form = forwarder_form.clone();
+        domain_select.connect_selected_notify(move |_| form.repaint_submit());
+        let form = forwarder_form.clone();
+        pattern_entry.connect_changed(move |_| form.repaint_submit());
+        let form = forwarder_form.clone();
+        target_entry.connect_changed(move |_| form.repaint_submit());
+    }
+
+    // Per-page generic `error-message` (cross-app rule #2), built here so the
+    // submit's draft refusal can target it; appended below the action error.
+    let error_label = build_error_label();
+
     {
         let client = Rc::clone(client);
         let domain_dd = domain_select.clone();
         let pattern = pattern_entry.clone();
         let target = target_entry.clone();
+        let form = forwarder_form.clone();
+        let err = error_label.clone();
         submit_btn.connect_clicked(move |_| {
+            // The painted answer, asked again: never a create on an empty or
+            // unhosted `local_domain` or a blank draft — the refusal reads on
+            // `error-message` and the drafts stay.
+            if crate::possible::refused_at_press(&form.create_answer(), &err) {
+                return;
+            }
+            err.set_visible(false);
             let local_domain = match dropdown_selected_string(&domain_dd) {
                 Some(d) => d,
-                None => return, // no hosted domain to forward from yet
+                None => return,
             };
             let pat = pattern.text().to_string().trim().to_string();
             let tgt = target.text().to_string().trim().to_string();
             if pat.is_empty() || tgt.is_empty() {
                 return;
             }
+            form.begin_create();
             client.create_forwarder(local_domain, pat, tgt);
             // Clear the inputs; the refetched snapshot re-renders the list with
             // the new forwarder (or surfaces an error to the action-error label).
@@ -7100,6 +8009,8 @@ fn build_admin_aliases_page(client: &Rc<FaunaClient>) -> AdminAliasesPage {
     }
 
     forwarders_section.append(&add_form);
+    forwarders_section.append(&form_reason);
+    forwarders_section.append(&domains_step);
     outer.append(&forwarders_section);
 
     // Dedicated action-error label (admin.md § Errors — forwarder action
@@ -7116,9 +8027,8 @@ fn build_admin_aliases_page(client: &Rc<FaunaClient>) -> AdminAliasesPage {
     crate::testid::set_test_id(&action_error, ids::ADMIN_ALIASES_ACTION_ERROR);
     outer.append(&action_error);
 
-    // Per-page generic `error-message` (cross-app rule #2). Present but only
-    // the dedicated action-error carries forwarder failures.
-    let error_label = build_error_label();
+    // Per-page generic `error-message` (cross-app rule #2): the add form's
+    // draft refusal; the dedicated action-error carries forwarder failures.
     outer.append(&error_label);
 
     let forwarders_list = gtk::ListBox::new();
@@ -7148,6 +8058,7 @@ fn build_admin_aliases_page(client: &Rc<FaunaClient>) -> AdminAliasesPage {
         forwarders_list,
         forwarder_add_domain: domain_select,
         forwarders_action_error: action_error,
+        forwarder_form,
     }
 }
 
@@ -7201,6 +8112,7 @@ fn build_forwarder_row(
 pub fn set_forwarders_snapshot(
     handles: &AdminHandles,
     snapshot: &fauna_client_mail_settings::forwarders::ForwardersSnapshot,
+    read: fauna_core::possibility::ReadState,
     client: &Rc<FaunaClient>,
 ) {
     // Rebuild the forwarder list.
@@ -7222,6 +8134,7 @@ pub fn set_forwarders_snapshot(
     {
         handles.forwarder_add_domain.set_selected(i as u32);
     }
+    handles.forwarder_form.paint(&snapshot.local_domains, read);
 
     render_page_error(&handles.forwarders_action_error, snapshot.error.as_deref());
 }
@@ -7229,6 +8142,115 @@ pub fn set_forwarders_snapshot(
 // ---------------------------------------------------------------------------
 // DNS sub-page (`admin-dns` — unified DNS-management page, manual-mode read+verify)
 // ---------------------------------------------------------------------------
+
+/// The `admin-dns` forms a successful save closes (`dns-management.md`
+/// § Errors & edge cases, *Forms close only once saved*) — tui's
+/// `admin::DnsForm`. The client reports one through
+/// `DataMessage::AdminDnsFormSaved` only once its dispatch succeeded, and
+/// [`close_dns_form`] is the only place a form closes after a submit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsForm {
+    AddDomain,
+    AddCredential,
+    RenameSheet,
+}
+
+/// The `admin-dns` page's refusal (`docs/goal/ui/README.md` § Offer only what
+/// is possible): an action whose answer is not possible puts that answer's
+/// reason on the page's `error-message` and does nothing — tui's
+/// `admin::refuse_dns`. The reason is held so a render that follows keeps it
+/// on screen; an action that passes its answer clears it.
+#[derive(Clone)]
+pub struct DnsRefusal {
+    label: gtk::Label,
+    reason: Rc<RefCell<Option<String>>>,
+}
+
+impl DnsRefusal {
+    /// `true` (and the reason painted) when `answer` refuses the action.
+    fn refuse(&self, answer: &Possibility) -> bool {
+        if answer.is_possible() {
+            return false;
+        }
+        let text = answer
+            .reason()
+            .map(|r| r.resolve(crate::i18n::strings::lookup));
+        render_page_error(&self.label, text.as_deref());
+        *self.reason.borrow_mut() = text;
+        true
+    }
+
+    /// The action passed its answer: drop a held refusal.
+    fn clear(&self) {
+        self.reason.borrow_mut().take();
+    }
+}
+
+/// The `admin-dns` page-level widgets painted from the shared answers on every
+/// render ([`render_admin_dns`]): the add-domain and add-credential submits,
+/// the master switch, the empty-state placeholder, and the [`DnsRefusal`].
+/// Built once by [`build_dns_page`]; every field is a cheap ref-clone.
+#[derive(Clone)]
+pub struct DnsPageUi {
+    refusal: DnsRefusal,
+    add_domain_submit: gtk::Button,
+    add_domain_input: gtk::Entry,
+    /// Close the add-domain form and drop what was typed.
+    add_domain_close: Rc<dyn Fn()>,
+    credential_submit: gtk::Button,
+    /// The add-credential submit's answer over the form's live draft.
+    credential_answer: Rc<dyn Fn() -> Possibility>,
+    /// Close the add-credential form and drop the typed secrets.
+    credential_close: Rc<dyn Fn()>,
+    /// `admin-dns-manage-all-toggle`, repainted with the page.
+    manage_all: gtk::ToggleButton,
+    /// The records list's empty-state placeholder: "loading" until the domains
+    /// read resolved, "no domains yet" only after.
+    placeholder: adw::StatusPage,
+}
+
+/// One domain row's answers (`dns-management.md` § Errors & edge cases),
+/// folded by [`render_admin_dns`] from the page's two reads and handed to
+/// [`build_domain_section`], which paints each control from its answer and
+/// has its action ask the same one.
+struct DnsRowAnswers {
+    /// `admin-dns-domain-mode`, switching to managed (back is always possible).
+    mode_to_managed: Possibility,
+    remove: Possibility,
+    rename: Possibility,
+    promote: Possibility,
+    cert_issue: Possibility,
+}
+
+/// The `admin-dns-rename-submit-button` answer over the sheet's live draft.
+fn rename_draft_answer(rename_ui: &RenameUi, ld: Option<&LocalDomainsSnapshot>) -> Possibility {
+    let idx = rename_ui.select.selected() as usize;
+    let target = rename_ui
+        .targets
+        .borrow()
+        .get(idx)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_default();
+    fauna_client_mail_settings::domain_forms::rename_draft_possibility(
+        ld,
+        &target,
+        &rename_ui.grace_input.text(),
+    )
+}
+
+/// Close a form whose save succeeded and drop what was typed into it — the
+/// only place an `admin-dns` form closes after a submit (tui's
+/// `admin::close_dns_form`).
+pub fn close_dns_form(handles: &AdminHandles, form: DnsForm) {
+    match form {
+        DnsForm::AddDomain => (handles.dns_page_ui.add_domain_close)(),
+        DnsForm::AddCredential => (handles.dns_page_ui.credential_close)(),
+        DnsForm::RenameSheet => {
+            handles.dns_rename.grace_input.set_text("");
+            handles.dns_rename.sheet.set_visible(false);
+        }
+    }
+}
 
 /// Handles for the primary-domain-rename UX on `admin-dns`
 /// (mail-primary-domain-rename.md § UX surface). Built once by [`build_rename_ui`];
@@ -7257,6 +8279,8 @@ pub struct RenameUi {
     pub select: gtk::DropDown,
     /// The sheet's optional grace-days override entry (blank → nest default 7).
     pub grace_input: gtk::Entry,
+    /// The sheet's submit, painted from [`rename_draft_answer`].
+    pub submit: gtk::Button,
     /// Parallel `(display name, 16-byte domain_id)` for the picker options, so
     /// submit/promote map the selected name → its id for `StartPrimaryRename`.
     /// Repopulated alongside the picker each render.
@@ -7317,6 +8341,8 @@ fn arm_dns_background_recheck(page: &gtk::Box, client: &Rc<FaunaClient>) {
 #[allow(clippy::type_complexity)]
 fn build_dns_page(
     client: &Rc<FaunaClient>,
+    last_local_domains: &Rc<RefCell<Option<LocalDomainsSnapshot>>>,
+    last_dns: &Rc<RefCell<Option<DnsSnapshot>>>,
 ) -> (
     gtk::Box,
     gtk::ListBox,
@@ -7328,9 +8354,17 @@ fn build_dns_page(
     gtk::Label,
     gtk::Box,
     Rc<std::cell::Cell<bool>>,
+    DnsPageUi,
 ) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     arm_dns_background_recheck(&outer, client);
+    // Built first so every action below can refuse onto it; placed in the
+    // page further down (see the `error_label` comment there).
+    let error_label = build_error_label();
+    let refusal = DnsRefusal {
+        label: error_label.clone(),
+        reason: Rc::new(RefCell::new(None)),
+    };
 
     let heading = gtk::Label::new(Some(admin::dns::TITLE));
     heading.add_css_class("title-2");
@@ -7355,12 +8389,17 @@ fn build_dns_page(
     // page-level singletons built once here (near the top, mirroring web); the
     // banner starts empty + the sheet starts hidden — `render_admin_dns` fills
     // them from the snapshot's `active_rename`.
-    let rename_ui = build_rename_ui(client);
+    let rename_ui = build_rename_ui(client, &refusal, last_local_domains);
     outer.append(&rename_ui.banner);
     outer.append(&rename_ui.sheet);
 
-    let (add_domain_form, dns_add_domain_warning, dns_add_domain_form, dns_adding_first_domain) =
-        build_add_domain_form(client);
+    let add_domain = build_add_domain_form(client, &refusal, last_local_domains);
+    let (add_domain_form, dns_add_domain_warning, dns_add_domain_form, dns_adding_first_domain) = (
+        add_domain.container.clone(),
+        add_domain.warning.clone(),
+        add_domain.form.clone(),
+        Rc::clone(&add_domain.warning_shown_for),
+    );
     outer.append(&add_domain_form);
 
     // Deployment "Fauna controls all domains" master switch: opts every active
@@ -7382,11 +8421,26 @@ fn build_dns_page(
     {
         let client = Rc::clone(client);
         let guard = Rc::clone(&manage_all_guard);
+        let refusal = refusal.clone();
+        let last_local_domains = Rc::clone(last_local_domains);
+        let last_dns = Rc::clone(last_dns);
         manage_all.connect_toggled(move |btn| {
             if guard.get() {
                 return; // reflective state sync from render_admin_dns, not a user click
             }
-            client.dns_set_all_managed(btn.is_active());
+            // The same answer the switch is painted from; a refusal snaps the
+            // switch back (guarded, so the snap dispatches nothing).
+            let managed = btn.is_active();
+            let answer =
+                manage_all_answer(&last_dns.borrow(), &last_local_domains.borrow(), managed);
+            if refusal.refuse(&answer) {
+                guard.set(true);
+                btn.set_active(!managed);
+                guard.set(false);
+                return;
+            }
+            refusal.clear();
+            client.dns_set_all_managed(managed);
         });
     }
     outer.append(&manage_all);
@@ -7440,7 +8494,8 @@ fn build_dns_page(
 
     // Write-only add-credential form (reveal → provider buttons → field entries
     // → verify+store). Built once so it keeps state across list refreshes.
-    creds_section.append(&build_add_credential_form(client));
+    let credential = build_add_credential_form(client, &refusal);
+    creds_section.append(&credential.container);
 
     outer.append(&creds_section);
 
@@ -7453,7 +8508,6 @@ fn build_dns_page(
     // is mapped with text set, AT-SPI never marks it SHOWING and the e2e
     // `is_visible("error-message")` reads false. Above the expanding region it
     // gets its natural height and shows reliably.
-    let error_label = build_error_label();
     outer.append(&error_label);
 
     let list_box = gtk::ListBox::new();
@@ -7463,9 +8517,11 @@ fn build_dns_page(
     list_box.set_margin_end(8);
     list_box.set_margin_bottom(8);
 
+    // "Loading" until the domains read resolves — never "No domains yet"
+    // before it (`dns-management.md` § Errors & edge cases, *Loading is not
+    // empty*); `render_admin_dns` switches it once the read is in.
     let placeholder = adw::StatusPage::builder()
-        .title(admin::dns::EMPTY)
-        .description(admin::dns::EMPTY_DESC)
+        .title(common::LOADING)
         .icon_name("network-server-symbolic")
         .build();
     list_box.set_placeholder(Some(&placeholder));
@@ -7483,13 +8539,37 @@ fn build_dns_page(
         list_box,
         error_label,
         credentials_list,
-        manage_all,
+        manage_all.clone(),
         manage_all_guard,
         rename_ui,
         dns_add_domain_warning,
         dns_add_domain_form,
         dns_adding_first_domain,
+        DnsPageUi {
+            refusal,
+            add_domain_submit: add_domain.submit,
+            add_domain_input: add_domain.input,
+            add_domain_close: add_domain.close,
+            credential_submit: credential.submit,
+            credential_answer: credential.answer,
+            credential_close: credential.close,
+            manage_all,
+            placeholder,
+        },
     )
+}
+
+/// `admin-dns-manage-all-toggle`, switching to `managed`, over the page's two
+/// reads (tui's `dns::manage_all_answer`).
+fn manage_all_answer(
+    dns: &Option<DnsSnapshot>,
+    ld: &Option<LocalDomainsSnapshot>,
+    managed: bool,
+) -> Possibility {
+    let active: Option<Vec<String>> = ld
+        .as_ref()
+        .map(|s| s.active.iter().map(|d| d.domain.clone()).collect());
+    fauna_client_dns::affordances::manage_all_possibility(dns.as_ref(), active.as_deref(), managed)
 }
 
 /// Build the page-level primary-domain-rename widgets (built once; see
@@ -7502,7 +8582,11 @@ fn build_dns_page(
 /// validates every precondition (single-active-rename / new-primary-is-additional
 /// / cert-mode / TLS-posture / SAN-cap) — a refusal surfaces via the page
 /// error-message (the "guard is the nest's" pattern).
-fn build_rename_ui(client: &Rc<FaunaClient>) -> RenameUi {
+fn build_rename_ui(
+    client: &Rc<FaunaClient>,
+    refusal: &DnsRefusal,
+    last_local_domains: &Rc<RefCell<Option<LocalDomainsSnapshot>>>,
+) -> RenameUi {
     // Deployment-wide in-flight banner container: page-level, cleared +
     // repopulated each render (empty ⟺ no active rename). `accessible_role(Group)`
     // so the container is reliably discoverable in the AT-SPI tree even while
@@ -7572,42 +8656,77 @@ fn build_rename_ui(client: &Rc<FaunaClient>) -> RenameUi {
 
     let targets: RenameTargets = Rc::new(RefCell::new(Vec::new()));
 
-    // Submit: map the picker's selection → its parallel domain_id, read the
-    // optional grace override (blank/invalid → `None` = nest default 7), dispatch
-    // StartPrimaryRename, hide the sheet. No selectable target → no-op (an empty
-    // DropDown's `selected()` is GTK_INVALID_LIST_POSITION, so `get` misses).
+    let rename_ui = RenameUi {
+        banner,
+        sheet,
+        select,
+        grace_input,
+        submit,
+        targets,
+        abort_armed: Rc::new(RefCell::new(None)),
+        complete_armed: Rc::new(RefCell::new(None)),
+    };
+
+    // The submit is painted from the shared draft answer (an active
+    // non-primary pick, a grace blank or 1–30, no rename in flight) on every
+    // edit of the sheet and every render.
+    let repaint: Rc<dyn Fn()> = {
+        let rename_ui = rename_ui.clone();
+        let ld = Rc::clone(last_local_domains);
+        Rc::new(move || {
+            crate::possible::paint(
+                &rename_ui.submit,
+                None,
+                rename_draft_answer(&rename_ui, ld.borrow().as_ref()),
+            );
+        })
+    };
+    {
+        let repaint = Rc::clone(&repaint);
+        rename_ui.grace_input.connect_changed(move |_| repaint());
+    }
+    {
+        let repaint = Rc::clone(&repaint);
+        rename_ui.select.connect_selected_notify(move |_| repaint());
+    }
+    repaint();
+
+    // Submit: ask the same answer (a refusal goes on `error-message`), map the
+    // picker's selection → its parallel domain_id, take the grace draft (blank
+    // → `None` = the nest default; an invalid one was refused above, never
+    // replaced by the default) and dispatch StartPrimaryRename. The sheet stays
+    // open until the save succeeded ([`close_dns_form`]).
     {
         let client = Rc::clone(client);
-        let sheet = sheet.clone();
-        let select = select.clone();
-        let grace_input = grace_input.clone();
-        let targets = Rc::clone(&targets);
-        submit.connect_clicked(move |_| {
-            let idx = select.selected() as usize;
-            let Some((_, domain_id)) = targets.borrow().get(idx).cloned() else {
+        let rename = rename_ui.clone();
+        let refusal = refusal.clone();
+        let ld = Rc::clone(last_local_domains);
+        rename_ui.submit.connect_clicked(move |_| {
+            let answer = rename_draft_answer(&rename, ld.borrow().as_ref());
+            if refusal.refuse(&answer) {
+                return;
+            }
+            let idx = rename.select.selected() as usize;
+            let Some((_, domain_id)) = rename.targets.borrow().get(idx).cloned() else {
                 return;
             };
-            let grace_days = grace_input.text().trim().parse::<i64>().ok();
+            let Ok(grace_days) = fauna_client_mail_settings::domain_forms::parse_rename_days(
+                &rename.grace_input.text(),
+            ) else {
+                return;
+            };
+            refusal.clear();
             client.start_primary_rename(domain_id, grace_days);
-            sheet.set_visible(false);
         });
     }
 
     // Cancel: hide without starting a rename.
     {
-        let sheet = sheet.clone();
+        let sheet = rename_ui.sheet.clone();
         cancel.connect_clicked(move |_| sheet.set_visible(false));
     }
 
-    RenameUi {
-        banner,
-        sheet,
-        select,
-        grace_input,
-        targets,
-        abort_armed: Rc::new(RefCell::new(None)),
-        complete_armed: Rc::new(RefCell::new(None)),
-    }
+    rename_ui
 }
 
 /// Build the deployment-wide in-flight primary-domain-rename banner
@@ -7673,9 +8792,14 @@ fn build_rename_banner(
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
 
-    // Complete (reveal → confirm). Shown when can_complete || can_force_complete;
-    // `force` iff can_force_complete (still in `grace`, before the window elapses).
-    if view.can_complete || view.can_force_complete {
+    // Each control is the shared rename view's answer (`dns-management.md`
+    // § Errors & edge cases): absent outside the states that take it, and the
+    // dispatching confirm asks it again. Possible-or-absent only, so the
+    // reveal → confirm swap keeps its own visibility.
+    // Complete (reveal → confirm). `force` iff can_force_complete (still in
+    // `grace`, before the window elapses).
+    let complete = view.complete_possibility();
+    if complete.is_shown() {
         let complete_btn = gtk::Button::with_label(admin::dns::rename::COMPLETE);
         crate::testid::set_test_id(&complete_btn, ids::ADMIN_DNS_RENAME_COMPLETE_BUTTON);
         let confirm_btn = gtk::Button::with_label(admin::dns::rename::COMPLETE_CONFIRM);
@@ -7715,7 +8839,9 @@ fn build_rename_banner(
             let rename_id = view.rename_id.clone();
             let force = view.can_force_complete;
             confirm_btn.connect_clicked(move |_| {
-                client.complete_primary_rename(rename_id.clone(), force);
+                if complete.is_possible() {
+                    client.complete_primary_rename(rename_id.clone(), force);
+                }
             });
         }
         actions.append(&complete_btn);
@@ -7724,7 +8850,8 @@ fn build_rename_banner(
     }
 
     // Extend (input + button) — push grace_ends_at out by N days.
-    if view.can_extend {
+    let extend = view.extend_possibility();
+    if extend.is_shown() {
         let extend_input = gtk::Entry::new();
         extend_input.set_input_purpose(gtk::InputPurpose::Digits);
         extend_input.set_text("7");
@@ -7743,7 +8870,7 @@ fn build_rename_banner(
             let extend_input = extend_input.clone();
             extend_btn.connect_clicked(move |_| {
                 let n = extend_input.text().trim().parse::<i64>().unwrap_or(0);
-                if n >= 1 {
+                if extend.is_possible() && n >= 1 {
                     client.extend_primary_rename_grace(rename_id.clone(), n);
                 }
             });
@@ -7754,7 +8881,8 @@ fn build_rename_banner(
 
     // Abort (reveal → confirm). The post-flip confirm names the inverse-re-flip
     // cost; pre-flip abort is cheap (nothing to unwind).
-    if view.can_abort {
+    let abort = view.abort_possibility();
+    if abort.is_shown() {
         let abort_btn = gtk::Button::with_label(admin::dns::rename::ABORT);
         abort_btn.add_css_class("destructive-action");
         crate::testid::set_test_id(&abort_btn, ids::ADMIN_DNS_RENAME_ABORT_BUTTON);
@@ -7793,7 +8921,9 @@ fn build_rename_banner(
             let client = Rc::clone(client);
             let rename_id = view.rename_id.clone();
             confirm_btn.connect_clicked(move |_| {
-                client.abort_primary_rename(rename_id.clone(), None);
+                if abort.is_possible() {
+                    client.abort_primary_rename(rename_id.clone(), None);
+                }
             });
         }
         actions.append(&abort_btn);
@@ -7823,9 +8953,23 @@ fn grace_remaining(ends_at_ms: i64) -> String {
 /// clears + hides the form; the resulting `AdminLocalDomainsLoaded` re-renders
 /// the list with the new domain. Built once (not rebuilt per render), so it
 /// keeps focus/state across list refreshes.
+/// The add-domain form's widgets ([`build_add_domain_form`]).
+struct AddDomainForm {
+    container: gtk::Box,
+    warning: gtk::Label,
+    form: gtk::Box,
+    warning_shown_for: Rc<std::cell::Cell<bool>>,
+    input: gtk::Entry,
+    submit: gtk::Button,
+    /// Clear + hide the form, restoring the add button.
+    close: Rc<dyn Fn()>,
+}
+
 fn build_add_domain_form(
     client: &Rc<FaunaClient>,
-) -> (gtk::Box, gtk::Label, gtk::Box, Rc<std::cell::Cell<bool>>) {
+    refusal: &DnsRefusal,
+    last_local_domains: &Rc<RefCell<Option<LocalDomainsSnapshot>>>,
+) -> AddDomainForm {
     let container = gtk::Box::new(gtk::Orientation::Vertical, 4);
     container.set_margin_start(12);
     container.set_margin_end(12);
@@ -7890,39 +9034,63 @@ fn build_add_domain_form(
         });
     }
 
-    // Cancel clears + hides the form, restoring the add button.
-    {
-        let form_ref = form.clone();
-        let input_ref = input.clone();
-        let add_ref = add_btn.clone();
-        let warning_ref = warning.clone();
-        cancel.connect_clicked(move |_| {
-            input_ref.set_text("");
-            form_ref.set_visible(false);
-            warning_ref.set_visible(false);
-            add_ref.set_visible(true);
-        });
-    }
-
-    // Submit dispatches add_local_domain with the typed (trimmed, lowercased)
-    // domain, then resets the form. Empty input is a no-op. `Rc<dyn Fn()>` so
-    // both the submit click and the entry's `activate` (Enter) share one body.
-    let do_submit: Rc<dyn Fn()> = {
-        let client = Rc::clone(client);
+    // Close clears + hides the form, restoring the add button — the Cancel
+    // press, and [`close_dns_form`] once an add succeeded.
+    let close: Rc<dyn Fn()> = {
         let form_ref = form.clone();
         let input_ref = input.clone();
         let add_ref = add_btn.clone();
         let warning_ref = warning.clone();
         Rc::new(move || {
-            let domain = input_ref.text().trim().to_lowercase();
-            if domain.is_empty() {
-                return;
-            }
-            client.add_local_domain(domain);
             input_ref.set_text("");
             form_ref.set_visible(false);
             warning_ref.set_visible(false);
             add_ref.set_visible(true);
+        })
+    };
+    {
+        let close = Rc::clone(&close);
+        cancel.connect_clicked(move |_| close());
+    }
+
+    // The submit is painted from the shared answer (the domains read in, a
+    // well-formed name not already active) on every keystroke and render.
+    {
+        let submit = submit.clone();
+        let ld = Rc::clone(last_local_domains);
+        input.connect_changed(move |entry| {
+            crate::possible::paint(
+                &submit,
+                None,
+                fauna_client_mail_settings::domain_forms::add_domain_possibility(
+                    ld.borrow().as_ref(),
+                    &entry.text(),
+                ),
+            );
+        });
+    }
+
+    // Submit asks the same answer (a refusal goes on `error-message`) and
+    // dispatches add_local_domain with the typed (trimmed, lowercased) domain.
+    // The form stays open, with what was typed, until the add succeeded
+    // ([`close_dns_form`]). `Rc<dyn Fn()>` so both the submit click and the
+    // entry's `activate` (Enter) share one body.
+    let do_submit: Rc<dyn Fn()> = {
+        let client = Rc::clone(client);
+        let input_ref = input.clone();
+        let refusal = refusal.clone();
+        let ld = Rc::clone(last_local_domains);
+        Rc::new(move || {
+            let draft = input_ref.text();
+            let answer = fauna_client_mail_settings::domain_forms::add_domain_possibility(
+                ld.borrow().as_ref(),
+                &draft,
+            );
+            if refusal.refuse(&answer) {
+                return;
+            }
+            refusal.clear();
+            client.add_local_domain(draft.trim().to_lowercase());
         })
     };
     {
@@ -7935,7 +9103,24 @@ fn build_add_domain_form(
         input.connect_activate(move |_| do_submit());
     }
 
-    (container, warning, form, warning_shown_for)
+    crate::possible::paint(
+        &submit,
+        None,
+        fauna_client_mail_settings::domain_forms::add_domain_possibility(
+            last_local_domains.borrow().as_ref(),
+            "",
+        ),
+    );
+
+    AddDomainForm {
+        container,
+        warning,
+        form,
+        warning_shown_for,
+        input,
+        submit,
+        close,
+    }
 }
 
 /// Build the always-present write-only add-credential form: a reveal button
@@ -7956,7 +9141,15 @@ fn build_add_domain_form(
 /// on the container Boxes so AT-SPI exposes them headless (plain Box → role
 /// Generic, which the Linux bridge may omit); the provider buttons + field
 /// entries have definite roles regardless.
-fn build_add_credential_form(client: &Rc<FaunaClient>) -> gtk::Box {
+/// The add-credential form's widgets ([`build_add_credential_form`]).
+struct CredentialForm {
+    container: gtk::Box,
+    submit: gtk::Button,
+    answer: Rc<dyn Fn() -> Possibility>,
+    close: Rc<dyn Fn()>,
+}
+
+fn build_add_credential_form(client: &Rc<FaunaClient>, refusal: &DnsRefusal) -> CredentialForm {
     use fauna_provisioning::{Capability, PROVIDERS};
 
     let container = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -7998,6 +9191,35 @@ fn build_add_credential_form(client: &Rc<FaunaClient>) -> gtk::Box {
     let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let entries: Rc<RefCell<Vec<(String, gtk::Entry)>>> = Rc::new(RefCell::new(Vec::new()));
 
+    // The submit's answer over the live draft (a provider picked, every one of
+    // its DNS fields typed) — the shared `credential_draft_possibility`.
+    let answer: Rc<dyn Fn() -> Possibility> = {
+        let selected = Rc::clone(&selected);
+        let entries = Rc::clone(&entries);
+        Rc::new(move || {
+            let typed: Vec<(String, String)> = entries
+                .borrow()
+                .iter()
+                .map(|(id, e)| (id.clone(), e.text().to_string()))
+                .collect();
+            let fields: Vec<(&str, &str)> = typed
+                .iter()
+                .map(|(id, v)| (id.as_str(), v.as_str()))
+                .collect();
+            fauna_client_dns::affordances::credential_draft_possibility(
+                selected.borrow().is_some(),
+                &fields,
+            )
+        })
+    };
+    // Laid out below; the repaint is wired into each provider click and field.
+    let submit = gtk::Button::with_label(admin::dns::ADD_CREDENTIAL_SUBMIT);
+    let repaint: Rc<dyn Fn()> = {
+        let submit = submit.clone();
+        let answer = Rc::clone(&answer);
+        Rc::new(move || crate::possible::paint(&submit, None, answer()))
+    };
+
     for p in PROVIDERS
         .iter()
         .filter(|p| p.capabilities.contains(&Capability::Dns))
@@ -8013,9 +9235,11 @@ fn build_add_credential_form(client: &Rc<FaunaClient>) -> gtk::Box {
             let entries = Rc::clone(&entries);
             let selected = Rc::clone(&selected);
             let pid_for_click = pid.clone();
+            let repaint = Rc::clone(&repaint);
             btn.connect_clicked(move |_| {
                 *selected.borrow_mut() = Some(pid_for_click.clone());
-                rebuild_credential_fields(&fields_box, &entries, &pid_for_click);
+                rebuild_credential_fields(&fields_box, &entries, &pid_for_click, &repaint);
+                repaint();
             });
         }
         provider_row.append(&btn);
@@ -8023,7 +9247,6 @@ fn build_add_credential_form(client: &Rc<FaunaClient>) -> gtk::Box {
 
     // Submit + cancel row.
     let btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let submit = gtk::Button::with_label(admin::dns::ADD_CREDENTIAL_SUBMIT);
     submit.add_css_class("suggested-action");
     crate::testid::set_test_id(&submit, ids::ADMIN_DNS_ADD_CREDENTIAL_SUBMIT_BUTTON);
     btn_row.append(&submit);
@@ -8050,12 +9273,14 @@ fn build_add_credential_form(client: &Rc<FaunaClient>) -> gtk::Box {
         let fields_box = fields_box.clone();
         let selected = Rc::clone(&selected);
         let entries = Rc::clone(&entries);
+        let repaint = Rc::clone(&repaint);
         Rc::new(move || {
             *selected.borrow_mut() = None;
             entries.borrow_mut().clear();
             clear_box(&fields_box);
             form_ref.set_visible(false);
             add_ref.set_visible(true);
+            repaint();
         })
     };
 
@@ -8064,18 +9289,22 @@ fn build_add_credential_form(client: &Rc<FaunaClient>) -> gtk::Box {
         cancel.connect_clicked(move |_| reset());
     }
 
-    // Submit: collect (field_id, value), dispatch PutCredentials, reset the form.
-    // No provider selected, or any field left blank → no-op (keep the form open
-    // so the admin can finish; the provider verify would reject a blank token
-    // anyway, so we skip the guaranteed-failing round-trip). The resulting
-    // snapshot re-renders the held list (success) or the error-message (verify
-    // failure) via `render_admin_dns`.
+    // Submit: ask the same answer (no provider, or a blank field, is refused
+    // on `error-message` with its reason), collect (field_id, value) and
+    // dispatch PutCredentials. The form — and the secrets typed into it — stays
+    // until the provider verified the credential and it was sealed
+    // ([`close_dns_form`]); a rejection leaves it open to correct, the
+    // error-message saying why.
     {
         let client = Rc::clone(client);
         let selected = Rc::clone(&selected);
         let entries = Rc::clone(&entries);
-        let reset = Rc::clone(&reset);
+        let answer = Rc::clone(&answer);
+        let refusal = refusal.clone();
         submit.connect_clicked(move |_| {
+            if refusal.refuse(&answer()) {
+                return;
+            }
             let Some(pid) = selected.borrow().clone() else {
                 return;
             };
@@ -8087,21 +9316,24 @@ fn build_add_credential_form(client: &Rc<FaunaClient>) -> gtk::Box {
                     value: e.text().to_string().into(),
                 })
                 .collect();
-            if fields.is_empty() || fields.iter().any(|f| f.value.trim().is_empty()) {
-                return;
-            }
             // No label input on the add-form, so the provider's translated
             // display name is the label (same as Apple, web, android, tui).
             let label = PROVIDERS
                 .iter()
                 .find(|p| p.id.as_str() == pid)
                 .map_or_else(|| pid.clone(), |p| resolve_i18n(p.display_name_key));
+            refusal.clear();
             client.dns_put_credentials(pid, fields, label);
-            reset();
         });
     }
+    repaint();
 
-    container
+    CredentialForm {
+        container,
+        submit,
+        answer,
+        close: reset,
+    }
 }
 
 /// Rebuild the add-credential form's field entries for the selected provider:
@@ -8114,6 +9346,7 @@ fn rebuild_credential_fields(
     fields_box: &gtk::Box,
     entries: &Rc<RefCell<Vec<(String, gtk::Entry)>>>,
     provider_id: &str,
+    on_change: &Rc<dyn Fn()>,
 ) {
     use fauna_provisioning::{Capability, FieldType, PROVIDERS};
 
@@ -8146,6 +9379,10 @@ fn rebuild_credential_fields(
             entry.set_visibility(false);
         }
         crate::testid::set_test_id(&entry, field.id);
+        {
+            let on_change = Rc::clone(on_change);
+            entry.connect_changed(move |_| on_change());
+        }
         row.append(&entry);
 
         fields_box.append(&row);
@@ -8223,11 +9460,42 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
 
     // Error: prefer CRUD feedback (local_domains, e.g. cannot_remove_primary),
     // then list/verify (dns).
-    let error = ld
-        .as_ref()
-        .and_then(|s| s.error.as_deref())
+    // A refusal the page just said stays on screen across the renders that
+    // follow (`DnsRefusal`); then CRUD feedback, then list/verify.
+    let ui = &handles.dns_page_ui;
+    let refused = ui.refusal.reason.borrow().clone();
+    let error = refused
+        .as_deref()
+        .or_else(|| ld.as_ref().and_then(|s| s.error.as_deref()))
         .or_else(|| dns.as_ref().and_then(|s| s.error.as_deref()));
     render_page_error(&handles.dns_records_error, error);
+
+    // Page-level controls, painted from the shared answers over the two reads
+    // (`dns-management.md` § Errors & edge cases): the add-domain, add-credential
+    // and rename submits, and the master switch for the flip it would make.
+    crate::possible::paint(
+        &ui.add_domain_submit,
+        None,
+        fauna_client_mail_settings::domain_forms::add_domain_possibility(
+            ld.as_ref(),
+            &ui.add_domain_input.text(),
+        ),
+    );
+    crate::possible::paint(&ui.credential_submit, None, (ui.credential_answer)());
+    crate::possible::paint(
+        &handles.dns_rename.submit,
+        None,
+        rename_draft_answer(&handles.dns_rename, ld.as_ref()),
+    );
+    // Loading is not empty: the placeholder says "No domains yet" only once
+    // the domains read resolved.
+    if ld.is_some() {
+        ui.placeholder.set_title(admin::dns::EMPTY);
+        ui.placeholder.set_description(Some(admin::dns::EMPTY_DESC));
+    } else {
+        ui.placeholder.set_title(common::LOADING);
+        ui.placeholder.set_description(None);
+    }
 
     // First-add irreversibility warning (`deployment-home-with-public-relay.md`
     // § MUA reach): cache the current hint for the reveal click, and correct the
@@ -8322,13 +9590,10 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
 
     // Primary-domain-rename state (mail-primary-domain-rename.md § UX surface),
     // threaded into each row's affordances (`build_domain_section`) + the
-    // deployment-wide banner (rebuilt below). `rename_available` gates the primary
-    // row's "Rename primary" button (the two-step rule); `active_rename` drives
-    // the per-row in-flight state + the banner.
-    let (rename_available, active_rename) = ld
-        .as_ref()
-        .map(|s| (s.rename_available, s.active_rename.clone()))
-        .unwrap_or((false, None));
+    // deployment-wide banner (rebuilt below). `active_rename` drives the per-row
+    // in-flight state + the banner; the rename and promote buttons are painted
+    // from the shared answers (`DnsRowAnswers`).
+    let active_rename = ld.as_ref().and_then(|s| s.active_rename.clone());
 
     // Why the nest's own certificate requests are failing: deployment-level,
     // once, above the domain sections (tls-certificates.md § Keeping the cert
@@ -8353,6 +9618,17 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
             .append(&build_remove_confirm(armed, client));
     }
 
+    // The answer for switching a domain to managed: not before the DNS read
+    // (which holds the credentials) resolved.
+    let mode_answer = |domain: &str| -> Possibility {
+        dns.as_ref().map_or(Possibility::once_read(false), |s| {
+            s.set_mode_possibility(domain, true)
+        })
+    };
+    let cert_answer = |domain: &str| -> Possibility {
+        fauna_client_dns::affordances::cert_issue_possibility(pending_cert, domain)
+    };
+
     match ld.as_ref() {
         Some(ld) => {
             for d in &ld.active {
@@ -8360,10 +9636,16 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
                 let cert = cert_by_name.get(d.domain.as_str()).copied();
                 let delegation = delegation_by_name.get(d.domain.as_str()).copied();
                 let pending = pending_cert.filter(|p| p.domain == d.domain);
+                let answers = DnsRowAnswers {
+                    mode_to_managed: mode_answer(&d.domain),
+                    remove: fauna_client_mail_settings::domain_forms::remove_possibility(d),
+                    rename: fauna_client_mail_settings::domain_forms::rename_possibility(ld),
+                    promote: fauna_client_mail_settings::domain_forms::promote_possibility(ld),
+                    cert_issue: cert_answer(&d.domain),
+                };
                 handles.dns_records_list.append(&build_domain_section(
                     &d.domain,
                     d.is_primary,
-                    rename_available,
                     active_rename.as_ref(),
                     &handles.dns_rename,
                     d.catch_all_actor_id.as_deref(),
@@ -8376,6 +9658,8 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
                     delegation,
                     pending,
                     &cred_zones,
+                    answers,
+                    &ui.refusal,
                     client,
                 ));
             }
@@ -8392,16 +9676,22 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
         }
         None => {
             // Local-domains snapshot not in yet — render the DNS domains
-            // read-only (no is_primary / catch-all known; the remove-button is
-            // enabled but the nest still refuses the primary).
+            // read-only (no is_primary / catch-all known, so the row controls
+            // the domains read decides are "still loading").
             if let Some(dns) = dns.as_ref() {
                 for view in &dns.domains {
                     let cert = cert_by_name.get(view.domain.as_str()).copied();
                     let delegation = delegation_by_name.get(view.domain.as_str()).copied();
                     let pending = pending_cert.filter(|p| p.domain == view.domain);
+                    let answers = DnsRowAnswers {
+                        mode_to_managed: mode_answer(&view.domain),
+                        remove: Possibility::once_read(false),
+                        rename: Possibility::once_read(false),
+                        promote: Possibility::once_read(false),
+                        cert_issue: cert_answer(&view.domain),
+                    };
                     handles.dns_records_list.append(&build_domain_section(
                         &view.domain,
-                        false,
                         false,
                         None,
                         &handles.dns_rename,
@@ -8415,6 +9705,8 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
                         delegation,
                         pending,
                         &cred_zones,
+                        answers,
+                        &ui.refusal,
                         client,
                     ));
                 }
@@ -8500,6 +9792,13 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
     handles.dns_manage_all_guard.set(true);
     handles.dns_manage_all_toggle.set_active(all_managed);
     handles.dns_manage_all_guard.set(false);
+    // Painted for the flip a press would make (on → off is never blocked by
+    // coverage; off → on needs every active domain covered).
+    crate::possible::paint(
+        &ui.manage_all,
+        None,
+        manage_all_answer(&dns, &ld, !all_managed),
+    );
     // The checked-state mirror (`state` = `on`/`off`), off this same projection —
     // a click's own optimistic flip of the button is not the reading.
     crate::testid::set_test_attr(
@@ -8537,7 +9836,6 @@ fn actor_not_loaded_fallback_label(id: &[u8]) -> String {
 fn build_domain_section(
     domain: &str,
     is_primary: bool,
-    rename_available: bool,
     active_rename: Option<&fauna_client_mail_settings::PrimaryDomainRenameView>,
     rename_ui: &RenameUi,
     catch_all_actor_id: Option<&[u8]>,
@@ -8550,6 +9848,8 @@ fn build_domain_section(
     delegation: Option<&fauna_client_dns::DelegationView>,
     pending: Option<&fauna_client_dns::PendingCertIssue>,
     cred_zones: &[String],
+    answers: DnsRowAnswers,
+    refusal: &DnsRefusal,
     client: &Rc<FaunaClient>,
 ) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
@@ -8593,10 +9893,39 @@ fn build_domain_section(
     mode.set_active(is_managed);
     mode.set_halign(gtk::Align::End);
     crate::testid::set_test_id(&mode, ids::ADMIN_DNS_DOMAIN_MODE);
+    // Painted for the switch a press would make: back to manual is always
+    // possible; to managed needs a held credential covering the domain
+    // (`DnsSnapshot::set_mode_possibility`), the add-credential step being
+    // what unblocks it.
+    crate::possible::paint(
+        &mode,
+        None,
+        if is_managed {
+            Possibility::Possible
+        } else {
+            answers.mode_to_managed.clone()
+        },
+    );
     {
         let client = Rc::clone(client);
         let domain = domain.to_string();
-        mode.connect_toggled(move |btn| client.dns_set_mode(domain.clone(), btn.is_active()));
+        let refusal = refusal.clone();
+        let to_managed = answers.mode_to_managed.clone();
+        let snapping = Rc::new(std::cell::Cell::new(false));
+        mode.connect_toggled(move |btn| {
+            if snapping.get() {
+                return;
+            }
+            let managed = btn.is_active();
+            if managed && refusal.refuse(&to_managed) {
+                snapping.set(true);
+                btn.set_active(false);
+                snapping.set(false);
+                return;
+            }
+            refusal.clear();
+            client.dns_set_mode(domain.clone(), managed);
+        });
     }
     header.append(&mode);
 
@@ -8636,33 +9965,48 @@ fn build_domain_section(
 
     let remove_btn = gtk::Button::with_label(admin::dns::REMOVE);
     remove_btn.add_css_class("destructive-action");
-    // Disabled on the primary (which cannot be removed); present on every row
-    // so the e2e index aligns with admin-dns-domain-name.
-    remove_btn.set_sensitive(!is_primary);
+    // Disabled on the primary (renamed away, never removed) with its reason;
+    // present on every row so the e2e index aligns with admin-dns-domain-name.
     crate::testid::set_test_id(&remove_btn, ids::ADMIN_DNS_DOMAIN_REMOVE_BUTTON);
+    crate::possible::paint(&remove_btn, None, answers.remove.clone());
     // The press only opens the shared confirm (synchronous, no nest); the
     // dialog's confirm — `build_remove_confirm` — is the act that removes.
     {
         let client = Rc::clone(client);
         let domain = domain.to_string();
-        remove_btn.connect_clicked(move |_| client.arm_remove_local_domain(domain.clone()));
+        let refusal = refusal.clone();
+        let answer = answers.remove.clone();
+        remove_btn.connect_clicked(move |_| {
+            if refusal.refuse(&answer) {
+                return;
+            }
+            refusal.clear();
+            client.arm_remove_local_domain(domain.clone());
+        });
     }
     header.append(&remove_btn);
 
     // Primary-domain-rename affordances (mail-primary-domain-rename.md § UX
-    // surface). On the PRIMARY row: "Rename primary domain" (insensitive until a
-    // non-primary domain exists — the two-step rule — or while a rename already
-    // runs) + a read-only in-flight state label during a rename. On each
-    // NON-PRIMARY active row: "Promote to primary" (a shortcut pre-targeting this
-    // domain; hidden while a rename is already in flight). Both open the shared
-    // sheet (built once; `render_admin_dns` keeps its target picker current).
+    // surface). On the PRIMARY row: "Rename primary domain" (disabled with its
+    // reason until a non-primary domain exists — the two-step rule — or while a
+    // rename already runs) + a read-only in-flight state label during a rename.
+    // On each NON-PRIMARY active row: "Promote to primary" (a shortcut
+    // pre-targeting this domain; disabled while a rename is already in flight).
+    // Both are painted from the shared answers and open the shared sheet (built
+    // once; `render_admin_dns` keeps its target picker current).
     if is_primary {
         let rename_btn = gtk::Button::with_label(admin::dns::rename::BUTTON);
-        rename_btn.set_sensitive(rename_available && active_rename.is_none());
         crate::testid::set_test_id(&rename_btn, ids::ADMIN_DNS_DOMAIN_RENAME_BUTTON);
+        crate::possible::paint(&rename_btn, None, answers.rename.clone());
         {
             let rename_ui = rename_ui.clone();
+            let refusal = refusal.clone();
+            let answer = answers.rename.clone();
             rename_btn.connect_clicked(move |_| {
+                if refusal.refuse(&answer) {
+                    return;
+                }
+                refusal.clear();
                 // Opened from the primary row — no pre-target; the picker keeps
                 // its first option (`render_admin_dns` selects index 0). Clear any
                 // stale grace override so it defaults to the nest's grace (web
@@ -8685,13 +10029,20 @@ fn build_domain_section(
             crate::testid::set_test_id(&state, ids::ADMIN_DNS_DOMAIN_RENAME_STATE);
             header.append(&state);
         }
-    } else if active_rename.is_none() {
+    } else {
         let promote_btn = gtk::Button::with_label(admin::dns::rename::PROMOTE);
         crate::testid::set_test_id(&promote_btn, ids::ADMIN_DNS_DOMAIN_PROMOTE_BUTTON);
+        crate::possible::paint(&promote_btn, None, answers.promote.clone());
         {
             let rename_ui = rename_ui.clone();
             let domain = domain.to_string();
+            let refusal = refusal.clone();
+            let answer = answers.promote.clone();
             promote_btn.connect_clicked(move |_| {
+                if refusal.refuse(&answer) {
+                    return;
+                }
+                refusal.clear();
                 // Pre-target this row's domain: find it in the picker's parallel
                 // targets and select that index, then reveal the sheet.
                 if let Some(i) = rename_ui
@@ -8955,7 +10306,15 @@ fn build_domain_section(
     // pending, the `_acme-challenge` paste surface + complete/cancel. Native-only.
     let single_issue =
         view.is_some_and(fauna_client_dns::DomainView::is_managed) || delegation.is_some();
-    build_cert_issuance(&section, domain, single_issue, pending, client);
+    build_cert_issuance(
+        &section,
+        domain,
+        single_issue,
+        pending,
+        answers.cert_issue,
+        refusal,
+        client,
+    );
 
     // `_acme-challenge` CNAME renewal-delegation (tls-certificates.md § B tier 3,
     // S6b). When a delegation exists, show the one-time CNAME (the same
@@ -9033,10 +10392,10 @@ fn build_cert_issuance(
     domain: &str,
     single_issue: bool,
     pending: Option<&fauna_client_dns::PendingCertIssue>,
+    answer: Possibility,
+    refusal: &DnsRefusal,
     client: &Rc<FaunaClient>,
 ) {
-    let pending_here = pending.is_some_and(|p| p.domain == domain);
-
     let issue_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     issue_row.set_margin_start(12);
     issue_row.set_margin_end(12);
@@ -9046,9 +10405,10 @@ fn build_cert_issuance(
     issue_btn.add_css_class("flat");
     issue_btn.set_halign(gtk::Align::Start);
     crate::testid::set_test_id(&issue_btn, ids::ADMIN_DNS_CERT_ISSUE_BUTTON);
-    // One order at a time: while a manual order is pending, the get/renew button
-    // is inert (the admin completes or cancels the open order first).
-    issue_btn.set_sensitive(!pending_here);
+    // One order at a time: while this domain's manual order is pending, the
+    // get/renew button is disabled with its reason (the admin completes or
+    // cancels the open order first) — `cert_issue_possibility`.
+    crate::possible::paint(&issue_btn, None, answer.clone());
     // A composite control (tui's `admin::Action::IssueDnsCert { single_issue }`):
     // the managed/delegated leg runs the whole DNS-01 order and delivers the
     // cert (`fauna.tls.publish_cert`, OnlineOnly); the manual leg only opens
@@ -9062,7 +10422,12 @@ fn build_cert_issuance(
     {
         let client = Rc::clone(client);
         let domain = domain.to_string();
+        let refusal = refusal.clone();
         issue_btn.connect_clicked(move |_| {
+            if refusal.refuse(&answer) {
+                return;
+            }
+            refusal.clear();
             if single_issue {
                 client.dns_issue_cert(domain.clone());
             } else {
@@ -9201,14 +10566,19 @@ fn build_cert_delegation(
 
     row.append(&form);
 
-    if cred_zones.is_empty() {
-        // No held credential → no controlled zone to delegate to.
-        delegate_btn.set_sensitive(false);
-        delegate_btn.set_tooltip_text(Some(admin::dns::cert::DELEGATE_NO_ZONES));
-    } else {
+    // The shared answer: blocked until a held credential covers a zone to
+    // delegate to (`dns-management.md` § Errors & edge cases), its reason on
+    // the button's tooltip; the click asks it again.
+    let delegate = fauna_client_dns::affordances::delegate_possibility(cred_zones);
+    let blocked = !delegate.is_possible();
+    crate::possible::paint(&delegate_btn, None, delegate);
+    if !blocked {
         {
             let form = form.clone();
             delegate_btn.connect_clicked(move |b| {
+                if !crate::possible::painted_possible(b) {
+                    return;
+                }
                 b.set_visible(false);
                 form.set_visible(true);
             });
@@ -9543,6 +10913,7 @@ pub fn update_users_page(
 ) {
     // A successful list render clears any prior Users-section action error.
     render_page_error(&handles.users_action_error, None);
+    handles.users_read.set(true);
     let total = if reply.total > 0 {
         reply.total as u64
     } else {
@@ -9552,15 +10923,32 @@ pub fn update_users_page(
         .users_page_count
         .set_text(&admin::users_page::total(&total.to_string()));
 
-    // Record the bound + reflect it on the prev/next buttons (the handlers also
-    // guard, so this is visual feedback only — admin.md § Users pagination) and
-    // the page-position indicator.
+    // Record the bound and paint prev/next from the shared
+    // `users_page_step_possibility` (admin.md § 2, the pagination rule: blocked
+    // at a bound with the reason saying so; the click handlers ask it again),
+    // then the page-position indicator.
     handles.users_total.set(total as i64);
     let offset = handles.users_offset.get();
-    handles.users_prev_page.set_sensitive(offset > 0);
-    handles
-        .users_next_page
-        .set_sensitive(offset + USERS_PAGE_SIZE < total as i64);
+    crate::possible::paint(
+        &handles.users_prev_page,
+        None,
+        fauna_client_admin::users_page_step_possibility(
+            offset,
+            total as i64,
+            USERS_PAGE_SIZE,
+            false,
+        ),
+    );
+    crate::possible::paint(
+        &handles.users_next_page,
+        None,
+        fauna_client_admin::users_page_step_possibility(
+            offset,
+            total as i64,
+            USERS_PAGE_SIZE,
+            true,
+        ),
+    );
     let pages = fauna_core::format::total_pages(total as i64, USERS_PAGE_SIZE);
     let current = fauna_core::format::current_page(offset, USERS_PAGE_SIZE);
     handles
@@ -9587,6 +10975,51 @@ pub fn update_users_page(
         ));
     }
     handles.users_take_over.sync();
+}
+
+/// The admit and invite controls' tier gate (`admin.md` § 2 → *What a row
+/// offers*: never offered enabled beside an empty tier select): the shared
+/// `fauna_client_admin::tier_pick_possibility` over the tier names the pickers
+/// offer, painted on the admit button, the invite form's opener and its
+/// confirm, and asked again by each click. The opener and the confirm keep
+/// the visibility the form's open/closed state gives them — the answer is
+/// never *absent*, so only the sensitivity and the reason are the seam's.
+pub struct TierGate {
+    tier_names: Rc<RefCell<Vec<String>>>,
+    admit: gtk::Button,
+    /// The admit form's account-key draft: the admit button's answer folds
+    /// the shared `admit_actor_possibility` after the tier gate.
+    admit_actor: gtk::Entry,
+    open: gtk::Button,
+    confirm: gtk::Button,
+}
+
+impl TierGate {
+    /// The answer the pickers' tier names give now.
+    pub fn answer(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_admin::tier_pick_possibility(&self.tier_names.borrow())
+    }
+
+    /// The admit button's answer: the tier gate first, then the account-key
+    /// draft (`admin.md` § Errors & edge cases, draft validity).
+    pub fn admit_answer(&self) -> fauna_core::possibility::Possibility {
+        self.answer()
+            .and(fauna_client_admin::admit_actor_possibility(
+                &self.admit_actor.text(),
+            ))
+    }
+
+    /// Paint the three controls from [`Self::answer`] (the admit button from
+    /// [`Self::admit_answer`]); called whenever the tier names change, the
+    /// account-key draft changes, and after a mint re-arms the opener.
+    pub fn paint(&self) {
+        crate::possible::paint(&self.admit, None, self.admit_answer());
+        for button in [&self.open, &self.confirm] {
+            let visible = button.is_visible();
+            crate::possible::paint(button, None, self.answer());
+            button.set_visible(visible);
+        }
+    }
 }
 
 /// The admin take-over's armed confirm on the Users hub (`family-safety.md`
@@ -9757,7 +11190,9 @@ pub fn update_invite_codes(
         handles.invite_codes_list.append(&row);
     }
 
-    handles.create_invite_btn.set_sensitive(true);
+    // The mint is answered: the opener is live again as far as the tier gate
+    // allows (the confirm left it insensitive while the mint was in flight).
+    handles.tier_gate.paint();
 }
 
 // ---------------------------------------------------------------------------
@@ -9892,9 +11327,25 @@ fn build_user_row(
     // the Cancel-eviction control beside them.
     // The viewer id keys the take-over offer (the row's guardian is not the
     // viewing admin).
+    // Each control is painted from its `*_possibility` sibling (absent where
+    // the row does not offer it — `admin.md` § Errors & edge cases, *Role and
+    // state gates answer one `Possibility` too*) and its click asks the same
+    // answer again, sending nothing when it no longer holds.
     let controls = fauna_client_admin::admin_user_row_controls(user, viewer);
+    let still = |pick: RowControlPick| {
+        let asked = user.clone();
+        let viewer = viewer.to_vec();
+        move || {
+            pick(&fauna_client_admin::admin_user_row_controls(
+                &asked, &viewer,
+            ))
+            .is_possible()
+        }
+    };
 
-    if controls.evict {
+    let evict = controls.evict_possibility();
+    if evict.is_shown() {
+        let possible_now = still(fauna_client_admin::AdminUserRowControls::evict_possibility);
         let actor = evict_actor.clone();
         let client = Rc::clone(&evict_client);
         let evict_btn = gtk::Button::with_label(admin::users_page::EVICT);
@@ -9902,15 +11353,20 @@ fn build_user_row(
         evict_btn.add_css_class("destructive-action");
         evict_btn.set_valign(gtk::Align::Center);
         crate::testid::set_test_id(&evict_btn, ids::ADMIN_USERS_EVICT_BUTTON);
+        crate::possible::paint(&evict_btn, None, evict);
         // tui's `admin::Action::EvictUser`.
         crate::offline_gate::declare_wire_kind(&evict_btn, "fauna.admin.users.evict");
         evict_btn.connect_clicked(move |_| {
-            client.evict_user(actor.clone());
+            if possible_now() {
+                client.evict_user(actor.clone());
+            }
         });
         hbox.append(&evict_btn);
     }
 
-    if controls.suspend {
+    let suspend = controls.suspend_possibility();
+    if suspend.is_shown() {
+        let possible_now = still(fauna_client_admin::AdminUserRowControls::suspend_possibility);
         let actor = evict_actor.clone();
         let client = Rc::clone(&evict_client);
         let suspend_btn = gtk::Button::with_label(admin::users_page::SUSPEND);
@@ -9918,60 +11374,84 @@ fn build_user_row(
         suspend_btn.add_css_class("destructive-action");
         suspend_btn.set_valign(gtk::Align::Center);
         crate::testid::set_test_id(&suspend_btn, ids::ADMIN_USERS_SUSPEND_BUTTON);
+        crate::possible::paint(&suspend_btn, None, suspend);
         // tui's `admin::Action::SuspendUser`.
         crate::offline_gate::declare_wire_kind(&suspend_btn, "fauna.admin.users.suspend");
         suspend_btn.connect_clicked(move |_| {
-            client.suspend_user(actor.clone());
+            if possible_now() {
+                client.suspend_user(actor.clone());
+            }
         });
         hbox.append(&suspend_btn);
     }
 
-    if controls.restore {
+    let restore = controls.restore_possibility();
+    if restore.is_shown() {
+        let possible_now = still(fauna_client_admin::AdminUserRowControls::restore_possibility);
         let cancel_btn = gtk::Button::with_label(admin::users_page::CANCEL_EVICTION);
         cancel_btn.add_css_class("flat");
         cancel_btn.set_valign(gtk::Align::Center);
         crate::testid::set_test_id(&cancel_btn, ids::ADMIN_USERS_CANCEL_EVICTION_BUTTON);
+        crate::possible::paint(&cancel_btn, None, restore);
         // tui's `admin::Action::CancelUserEviction`.
         crate::offline_gate::declare_wire_kind(&cancel_btn, "fauna.admin.users.cancel_eviction");
         cancel_btn.connect_clicked(move |_| {
-            evict_client.cancel_user_eviction(evict_actor.clone());
+            if possible_now() {
+                evict_client.cancel_user_eviction(evict_actor.clone());
+            }
         });
         hbox.append(&cancel_btn);
     }
 
-    if controls.make_admin {
+    let make_admin = controls.make_admin_possibility();
+    if make_admin.is_shown() {
+        let possible_now = still(fauna_client_admin::AdminUserRowControls::make_admin_possibility);
         let actor = actor_for_role.clone();
         let client = Rc::clone(&role_client);
         let make_admin_btn = gtk::Button::with_label(admin::users_page::MAKE_ADMIN);
         make_admin_btn.add_css_class("flat");
         make_admin_btn.set_valign(gtk::Align::Center);
         crate::testid::set_test_id(&make_admin_btn, ids::ADMIN_USERS_MAKE_ADMIN_BUTTON);
+        crate::possible::paint(&make_admin_btn, None, make_admin);
         // tui's `admin::Action::MakeAdmin`.
         crate::offline_gate::declare_wire_kind(&make_admin_btn, "fauna.admin.admins.add");
         make_admin_btn.connect_clicked(move |_| {
-            client.make_admin(actor.clone());
+            if possible_now() {
+                client.make_admin(actor.clone());
+            }
         });
         hbox.append(&make_admin_btn);
     }
 
-    if controls.remove_admin {
+    // `admin.md` § 2 → *What a row offers*: the shared answer paints the
+    // button (absent without the role; blocked, with its reason on the
+    // tooltip, on the nest's last superadmin) and the click asks it again.
+    let remove_admin = fauna_client_admin::remove_admin_possibility(user);
+    if remove_admin.is_shown() {
         let remove_admin_btn = gtk::Button::with_label(admin::users_page::REMOVE_ADMIN);
         remove_admin_btn.add_css_class("flat");
         remove_admin_btn.add_css_class("destructive-action");
         remove_admin_btn.set_valign(gtk::Align::Center);
         crate::testid::set_test_id(&remove_admin_btn, ids::ADMIN_USERS_REMOVE_ADMIN_BUTTON);
+        crate::possible::paint(&remove_admin_btn, None, remove_admin);
         // tui's `admin::Action::RemoveAdmin`.
         crate::offline_gate::declare_wire_kind(&remove_admin_btn, "fauna.admin.admins.remove");
+        let asked = user.clone();
         remove_admin_btn.connect_clicked(move |_| {
-            role_client.remove_admin(actor_for_role.clone());
+            if fauna_client_admin::remove_admin_possibility(&asked).is_possible() {
+                role_client.remove_admin(actor_for_role.clone());
+            }
         });
         hbox.append(&remove_admin_btn);
     }
 
     vbox.append(&hbox);
-    if let Some(take_over_line) =
-        build_take_over_line(user, controls.take_over, &take_over_client, take_over)
-    {
+    if let Some(take_over_line) = build_take_over_line(
+        user,
+        controls.take_over_possibility(),
+        &take_over_client,
+        take_over,
+    ) {
         vbox.append(&take_over_line);
     }
     row.set_child(Some(&vbox));
@@ -9984,9 +11464,14 @@ fn build_user_row(
 /// the SHARED decision offers it, and the armed inline confirm triple, shown
 /// only while this row is armed. Confirm disarms BEFORE it dispatches
 /// `fauna.family.transfer { ward, self }`. `None` on an unsupervised row.
+/// One of [`fauna_client_admin::AdminUserRowControls`]'s `*_possibility`
+/// siblings, named so a users-row control's click can ask it again.
+type RowControlPick =
+    fn(&fauna_client_admin::AdminUserRowControls) -> fauna_core::possibility::Possibility;
+
 fn build_take_over_line(
     user: &fauna_client_admin::admin::AdminUser,
-    offered: bool,
+    offered: fauna_core::possibility::Possibility,
     client: &Rc<FaunaClient>,
     take_over: &Rc<TakeOverArm>,
 ) -> Option<gtk::Box> {
@@ -10007,14 +11492,22 @@ fn build_take_over_line(
     crate::testid::set_test_id(&supervised_by, ids::ADMIN_USERS_SUPERVISED_BY);
     line.append(&supervised_by);
 
-    let button = offered.then(|| {
+    // `AdminUserRowControls::take_over_possibility`: absent where the row
+    // does not offer it; the click arms only while the painted answer holds.
+    let button = offered.is_shown().then(|| {
         let button = gtk::Button::with_label(admin::users_page::TAKE_OVER);
         button.add_css_class("flat");
         button.set_valign(gtk::Align::Center);
         crate::testid::set_test_id(&button, ids::ADMIN_USERS_TAKE_OVER_BUTTON);
+        crate::possible::paint(&button, None, offered.clone());
         let arm = Rc::clone(take_over);
         let ward = ward.clone();
-        button.connect_clicked(move |_| arm.arm(ward.clone()));
+        let possible_now = offered.is_possible();
+        button.connect_clicked(move |_| {
+            if possible_now {
+                arm.arm(ward.clone());
+            }
+        });
         line.append(&button);
         button
     });
@@ -10077,6 +11570,48 @@ mod tests {
     };
     use adw::prelude::*;
     use fauna_client_admin::IssuerForcedArm;
+    use fauna_core::possibility::ReadState;
+
+    /// `admin-users-invite-code-copy-btn` confirms a copy that reached the
+    /// clipboard (the code as its `copied` attr) and says a failed one on
+    /// `admin-users-action-error` — the tui `CopyMintedCode` twin.
+    #[test]
+    fn invite_code_copy_confirms_or_says_it_failed() {
+        crate::testid::run_on_gtk_thread(|| {
+            let btn = gtk::Button::with_label(admin::users_page::COPY_CODE);
+            let error = gtk::Label::new(None);
+            error.set_visible(false);
+
+            super::copy_minted_code(&btn, &error, "", |_| panic!("no code, no write"));
+
+            super::copy_minted_code(&btn, &error, "inv-123", |_| Err("closed".into()));
+            assert!(error.is_visible());
+            assert_eq!(
+                error.text().as_str(),
+                crate::clipboard::copy_failed_text("closed")
+            );
+            assert_eq!(
+                crate::testid::test_attr_text(&btn, "copied").as_deref(),
+                Some("")
+            );
+
+            let mut written = String::new();
+            super::copy_minted_code(&btn, &error, "inv-123", |t| {
+                written = t.to_string();
+                Ok(())
+            });
+            assert_eq!(written, "inv-123");
+            assert_eq!(
+                crate::testid::test_attr_text(&btn, "copied").as_deref(),
+                Some("inv-123")
+            );
+            assert_eq!(
+                btn.label().as_deref(),
+                Some(crate::i18n::strings::settings::account_page::COPIED_CLIPBOARD)
+            );
+            assert!(!error.is_visible(), "the success clears its own failure");
+        });
+    }
 
     /// The DNS catch-all/role-address pickers' not-loaded fallback shows the
     /// **full** actor hex, not a 4-byte-truncated prefix (admin.md § 2's
@@ -10201,6 +11736,396 @@ mod tests {
                 "{ctx} should route to admin-users-action-error"
             );
         }
+    }
+
+    /// `admin.md` § 4, *A forwarder needs a hosted domain*: nothing is painted
+    /// before the read; a read with no hosted domain blocks the fields and the
+    /// submit with the DNS reason and offers the step; a hosted domain picked
+    /// makes the submit live and drops the step.
+    #[test]
+    fn forwarder_form_needs_a_hosted_domain_and_offers_dns() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let form = super::ForwarderForm {
+                domain: gtk::DropDown::from_strings(&[]),
+                pattern: gtk::Entry::new(),
+                target: gtk::Entry::new(),
+                submit: gtk::Button::new(),
+                domains_step: gtk::Button::new(),
+                reason: gtk::Label::new(None),
+                local_domains: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                read: std::rc::Rc::new(std::cell::Cell::new(ReadState::Pending)),
+                busy: std::rc::Rc::new(std::cell::Cell::new(false)),
+            };
+            form.domains_step.set_visible(false);
+            assert!(
+                !form.create_answer().is_possible(),
+                "unread is not possible"
+            );
+            // `admin.md` § Errors & edge cases, *Controls wait for their
+            // read*: before the read every control says it is loading and
+            // the DNS step is not offered; a failed read says so instead.
+            form.repaint();
+            for w in [
+                form.domain.upcast_ref::<gtk::Widget>(),
+                form.pattern.upcast_ref(),
+                form.target.upcast_ref(),
+                form.submit.upcast_ref(),
+            ] {
+                assert!(!w.is_sensitive());
+            }
+            assert_eq!(
+                form.reason.text().as_str(),
+                crate::i18n::strings::common::STILL_LOADING
+            );
+            assert!(!form.domains_step.is_visible());
+            form.paint(&[], ReadState::Failed);
+            assert_eq!(
+                form.reason.text().as_str(),
+                crate::i18n::strings::common::LOAD_FAILED
+            );
+            assert!(!form.domains_step.is_visible());
+            let err = gtk::Label::new(None);
+            assert!(crate::possible::refused_at_press(
+                &form.create_answer(),
+                &err
+            ));
+            assert_eq!(
+                err.text().as_str(),
+                crate::i18n::strings::common::LOAD_FAILED
+            );
+
+            form.paint(&[], ReadState::Resolved);
+            assert!(form.domains_step.is_visible(), "the DNS step is offered");
+            for w in [
+                form.domain.upcast_ref::<gtk::Widget>(),
+                form.pattern.upcast_ref(),
+                form.target.upcast_ref(),
+                form.submit.upcast_ref(),
+            ] {
+                assert!(!w.is_sensitive());
+            }
+            assert_eq!(
+                form.reason.text().as_str(),
+                admin::aliases_page::NO_HOSTED_DOMAIN
+            );
+
+            form.domain
+                .set_model(Some(&gtk::StringList::new(&["acme.test"])));
+            form.domain.set_selected(0);
+            form.paint(&["acme.test".to_string()], ReadState::Resolved);
+            assert!(!form.domains_step.is_visible());
+            assert!(form.pattern.is_sensitive() && form.target.is_sensitive());
+            // `admin.md` § Errors & edge cases, draft validity: a domain is
+            // hosted and picked, but the blank drafts block the submit with the
+            // shared reason — the inputs themselves stay editable.
+            assert!(!form.submit.is_sensitive());
+            assert_eq!(
+                form.reason.text().as_str(),
+                admin::aliases_page::FORWARDER_DRAFT_INCOMPLETE
+            );
+            form.pattern.set_text("sales");
+            form.repaint_submit();
+            assert!(
+                !form.submit.is_sensitive(),
+                "a blank destination still blocks"
+            );
+            form.target.set_text("someone@example.com");
+            form.repaint_submit();
+            assert!(form.submit.is_sensitive());
+            assert!(!form.reason.is_visible());
+
+            // The press refuses with the same reason on `error-message`.
+            let err = gtk::Label::new(None);
+            assert!(!crate::possible::refused_at_press(
+                &form.create_answer(),
+                &err
+            ));
+            form.target.set_text("  ");
+            assert!(crate::possible::refused_at_press(
+                &form.create_answer(),
+                &err
+            ));
+            assert!(err.is_visible());
+            assert_eq!(
+                err.text().as_str(),
+                admin::aliases_page::FORWARDER_DRAFT_INCOMPLETE
+            );
+        });
+    }
+
+    /// `admin.md` § 2, *What a row offers*: the tier gate blocks admit, the
+    /// invite opener and its confirm beside an empty tier list, keeping the
+    /// opener's and the confirm's own visibility.
+    #[test]
+    fn tier_gate_blocks_admit_and_invite_without_a_tier() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let gate = super::TierGate {
+                tier_names: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                admit: gtk::Button::new(),
+                admit_actor: gtk::Entry::new(),
+                open: gtk::Button::new(),
+                confirm: gtk::Button::new(),
+            };
+            gate.confirm.set_visible(false);
+            gate.paint();
+            assert!(!gate.admit.is_sensitive() && !gate.open.is_sensitive());
+            assert!(
+                !gate.confirm.is_visible(),
+                "the closed form's confirm stays hidden"
+            );
+            assert_eq!(
+                gate.admit.tooltip_text().as_deref(),
+                Some(admin::users_page::NO_TIER),
+                "the tier gate speaks before the draft"
+            );
+            gate.tier_names.borrow_mut().push("free".into());
+            gate.paint();
+            assert!(gate.open.is_sensitive());
+            // `admin.md` § Errors & edge cases, draft validity: admit then
+            // waits on a 64-hex account key.
+            assert!(!gate.admit.is_sensitive());
+            assert_eq!(
+                gate.admit.tooltip_text().as_deref(),
+                Some(admin::users_page::ADMIT_ACTOR_HINT)
+            );
+            gate.admit_actor.set_text(&"ab".repeat(32));
+            gate.paint();
+            assert!(gate.admit.is_sensitive());
+        });
+    }
+
+    /// `admin.md` § Errors & edge cases, draft validity, on the Settings and
+    /// Users forms: each submit is painted from its shared draft predicate,
+    /// live only once every draft parses.
+    #[test]
+    fn tier_and_membership_saves_follow_their_drafts() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let caps: [gtk::Entry; 5] = std::array::from_fn(|_| {
+                let e = gtk::Entry::new();
+                e.set_text("10");
+                e
+            });
+            let save = gtk::Button::new();
+            super::paint_tier_caps_save(&save, &caps);
+            assert!(save.is_sensitive());
+            caps[2].set_text("ten");
+            super::paint_tier_caps_save(&save, &caps);
+            assert!(!save.is_sensitive());
+            assert_eq!(
+                save.tooltip_text().as_deref(),
+                Some(admin::settings_page::SAVE_TIER_ERROR_INVALID_CAP)
+            );
+            assert_eq!(super::read_caps(&caps), None, "never a stored fallback");
+            caps[2].set_text("3");
+            assert_eq!(super::read_caps(&caps), Some([10, 10, 3, 10, 10]));
+
+            let form = super::TierAddForm {
+                name: gtk::Entry::new(),
+                caps: caps.clone(),
+                add: gtk::Button::new(),
+                read: std::rc::Rc::new(std::cell::Cell::new(false)),
+            };
+            // `admin.md` § Errors & edge cases, *Controls wait for their
+            // read*: before `tiers.list` answers the form says it is loading
+            // — the read ahead of the empty-name draft — and refuses a press.
+            form.paint();
+            assert!(!form.add.is_sensitive() && !form.name.is_sensitive());
+            assert_eq!(
+                form.add.tooltip_text().as_deref(),
+                Some(crate::i18n::strings::common::STILL_LOADING)
+            );
+            let err = gtk::Label::new(None);
+            assert!(crate::possible::refused_at_press(&form.answer(), &err));
+            form.read.set(true);
+            form.paint();
+            assert!(form.name.is_sensitive());
+            assert!(!form.add.is_sensitive());
+            assert_eq!(
+                form.add.tooltip_text().as_deref(),
+                Some(admin::settings_page::ADD_TIER_ERROR_EMPTY_NAME)
+            );
+            form.name.set_text("plus");
+            form.paint();
+            assert!(form.add.is_sensitive());
+
+            let empty = gtk::DropDown::from_strings(&[]);
+            let membership_save = gtk::Button::new();
+            super::paint_membership_save(&membership_save, &empty);
+            assert!(!membership_save.is_sensitive());
+            assert_eq!(
+                membership_save.tooltip_text().as_deref(),
+                Some(admin::settings_page::SAVE_MEMBERSHIP_TIER_ERROR_NO_TIER)
+            );
+            super::paint_membership_save(&membership_save, &gtk::DropDown::from_strings(&["free"]));
+            assert!(membership_save.is_sensitive());
+        });
+    }
+
+    /// The Nest page's serving-port and region saves: loading first, then the
+    /// draft; a router-fronted nest blocks the port with its hint.
+    #[test]
+    fn nest_draft_gates_fold_the_read_then_the_draft() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let gates = super::NestDraftGates {
+                serving_port_entry: gtk::Entry::new(),
+                serving_port_save: gtk::Button::new(),
+                serving_port_fronted: std::rc::Rc::new(std::cell::Cell::new(None)),
+                region_entry: gtk::Entry::new(),
+                region_save: gtk::Button::new(),
+                region_read: std::rc::Rc::new(std::cell::Cell::new(false)),
+                pairing_toggle: gtk::Switch::new(),
+                pairing_read: std::rc::Rc::new(std::cell::Cell::new(false)),
+            };
+            gates.connect();
+            // `admin.md` § Errors & edge cases, *Controls wait for their
+            // read*: the pairing toggle and the serving-port input wait for
+            // their reads too.
+            assert!(!gates.pairing_toggle.is_sensitive());
+            assert_eq!(
+                gates.pairing_toggle.tooltip_text().as_deref(),
+                Some(crate::i18n::strings::common::STILL_LOADING)
+            );
+            assert!(!gates.serving_port_entry.is_sensitive());
+            gates.serving_port_entry.set_text("99999");
+            assert_eq!(
+                gates.serving_port_save.tooltip_text().as_deref(),
+                Some(crate::i18n::strings::common::STILL_LOADING),
+                "a page still loading says so first"
+            );
+            gates.serving_port_fronted.set(Some(false));
+            gates.paint_serving_port();
+            assert!(!gates.serving_port_save.is_sensitive());
+            assert_eq!(
+                gates.serving_port_save.tooltip_text().as_deref(),
+                Some(admin::nest_page::SERVING_PORT_INVALID)
+            );
+            gates.serving_port_entry.set_text("8443");
+            assert!(
+                gates.serving_port_save.is_sensitive(),
+                "repainted on the keystroke"
+            );
+            assert!(
+                gates.serving_port_entry.is_sensitive(),
+                "the input stays editable"
+            );
+
+            gates.region_read.set(true);
+            gates.region_entry.set_text("no");
+            assert!(!gates.region_save.is_sensitive());
+            let err = gtk::Label::new(None);
+            assert!(crate::possible::refused_at_press(
+                &gates.region_answer(),
+                &err
+            ));
+            assert_eq!(err.text().as_str(), admin::nest_page::REGION_INVALID);
+            gates.region_entry.set_text("NO");
+            assert!(gates.region_save.is_sensitive());
+
+            gates.pairing_read.set(true);
+            gates.paint_pairing();
+            assert!(gates.pairing_toggle.is_sensitive());
+        });
+    }
+
+    /// `admin.md` § Errors & edge cases, *Controls wait for their read*,
+    /// Bridges: until the list read resolves both sections say they are
+    /// loading (or that the read failed) instead of their empty text, and
+    /// both headings publish that reason; once read the empty text returns
+    /// and the headings publish none.
+    #[test]
+    fn bridges_sections_say_loading_before_their_empty_text() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let (_page, _pending, _approved, _err, gate) = super::build_bridges_pending_page();
+            let reason = |label: &gtk::Label| crate::testid::test_attr_text(label, "reason");
+            let loading = crate::i18n::strings::common::STILL_LOADING;
+            for section in [&gate.pending_section, &gate.approved_section] {
+                assert_eq!(reason(section).as_deref(), Some(loading));
+            }
+            assert_eq!(gate.pending_placeholder.title().as_str(), loading);
+            assert_eq!(gate.approved_placeholder.title().as_str(), loading);
+
+            gate.paint(ReadState::Failed);
+            let failed = crate::i18n::strings::common::LOAD_FAILED;
+            assert_eq!(reason(&gate.approved_section).as_deref(), Some(failed));
+            assert_eq!(gate.pending_placeholder.title().as_str(), failed);
+
+            gate.paint(ReadState::Resolved);
+            for section in [&gate.pending_section, &gate.approved_section] {
+                assert_eq!(reason(section).as_deref(), Some(""));
+            }
+            assert_eq!(
+                gate.pending_placeholder.title().as_str(),
+                admin::bridges_pending::EMPTY
+            );
+            assert_eq!(
+                gate.approved_placeholder.title().as_str(),
+                admin::bridges_pending::APPROVED_EMPTY
+            );
+        });
+    }
+
+    /// `admin.md` § Errors & edge cases, *Controls wait for their read*,
+    /// Bridges: the first confirm press takes the armed act; a second while
+    /// it is on its way is refused with *still saving*, never the machine's
+    /// raw invalid-state error, and onto the page's error line.
+    #[test]
+    fn a_second_bridge_confirm_press_is_refused_in_flight() {
+        crate::testid::run_on_gtk_thread(|| {
+            let nest = fauna_client::NestClient::new(
+                "http://127.0.0.1:1".to_string(),
+                fauna_core::identity::ActorKeypair::generate(),
+            );
+            let machine = fauna_client_mail_settings::rpc_glue::build_bridge_approval_machine(nest);
+            machine.arm(fauna_client_mail_settings::BridgeConfirm::Reject {
+                pubkey_hex: "22".repeat(32),
+            });
+            assert!(super::begin_bridge_confirm(&machine).is_ok());
+            let refused = super::begin_bridge_confirm(&machine).expect_err("in flight");
+            assert_eq!(
+                refused.reason().map(|r| r.key.as_str()),
+                Some("common.in_flight")
+            );
+            let err = gtk::Label::new(None);
+            assert!(crate::possible::refused_at_press(&refused, &err));
+            assert_eq!(err.text().as_str(), crate::i18n::strings::common::IN_FLIGHT);
+        });
+    }
+
+    /// `admin.md` § Errors & edge cases, *Controls wait for their read*, Nest:
+    /// before `fauna.setup.status` answers, the NAT radios and save paint
+    /// blocked with *still loading*, and a radio press is refused — the
+    /// machine's pre-selected `public` is never saved over an unread mode.
+    #[test]
+    fn nat_mode_waits_for_the_status_read() {
+        crate::testid::run_on_gtk_thread(|| {
+            let machine = fauna_onboarding_machine::AdminNatModeMachine::new(
+                "http://127.0.0.1:1".to_string(),
+                fauna_core::secret::SecretString::new("00".repeat(32)),
+            );
+            let select = super::nat_select_answer(&machine, false);
+            assert_eq!(
+                select.reason().map(|r| r.key.as_str()),
+                Some("common.still_loading")
+            );
+            assert_eq!(
+                machine.save_possibility().reason().map(|r| r.key.as_str()),
+                Some("common.still_loading")
+            );
+            let radio = gtk::CheckButton::new();
+            crate::possible::paint(&radio, None, select.clone());
+            assert!(!radio.is_sensitive());
+            let err = gtk::Label::new(None);
+            assert!(crate::possible::refused_at_press(&select, &err));
+            assert_eq!(
+                err.text().as_str(),
+                crate::i18n::strings::common::STILL_LOADING
+            );
+        });
     }
 
     /// The take-over arm (family-safety.md § App surface → Admin take-over):
@@ -10608,6 +12533,103 @@ mod tests {
             assert!(w.rotate_button.is_sensitive());
 
             crate::offline_gate::reset_for_test("disconnected");
+        });
+    }
+
+    /// The web-app origin section's widgets as the page builds them, the
+    /// section hidden until the read lands.
+    fn web_origin_widgets() -> super::WebOriginWidgets {
+        let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        section.set_visible(false);
+        let bundled = gtk::CheckButton::with_label("bundled");
+        let central = gtk::CheckButton::with_label("central");
+        central.set_group(Some(&bundled));
+        super::WebOriginWidgets {
+            section,
+            bundled,
+            central,
+            status: gtk::Label::new(None),
+            scope: gtk::Label::new(None),
+            save: gtk::Button::with_label("save"),
+        }
+    }
+
+    fn origin_view(
+        mode: fauna_client_admin::WebAppOrigin,
+        central_live: bool,
+    ) -> fauna_client_admin::AdminWebAppOriginView {
+        fauna_client_admin::admin_web_app_origin_view(Some(
+            &fauna_client_admin::WebAppOriginStatus::project(
+                mode,
+                Some("example.org"),
+                central_live,
+            ),
+        ))
+    }
+
+    /// Today's builds: bundled stored and the central origin not live — no
+    /// element of the section is shown (`web-content-hosting.md` § While the
+    /// central origin is not live, the choice is not offered, rule 5).
+    #[test]
+    fn web_origin_bundled_while_central_is_not_live_shows_no_section() {
+        crate::testid::run_on_gtk_thread(|| {
+            let w = web_origin_widgets();
+            let view = origin_view(fauna_client_admin::WebAppOrigin::Bundled, false);
+            super::paint_web_app_origin(&w, &view);
+            assert!(!w.section.is_visible(), "section shown while not live");
+        });
+    }
+
+    /// A stored central while not live: the section, the bundled radio and
+    /// the save stay as the way back; the central radio is gone, no radio is
+    /// marked, and once bundled is picked the save is live.
+    #[test]
+    fn web_origin_stored_central_while_not_live_offers_only_the_way_back() {
+        crate::testid::run_on_gtk_thread(|| {
+            let w = web_origin_widgets();
+            let view = origin_view(fauna_client_admin::WebAppOrigin::Central, false);
+            super::paint_web_app_origin(&w, &view);
+            assert!(w.section.is_visible());
+            assert!(w.bundled.is_visible() && w.bundled.is_sensitive());
+            assert!(
+                !w.central.is_visible(),
+                "central radio offered while not live"
+            );
+            assert!(!w.bundled.is_active() && !w.central.is_active());
+            assert!(!w.save.is_sensitive(), "nothing marked, nothing to save");
+            assert_eq!(
+                w.status.text().as_str(),
+                view.status.resolve(crate::i18n::strings::lookup)
+            );
+            w.bundled.set_active(true);
+            super::paint_web_app_origin_save(&w, &view);
+            assert!(w.save.is_sensitive(), "saving bundled is the way back");
+        });
+    }
+
+    /// A nest whose central origin is live shows the whole section, both
+    /// radios live.
+    #[test]
+    fn web_origin_live_central_origin_shows_the_whole_section() {
+        crate::testid::run_on_gtk_thread(|| {
+            let w = web_origin_widgets();
+            let view = origin_view(fauna_client_admin::WebAppOrigin::Bundled, true);
+            super::paint_web_app_origin(&w, &view);
+            assert!(w.section.is_visible());
+            assert!(w.central.is_visible() && w.central.is_sensitive());
+            assert!(w.bundled.is_active());
+            assert!(w.save.is_sensitive());
+        });
+    }
+
+    /// A nest predating the choice: a feature it does not have, no section.
+    #[test]
+    fn web_origin_nest_predating_the_choice_shows_no_section() {
+        crate::testid::run_on_gtk_thread(|| {
+            let w = web_origin_widgets();
+            let view = fauna_client_admin::admin_web_app_origin_view(None);
+            super::paint_web_app_origin(&w, &view);
+            assert!(!w.section.is_visible());
         });
     }
 }

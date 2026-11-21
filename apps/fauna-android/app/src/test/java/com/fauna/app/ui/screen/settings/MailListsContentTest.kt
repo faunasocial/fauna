@@ -11,6 +11,8 @@ import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.fauna_client_mail_settings.ListDraft
 import uniffi.fauna_client_mail_settings.ListView
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [MailListsContent] (the `mail-lists`
@@ -45,6 +47,9 @@ class MailListsContentTest {
         lists: List<ListView> = emptyList(),
         localDomains: List<String> = listOf("example.com"),
         hydrated: Boolean = true,
+        // The shared `MailListsSnapshot::create_possibility` answer the wrapper
+        // computes; possible by default (a domain to create on).
+        createAnswer: Possibility = Possibility.Possible,
         onCreate: (ListDraft) -> Unit = {},
         onUpdate: (String, ListDraft) -> Unit = { _, _ -> },
         onDelete: (String) -> Unit = {},
@@ -54,6 +59,7 @@ class MailListsContentTest {
             MailListsContent(
                 lists = lists,
                 localDomains = localDomains,
+                createAnswer = createAnswer,
                 hydrated = hydrated,
                 working = false,
                 onBack = {},
@@ -72,10 +78,37 @@ class MailListsContentTest {
         composeTestRule.onNodeWithTag("mail-lists-add-button").assertExists()
     }
 
+    // ── The create answer (mail-settings.md § Errors & edge cases, *The
+    // in-page predicates*; ui/README.md § Offer only what is possible, rules
+    // 2, 5 and 6) ──
+
+    private fun noDomainText() = ApplicationProvider.getApplicationContext<android.content.Context>()
+        .getString(com.fauna.app.R.string.mail_lists_no_domain)
+
     @Test
-    fun addDisabledWithoutDomain() {
-        render(localDomains = emptyList())
+    fun addDisabledWithTheReasonWhileTheCreateAnswerIsBlocked() {
+        render(
+            localDomains = emptyList(),
+            createAnswer = Possibility.Blocked(LocalizedText("mail_lists.no_domain", emptyMap())),
+        )
         composeTestRule.onNodeWithTag("mail-lists-add-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(noDomainText()).assertExists()
+    }
+
+    @Test
+    fun addWaitsBeforeTheFirstRead() {
+        render(
+            hydrated = false,
+            createAnswer = Possibility.Blocked(LocalizedText("common.still_loading", emptyMap())),
+        )
+        composeTestRule.onNodeWithTag("mail-lists-add-button").assertIsNotEnabled()
+    }
+
+    @Test
+    fun addLiveWhenTheCreateAnswerIsPossible() {
+        render(createAnswer = Possibility.Possible)
+        composeTestRule.onNodeWithTag("mail-lists-add-button").assertIsEnabled()
+        composeTestRule.onAllNodesWithText(noDomainText()).assertCountEquals(0)
     }
 
     @Test

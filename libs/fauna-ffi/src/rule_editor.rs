@@ -88,6 +88,15 @@ impl FfiRuleEditor {
         self.with(|e| e.view())
     }
 
+    /// Whether `rule-editor-save-button` can save now
+    /// ([`RuleEditor::save_possibility`]; `docs/goal/ui/README.md` § Offer only
+    /// what is possible, rule 6): possible, or blocked by the sentence
+    /// `rule-editor-status` shows. The view's `can_save` bool stays for the
+    /// callers that read it.
+    pub fn save_possibility(&self) -> fauna_core::possibility::Possibility {
+        self.with(|e| e.save_possibility())
+    }
+
     /// `rule-editor-add-button` — the new rule's index, or `None` when the
     /// kind is not offered or the document is not editable here.
     pub fn add_rule(&self, kind: RuleKind) -> Option<u32> {

@@ -275,8 +275,6 @@ fn machine_at_already_on_nest() -> (Arc<OnboardingMachine>, Arc<FakeNestApi>) {
             args: Default::default(),
         },
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         ..Default::default()
     });
     (m, fake)

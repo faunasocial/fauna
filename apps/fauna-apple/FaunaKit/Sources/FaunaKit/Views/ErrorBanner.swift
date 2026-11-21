@@ -228,6 +228,9 @@ public struct ErrorBanner: View {
             Text(message)
                 .foregroundStyle(.red)
                 .font(.caption)
+                // Read-only text: selectable and copyable (ui/README.md § Text the
+                // person reads can be copied).
+                .textSelection(.enabled)
                 .accessibilityIdentifier(Ids.errorMessage)
                 // In-process e2e read of `error-message`, wired once on the shared
                 // component so every call site (conversations send error, …) is
@@ -269,6 +272,9 @@ public struct WarningBanner: View {
         Text(message)
             .foregroundStyle(.orange)
             .font(.caption)
+            // Read-only text: selectable and copyable (ui/README.md § Text the
+            // person reads can be copied).
+            .textSelection(.enabled)
             .accessibilityIdentifier(Ids.warningMessage)
             .onAppear {
                 Task { @MainActor in AppMessages.bannerAppeared(.warning, owner: owner, message: message) }
@@ -296,6 +302,9 @@ public struct InfoBanner: View {
         Text(message)
             .foregroundStyle(.secondary)
             .font(.caption)
+            // Read-only text: selectable and copyable (ui/README.md § Text the
+            // person reads can be copied).
+            .textSelection(.enabled)
             .accessibilityIdentifier(Ids.infoMessage)
             .onAppear {
                 Task { @MainActor in AppMessages.bannerAppeared(.info, owner: owner, message: message) }

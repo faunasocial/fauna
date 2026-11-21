@@ -40,6 +40,7 @@ use fauna_client_profile::{ProfileClient, decode_profile_display};
 use fauna_client_subscriptions::SubscriptionsClient;
 use fauna_conversations::TypedAddress;
 use fauna_core::identity::ActorId;
+use fauna_core::possibility::{Possibility, ReadState};
 
 use self::offers::FOLLOWERS_TIER;
 use crate::async_helper::spawn_with_snapshot;
@@ -198,19 +199,21 @@ pub fn build_profile_view(
     )));
     report_page(is_self, &actor_id, &actor_home);
 
-    let (header, header_widgets) = build_header(client, &actor_id, is_self, &actor_home);
-    outer.append(&header_widgets.pictures.banner);
-    outer.append(&header);
-
     // Page-level error-message (Rule 2), shared into the Tiers tab so its
     // mint/roster failures surface here, and written by the OTHER profile's
-    // knock / guardian ask. Built here, appended below the tab strip.
+    // knock / guardian ask and by a refused follow or block press. Built here,
+    // appended below the tab strip.
     let error_label = gtk::Label::builder().visible(false).build();
     error_label.add_css_class("error");
     error_label.set_halign(gtk::Align::Start);
     error_label.set_wrap(true);
     error_label.set_margin_start(12);
     set_test_id(&error_label, ids::ERROR_MESSAGE);
+
+    let (header, header_widgets) =
+        build_header(client, &actor_id, is_self, &actor_home, &error_label);
+    outer.append(&header_widgets.pictures.banner);
+    outer.append(&header);
 
     // Secondary relationship actions — OTHER profile only (`profile.md` § Layout
     // & flow: "on another's profile only, secondary relationship actions"):
@@ -249,19 +252,29 @@ pub fn build_profile_view(
         let block_btn = new_block_button();
         let is_blocked = Rc::new(Cell::new(false));
         let block_user_authored = Rc::new(Cell::new(false));
+        // Whether the edge is known yet: the open-time read landed, or a
+        // press (here or the report sheet's) authored it.
+        let block_read = Rc::new(Cell::new(ReadState::Pending));
         refresh_block_state(
             client,
             &actor_id,
             &block_btn,
             &is_blocked,
             &block_user_authored,
+            &block_read,
         );
         {
             let client = Rc::clone(client);
             let actor_id = actor_id.clone();
             let is_blocked = Rc::clone(&is_blocked);
             let block_user_authored = Rc::clone(&block_user_authored);
+            let error_label = error_label.clone();
+            let block_read = Rc::clone(&block_read);
             block_btn.connect_clicked(move |btn| {
+                // The answer the toggle is painted from, asked again (rule 6).
+                if crate::form_gate::refuse(&block_answer(block_read.get()), &error_label) {
+                    return;
+                }
                 toggle_block(&client, &actor_id, btn, &is_blocked, &block_user_authored)
             });
         }
@@ -280,16 +293,19 @@ pub fn build_profile_view(
             let block_btn = block_btn.clone();
             let is_blocked = Rc::clone(&is_blocked);
             let block_user_authored = Rc::clone(&block_user_authored);
+            let block_read = Rc::clone(&block_read);
             report_btn.connect_clicked(move |b| {
                 let block_btn = block_btn.clone();
                 let is_blocked = Rc::clone(&is_blocked);
                 let block_user_authored = Rc::clone(&block_user_authored);
+                let block_read = Rc::clone(&block_read);
                 let on_blocked: Rc<dyn Fn(&str)> = Rc::new(move |_| {
                     is_blocked.set(true);
                     block_user_authored.set(true);
+                    block_read.set(ReadState::Resolved);
                     apply_block_state(&block_btn, true);
                     // The sheet's block authors the edge: the toggle is known.
-                    block_btn.set_sensitive(true);
+                    paint_block(&block_btn, ReadState::Resolved);
                 });
                 crate::report::open_sheet(
                     b,
@@ -349,18 +365,8 @@ pub fn build_profile_view(
     set_test_id(&heading, ids::PAGE_HEADING);
     outer.append(&heading);
 
-    // Tab strip — two buttons driving the inner stack.
-    let tabs = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .margin_start(12)
-        .build();
-    let posts_tab = gtk::Button::with_label(p::POSTS);
-    set_test_id(&posts_tab, ids::PROFILE_POSTS_TAB);
-    let tiers_tab = gtk::Button::with_label(p::TIERS);
-    set_test_id(&tiers_tab, ids::PROFILE_TIERS_TAB);
-    tabs.append(&posts_tab);
-    tabs.append(&tiers_tab);
+    // Tab strip — two buttons driving the inner stack ([`build_tab_strip`]).
+    let (tabs, posts_tab, tiers_tab) = build_tab_strip();
     outer.append(&tabs);
 
     outer.append(&error_label);
@@ -464,6 +470,39 @@ pub fn build_profile_view(
     )
 }
 
+/// The profile's tab strip: `profile-posts-tab` | `profile-tiers-tab` as a
+/// linked one-of-N toggle group, Posts in force at build. The tab in force
+/// publishes itself as the current choice — `test-attr-state-on` (the other
+/// `off`) and a pressed toggle look — so a re-press of it reads as re-choosing
+/// the current choice, and the person can see which tab is showing
+/// (`e2e-systematic-ui-walks.md` § Implementation status today, the
+/// possibility-invariants bullet, layer (c)), as the contacts segment and the
+/// calendar view toggles do. The callers' `clicked` handlers still run on a
+/// re-press of the tab in force (the Tiers re-read door relies on it).
+fn build_tab_strip() -> (gtk::Box, gtk::ToggleButton, gtk::ToggleButton) {
+    let tabs = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .margin_start(12)
+        .build();
+    tabs.add_css_class("linked");
+    let posts_tab = gtk::ToggleButton::with_label(p::POSTS);
+    set_test_id(&posts_tab, ids::PROFILE_POSTS_TAB);
+    let tiers_tab = gtk::ToggleButton::with_label(p::TIERS);
+    set_test_id(&tiers_tab, ids::PROFILE_TIERS_TAB);
+    tiers_tab.set_group(Some(&posts_tab));
+    for tab in [&posts_tab, &tiers_tab] {
+        tab.connect_toggled(|t| {
+            crate::testid::set_test_attr(t, "state", if t.is_active() { "on" } else { "off" });
+        });
+    }
+    posts_tab.set_active(true);
+    crate::testid::set_test_attr(&posts_tab, "state", "on");
+    crate::testid::set_test_attr(&tiers_tab, "state", "off");
+    tabs.append(&posts_tab);
+    tabs.append(&tiers_tab);
+    (tabs, posts_tab, tiers_tab)
+}
+
 /// Header widgets the page wires after construction: the identity `names`
 /// (refreshed with the published display_name) and — SELF only — the `edit_btn`
 /// (opens the edit form). On another actor's profile the `profile-follow-button`
@@ -554,6 +593,7 @@ fn build_header(
     actor_id: &str,
     is_self: bool,
     actor_home: &HomeSlot,
+    error_label: &gtk::Label,
 ) -> (gtk::Box, HeaderWidgets) {
     let header = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -623,14 +663,19 @@ fn build_header(
     copy_btn.set_valign(gtk::Align::Center);
     set_test_id(&copy_btn, ids::PROFILE_ACTOR_ID_COPY_BTN);
     // `copied` reports the exact string that reached the clipboard — the
-    // settings copy-link buttons' contract. The header is rebuilt on every
-    // profile open, so a fresh page's button carries no stale value.
+    // settings copy-link buttons' contract — for THIS open of the page, as on
+    // tui (`profile::State::copied`, cleared by `reset_for_open`). The header
+    // is rebuilt when another profile is opened, but a return to the same
+    // page by its tab only re-shows it, so the value is dropped each time the
+    // button is shown again: a person coming back meets "Copy ID", not a
+    // confirmation of a copy made on an earlier visit.
     {
         let actor_id = actor_id.to_string();
         copy_btn.connect_clicked(move |btn| {
             crate::clipboard::copy_text(&actor_id);
             crate::testid::set_test_attr(btn, "copied", &actor_id);
         });
+        copy_btn.connect_map(|btn| crate::testid::clear_test_attr(btn, "copied"));
     }
     header.append(&copy_btn);
 
@@ -643,9 +688,11 @@ fn build_header(
     } else {
         // `profile-follow-button` is the Follow ⇄ Following toggle
         // (`subscriptions.md` § The free followers tier — follow and unfollow,
-        // rule 4). It reads *Follow* until the open-time status read answers;
-        // every decision (following, confirm-gated, the label) is shared Rust
-        // (`fauna_core::format`), the state is [`FollowToggle`].
+        // rule 4). It reads *Follow*, blocked still loading, until the
+        // open-time status read answers (`profile.md` § Errors & edge cases →
+        // *Unread state is not possible*); every decision (following,
+        // confirm-gated, the label) is shared Rust (`fauna_core::format`), the
+        // state is [`FollowToggle`].
         let follow_btn = gtk::Button::with_label(
             &fauna_core::format::follow_toggle_label(false).resolve(crate::i18n::strings::lookup),
         );
@@ -661,7 +708,12 @@ fn build_header(
             let actor_id = actor_id.to_string();
             let actor_home = Rc::clone(actor_home);
             let toggle = Rc::clone(&toggle);
+            let error_label = error_label.clone();
             follow_btn.connect_clicked(move |_| {
+                // The answer the button is painted from, asked again (rule 6).
+                if crate::form_gate::refuse(&toggle.state.borrow().answer(), &error_label) {
+                    return;
+                }
                 let home = press_home(&actor_home);
                 toggle.press(&client, &actor_id, home)
             });
@@ -793,9 +845,39 @@ struct FollowState {
     status: Option<FollowStatus>,
     flip: Option<bool>,
     armed: bool,
+    /// Where the open-time `status.get` read stands — `Failed` when it came
+    /// back with an error, which [`Self::status`] alone cannot tell from "not
+    /// answered yet" (tui's `follow_read`).
+    read: ReadState,
 }
 
 impl FollowState {
+    /// Whether `profile-follow-button` can be pressed now (`profile.md`
+    /// § Errors & edge cases, *Unread state is not possible*): only once the
+    /// page knows which way the press goes — the viewer's own press for this
+    /// open, or a status read that answered. Before it the button is blocked
+    /// still loading, after a failed read blocked with the failure, so a press
+    /// never subscribes again to an author the viewer already follows. tui's
+    /// `ProfileState::follow_answer`.
+    fn answer(&self) -> Possibility {
+        if self.flip.is_some() || self.status.is_some() {
+            return Possibility::from_read(ReadState::Resolved);
+        }
+        Possibility::from_read(self.read)
+    }
+
+    /// The open-time status read landed: `None` is a failed read.
+    fn read_answered(&mut self, status: Option<FollowStatus>) {
+        self.read = if status.is_some() {
+            ReadState::Resolved
+        } else {
+            ReadState::Failed
+        };
+        if status.is_some() && self.flip.is_none() {
+            self.status = status;
+        }
+    }
+
     fn status_tier(&self) -> Option<&str> {
         self.status.as_ref().and_then(|s| s.tier.as_deref())
     }
@@ -866,15 +948,21 @@ struct FollowToggle {
 
 impl FollowToggle {
     fn new(btn: &gtk::Button) -> Self {
-        Self {
+        let this = Self {
             btn: btn.downgrade(),
             state: RefCell::new(FollowState::default()),
-        }
+        };
+        this.repaint();
+        this
     }
 
+    /// The label and, through the possibility seam, the button's answer
+    /// (its reason on the tooltip, linux's disabled-with-a-reason idiom).
     fn repaint(&self) {
         if let Some(btn) = self.btn.upgrade() {
-            btn.set_label(&self.state.borrow().label());
+            let st = self.state.borrow();
+            btn.set_label(&st.label());
+            crate::possible::paint(&btn, None, st.answer());
         }
     }
 
@@ -887,12 +975,7 @@ impl FollowToggle {
             &client.runtime_handle(),
             move || async move { fetch_follow_status(&SubscriptionsClient::new(nest), author).await },
             move |status| {
-                if status.is_some() {
-                    let mut st = this.state.borrow_mut();
-                    if st.flip.is_none() {
-                        st.status = status;
-                    }
-                }
+                this.state.borrow_mut().read_answered(status);
                 this.repaint();
             },
         );
@@ -946,9 +1029,8 @@ impl FollowToggle {
                 (ok, status)
             },
             move |(ok, status)| {
-                if let Some(btn) = this.btn.upgrade() {
-                    btn.set_sensitive(true);
-                }
+                // In flight it was held insensitive; the repaint below paints
+                // the answer back.
                 if ok {
                     this.state.borrow_mut().replied(follow, status);
                 }
@@ -985,9 +1067,25 @@ fn start_dm(actor_id: &str, on_open_conversations: &Rc<dyn Fn()>) {
 fn new_block_button() -> gtk::Button {
     let btn = gtk::Button::with_label(p::BLOCK);
     btn.add_css_class("destructive-action");
-    btn.set_sensitive(false);
     set_test_id(&btn, ids::PROFILE_BLOCK_BUTTON);
+    paint_block(&btn, ReadState::Pending);
     btn
+}
+
+/// Paint `profile-block-button` from where the open-time block read stands
+/// (or `Resolved` once the viewer's own press authored the edge): pending is
+/// blocked `common.still_loading`, a failed read blocked `common.load_failed`
+/// — never a guessed not-blocked edge — with the reason on its tooltip
+/// (`profile.md` § Errors & edge cases, *Unread state is not possible*; tui's
+/// `block_answer`).
+fn paint_block(btn: &gtk::Button, read: ReadState) {
+    crate::possible::paint(btn, None, block_answer(read));
+}
+
+/// The block toggle's answer — the one it is painted from ([`paint_block`])
+/// and its press asks again before sending anything (rule 6).
+fn block_answer(read: ReadState) -> Possibility {
+    Possibility::from_read(read)
 }
 
 /// Reflect the current block state on the toggle button: `blocked` → "Unblock"
@@ -1024,22 +1122,37 @@ fn apply_block_state(btn: &gtk::Button, blocked: bool) {
 /// cross-open half to guard: a stale reply from a PRIOR open closed over the old
 /// `is_blocked`/`block_user_authored` pair and cannot reach a rebuilt view.
 ///
-/// The toggle is built insensitive and this read is what enables it (a failed
-/// read lands as `false`, so the toggle never stays stuck off): the edge is
-/// not-yet-known until then, and a press on the not-blocked default would
-/// re-send `knocks_block` against an edge the viewer already holds.
+/// The toggle is built insensitive and this read is what enables it: the edge
+/// is not-yet-known until then, and a press on the not-blocked default would
+/// re-send `knocks_block` against an edge the viewer already holds. `blocked`
+/// is `None` for a failed read, which leaves the toggle blocked with
+/// `common.load_failed` — never a guessed not-blocked edge (`profile.md`
+/// § Errors & edge cases, *Unread state is not possible*) — unless the viewer's
+/// own press already authored the edge, which outranks a late read either way.
 fn apply_block_read(
     btn: &gtk::Button,
     is_blocked: &Rc<Cell<bool>>,
     block_user_authored: &Rc<Cell<bool>>,
-    blocked: bool,
+    block_read: &Cell<ReadState>,
+    blocked: Option<bool>,
 ) {
-    btn.set_sensitive(true);
     if block_user_authored.get() {
+        block_read.set(ReadState::Resolved);
+        paint_block(btn, ReadState::Resolved);
         return;
     }
-    is_blocked.set(blocked);
-    apply_block_state(btn, blocked);
+    match blocked {
+        Some(blocked) => {
+            block_read.set(ReadState::Resolved);
+            paint_block(btn, ReadState::Resolved);
+            is_blocked.set(blocked);
+            apply_block_state(btn, blocked);
+        }
+        None => {
+            block_read.set(ReadState::Failed);
+            paint_block(btn, ReadState::Failed);
+        }
+    }
 }
 
 /// Read the viewed actor's current contact edge (`fauna.contacts.list`) and set
@@ -1054,25 +1167,33 @@ fn refresh_block_state(
     btn: &gtk::Button,
     is_blocked: &Rc<Cell<bool>>,
     block_user_authored: &Rc<Cell<bool>>,
+    block_read: &Rc<Cell<ReadState>>,
 ) {
     let nest = client.nest_rpc().clone();
     let peer_id = actor_id.to_string();
     let btn = btn.clone();
     let is_blocked = Rc::clone(is_blocked);
     let block_user_authored = Rc::clone(block_user_authored);
+    let block_read = Rc::clone(block_read);
     spawn_with_snapshot(
         &client.runtime_handle(),
         move || async move {
             let contacts = fauna_client_contacts::ContactsClient::new(nest);
             match contacts.contacts_list().await {
-                Ok(reply) => reply.contacts.iter().any(|c| {
+                Ok(reply) => Some(reply.contacts.iter().any(|c| {
                     fauna_core::format::contact_row_blocks_actor(&c.peer_id, &c.status, &peer_id)
-                }),
-                Err(_) => false,
+                })),
+                Err(_) => None,
             }
         },
         move |blocked| {
-            apply_block_read(&btn, &is_blocked, &block_user_authored, blocked);
+            apply_block_read(
+                &btn,
+                &is_blocked,
+                &block_user_authored,
+                &block_read,
+                blocked,
+            );
         },
     );
 }
@@ -1111,7 +1232,8 @@ fn toggle_block(
             }
         },
         move |ok| {
-            btn.set_sensitive(true);
+            // Held insensitive in flight; the edge stays known either way.
+            paint_block(&btn, ReadState::Resolved);
             if ok {
                 let now_blocked = !was_blocked;
                 is_blocked.set(now_blocked);
@@ -1379,6 +1501,46 @@ fn apply_knock_outcome(btn: &gtk::Button, ask: &GuardianAsk, outcome: KnockSend)
 mod tests {
     use super::*;
 
+    fn state_of(t: &gtk::ToggleButton) -> Option<String> {
+        t.css_classes()
+            .iter()
+            .find_map(|c| c.strip_prefix("test-attr-state-").map(str::to_owned))
+    }
+
+    /// The tab in force publishes itself as the current choice — `state` `on`,
+    /// the other `off` — flipping on a switch, and a re-press of the tab in
+    /// force keeps it current while its `clicked` handler still runs (the
+    /// Tiers re-read door). `e2e-systematic-ui-walks.md` layer (c).
+    #[test]
+    fn the_tab_in_force_publishes_itself_as_the_current_choice() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (_tabs, posts, tiers) = build_tab_strip();
+            assert_eq!(state_of(&posts).as_deref(), Some("on"));
+            assert_eq!(state_of(&tiers).as_deref(), Some("off"));
+            assert!(posts.is_active() && !tiers.is_active());
+
+            let tiers_clicks = Rc::new(Cell::new(0));
+            {
+                let n = Rc::clone(&tiers_clicks);
+                tiers.connect_clicked(move |_| n.set(n.get() + 1));
+            }
+            tiers.emit_clicked();
+            assert_eq!(state_of(&posts).as_deref(), Some("off"));
+            assert_eq!(state_of(&tiers).as_deref(), Some("on"));
+            assert!(tiers.is_active() && !posts.is_active());
+
+            // Re-press of the tab in force: stays current, handler still runs.
+            tiers.emit_clicked();
+            assert_eq!(state_of(&tiers).as_deref(), Some("on"));
+            assert!(tiers.is_active());
+            assert_eq!(tiers_clicks.get(), 2);
+
+            posts.emit_clicked();
+            assert_eq!(state_of(&posts).as_deref(), Some("on"));
+            assert_eq!(state_of(&tiers).as_deref(), Some("off"));
+        });
+    }
+
     /// A LATE open-time read must not rewind the edge the viewer's own press
     /// already authored. `refresh_block_state` issues its `contacts.list` read
     /// when the page is built; over a real WS round-trip that answer routinely
@@ -1400,7 +1562,13 @@ mod tests {
 
             // The open-time read, issued BEFORE that press, finally returns —
             // still reporting not-blocked.
-            apply_block_read(&btn, &is_blocked, &block_user_authored, false);
+            apply_block_read(
+                &btn,
+                &is_blocked,
+                &block_user_authored,
+                &Cell::new(ReadState::Pending),
+                Some(false),
+            );
 
             assert_eq!(
                 btn.label().as_deref(),
@@ -1427,7 +1595,13 @@ mod tests {
 
             is_blocked.set(true);
             block_user_authored.set(true);
-            apply_block_read(&btn, &is_blocked, &block_user_authored, false);
+            apply_block_read(
+                &btn,
+                &is_blocked,
+                &block_user_authored,
+                &Cell::new(ReadState::Pending),
+                Some(false),
+            );
 
             assert!(
                 is_blocked.get(),
@@ -1451,11 +1625,81 @@ mod tests {
                 "the toggle is disabled until the edge is known"
             );
 
+            // Blocked still loading, with the reason beside it (rule 2), and
+            // a press refuses with it on `error-message` (rule 6).
+            let loading = fauna_core::localized::LocalizedText::key("common.still_loading")
+                .resolve(crate::i18n::strings::lookup);
+            assert_eq!(view.tooltip_text().as_deref(), Some(loading.as_str()));
+            let block_read = Cell::new(ReadState::Pending);
+            let error = gtk::Label::new(None);
+            assert!(crate::form_gate::refuse(
+                &block_answer(block_read.get()),
+                &error
+            ));
+            assert_eq!(error.text().as_str(), loading);
+
             let is_blocked = Rc::new(Cell::new(false));
             let block_user_authored = Rc::new(Cell::new(false));
-            apply_block_read(&view, &is_blocked, &block_user_authored, true);
+            apply_block_read(
+                &view,
+                &is_blocked,
+                &block_user_authored,
+                &block_read,
+                Some(true),
+            );
             assert!(view.is_sensitive(), "the read enables the toggle");
+            assert_eq!(block_read.get(), ReadState::Resolved);
+            assert!(!crate::form_gate::refuse(
+                &block_answer(block_read.get()),
+                &error
+            ));
             assert!(is_blocked.get());
+        });
+    }
+
+    /// A FAILED open-time read leaves Block blocked with `common.load_failed`,
+    /// never a guessed not-blocked edge (`profile.md` § Errors & edge cases,
+    /// *Unread state is not possible*; tui's failed-read arm).
+    #[test]
+    fn a_failed_open_time_read_blocks_the_toggle_with_load_failed() {
+        crate::testid::run_on_gtk_thread(|| {
+            let view = new_block_button();
+            let is_blocked = Rc::new(Cell::new(false));
+            let block_user_authored = Rc::new(Cell::new(false));
+            let block_read = Cell::new(ReadState::Pending);
+
+            apply_block_read(&view, &is_blocked, &block_user_authored, &block_read, None);
+
+            assert_eq!(block_read.get(), ReadState::Failed);
+            assert!(!view.is_sensitive(), "a failed read does not enable Block");
+            let failed = fauna_core::localized::LocalizedText::key("common.load_failed")
+                .resolve(crate::i18n::strings::lookup);
+            assert_eq!(view.tooltip_text().as_deref(), Some(failed.as_str()));
+            let error = gtk::Label::new(None);
+            assert!(crate::form_gate::refuse(
+                &block_answer(block_read.get()),
+                &error
+            ));
+            assert_eq!(error.text().as_str(), failed);
+        });
+    }
+
+    /// The viewer's own press outranks a late FAILED read too: the edge it
+    /// authored stays known and the toggle stays usable.
+    #[test]
+    fn a_late_failed_read_does_not_undo_the_users_press() {
+        crate::testid::run_on_gtk_thread(|| {
+            let btn = new_block_button();
+            let is_blocked = Rc::new(Cell::new(true));
+            let block_user_authored = Rc::new(Cell::new(true));
+            let block_read = Cell::new(ReadState::Resolved);
+            apply_block_state(&btn, true);
+
+            apply_block_read(&btn, &is_blocked, &block_user_authored, &block_read, None);
+
+            assert_eq!(block_read.get(), ReadState::Resolved);
+            assert!(btn.is_sensitive());
+            assert_eq!(btn.label().as_deref(), Some(p::UNBLOCK));
         });
     }
 
@@ -1470,7 +1714,13 @@ mod tests {
             let is_blocked = Rc::new(Cell::new(false));
             let block_user_authored = Rc::new(Cell::new(false));
 
-            apply_block_read(&btn, &is_blocked, &block_user_authored, true);
+            apply_block_read(
+                &btn,
+                &is_blocked,
+                &block_user_authored,
+                &Cell::new(ReadState::Pending),
+                Some(true),
+            );
 
             assert!(is_blocked.get(), "an unauthored open must accept the read");
             assert_eq!(btn.label().as_deref(), Some(p::UNBLOCK));
@@ -1679,7 +1929,9 @@ mod tests {
 
 #[cfg(test)]
 mod follow_toggle_tests {
-    use super::{FollowPress, FollowState, FollowStatus, p};
+    use super::{FollowPress, FollowState, FollowStatus, FollowToggle, p};
+    use adw::prelude::*;
+    use fauna_core::possibility::{Possibility, ReadState};
 
     fn holding(tier: Option<&str>) -> FollowState {
         FollowState {
@@ -1716,5 +1968,66 @@ mod follow_toggle_tests {
         assert_eq!(stranger.label(), p::FOLLOWING);
         // No status read yet → Follow.
         assert_eq!(FollowState::default().label(), p::FOLLOW);
+    }
+
+    /// Unknown is not possible (`profile.md` § Errors & edge cases →
+    /// *Unread state is not possible*): before the status read answers,
+    /// Follow is blocked still loading; a failed read blocks it with the
+    /// failure; an answered read — or the viewer's own press this open —
+    /// enables it.
+    #[test]
+    fn follow_waits_for_the_status_read() {
+        let mut st = FollowState::default();
+        assert_eq!(st.answer(), Possibility::from_read(ReadState::Pending));
+        st.read_answered(None);
+        assert_eq!(st.answer(), Possibility::from_read(ReadState::Failed));
+        st.read_answered(holding(None).status);
+        assert_eq!(st.answer(), Possibility::Possible);
+
+        let mut pressed = FollowState::default();
+        pressed.replied(true, None);
+        assert_eq!(pressed.answer(), Possibility::Possible);
+        // A late read never rewinds the press's flip.
+        pressed.read_answered(holding(None).status);
+        assert_eq!(pressed.label(), p::FOLLOWING);
+    }
+
+    /// The follow button is painted from that answer, with the reason on its
+    /// tooltip, and its press asks the same answer and refuses with it on
+    /// `error-message` (rule 6).
+    #[test]
+    fn the_follow_button_is_painted_and_refuses_until_read() {
+        crate::testid::run_on_gtk_thread(|| {
+            let btn = gtk::Button::with_label("placeholder");
+            let toggle = FollowToggle::new(&btn);
+            let loading = fauna_core::localized::LocalizedText::key("common.still_loading")
+                .resolve(crate::i18n::strings::lookup);
+            assert!(!btn.is_sensitive());
+            assert_eq!(btn.tooltip_text().as_deref(), Some(loading.as_str()));
+            let error = gtk::Label::new(None);
+            assert!(crate::form_gate::refuse(
+                &toggle.state.borrow().answer(),
+                &error
+            ));
+            assert_eq!(error.text().as_str(), loading);
+
+            toggle.state.borrow_mut().read_answered(None);
+            toggle.repaint();
+            let failed = fauna_core::localized::LocalizedText::key("common.load_failed")
+                .resolve(crate::i18n::strings::lookup);
+            assert!(!btn.is_sensitive());
+            assert_eq!(btn.tooltip_text().as_deref(), Some(failed.as_str()));
+
+            toggle
+                .state
+                .borrow_mut()
+                .read_answered(holding(None).status);
+            toggle.repaint();
+            assert!(btn.is_sensitive());
+            assert!(!crate::form_gate::refuse(
+                &toggle.state.borrow().answer(),
+                &error
+            ));
+        });
     }
 }

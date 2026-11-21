@@ -832,6 +832,7 @@ def test_the_posting_permission_shows_and_stops_below_the_full_level(
 @pytest.mark.web
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_an_unsigned_posting_permission_shows_as_a_mismatch(
@@ -847,8 +848,7 @@ def test_an_unsigned_posting_permission_shows_as_a_mismatch(
     therefore the nest's own row (`atproto_authoring_keys.cert`), overwritten on
     this test-owned nest with a cert built by the SAME shared-Rust minter every
     app uses, for the account's own authoring sub-key, but signed by a key that
-    is not this account's. tui, linux, web, macos, ios and windows; android follows in its own
-    queue."""
+    is not this account's. All seven apps."""
     import os
     import sqlite3
 
@@ -934,10 +934,12 @@ def test_an_unsigned_posting_permission_shows_as_a_mismatch(
 @pytest.mark.web
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_an_app_password_is_shown_again_on_another_device(
-    request, atproto_hosted_logged_in_app, atproto_hosted_nest
+    request, atproto_hosted_logged_in_app, atproto_hosted_nest,
+    android_other_device_seat,
 ):
     """An app password minted on one device is shown again later on another
     device of the same account (`atproto-pds-full.md` § Implementation status
@@ -948,8 +950,9 @@ def test_an_app_password_is_shown_again_on_another_device(
     reveal cache. So the second read is a SECOND seat — the same identity, a
     distinct device id, a fresh empty state root — which can only show the
     secret by reading it back from the synced plane (on web, a twin page in its
-    own browser context). tui, linux, web, macos, ios and windows; android follows in its own
-    queue."""
+    own browser context; on android, where one emulator runs one app instance,
+    a tui seat — `android_other_device_seat`, declared so the prebuild hoist
+    builds it). All seven apps."""
     from conftest import _alice_extra_seat, _alice_web_twin_seat
     from helpers.app_surface import app_name
     from helpers.waiting import account_pump_role, await_account_runtime_assembled
@@ -979,12 +982,21 @@ def test_an_app_password_is_shown_again_on_another_device(
             screenshot_tag="atproto-second-device",
             node_url=request.getfixturevalue("atproto_hosted_spa_url"),
         )
+    elif name == "android":
+        seat_gen = None
     else:
         seat_gen = _alice_extra_seat(
             name, request, atproto_hosted_nest["user"], atproto_hosted_nest,
             screenshot_tag="atproto-second-device",
         )
-    seat_b, seat_b_driver = next(seat_gen)
+    if seat_gen is None:
+        # The fixture tears its seat down itself at the end of the test.
+        seat_b, seat_b_driver = android_other_device_seat(
+            "atproto-second-device", identity=atproto_hosted_nest["user"],
+            nest=atproto_hosted_nest,
+        )
+    else:
+        seat_b, seat_b_driver = next(seat_gen)
     try:
         # The plane is reachable only once the second seat's account runtime
         # has assembled — a task off the login path with no other signal.
@@ -1017,7 +1029,8 @@ def test_an_app_password_is_shown_again_on_another_device(
             f"got {shown!r}. error: {bs_b.current_error_text()!r}"
         )
     finally:
-        seat_gen.close()
+        if seat_gen is not None:
+            seat_gen.close()
         bs.revoke_credential(index)
         assert bs.wait_for_credential_count(before), (
             f"cleanup revoke failed. error: {bs.page_error_text()!r}"

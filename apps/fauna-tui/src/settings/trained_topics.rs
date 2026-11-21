@@ -185,6 +185,36 @@ impl PublishSheetState {
     }
 }
 
+impl PublishSheetState {
+    /// The submit's answer — the shared draft predicate over the public name,
+    /// what survives the prune, and the publish in flight.
+    pub(super) fn submit_answer(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_personalization::drafts::publish_submit_possibility(
+            &self.name,
+            self.any_kept(),
+            self.busy,
+        )
+    }
+}
+
+/// The create / save-name button's answer.
+pub(super) fn name_answer(tt: &TrainedTopicsState) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::drafts::factor_name_possibility(&tt.input, tt.busy)
+}
+
+/// Row `index`'s Publish… answer, over whether the live feed manager is up.
+pub(crate) fn publish_open_answer(
+    tt: &TrainedTopicsState,
+    index: usize,
+    manager_ready: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::drafts::publish_open_possibility(
+        tt.rows.get(index).is_some_and(|r| r.factor_key.is_some()),
+        manager_ready,
+        tt.busy,
+    )
+}
+
 /// The facet's state — the persisted rows plus the one shared name buffer.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TrainedTopicsState {
@@ -343,12 +373,15 @@ pub(super) fn trained_topics_elements(state: &SettingsState) -> Vec<Element> {
             Field::Settings(SettingsField::TrainedFactorNameInput),
         )
         .labelled(p::TRAINED_FACTOR_PLACEHOLDER),
+        // Live only with a name typed and no change in flight — the shared
+        // draft answer; the seam disables it with why (rule 4).
         Element::gesture_button(
             ids::PERSONALIZATION_TRAINED_FACTOR_CREATE_BUTTON,
             commit_label,
-            !tt.busy,
+            true,
             Gesture::Settings(Action::CommitTrainedFactorName),
-        ),
+        )
+        .possible(name_answer(tt)),
     ];
     for (i, row) in tt.rows.iter().enumerate() {
         // The row landmark carries the composition key as a test-attr — the one
@@ -417,12 +450,18 @@ pub(super) fn trained_topics_elements(state: &SettingsState) -> Vec<Element> {
         // "Publish…" — reveals the single-instance sheet against THIS row.
         // Flat, like its sibling row buttons (`open_publish_sheet` clicks it
         // with a plain `index=`).
-        els.push(Element::gesture_button(
-            ids::PERSONALIZATION_TRAINED_FACTOR_PUBLISH_BUTTON,
-            p::TRAINED_FACTOR_PUBLISH,
-            !tt.busy,
-            Gesture::Settings(Action::OpenTrainedFactorPublish(i)),
-        ));
+        // Absent on a row with no addressable model; blocked while the live
+        // feed window is not up — declared here with the manager taken as up,
+        // and re-declared over the real one by the page builder in `mod.rs`.
+        els.push(
+            Element::gesture_button(
+                ids::PERSONALIZATION_TRAINED_FACTOR_PUBLISH_BUTTON,
+                p::TRAINED_FACTOR_PUBLISH,
+                true,
+                Gesture::Settings(Action::OpenTrainedFactorPublish(i)),
+            )
+            .possible(publish_open_answer(tt, i, true)),
+        );
     }
     els.extend(publish_sheet_elements(&tt.publish));
     els
@@ -491,10 +530,16 @@ fn publish_sheet_elements(sheet: &PublishSheetState) -> Vec<Element> {
             },
         ),
         // Blank on every open — never seeded from the row's sealed name.
-        Element::input(
+        // Enter commits the sheet: the press, an input's Enter included, asks
+        // the submit's own answer and refuses with its reason on
+        // `error-message` while the draft cannot succeed (`ui/settings.md`
+        // § Errors & edge cases, *Personal form submits paint from their
+        // draft*) — the same `SubmitTrainedFactorPublish` the button fires.
+        Element::input_commit(
             ids::PERSONALIZATION_TRAINED_FACTOR_PUBLISH_NAME_INPUT,
             sheet.name.clone(),
             Field::Settings(SettingsField::TrainedFactorPublishNameInput),
+            Gesture::Settings(Action::SubmitTrainedFactorPublish),
         )
         .labelled(if model {
             p::PUBLISH_NAME_LABEL_MODEL
@@ -512,12 +557,15 @@ fn publish_sheet_elements(sheet: &PublishSheetState) -> Vec<Element> {
     // does nothing and explains nothing is indistinguishable from a broken
     // sheet (linux's `restore-confirm-button` precedent). Covers both "the
     // corpus scored nothing" and "the user unchecked everything".
-    els.push(Element::gesture_button(
-        ids::PERSONALIZATION_TRAINED_FACTOR_PUBLISH_SUBMIT_BUTTON,
-        p::PUBLISH_SUBMIT,
-        sheet.any_kept() && !sheet.busy,
-        Gesture::Settings(Action::SubmitTrainedFactorPublish),
-    ));
+    els.push(
+        Element::gesture_button(
+            ids::PERSONALIZATION_TRAINED_FACTOR_PUBLISH_SUBMIT_BUTTON,
+            p::PUBLISH_SUBMIT,
+            true,
+            Gesture::Settings(Action::SubmitTrainedFactorPublish),
+        )
+        .possible(sheet.submit_answer()),
+    );
     els.push(Element::gesture_button(
         ids::PERSONALIZATION_TRAINED_FACTOR_PUBLISH_CANCEL_BUTTON,
         fauna_i18n::strings::common::CANCEL,
@@ -705,18 +753,6 @@ pub(super) fn commit_name_op(state: &mut SettingsState) -> Option<super::Op> {
         None => TrainedTopicsGesture::Create(name),
     };
     gesture_op(state, gesture)
-}
-
-/// The sentence a blank commit paints on `error-message`, or `None` when the
-/// buffer holds a name. The shared [`TrainedTopicsError::BlankName`] refusal's
-/// own text, so the local guard and the service say the same thing.
-pub(super) fn blank_name_refusal(state: &SettingsState) -> Option<String> {
-    state
-        .trained_topics
-        .input
-        .trim()
-        .is_empty()
-        .then(|| localize(&TrainedTopicsError::BlankName))
 }
 
 /// `-rename-button`: retarget the shared input at this row and seed it with the
@@ -1352,6 +1388,42 @@ mod tests {
         assert_eq!(state.trained_topics.publish.name, "");
     }
 
+    /// The public name input's Enter is the sheet's submit (`ui/settings.md`
+    /// § Errors & edge cases): it commits the same gesture the Publish button
+    /// fires, so a press on an over-length name refuses with the shared
+    /// answer's reason even while the button itself is disabled.
+    #[test]
+    fn the_public_name_inputs_enter_commits_the_publish() {
+        let mut state = state_with_open_sheet(vec![exemplar("aa", "cats", 900)]);
+        state.trained_topics.publish.name = "x".repeat(200);
+        let els = trained_topics_elements(&state);
+        let input = els
+            .iter()
+            .find(|e| e.id == "personalization-trained-factor-publish-name-input")
+            .expect("name input paints");
+        match &input.role {
+            crate::element::Role::InputCommit { field, gesture } => {
+                assert_eq!(
+                    *field,
+                    Field::Settings(SettingsField::TrainedFactorPublishNameInput)
+                );
+                assert!(
+                    matches!(
+                        gesture,
+                        Gesture::Settings(Action::SubmitTrainedFactorPublish)
+                    ),
+                    "the name input's Enter must fire the submit gesture"
+                );
+            }
+            other => panic!("the name input's Enter must commit the publish; role {other:?}"),
+        }
+        let submit = els
+            .iter()
+            .find(|e| e.id == "personalization-trained-factor-publish-submit-button")
+            .expect("submit paints");
+        assert!(!submit.offered(), "an over-length name disables Publish");
+    }
+
     /// Exemplars arrive CHECKED: the user edits the factor's own proposal
     /// rather than assembling one (the `restore-kind-checkbox` prune shape).
     #[test]
@@ -1457,11 +1529,13 @@ mod tests {
             exemplar("aa", "cats", 900),
             exemplar("bb", "boats", 120),
         ]);
+        // A public name, so only the prune is under test.
+        state.trained_topics.publish.name = "Cats".to_string();
         let submit_enabled = |s: &SettingsState| {
             trained_topics_elements(s)
                 .iter()
                 .find(|e| e.id == "personalization-trained-factor-publish-submit-button")
-                .map(|e| e.enabled)
+                .map(|e| e.offered())
                 .expect("submit paints")
         };
         assert!(submit_enabled(&state), "armed with both kept");
@@ -2024,7 +2098,7 @@ mod tests {
             .find(|e| e.id == "personalization-trained-factor-publish-submit-button")
             .expect("submit button");
         assert!(
-            !submit.enabled,
+            !submit.offered(),
             "an empty Model prune must disarm submit even with a full List prune in state"
         );
         assert!(

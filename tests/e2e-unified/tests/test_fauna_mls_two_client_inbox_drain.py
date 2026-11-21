@@ -34,7 +34,8 @@ app marker, so it collects everywhere and
 ``conftest.py::_launch_second_real_faunamls_app`` decides: the two direct-Rust
 clients (linux + tui, which wire the in-process ``ConversationsSession`` at
 login), apple (macos + ios), and windows — whose per-launch isolation each
-supply bob's second seat — and a skip for anything else. web is the one
+supply bob's second seat — android, where the phone plays bob and alice signs
+in on a tui seat of her own, and a skip for anything else. web is the one
 principled absence: the SPA has no push arm to suppress (poll-only by
 construction, ``api-layers.md`` layer 4), so its layer-5 leg is tracked with the
 web app's own backlog.
@@ -71,7 +72,7 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
 def test_fauna_mls_two_client_inbox_drain(
     real_faunamls_app, second_real_faunamls_app, nest_instance
 ):
-    alice = real_faunamls_app
+    alice = second_real_faunamls_app.owner_app
     bob_app, bob = second_real_faunamls_app
     port = nest_instance["port"]
     body = "hi via drain"

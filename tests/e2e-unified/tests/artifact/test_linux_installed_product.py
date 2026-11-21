@@ -34,10 +34,15 @@ the build produced" and "a binary an install channel placed":
   running window with its icon (`install.sh`'s own comment on `APP_ID`, and the
   2026-08-22 rename that made basename and id one string).
 
-Read `helpers/linux_installed_product.py` first: it owns the prefix, the staging
-seam that lets a shipped installer install a debug-config binary without being
-given a test-only knob, and why every invocation carries a throwaway
-`XDG_CONFIG_HOME`.
+* The released FORM is what got installed: the archive
+  `fauna-desktop-<suffix>.tar.gz` (`installers/linux-desktop.md` § What the
+  release publishes), staged by the release's own `installer/assemble-archive.sh`
+  and installed by the `install.sh` it carries, from the files beside it — no
+  build tree, no repository, as for a person who downloaded it.
+
+Read `helpers/linux_installed_product.py` first: it owns the prefix, the
+archive staging (the release's script over the DEBUG binaries, and why debug),
+and why every invocation carries a throwaway `XDG_CONFIG_HOME`.
 """
 
 import re
@@ -48,6 +53,7 @@ import pytest
 
 from common import get_repo_root
 from helpers.linux_installed_product import (
+    ARCHIVE_FILES,
     _STAGING_RELPATH,
     child_sees,
     install_prefix,
@@ -55,6 +61,7 @@ from helpers.linux_installed_product import (
     installed_app_path,
     run_install,
     run_uninstall,
+    staged_archive_dir,
 )
 
 # tier_4: the subject is a real deployment artifact rather than locally-built
@@ -147,6 +154,41 @@ def test_the_install_puts_the_sync_agent_where_the_app_looks_for_it(installed_pr
     assert agent.stat().st_mode & stat.S_IXUSR, f"{agent} is not executable"
 
 
+def test_the_archive_carries_the_release_payload_and_installs_all_of_it(installed_product):
+    """The archive's file set is the release's, and its `install.sh` places all of it.
+
+    The staged directory is what `assemble-archive.sh --payload linux-desktop`
+    produced — the same call the release leg makes — so its contents are the
+    published archive's. Then every file the installer owes lands where
+    § Installation Files puts it: both binaries, the desktop entry under the
+    app-id basename, the icon, and the three licence files.
+    """
+    repo = Path(get_repo_root())
+    staged = staged_archive_dir(repo)
+    assert {p.name for p in staged.iterdir()} == ARCHIVE_FILES, (
+        f"the archive holds {sorted(p.name for p in staged.iterdir())}, not the "
+        f"release payload {sorted(ARCHIVE_FILES)} (installers/linux-desktop.md "
+        f"§ What the release publishes)."
+    )
+    assert (staged / "install.sh").read_bytes() == (
+        repo / "apps" / "fauna-linux" / "install.sh"
+    ).read_bytes(), "the archive's install.sh is not the ONE apps/fauna-linux/install.sh"
+    prefix = install_prefix(repo)
+    for rel in (
+        "bin/fauna-desktop",
+        "bin/fauna-sync-agent",
+        "share/applications/social.fauna.fauna.desktop",
+        "share/icons/hicolor/scalable/apps/fauna.svg",
+        "share/doc/fauna-desktop/LICENSE-MIT",
+        "share/doc/fauna-desktop/LICENSE-APACHE",
+        "share/doc/fauna-desktop/THIRD-PARTY-NOTICES",
+    ):
+        assert (prefix / rel).is_file(), f"the archive's install.sh did not install {rel}"
+    assert (prefix / "share/doc/fauna-desktop/LICENSE-MIT").read_bytes() == (
+        repo / "LICENSE-MIT"
+    ).read_bytes()
+
+
 @pytest.mark.feature("get-the-app")
 def test_the_installed_app_drives_a_login_to_feed_journey(journey_app, test_user):
     """The minimal journey, end to end, against what `install.sh` installed.
@@ -188,9 +230,9 @@ def test_install_sh_branches_on_no_build_configuration():
     automation surface out of release builds and a release `fauna-desktop`
     therefore cannot be driven at all (`helpers/linux_installed_product` says so
     at length). The substitution is honest only while `install.sh` does the same
-    thing whatever it is handed: it resolves two paths under
-    `$CARGO_TARGET_DIR/release` and `install -Dm755` them, and every later step
-    reads the repo, not the build config.
+    thing whatever it is handed: from the unpacked archive it resolves the two
+    binaries beside itself and `install -Dm755`s them, and every later step
+    reads files the archive took from the repository, not the build config.
 
     So: read the script and assert no *control flow* in it tests a build
     configuration. The day someone adds a release-only step, this says so —
@@ -200,13 +242,14 @@ def test_install_sh_branches_on_no_build_configuration():
     """
     script = (Path(get_repo_root()) / "apps" / "fauna-linux" / "install.sh").read_text()
 
-    # The staging seam: CARGO_TARGET_DIR/release/<name> is what the helper
-    # populates with debug binaries. If these move, the seam moves with them.
-    assert '"$CARGO_TARGET_DIR/release/fauna-desktop"' in script, (
-        "install.sh no longer reads $CARGO_TARGET_DIR/release/fauna-desktop — "
-        "helpers/linux_installed_product stages the debug binaries through "
-        "exactly that path, so the seam is gone and the module is installing "
-        "something other than it thinks."
+    # The archive layout: the binaries beside the script are what the helper
+    # stages (through the release's assemble-archive.sh). If this moves, the
+    # module is installing something other than it thinks.
+    assert 'BINARY="$SCRIPT_DIR/fauna-desktop"' in script, (
+        "install.sh no longer installs $SCRIPT_DIR/fauna-desktop from the "
+        "unpacked archive — helpers/linux_installed_product stages the archive "
+        "layout and runs its install.sh, so the module is installing something "
+        "other than it thinks."
     )
 
     control_flow = re.compile(r"^\s*(if|elif|while|until|case)\b")
@@ -223,21 +266,31 @@ def test_install_sh_branches_on_no_build_configuration():
         "step config-independent, or build `--release --features e2e-agent` here "
         "and drop the substitution."
     )
+    archive = (Path(get_repo_root()) / "installer" / "assemble-archive.sh").read_text()
+    offenders = [
+        line for line in archive.splitlines()
+        if control_flow.match(line) and re.search(r"\b(debug|release)\b", line, re.I)
+    ]
+    assert not offenders, (
+        f"assemble-archive.sh now branches on a build configuration: {offenders} — "
+        "the staged archive would no longer be what the release leg publishes."
+    )
 
 
 def test_the_installer_reads_the_environment_this_module_hands_it():
     """The isolation and the staging seam, asserted where they actually bind.
 
-    Both of this module's environment promises — the staging `CARGO_TARGET_DIR`
-    that lets a shipped installer install a debug binary, and the throwaway
-    `XDG_CONFIG_HOME` that keeps `--uninstall` out of the developer's real
-    systemd user session (convention 10) — are made by handing `install.sh` an
-    environment. So they must be asserted on **what the child reads**, never on
+    Both of this module's environment promises — no `CARGO_TARGET_DIR`, so the
+    installer can only find what the archive carries beside it (a download has
+    no build tree), and the throwaway `XDG_CONFIG_HOME` that keeps `--uninstall`
+    out of the developer's real systemd user session (convention 10) — are made
+    by handing `install.sh` an environment. So they must be asserted on **what the child reads**, never on
     the dict handed to `subprocess.run`.
 
     That distinction is the whole test, and it is not pedantry: the first run of
-    this module failed with "release binaries not found" while the dict was
-    perfectly correct. A dev machine here exports `BASH_ENV=$HOME/.bashrc`, bash
+    this module (when the installer still read the build tree through
+    `CARGO_TARGET_DIR`) failed with "release binaries not found" while the dict
+    was perfectly correct. A dev machine here exports `BASH_ENV=$HOME/.bashrc`, bash
     sources `$BASH_ENV` at the start of every NON-interactive shell — after the
     passed environment is installed — and that rc re-exports `CARGO_TARGET_DIR`
     from the working directory, silently replacing ours. A dict-side assertion
@@ -259,13 +312,11 @@ def test_the_installer_reads_the_environment_this_module_hands_it():
         f"staging copy. `_isolated_env` must keep dropping it."
     )
 
-    staging = str(repo / _STAGING_RELPATH)
-    assert seen.get("CARGO_TARGET_DIR") == staging, (
-        f"the child reads CARGO_TARGET_DIR={seen.get('CARGO_TARGET_DIR')!r}, not "
-        f"the staging tree {staging!r}. `install.sh` resolves its two source "
-        f"binaries under $CARGO_TARGET_DIR/release, so the staging seam is what "
-        f"lets it install the DEBUG binaries this module can actually drive — "
-        f"and without it, it installs (or fails to find) the real release ones."
+    assert seen.get("CARGO_TARGET_DIR") == "", (
+        f"the child reads CARGO_TARGET_DIR={seen.get('CARGO_TARGET_DIR')!r}. A "
+        f"download has no build tree: the archive's install.sh must find "
+        f"everything beside itself, and an inherited build tree could only hide "
+        f"a broken archive layout behind install.sh's source-tree fallback."
     )
 
     xdg = seen.get("XDG_CONFIG_HOME", "")
@@ -274,7 +325,7 @@ def test_the_installer_reads_the_environment_this_module_hands_it():
         "now run `systemctl --user disable --now` and delete the unit in the "
         "developer's REAL session (convention 10)."
     )
-    assert Path(xdg).is_relative_to(repo), (
+    assert Path(xdg).is_relative_to(repo / _STAGING_RELPATH), (
         f"XDG_CONFIG_HOME is {xdg}, outside the repo — the redirect must land "
         f"somewhere disposable, never in the box's own config."
     )

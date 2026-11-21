@@ -5,6 +5,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.TextFieldValue
@@ -13,12 +14,24 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.LocalRestoreVM
 import com.fauna.app.ui.viewmodel.RestoreProgress
 import com.fauna.ffi.FfiSnapshotSummary
+import com.fauna.ffi.restoreInputsPossibility
+import com.fauna.ffi.restorePossibility
 import com.fauna.ffi.snapshotRestoreOptionLabel
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The local-restore action card on the Backups page
@@ -62,6 +75,7 @@ fun LocalRestoreSection(
         progress = progress,
         configAbsent = configAbsent,
         onRestore = vm::restore,
+        onError = appMessages::showError,
     )
 }
 
@@ -84,6 +98,8 @@ fun LocalRestoreContent(
     progress: RestoreProgress,
     configAbsent: Boolean,
     onRestore: (Long, String) -> Unit,
+    /** A refused gesture's reason, to the page's one `error-message` surface. */
+    onError: (String) -> Unit = {},
 ) {
     var selectedIndex by remember(snapshots) { mutableStateOf(0) }
     var confirm by remember { mutableStateOf(TextFieldValue("")) }
@@ -91,14 +107,26 @@ fun LocalRestoreContent(
     // `restore-confirm-button` for a picked snapshot of that kind.
     val kindChecked = remember { mutableStateListOf(*BooleanArray(RESTORE_KINDS.size) { true }.toTypedArray()) }
 
+    val context = LocalContext.current
     val selected = snapshots.getOrNull(selectedIndex)
-    val matchTarget = selected?.id?.toString().orEmpty()
-    val selectedKindIndex = RESTORE_KINDS.indexOfFirst { it.first == selected?.messageKind }
-    val kindTicked = selectedKindIndex < 0 || kindChecked[selectedKindIndex]
-    val confirmEnabled = selected != null &&
-        confirm.text.isNotEmpty() &&
-        confirm.text == matchTarget &&
-        kindTicked
+    // The section's state as the shared predicates take it, then their answers
+    // (`fauna_backups_machine::possibility::{restore_inputs_possibility,
+    // restore_possibility}`): every control below paints from these and every
+    // gesture asks them again — no hand-written enable predicate.
+    val ask = restoreAskOf(selected?.id, selected?.messageKind, RESTORE_KINDS.map { it.first }, kindChecked)
+    val running = progress == RestoreProgress.RUNNING
+    val inputs = askForm { restoreInputsPossibility(ask.snapshotId, ask.kindTicked) }
+    val restoreAnswer = askForm {
+        restorePossibility(running, ask.snapshotId, ask.kindTicked, confirm.text)
+    }
+    // Rule 6's second half for the inputs: a refused gesture says why on
+    // `error-message` and changes nothing.
+    val inputsRefused: () -> Boolean = {
+        val asked = askForm { restoreInputsPossibility(ask.snapshotId, ask.kindTicked) }
+        val refusal = formRefusal(context, asked)
+        refusal?.reason?.let(onError)
+        refusal != null
+    }
 
     Column(
         modifier = Modifier
@@ -140,16 +168,19 @@ fun LocalRestoreContent(
             RESTORE_KINDS.forEachIndexed { index, (_, labelRes) ->
                 KindCheckbox(
                     checked = kindChecked[index],
-                    onChecked = { kindChecked[index] = it },
+                    enabled = inputs.isPossible,
+                    onChecked = { if (!inputsRefused()) kindChecked[index] = it },
                     label = stringResource(labelRes),
                 )
             }
         }
+        DisabledControlReasonText(localized(inputs.blockedReason))
 
         // ── restore-confirm-input — friction bar (re-type the snapshot id) ──
         OutlinedTextField(
             value = confirm,
-            onValueChange = { confirm = it },
+            onValueChange = { if (!inputsRefused()) confirm = it },
+            enabled = inputs.isPossible,
             singleLine = true,
             label = { Text(stringResource(R.string.backups_restore_confirm_placeholder)) },
             modifier = Modifier.fillMaxWidth().testTag(Ids.RESTORE_CONFIRM_INPUT),
@@ -164,14 +195,27 @@ fun LocalRestoreContent(
         // connected nest.
         val restoreGate = faunaGate(
             "fauna.filesync.snapshot.restore_message_kind",
-            enabled = confirmEnabled && progress != RestoreProgress.RUNNING,
+            enabled = restoreAnswer.isPossible,
         )
+        val restoreConfirm = faunaFormGate(restoreAnswer, restoreGate)
         Button(
-            onClick = { selected?.let { onRestore(it.id, confirm.text) } },
-            enabled = restoreGate.enabled,
+            onClick = {
+                val asked = askForm {
+                    restorePossibility(running, ask.snapshotId, ask.kindTicked, confirm.text)
+                }
+                val refusal = formRefusal(context, asked)
+                if (refusal != null) {
+                    refusal.reason?.let(onError)
+                } else {
+                    selected?.let { onRestore(it.id, confirm.text) }
+                }
+            },
+            enabled = restoreConfirm.enabled,
             modifier = Modifier.testTag(Ids.RESTORE_CONFIRM_BUTTON),
         ) { Text(stringResource(R.string.backups_restore_confirm_button)) }
-        DisabledControlReasonText(restoreGate.reason)
+        // While nothing exists to restore, the inputs' line above already says
+        // so; one reason under a dead section, never two stacked.
+        DisabledControlReasonText(if (inputs.isPossible) restoreConfirm.reason else null)
 
         // ── restore-progress ──
         Text(
@@ -248,6 +292,7 @@ private fun SnapshotSelect(
 @Composable
 private fun KindCheckbox(
     checked: Boolean,
+    enabled: Boolean,
     onChecked: (Boolean) -> Unit,
     label: String,
 ) {
@@ -255,6 +300,7 @@ private fun KindCheckbox(
         Checkbox(
             checked = checked,
             onCheckedChange = onChecked,
+            enabled = enabled,
             modifier = Modifier.testTag(Ids.RESTORE_KIND_CHECKBOX),
         )
         Text(label, style = MaterialTheme.typography.bodyMedium)

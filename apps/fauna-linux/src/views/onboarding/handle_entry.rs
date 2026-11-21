@@ -3,8 +3,6 @@
 //! ui.yaml IDs: `page-heading`, `handle-input`, `handle-check-button`,
 //! `handle-message-area`, `handle-entry-continue-button`,
 //! `handle-entry-back-button`, `error-message`.
-//! Optional: `handle-control-checkbox` (visible iff
-//! `snapshot.control_checkbox_visible`).
 //!
 //! Replaces the old `submit_handle()` flow with the new snapshot-driven
 //! start_handle_check / handle_check_snapshot API.
@@ -70,12 +68,39 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     let check_btn = gtk::Button::with_label(crate::i18n::strings::common::CHECK);
     check_btn.add_css_class("suggested-action");
     set_test_id(&check_btn, ids::HANDLE_CHECK_BUTTON);
-    check_btn.set_sensitive(false); // disabled when input is empty
+    // Painted from the machine's answer (`ui/README.md` § Offer only what is
+    // possible, rule 4's form case): a handle typed and no check in flight.
+    crate::possible::paint(&check_btn, None, m.handle_check_possibility(String::new()));
+    {
+        let m = m.clone();
+        let check_btn = check_btn.clone();
+        entry.connect_changed(move |e| {
+            crate::possible::paint(
+                &check_btn,
+                None,
+                m.handle_check_possibility(e.text().to_string()),
+            );
+        });
+    }
+    // -- Error label --
+    let error_label = gtk::Label::new(None);
+    error_label.add_css_class("error");
+    error_label.set_wrap(true);
+    error_label.set_halign(gtk::Align::Start);
+    error_label.set_selectable(true);
+    set_test_id(&error_label, ids::ERROR_MESSAGE);
+    error_label.set_visible(false);
     {
         let m = m.clone();
         let entry = entry.clone();
+        let error_label = error_label.clone();
         check_btn.connect_clicked(move |_| {
             let handle = entry.text().to_string();
+            // The press asks the answer it was painted from again (rule 6).
+            let answer = m.handle_check_possibility(handle.clone());
+            if crate::possible::refused_at_press(&answer, &error_label) {
+                return;
+            }
             let m = m.clone();
             async_helper::run_on_tokio(async move { m.start_handle_check(handle).await }, |_| {});
         });
@@ -88,32 +113,11 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     message_label.set_wrap(true);
     message_label.set_halign(gtk::Align::Start);
     message_label.add_css_class("fauna-muted");
+    // Selectable, so a message can be copied out and searched for.
+    message_label.set_selectable(true);
     set_test_id(&message_label, ids::HANDLE_MESSAGE_AREA);
     root.append(&message_label);
 
-    // -- Control checkbox (optional, hidden until snapshot says visible) --
-    // A native gtk::CheckButton, matching web's `<input type=checkbox>`. The
-    // agent actuates it via activate(); same `:active` + connect_toggled API
-    // the snapshot refresh closure expects.
-    let control_checkbox =
-        gtk::CheckButton::with_label(crate::i18n::strings::onboarding::handle::CONTROL_CHECKBOX);
-    set_test_id(&control_checkbox, ids::HANDLE_CONTROL_CHECKBOX);
-    control_checkbox.set_visible(false);
-    {
-        let m = m.clone();
-        control_checkbox.connect_toggled(move |cb| {
-            m.set_control_checkbox(cb.is_active());
-        });
-    }
-    root.append(&control_checkbox);
-
-    // -- Error label --
-    let error_label = gtk::Label::new(None);
-    error_label.add_css_class("error");
-    error_label.set_wrap(true);
-    error_label.set_halign(gtk::Align::Start);
-    set_test_id(&error_label, ids::ERROR_MESSAGE);
-    error_label.set_visible(false);
     root.append(&error_label);
 
     // -- By-continuing terms notice: only while Continue signs in, read from
@@ -145,7 +149,7 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
 
     let continue_btn = gtk::Button::with_label(crate::i18n::strings::common::CONTINUE);
     continue_btn.add_css_class("suggested-action");
-    continue_btn.set_sensitive(false); // driven by snapshot.continue_enabled
+    continue_btn.set_sensitive(false); // painted from the machine's answer on refresh
     set_test_id(&continue_btn, ids::HANDLE_ENTRY_CONTINUE_BUTTON);
     {
         let m = m.clone();
@@ -175,7 +179,6 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
         let entry = entry.clone();
         let check_btn = check_btn.clone();
         let message_label = message_label.clone();
-        let control_checkbox = control_checkbox.clone();
         let continue_btn = continue_btn.clone();
         let error_label = error_label.clone();
         let terms_notice = terms_notice.clone();
@@ -188,22 +191,21 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
                 entry.set_text(&h);
             }
 
-            // check button: sensitive when input non-empty and not loading.
-            check_btn.set_sensitive(!entry.text().is_empty() && !m.is_loading());
+            crate::possible::paint(
+                &check_btn,
+                None,
+                m.handle_check_possibility(entry.text().to_string()),
+            );
 
             // snapshot-driven fields
             let snap = m.handle_check_snapshot();
-            message_label.set_text(&snap.message.resolve(crate::i18n::strings::lookup));
-
-            control_checkbox.set_visible(snap.control_checkbox_visible);
-            if snap.control_checkbox_visible {
-                // Only update the toggle if it differs (avoids toggled signal loops).
-                if control_checkbox.is_active() != snap.control_checkbox_checked {
-                    control_checkbox.set_active(snap.control_checkbox_checked);
-                }
+            // Only on a change: a repaint would drop a selection being made.
+            let message = snap.message.resolve(crate::i18n::strings::lookup);
+            if message_label.text() != message.as_str() {
+                message_label.set_text(&message);
             }
 
-            continue_btn.set_sensitive(snap.continue_enabled);
+            crate::possible::paint(&continue_btn, None, m.handle_continue_possibility());
             terms_notice.set_visible(snap.terms_notice_visible);
             crate::nest_rules::paint_joining(
                 &nest_rules,

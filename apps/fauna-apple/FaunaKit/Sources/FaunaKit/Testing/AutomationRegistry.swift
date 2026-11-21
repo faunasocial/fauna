@@ -405,6 +405,15 @@ public struct SentinelGeometry {
     /// is read only by the `painted_text_area` feed, never by every geometry
     /// read. `nil` where no sentinel is realized.
     public var laidOutRoom: (() -> AutomationLaidOutRoom?)?
+    /// The sentinel's own platform view, read on demand by the routes that act
+    /// on the platform views the element's frame holds — the selection behind
+    /// `POST /element/select-text` (`TextSelectionRead.swift`: Select All on
+    /// macos, the long-press on ios). `nil` where no sentinel is realized.
+    #if os(macOS)
+    public var sentinelView: (() -> NSView?)?
+    #elseif os(iOS)
+    public var sentinelView: (() -> UIView?)?
+    #endif
 
     /// The zombie test — deliberately horizontal-origin-only. UIKit
     /// slide-transition/reuse churn leaves a DEAD row's cell attached at the
@@ -681,6 +690,13 @@ public final class AutomationRegistry {
             }
         }
         return frame
+    }
+
+    /// Whether the screen shows anything at all: some slot is visible, with
+    /// text or without — the `root_surface` journal's test for a frame that
+    /// painted nothing (`E2eLoudSurfaces`).
+    public func paintsAnything() -> Bool {
+        entries.keys.contains { !visibleSlots($0).isEmpty }
     }
 
     /// Every visible slot with text of its own (the `paintedTexts` rule) and a
@@ -1170,6 +1186,18 @@ public final class AutomationRegistry {
         resolvedSlot(id, scope: scope, leafIndex: leafIndex)?.entry
     }
 
+    #if os(macOS) || os(iOS)
+    /// Scope-aware sentinel view — the anchor `POST /element/select-text` finds
+    /// the element's own text view from (`TextSelectionRead.swift`). `nil` for an
+    /// unresolved element or one whose sentinel is not realized; the caller tells
+    /// the two apart with `resolvedEntry`.
+    func resolvedSentinelView(
+        _ id: String, scope: [AutomationScopeStep], leafIndex: Int
+    ) -> _PlatformView? {
+        resolvedSlot(id, scope: scope, leafIndex: leafIndex)?.geometry?()?.sentinelView?()
+    }
+    #endif
+
     /// Scope-aware live window-space frame (top-left origin) — backs
     /// `/element/attr?attr=frame`, the geometry read the harness's
     /// `assert_on_screen` builds on. `nil` for an unresolved scope/index or a
@@ -1281,6 +1309,16 @@ public final class AutomationRegistry {
         /// geometry read can tell WHICH block a frame belongs to
         /// (`actions/events.py::_timeline_frames`) in the one round trip.
         public var text: String? = nil
+        /// The element's named reads, the shape tui's and linux's registry
+        /// records carry: every `Entry.attributes` name (a copy button's
+        /// `copied`, a reason, a revealed address), plus `value` — the
+        /// `/element/attr?attr=value` read, which on apple carries a toggle's
+        /// `on`/`off` and a value-labelled button's live label — wherever the
+        /// entry registers one. Without it a frame-wide checker could not see a
+        /// copy confirm, a checkbox flip or a toggle's new label, and read each
+        /// as "nothing changed" (the actuation sweep, `e2e-systematic-ui-walks.md`
+        /// § Implementation status today, layer (c)). Empty map = no named reads.
+        public var attrs: [String: String] = [:]
     }
 
     /// Every VISIBLE registered element, id-sorted then in document order —
@@ -1301,6 +1339,8 @@ public final class AutomationRegistry {
         for id in entries.keys.sorted() {
             for (index, slot) in visibleSlots(id).enumerated() {
                 let e = slot.entry
+                var attrs = e.attributes?() ?? [:]
+                if attrs["value"] == nil, let v = e.value?() { attrs["value"] = v }
                 rows.append(ElementSnapshot(
                     id: id,
                     index: index,
@@ -1310,7 +1350,8 @@ public final class AutomationRegistry {
                     editable: e.setValue != nil && e.typeRefusal?() == nil,
                     scope: slot.path.map { "\($0.id)[\($0.index)]" }.joined(separator: "/"),
                     frame: slot.geometry?()?.frame,
-                    text: e.text?()))
+                    text: e.text?(),
+                    attrs: attrs))
             }
         }
         return rows
@@ -1359,6 +1400,44 @@ public final class AutomationRegistry {
         guard !inheritedEnabled else { return entry }
         var folded = entry
         folded.isEnabled = { false }
+        return folded
+    }
+
+    /// Fold the reason an enclosing `.faunaPossible` painted into the entry's
+    /// named `reason` attribute — the read behind the e2e driver's
+    /// `blocked_reason` (`docs/goal/ui/README.md` § Offer only what is possible,
+    /// rule 2: the reason within eyeshot). `nil` (no painter above) returns the
+    /// entry as-is; a `reason` the entry publishes itself wins.
+    public static func folding(_ entry: Entry, possibleReason: String?) -> Entry {
+        guard let possibleReason else { return entry }
+        var folded = entry
+        let own = entry.attributes
+        folded.attributes = {
+            var attrs = own?() ?? [:]
+            if attrs["reason"] == nil { attrs["reason"] = possibleReason }
+            return attrs
+        }
+        return folded
+    }
+
+    /// Fold the text-selection decision in force where the element registers
+    /// (`faunaTextSelectable`, set with SwiftUI's own `.textSelection` by
+    /// `.faunaReadOnlyText()` / `.faunaActsOnClick()` — `Core/ReadOnlyText.swift`)
+    /// into the entry's named `selectable` attribute: the read behind the e2e
+    /// driver's `is_text_selectable` (`docs/goal/ui/README.md` § Text the person
+    /// reads can be copied). An actuable control (`activate` set) answers
+    /// `false` whatever its environment — a control's caption is exempt and a
+    /// row that acts on a click keeps its text unselectable (rule 3). A
+    /// `selectable` the entry publishes itself wins.
+    public static func folding(_ entry: Entry, textSelectable: Bool) -> Entry {
+        var folded = entry
+        let own = entry.attributes
+        let selectable = textSelectable && entry.activate == nil
+        folded.attributes = {
+            var attrs = own?() ?? [:]
+            if attrs["selectable"] == nil { attrs["selectable"] = selectable ? "true" : "false" }
+            return attrs
+        }
         return folded
     }
 
@@ -1828,13 +1907,15 @@ private final class _AutomationLifecycle {
             frame: CGRect(x: r.minX, y: h - r.maxY, width: r.width, height: r.height),
             windowBounds: CGRect(x: 0, y: 0, width: window.frame.width, height: h),
             windowVisible: window.isVisible,
-            laidOutRoom: { [weak view] in view?.laidOutRoom })
+            laidOutRoom: { [weak view] in view?.laidOutRoom },
+            sentinelView: { [weak view] in view })
         #else
         return SentinelGeometry(
             frame: r,
             windowBounds: CGRect(origin: .zero, size: window.bounds.size),
             windowVisible: !window.isHidden,
-            laidOutRoom: { [weak view] in view?.laidOutRoom })
+            laidOutRoom: { [weak view] in view?.laidOutRoom },
+            sentinelView: { [weak view] in view })
         #endif
         #else
         return nil
@@ -2253,6 +2334,14 @@ public struct _AutomationRegister: ViewModifier {
     /// **every** cause of disablement rather than the one the offline gate used
     /// to publish through a dedicated environment key of its own.
     @Environment(\.isEnabled) private var inheritedEnabled
+    /// The reason the nearest enclosing `.faunaPossible` painted (`nil` under
+    /// none), published as the `reason` attribute
+    /// (`AutomationRegistry.folding(_:possibleReason:)`).
+    @Environment(\.faunaPossibleReason) private var possibleReason
+    /// Whether SwiftUI's text selection is on where this element registers
+    /// (`Core/ReadOnlyText.swift`), published as the `selectable` attribute
+    /// (`AutomationRegistry.folding(_:textSelectable:)`).
+    @Environment(\.faunaTextSelectable) private var textSelectable
 
     /// `entry` with the inherited disablement folded into its `isEnabled`
     /// (`AutomationRegistry.folding`, which carries the full rationale). Every
@@ -2260,7 +2349,11 @@ public struct _AutomationRegister: ViewModifier {
     /// path registering the unfolded one is how a re-attached control silently
     /// regained `enabled=true` after a `NavigationStack` pop or a tab return.
     private var registeredEntry: AutomationRegistry.Entry {
-        AutomationRegistry.folding(entry, inheritedEnabled: inheritedEnabled)
+        AutomationRegistry.folding(
+            AutomationRegistry.folding(
+                AutomationRegistry.folding(entry, inheritedEnabled: inheritedEnabled),
+                possibleReason: possibleReason),
+            textSelectable: textSelectable)
     }
 
     public func body(content: Content) -> some View {
@@ -2434,5 +2527,48 @@ public enum AutomationPaintedTextRoom {
 
     private static func hasArea(_ size: CGSize) -> Bool {
         size.width > 0 && size.height > 0
+    }
+}
+
+// MARK: - The painted possibility reason
+//
+// Unconditional and in THIS file, so the file still typechecks standalone for
+// iOS and `.faunaPossible`
+// can set it in production builds.
+
+/// The reason the nearest enclosing `.faunaPossible` (`Core/Possibility.swift`) painted:
+/// `nil` under no painter, `""` while its answer is possible, else the blocked
+/// reason's rendered text. Read only by the automation registry, which
+/// publishes it as a control's `reason` attribute — the apple twin of the
+/// reason a linux or tui control carries for `blocked_reason`.
+private struct FaunaPossibleReasonKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+public extension EnvironmentValues {
+    var faunaPossibleReason: String? {
+        get { self[FaunaPossibleReasonKey.self] }
+        set { self[FaunaPossibleReasonKey.self] = newValue }
+    }
+}
+
+// MARK: - The text-selection decision
+//
+// Unconditional and in THIS file for the same reason as the possibility reason
+// above: the file typechecks standalone for iOS.
+
+/// Whether the nearest enclosing `.faunaReadOnlyText()` / `.faunaActsOnClick()`
+/// (`Core/ReadOnlyText.swift`) turned SwiftUI's text selection on (`false` under
+/// neither). Set only by those two modifiers, beside the `.textSelection` they
+/// apply, and read only by the automation registry, which publishes it as an
+/// element's `selectable` attribute (`AutomationRegistry.folding(_:textSelectable:)`).
+private struct FaunaTextSelectableKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+public extension EnvironmentValues {
+    var faunaTextSelectable: Bool {
+        get { self[FaunaTextSelectableKey.self] }
+        set { self[FaunaTextSelectableKey.self] = newValue }
     }
 }

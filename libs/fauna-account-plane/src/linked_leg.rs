@@ -303,7 +303,18 @@ pub async fn list_linked_targets<R: RpcRequester>(
     session_rpc: &R,
     bound: &[[u8; 32]],
 ) -> Result<Vec<LinkedNestTarget>> {
-    let reply: PairListReply = session_rpc
+    Ok(linked_targets(&list_pairings(session_rpc).await?, bound))
+}
+
+/// The account's pairings on the bound nest, as it answered them — what the
+/// secondary leg picks its targets from and digests into the bound nest's
+/// pairing mark (`crate::pairing_mark_rows`).
+///
+/// # Errors
+///
+/// The list request failed.
+pub async fn list_pairings<R: RpcRequester>(session_rpc: &R) -> Result<PairListReply> {
+    session_rpc
         .request(
             KIND_PAIR_LIST,
             PairListRequest {
@@ -311,8 +322,7 @@ pub async fn list_linked_targets<R: RpcRequester>(
             },
         )
         .await
-        .map_err(|e| anyhow::anyhow!("{KIND_PAIR_LIST}: {e}"))?;
-    Ok(linked_targets(&reply, bound))
+        .map_err(|e| anyhow::anyhow!("{KIND_PAIR_LIST}: {e}"))
 }
 
 /// What one linked nest's leg is run with — everything but the connection.

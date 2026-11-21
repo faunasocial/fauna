@@ -8,24 +8,48 @@ struct EventSplitView: View {
     @Environment(EventsVM.self) private var vm
 
     var body: some View {
+        // Three regions, Microsoft Outlook's arrangement (events.md § Layout &
+        // flow — the calendar list and controls are the sidebar / top, the grid
+        // is the MAIN AREA): a narrow calendar pane, the toolbar + grid taking
+        // every point of width left, and a trailing detail / compose pane that
+        // exists only while there is something to show. Until 2026-11-16 the
+        // toolbar AND the grid sat in the calendar pane, capped at 400pt, beside
+        // a placeholder filling the rest of the window.
         HSplitView {
             VStack(spacing: 0) {
                 RefusedChangeList(vm: vm)
                 MacCalendarListView(vm: vm)
-                Divider()
-                MacEventListView(vm: vm)
             }
-            .frame(minWidth: 300, maxWidth: 400)
+            .frame(minWidth: 240, idealWidth: 260, maxWidth: 320)
 
-            if vm.selectedEvent != nil {
+            MacEventListView(vm: vm)
+                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+
+            // On demand. Compose wins over a selected event: the user just asked
+            // for it. Both close without any id of their own — compose through
+            // `new-event-btn` (its Cancel face) or `event-form-discard`, the
+            // detail by selecting a calendar or Esc. macOS paints no
+            // `event-detail-back`: this is a split-view panel with no navigation
+            // to reverse (the 2026-08-14 ruling, events.md § Element IDs).
+            if vm.showNewEvent {
+                ScrollView {
+                    MacEventFormView(vm: vm)
+                        .padding(.horizontal)
+                }
+                .frame(minWidth: 300, idealWidth: 360, maxWidth: 440)
+            } else if vm.selectedEvent != nil {
                 MacEventDetailView(vm: vm)
-            } else {
-                ContentUnavailableView(L.events.title,
-                    systemImage: "calendar",
-                    description: Text(L.events.selectCalendar))
+                    .frame(minWidth: 300, idealWidth: 360, maxWidth: 440)
             }
         }
         .accessibilityElement(children: .contain)
+        .onExitCommand {
+            if vm.showNewEvent {
+                vm.showNewEvent = false
+            } else {
+                vm.selectedEvent = nil
+            }
+        }
         .pageTitle(L.events.title)
         // The calendar `.ics` import / export controls used to be two toolbar buttons
         // here; they now sit beside the calendar list (`MacCalendarListView`) in the

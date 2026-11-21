@@ -38,10 +38,53 @@ public final class MailImportVM {
     static let progressTickMs: UInt64 = 400
 
     /// Latest snapshot; `nil` until `configure`.
-    public private(set) var snapshot: MailImportSnapshot?
+    public internal(set) var snapshot: MailImportSnapshot?
     /// Page-level error surface (`error-message`).
     public var errorMessage: String?
+
+    /// The Outlook source's shared answer
+    /// (`MailImportSnapshot::outlook_source_possibility`, `mailbox-migration.md`
+    /// § Microsoft sign-in — the device-code grant): absent on a build with no
+    /// sign-in transport (the picker leaves Outlook out), blocked while no
+    /// registration is saved, possible otherwise; before the first snapshot it
+    /// is not known yet (rule 5) — tui's `outlook_answer`.
+    public var outlookAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return mailImportOutlookSourcePossibility(snapshot: snapshot)
+    }
     public private(set) var isLoading = false
+
+    /// `wizard-next-button`'s shared answer (`mailbox-migration.md` § *Next
+    /// and Start offer only an import that can start*): on Scope it is
+    /// blocked, with its reason, while no mailbox is selected or the typed
+    /// since date is malformed — asked over `dateFrom`, the Scope page's draft,
+    /// folded in by the shared face exactly as tui folds it. Before the first
+    /// snapshot it is not known yet (rule 5).
+    public func nextAnswer(dateFrom: String) -> Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return mailImportNextPossibility(snapshot: snapshot, dateFrom: dateFrom)
+    }
+
+    /// `mail-import-start-button`'s shared answer: the scope's, re-asked.
+    public var startAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return mailImportStartPossibility(snapshot: snapshot)
+    }
+
+    /// Scope's Next press: asks what the paint asked over the same draft and
+    /// refuses on `error-message` with the reason (`ui/README.md` § Offer only
+    /// what is possible, rule 7); otherwise commits both drafts and advances
+    /// (`scopeNextActions` owns the unparseable-max-size fallback).
+    public func pressScopeNext(dateFrom: String, maxSizeInput: String) async {
+        if refusePress(nextAnswer(dateFrom: dateFrom), errorMessage: &errorMessage) { return }
+        await dispatchSequence(scopeNextActions(dateFrom: dateFrom, maxSizeInput: maxSizeInput))
+    }
+
+    /// The Start press, refused with ``startAnswer``'s reason the same way.
+    public func pressStart() async {
+        if refusePress(startAnswer, errorMessage: &errorMessage) { return }
+        await dispatch(.start)
+    }
 
     private var machine: MailImportMachine?
     /// The `APIClient` the cached ``machine`` was built from — re-vend on a
@@ -149,7 +192,14 @@ public final class MailImportVM {
     /// `connectActions` / `scopeNextActions`; this side only locates its own
     /// field values.
     public func dispatchSequence(_ actions: [MailImportAction]) async {
-        guard let machine, !actions.isEmpty else { return }
+        guard !actions.isEmpty else { return }
+        // A gesture on a page whose machine was never built says so
+        // (`mail-settings.md` § Errors & edge cases, *The in-page predicates*;
+        // rule 7) — never a silent return.
+        guard let machine else {
+            errorMessage = mailUsableUnbuilt().refusal
+            return
+        }
         isLoading = true
         defer { isLoading = false }
         // The one list every app asks (`import_action_starts_run`), so a new

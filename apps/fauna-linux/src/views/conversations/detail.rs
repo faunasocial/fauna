@@ -24,7 +24,7 @@ use std::sync::Arc;
 use gtk::prelude::*;
 
 use fauna_conversations::{
-    ConversationsManager, SendState,
+    ConversationsManager, NewThreadControl, SendState,
     message::MessageId,
     room::{RoomSearchNav, RoomSearchStatus},
     snapshot::{ConversationsSnapshot, ThreadDetail},
@@ -399,7 +399,14 @@ impl ConversationDetail {
             let m = manager.clone();
             let id = detail_thread_id.clone();
             detail_compose.on_topic_toggle(move || {
-                if let Some(tid) = id.borrow().clone() {
+                // The same answer the toggle was painted from: a rail with no
+                // subject toggles nothing, whoever raced the paint.
+                if let Some(tid) = id.borrow().clone()
+                    && m.thread_detail(tid.clone()).is_some_and(|d| {
+                        super::thread_control(&d, fauna_conversations::ThreadControl::Subject)
+                            .is_possible()
+                    })
+                {
                     m.toggle_topic(tid);
                 }
             });
@@ -888,10 +895,14 @@ impl ConversationDetail {
                     move || async move { crate::settings::member_review::keep_person(person).await },
                     move |kept| match kept {
                         Ok(()) => client.fetch_member_reviews(),
+                        // The sentence names the failure; never only the log
+                        // (`ui/README.md` § Offer only what is possible, rule 7).
                         Err(error) => client.tx().send(crate::app::UiMessage::Action(
-                            crate::app::ActionResult::Failed {
-                                context: "member_review_keep".into(),
-                                error,
+                            crate::app::ActionResult::FailedLocalized {
+                                message:
+                                    crate::i18n::strings::settings::recovery_kit::review_keep_failed(
+                                        &error,
+                                    ),
                             },
                         )),
                     },
@@ -914,9 +925,15 @@ impl ConversationDetail {
         }
         // Topic toggle for new-thread compose: there's no per-thread id, so
         // we toggle subject_draft directly via set_new_thread_subject.
+        // The toggle asks the same `new_thread_possibility` answer its paint
+        // showed; a refusal says why on `error-message` and opens nothing.
         {
             let m = manager.clone();
+            let client = client.clone();
             new_thread_compose.on_topic_toggle(move || {
+                if !super::new_thread_control(&m, &client, NewThreadControl::Topic) {
+                    return;
+                }
                 let snap = m.snapshot();
                 let is_some = snap
                     .new_thread_compose
@@ -933,17 +950,50 @@ impl ConversationDetail {
         // Send the new-thread compose: materialize the thread from the
         // recipient chips + draft and submit through the rail backend on the
         // tokio runtime.
+        //
+        // Send asks the same answer its paint showed (rule 6); the manager asks
+        // it again after flushing a typed recipient and stamps any refusal on
+        // the draft's `send_state`, which `error-message` reads. The returned
+        // error is never dropped (rule 7): a failure no draft carries any more
+        // reaches `error-message` from its own detail — tui's
+        // `Outcome::NewThreadSent(Option<String>)`.
         {
             let m = manager.clone();
             let rt = rt.clone();
+            let client = client.clone();
             new_thread_compose.on_send(move || {
+                if !super::new_thread_control(&m, &client, NewThreadControl::Send) {
+                    return;
+                }
                 // Same live-cell stance as the existing-thread send above.
                 let m2 = m.clone();
-                rt.spawn(async move {
-                    if let Err(e) = m2.send_new_thread().await {
-                        tracing::error!("send_new_thread failed: {e}");
-                    }
-                });
+                let client = client.clone();
+                crate::async_helper::spawn_with_snapshot(
+                    &rt,
+                    move || async move {
+                        let error = m2.send_new_thread().await.err().map(|e| {
+                            tracing::error!("send_new_thread failed: {e}");
+                            e.user_detail()
+                        });
+                        let stamped = m2
+                            .snapshot()
+                            .new_thread_compose
+                            .is_some_and(|c| matches!(c.send_state, SendState::Failed { .. }));
+                        error.filter(|_| !stamped)
+                    },
+                    move |unstamped| {
+                        if let Some(detail) = unstamped {
+                            client.tx().send(crate::app::UiMessage::Action(
+                                crate::app::ActionResult::FailedLocalized {
+                                    message:
+                                        crate::i18n::strings::conversations::unified::error_send(
+                                            &detail,
+                                        ),
+                                },
+                            ));
+                        }
+                    },
+                );
             });
         }
 
@@ -951,10 +1001,16 @@ impl ConversationDetail {
         // existing-thread leg above, staging onto the single-slot new-thread
         // draft (`add_new_thread_attachment`); `send_new_thread` carries it
         // onto the materialized thread.
+        // The press asks the same answer its paint showed first: a refused
+        // attach says why and opens no chooser.
         {
             let m = manager.clone();
+            let client = client.clone();
             let compose_root = new_thread_compose.root.clone();
             new_thread_compose.on_attach(move || {
+                if !super::new_thread_control(&m, &client, NewThreadControl::Attach) {
+                    return;
+                }
                 let dialog = gtk::FileDialog::builder()
                     .title(crate::i18n::strings::conversations::unified::ATTACHMENT_BUTTON)
                     .build();
@@ -1098,6 +1154,10 @@ impl ConversationDetail {
             });
             self.new_thread_compose
                 .render(c, None, new_thread_rail, None, founds_room);
+            // Send, attach and topic answer the shared new-thread predicate
+            // (`ui/conversations.md` § Errors & edge cases → *The new-thread
+            // composer offers only what it can send*).
+            self.new_thread_compose.paint_new_thread_controls(Some(c));
             // Group-conversation hint surfaces once we have ≥2 chips — same
             // threshold as Windows ConversationsPage.xaml.cs:227.
             self.group_hint.set_visible(chip_count >= 2);
@@ -1549,6 +1609,7 @@ mod page_error_tests {
             launch_floor_ms: 0,
             room_invitations: Vec::new(),
             bridges: Vec::new(),
+            loaded: false,
         }
     }
 

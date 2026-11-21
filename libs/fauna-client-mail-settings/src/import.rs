@@ -132,6 +132,7 @@ use async_trait::async_trait;
 use fauna_client_config::MailImportSourceStore;
 use fauna_core::localized::LocalizedText;
 use fauna_core::mail_import_source::RememberedImportSource;
+use fauna_core::possibility::Possibility;
 use fauna_core::secret::SecretString;
 use fauna_mail::imap_client::oauth_device::{
     self, DeviceFlow, FlowOutcome, MicrosoftRegistration, OAuthClient, OAuthHttpResponse,
@@ -428,7 +429,8 @@ impl ImportDateFloor {
         }
         let day = fauna_core::caltime::days_from_ymd(value).ok_or_else(|| {
             DispatchError::InvalidState(
-                "the import's since date must be a real date written YYYY-MM-DD".into(),
+                LocalizedText::key("mail_import.scope_date_from_invalid")
+                    .resolve(fauna_i18n::strings::lookup),
             )
         })?;
         Ok(Self {
@@ -634,6 +636,16 @@ pub struct MailImportSnapshot {
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     #[serde(default)]
     pub microsoft_signin_available: bool,
+    /// Whether this build has an HTTPS seam for the Microsoft sign-in at all
+    /// (every native shell gives one; web waits for the relay). `false` means
+    /// no step on this app can ever make the sign-in work, so
+    /// [`Self::outlook_source_possibility`] answers absent and the Outlook
+    /// source is not offered; `true` with [`Self::microsoft_signin_available`]
+    /// still `false` is a registration nobody has saved yet — blocked, since an
+    /// admin can supply one.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    #[serde(default)]
+    pub microsoft_signin_transport: bool,
     /// The Outlook source's sign-in, while one is under way or has just
     /// ended; `None` otherwise.
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
@@ -680,6 +692,100 @@ fn default_selected(name: &str, special_use: Option<SpecialUse>) -> bool {
 }
 
 impl MailImportSnapshot {
+    /// Whether the Outlook source can be offered **now** — the one answer the
+    /// source picker's Outlook option and its Sign in with Microsoft button
+    /// paint from, and the one [`MailImportAction::BeginMicrosoftSignIn`]
+    /// asks (`docs/goal/ui/README.md` § Offer only what is possible, rules 2
+    /// and 6; `mailbox-migration.md` § Microsoft sign-in — the device-code
+    /// grant):
+    ///
+    /// - no sign-in transport on this build ([`Self::microsoft_signin_transport`])
+    ///   → [`Possibility::Absent`]: nothing on this app can make it work, so
+    ///   the option is not shown;
+    /// - a transport but no application registration yet
+    ///   ([`Self::microsoft_signin_available`] false) → blocked with
+    ///   `mail_import.microsoft_unavailable`: an admin can save one;
+    /// - otherwise possible.
+    pub fn outlook_source_possibility(&self) -> Possibility {
+        if !self.microsoft_signin_transport {
+            return Possibility::Absent;
+        }
+        if !self.microsoft_signin_available {
+            return Possibility::blocked(LocalizedText::key("mail_import.microsoft_unavailable"));
+        }
+        Possibility::Possible
+    }
+
+    /// Whether the scope step's choices can be imported
+    /// (`mailbox-migration.md` § Wizard steps, step 3; `docs/goal/ui/README.md`
+    /// § Offer only what is possible, rules 2, 4 and 6): blocked while no
+    /// mailbox is selected, and while the since date is not a real
+    /// `YYYY-MM-DD` day (the floor [`ImportDateFloor::parse`] resolves);
+    /// possible otherwise.
+    pub fn scope_possibility(&self) -> Possibility {
+        if !self.mailboxes.iter().any(|m| m.selected) {
+            return Possibility::blocked(LocalizedText::key("mail_import.scope_needs_mailbox"));
+        }
+        if ImportDateFloor::parse(&self.date_from).is_err() {
+            return Possibility::blocked(LocalizedText::key("mail_import.scope_date_from_invalid"));
+        }
+        Possibility::Possible
+    }
+
+    /// `wizard-next-button`: on the scope step it waits on
+    /// [`Self::scope_possibility`] (the step's exit, before the source is
+    /// asked for estimates); every other step's Next is possible.
+    pub fn next_possibility(&self) -> Possibility {
+        if self.step == ImportStep::Scope {
+            self.scope_possibility()
+        } else {
+            Possibility::Possible
+        }
+    }
+
+    /// `mail-import-start-button`: the scope's answer, re-asked at Start.
+    pub fn start_possibility(&self) -> Possibility {
+        self.scope_possibility()
+    }
+
+    /// The snapshot with the Scope step's typed since-date draft folded in
+    /// (trimmed) — what the machine will hold once Next commits it
+    /// ([`scope_next_actions`]), so the answer an app paints over its draft is
+    /// the one the machine then asks. Off the Scope step the snapshot comes
+    /// back unchanged.
+    #[must_use]
+    pub fn with_scope_draft(&self, date_from: &str) -> Self {
+        let mut s = self.clone();
+        if s.step == ImportStep::Scope {
+            s.date_from = date_from.trim().to_string();
+        }
+        s
+    }
+}
+
+/// `wizard-next-button`'s answer over FFI: [`MailImportSnapshot::next_possibility`]
+/// over the snapshot with the Scope step's typed since-date draft folded in
+/// ([`MailImportSnapshot::with_scope_draft`]).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_import_next_possibility(snapshot: MailImportSnapshot, date_from: &str) -> Possibility {
+    snapshot.with_scope_draft(date_from).next_possibility()
+}
+
+/// `mail-import-start-button`'s answer over FFI
+/// ([`MailImportSnapshot::start_possibility`]).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_import_start_possibility(snapshot: MailImportSnapshot) -> Possibility {
+    snapshot.start_possibility()
+}
+
+/// [`MailImportSnapshot::outlook_source_possibility`] over FFI: a UniFFI record
+/// carries no methods (the `mail_settings_mail_usable` shape).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_import_outlook_source_possibility(snapshot: MailImportSnapshot) -> Possibility {
+    snapshot.outlook_source_possibility()
+}
+
+impl MailImportSnapshot {
     /// The page as it paints before `hydrate` has answered: step 1, the Gmail
     /// preset, nothing known about the source or the mailbox. `pub` for the
     /// `ArchiveImportSnapshot::empty` reason — an app's own tests fold a
@@ -717,6 +823,7 @@ impl MailImportSnapshot {
             rebuilt_mailboxes: Vec::new(),
             resume_needs_credentials: false,
             microsoft_signin_available: false,
+            microsoft_signin_transport: false,
             microsoft_signin: None,
             source_remembered: false,
         }
@@ -863,6 +970,7 @@ impl MailImportSnapshot {
         fresh.tls_mode = self.tls_mode;
         fresh.username = std::mem::take(&mut self.username);
         fresh.microsoft_signin_available = self.microsoft_signin_available;
+        fresh.microsoft_signin_transport = self.microsoft_signin_transport;
         fresh.source_remembered = self.source_remembered;
         *self = fresh;
     }
@@ -2100,10 +2208,9 @@ impl MailImportMachine {
 
     fn refresh_signin_availability(&self) {
         let available = self.oauth_available && !self.microsoft_client().client_id.is_empty();
-        self.inner
-            .lock()
-            .expect("snapshot mutex")
-            .microsoft_signin_available = available;
+        let mut snap = self.inner.lock().expect("snapshot mutex");
+        snap.microsoft_signin_available = available;
+        snap.microsoft_signin_transport = self.oauth_available;
     }
 
     fn set_signin_view(&self, view: Option<MicrosoftSignInView>) {
@@ -2453,12 +2560,12 @@ impl MailImportMachine {
     /// first — one sign-in, one account.
     async fn begin_microsoft_sign_in(&self) -> Result<(), DispatchError> {
         use fauna_i18n::strings::mail_import as s;
-        let (kind, username, available) = {
+        let (kind, username, outlook) = {
             let snap = self.inner.lock().expect("snapshot mutex");
             (
                 snap.source_kind,
                 snap.username.trim().to_string(),
-                snap.microsoft_signin_available,
+                snap.outlook_source_possibility(),
             )
         };
         if kind != ImportSourceKind::Outlook {
@@ -2466,7 +2573,10 @@ impl MailImportMachine {
                 "Microsoft sign-in is for the Outlook source".into(),
             ));
         }
-        if !available {
+        // The same answer the Outlook option and its button paint from: absent
+        // (no transport on this build) and blocked (no registration yet) both
+        // refuse with the sentence the button carries.
+        if outlook != Possibility::Possible {
             return Err(DispatchError::InvalidState(s::MICROSOFT_UNAVAILABLE.into()));
         }
         if username.is_empty() {
@@ -3825,6 +3935,22 @@ impl MailImportMachine {
 
     pub async fn dispatch(&self, action: MailImportAction) -> Result<(), DispatchError> {
         self.inner.lock().expect("snapshot mutex").error = None;
+        // Next and Start ask the answer their buttons paint from, and refuse
+        // with its reason (`docs/goal/ui/README.md` § Offer only what is
+        // possible, rule 6).
+        let answer = {
+            let snap = self.inner.lock().expect("snapshot mutex");
+            match action {
+                MailImportAction::Next => Some(snap.next_possibility()),
+                MailImportAction::Start => Some(snap.start_possibility()),
+                _ => None,
+            }
+        };
+        if let Some(reason) = answer.as_ref().and_then(|a| a.reason()) {
+            let message = reason.resolve(fauna_i18n::strings::lookup);
+            self.inner.lock().expect("snapshot mutex").error = Some(message.clone());
+            return Err(DispatchError::InvalidState(message));
+        }
         if self.apply_client_action(&action) {
             return Ok(());
         }
@@ -5446,6 +5572,61 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.session_state, Some(ImportSessionState::Running));
         assert!(snap.error_log.is_empty());
+    }
+
+    /// The scope step's answer: zero mailboxes and a malformed since date
+    /// block Next and Start with their reason.
+    #[test]
+    fn the_scope_blocks_next_and_start_on_zero_mailboxes_and_a_bad_floor() {
+        let key = |p: Possibility| p.reason().map(|r| r.key.clone());
+        let mut snap = MailImportSnapshot::empty();
+        snap.step = ImportStep::Scope;
+        assert_eq!(
+            key(snap.next_possibility()),
+            Some("mail_import.scope_needs_mailbox".into())
+        );
+        snap.mailboxes = vec![SourceMailboxOption {
+            name: "INBOX".into(),
+            selected: true,
+            message_count: 0,
+            byte_total: None,
+        }];
+        snap.date_from = "2026-02-30".into();
+        assert_eq!(
+            key(snap.start_possibility()),
+            Some("mail_import.scope_date_from_invalid".into())
+        );
+        snap.date_from = "2026-02-28".into();
+        assert!(snap.next_possibility().is_possible());
+        snap.mailboxes[0].selected = false;
+        snap.step = ImportStep::Source;
+        assert!(
+            snap.next_possibility().is_possible(),
+            "not the scope's step"
+        );
+    }
+
+    /// The FFI face asks Next over the typed since-date draft (trimmed), on
+    /// the Scope step only.
+    #[test]
+    fn the_next_face_folds_the_typed_draft_in_on_the_scope_step_only() {
+        let key = |p: Possibility| p.reason().map(|r| r.key.clone());
+        let mut snap = MailImportSnapshot::empty();
+        snap.step = ImportStep::Scope;
+        snap.mailboxes = vec![SourceMailboxOption {
+            name: "INBOX".into(),
+            selected: true,
+            message_count: 0,
+            byte_total: None,
+        }];
+        assert_eq!(
+            key(mail_import_next_possibility(snap.clone(), "2026-02-30")),
+            Some("mail_import.scope_date_from_invalid".into())
+        );
+        assert!(mail_import_next_possibility(snap.clone(), " 2026-02-28 ").is_possible());
+        assert!(mail_import_start_possibility(snap.clone()).is_possible());
+        snap.step = ImportStep::Source;
+        assert!(mail_import_next_possibility(snap, "nope").is_possible());
     }
 
     #[test]
@@ -7199,6 +7380,38 @@ mod tests {
             oauth_error("authorization_pending"),
             token_answer(ACCESS, REFRESH, expires_in),
         ]
+    }
+
+    /// The Outlook option's one answer (`ui/README.md` § Offer only what is
+    /// possible, rules 2 and 6): absent on a build with no sign-in transport,
+    /// blocked with the unavailable sentence while no registration is saved,
+    /// possible once both exist — and the machine fills the transport bit.
+    #[tokio::test]
+    async fn the_outlook_source_is_absent_without_a_transport_and_blocked_without_a_registration() {
+        // No transport (web): absent, registration or not.
+        let m = machine(&[]).with_microsoft_client(test_identity());
+        assert!(!m.snapshot().microsoft_signin_transport);
+        assert_eq!(
+            m.snapshot().outlook_source_possibility(),
+            Possibility::Absent
+        );
+        // A transport and a registration: possible.
+        let m = machine(&[])
+            .with_oauth_http(FakeIdentity::new([]))
+            .with_microsoft_client(test_identity());
+        assert!(m.snapshot().microsoft_signin_transport);
+        assert_eq!(
+            mail_import_outlook_source_possibility(m.snapshot()),
+            Possibility::Possible
+        );
+        // A transport, no registration saved yet: blocked with its sentence.
+        let mut snap = MailImportSnapshot::empty();
+        snap.microsoft_signin_transport = true;
+        snap.microsoft_signin_available = false;
+        assert_eq!(
+            snap.outlook_source_possibility(),
+            Possibility::blocked(LocalizedText::key("mail_import.microsoft_unavailable"))
+        );
     }
 
     #[tokio::test]

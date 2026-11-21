@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import androidx.compose.foundation.text.selection.SelectionContainer
 import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -12,6 +13,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -23,10 +25,21 @@ import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.and
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.faunaReadGate
+import com.fauna.app.ui.util.paintedReason
+import com.fauna.app.ui.util.pressAsked
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.AdminNestVM
+import com.fauna.app.ui.viewmodel.AdminEntryRereadEffect
 import com.fauna.app.ui.viewmodel.FeatureAuthoringState
 import com.fauna.app.ui.viewmodel.FeatureEditorActions
 import com.fauna.ffi.FfiAdminRegionView
@@ -39,7 +52,13 @@ import com.fauna.ffi.FfiIssuerKeyView
 import com.fauna.ffi.FfiWebAppOrigin
 import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_core.NodeMode
+import uniffi.fauna_core.Possibility
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The admin `admin-nest` page (admin.md § N Nest): the home for nest-wide admin
@@ -77,6 +96,7 @@ fun AdminNestScreen(
     onFactoryResetComplete: () -> Unit,
     vm: AdminNestVM = hiltViewModel(),
 ) {
+    AdminEntryRereadEffect(vm.entryReread)
     val pairing by vm.pairing.collectAsState()
     val servingPort by vm.servingPort.collectAsState()
     val frontedByRouter by vm.frontedByRouter.collectAsState()
@@ -90,6 +110,9 @@ fun AdminNestScreen(
     val natMessage by vm.natMessage.collectAsState()
     val natSubmitEnabled by vm.natSubmitEnabled.collectAsState()
     val natSubmitting by vm.natSubmitting.collectAsState()
+    val natSelectAnswer by vm.natSelectAnswer.collectAsState()
+    val natSaveAnswer by vm.natSaveAnswer.collectAsState()
+    val nestWriteAnswer by vm.nestWriteAnswer.collectAsState()
     val regionView by vm.regionView.collectAsState()
     val regionWorking by vm.regionWorking.collectAsState()
     val webAppOriginView by vm.webAppOriginView.collectAsState()
@@ -110,9 +133,6 @@ fun AdminNestScreen(
     val oauth by vm.oauth.collectAsState()
     val featureLimits by vm.featureLimits.state.collectAsState()
 
-    val invalidServingPortMessage = stringResource(R.string.admin_nest_page_serving_port_invalid)
-    val invalidRegionMessage = stringResource(R.string.admin_nest_page_region_invalid)
-
     AdminNestContent(
         pairing = pairing,
         servingPort = servingPort,
@@ -131,6 +151,9 @@ fun AdminNestScreen(
         natMessage = natMessage,
         natSubmitEnabled = natSubmitEnabled,
         natSubmitting = natSubmitting,
+        natSelectAnswer = natSelectAnswer,
+        natSaveAnswer = natSaveAnswer,
+        nestWriteAnswer = nestWriteAnswer,
         regionView = regionView,
         regionWorking = regionWorking,
         webAppOriginView = webAppOriginView,
@@ -154,13 +177,13 @@ fun AdminNestScreen(
         onBack = { navController.exitAdminToPrimary() },
         onSetPairing = vm::setPairing,
         onSaveServingPort = vm::setServingPort,
-        onInvalidServingPort = { vm.reportInvalidServingPort(invalidServingPortMessage) },
+        onInvalidServingPort = vm::reportInvalidServingPort,
         onRestartNow = vm::restartNow,
         onSelectNatMode = vm::selectNatMode,
         onSaveNatMode = vm::saveNatMode,
         onSaveRegion = vm::setRegion,
         onWithdrawRegion = { vm.setRegion(null) },
-        onInvalidRegion = { vm.reportInvalidRegion(invalidRegionMessage) },
+        onInvalidRegion = vm::reportInvalidRegion,
         onArmSeedRotate = vm::armSeedRotate,
         onCancelSeedRotate = vm::cancelSeedRotate,
         onConfirmSeedRotate = vm::confirmSeedRotate,
@@ -205,6 +228,16 @@ fun AdminNestContent(
     natMessage: LocalizedText?,
     natSubmitEnabled: Boolean,
     natSubmitting: Boolean,
+    // Controls wait for their read (admin.md § Errors & edge cases): the NAT
+    // radios' and save's answers — the shared `AdminNatModeMachine`
+    // `select_possibility` / `save_possibility` over `fauna.setup.status` —
+    // and the pairing toggle's and serving-port input's and save's answer —
+    // `write_after_read_possibility` over the page's own reflective read.
+    // Each painted, and asked again at the press. Defaulted possible so a
+    // content test that predates them still composes.
+    natSelectAnswer: Possibility = Possibility.Possible,
+    natSaveAnswer: Possibility = Possibility.Possible,
+    nestWriteAnswer: Possibility = Possibility.Possible,
     regionView: FfiAdminRegionView?,
     regionWorking: Boolean,
     seedRotateConfirm: AdminNestVM.SeedRotateConfirmState?,
@@ -218,13 +251,16 @@ fun AdminNestContent(
     onBack: () -> Unit,
     onSetPairing: (Boolean) -> Unit,
     onSaveServingPort: (Int) -> Unit,
-    onInvalidServingPort: () -> Unit,
+    // A refused serving-port save's reason (the shared draft answer asked
+    // again at the press), for the page's `error-message`.
+    onInvalidServingPort: (String) -> Unit,
     onRestartNow: () -> Unit,
     onSelectNatMode: (NodeMode) -> Unit,
     onSaveNatMode: () -> Unit,
     onSaveRegion: (String) -> Unit,
     onWithdrawRegion: () -> Unit,
-    onInvalidRegion: () -> Unit,
+    // A refused region save's reason, for the page's `error-message`.
+    onInvalidRegion: (String) -> Unit,
     onArmSeedRotate: () -> Unit,
     onCancelSeedRotate: () -> Unit,
     onConfirmSeedRotate: () -> Unit,
@@ -247,6 +283,12 @@ fun AdminNestContent(
     parseRegionCode: (String) -> String? = {
         runCatching { com.fauna.ffi.adminParseRegionCode(it) }.getOrNull()
     },
+    // The two saves' draft answers (admin.md § Errors & edge cases, the form
+    // bullet): `fauna_client_admin::{serving_port_possibility,
+    // region_possibility}`. Each save is painted from its answer and asks it
+    // again at the press; fail open off the native path ([askForm]).
+    servingPortDraft: (String) -> Possibility = { askForm { com.fauna.ffi.adminServingPortPossibility(it) } },
+    regionDraft: (String) -> Possibility = { askForm { com.fauna.ffi.adminRegionPossibility(it) } },
     // The admin host of the shared feature-policy editor
     // (`admin-nest-feature-limits-*`) — defaulted like the sections below, so a
     // content-test that predates it still composes (the section then reads as
@@ -266,6 +308,7 @@ fun AdminNestContent(
     updateChannelWorking: Boolean = false,
     onSelectUpdateChannel: (UpdateChannel) -> Unit = {},
     onSaveUpdateChannel: () -> Unit = {},
+    setAnswers: AdminNestSetAnswers = AdminNestSetAnswers(),
     // The shared `takedown_form_view` fold (moderation.md § Legal takedown →
     // Invocation surface), injected for the same FFI-free-test reason.
     takedownFormView: (String, Boolean, String, Boolean) -> com.fauna.ffi.FfiTakedownFormView =
@@ -343,6 +386,8 @@ fun AdminNestContent(
                 checked = pairing,
                 working = working,
                 onCheckedChange = onSetPairing,
+                answer = nestWriteAnswer,
+                onRefused = onInvalidServingPort,
             )
 
             // ── Serving port (fauna.admin.set_serving_port) ──
@@ -359,6 +404,8 @@ fun AdminNestContent(
                 onSavePort = onSaveServingPort,
                 onInvalidPort = onInvalidServingPort,
                 parsePort = parsePort,
+                portDraft = servingPortDraft,
+                readAnswer = nestWriteAnswer,
             )
 
             // ── NAT-mode control (fauna.setup.nat_mode via the shared AdminNatModeMachine) ──
@@ -376,21 +423,26 @@ fun AdminNestContent(
                 submitting = natSubmitting,
                 onSelect = onSelectNatMode,
                 onSave = onSaveNatMode,
+                selectAnswer = natSelectAnswer,
+                saveAnswer = natSaveAnswer,
+                onRefused = onInvalidServingPort,
             )
 
             // ── Web-app origin (fauna.admin.web_app_origin.{get,set}) ──
             // What this nest's own address answers: the app it ships, or a
             // redirect to the central origin (admin.md § N Nest → Web-app
             // origin), directly after NAT mode and mirroring its radio shape.
-            // Every sentence and the can-set verdict are the shared
-            // FfiAdminWebAppOriginView fold (tui's admin/nest.rs, the
-            // reference leg) — this file paints and wires, decides nothing.
+            // Every sentence, the can-set verdict and whether the section and
+            // its central radio exist are the shared FfiAdminWebAppOriginView
+            // fold (tui's admin/nest.rs, the reference leg) — this file paints
+            // and wires, decides nothing.
             WebAppOriginSection(
                 view = webAppOriginView,
                 draft = webAppOriginDraft,
                 working = webAppOriginWorking,
                 onSelect = onSelectWebAppOrigin,
                 onSave = onSaveWebAppOrigin,
+                setAnswers = setAnswers,
             )
 
             // ── Update channel (fauna.admin.update_channel.{get,set}) ──
@@ -406,6 +458,7 @@ fun AdminNestContent(
                 working = updateChannelWorking,
                 onSelect = onSelectUpdateChannel,
                 onSave = onSaveUpdateChannel,
+                setAnswers = setAnswers,
             )
 
             // ── Declared region (fauna.admin.region.{get,set}) ──
@@ -424,6 +477,7 @@ fun AdminNestContent(
                 onWithdraw = onWithdrawRegion,
                 onInvalidRegion = onInvalidRegion,
                 parseRegionCode = parseRegionCode,
+                regionDraft = regionDraft,
             )
 
             // ── Feature limits for everyone (fauna.features.policy.{get,update}) ──
@@ -559,12 +613,14 @@ fun AdminNestContent(
             // `Box` this used to render made `is_visible("error-message")`
             // structurally true on a clean page.
             if (!error.isNullOrEmpty()) {
-                Text(
-                    error,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.testTag(Ids.ERROR_MESSAGE),
-                )
+                SelectionContainer {
+                    Text(
+                        error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag(Ids.ERROR_MESSAGE),
+                    )
+                }
             }
         }
     }
@@ -578,11 +634,18 @@ private fun PairingRow(
     checked: Boolean,
     working: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    answer: Possibility,
+    onRefused: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     // A dispatch-on-change toggle IS the commit, so it declares (the offline
     // gate's "the commit gates, not the buffer" rule — there is no Save beside
-    // it to carry the declaration instead).
-    val gate = faunaGate("fauna.admin.services.update", enabled = !working)
+    // it to carry the declaration instead). It waits for the reflective read
+    // first: never flipped from the `false` the page starts at.
+    val gate = faunaReadGate(
+        answer,
+        faunaGate("fauna.admin.services.update", enabled = !working && answer.isPossible),
+    )
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(16.dp).fillMaxWidth(),
@@ -611,9 +674,9 @@ private fun PairingRow(
             )
             Switch(
                 checked = checked,
-                onCheckedChange = onCheckedChange,
+                onCheckedChange = { on -> pressAsked(context, answer, onRefused) { onCheckedChange(on) } },
                 enabled = gate.enabled,
-                modifier = Modifier.testTag(Ids.ADMIN_SERVICE_PAIRING_TOGGLE),
+                modifier = Modifier.testTag(Ids.ADMIN_SERVICE_PAIRING_TOGGLE).paintedReason(gate.reason),
             )
         }
         DisabledControlReasonText(
@@ -624,11 +687,11 @@ private fun PairingRow(
 }
 
 /** The admin-set client-facing API serving-port field: a numeric text_input +
- *  save button (mirrors AdminCalendarScreen's `CaldavPortField`). The save
- *  validates the port via the shared `parsePort` (u16 in [1, 65535], reject 0)
- *  client-side — invalid → `onInvalidPort` (the VM
- *  surfaces the message on `error-message`, no dispatch), else `onSavePort`
- *  drives `fauna.admin.set_serving_port`. The entry seeds from the persisted
+ *  save button (mirrors AdminCalendarScreen's `CaldavPortField`). The save is
+ *  painted from the shared `serving_port_possibility` ([portDraft], a port in
+ *  [1, 65535]) and asks it again at the press — blocked → `onInvalidPort` with
+ *  its reason (the VM surfaces it on `error-message`, no dispatch), else
+ *  `onSavePort` drives `fauna.admin.set_serving_port`. The entry seeds from the persisted
  *  port (`remember(servingPort)`), so a re-read after save re-seeds it. */
 @Composable
 private fun ServingPortField(
@@ -636,10 +699,17 @@ private fun ServingPortField(
     frontedByRouter: Boolean,
     working: Boolean,
     onSavePort: (Int) -> Unit,
-    onInvalidPort: () -> Unit,
+    onInvalidPort: (String) -> Unit,
     parsePort: (String) -> Int?,
+    portDraft: (String) -> Possibility,
+    readAnswer: Possibility,
 ) {
+    val context = LocalContext.current
     var edited by remember(servingPort) { mutableStateOf(servingPort.toString()) }
+    // The port shown is the reflective read's: typing over (or saving) an
+    // unread value would send a guess. A router-fronted nest keeps its
+    // read-only render with its hint.
+    val readReason = localized(readAnswer.blockedReason)
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -655,8 +725,9 @@ private fun ServingPortField(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 // Read-only behind the cloud :443 SNI router — the chosen port is
                 // inert and the nest rejects a write. nest/common.md § Serving ports.
-                enabled = !working && !frontedByRouter,
-                modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_SERVING_PORT_INPUT),
+                enabled = !working && !frontedByRouter && readAnswer.isPossible,
+                modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_SERVING_PORT_INPUT)
+                    .paintedReason(if (frontedByRouter) null else readReason),
             )
             if (frontedByRouter) {
                 Text(
@@ -668,21 +739,30 @@ private fun ServingPortField(
             // The commit gates; the input above it stays live so the admin can
             // still type. The page's own predicate is handed over rather than
             // re-tested beside the verdict.
-            val gate = faunaGate(
-                "fauna.admin.set_serving_port",
-                enabled = !working && !frontedByRouter,
-            )
+            // The draft answer folds after the page's own predicate: behind
+            // the router or mid-write the save is simply not offered live.
+            // The read folds first, so a page still loading says so before
+            // any draft complaint.
+            val draft = portDraft(edited)
+            val gate = faunaReadGate(
+                readAnswer,
+                faunaGate(
+                    "fauna.admin.set_serving_port",
+                    enabled = !working && !frontedByRouter && (readAnswer and draft).isPossible,
+                ),
+                draft,
+            ).let { if (frontedByRouter || (working && readAnswer.isPossible)) it.copy(enabled = false, reason = null) else it }
             Button(
                 onClick = {
+                    val refusal = formRefusal(context, readAnswer and portDraft(edited))
                     val port = parsePort(edited)
-                    if (port == null) {
-                        onInvalidPort()
-                    } else {
-                        onSavePort(port)
+                    when {
+                        refusal != null -> refusal.reason?.let(onInvalidPort)
+                        port != null -> onSavePort(port)
                     }
                 },
                 enabled = gate.enabled,
-                modifier = Modifier.testTag(Ids.ADMIN_NEST_SERVING_PORT_SAVE_BUTTON),
+                modifier = Modifier.testTag(Ids.ADMIN_NEST_SERVING_PORT_SAVE_BUTTON).paintedReason(gate.reason),
             ) { Text(stringResource(R.string.admin_nest_page_serving_port_save)) }
             DisabledControlReasonText(gate.reason)
         }
@@ -704,10 +784,21 @@ private fun NatModeSection(
     submitting: Boolean,
     onSelect: (NodeMode) -> Unit,
     onSave: () -> Unit,
+    selectAnswer: Possibility,
+    saveAnswer: Possibility,
+    onRefused: (String) -> Unit,
 ) {
-    // Save commits; the two radios above it are the buffer and stay live, so an
-    // admin can still choose a mode while offline and commit on reconnect.
-    val gate = faunaGate("fauna.setup.nat_mode", enabled = submitEnabled)
+    val context = LocalContext.current
+    // Save commits; the two radios above it are the buffer and stay live while
+    // offline, so an admin can still choose a mode and commit on reconnect —
+    // but both wait for the read (a failed one leaves them blocked: the
+    // pre-selected `public` is not a mode the page read).
+    val gate = faunaReadGate(
+        saveAnswer,
+        faunaGate("fauna.setup.nat_mode", enabled = submitEnabled && saveAnswer.isPossible),
+    )
+    val radiosLive = !submitting && selectAnswer.isPossible
+    val radioReason = localized(selectAnswer.blockedReason)
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp).fillMaxWidth(),
@@ -720,16 +811,18 @@ private fun NatModeSection(
             NatModeRadioRow(
                 testTag = Ids.ADMIN_NEST_NAT_MODE_PUBLIC_RADIO,
                 selected = selectedMode == NodeMode.PUBLIC,
-                enabled = !submitting,
-                onClick = { onSelect(NodeMode.PUBLIC) },
+                enabled = radiosLive,
+                reason = radioReason,
+                onClick = { pressAsked(context, selectAnswer, onRefused) { onSelect(NodeMode.PUBLIC) } },
                 label = stringResource(R.string.onboarding_nat_mode_public_label),
                 desc = stringResource(R.string.onboarding_nat_mode_public_desc),
             )
             NatModeRadioRow(
                 testTag = Ids.ADMIN_NEST_NAT_MODE_PRIVATE_RADIO,
                 selected = selectedMode == NodeMode.PRIVATE,
-                enabled = !submitting,
-                onClick = { onSelect(NodeMode.PRIVATE) },
+                enabled = radiosLive,
+                reason = radioReason,
+                onClick = { pressAsked(context, selectAnswer, onRefused) { onSelect(NodeMode.PRIVATE) } },
                 label = stringResource(R.string.onboarding_nat_mode_private_label),
                 desc = stringResource(R.string.onboarding_nat_mode_private_desc),
             )
@@ -738,16 +831,18 @@ private fun NatModeSection(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    localized(message).orEmpty(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f).testTag(Ids.ADMIN_NEST_NAT_MODE_STATUS),
-                )
+                SelectionContainer(Modifier.weight(1f)) {
+                    Text(
+                        localized(message).orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(Ids.ADMIN_NEST_NAT_MODE_STATUS),
+                    )
+                }
                 Button(
-                    onClick = onSave,
+                    onClick = { pressAsked(context, saveAnswer, onRefused) { onSave() } },
                     enabled = gate.enabled,
-                    modifier = Modifier.testTag(Ids.ADMIN_NEST_NAT_MODE_SAVE_BUTTON),
+                    modifier = Modifier.testTag(Ids.ADMIN_NEST_NAT_MODE_SAVE_BUTTON).paintedReason(gate.reason),
                 ) { Text(stringResource(R.string.admin_nest_page_nat_mode_save)) }
             }
             DisabledControlReasonText(gate.reason)
@@ -760,6 +855,8 @@ private fun NatModeRadioRow(
     testTag: String,
     selected: Boolean,
     enabled: Boolean,
+    // A blocked radio's reason, published as its automation `reason`.
+    reason: String?,
     onClick: () -> Unit,
     label: String,
     desc: String,
@@ -774,6 +871,7 @@ private fun NatModeRadioRow(
                 onClick = onClick,
             )
             .testTag(testTag)
+            .paintedReason(reason)
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -788,9 +886,11 @@ private fun NatModeRadioRow(
 
 /** The web-app origin section (`admin-nest-web-app-origin-*`,
  *  `fauna.admin.web_app_origin.{get,set}`; admin.md § N Nest → Web-app origin).
- *  Radios stay unmarked and disabled until the read lands ([view] `null`) and
- *  whenever `canSet` is false — pre-marking bundled would state a choice the
- *  nest may not hold. A radio pick is local; the save commits it. */
+ *  Composed only where the view's `sectionPossibility` is shown, the central
+ *  radio only where its `centralPossibility` is (`web-content-hosting.md`
+ *  § While the central origin is not live, the choice is not offered, rule 5):
+ *  nothing until the read lands ([view] `null`) — whether the section exists
+ *  is the read's answer. A radio pick is local; the save commits it. */
 @Composable
 private fun WebAppOriginSection(
     view: FfiAdminWebAppOriginView?,
@@ -798,8 +898,18 @@ private fun WebAppOriginSection(
     working: Boolean,
     onSelect: (FfiWebAppOrigin) -> Unit,
     onSave: () -> Unit,
+    setAnswers: AdminNestSetAnswers,
 ) {
-    val canSet = view?.canSet == true && !working
+    if (view == null || !view.sectionPossibility.isShown) return
+    // The radios and save are painted from the shared `set_possibility`
+    // answer (admin.md § Errors & edge cases, *Role and state gates answer one
+    // `Possibility` too*): blocked still-loading until the read lands, blocked
+    // by the status sentence where the origin cannot be set, and asked with
+    // the mode the press would take — a radio's own, the save's draft — so a
+    // central draft is refused while the central origin is not live
+    // (web-content-hosting.md § While the central origin is not live, rule 5).
+    val canSelect = { mode: FfiWebAppOrigin -> setAnswers.webAppOrigin(view, mode).isPossible && !working }
+    val canSet = setAnswers.webAppOrigin(view, draft).isPossible && !working
     // The commit gates; the radios above it stay the buffer.
     val gate = faunaGate("fauna.admin.web_app_origin.set", enabled = canSet && draft != null)
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_WEB_APP_ORIGIN_SECTION)) {
@@ -819,44 +929,45 @@ private fun WebAppOriginSection(
             WebAppOriginRadioRow(
                 testTag = Ids.ADMIN_NEST_WEB_APP_ORIGIN_BUNDLED_RADIO,
                 selected = draft == FfiWebAppOrigin.BUNDLED,
-                enabled = canSet,
+                enabled = canSelect(FfiWebAppOrigin.BUNDLED),
                 onClick = { onSelect(FfiWebAppOrigin.BUNDLED) },
                 label = stringResource(R.string.admin_nest_page_web_app_origin_bundled),
             )
-            WebAppOriginRadioRow(
-                testTag = Ids.ADMIN_NEST_WEB_APP_ORIGIN_CENTRAL_RADIO,
-                selected = draft == FfiWebAppOrigin.CENTRAL,
-                enabled = canSet,
-                onClick = { onSelect(FfiWebAppOrigin.CENTRAL) },
-                label = view?.let { localized(it.centralLabel) }
-                    ?: stringResource(R.string.admin_nest_page_web_app_origin_loading),
-            )
+            if (view.centralPossibility.isShown) {
+                WebAppOriginRadioRow(
+                    testTag = Ids.ADMIN_NEST_WEB_APP_ORIGIN_CENTRAL_RADIO,
+                    selected = draft == FfiWebAppOrigin.CENTRAL,
+                    enabled = canSelect(FfiWebAppOrigin.CENTRAL),
+                    onClick = { onSelect(FfiWebAppOrigin.CENTRAL) },
+                    label = localized(view.centralLabel).orEmpty(),
+                )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    view?.let { localized(it.status) }
-                        ?: stringResource(R.string.admin_nest_page_web_app_origin_loading),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f).testTag(Ids.ADMIN_NEST_WEB_APP_ORIGIN_STATUS),
-                )
+                SelectionContainer(Modifier.weight(1f)) {
+                    Text(
+                        localized(view.status).orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(Ids.ADMIN_NEST_WEB_APP_ORIGIN_STATUS),
+                    )
+                }
                 Button(
-                    onClick = onSave,
+                    // The press asks the answer the save was painted from again.
+                    onClick = { if (setAnswers.webAppOrigin(view, draft).isPossible) onSave() },
                     enabled = gate.enabled,
                     modifier = Modifier.testTag(Ids.ADMIN_NEST_WEB_APP_ORIGIN_SAVE_BUTTON),
                 ) { Text(stringResource(R.string.admin_nest_page_web_app_origin_save)) }
             }
             DisabledControlReasonText(gate.reason)
-            view?.let {
-                Text(
-                    localized(it.scope).orEmpty(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text(
+                localized(view.scope).orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -872,8 +983,12 @@ private fun UpdateChannelSection(
     working: Boolean,
     onSelect: (UpdateChannel) -> Unit,
     onSave: () -> Unit,
+    setAnswers: AdminNestSetAnswers,
 ) {
-    val canSet = view?.canSet == true && !working
+    // Painted from the shared `update_channel_set_possibility` answer, as the
+    // origin section above is.
+    val answer = setAnswers.updateChannel(view)
+    val canSet = answer.isPossible && !working
     val gate = faunaGate("fauna.admin.update_channel.set", enabled = canSet && draft != null)
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_UPDATE_CHANNEL_SECTION)) {
         Column(
@@ -913,15 +1028,18 @@ private fun UpdateChannelSection(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    view?.let { localized(it.status) }
-                        ?: stringResource(R.string.admin_nest_page_update_channel_loading),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f).testTag(Ids.ADMIN_NEST_UPDATE_CHANNEL_STATUS),
-                )
+                SelectionContainer(Modifier.weight(1f)) {
+                    Text(
+                        view?.let { localized(it.status) }
+                            ?: stringResource(R.string.admin_nest_page_update_channel_loading),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(Ids.ADMIN_NEST_UPDATE_CHANNEL_STATUS),
+                    )
+                }
                 Button(
-                    onClick = onSave,
+                    // The press asks the answer the save was painted from again.
+                    onClick = { if (setAnswers.updateChannel(view).isPossible) onSave() },
                     enabled = gate.enabled,
                     modifier = Modifier.testTag(Ids.ADMIN_NEST_UPDATE_CHANNEL_SAVE_BUTTON),
                 ) { Text(stringResource(R.string.admin_nest_page_update_channel_save)) }
@@ -979,11 +1097,14 @@ private fun RegionSection(
     working: Boolean,
     onSave: (String) -> Unit,
     onWithdraw: () -> Unit,
-    onInvalidRegion: () -> Unit,
+    onInvalidRegion: (String) -> Unit,
     // Injected by the caller so the Robolectric content-test can pass an
     // FFI-free stub — mirrors AdminNestContent's `parsePort` param.
     parseRegionCode: (String) -> String?,
+    // The save's draft answer, the shared `region_possibility`.
+    regionDraft: (String) -> Possibility,
 ) {
+    val context = LocalContext.current
     var edited by remember(view?.declared) { mutableStateOf(view?.declared.orEmpty()) }
 
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_REGION_SECTION)) {
@@ -1003,12 +1124,14 @@ private fun RegionSection(
             // `admin-nest-region-status` — the declared region, or that none
             // is declared. A NORMAL state, never an error: a deployment that
             // has never declared is conforming.
-            Text(
-                view?.let { localized(it.status) }
-                    ?: stringResource(R.string.admin_nest_page_region_none),
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.testTag(Ids.ADMIN_NEST_REGION_STATUS),
-            )
+            SelectionContainer {
+                Text(
+                    view?.let { localized(it.status) }
+                        ?: stringResource(R.string.admin_nest_page_region_none),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag(Ids.ADMIN_NEST_REGION_STATUS),
+                )
+            }
             // `admin-nest-region-authority` — present only while a region is
             // declared: before that there is no authority channel to
             // describe, and inventing a line about one would be a claim.
@@ -1045,18 +1168,25 @@ private fun RegionSection(
             // The commit gates; the input above it stays live so the admin
             // can still type. Both save and withdraw drive the same wire
             // kind (`fauna.admin.region.set` with the region present/absent).
+            // The save is also painted from the draft answer; the withdraw
+            // sends no draft, so it keeps the bare gate.
             val gate = faunaGate("fauna.admin.region.set", enabled = !working)
+            val draft = regionDraft(edited)
+            val saveGate = faunaFormGate(
+                draft,
+                faunaGate("fauna.admin.region.set", enabled = !working && draft.isPossible),
+            ).let { if (working) it.copy(enabled = false, reason = null) else it }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = {
+                        val refusal = formRefusal(context, regionDraft(edited))
                         val code = parseRegionCode(edited)
-                        if (code == null) {
-                            onInvalidRegion()
-                        } else {
-                            onSave(code)
+                        when {
+                            refusal != null -> refusal.reason?.let(onInvalidRegion)
+                            code != null -> onSave(code)
                         }
                     },
-                    enabled = gate.enabled,
+                    enabled = saveGate.enabled,
                     modifier = Modifier.testTag(Ids.ADMIN_NEST_REGION_SAVE_BUTTON),
                 ) { Text(stringResource(R.string.admin_nest_page_region_save)) }
                 // `admin-nest-region-withdraw-button` — shown only while a
@@ -1070,7 +1200,7 @@ private fun RegionSection(
                     ) { Text(stringResource(R.string.admin_nest_page_region_withdraw)) }
                 }
             }
-            DisabledControlReasonText(gate.reason)
+            DisabledControlReasonText(saveGate.reason ?: gate.reason)
         }
     }
 }
@@ -1243,11 +1373,13 @@ private fun SeedRotateSection(
                 DisabledControlReasonText(gate.reason)
             }
             if (status != null) {
-                Text(
-                    status,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.testTag(Ids.ADMIN_NEST_SEED_ROTATE_STATUS),
-                )
+                SelectionContainer {
+                    Text(
+                        status,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag(Ids.ADMIN_NEST_SEED_ROTATE_STATUS),
+                    )
+                }
             }
         }
     }
@@ -1404,11 +1536,13 @@ private fun OauthKeysSection(
             // every success here has consequences worth words, and a failure
             // must not claim nothing changed.
             if (status != null) {
-                Text(
-                    status,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.testTag(Ids.ADMIN_NEST_OAUTH_STATUS),
-                )
+                SelectionContainer {
+                    Text(
+                        status,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag(Ids.ADMIN_NEST_OAUTH_STATUS),
+                    )
+                }
             }
         }
     }
@@ -1555,11 +1689,13 @@ private fun TakedownSection(
                 }
             }
             if (status != null) {
-                Text(
-                    status,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.testTag(Ids.ADMIN_NEST_TAKEDOWN_STATUS),
-                )
+                SelectionContainer {
+                    Text(
+                        status,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag(Ids.ADMIN_NEST_TAKEDOWN_STATUS),
+                    )
+                }
             }
         }
     }
@@ -1855,3 +1991,20 @@ private fun FactoryResetSection(onFactoryReset: () -> Unit) {
         )
     }
 }
+
+/**
+ * The web-app origin and update-channel choices' shared answers (admin.md
+ * § Errors & edge cases, *Role and state gates answer one `Possibility`
+ * too*): `web_app_origin_set_possibility` / `update_channel_set_possibility`
+ * over UniFFI, each over the read as the page holds it (`null` until it lands);
+ * the web-app origin's is asked with the mode the press would take.
+ * Injected so a Robolectric harness can stay off the native path.
+ */
+class AdminNestSetAnswers(
+    val webAppOrigin: (FfiAdminWebAppOriginView?, FfiWebAppOrigin?) -> Possibility = { view, draft ->
+        com.fauna.ffi.adminWebAppOriginSetPossibility(view, draft)
+    },
+    val updateChannel: (FfiAdminUpdateChannelView?) -> Possibility = {
+        com.fauna.ffi.adminUpdateChannelSetPossibility(it)
+    },
+)

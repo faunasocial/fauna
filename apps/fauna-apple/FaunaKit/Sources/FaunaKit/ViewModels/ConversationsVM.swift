@@ -545,6 +545,16 @@ public final class ConversationsVM {
         _ = _observerTick
         return manager.snapshot().threads
     }
+    /// Whether the list paints its "No conversations yet." line: only once the
+    /// room list has loaded and is still empty — before the first sweep the
+    /// page paints no empty state (`ui/README.md` § List pages: loading is not
+    /// empty; `ui/conversations.md` → *Loading is not empty*). The same
+    /// condition as tui's `snapshot.loaded && snapshot.threads.is_empty()`,
+    /// re-stated here because a `uniffi::Record` carries data, not methods.
+    public var showsEmptyState: Bool { Self.showsEmptyState(snapshot) }
+    static func showsEmptyState(_ snapshot: ConversationsSnapshot) -> Bool {
+        snapshot.loaded && snapshot.threads.isEmpty
+    }
     public var selectedThreadId: ThreadId? {
         _ = _observerTick
         return manager.snapshot().selectedThreadId
@@ -1026,13 +1036,52 @@ public final class ConversationsVM {
     /// (`dm-send-button` in new-thread compose). Shared-Rust `send_new_thread`
     /// first flushes a typed-but-uncommitted recipient, then routes through the
     /// resolved rail and selects the new thread. Returns the new thread id, or
-    /// `nil` when there was nothing to send / send failed (the materialized
-    /// thread keeps a `Failed` draft to retry).
+    /// `nil` when the send was refused or failed.
+    ///
+    /// The returned error is never discarded (`conversations.md` § Errors &
+    /// edge cases → *The new-thread composer offers only what it can send*): a
+    /// refusal the manager stamped on a draft's `sendState` (the composer's own,
+    /// or the materialized thread's `Failed` draft) is already on
+    /// `error-message`; one no draft carries is shown from its detail
+    /// (``newThreadSendFailureText(newThreadSend:selectedSend:pageError:detail:)``,
+    /// tui's `Outcome::NewThreadSent`).
     @discardableResult
     public func sendNewThread() async -> ThreadId? {
+        clientErrorMessage = nil
         do { return try await manager.sendNewThread() }
-        catch { return nil }
+        catch {
+            clientErrorMessage = newThreadSendFailureText(
+                newThreadSend: newThreadCompose?.sendState,
+                selectedSend: selectedDetail?.compose.sendState,
+                pageError: snapshot.error != nil,
+                detail: error.localizedDescription
+            )
+            return nil
+        }
     }
+}
+
+/// What a failed new-thread send owes `error-message` beyond what the manager
+/// stamped: `nil` when a draft's `sendState` (the composer's, or the
+/// materialized thread's) or the page error already says it, else
+/// `conversations.unified.error_send` over the error's detail — never silent
+/// (tui's `Outcome::NewThreadSent`).
+func newThreadSendFailureText(
+    newThreadSend: SendState?,
+    selectedSend: SendState?,
+    pageError: Bool,
+    detail: String
+) -> String? {
+    if case .failed? = newThreadSend { return nil }
+    if case .failed? = selectedSend { return nil }
+    if pageError { return nil }
+    return L.conversations.unified.errorSend(message: detail)
+}
+
+/// A failed post-succession *Keep*'s `error-message` sentence
+/// (`settings.recovery_kit.review_keep_failed`, tui's `Outcome::MemberReviews`).
+func memberKeepFailureText(detail: String) -> String {
+    L.settings.recoveryKit.reviewKeepFailed(reason: detail)
 }
 
 /// Trampoline conforming to UniFFI's `SnapshotObserver`. The manager takes

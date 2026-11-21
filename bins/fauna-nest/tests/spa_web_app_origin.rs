@@ -11,12 +11,14 @@
 //!   invariant-#5 security headers ride the redirect.
 //! - A domainless box serves bundled whatever the choice
 //!   (`WebAppOriginServing::BundledDomainless`).
+//! - Stored central while the central origin is not live serves bundled and
+//!   never redirects (`WebAppOriginServing::BundledCentralNotLive`).
 //! - `/app` stays reserved with no SPA shipped: bundled answers 404, never
 //!   anything else's content (invariant 3); central still redirects.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use fauna_protocol::web_app_origin::WebAppOriginServing;
+use fauna_protocol::web_app_origin::{WebAppOrigin, WebAppOriginServing};
 use tower::ServiceExt; // oneshot
 
 const INDEX: &str = "<!doctype html><title>fauna</title>";
@@ -46,10 +48,19 @@ async fn body_text(resp: axum::response::Response) -> String {
     String::from_utf8_lossy(&bytes).to_string()
 }
 
+/// Stored central on a box with a domain, the central origin passed as live —
+/// the redirect stays pinned here while the shipped fact is `false`
+/// (`web-content-hosting.md` § While the central origin is not live, the
+/// choice is not offered, the tests paragraph).
 fn central() -> WebAppOriginServing {
-    WebAppOriginServing::Central {
-        nest_domain: "nest.example".into(),
-    }
+    let serving = WebAppOriginServing::resolve(WebAppOrigin::Central, Some("nest.example"), true);
+    assert_eq!(
+        serving,
+        WebAppOriginServing::Central {
+            nest_domain: "nest.example".into(),
+        }
+    );
+    serving
 }
 
 fn assert_security_headers(resp: &axum::response::Response) {
@@ -110,6 +121,20 @@ async fn a_domainless_box_serves_bundled_under_central() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(resp.headers().get("location").is_none());
     assert_eq!(body_text(resp).await, INDEX);
+}
+
+#[tokio::test]
+async fn stored_central_serves_bundled_while_the_central_origin_is_not_live() {
+    let serving = WebAppOriginServing::resolve(WebAppOrigin::Central, Some("nest.example"), false);
+    assert_eq!(serving, WebAppOriginServing::BundledCentralNotLive);
+    let (r, _tmp) = router(serving, true);
+    for uri in ["/app/", "/app/feed?x=1"] {
+        let resp = get(&r, uri).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        assert!(resp.headers().get("location").is_none(), "{uri}");
+        assert_security_headers(&resp);
+        assert_eq!(body_text(resp).await, INDEX, "{uri}");
+    }
 }
 
 #[tokio::test]

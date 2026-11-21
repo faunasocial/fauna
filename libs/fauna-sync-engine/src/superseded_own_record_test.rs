@@ -159,6 +159,72 @@ async fn only_a_kept_own_record_is_replaced() {
     );
 }
 
+/// The rule never opens a cloud-only file (`on-demand-files.md` § On-Demand
+/// Files, *Nothing the serve loop waits on holds up the root*). On a cfapi root
+/// the stale copy's invalidation reaches it from the on-demand fold, on the
+/// thread that serves the root, where the provider's own read of its own
+/// placeholder stalls for cfapi's 60 s timeout (`crate::placeholder`). A freed
+/// file is no recorded body on this disk: nothing is fetched or written, and the
+/// row stays where it was.
+///
+/// The file keeps the recorded bytes behind `FILE_ATTRIBUTE_OFFLINE` (the half
+/// of the cloud-only attributes an ordinary process may set) and a holder
+/// answers for the new head, so an open would SUCCEED here and the rule would
+/// run to its end: the fetched head is the open's witness. Holding the file with
+/// no sharing instead would make the open fail into the same `Ok(false)` and
+/// hide it.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_cloud_only_own_record_is_never_opened() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().with_blob_plane().mount(&server).await;
+    let key = BackupKey::from_bytes([0x11; 32]);
+    let b_watch = tempfile::tempdir().unwrap();
+    let seat_b = test_engine(
+        &server.uri(),
+        b_watch.path().to_path_buf(),
+        Some(key.clone()),
+    );
+    let v2 = b"v2 - another seat wrote past it".to_vec();
+    let v2_manifest = seed_file(&seat_b, &store, b_watch.path(), REL, &v2).await;
+
+    // Seat A on a cfapi root (its placeholders are files on the disk) of a
+    // metadata-only folder, its own record's file freed by the platform.
+    let a_watch = tempfile::tempdir().unwrap();
+    let seat_a = test_engine(&server.uri(), a_watch.path().to_path_buf(), Some(key))
+        .with_metadata_only_residency(true);
+    record_own_write(&seat_a, a_watch.path(), REL, V1);
+    let before = seat_a.db().get_entry(REL).unwrap().expect("the row");
+    let abs = a_watch.path().join(REL);
+    crate::placeholder::set_offline_for_test(&abs, true);
+    assert!(
+        crate::placeholder::path_is_cloud_placeholder(&abs),
+        "precondition: the file reads as cloud-only"
+    );
+
+    let replaced = seat_a
+        .replace_superseded_own_record(&head_moved_to(v2_manifest, v2.len()))
+        .await
+        .expect("a cloud-only file is no error, only not the rule's case");
+
+    assert!(!replaced, "a freed file is no recorded body on this disk");
+    assert!(
+        !store.manifest_was_fetched(v2_manifest),
+        "nothing was fetched: the cloud-only file was never opened"
+    );
+    assert!(
+        crate::placeholder::path_is_cloud_placeholder(&abs),
+        "the platform's file stands"
+    );
+    assert_eq!(std::fs::read(&abs).unwrap(), V1, "nothing was written");
+    let after = seat_a.db().get_entry(REL).unwrap().expect("the row");
+    assert_eq!(
+        after.manifest_hash, before.manifest_hash,
+        "the row has not moved"
+    );
+    assert_eq!(after.recorded_content_hash, before.recorded_content_hash);
+}
+
 /// The fold that reports `row` as its one stale hydrated row — what the
 /// on-demand pull hands [`SyncEngine::apply_refresh_fold`].
 fn fold_reporting(row: StaleHydratedRow) -> crate::engine::PlaceholderFold {

@@ -58,7 +58,7 @@ public static class NotificationService
 
     /// <summary>
     /// Where the registration <see cref="Initialize"/> made lives. With package identity
-    /// (the Store package, or the MSI's sparse identity) toasts post under the package
+    /// (the full MSIX: the Store package or the direct-download bundle) toasts post under the package
     /// app's AUMID. Without it, <c>AppNotificationManager.Register()</c> keeps a per-user
     /// registration under <c>HKCU\Software\Classes\AppUserModelId</c>: a key named for
     /// this exe's path (lowercased, <c>\</c> → <c>.</c>) whose <c>NotificationGUID</c>
@@ -149,19 +149,18 @@ public static class NotificationService
         catch { }
     }
 
-    /// <summary>The local sync-agent's <c>FileStatusChanged{Synced}</c> push
+    /// <summary>The local sync-agent's <c>UploadComplete</c> push
     /// (`sync-agent.md` § Local agent health — the sync-complete toast consumer),
     /// surfaced via the shared listener thread <c>SyncAgentSession</c> holds
-    /// (<c>fauna_ipc::events</c>, the same loop the linux GTK client runs).</summary>
+    /// (<c>fauna_ipc::events</c>, the same loop the linux GTK client runs). One
+    /// quiet notice a burst of uploads collapses into, as on linux and macOS
+    /// (<see cref="SyncCompleteToastBuilder"/>).</summary>
     public static void ShowSyncCompleteNotification(string fileName)
     {
         if (!_initialized) return;
         try
         {
-            var builder = new AppNotificationBuilder()
-                .AddText("Sync complete")
-                .AddText(fileName);
-            AppNotificationManager.Default.Show(builder.BuildNotification());
+            AppNotificationManager.Default.Show(SyncCompleteToastBuilder.Build(fileName));
         }
         catch { }
     }

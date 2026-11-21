@@ -881,22 +881,14 @@ async fn verify_sampled_record_presence(
         .map_err(|_| format!("manifest hash for {path} is not 32 bytes"))?;
     let manifest_hash = ContentHash::from_digest_raw(digest);
 
-    let manifest_bytes = fetcher
-        .fetch_manifest(&manifest_hash)
+    // Address-vs-bytes, not a trusted echo: the destination serves these
+    // bytes. The shared keyless walk checks the manifest against its address
+    // and, for a paged root, every page against what the root names
+    // (`file-sync.md` § Paged manifests → *One walk*).
+    let store_keys = fauna_core::file_download::fetch_manifest_blobs(fetcher, &manifest_hash)
         .await
-        .map_err(|e| format!("{path}: manifest fetch failed: {e}"))?;
-    // Address-vs-bytes, not a trusted echo: the destination serves these bytes.
-    if ContentHash::of_raw(&manifest_bytes) != manifest_hash {
-        return Err(format!(
-            "{path}: manifest bytes do not hash to {}",
-            item.manifest_hash
-        ));
-    }
-    let manifest: fauna_core::chunk::ChunkManifest =
-        fauna_core::encoding::canonical_decode(&manifest_bytes)
-            .map_err(|e| format!("{path}: manifest does not decode: {e}"))?;
-
-    let store_keys = manifest.store_keys();
+        .map_err(|e| format!("{path}: manifest fetch failed: {e:#}"))?
+        .store_keys;
     let bodies = fetcher
         .fetch_chunks(&store_keys, path)
         .await
@@ -2999,6 +2991,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         fauna_core::encoding::canonical_encode(&manifest).expect("encode manifest")
     }
@@ -3024,6 +3017,7 @@ mod tests {
             stored_hashes: Some(vec![ContentHash::of_raw(b"ciphertext")]),
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         fauna_core::encoding::canonical_encode(&manifest).expect("encode sealed manifest")
     }
@@ -3083,6 +3077,7 @@ mod tests {
             stored_hashes: Some(vec![ContentHash::of_raw(CIPHERTEXT)]),
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         fauna_core::encoding::canonical_encode(&manifest).expect("encode mirror manifest")
     }
@@ -3309,6 +3304,72 @@ mod tests {
     // therefore impossible by construction, and the goal doc
     // (`backup-destinations.md` § Ordinary-folder coverage → *Retention +
     // audit*) sets hash-verified presence as this plane's floor.
+
+    /// A content-addressed store serving whatever it holds by address.
+    struct AddressedBlobs(HashMap<ContentHash, Vec<u8>>);
+
+    #[async_trait]
+    impl BlobFetcher for AddressedBlobs {
+        async fn fetch_manifest(&self, hash: &ContentHash) -> anyhow::Result<Vec<u8>> {
+            self.0
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("404"))
+        }
+
+        async fn fetch_chunks(
+            &self,
+            keys: &[ContentHash],
+            _path: &str,
+        ) -> anyhow::Result<Vec<Vec<u8>>> {
+            keys.iter()
+                .map(|k| self.0.get(k).cloned().ok_or_else(|| anyhow::anyhow!("404")))
+                .collect()
+        }
+    }
+
+    /// A paged root on the mirror plane (`file-sync.md` § Paged manifests):
+    /// the presence walk reads the root's pages through the shared keyless
+    /// walk and checks every chunk they name — and a dropped chunk named only
+    /// by a page is still caught.
+    #[test]
+    fn a_paged_root_is_walked_for_presence() {
+        let bodies: Vec<Vec<u8>> = (0..40u8).map(|i| vec![i; 64 + i as usize]).collect();
+        let view = fauna_core::chunk::ChunkManifest {
+            file_hash: ContentHash::of_raw(b"plaintext the auditor cannot reach"),
+            total_size: bodies.iter().map(|b| b.len() as u64).sum(),
+            chunk_hashes: (0..40u8).map(|i| ContentHash::of_raw(&[i])).collect(),
+            chunk_sizes: bodies.iter().map(|b| b.len() as u64).collect(),
+            stored_hashes: Some(bodies.iter().map(|b| ContentHash::of_raw(b)).collect()),
+            sealed_hashes: None,
+            min_reader: None,
+            pages: None,
+        };
+        let rule = fauna_core::manifest_paging::PagingRule::with_thresholds(16, 4, 32, 3);
+        let (root, pages) = view.into_wire_parts_with(&rule, Some(&[3u8; 32])).unwrap();
+        assert!(pages.len() > 1);
+        let root_hash = ContentHash::of_raw(&root);
+        let mut store: HashMap<ContentHash, Vec<u8>> = bodies
+            .iter()
+            .chain(pages.iter())
+            .map(|b| (ContentHash::of_raw(b), b.clone()))
+            .collect();
+        store.insert(root_hash, root);
+        let item = CustodyItem {
+            path: Some("ab".repeat(32)),
+            path_hash: "ab".repeat(32),
+            manifest_hash: hex::encode(root_hash.digest()),
+            ..Default::default()
+        };
+        let mut fetcher = AddressedBlobs(store);
+        assert_eq!(
+            block_on(verify_sampled_record_presence(&fetcher, &item)),
+            Ok(())
+        );
+        fetcher.0.remove(&ContentHash::of_raw(&bodies[39]));
+        let err = block_on(verify_sampled_record_presence(&fetcher, &item)).unwrap_err();
+        assert!(err.contains("chunk fetch failed"), "{err}");
+    }
 
     /// **The headline defect, inverted:** attaching one ordinary folder used to
     /// turn a byte-perfect destination permanently red. It must now pass —
@@ -5871,6 +5932,7 @@ mod tests {
                 stored_hashes: None,
                 sealed_hashes: None,
                 min_reader: None,
+                pages: None,
             };
             let bytes = fauna_core::encoding::canonical_encode(&manifest).expect("encode manifest");
             let address = address_hex(&ContentHash::of_raw(&bytes));

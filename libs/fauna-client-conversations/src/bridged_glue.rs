@@ -110,9 +110,13 @@ pub fn open_bridged_row(
     String::from_utf8(plain).ok()
 }
 
-/// The nest's refusal for an address no consented bridge's grammar admits, or
-/// more than one does (`conversation.rooms.open` with no `bridge_id`).
+/// The nest's refusal of a `conversation.rooms.open` whose address no
+/// consented bridge's grammar admits, or the far network does not know.
 const ADDRESS_REFUSED: &str = "fauna.bridges.address_refused";
+
+/// The nest's refusal of a kind it does not serve — an older nest asked
+/// `conversation.address.admit`.
+const UNKNOWN_KIND: &str = "fauna.protocol.unknown_kind";
 
 /// What the glue remembers of a room between reads: the id `send` and the
 /// inbox name it by, and who is in it.
@@ -262,16 +266,42 @@ where
         Ok(rooms)
     }
 
-    /// `rooms.open` with no bridge: the nest picks the one consented bridge
-    /// whose grammar admits `raw`. Its `address_refused` — none, or several —
-    /// is "not a bridged address"; any other failure is the caller's to treat
-    /// as unavailable.
+    /// `address.admit`: the nest names the one consented bridge whose grammar
+    /// admits `raw`, and nothing else happens — no room, no far lookup
+    /// (`ui/conversations.md` § Errors & edge cases → *The picker tells the
+    /// truth*, rule 4 (a)). No bridge — none, or several — is "not a bridged
+    /// address", and so is an older nest's `unknown_kind`; any other failure
+    /// is the caller's to treat as unavailable.
     async fn resolve_inner(&self, raw: String) -> Result<Option<BridgedResolved>, String> {
-        match self.client.rooms_open(None, raw.clone()).await {
+        match self.client.address_admit(raw.clone()).await {
+            Ok(bridge_id) => Ok(bridge_id.map(|bridge_id| BridgedResolved {
+                bridge_id,
+                address: raw,
+            })),
+            Err(e) if e.as_rpc_error().is_some_and(|rpc| rpc.code == UNKNOWN_KIND) => Ok(None),
+            Err(e) => Err(user_sentence(e)),
+        }
+    }
+
+    /// `rooms.open` on the chip's bridge, when a new thread is sent: the far
+    /// network resolves the spelling, the room is found or minted and
+    /// remembered, and its first participant — the stable far id — is the
+    /// address the thread keys on (rule 4 (b)). `address_refused` is
+    /// "unknown there".
+    async fn open_inner(
+        &self,
+        bridge_id: String,
+        address: String,
+    ) -> Result<Option<BridgedResolved>, String> {
+        match self
+            .client
+            .rooms_open(Some(bridge_id), address.clone())
+            .await
+        {
             Ok(room) => {
                 self.remember(&room);
                 Ok(Some(BridgedResolved {
-                    address: room.participants.first().cloned().unwrap_or(raw),
+                    address: room.participants.first().cloned().unwrap_or(address),
                     bridge_id: room.bridge_id,
                 }))
             }
@@ -665,6 +695,14 @@ impl BridgedSink for NestBridgedGlue<Arc<NestClient>, MailKeyCache> {
         self.resolve_inner(raw).await
     }
 
+    async fn open(
+        &self,
+        bridge_id: String,
+        address: String,
+    ) -> Result<Option<BridgedResolved>, String> {
+        self.open_inner(bridge_id, address).await
+    }
+
     async fn send(&self, outbound: BridgedOutbound) -> Result<BridgedSent, String> {
         self.send_inner(outbound).await
     }
@@ -695,6 +733,14 @@ impl BridgedSource for NestBridgedGlue<Arc<NestClient>, MailKeyCache> {
 impl<K: BridgedKeySource> BridgedSink for NestBridgedGlue<fauna_rpc_wasm::WsRpcClient, K> {
     async fn resolve(&self, raw: String) -> Result<Option<BridgedResolved>, String> {
         self.resolve_inner(raw).await
+    }
+
+    async fn open(
+        &self,
+        bridge_id: String,
+        address: String,
+    ) -> Result<Option<BridgedResolved>, String> {
+        self.open_inner(bridge_id, address).await
     }
 
     async fn send(&self, outbound: BridgedOutbound) -> Result<BridgedSent, String> {
@@ -1001,6 +1047,65 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// `conversations.md` § *The picker tells the truth*, rule 4: the
+    /// keystroke probe is one `address.admit` and no `rooms.open`, answering
+    /// the spelling as typed; the room is opened only by `open`, on the named
+    /// bridge, which answers the far id the nest keyed it on.
+    #[test]
+    fn the_probe_admits_and_only_open_opens_the_room() {
+        use fauna_protocol::bridged_conversations::{
+            AddressAdmitReply, AddressAdmitRequest, KIND_ADDRESS_ADMIT, KIND_ROOMS_OPEN,
+            RoomsOpenReply, RoomsOpenRequest,
+        };
+        let nest = Scripted::default();
+        let glue = NestBridgedGlue::new(&nest, Arc::new(NoKeys));
+
+        nest.script(&AddressAdmitReply {
+            bridge_id: Some("matrix".into()),
+            ..Default::default()
+        });
+        let probed = fauna_client_testkit::block_on(glue.resolve_inner("bob@".into())).unwrap();
+        assert_eq!(
+            probed,
+            Some(BridgedResolved {
+                bridge_id: "matrix".into(),
+                address: "bob@".into(),
+            })
+        );
+        nest.script(&AddressAdmitReply::default());
+        let none = fauna_client_testkit::block_on(glue.resolve_inner("bo".into())).unwrap();
+        assert_eq!(none, None);
+        assert_eq!(nest.kinds(), vec![KIND_ADDRESS_ADMIT, KIND_ADDRESS_ADMIT]);
+        let sent = nest.sent.lock().unwrap().clone();
+        let req: AddressAdmitRequest = fauna_protocol::decode_strict(&sent[0].1).unwrap();
+        assert_eq!(req.address, "bob@");
+
+        nest.script(&RoomsOpenReply {
+            room: BridgedRoomInfo {
+                participants: vec!["did:plc:bob".into()],
+                ..info()
+            },
+            ..Default::default()
+        });
+        let opened =
+            fauna_client_testkit::block_on(glue.open_inner("matrix".into(), "bob.example".into()))
+                .unwrap();
+        assert_eq!(
+            opened,
+            Some(BridgedResolved {
+                bridge_id: "matrix".into(),
+                address: "did:plc:bob".into(),
+            })
+        );
+        let sent = nest.sent.lock().unwrap().clone();
+        assert_eq!(sent[2].0, KIND_ROOMS_OPEN);
+        let req: RoomsOpenRequest = fauna_protocol::decode_strict(&sent[2].1).unwrap();
+        assert_eq!(
+            (req.bridge_id.as_deref(), req.address.as_str()),
+            (Some("matrix"), "bob.example")
+        );
     }
 
     /// Rule 5: the first sight of a room is the baseline and reads nothing;

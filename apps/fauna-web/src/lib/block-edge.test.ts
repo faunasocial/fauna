@@ -7,6 +7,7 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import {
   blockEdgeBlocked,
+  blockReadWord,
   blockToggleEnabled,
   foldBlockPress,
   foldBlockRead,
@@ -31,6 +32,23 @@ Deno.test("a read that says not-blocked also enables the toggle", () => {
 
 Deno.test("an in-flight call keeps a known toggle disabled", () => {
   assert(!blockToggleEnabled(foldBlockRead(unknownBlockEdge(), false), true));
+});
+
+Deno.test("a failed open-time read keeps the toggle blocked with load_failed", () => {
+  const failed = foldBlockRead(unknownBlockEdge(), null);
+  assert(!blockToggleEnabled(failed, false), "a failed read never enables Block");
+  assert(!blockEdgeBlocked(failed), "no guessed edge is painted as blocked");
+  assertEquals(blockReadWord(failed), "failed");
+  assertEquals(blockReadWord(unknownBlockEdge()), "pending");
+  assertEquals(blockReadWord(foldBlockRead(unknownBlockEdge(), false)), "resolved");
+});
+
+Deno.test("a late failed read does not undo the viewer's press", () => {
+  const pressed = foldBlockPress(true);
+  const afterLateFailure = foldBlockRead(pressed, null);
+  assertEquals(afterLateFailure, pressed);
+  assertEquals(blockReadWord(afterLateFailure), "resolved");
+  assert(blockToggleEnabled(afterLateFailure, false));
 });
 
 Deno.test("a late open-time read does not rewind the viewer's press", () => {

@@ -130,8 +130,6 @@ def test_recovery_handle_already_on_nest_routes_to_nest_recovery(app):
             "args": {"handle": "alice@example.com"},
         },
         "continue_enabled": True,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     app.click("handle-entry-continue-button")
     app.driver.wait_for("recover-back-button", timeout=15)

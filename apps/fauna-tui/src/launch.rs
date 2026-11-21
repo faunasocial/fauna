@@ -239,9 +239,174 @@ pub enum LaunchAction {
     /// channel: "tui neither claims an endpoint... nor raises — its
     /// focus-existing exit prints where the account is served and exits").
     FocusExisting,
+    /// `account-switcher-item` on `launch_retry` — the way back from a failed
+    /// append finish (`onboarding.md` § Wizard exit handling → *The finished
+    /// wizard holds*): switch to the carried account through the Stage-2 gate
+    /// and re-run the launch as it ([`switch_from_launch`]).
+    SwitchAccount(String),
+    /// `account-activate-reauth-confirm-button` on `launch_retry`: the
+    /// post-re-auth switch to the account the prompt names.
+    ConfirmSwitch,
+    /// `account-activate-reauth-cancel-button` on `launch_retry`: a pure no-op
+    /// that closes the prompt.
+    CancelSwitch,
+}
+
+/// The account switcher's own state on `launch_retry` — the pending Stage-2
+/// prompt and a refused switch's sentence. Lives on `App` because the
+/// [`LaunchSurface::TransientRetry`] arm is rebuilt by every verdict; it is
+/// cleared by every other launch gesture and by every switch it runs.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LaunchSwitchState {
+    /// `(actor_id, label)` of the flagged account awaiting the re-auth confirm.
+    pub reauth: Option<(String, String)>,
+    /// A refused switch, painted as `error-message`.
+    pub error: Option<String>,
+}
+
+impl LaunchAction {
+    /// The switcher's own gestures — every other launch gesture clears
+    /// [`LaunchSwitchState`].
+    fn is_switcher(&self) -> bool {
+        matches!(
+            self,
+            LaunchAction::SwitchAccount(_)
+                | LaunchAction::ConfirmSwitch
+                | LaunchAction::CancelSwitch
+        )
+    }
+}
+
+/// The account switcher `launch_retry` carries when the device holds more than
+/// one account (`onboarding.md` § Wizard exit handling → *The finished wizard
+/// holds*; ui.yaml `onboarding.launch_retry.optional_elements`): the
+/// `account-switcher-list` heading, one `account-switcher-item` per account in
+/// registry order — the active (unreachable) one a plain row, every other a
+/// switch — and, while a flagged switch waits, the in-app re-auth prompt. Read
+/// from the registry at paint, like `launch-identity-label` beside it. Empty on
+/// every other surface.
+pub fn switcher_elements(app: &App) -> Vec<Element> {
+    if !matches!(app.launch, LaunchSurface::TransientRetry { .. }) {
+        return Vec::new();
+    }
+    let registry = crate::session::registry(app);
+    let active = registry.active();
+    let rows = crate::session::switcher_rows_serving(&registry, active.as_deref());
+    switcher_elements_for(&rows, app.launch_switch.reauth.as_ref())
+}
+
+fn switcher_elements_for(
+    rows: &[crate::session::AccountSwitcherRow],
+    reauth: Option<&(String, String)>,
+) -> Vec<Element> {
+    use fauna_i18n::strings::{common, settings::account_page as ap};
+    if rows.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = vec![Element::label(ids::ACCOUNT_SWITCHER_LIST, ap::ACCOUNTS)];
+    for row in rows {
+        out.push(if row.is_active {
+            Element::label(ids::ACCOUNT_SWITCHER_ITEM, row.label.clone())
+        } else {
+            Element::launch_button(
+                ids::ACCOUNT_SWITCHER_ITEM,
+                row.label.clone(),
+                LaunchAction::SwitchAccount(row.actor_id.clone()),
+            )
+        });
+    }
+    if let Some((_, label)) = reauth {
+        out.push(Element::label(
+            ids::ACCOUNT_ACTIVATE_REAUTH_PROMPT,
+            ap::reauth_prompt_body(label),
+        ));
+        out.push(Element::launch_button(
+            ids::ACCOUNT_ACTIVATE_REAUTH_CONFIRM_BUTTON,
+            ap::REAUTH_CONFIRM,
+            LaunchAction::ConfirmSwitch,
+        ));
+        out.push(Element::launch_button(
+            ids::ACCOUNT_ACTIVATE_REAUTH_CANCEL_BUTTON,
+            common::CANCEL,
+            LaunchAction::CancelSwitch,
+        ));
+    }
+    out
+}
+
+/// A switcher gesture on `launch_retry`, both dispatch paths (all local: a
+/// registry mutation plus the re-entrant [`start`] `App::switch_account` runs).
+/// A flagged target arms the in-app prompt first — read fresh, as the
+/// Settings switcher does (`long-term-store.md` § Per-account re-auth). The work
+/// a finished wizard deferred stays held: it runs only on its own account's
+/// `Online` (`crate::wizard::run_deferred_first_setup`).
+fn perform_switcher(app: &mut App, action: LaunchAction) {
+    match action {
+        LaunchAction::SwitchAccount(actor_id) => {
+            if crate::session::account_requires_confirm(app, &actor_id) {
+                let label = account_label(app, &actor_id);
+                app.launch_switch = LaunchSwitchState {
+                    reauth: Some((actor_id, label)),
+                    error: None,
+                };
+            } else {
+                run_launch_switch(app, &actor_id, false);
+            }
+        }
+        LaunchAction::ConfirmSwitch => {
+            if let Some((actor_id, _)) = app.launch_switch.reauth.take() {
+                run_launch_switch(app, &actor_id, true);
+            }
+        }
+        LaunchAction::CancelSwitch => app.launch_switch = LaunchSwitchState::default(),
+        _ => {}
+    }
+}
+
+fn account_label(app: &App, actor_id: &str) -> String {
+    let registry = crate::session::registry(app);
+    crate::session::switcher_rows_serving(&registry, None)
+        .into_iter()
+        .find(|r| r.actor_id == actor_id)
+        .map(|r| r.label)
+        .unwrap_or_else(|| actor_id.to_string())
+}
+
+fn run_launch_switch(app: &mut App, actor_id: &str, confirmed: bool) {
+    let label = account_label(app, actor_id);
+    app.launch_switch = LaunchSwitchState::default();
+    if let Err(e) = app.switch_account(actor_id, confirmed) {
+        tracing::warn!("[launch] switch to {actor_id} refused: {e}");
+        app.launch_switch.error = Some(
+            fauna_client_accounts::switch_refused_copy(&e, &label)
+                .resolve(fauna_i18n::strings::lookup),
+        );
+    }
 }
 
 impl LaunchSurface {
+    /// This surface's name in `fauna_e2e_agent::ROOT_SURFACE_KEY`'s journal:
+    /// its ui.yaml page, or a `launch_*` name for the one surface ui.yaml gives
+    /// no page of its own (`NeedsUpdate`). Test-agent use only, but compiled
+    /// everywhere: it is a total match, so a new surface must be named here.
+    pub fn root_surface_name(&self) -> &'static str {
+        match self {
+            LaunchSurface::Wizard => fauna_e2e_agent::ROOT_SURFACE_WIZARD,
+            LaunchSurface::Launching => fauna_e2e_agent::ROOT_SURFACE_LAUNCH_PROGRESS,
+            LaunchSurface::TransientRetry { .. } => "launch_retry",
+            LaunchSurface::NeedsUpdate { .. } => "launch_needs_update",
+            LaunchSurface::SignInRefused { .. } => "launch_sign_in_refused",
+            LaunchSurface::AccountLocked { .. } => "launch_account_locked",
+            LaunchSurface::IdentityStolenEntry { .. } => "identity_stolen_entry",
+            LaunchSurface::IdentityChanged { .. } | LaunchSurface::IdentityForked { .. } => {
+                "launch_identity_changed"
+            }
+            LaunchSurface::AccountIndexUnreadable { .. } => "launch_account_index_unreadable",
+            LaunchSurface::Unlock | LaunchSurface::CreatePassphrase => "unlock",
+            LaunchSurface::InstanceChooser { .. } => "launch_instance_chooser",
+        }
+    }
+
     /// The ordered ui.yaml element list this surface paints — the one source
     /// paint, the automation registry, and the focus ring all read.
     ///
@@ -999,6 +1164,12 @@ pub fn route(app: &mut App, tx: &UnboundedSender<UiMessage>, snapshot: LaunchSna
             if let Some(machine) = &app.launch_machine {
                 tokio::spawn(Arc::clone(machine).ttl_refresh_loop());
             }
+            // A finished first-run wizard's deferred work (the serving
+            // enablement, the recovery kit, the trust answer, the DNS
+            // credential) runs here, once, on this account's first `Online` —
+            // never before, however many Retries it took (`onboarding.md`
+            // § Wizard exit handling → *The finished wizard holds*).
+            crate::wizard::run_deferred_first_setup(app, tx, &nest_url, &secret_hex);
             // Signed in: the command line's nest hint is spent unused
             // (`apps/tui.md` § System integration → *The nest hint*).
             app.drop_pending_nest_hint();
@@ -1291,6 +1462,10 @@ fn route_wizard_entry(app: &mut App, entry: LaunchWizardEntry) {
 /// un-retried) element read already observes the new surface; the keyboard path
 /// spawns it, exactly as the wizard's gestures split.
 pub async fn perform(app: &mut App, tx: &UnboundedSender<UiMessage>, action: LaunchAction) {
+    if action.is_switcher() {
+        return perform_switcher(app, action);
+    }
+    app.launch_switch = LaunchSwitchState::default();
     match action {
         LaunchAction::Retry => {
             let Some(machine) = app.launch_machine.clone() else {
@@ -1332,6 +1507,10 @@ pub async fn perform(app: &mut App, tx: &UnboundedSender<UiMessage>, action: Lau
         LaunchAction::BackToLocked => crate::locked::back(app, tx),
         // Awaited: the driver's next read sees the ceremony's settled outcome.
         LaunchAction::SubmitStolen => crate::locked::submit(app).await,
+        // Dispatched to `perform_switcher` above.
+        LaunchAction::SwitchAccount(_)
+        | LaunchAction::ConfirmSwitch
+        | LaunchAction::CancelSwitch => {}
     }
 }
 
@@ -1481,6 +1660,55 @@ fn focus_existing(app: &mut App, tx: &UnboundedSender<UiMessage>) {
     }
 }
 
+/// The shown chooser's watch, one tick (`run`'s `chooser_watch` arm, every
+/// [`fauna_client_accounts::CHOOSER_WATCH_INTERVAL`] while the chooser is the
+/// launch surface): the shared [`fauna_client_accounts::chooser_watch_step`]
+/// re-reads the facts the chooser rests on (`account-scoping.md`
+/// § Concurrent instances → the colliding instance's surface).
+///
+/// - **freed** — the instance serving the account quit: the collision is
+///   over, so this process continues as the plain launch, [`start`] — the
+///   same continuation as [`focus_existing`]'s no-longer-served arm, with no
+///   input;
+/// - **choices** — another account opened or closed elsewhere: the list is
+///   replaced, a stale pick error with it (it named a row that may be gone).
+///
+/// The registry is re-read each tick, so an account registered meanwhile is
+/// offered too.
+pub fn watch_chooser(app: &mut App, tx: &UnboundedSender<UiMessage>) {
+    let (served, shown) = match &app.launch {
+        LaunchSurface::InstanceChooser {
+            served_actor,
+            choices,
+            ..
+        } => (served_actor.clone(), choices.clone()),
+        _ => return,
+    };
+    let Some(base) = crate::session::config_dir() else {
+        return;
+    };
+    let entries: Vec<(String, Option<String>)> = crate::session::registry(app)
+        .list()
+        .into_iter()
+        .map(|e| (e.actor_id, e.handle))
+        .collect();
+    match fauna_client_accounts::chooser_watch_step(&base, &served, &entries, &shown) {
+        fauna_client_accounts::ChooserWatchStep::Unchanged => {}
+        fauna_client_accounts::ChooserWatchStep::Freed => {
+            tracing::info!(
+                "[launch-instance-chooser] {served} is no longer served — continuing as a plain launch"
+            );
+            start(app, tx);
+        }
+        fauna_client_accounts::ChooserWatchStep::Choices(now) => {
+            if let LaunchSurface::InstanceChooser { choices, error, .. } = &mut app.launch {
+                *choices = now;
+                *error = None;
+            }
+        }
+    }
+}
+
 /// The still-served arm of [`focus_existing`]: prints where the account is
 /// already being served and exits (`account-scoping.md` § Concurrent
 /// instances → the raise channel).
@@ -1510,6 +1738,10 @@ fn focus_existing_and_exit(app: &App) -> ! {
 /// trips through the UI channel: the task drives the machine and posts the
 /// settled snapshot back for `route` to apply on the main loop.
 pub fn spawn_launch_action(app: &mut App, tx: &UnboundedSender<UiMessage>, action: LaunchAction) {
+    if action.is_switcher() {
+        return perform_switcher(app, action);
+    }
+    app.launch_switch = LaunchSwitchState::default();
     match action {
         LaunchAction::Retry => {
             let Some(machine) = app.launch_machine.clone() else {
@@ -1549,6 +1781,10 @@ pub fn spawn_launch_action(app: &mut App, tx: &UnboundedSender<UiMessage>, actio
         LaunchAction::BackToLocked => crate::locked::back(app, tx),
         // Network work: the outcome rides the UI channel back to the fold.
         LaunchAction::SubmitStolen => crate::locked::spawn_submit(app, tx),
+        // Dispatched to `perform_switcher` above.
+        LaunchAction::SwitchAccount(_)
+        | LaunchAction::ConfirmSwitch
+        | LaunchAction::CancelSwitch => {}
     }
 }
 
@@ -1557,6 +1793,9 @@ pub fn spawn_launch_action(app: &mut App, tx: &UnboundedSender<UiMessage>, actio
 /// cleared, the identity kept — [`crate::session::walk_away_from_nest`]),
 /// seed the wizard with the identity and hand it the screen.
 fn use_a_different_nest(app: &mut App) {
+    // A finished wizard's deferred work belonged to the nest it signed in to;
+    // the wizard run this hands the screen to captures its own.
+    app.held_first_setup = None;
     match crate::session::walk_away_from_nest(app) {
         Some(secret_hex) => app.wizard.machine.seed_identity(secret_hex.to_string()),
         None => tracing::error!("[launch] fallthrough with no stored identity"),
@@ -1567,6 +1806,19 @@ fn use_a_different_nest(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Use a different nest" from a finished wizard's `launch_retry` drops the
+    /// work that wizard deferred (`onboarding.md` § Wizard exit handling → *The
+    /// finished wizard holds*): it belonged to the nest that could not be
+    /// reached, and the wizard run the screen goes back to captures its own.
+    #[test]
+    fn use_a_different_nest_drops_the_held_first_setup() {
+        let mut app = crate::app::tests::test_app();
+        app.held_first_setup = Some(crate::wizard::DeferredFirstSetup::for_test(&"1".repeat(64)));
+        use_a_different_nest(&mut app);
+        assert!(app.held_first_setup.is_none());
+        assert_eq!(app.launch, LaunchSurface::Wizard);
+    }
 
     fn ids(surface: &LaunchSurface) -> Vec<String> {
         surface.elements().iter().map(|e| e.id.clone()).collect()
@@ -2202,6 +2454,86 @@ mod tests {
             "must stay empty so the shared renderer falls back to the localized generic \
              retry text, not a raw Debug dump: {error:?}"
         );
+    }
+
+    fn switcher_row(actor: char, active: bool) -> crate::session::AccountSwitcherRow {
+        crate::session::AccountSwitcherRow {
+            actor_id: actor.to_string().repeat(64),
+            label: format!("user-{actor}"),
+            is_active: active,
+            require_confirm: false,
+        }
+    }
+
+    /// `launch_retry` carries the account switcher only with more than one
+    /// account (`onboarding.md` § Wizard exit handling → *The finished wizard
+    /// holds*: the way back from a failed append finish): the list heading, one
+    /// item per account — the active one a plain row, every other a switch.
+    #[test]
+    fn the_retry_switcher_shows_only_with_more_than_one_account() {
+        assert!(switcher_elements_for(&[switcher_row('a', true)], None).is_empty());
+
+        let rows = [switcher_row('a', false), switcher_row('b', true)];
+        let els = switcher_elements_for(&rows, None);
+        let ids: Vec<&str> = els.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                ids::ACCOUNT_SWITCHER_LIST,
+                ids::ACCOUNT_SWITCHER_ITEM,
+                ids::ACCOUNT_SWITCHER_ITEM
+            ]
+        );
+        assert!(
+            matches!(
+                els[1].gesture(),
+                Some(crate::element::Gesture::Launch(LaunchAction::SwitchAccount(ref a)))
+                    if *a == "a".repeat(64)
+            ),
+            "the previous account's row is the switch"
+        );
+        assert!(
+            els[2].gesture().is_none(),
+            "the active row is no switch target"
+        );
+    }
+
+    /// A pending Stage-2 switch adds the in-app prompt naming the target, with
+    /// its confirm and its cancel.
+    #[test]
+    fn a_pending_flagged_switch_paints_the_reauth_prompt() {
+        let rows = [switcher_row('a', false), switcher_row('b', true)];
+        let pending = ("a".repeat(64), "user-a".to_string());
+        let els = switcher_elements_for(&rows, Some(&pending));
+        let tail: Vec<&str> = els[3..].iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            tail,
+            [
+                ids::ACCOUNT_ACTIVATE_REAUTH_PROMPT,
+                ids::ACCOUNT_ACTIVATE_REAUTH_CONFIRM_BUTTON,
+                ids::ACCOUNT_ACTIVATE_REAUTH_CANCEL_BUTTON
+            ]
+        );
+        assert!(els[3].text.contains("user-a"), "{:?}", els[3].text);
+    }
+
+    /// The switcher belongs to `launch_retry` alone, and another launch
+    /// gesture closes a pending prompt.
+    #[test]
+    fn the_switcher_paints_on_retry_only_and_other_gestures_clear_its_state() {
+        let mut app = crate::app::tests::test_app();
+        app.launch = LaunchSurface::Launching;
+        assert!(switcher_elements(&app).is_empty());
+
+        app.launch_switch.reauth = Some(("a".repeat(64), "user-a".into()));
+        app.launch_switch.error = Some("refused".into());
+        let tx = app.tx.clone();
+        spawn_launch_action(&mut app, &tx, LaunchAction::StartOver);
+        assert_eq!(app.launch_switch, LaunchSwitchState::default());
+
+        app.launch_switch.reauth = Some(("a".repeat(64), "user-a".into()));
+        perform_switcher(&mut app, LaunchAction::CancelSwitch);
+        assert_eq!(app.launch_switch, LaunchSwitchState::default());
     }
 
     /// A launch decision that lands on neither the wizard nor a session — here

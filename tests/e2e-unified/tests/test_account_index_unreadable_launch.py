@@ -1,6 +1,6 @@
 """tier_3 E2E: an account index this build cannot read reaches the user as
 itself — never as fresh onboarding — CROSS-APP (tui, linux, macos, ios,
-windows, web).
+windows, web, android).
 
 ``docs/goal/behavior/onboarding.md`` § App-launch routing (the account-index
 row, checked before every other) and
@@ -52,10 +52,12 @@ reload ``launch_and_route()`` performs — exactly the native/web split
 ``LaunchHarness.launch_and_route`` documents. Its store is
 ``WebCredStore.inject_raw`` (new this row): a plain ``localStorage.setItem``
 per field, verbatim — ``web_store.rs``'s ``native_key()`` maps ``fauna/index``
-to itself, so no translation is owed there either. **android is deliberately
-absent from ``_SUPPORTED_APPS``** — its tier_3 leg is blocked on the Android
-emulator, which only runs on the dedicated emulator machine; the routing +
-rendering are instead witnessed by a Robolectric unit test
+to itself, so no translation is owed there either. **android** joined with no new harness code: ``make_launch_harness``'s native
+branch builds its ``AndroidLaunchHarness``, whose ``AndroidCredStore.inject_raw``
+merges ``fauna/index`` verbatim over the seed the bridge writes as the app's
+credential file before the activity starts — the seam
+``test_nest_identity_pin.py``'s android leg already rides. The device run is
+the emulator venue's; the routing + rendering stay pinned by Robolectric too
 (``AppLaunchVMTest``/``LaunchAccountIndexUnreadableScreenTest``).
 """
 
@@ -79,13 +81,12 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.windows,
     pytest.mark.web,
+    pytest.mark.android,
 ]
 
 #: Apps that render this surface through the shared ``LaunchMachine``'s
-#: ``account_index_refusal`` side channel. android is not here — its tier_3
-#: leg is blocked on the host-only Android emulator; witnessed by a
-#: Robolectric unit test instead (see the module docstring).
-_SUPPORTED_APPS = ("tui", "linux", "macos", "ios", "windows", "web")
+#: ``account_index_refusal`` side channel.
+_SUPPORTED_APPS = ("tui", "linux", "macos", "ios", "windows", "web", "android")
 
 
 def _apps():

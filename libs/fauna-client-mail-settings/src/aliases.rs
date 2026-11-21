@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use fauna_mail::aliases::{
     ALIAS_KIND_DISPOSABLE, ALIAS_KIND_EXACT, ALIAS_KIND_FORWARDER, ALIAS_KIND_WILDCARD_PREFIX,
     DEFAULT_RESERVED_LOCAL_PARTS, validate_exact_local_part, validate_wildcard_prefix,
@@ -462,6 +463,29 @@ impl MailAliasesSnapshot {
             audit: None,
         }
     }
+
+    /// Whether a new alias can be created **now** — add, import and the
+    /// disposable mint all create on [`Self::default_domain`], so this one
+    /// answer paints all three and the machine's create asks it too
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rules 2 and 6;
+    /// `mail-aliases.md`). No canonical exact alias → blocked with
+    /// `mail_aliases.no_default_domain`. Mail being off is the page's entry
+    /// gate (`MailSettingsSnapshot::mail_usable`), not this one; an app with
+    /// no snapshot yet asks `Possibility::once_read(false)`.
+    pub fn create_possibility(&self) -> Possibility {
+        if self.default_domain.is_some() {
+            Possibility::Possible
+        } else {
+            Possibility::blocked(LocalizedText::key("mail_aliases.no_default_domain"))
+        }
+    }
+}
+
+/// [`MailAliasesSnapshot::create_possibility`] over FFI (a UniFFI record
+/// carries no methods).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_aliases_create_possibility(snapshot: MailAliasesSnapshot) -> Possibility {
+    snapshot.create_possibility()
 }
 
 /// Actions the per-app UI dispatches.
@@ -1304,6 +1328,7 @@ mod tests {
         assert_eq!(snap.aliases[1].address, "bob-*@example.net");
         // Default domain comes from the (only) exact alias.
         assert_eq!(snap.default_domain.as_deref(), Some("example.net"));
+        assert_eq!(snap.create_possibility(), Possibility::Possible);
         assert_eq!(snap.status, AliasesStatus::Idle);
         assert!(snap.error.is_none());
     }
@@ -1442,6 +1467,10 @@ mod tests {
         let m = machine_with(vec![]);
         m.hydrate().await.unwrap();
         assert!(m.snapshot().default_domain.is_none());
+        assert_eq!(
+            mail_aliases_create_possibility(m.snapshot()),
+            Possibility::blocked(LocalizedText::key("mail_aliases.no_default_domain"))
+        );
         let err = m
             .dispatch(MailAliasesAction::Create {
                 kind: AliasKind::Exact,

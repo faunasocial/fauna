@@ -18,6 +18,10 @@ public final class TrainedTopicsVM {
     /// rename, delete, reload) must not clear it. Set by `PersonalizationView`.
     public var publishSheetOpen = false
 
+    /// A registry write is in flight — the shared draft answers fold it in
+    /// (`common.in_flight`), so create / save-name and Publish… wait for it.
+    public private(set) var busy = false
+
     private var api: APIClient?
 
     /// Bumped at the start and end of every registry write, so a store-change
@@ -62,45 +66,59 @@ public final class TrainedTopicsVM {
         if fresh != rows { rows = fresh }
     }
 
-    /// A blank (all-whitespace) name is refused here, before the round trip,
-    /// with the boundary's own `BlankName` sentence — the one tui and linux
-    /// paint — never a silent no-op that leaves the user wondering why nothing
-    /// happened (topic-factors.md § Authoring surface & picker, outcome 13).
-    /// Returns the trimmed name, or nil once the refusal is painted.
-    private func nonBlank(_ name: String) -> String? {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            errorMessage = mapError(FfiTrainedTopicsError.BlankName)
-            return nil
-        }
-        return trimmed
+    /// The create / save-name button's answer — the shared
+    /// `factor_name_possibility` (a name, and no change in flight), the one
+    /// tui paints (`settings.md` § Errors & edge cases, *Personal form submits
+    /// paint from their draft*).
+    public func nameAnswer(_ name: String) -> Possibility {
+        trainedFactorNamePossibility(name: name, busy: busy)
     }
 
-    /// Create a new trained factor named `name` (trimmed; blank is refused by
-    /// `nonBlank`).
+    /// The press asks the paint's answer again and refuses with its reason on
+    /// `error-message` — never a silent no-op (topic-factors.md § Authoring
+    /// surface & picker, outcome 13). Returns the trimmed name, or nil once
+    /// the refusal is painted.
+    private func acceptedName(_ name: String) -> String? {
+        if refusePress(nameAnswer(name), errorMessage: &errorMessage) { return nil }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Hold `busy` and the gesture epoch across one registry write.
+    private func write(_ body: () async -> Void) async {
+        busy = true
+        gestureEpoch += 1
+        defer {
+            gestureEpoch += 1
+            busy = false
+        }
+        await body()
+    }
+
+    /// Create a new trained factor named `name` (trimmed; refused by the
+    /// shared name answer).
     public func create(name: String) async {
-        guard let trimmed = nonBlank(name), let api else { return }
-        gestureEpoch += 1
-        defer { gestureEpoch += 1 }
-        do {
-            rows = try await api.trainedTopicsCreate(name: trimmed)
-            clearErrorAfterSuccess()
-        } catch {
-            errorMessage = mapError(error)
+        guard let trimmed = acceptedName(name), let api else { return }
+        await write {
+            do {
+                rows = try await api.trainedTopicsCreate(name: trimmed)
+                clearErrorAfterSuccess()
+            } catch {
+                errorMessage = mapError(error)
+            }
         }
     }
 
-    /// Rename an existing factor's display name (trimmed; blank is refused,
-    /// same guard as `create`).
+    /// Rename an existing factor's display name (trimmed; refused by the same
+    /// shared name answer as `create`).
     public func rename(id: Data, name: String) async {
-        guard let trimmed = nonBlank(name), let api else { return }
-        gestureEpoch += 1
-        defer { gestureEpoch += 1 }
-        do {
-            rows = try await api.trainedTopicsRename(id: id, name: trimmed)
-            clearErrorAfterSuccess()
-        } catch {
-            errorMessage = mapError(error)
+        guard let trimmed = acceptedName(name), let api else { return }
+        await write {
+            do {
+                rows = try await api.trainedTopicsRename(id: id, name: trimmed)
+                clearErrorAfterSuccess()
+            } catch {
+                errorMessage = mapError(error)
+            }
         }
     }
 

@@ -31,6 +31,7 @@ Stamped 2026-11-07 at b844c771f6.
    - `tests/e2e-unified/tests/test_fauna_mls_two_client_inbox_drain.py::test_fauna_mls_two_client_inbox_drain`
    - `tests/e2e-unified/tests/test_fauna_mls_web_receive.py::test_fauna_mls_web_receive`
    - `tests/e2e-unified/tests/test_fauna_mls_web_receives_from_linux_sender.py::test_fauna_mls_web_receives_from_linux_sender`
+   - `tests/e2e-unified/tests/test_use_case_user_journeys.py::test_a_user_starts_a_conversation_and_sends_a_message`
 3. [app] A conversation with someone on another nest works the same way — `docs/goal/behavior/direct-messages.md` § Technical Flow — Cross-Nest
    - `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_fauna_mls_cross_nest_roundtrip`
    - `tests/e2e-unified/tests/test_fauna_mls_cross_nest_receive.py::test_fauna_mls_cross_nest_receive`
@@ -96,19 +97,22 @@ Stamped 2026-11-07 at b844c771f6.
 27. [app] You can remove your own copy of a message, or of a whole conversation, that reached you from another network; it is gone on all your devices, the other side is not told, and the conversation comes back only when something new arrives in it — `docs/goal/behavior/bridged-adapter.md` § Removing bridged rows
    - `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_message_takes_only_my_nests_copy`
    - `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_conversation_hides_it_until_the_peer_writes_again`
+28. [app] In a new conversation, Send is disabled and says to add a recipient until there is someone to send to; once the recipient is on a network that carries no attachments or topics, those two are disabled with that reason; and a send that fails keeps the composer open with what you typed and says why — `docs/goal/ui/conversations.md` § Errors & edge cases
+   - `tests/e2e-unified/tests/test_new_thread_offer_only_possible.py::test_send_waits_for_a_recipient_and_a_refused_send_keeps_what_was_typed`
+   - `tests/e2e-unified/tests/test_new_thread_offer_only_possible.py::test_attach_and_topic_are_blocked_with_their_reasons_for_a_bridged_recipient`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
-| linux | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
-| windows | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| web | ⚠ partial | 0.1.7-dev+e08dc6d6 standalone |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.7-dev+e08dc6d6 standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.6-dev+c788c80c standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -124,6 +128,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 2 | app | `tests/e2e-unified/tests/test_fauna_mls_two_client_inbox_drain.py::test_fauna_mls_two_client_inbox_drain` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_fauna_mls_web_receive.py::test_fauna_mls_web_receive` | web (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_fauna_mls_web_receives_from_linux_sender.py::test_fauna_mls_web_receives_from_linux_sender` | web (linux): passed, linux (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_use_case_user_journeys.py::test_a_user_starts_a_conversation_and_sends_a_message` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_fauna_mls_cross_nest_roundtrip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_receive.py::test_fauna_mls_cross_nest_receive` — requires `cross-nest-mls-receive-seam` (test harness) (not built: windows, android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_conv_rail_push_wakes_native.py::test_conv_rail_push_wakes_native` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -162,6 +167,8 @@ Stamped 2026-11-07 at b844c771f6.
 | 25 | app | `tests/e2e-unified/tests/test_conversations_unread_by_nest_position.py::test_unread_follows_the_nests_order_never_the_senders_clock` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
 | 26 | app | `tests/e2e-unified/tests/test_conversations_rejoin_read_position.py::test_a_group_left_and_re_joined_opens_at_the_old_read_position` | windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 26 | app | `tests/e2e-unified/tests/test_conversations_rejoin_later_enrolled_device.py::test_a_device_enrolled_after_you_left_starts_the_rejoined_conversation_unread` | macos (macos): passed, tui (linux): passed |
-| 27 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_message_takes_only_my_nests_copy` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 27 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_conversation_hides_it_until_the_peer_writes_again` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 27 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_message_takes_only_my_nests_copy` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 27 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_removing_a_bridged_conversation_hides_it_until_the_peer_writes_again` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/test_new_thread_offer_only_possible.py::test_send_waits_for_a_recipient_and_a_refused_send_keeps_what_was_typed` — requires `blocked-reason-read` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/test_new_thread_offer_only_possible.py::test_attach_and_topic_are_blocked_with_their_reasons_for_a_bridged_recipient` — requires `blocked-reason-read` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

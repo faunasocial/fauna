@@ -28,11 +28,11 @@ def app_launch_config(app_name: str, request) -> dict:
     if app_name in ("ios", "ios-kids"):  # ios-kids: the kids build on ios's venue
         setup = request.getfixturevalue("ios_setup")
         return {"app_path": setup["app_path"], "udid": setup["udid"]}
-    if app_name == "android":
+    if app_name in ("android", "android-kids"):  # android-kids: the kids build on android's venue
         from helpers import android_device
 
         return {
             "app_path": request.getfixturevalue("android_app_path"),
-            **android_device.run_launch_facts(_REPO_ROOT),
+            **android_device.run_launch_facts(_REPO_ROOT, app_name),
         }
     return {"app_path": request.getfixturevalue(f"{app_name}_app_path")}

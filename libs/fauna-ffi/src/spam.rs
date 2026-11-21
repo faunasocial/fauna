@@ -40,6 +40,36 @@ pub fn spam_threshold_band(threshold_per_mille: u16) -> String {
         .to_string()
 }
 
+/// *Save* on the spam-preferences section (`save-spam-prefs`):
+/// [`fauna_client_spam::possibility::save_preferences_possibility`] — blocked
+/// until the read that prefilled the sliders has resolved, then blocked
+/// `common.nothing_to_save` while both drafts equal the `saved` preferences
+/// the nest last confirmed (read or echoed); an unparseable draft stays
+/// possible so the press names it (`docs/goal/ui/README.md` § Offer only what
+/// is possible, rules 5 and 6; `docs/goal/ui/settings.md`). The drafts are
+/// the threshold text the app would send (`"0.7"`); compared on the wire's
+/// per-mille, so spelling differences do not count as an edit.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn spam_save_preferences_possibility(
+    read: fauna_core::possibility::ReadState,
+    saved: Option<FfiSpamPreferences>,
+    spam_draft: String,
+    phishing_draft: String,
+) -> fauna_core::possibility::Possibility {
+    let saved = saved.map(|p| SpamPreferences {
+        spam_threshold: p.spam_threshold,
+        phishing_threshold: p.phishing_threshold,
+        extra: Default::default(),
+    });
+    fauna_client_spam::possibility::save_preferences_possibility(
+        read,
+        saved.as_ref(),
+        &spam_draft,
+        &phishing_draft,
+    )
+}
+
 // ── transport: FfiSpamClient ───────────────────────────────────────────────
 
 /// FFI mirror of [`fauna_protocol::spam::SpamPreferences`] — the calling
@@ -122,6 +152,33 @@ impl FfiSpamClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "value-format")]
+    #[test]
+    fn save_is_offered_only_while_a_threshold_changed() {
+        use fauna_core::possibility::{Possibility, ReadState};
+        let saved = Some(FfiSpamPreferences {
+            spam_threshold: 700,
+            phishing_threshold: 400,
+        });
+        let unchanged = spam_save_preferences_possibility(
+            ReadState::Resolved,
+            saved.clone(),
+            "0.7".into(),
+            "0.4".into(),
+        );
+        assert!(matches!(unchanged, Possibility::Blocked { .. }));
+        let edited = spam_save_preferences_possibility(
+            ReadState::Resolved,
+            saved,
+            "0.8".into(),
+            "0.4".into(),
+        );
+        assert_eq!(edited, Possibility::Possible);
+        let loading =
+            spam_save_preferences_possibility(ReadState::Pending, None, "0.5".into(), "0.5".into());
+        assert!(matches!(loading, Possibility::Blocked { .. }));
+    }
 
     #[test]
     fn band_export_returns_i18n_keys() {

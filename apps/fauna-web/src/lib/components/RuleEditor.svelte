@@ -15,7 +15,7 @@
   import { connectionStatus } from '#lib/store';
   import { ruleLabelers, ruleModule } from '#lib/rpc';
   import {
-    offlineAffordance,
+    offlinePossibility,
     ruleKeywordsInline,
     type LabelerChoice,
     type RuleEditorHandle,
@@ -23,6 +23,7 @@
     type RuleVerdict,
   } from '#lib/wasm';
   import { makeOfflineGate } from '#lib/offline-gate';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
@@ -50,7 +51,7 @@
     onchange?: () => void;
   } = $props();
 
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   let view = $state(editor.view());
   // The keywords inputs as typed. A single-line input re-painted from the stored
@@ -75,6 +76,21 @@
       cancelled = true;
     };
   });
+
+  // `rule-editor-save-button` paints from the shared
+  // `RuleEditor::save_possibility` (README § Offer only what is possible): the
+  // first thing that stops a save is its reason, on the button's `title`; the
+  // save asks the same answer before it calls the host. Re-read on every edit.
+  const saveAnswer = () => editor.savePossibility();
+  let saveGate = $derived.by(() => {
+    void view;
+    return formGate(askPossibility(saveAnswer));
+  });
+
+  function save() {
+    if (formRefusal(askPossibility(saveAnswer)) !== null) return;
+    onsave();
+  }
 
   function refresh() {
     view = editor.view();
@@ -320,16 +336,18 @@
         type="button"
         class="btn primary"
         data-testid={IDS.RULE_EDITOR_SAVE_BUTTON}
-        use:offlineGate={{ kind: 'fauna.admin.content_policy.set', disabled: saving || !view.can_save }}
-        onclick={onsave}
+        use:offlineGate={{ kind: 'fauna.admin.content_policy.set', disabled: saving || saveGate.disabled }}
+        title={saveGate.reason || undefined}
+        onclick={save}
       >{saving ? t.rule_editor.saving : t.rule_editor.save_button}</button>
     {:else}
       <button
         type="button"
         class="btn primary"
         data-testid={IDS.RULE_EDITOR_SAVE_BUTTON}
-        use:offlineGate={{ kind: 'fauna.family.policy.update', disabled: saving || !view.can_save }}
-        onclick={onsave}
+        use:offlineGate={{ kind: 'fauna.family.policy.update', disabled: saving || saveGate.disabled }}
+        title={saveGate.reason || undefined}
+        onclick={save}
       >{saving ? t.rule_editor.saving : t.rule_editor.save_button}</button>
     {/if}
   </div>

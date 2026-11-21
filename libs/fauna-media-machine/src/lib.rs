@@ -44,6 +44,17 @@ pub mod snapshots;
 #[cfg(feature = "rpc-glue")]
 pub mod succession_take_over;
 
+/// Whether `share-link-button` is offered on an item's detail surface, from the
+/// verdict the machine stamps on it (`MediaItemSnapshot::share_link_eligible`)
+/// — [`fauna_client_share::share_link_possibility`] (`docs/goal/ui/README.md`
+/// § Offer only what is possible, rule 6): *possible* where the nest will serve
+/// the link, *absent* elsewhere, never painted inert. A free function because
+/// a UniFFI record carries no methods; the bool stays on the snapshot.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn share_link_possibility(eligible: bool) -> fauna_core::possibility::Possibility {
+    fauna_client_share::share_link_possibility(eligible)
+}
+
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use blob_uploader::FakeMediaBlobUploader;
 pub use blob_uploader::MediaBlobUploader;
@@ -52,6 +63,8 @@ pub use fauna_core::followed_media::{
 };
 pub use folder_keys::{FolderKeyResolver, ResolvedCustody, ResolvedFolderKeys};
 pub use machine::{FolderChannelOwners, MediaMachine, MlsQuery, SettlePolicy};
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub use nest_api::fake::{FakeFolderMaker, FakeMakeOutcome};
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use nest_api::{FakeMediaNestApi, MediaNestCall};
 pub use nest_api::{ForeignListing, MediaApiError, MediaNestApi};

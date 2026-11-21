@@ -109,23 +109,70 @@ def connect_state() -> tuple[int, str]:
     return state, _STATE_NAMES.get(state, f"Unknown({state})")
 
 
+_user32 = None
+
+_DESKTOP_SWITCHDESKTOP = 0x0100
+_ERROR_ACCESS_DENIED = 5
+
+
+def _user():
+    global _user32
+    if _user32 is None:
+        dll = ctypes.WinDLL("user32", use_last_error=True)
+        dll.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        dll.OpenInputDesktop.restype = wintypes.HANDLE
+        dll.CloseDesktop.argtypes = [wintypes.HANDLE]
+        dll.CloseDesktop.restype = wintypes.BOOL
+        _user32 = dll
+    return _user32
+
+
+def input_desktop_reachable() -> bool | None:
+    """Whether this process can open the desktop that receives input — the one
+    `SendInput` injects into.
+
+    A WTS-connected session can still hold no input desktop this process may
+    reach: a LOCKED workstation (the console reattached, or never detached, but
+    locked — the secure Winlogon desktop takes input), a UAC prompt, or a window
+    station that is not interactive. `OpenInputDesktop` then fails with
+    ``ERROR_ACCESS_DENIED`` — the same Win32 error 5 `SendInput` answers — while
+    the connect state reads ``Active``. Measured on Windows 2026-11-18: the
+    session read Disconnected with the lock flag set, and `OpenInputDesktop`
+    returned NULL with error 5.
+
+    ``False`` only on that access-denied answer; ``None`` when the probe could
+    not tell (any other error), which is no evidence either way.
+    """
+    user32 = _user()
+    handle = user32.OpenInputDesktop(0, False, _DESKTOP_SWITCHDESKTOP)
+    if handle:
+        user32.CloseDesktop(handle)
+        return True
+    return False if ctypes.get_last_error() == _ERROR_ACCESS_DENIED else None
+
+
 _SENDINPUT_NEED = "SendInput needs an attached interactive desktop"
 
 
-def skip_unless_attached_desktop(need: str = _SENDINPUT_NEED) -> None:
-    """``skip_environment`` iff this session is WTS-disconnected.
+def skip_unless_attached_desktop(need: str = _SENDINPUT_NEED, *, input_desktop: bool = True) -> None:
+    """``skip_environment`` iff this session is WTS-disconnected, or — when
+    ``input_desktop`` — its input desktop is out of this process's reach
+    (`input_desktop_reachable`: a locked workstation reads ``Active`` yet
+    refuses every `SendInput`).
 
     ``need`` names what the caller cannot do without a desktop: hardware
     input by default, or — for the store-listing shots — a window render,
     since a disconnected session composes no app content and
-    ``PrintWindow`` hands back a title bar over a flat client area.
+    ``PrintWindow`` hands back a title bar over a flat client area. A
+    caller that needs no input (a render) passes ``input_desktop=False``:
+    a lock takes the input desktop, not the window's composition.
 
-    Runs the caller normally (returns) on every other connect state,
-    including the query itself failing — an inability to probe is not
-    evidence of disconnection, and a genuine disconnection that slips past
-    this probe still turns into a self-diagnosing error downstream (the
-    `SendInput` call's `PhysicalOnly`, or `CaptureWindow`'s flat-client-area
-    refusal), so a false negative here is not a silent one.
+    Runs the caller normally (returns) on every other state, including either
+    query failing — an inability to probe is not evidence of a missing
+    desktop, and one that slips past this probe still turns into a
+    self-diagnosing error downstream (the `SendInput` call's `PhysicalOnly`,
+    or `CaptureWindow`'s flat-client-area refusal), so a false negative here
+    is not a silent one.
     """
     from helpers.app_surface import skip_environment
 
@@ -140,4 +187,13 @@ def skip_unless_attached_desktop(need: str = _SENDINPUT_NEED) -> None:
             "%SESSIONNAME% /dest:console` from an elevated prompt (the "
             "project's internal Windows dev-setup notes — the "
             "SendInput/attached-desktop paragraph) and re-run."
+        )
+    if input_desktop and input_desktop_reachable() is False:
+        skip_environment(
+            "this box's automation session is connected but its input desktop "
+            "is out of reach (`OpenInputDesktop` answers Access is denied — a "
+            f"locked workstation, or a secure desktop holding input) — {need}. "
+            "Unlock the console session (the project's internal Windows "
+            "dev-setup notes — the SendInput/attached-desktop paragraph) and "
+            "re-run."
         )

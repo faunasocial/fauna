@@ -17,7 +17,7 @@ hands every app launch the compile-gated e2e ACME directory seed
 admin-dns machine builder installs. Nothing about the order is faked: the
 record on the paste card is the challenge pebble issued.
 
-**Which apps.** tui, linux and android build the admin-dns machine through the
+**Which apps.** tui, linux, android, macos and ios build the admin-dns machine through the
 shared native builder, so the same seed reaches them with no per-app glue;
 android's runs wait on the first venue run (convention 7's environment skip).
 web runs its order in wasm and takes the seed through its own reading
@@ -43,6 +43,8 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.android,
+    pytest.mark.macos,
+    pytest.mark.ios,
     # Starts pebble + the fake name server for the session and seeds
     # FAUNA_E2E_ACME_* into every app launch.
     pytest.mark.acme_pebble,
@@ -80,7 +82,7 @@ def _seed_local_domain(nest_instance, domain: str) -> None:
 
 
 def _error(admin_app) -> str:
-    return admin_app.driver.get_text("error-message") if admin_app.has_error() else "none"
+    return admin_app.error_for_failure()
 
 
 def _domain_index(admin_app, domain: str) -> int:
@@ -108,6 +110,17 @@ def _begin_manual_issue(admin_app, domain: str) -> tuple[int, dict[str, str]]:
     challenge row once the CA's order is open."""
     admin_app.admin.navigate_dns()
     idx = _domain_index(admin_app, domain)
+    # The button's enabled predicate follows the domain's own state load, which
+    # can trail the domain's listing (ios): wait for it, never click around it.
+    wait_until(
+        lambda: admin_app.driver.is_enabled(
+            "admin-dns-cert-issue-button", scope=f"admin-dns-domain[{idx}]"
+        ),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"the issue button for {domain!r} never enabled (error: {_error(admin_app)})"
+        ),
+    )
     admin_app.admin.issue_cert(idx)
     rows = wait_until(
         lambda: admin_app.admin.cert_pending_paste_present(idx)
@@ -232,7 +245,7 @@ def test_manual_issue_is_waiting_with_the_same_record_on_another_device(
     seat is (`conftest.py::_alice_extra_seat`): the standard launch config,
     which carries the ACME and trust seeds, then a state-protocol login."""
     from actions import ActionLayer
-    from conftest import _build_app_config
+    from conftest import _second_seat_config
     from drivers import create_driver
     from helpers.app_surface import app_name
     from helpers.waiting import account_pump_role, await_account_runtime_assembled
@@ -244,7 +257,9 @@ def test_manual_issue_is_waiting_with_the_same_record_on_another_device(
     # The second seat is the app under test, so the witness is of that app.
     app = app_name(admin_app.driver)
     driver_b = create_driver(app)
-    driver_b.launch(_build_app_config(app, nest_instance, request))
+    # `_second_seat_config` is the standard launch config plus each app's
+    # per-seat isolation (macOS's short-path home, iOS's second simulator).
+    driver_b.launch(_second_seat_config(app, nest_instance, request))
     try:
         driver_b.set_state({
             "session": {

@@ -108,6 +108,16 @@ impl LabelerCatalogMachine {
         self.0.subscribe_enabled(index)
     }
 
+    /// The same gate with its reason — the shared
+    /// `LabelerCatalogMachine::subscribe_possibility`, as a JSON `Possibility`
+    /// the row paints `labeler-catalog-item-subscribe-button` from and its
+    /// press asks again (`docs/goal/ui/settings.md` § Errors & edge cases).
+    #[wasm_bindgen(js_name = subscribePossibilityJson)]
+    pub fn subscribe_possibility_json(&self, index: u32) -> Result<String, JsValue> {
+        serde_json::to_string(&self.0.subscribe_possibility(index))
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
     /// Re-read the full catalog (`fauna.labelers.list`). Resolves when done
     /// (read `snapshotJson` for the result / `error`).
     #[wasm_bindgen(js_name = refresh)]

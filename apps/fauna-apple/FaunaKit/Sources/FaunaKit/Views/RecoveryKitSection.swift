@@ -609,19 +609,19 @@ public struct RecoveryKitSection: View {
                         onSucceeded: onSucceeded)
                 }
             }
-            .disabled(!vm.stolenArmed)
             .accessibilityIdentifier(Ids.identityStolenButton)
-            .automationActivate(Ids.identityStolenButton,
-                                isEnabled: { vm.stolenArmed }) {
+            .automationActivate(Ids.identityStolenButton) {
                 Task {
                     await vm.succeedWithHeldKit(
                         predecessorActorIdHex: sessionActorIdHex,
                         onSucceeded: onSucceeded)
                 }
             }
+            .faunaPossible(vm.stolenAnswer)
             // The COMMIT gates, not the buffer — the two fields beside it stay
             // typeable with no nest, exactly as account deletion's do.
             .faunaGate("fauna.recovery.succession.submit")
+            FaunaPossibilityReason(vm.stolenAnswer)
         }
     }
 

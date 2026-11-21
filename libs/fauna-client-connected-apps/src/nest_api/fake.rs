@@ -66,6 +66,9 @@ struct Inner {
     fail_all: bool,
     fail_revokes: bool,
     fail_mail: bool,
+    /// The next reads of the mail app passwords answer not-ready, each with
+    /// its reason key, front first.
+    mail_not_ready: std::collections::VecDeque<&'static str>,
     external_apps_off: bool,
     external_apps_unavailable: bool,
     fail_external_apps: bool,
@@ -177,6 +180,16 @@ impl FakeConnectedAppsNestApi {
     /// The mail app-password read fails transiently from now on.
     pub fn fail_mail(&self) {
         self.inner.lock().unwrap().fail_mail = true;
+    }
+    /// The next `reads` mail app-password reads answer not-ready with
+    /// `reason` (`common.needs_nest` / `common.needs_other_device`) — the
+    /// account store before its first listing; later reads answer as set.
+    pub fn mail_not_ready(&self, reads: usize, reason: &'static str) {
+        self.inner
+            .lock()
+            .unwrap()
+            .mail_not_ready
+            .extend(std::iter::repeat_n(reason, reads));
     }
     /// The account's external-apps switch (default ON).
     pub fn set_external_apps_enabled(&self, enabled: bool) {
@@ -408,9 +421,14 @@ impl ConnectedAppsNestApi for FakeConnectedAppsNestApi {
     async fn list_mail_credentials(
         &self,
     ) -> Result<Vec<MailCredentialSummary>, ConnectedAppsApiError> {
-        let g = self.record(FakeCall::ListMailCredentials);
+        let mut g = self.record(FakeCall::ListMailCredentials);
         if g.fail_all || g.fail_mail {
             return Err(transient());
+        }
+        if let Some(reason) = g.mail_not_ready.pop_front() {
+            return Err(ConnectedAppsApiError::NotReady {
+                detail: reason.into(),
+            });
         }
         Ok(g.mail.clone())
     }

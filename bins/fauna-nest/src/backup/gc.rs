@@ -461,7 +461,20 @@ pub async fn drop_folder_chunk_bytes(
         let Ok(manifest) = decode_manifest(&raw_bytes, encryption_key) else {
             continue; // a rail blob / non-manifest reference — nothing to walk
         };
-        for key in &manifest.store_keys() {
+        // Through the one walk: a paged root's store keys live in its pages.
+        // The pages themselves are manifest-class blobs the folder keeps (they
+        // ARE its metadata), so only the store keys are candidates. A page
+        // that cannot be walked drops nothing rather than a drop computed from
+        // an incomplete key set.
+        let src = crate::manifest_walk::StorePages {
+            store: blob_store,
+            at_rest_key: encryption_key,
+        };
+        let keys = crate::manifest_walk::store_keys(&manifest, &src)
+            .await
+            .map_err(|e| anyhow::anyhow!("residency drop fail-closed: {e} — nothing deleted"))?
+            .store_keys;
+        for key in &keys {
             let digest = key.digest().to_vec();
             if !reach.referenced.contains(&digest) {
                 candidates.insert(digest);
@@ -913,6 +926,39 @@ pub(crate) async fn collect_reachable_hashes(
     // Pin the metadata-only folders' manifests WITHOUT chunk-walking them —
     // the residency partition above. A hash also referenced by a full source
     // is in `classified` too and walks through that source.
+    //
+    // A paged root's PAGES are part of the manifest the folder keeps, so they
+    // are pinned beside it — from the page list the root itself carries, with
+    // no page fetched and no store key walked. A root that cannot be read
+    // this run fail-closes (its pages might otherwise be swept from under
+    // kept metadata); bytes that do not decode as a manifest name no page.
+    for mh in meta_pin_only_sync.iter().chain(&meta_pin_only_snapshots) {
+        let Ok(hash_arr) = <[u8; 32]>::try_from(mh.as_slice()) else {
+            continue;
+        };
+        match blob_store
+            .get(&ContentHash::from_digest_raw(hash_arr))
+            .await
+        {
+            Ok(Some(raw)) => {
+                if let Ok(manifest) = decode_manifest(&raw, encryption_key) {
+                    for page in manifest.pages.iter().flatten() {
+                        referenced.insert(page.hash.digest().to_vec());
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                manifest_decode_failures += 1;
+                tracing::error!(
+                    manifest = hex::encode(hash_arr),
+                    error = %e,
+                    "failed to read a metadata-only folder's manifest during GC — a paged \
+                     root's pages cannot be pinned; this run's sweep will be skipped"
+                );
+            }
+        }
+    }
     referenced.extend(meta_pin_only_sync);
     referenced.extend(meta_pin_only_snapshots);
     referenced.extend(meta_pin_only_thumbnails);
@@ -1042,8 +1088,43 @@ pub(crate) async fn collect_reachable_hashes(
                             // delete it (data loss). `store_keys()` is the plaintext
                             // hash for unencrypted chunks, the ciphertext hash for
                             // encrypted ones.
-                            for ch in &manifest.store_keys() {
-                                referenced.insert(ch.digest().to_vec());
+                            //
+                            // Through the one walk (`file-sync.md` § Paged
+                            // manifests): a paged root's page blobs join the
+                            // referenced set and so does every store key its
+                            // pages name (`backup-restore.md` § 9 step 4). An
+                            // absent or corrupt page is an unresolved
+                            // reference — its chunks cannot be enumerated, so
+                            // this run fail-closes exactly as for a corrupt
+                            // manifest, never sweeps past it. (The root door
+                            // admits a root only with its pages at rest, so
+                            // only at-rest corruption reaches this arm.)
+                            let src = crate::manifest_walk::StorePages {
+                                store: blob_store,
+                                at_rest_key: encryption_key,
+                            };
+                            match crate::manifest_walk::store_keys(&manifest, &src).await {
+                                Ok(keys) => {
+                                    for h in keys.page_hashes.iter().chain(&keys.store_keys) {
+                                        referenced.insert(h.digest().to_vec());
+                                    }
+                                }
+                                Err(e) => {
+                                    manifest_decode_failures += 1;
+                                    let detail = match &e {
+                                        crate::manifest_walk::WalkError::Source(s) => {
+                                            format!("{e}: {s:#}")
+                                        }
+                                        _ => e.to_string(),
+                                    };
+                                    tracing::error!(
+                                        manifest = hex::encode(hash_arr),
+                                        error = %detail,
+                                        "a paged manifest root's pages cannot be walked — an \
+                                         absent or corrupt page; its chunks cannot be \
+                                         enumerated and this run's sweep will be skipped"
+                                    );
+                                }
                             }
                         }
                         // The bytes are hash-intact under their content address
@@ -2397,6 +2478,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&manifest_bytes);
@@ -2478,6 +2560,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&bytes);
@@ -3010,6 +3093,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&manifest_bytes);
@@ -3298,6 +3382,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
         let manifest_compressed = fauna_core::compress::compress_chunk(&manifest_bytes);
@@ -3425,6 +3510,7 @@ mod tests {
                 stored_hashes: None,
                 sealed_hashes: None,
                 min_reader: None,
+                pages: None,
             };
             let bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
             let hash = ContentHash::of_raw(&bytes);
@@ -3745,5 +3831,186 @@ mod tests {
             !excluded.referenced.contains(full_thumb.digest().as_slice()),
             "an excluded set's thumbnail pins nothing, exactly as its manifests pin nothing"
         );
+    }
+
+    // ── paged manifests (`backup-restore.md` § 9 step 4) ──────────────────
+
+    /// A paged file recorded in `folder` under `name`, seeded through the
+    /// shared fixture (small paging rule, every blob with its metadata row).
+    async fn record_paged_file(
+        db: &Arc<CacheDb>,
+        store: &Arc<dyn BlobStoreBackend>,
+        owner: &[u8; 32],
+        folder_id: i64,
+        name: &str,
+        seed: u8,
+    ) -> crate::manifest_walk::tests::PagedFile {
+        let content: Vec<u8> = (0..240u32)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+            .collect();
+        let file =
+            crate::manifest_walk::tests::seed_paged_file(store, Some(db), None, &content, 16, None)
+                .await;
+        let ph: [u8; 32] = *blake3::hash(name.as_bytes()).as_bytes();
+        db.record_sync_change(
+            owner,
+            &ph,
+            Some(&file.root.digest()),
+            content.len() as i64,
+            "modify",
+            Some(folder_id),
+            None,
+            Some(name),
+        )
+        .await
+        .unwrap();
+        file
+    }
+
+    /// A live change record naming a paged root keeps the root, every page
+    /// and every chunk the pages name; once the record is superseded past
+    /// grace, the root, its pages and its exclusive chunks are reclaimed.
+    #[tokio::test]
+    async fn gc_keeps_a_live_paged_root_whole_and_reclaims_it_once_superseded() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn BlobStoreBackend> = Arc::new(DiskBlobStore::new(tmp.path()).unwrap());
+        let (_segs_dir, segs) = post_segments();
+        let owner = [0x61u8; 32];
+        db.create_folder("paged", &owner).await.unwrap();
+        let fs = db.get_folder("paged").await.unwrap().unwrap();
+
+        let old = record_paged_file(&db, &store, &owner, fs.id, "big.img", 1).await;
+        let all_old: Vec<ContentHash> = std::iter::once(old.root)
+            .chain(old.pages.iter().copied())
+            .chain(old.chunks.iter().copied())
+            .collect();
+
+        let kept = garbage_collect(&db, &store, records(&segs), 0, None, false)
+            .await
+            .unwrap();
+        assert_eq!(kept.manifest_decode_failures, 0);
+        assert_eq!(
+            kept.deleted_blobs, 0,
+            "a live root keeps everything it names"
+        );
+        for h in &all_old {
+            assert!(store.exists(h).await.unwrap(), "{h:?} kept");
+        }
+
+        let new = record_paged_file(&db, &store, &owner, fs.id, "big.img", 2).await;
+        let ph: [u8; 32] = *blake3::hash(b"big.img").as_bytes();
+        db.supersede_sync_changes_for_path(
+            fs.id,
+            &ph,
+            &new.root.digest(),
+            Some(&old.root.digest()),
+        )
+        .await
+        .unwrap();
+        let reclaimed = garbage_collect(&db, &store, records(&segs), 0, None, false)
+            .await
+            .unwrap();
+        assert_eq!(reclaimed.manifest_decode_failures, 0);
+        let shared: HashSet<ContentHash> = new.chunks.iter().copied().collect();
+        for h in &all_old {
+            assert_eq!(
+                store.exists(h).await.unwrap(),
+                shared.contains(h),
+                "{h:?}: the superseded root, its pages and its exclusive chunks are reclaimed"
+            );
+        }
+        for h in std::iter::once(&new.root)
+            .chain(&new.pages)
+            .chain(&new.chunks)
+        {
+            assert!(store.exists(h).await.unwrap(), "the head file survives");
+        }
+    }
+
+    /// An absent or corrupt page is an unresolved reference: the run deletes
+    /// nothing at all — not even an unrelated orphan — rather than sweep the
+    /// chunks it could not enumerate.
+    #[tokio::test]
+    async fn gc_fails_closed_on_a_missing_or_corrupt_page() {
+        for corrupt in [false, true] {
+            let db = Arc::new(CacheDb::open_in_memory().unwrap());
+            let tmp = tempfile::tempdir().unwrap();
+            let store: Arc<dyn BlobStoreBackend> =
+                Arc::new(DiskBlobStore::new(tmp.path()).unwrap());
+            let (_segs_dir, segs) = post_segments();
+            let owner = [0x62u8; 32];
+            db.create_folder("paged", &owner).await.unwrap();
+            let fs = db.get_folder("paged").await.unwrap().unwrap();
+            let file = record_paged_file(&db, &store, &owner, fs.id, "big.img", 3).await;
+            let orphan = ContentHash::from_digest_raw([0xB7u8; 32]);
+            store.put(&orphan, b"orphan").await.unwrap();
+            db.put_blob_metadata(&orphan.digest(), 6, "chunk", None, None)
+                .await
+                .unwrap();
+
+            // The store is first-writer-wins: corrupting a page is a delete
+            // and a write of other bytes under its address.
+            store.delete(&file.pages[1]).await.unwrap();
+            if corrupt {
+                let junk = crate::backup::encode_blob(b"not this page", None, false).unwrap();
+                store.put(&file.pages[1], &junk).await.unwrap();
+            }
+            let result = garbage_collect(&db, &store, records(&segs), 0, None, false)
+                .await
+                .unwrap();
+            assert!(result.manifest_decode_failures > 0, "corrupt={corrupt}");
+            assert_eq!(
+                result.deleted_blobs, 0,
+                "corrupt={corrupt}: nothing deleted"
+            );
+            assert!(store.exists(&orphan).await.unwrap());
+            for h in &file.chunks {
+                assert!(store.exists(h).await.unwrap());
+            }
+        }
+    }
+
+    /// A metadata-only folder keeps its manifests whole — a paged root's
+    /// pages are part of what it keeps — while none of its chunks is reached.
+    #[tokio::test]
+    async fn gc_pins_a_metadata_only_folders_root_pages_but_not_its_chunks() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn BlobStoreBackend> = Arc::new(DiskBlobStore::new(tmp.path()).unwrap());
+        let (_segs_dir, segs) = post_segments();
+        let owner = [0x63u8; 32];
+        db.create_folder("meta", &owner).await.unwrap();
+        let fs = db.get_folder("meta").await.unwrap().unwrap();
+        let file = record_paged_file(&db, &store, &owner, fs.id, "big.img", 4).await;
+        assert!(
+            db.update_folder_for_user(
+                "meta",
+                &owner,
+                crate::db::FolderUpdate {
+                    residency: Some(Some("metadata_only")),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let reach = collect_reachable_hashes(&db, &store, records(&segs), 0, None, &[])
+            .await
+            .unwrap();
+        assert!(reach.referenced.contains(file.root.digest().as_slice()));
+        for p in &file.pages {
+            assert!(
+                reach.referenced.contains(p.digest().as_slice()),
+                "page pinned"
+            );
+        }
+        for c in &file.chunks {
+            assert!(
+                !reach.referenced.contains(c.digest().as_slice()),
+                "chunk not reached"
+            );
+        }
     }
 }

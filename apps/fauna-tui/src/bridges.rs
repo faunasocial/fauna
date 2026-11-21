@@ -154,6 +154,11 @@ pub struct BridgesState {
     /// A bind card was opened by this visit's Connect — the page points the
     /// user at Connected apps, where the card is answered.
     pub plugin_bind_opened: bool,
+    /// Bumped by every [`Outcome::Loaded`] this page's own ops fold (a follow,
+    /// an unfollow, a link, a visit); the AT Protocol push resync carries it,
+    /// so a late one never repaints the follows a newer gesture folded
+    /// ([`apply_resync`], the late-fold rule's generation half).
+    pub(crate) gesture_gen: crate::settings::GestureGen,
 }
 
 /// Whose settings a settings row edits: a bridge's
@@ -459,6 +464,19 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     let st = &mut app.bridges;
     match action {
         Action::Link { bridge_id, mode } => {
+            // The action asks the answer the button painted from and refuses
+            // with its reason (`ui/README.md` § Offer only what is possible,
+            // rule 6).
+            if let Some(bridge) = st.bridges.iter().find(|b| b.id == bridge_id) {
+                let answer = fauna_client_bridges::bridge_link_possibility(
+                    bridge,
+                    BridgesState::platform_modes(bridge).len(),
+                );
+                if app.errors.refuse(Page::Bridges, &answer) {
+                    return None;
+                }
+            }
+            let st = &mut app.bridges;
             let nest = st.nest.clone()?;
             // Build the mode's params from the declared field buffers. A
             // zero-field mode (ActivityPub `enable`) yields an empty map.
@@ -552,7 +570,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .unwrap_or_default()
                 .trim()
                 .to_string();
-            if id.is_empty() {
+            // The press asks the same draft answer the button paints from and
+            // refuses with its reason (rules 4 and 7) — never a silent drop.
+            let answer = fauna_client_bridges::bridge_forms::bridge_follow_possibility(&id);
+            if !answer.is_possible() {
+                if let Some(reason) = answer.reason() {
+                    app.errors
+                        .insert(Page::Bridges, crate::wizard::localized(reason));
+                }
                 return None;
             }
             let petname = {
@@ -607,7 +632,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::InstallPlugin => {
             let nest = st.nest.clone()?;
             let document_url = st.plugin_install_url.trim().to_string();
-            if document_url.is_empty() {
+            let answer =
+                fauna_client_bridges::bridge_forms::plugin_install_possibility(&document_url);
+            if !answer.is_possible() {
+                if let Some(reason) = answer.reason() {
+                    app.errors
+                        .insert(Page::Bridges, crate::wizard::localized(reason));
+                }
                 return None;
             }
             st.plugin_install_opened = false;
@@ -1141,25 +1172,55 @@ pub(crate) fn offline_queue(
 
 /// Fold an op's result back into the page. One function for both dispatch
 /// paths, so they cannot disagree about what an outcome means.
+/// Fold a re-read this page's ops did not issue — the AT Protocol push resync
+/// (`settings::atproto_resync_op`), which is spawned and lands whenever the
+/// channel is drained. `resync_of` is [`BridgesState::gesture_gen`] as its op
+/// was built: a read a gesture has folded since is dropped whole, its error
+/// included (the newer fold set the slot from a newer read). One that is not
+/// outlived lands without bumping — it is a read, not a gesture.
+pub(crate) fn apply_resync(
+    app: &mut App,
+    outcome: Outcome,
+    resync_of: crate::settings::GestureGen,
+) {
+    if app.bridges.gesture_gen.outlived(resync_of) {
+        return;
+    }
+    match outcome {
+        Outcome::Loaded { .. } => paint_loaded(app, outcome),
+        other => apply_outcome(app, other),
+    }
+}
+
+/// Paint an [`Outcome::Loaded`] — the one write of the page's rows.
+fn paint_loaded(app: &mut App, outcome: Outcome) {
+    let Outcome::Loaded {
+        bridges,
+        follows,
+        follow_requests,
+        plugins,
+        plugin_cards,
+    } = outcome
+    else {
+        return;
+    };
+    app.bridges.bridges = bridges;
+    app.bridges.follows = follows;
+    app.bridges.follow_requests = follow_requests;
+    if let Some(plugins) = plugins {
+        app.bridges.plugins = Some(plugins);
+    }
+    if let Some(cards) = plugin_cards {
+        app.bridges.plugin_cards = cards;
+    }
+    app.errors.remove(&Page::Bridges);
+}
+
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
     match outcome {
-        Outcome::Loaded {
-            bridges,
-            follows,
-            follow_requests,
-            plugins,
-            plugin_cards,
-        } => {
-            app.bridges.bridges = bridges;
-            app.bridges.follows = follows;
-            app.bridges.follow_requests = follow_requests;
-            if let Some(plugins) = plugins {
-                app.bridges.plugins = Some(plugins);
-            }
-            if let Some(cards) = plugin_cards {
-                app.bridges.plugin_cards = cards;
-            }
-            app.errors.remove(&Page::Bridges);
+        Outcome::Loaded { .. } => {
+            app.bridges.gesture_gen.bump();
+            paint_loaded(app, outcome);
         }
         Outcome::FollowQueued => {
             app.errors.remove(&Page::Bridges);
@@ -1268,8 +1329,23 @@ pub fn elements(app: &App) -> Vec<Element> {
     if st.plugin_bind_opened {
         out.push(Element::chrome(t::PLUGIN_BIND_OPENED));
     }
-    if app.am_i_admin {
-        plugin_elements(st, &mut out);
+    // The hosted-plugin section is an admin entry point: absent for a
+    // non-admin, by the shared answer every element of it declares.
+    let admin = fauna_client_account::admin_entry_possibility(app.am_i_admin);
+    if admin.is_shown() {
+        let mut section = Vec::new();
+        plugin_elements(st, &mut section);
+        // Declared where the seam can paint a folded reason (the offline
+        // one) beside it: an enabled element with no label of its own. A
+        // labelled input, or a control its own draft already disables, is
+        // admitted by the answer above without declaring it.
+        out.extend(section.into_iter().map(|e| {
+            if e.enabled && e.label.is_none() {
+                e.possible(admin.clone())
+            } else {
+                e
+            }
+        }));
     }
     out
 }
@@ -1353,12 +1429,20 @@ fn plugin_elements(st: &BridgesState, out: &mut Vec<Element>) {
         )
         .labelled(t::PLUGIN_INSTALL_LABEL),
     );
-    out.push(Element::gesture_button(
+    let install =
+        fauna_client_bridges::bridge_forms::plugin_install_possibility(&st.plugin_install_url);
+    // Disabled from the answer, so the seam leaves it be: the reason rides
+    // the button's own label, painted within eyeshot (walk invariant I8).
+    let mut submit = Element::gesture_button(
         ids::BRIDGE_PLUGIN_INSTALL_SUBMIT,
         t::PLUGIN_INSTALL_SUBMIT,
-        !st.plugin_install_url.trim().is_empty(),
+        install.is_possible(),
         Gesture::Bridges(Action::InstallPlugin),
-    ));
+    );
+    if let Some(reason) = install.reason() {
+        submit = submit.labelled(crate::wizard::localized(reason));
+    }
+    out.push(submit.possible(install));
     if st.plugin_install_opened {
         out.push(Element::chrome(t::PLUGIN_INSTALL_OPENED));
     }
@@ -1600,6 +1684,12 @@ fn bridge_card(
                         .unwrap_or_default(),
                 }),
             )
+            // The shared answer, blocked by the reason painted above, so I8
+            // holds the button to it.
+            .possible(fauna_client_bridges::bridge_link_possibility(
+                bridge,
+                BridgesState::platform_modes(bridge).len(),
+            ))
             .within(ids::BRIDGE_CARD, display_i),
         );
     }
@@ -1897,15 +1987,22 @@ fn follows_elements(st: &BridgesState, i: usize, bridge: &BridgeStatus, out: &mu
         .labelled(t::PETNAME_OPTIONAL)
         .within(ids::BRIDGE_CARD, i),
     );
+    let follow = fauna_client_bridges::bridge_forms::bridge_follow_possibility(
+        &st.follow_id_input
+            .get(&bridge.id)
+            .cloned()
+            .unwrap_or_default(),
+    );
     out.push(
         Element::gesture_button(
             ids::BRIDGE_ADD_FOLLOW_BUTTON,
             t::ADD_FOLLOW,
-            true,
+            follow.is_possible(),
             Gesture::Bridges(Action::AddFollow {
                 bridge_id: bridge.id.clone(),
             }),
         )
+        .possible(follow)
         .within(ids::BRIDGE_CARD, i),
     );
 }
@@ -2879,6 +2976,38 @@ mod tests {
         );
         assert_eq!(els[action_idx].text, t::UNLINK_BRIDGE);
         assert_eq!(count_id(&app, "bridge-add-follow-button"), 1);
+    }
+
+    /// Rule 4: the follow button is blocked with the field's reason until an
+    /// id is typed, and a press on a blank id refuses out loud, sending nothing.
+    #[test]
+    fn the_follow_button_waits_for_an_id_and_a_blank_press_says_why() {
+        let mut app = bridges_app();
+        app.bridges.bridges = vec![linked_bridge("activitypub", "ActivityPub", vec![])];
+        let follow = |app: &App| {
+            elements(app)
+                .into_iter()
+                .find(|e| e.id == ids::BRIDGE_ADD_FOLLOW_BUTTON)
+                .unwrap()
+        };
+        assert!(!follow(&app).enabled);
+        assert!(
+            apply_local(
+                &mut app,
+                Action::AddFollow {
+                    bridge_id: "activitypub".into()
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(
+            app.errors.get(&Page::Bridges).map(String::as_str),
+            Some(t::FOLLOW_ID_REQUIRED)
+        );
+        app.bridges
+            .follow_id_input
+            .insert("activitypub".into(), "alice".into());
+        assert!(follow(&app).enabled);
     }
 
     /// Follows on two bridges must be scope-addressable per bridge — the A6

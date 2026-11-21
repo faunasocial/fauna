@@ -58,6 +58,22 @@ pub mod observer;
 pub mod snapshot;
 
 pub use kind::{SearchKindClass, TYPE_FILTER_ALL, TYPE_FILTER_OPTIONS, type_filter_label};
+
+/// `search-submit-button`'s answer from the live query buffer
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rule 4's form
+/// case; `docs/goal/ui/search.md` § Errors & edge cases): a blank query is
+/// blocked with `search_page.query_required`, so the button is painted
+/// disabled with that reason instead of firing a no-op. The manager's
+/// `run_query` keeps its blank guard as the same rule's backstop.
+pub fn query_possibility(query: &str) -> fauna_core::possibility::Possibility {
+    if query.trim().is_empty() {
+        fauna_core::possibility::Possibility::blocked(fauna_core::localized::LocalizedText::key(
+            "search_page.query_required",
+        ))
+    } else {
+        fauna_core::possibility::Possibility::Possible
+    }
+}
 pub use local::{
     CompositeLocalSearch, LocalIndexResolver, LocalSearchHit, LocalSearchIndex,
     OwnPostIndexObserver,
@@ -104,6 +120,18 @@ impl<R: RpcRequester> SearchClient<R> {
 mod tests {
     use super::*;
     use fauna_client_testkit::{MockRequester, RecordingRequester, block_on};
+
+    #[test]
+    fn a_blank_query_is_blocked_with_its_reason() {
+        for q in ["", "   ", "\t\n"] {
+            assert_eq!(
+                query_possibility(q).reason().map(|r| r.key.as_str()),
+                Some("search_page.query_required"),
+                "{q:?}"
+            );
+        }
+        assert!(query_possibility(" cats ").is_possible());
+    }
 
     #[test]
     fn constructor_builds_over_generic_requester() {

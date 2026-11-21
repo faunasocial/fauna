@@ -75,7 +75,8 @@ pub const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(1500);
 /// (`docs/goal/behavior/reserved-folders.md` § The leave-flush promise): a slow
 /// or unreachable nest must not hang quitting or signing out. Each rail is
 /// bounded on its own, so one rail's timeout never costs another its save.
-/// tui, web and linux read it here; windows' teardown flush still carries its own
+/// tui, web, linux, android, macos and ios (`fauna_ffi::drafts::leave_flush_budget_ms`) read
+/// it here; windows' teardown flush still carries its own
 /// 5 s budget.
 pub const LEAVE_FLUSH_BUDGET: Duration = Duration::from_secs(3);
 

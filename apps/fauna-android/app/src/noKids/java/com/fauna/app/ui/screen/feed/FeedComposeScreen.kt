@@ -22,7 +22,12 @@ import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.core.ExifStripper
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
+import com.fauna.app.ui.util.formRefusal
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.FeedVM
 import kotlinx.coroutines.launch
@@ -31,6 +36,10 @@ import uniffi.fauna_feed.GateRoomOption
 import uniffi.fauna_feed.GateTierOption
 import uniffi.fauna_feed.SellComposeState
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.InputChip
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The feed composer (`feed-compose-bar`), wired to the shared `FeedManager`:
@@ -88,6 +97,16 @@ fun FeedComposeScreen(navController: NavController, vm: FeedVM = hiltViewModel()
     // the restore lands never stops the restored teaser painting.
     var userEditedAudienceText by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val appMessages = LocalAppMessages.current
+    // `post-submit-button` is painted from the shared draft predicate
+    // (`feed_post_submit_possibility`: no text -> `feed.compose_empty`), the
+    // reason beside the bar; the click asks it again first (feed.md § Errors &
+    // edge cases — the form case of README § Offer only what is possible).
+    val postSubmit = faunaFormGate(askForm { com.fauna.ffi.feedPostSubmitPossibility(body) })
+    // A failed save stays on this screen with what was typed (and the staged
+    // attachment); its message reaches `error-message` through the VM's verb
+    // channel — the screen closes only on a saved post.
+    VerbErrorEffect(vm)
 
     val compose = snapshot?.compose
     val attachedFile = compose?.attachedFile
@@ -209,15 +228,23 @@ fun FeedComposeScreen(navController: NavController, vm: FeedVM = hiltViewModel()
                     }
                     IconButton(
                         onClick = {
-                            scope.launch {
-                                isPosting = true
-                                // The audience is the manager's — never re-read
-                                // from this screen (see the KDoc above).
-                                val ok = vm.submitPost(body, tags)
-                                if (ok) navController.popBackStack() else isPosting = false
+                            val refusal = formRefusal(
+                                context,
+                                askForm { com.fauna.ffi.feedPostSubmitPossibility(body) },
+                            )
+                            if (refusal != null) {
+                                refusal.reason?.let { appMessages.showError(it) }
+                            } else {
+                                scope.launch {
+                                    isPosting = true
+                                    // The audience is the manager's — never re-read
+                                    // from this screen (see the KDoc above).
+                                    val ok = vm.submitPost(body, tags)
+                                    if (ok) navController.popBackStack() else isPosting = false
+                                }
                             }
                         },
-                        enabled = body.isNotBlank() && !isPosting,
+                        enabled = postSubmit.enabled && !isPosting,
                         modifier = Modifier.testTag(Ids.POST_SUBMIT_BUTTON)
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.composer_new_post))
@@ -339,6 +366,7 @@ fun FeedComposeScreen(navController: NavController, vm: FeedVM = hiltViewModel()
                     enabled = !isPosting,
                 )
             }
+            DisabledControlReasonText(postSubmit.reason)
             Spacer(Modifier.height(8.dp))
             composeErrorText?.let { msg ->
                 Text(

@@ -243,7 +243,10 @@ def _poll_ui(app, predicate, *, what: str, receive: bool = False, budget_s: floa
 #
 # This journey and the three below it are marked for the six apps that can run
 # the whole ceremony: web lacks the accept (`require_supported`), and the
-# second seat they drive is `second_real_faunamls_app`, which skips on web. Web's
+# second seat they drive is `second_real_faunamls_app`, which skips on web. On
+# android that seat swaps the roles (one emulator runs one app instance): the
+# phone plays bob, the host who consents, and alice mints from a tui seat of
+# her own, so every journey reads alice from the seat's `owner_app`. Web's
 # own half, the owner's mint, is witnessed against a tui friend by
 # `test_a_web_owner_mints_an_offer_a_native_friend_accepts`. They
 # are never gated on web at run time, which would write no record and hold web's
@@ -262,9 +265,9 @@ def _poll_ui(app, predicate, *, what: str, receive: bool = False, budget_s: floa
 def test_custody_ceremony_two_accounts(
     real_faunamls_app, second_real_faunamls_app, nest_instance
 ):
-    alice = real_faunamls_app
+    alice = second_real_faunamls_app.owner_app
     bob_app, bob = second_real_faunamls_app
-    alice.custody.require_supported()
+    real_faunamls_app.custody.require_supported()
     port = nest_instance["port"]
 
     # ── The carrier: a real 1:1 MLS conversation (the mint host list derives
@@ -530,7 +533,7 @@ def test_custody_ceremony_two_accounts(
 def test_a_web_owner_mints_an_offer_a_native_friend_accepts(
     real_faunamls_app, custody_host_seat, nest_instance
 ):
-    alice = real_faunamls_app
+    alice = custody_host_seat.owner_app
     bob_app, bob = custody_host_seat
     alice.custody.require_mint_supported()
     bob_app.custody.require_supported()
@@ -612,9 +615,9 @@ def test_a_declined_custody_offer_goes_away(
     would leave that pending row on it for every later custody journey in the
     session (the ceremony journey's revoke leg counted it). Declining leaves
     the shared account only a hidden record."""
-    alice = real_faunamls_app
+    alice = second_real_faunamls_app.owner_app
     bob_app, bob = second_real_faunamls_app
-    alice.custody.require_supported()
+    real_faunamls_app.custody.require_supported()
 
     _open_carrier(alice, bob_app, bob, nest_instance["port"])
     bob_app.backups.navigate_devices()
@@ -686,9 +689,9 @@ def test_a_removed_custody_stays_gone_when_its_owner_sends_again(
     ``test_custody_ceremony_two_accounts``: the ledger records a whole test, so
     a leg an app has not built would hide that journey's outcomes 10–14 on it.
     """
-    alice = real_faunamls_app
+    alice = second_real_faunamls_app.owner_app
     bob_app, bob = second_real_faunamls_app
-    alice.custody.require_supported()
+    real_faunamls_app.custody.require_supported()
     _require_owner_resend(alice)
 
     # ── A delivered custody bob holds (the ceremony journey's opening, with
@@ -810,9 +813,9 @@ def test_a_declined_custody_offer_stays_gone_when_its_owner_sends_again(
     declines, so no pending custodian row is left on the shared account. Bob's
     re-send is the ``custody_owner_resend_now`` poke (the recorded envelope,
     verbatim); alice's ``custody_ceremony_ingest`` tally is the barrier."""
-    alice = real_faunamls_app
+    alice = second_real_faunamls_app.owner_app
     bob_app, bob = second_real_faunamls_app
-    alice.custody.require_supported()
+    real_faunamls_app.custody.require_supported()
     _require_owner_resend(alice)
 
     _open_carrier(alice, bob_app, bob, nest_instance["port"])

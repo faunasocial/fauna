@@ -26,6 +26,8 @@
   import { checkIsAdmin } from '#lib/api';
   import { t } from '#lib/i18n/strings';
   import { feedSourceOp, isUnifiedBridgesPageBridge, wardAskRules } from '#lib/wasm';
+  import { adminEntryPossibility } from '#lib/wasm';
+  import { askPossibility } from '#lib/form-gate';
   import { IDS } from '#lib/generated/uiIds';
   import { familyFeedSourceRequest } from '#lib/rpc';
   import { isGuardianApprovalRequired, refusalText } from '#lib/guardian-refusal';
@@ -43,6 +45,13 @@
   let followRequests: Record<string, BridgeFollowRequestRow[]> = $state({});
   // The installed-plugins list and its install entry are the admin's alone.
   let isAdmin = $state(false);
+  /** The hosted-plugin section is an admin entry point: absent for a
+   *  non-admin by the shared `admin_entry_possibility` (`admin.md` § Errors &
+   *  edge cases). */
+  const pluginAdminShown = $derived.by(() => {
+    const answer = askPossibility(() => adminEntryPossibility(isAdmin));
+    return answer !== null && answer.state !== 'absent';
+  });
   // The `(bridge_id, operation, target)` triples this session saw refused by
   // the guardian gate (family-safety.md § Feed-source approvals) — the LOCAL
   // half of the ask surface, what turns a refusal the ward just hit into a
@@ -240,7 +249,7 @@
   {/each}
   <!-- Every installed plugin's settings card, for every account. -->
   <BridgePluginCards bind:error />
-  {#if isAdmin}
+  {#if pluginAdminShown}
     <BridgePlugins bind:error />
   {/if}
 {/if}

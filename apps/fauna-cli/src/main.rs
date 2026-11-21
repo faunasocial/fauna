@@ -25,6 +25,7 @@ use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use fauna_cli::argv::{self, EXIT_OK, EXIT_TOOL_ERROR, EXIT_USAGE, Parsed, Terminal};
+use fauna_cli::tools::ADMIN_CONSENT_EXPIRED;
 use fauna_cli::{Host, SessionUnavailable};
 use host::DeviceHost;
 use tokio::io::BufReader;
@@ -71,12 +72,17 @@ fn serve_mcp(flags: &[String]) -> i32 {
         }
     };
     let served = runtime().block_on(async {
-        let server = fauna_cli::Server::new(DeviceHost::new());
+        // The streamable-HTTP shell offers no event stream, so it cannot
+        // announce a listing change and keeps the whole catalog listed; stdio
+        // lists what the held connections reach (`apps/cli.md` § A tool that
+        // cannot run, rule 2).
         if listen {
+            let server = fauna_cli::Server::new(DeviceHost::new());
             let listener = fauna_cli::http::bind().await?;
             println!("{}", fauna_cli::http::url(&listener)?);
             return fauna_cli::http::serve(&server, listener).await;
         }
+        let server = fauna_cli::Server::announcing(DeviceHost::new());
         fauna_cli::stdio::serve(
             &server,
             BufReader::new(tokio::io::stdin()),
@@ -112,11 +118,14 @@ fn run_argv(args: &[String]) -> i32 {
             return EXIT_OK;
         }
         Ok(Parsed::Overview { asked }) => {
+            let host = DeviceHost::new();
+            let reach = runtime().block_on(host.reach());
+            let overview = argv::overview_for(&reach, host.conversations_door());
             if asked {
-                print!("{}", argv::overview());
+                print!("{overview}");
                 return EXIT_OK;
             }
-            eprint!("{}", argv::overview());
+            eprint!("{overview}");
             return EXIT_USAGE;
         }
         Err(e) => {
@@ -157,7 +166,19 @@ async fn await_approval(host: &DeviceHost, handle: &str) -> i32 {
                 eprintln!("Connected.");
                 return EXIT_OK;
             }
-            Err(SessionUnavailable::Pending { .. }) => tokio::time::sleep(SETTLE_CHECK).await,
+            Err(SessionUnavailable::Pending { .. } | SessionUnavailable::PendingAdmin { .. }) => {
+                tokio::time::sleep(SETTLE_CHECK).await
+            }
+            // The person at the terminal reads this one, so it speaks to them
+            // and names the argv flag, not the tool argument.
+            Err(SessionUnavailable::Failed(why)) if why == ADMIN_CONSENT_EXPIRED => {
+                // public-text: cli-answer-strings-public
+                eprintln!(
+                    "The code expired before the connection was approved. This connection asked for the admin permissions, which only an account that administers its server can approve: if you approved it, your account does not administer its server — run fauna-cli connect again without --admin."
+                );
+                // public-text-end: cli-answer-strings-public
+                return EXIT_TOOL_ERROR;
+            }
             Err(why) => {
                 eprintln!("{}", fauna_cli::ToolError::from(why).text());
                 return EXIT_TOOL_ERROR;

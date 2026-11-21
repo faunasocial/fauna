@@ -8,12 +8,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -34,6 +31,9 @@ import com.fauna.app.ui.viewmodel.ReportVM
 import com.fauna.ffi.FfiReportSheetView
 import com.fauna.ffi.reportSheetView
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The shared report sheet and its acknowledgement line (`report-sheet`,

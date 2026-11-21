@@ -186,6 +186,31 @@ pub enum AuthError {
     Internal(String),
 }
 
+/// The mint half of account lockout, shared by every mint door (the
+/// handshake, the silent-challenge verify and the device/renewal handshake) so
+/// the exemption lifts at every door together (`login.md` § Silent Challenge).
+/// A locked actor is refused with `AccountLocked`, **except an admin** (user
+/// ruling 2026-10-01, mirroring the use-time exemption in
+/// `auth::check_bearer_session`) until a cannot-lock-the-last-admin guard
+/// exists. A database fault reads as no lock.
+async fn refuse_if_locked(
+    state: &AppState,
+    actor_id: &[u8; 32],
+    now_secs: u64,
+) -> Result<(), AuthError> {
+    if let Ok(Some(locked_until)) = state.db.get_locked_until(actor_id).await
+        && (locked_until as u64) > now_secs
+        && !matches!(state.db.is_admin(actor_id).await, Ok(true))
+    {
+        // Test-only: the outside witness that a locked app stops retrying
+        // (`account_lock_test_hook`). Compiled out of every production build.
+        #[cfg(feature = "test-hooks")]
+        state.account_lock_hook.note(actor_id);
+        return Err(AuthError::AccountLocked { locked_until });
+    }
+    Ok(())
+}
+
 /// The supersession consult — the enforcement point of
 /// `identity-succession.md:71`.
 ///
@@ -407,17 +432,8 @@ pub async fn direct_auth_core(
         .await
         .map_err(|e| AuthError::NotRegistered(e.to_string()))?;
 
-    // 5. Check account lockout.
-    if let Ok(Some(locked_until)) = state.db.get_locked_until(&actor_bytes).await {
-        let now_secs = now_ms / 1000;
-        if (locked_until as u64) > now_secs {
-            // Test-only: the outside witness that a locked app stops retrying
-            // (`account_lock_test_hook`). Compiled out of every production build.
-            #[cfg(feature = "test-hooks")]
-            state.account_lock_hook.note(&actor_bytes);
-            return Err(AuthError::AccountLocked { locked_until });
-        }
-    }
+    // 5. Check account lockout (admins exempt — `refuse_if_locked`).
+    refuse_if_locked(state, &actor_bytes, now_ms / 1000).await?;
 
     // 6. Issue token.
     let actor_id = fauna_core::identity::ActorId(actor_bytes);
@@ -633,18 +649,12 @@ pub async fn verify_core(
         .account_lock_hook
         .write_armed_lock(&state.db, &actor_bytes)
         .await;
-    if let Ok(Some(locked_until)) = state.db.get_locked_until(&actor_bytes).await {
-        let now_secs = fauna_core::data::Timestamp::now_secs() as u64;
-        if (locked_until as u64) > now_secs
-            && !matches!(state.db.is_admin(&actor_bytes).await, Ok(true))
-        {
-            // Test-only: the outside witness that a locked app stops retrying
-            // (`account_lock_test_hook`). Compiled out of every production build.
-            #[cfg(feature = "test-hooks")]
-            state.account_lock_hook.note(&actor_bytes);
-            return Err(AuthError::AccountLocked { locked_until });
-        }
-    }
+    refuse_if_locked(
+        state,
+        &actor_bytes,
+        fauna_core::data::Timestamp::now_secs() as u64,
+    )
+    .await?;
 
     let handle = match state.db.get_handle(&actor_bytes).await {
         Ok(Some(h)) => h,
@@ -1057,16 +1067,7 @@ async fn verify_device_proof(
         .check_actor_active(actor_bytes)
         .await
         .map_err(|e| AuthError::NotRegistered(e.to_string()))?;
-    if let Ok(Some(locked_until)) = state.db.get_locked_until(actor_bytes).await {
-        let now_secs = now_ms / 1000;
-        if (locked_until as u64) > now_secs {
-            // Test-only: the outside witness that a locked app stops retrying
-            // (`account_lock_test_hook`). Compiled out of every production build.
-            #[cfg(feature = "test-hooks")]
-            state.account_lock_hook.note(actor_bytes);
-            return Err(AuthError::AccountLocked { locked_until });
-        }
-    }
+    refuse_if_locked(state, actor_bytes, now_ms / 1000).await?;
     Ok(now_ms)
 }
 
@@ -1885,6 +1886,72 @@ mod device_auth_tests {
             state.auth.token_store.validate(&mint.token).await.is_some(),
             "minted token must validate in the session store"
         );
+    }
+
+    /// `login.md` § Silent Challenge: the lockout's admin exemption lifts at
+    /// every mint door together. The device door refuses a locked non-admin
+    /// and admits a locked admin; the helper all three doors share does the
+    /// same, and each door's body calls it.
+    #[tokio::test]
+    async fn device_door_refuses_locked_non_admin_admits_locked_admin() {
+        let locked_until = (now_ms() / 1000 + 3600) as i64;
+        // Non-admin: refused.
+        let state = test_state().await;
+        let identity = ActorKeypair::generate();
+        let renewal = seed_grant(&state, &identity, vec![Capability::RenewBearer], None).await;
+        let actor = identity.actor_id().0;
+        state
+            .db
+            .set_locked_until(&actor, Some(locked_until))
+            .await
+            .unwrap();
+        let Err(err) = attempt(&state, &actor, &renewal.actor_id().0, &renewal, b"lock-1").await
+        else {
+            panic!("a locked non-admin must be refused at the device door")
+        };
+        assert!(matches!(err, AuthError::AccountLocked { .. }));
+        // Admin: admitted.
+        state.db.add_admin_actor(&actor).await.unwrap();
+        attempt(&state, &actor, &renewal.actor_id().0, &renewal, b"lock-2")
+            .await
+            .expect("a locked admin is exempt at the device door");
+    }
+
+    #[tokio::test]
+    async fn refuse_if_locked_exempts_admin_and_every_door_calls_it() {
+        let state = test_state().await;
+        let actor = ActorKeypair::generate().actor_id().0;
+        let now = now_ms() / 1000;
+        state.db.create_user(&actor, "free", "test").await.unwrap();
+        state
+            .db
+            .set_locked_until(&actor, Some((now + 3600) as i64))
+            .await
+            .unwrap();
+        assert!(matches!(
+            refuse_if_locked(&state, &actor, now).await,
+            Err(AuthError::AccountLocked { .. })
+        ));
+        assert!(
+            refuse_if_locked(&state, &actor, now + 7200).await.is_ok(),
+            "an expired lock refuses nobody"
+        );
+        state.db.add_admin_actor(&actor).await.unwrap();
+        assert!(refuse_if_locked(&state, &actor, now).await.is_ok());
+
+        let src = include_str!("auth_core.rs");
+        for door in [
+            "pub async fn direct_auth_core(",
+            "pub async fn verify_core(",
+            "async fn verify_device_proof(",
+        ] {
+            let body = src.split_once(door).expect("door is in this file").1;
+            let body = &body[..body.find("\n}\n").expect("door ends at column 0")];
+            assert!(
+                body.contains("refuse_if_locked("),
+                "{door} must refuse a lock through refuse_if_locked"
+            );
+        }
     }
 
     #[tokio::test]

@@ -76,10 +76,19 @@ protocol MachineBackedVM: AnyObject {
     /// § List pages) — a wizard/settings-shaped page with no such gate leaves
     /// it unimplemented.
     func didHydrateSuccessfully()
+
+    /// What a gesture says when it reaches this page with no machine
+    /// (`ui/README.md` § Offer only what is possible, rule 7: never a silent
+    /// return). Default `nil` — the bare return stands for a page that has no
+    /// such ruling yet; every mail page answers the shared
+    /// `mailUsableUnbuilt()` reason (`mail-settings.md` § Errors & edge cases,
+    /// *The in-page predicates*) through ``MailUnbuiltRefusing``.
+    var missingMachineRefusal: String? { get }
 }
 
 extension MachineBackedVM {
     func didHydrateSuccessfully() {}
+    var missingMachineRefusal: String? { nil }
 
     /// Refresh from the nest (page mount). Never clobbers a thrown-hydrate
     /// error with a since-cleared `snapshot.error` — the bug pass 68 found (and
@@ -102,7 +111,10 @@ extension MachineBackedVM {
     /// Dispatch a user action; the machine runs it to completion (or records an
     /// error on the snapshot), then we re-read.
     func dispatchToMachine(_ action: Machine.Act) async {
-        guard let machine else { return }
+        guard let machine else {
+            if let refusal = missingMachineRefusal { errorMessage = refusal }
+            return
+        }
         isLoading = true
         defer { isLoading = false }
         try? await machine.dispatch(action: action)
@@ -175,3 +187,59 @@ extension WebdavPolicyMachine: MachineBacked {}
 extension DmarcReportsMachine: MachineBacked {}
 extension MailSettingsMachine: MachineBacked {}
 extension BridgeApprovalMachine: MachineBacked {}
+
+#if !FAUNA_KIDS
+/// A shared admin DAV machine that answers whether its enable toggle (and, on
+/// CalDAV, the port save) is live — `toggle_possibility` (admin.md § Errors &
+/// edge cases, *Controls wait for their read*): blocked until the page's
+/// `get_mail_config` read resolves, blocked after a failed one, blocked while
+/// a change is on its way.
+protocol TogglePossibilityMachine {
+    func togglePossibility() -> Possibility
+    /// Where the page's `get_mail_config` read stands — an unanswered one is
+    /// asked again when the nest connection comes back (``AdminPageReading``).
+    func readState() -> ReadState
+}
+
+extension CaldavPolicyMachine: TogglePossibilityMachine {}
+extension CarddavPolicyMachine: TogglePossibilityMachine {}
+extension WebdavPolicyMachine: TogglePossibilityMachine {}
+
+/// The three admin DAV pages' one gate (Calendar, Contacts, Files): paint the
+/// toggle from the machine's answer, refuse the press with the same reason.
+/// tui's twin is `admin::action_possibility`'s `Toggle*Enabled` arms.
+@MainActor
+protocol ReadGatedToggleVM: MachineBackedVM where Machine: TogglePossibilityMachine {
+    /// The machine could not be built — the page will never read.
+    var machineBuildFailed: Bool { get set }
+}
+
+extension ReadGatedToggleVM {
+    /// The toggle's answer. Reads `snapshot` and `isLoading` so a SwiftUI body
+    /// that paints it re-renders on every re-read; the answer itself is the
+    /// machine's, asked now.
+    var toggleAnswer: Possibility {
+        _ = snapshot
+        _ = isLoading
+        return machinePossibility(machine, buildFailed: machineBuildFailed) { $0.togglePossibility() }
+    }
+
+    /// Dispatch a write only when the toggle's answer allows it; otherwise its
+    /// reason goes on `error-message` and nothing reaches the nest.
+    func dispatchGated(_ action: Machine.Act) async {
+        if refusePress(toggleAnswer, errorMessage: &errorMessage) { return }
+        await dispatchToMachine(action)
+    }
+}
+#endif
+
+/// A mail page: a gesture reaching it with no machine — its build failed, so
+/// the entry gate answers `mail_usable_unbuilt()` — refuses with that same
+/// reason on `error-message` (`mail-settings.md` § Errors & edge cases, *The
+/// in-page predicates*; tui's `mail_machine_or_refuse`).
+@MainActor
+protocol MailUnbuiltRefusing {}
+
+extension MachineBackedVM where Self: MailUnbuiltRefusing {
+    var missingMachineRefusal: String? { mailUsableUnbuilt().refusal }
+}

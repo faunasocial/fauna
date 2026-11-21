@@ -32,6 +32,7 @@ use std::sync::Arc;
 use adw::prelude::*;
 use gtk::gio;
 
+use fauna_core::possibility::Possibility;
 use fauna_media_machine::{FileVersionSummary, MediaItemSummary, MediaMachine};
 
 use crate::i18n::strings;
@@ -58,6 +59,10 @@ struct DetailCtx {
     /// routes the download to the keyless `download_followed` and withholds
     /// every version/restore/delete affordance.
     followed_scope: Option<String>,
+    /// Whether this person may write into the item's set — the machine's one
+    /// answer ([`write_answer`]) that delete and every version row's restore
+    /// paint from, read once at open.
+    write: Possibility,
     /// `media-item-detail-download-button` — painted once it is actionable (a
     /// manifest known from the version rows, or at once in a followed scope),
     /// never inert.
@@ -70,6 +75,19 @@ struct DetailCtx {
     /// `include_pruned`, so soft-pruned rows appear with their badge +
     /// undelete button.
     show_pruned: Cell<bool>,
+}
+
+/// Whether a delete or a version restore can succeed on `item`
+/// (`MediaMachine::write_possibility`; `ui/media.md` § Errors & edge cases →
+/// *What this person may write*): absent on a followed item and in a set this
+/// person may only read, else possible. The page derives none of it; `delete`
+/// and `restore_version` refuse on the same reading.
+fn write_answer(machine: &MediaMachine, followed: bool, item: &MediaItemSummary) -> Possibility {
+    if followed {
+        Possibility::Absent
+    } else {
+        machine.write_possibility(item.filter_value.clone())
+    }
 }
 
 /// Open the modal `media-item-detail` window for `item`. `parent` is the main
@@ -87,6 +105,7 @@ pub fn open_item_detail(
     // asked at open, never parsed (tui's `followed_scope_value` idiom).
     let followed_scope = machine.snapshot().followed_scope.map(|s| s.value);
     let followed = followed_scope.is_some();
+    let write = write_answer(machine, followed, item);
 
     let window = adw::Window::builder()
         .title(&item.name)
@@ -94,6 +113,7 @@ pub fn open_item_detail(
         .default_width(480)
         .default_height(420)
         .build();
+    crate::modal_escape::close_on_escape(&window);
     if let Some(p) = parent {
         window.set_transient_for(Some(p));
         if let Some(app) = p.application() {
@@ -166,9 +186,12 @@ pub fn open_item_detail(
     // "Share a link" — present ONLY on an eligible file (the machine's
     // `share_link_eligible` verdict), absent elsewhere; its create surface is a
     // window over this one (`super::share`, `share-links.md` § Flows → Create).
-    if let Some(share) =
-        super::share::detail_button(item.share_link_eligible, machine, &item.folder, &item.path)
-    {
+    if let Some(share) = super::share::detail_button(
+        fauna_media_machine::share_link_possibility(item.share_link_eligible),
+        machine,
+        &item.folder,
+        &item.path,
+    ) {
         actions.append(&share);
     }
     let delete = gtk::Button::with_label(media_strings::file_detail::DELETE_FILE);
@@ -176,6 +199,7 @@ pub fn open_item_detail(
     delete.set_halign(gtk::Align::Start);
     delete.set_hexpand(true);
     set_test_id(&delete, ids::MEDIA_DELETE_BUTTON);
+    crate::possible::paint(&delete, None, write.clone());
     actions.append(&delete);
 
     let download = gtk::Button::with_label(media_strings::DOWNLOAD);
@@ -203,7 +227,6 @@ pub fn open_item_detail(
             versions_heading.upcast_ref::<gtk::Widget>(),
             show_pruned_row.upcast_ref(),
             scroll.upcast_ref(),
-            delete.upcast_ref(),
             status.upcast_ref(),
         ] {
             widget.set_visible(false);
@@ -227,6 +250,7 @@ pub fn open_item_detail(
         name: item.name.clone(),
         backup_key: backup_key.to_vec(),
         followed_scope,
+        write,
         download: download.clone(),
         latest: RefCell::new(None),
     });
@@ -547,6 +571,7 @@ fn build_version_row(ctx: &Rc<DetailCtx>, version: &FileVersionSummary) -> gtk::
 
     let restore = gtk::Button::with_label(media_strings::VERSION_RESTORE);
     set_test_id(&restore, ids::FILE_VERSION_RESTORE_BUTTON);
+    crate::possible::paint(&restore, None, ctx.write.clone());
     {
         let ctx = Rc::clone(ctx);
         let version = version.clone();
@@ -584,6 +609,7 @@ fn open_restore_confirm(
         .modal(true)
         .default_width(360)
         .build();
+    crate::modal_escape::close_on_escape(&modal);
     if let Some(p) = parent {
         modal.set_transient_for(Some(p));
         if let Some(app) = p.application() {
@@ -695,6 +721,7 @@ fn open_delete_confirm(
         .modal(true)
         .default_width(360)
         .build();
+    crate::modal_escape::close_on_escape(&modal);
     if let Some(p) = parent {
         modal.set_transient_for(Some(p));
         if let Some(app) = p.application() {
@@ -805,4 +832,107 @@ fn open_delete_confirm(
 
     modal.set_content(Some(&outer));
     modal.present();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fauna_media_machine::observer::NullObserver;
+    use fauna_media_machine::{FakeMediaNestApi, MediaFolder, MediaItem, MediaSnapshot};
+
+    /// Every shared set is joined — so a member row is admitted to the page.
+    struct JoinedAll;
+
+    impl fauna_media_machine::FolderChannelOwners for JoinedAll {
+        fn folder_channel_owner(&self, _: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+            None
+        }
+    }
+
+    impl fauna_media_machine::MlsQuery for JoinedAll {
+        fn is_joined_shared_set(&self, _: &str) -> bool {
+            true
+        }
+    }
+
+    fn item(folder: &str, path: &str, folder_id: i64) -> MediaItem {
+        MediaItem {
+            folder: folder.into(),
+            path: path.into(),
+            size_bytes: 10,
+            updated_at: 1_600_000_000,
+            source_online: true,
+            folder_id: Some(folder_id),
+            ..Default::default()
+        }
+    }
+
+    /// A reader member's detail shows neither delete nor restore on an item of
+    /// the set shared with them; the owner's own item shows both, live — each
+    /// painted from the machine's `write_possibility` (`ui/media.md` § Errors &
+    /// edge cases → *What this person may write*).
+    #[test]
+    fn a_readers_detail_offers_no_delete_and_no_restore() {
+        crate::testid::run_on_gtk_thread(|| {
+            let api = Arc::new(FakeMediaNestApi::new());
+            api.set_folders(vec![
+                MediaFolder {
+                    id: 1,
+                    name: "mine".into(),
+                    ..Default::default()
+                },
+                MediaFolder {
+                    id: 9,
+                    name: "theirs".into(),
+                    member: true,
+                    writer: false,
+                    mls_group_id: Some("g9".into()),
+                    ..Default::default()
+                },
+            ]);
+            api.set_snapshot(MediaSnapshot {
+                items: vec![
+                    item("mine", "mine/a.jpg", 1),
+                    item("theirs", "theirs/b.jpg", 9),
+                ],
+                ..Default::default()
+            });
+            let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None);
+            machine.set_mls_query(Arc::new(JoinedAll));
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(machine.refresh(Some(vec![0u8; 32])));
+            let summary = |folder: &str| {
+                machine
+                    .snapshot()
+                    .items
+                    .into_iter()
+                    .find(|i| i.folder == folder)
+                    .expect("listed")
+            };
+
+            let delete = gtk::Button::new();
+            let restore = gtk::Button::new();
+            let theirs = write_answer(&machine, false, &summary("theirs"));
+            crate::possible::paint(&delete, None, theirs.clone());
+            crate::possible::paint(&restore, None, theirs);
+            assert!(!delete.is_visible(), "a reader is offered no delete");
+            assert!(!restore.is_visible(), "a reader is offered no restore");
+
+            let mine = write_answer(&machine, false, &summary("mine"));
+            assert_eq!(mine, Possibility::Possible);
+            crate::possible::paint(&delete, None, mine.clone());
+            crate::possible::paint(&restore, None, mine);
+            assert!(delete.is_visible() && delete.is_sensitive());
+            assert!(restore.is_visible() && restore.is_sensitive());
+
+            assert_eq!(
+                write_answer(&machine, true, &summary("mine")),
+                Possibility::Absent,
+                "a followed item is head-only",
+            );
+        });
+    }
 }

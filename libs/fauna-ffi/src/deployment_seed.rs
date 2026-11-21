@@ -17,7 +17,10 @@
 //!   trailing `store_container_dir` defaulting to the platform location.
 //! - **Capture** is only the **custody leg** (*(c) The writes*), run whenever
 //!   a session holds both an authenticated connection and the account-store
-//!   handle: at the post-auth edge through [`self_heal_deployment_seed_custody`]
+//!   handle: at the post-auth edge through
+//!   [`self_heal_deployment_seed_custody_signalled`] (every run's signal to the
+//!   app's [`FfiCustodyLegSink`], the reconnect retry's cleared mark included)
+//!   or its one-shot form [`self_heal_deployment_seed_custody`]
 //!   and at the store-ready edge inside the account-runtime seat
 //!   (`crate::account_runtime::install`'s installed arm) — whichever lands
 //!   second finds the other half. The claim reply's seed is not consumed. The
@@ -39,8 +42,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use fauna_client_config::{
-    ResolvingLedgerStore, custody_leg_unattempted_warning, recoverable_boxes_in,
-    selfhosted_recovery_command_in,
+    CUSTODY_MISMATCH_KEY, CUSTODY_UNCONFIRMED_KEY, CustodyLegSignal, ResolvingLedgerStore,
+    custody_leg_unattempted_warning, recoverable_boxes_in, selfhosted_recovery_command_in,
 };
 use fauna_core::data::DeploymentSeedEntry;
 use fauna_core::identity::ActorId;
@@ -174,6 +177,12 @@ pub async fn rotate_deployment_seed(
 /// `owner_secret` is validated as a 32-byte secret only; `app_data_dir` is
 /// unused (the device-local replica retired for this kind) and
 /// kept so no caller's signature changes.
+///
+/// The first run's answer only: a reconnect retry that lands custody never
+/// reaches the caller, so a warning painted from this answer stays up. A host
+/// that can take its warning down calls
+/// [`self_heal_deployment_seed_custody_signalled`] instead (android does);
+/// this form stays until the windows and apple glue move over.
 #[fauna_uniffi_async::export]
 pub async fn self_heal_deployment_seed_custody(
     nest: Arc<FfiNestClient>,
@@ -186,7 +195,71 @@ pub async fn self_heal_deployment_seed_custody(
         return Some(custody_leg_unattempted_warning());
     }
     let store = ResolvingLedgerStore::new(crate::account_runtime::handle);
-    fauna_client_account_runtime::deployment_seeds::run_custody_leg(&nest.nest_arc(), &store).await
+    fauna_client_account_runtime::deployment_seeds::run_custody_leg(&nest.nest_arc(), store).await
+}
+
+/// The app's sink for the custody leg's signals — every run's, the first
+/// and each later retry's at a reconnect of the same nest
+/// (`fauna_client_config::CustodyLegSignal`; `box-recovery.md` § The
+/// plane-era recovery floor, *(c) The writes*: the warning shows while
+/// custody is unconfirmed, and a later run that confirms it takes the warning
+/// down). Called on a runtime thread, never the UI thread — hop before
+/// touching UI state.
+#[uniffi::export(with_foreign)]
+pub trait FfiCustodyLegSink: Send + Sync {
+    /// Custody is unconfirmed: paint this shared warning on the warning
+    /// surface (`fauna_client_config::custody_leg_warning`).
+    fn on_warning(&self, warning: LocalizedText);
+    /// Nothing is owed: take the warning surface down **only** while it still
+    /// shows a custody warning — the text the app's resolver renders for
+    /// `launch.recovery_custody_mismatch` or `launch.recovery_custody_failed`
+    /// (`fauna_client_config::is_custody_leg_warning`) — never an unrelated
+    /// warning shown since.
+    fn on_cleared(&self);
+}
+
+/// Hand one signal to the app's sink.
+fn deliver(sink: &dyn FfiCustodyLegSink, signal: CustodyLegSignal) {
+    match signal {
+        CustodyLegSignal::Warning(warning) => sink.on_warning(warning),
+        CustodyLegSignal::Cleared => sink.on_cleared(),
+    }
+}
+
+/// **The custody leg's post-auth entry, signalled** — the same run as
+/// [`self_heal_deployment_seed_custody`], called at the same edge, but every
+/// run's signal goes to `sink`: this run's before the call returns, then each
+/// retry's at a later connection of `nest` (the shared native seam
+/// `fauna_client_account_runtime::deployment_seeds::run_custody_leg_signalled`,
+/// the one tui and linux call). So a warning the first run painted is taken
+/// down when the reconnect retry lands custody. Never throws: a malformed
+/// `owner_secret` signals the unattempted warning.
+///
+/// `app_data_dir` is unused, as on the one-shot form. The one-shot export
+/// stays until the windows and apple glue move to this one.
+#[fauna_uniffi_async::export]
+pub async fn self_heal_deployment_seed_custody_signalled(
+    nest: Arc<FfiNestClient>,
+    owner_secret: Vec<u8>,
+    app_data_dir: String,
+    sink: Arc<dyn FfiCustodyLegSink>,
+) {
+    let _ = app_data_dir;
+    if let Err(e) = crate::keypair_from_bytes(&owner_secret) {
+        tracing::warn!("deployment-seed custody leg: not attempted: {e}");
+        deliver(
+            &*sink,
+            CustodyLegSignal::Warning(custody_leg_unattempted_warning()),
+        );
+        return;
+    }
+    let store = ResolvingLedgerStore::new(crate::account_runtime::handle);
+    fauna_client_account_runtime::deployment_seeds::run_custody_leg_signalled(
+        &nest.nest_arc(),
+        store,
+        move |signal| deliver(&*sink, signal),
+    )
+    .await;
 }
 
 /// The warning owed when the glue could not even reach
@@ -197,6 +270,20 @@ pub async fn self_heal_deployment_seed_custody(
 #[uniffi::export]
 pub fn deployment_seed_custody_unattempted_warning() -> LocalizedText {
     custody_leg_unattempted_warning()
+}
+
+/// Every custody-leg warning the shared leg can paint, as the
+/// [`LocalizedText`]s the app renders — what an [`FfiCustodyLegSink::on_cleared`]
+/// compares the warning surface against (the FFI face of
+/// `fauna_client_config::is_custody_leg_warning`, whose closure cannot cross
+/// the boundary): the surface is a custody warning when its text equals one of
+/// these rendered through the app's resolver. The keys stay in Rust.
+#[uniffi::export]
+pub fn deployment_seed_custody_warnings() -> Vec<LocalizedText> {
+    [CUSTODY_MISMATCH_KEY, CUSTODY_UNCONFIRMED_KEY]
+        .into_iter()
+        .map(LocalizedText::key)
+        .collect()
 }
 
 /// One custodied box for the total-box-loss recovery box list — the native twin
@@ -406,4 +493,55 @@ pub async fn recover_selfhosted_command_pre_login(
         )
         .await,
     )
+}
+
+#[cfg(test)]
+mod custody_sink_tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// A sink that records what it was told, in order.
+    #[derive(Default)]
+    struct Recording(Mutex<Vec<Option<LocalizedText>>>);
+
+    impl FfiCustodyLegSink for Recording {
+        fn on_warning(&self, warning: LocalizedText) {
+            self.0.lock().unwrap().push(Some(warning));
+        }
+        fn on_cleared(&self) {
+            self.0.lock().unwrap().push(None);
+        }
+    }
+
+    /// A warning then a later run's cleared mark reach the app's sink as
+    /// `on_warning` then `on_cleared` — the order the retry delivers them.
+    #[test]
+    fn a_warning_then_the_cleared_mark_reach_the_sink_in_order() {
+        let sink = Recording::default();
+        let warning = custody_leg_unattempted_warning();
+        deliver(&sink, CustodyLegSignal::Warning(warning.clone()));
+        deliver(&sink, CustodyLegSignal::Cleared);
+        assert_eq!(*sink.0.lock().unwrap(), vec![Some(warning), None]);
+    }
+
+    /// The comparands the app's cleared mark checks against are exactly the
+    /// shared rule's: each one is a custody warning by
+    /// `is_custody_leg_warning`, and every warning the leg paints is one.
+    #[test]
+    fn the_custody_warnings_are_the_shared_rules_comparands() {
+        let render = |text: &LocalizedText| text.key.clone();
+        let warnings = deployment_seed_custody_warnings();
+        for warning in &warnings {
+            assert!(fauna_client_config::is_custody_leg_warning(
+                &render(warning),
+                render
+            ));
+        }
+        assert!(warnings.contains(&custody_leg_unattempted_warning()));
+        assert!(!fauna_client_config::is_custody_leg_warning(
+            "another warning",
+            render
+        ));
+    }
 }

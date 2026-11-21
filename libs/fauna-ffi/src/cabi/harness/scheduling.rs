@@ -483,6 +483,109 @@ pub unsafe extern "C" fn fauna_harness_caldav_events(
     unsafe { run(body, out) }
 }
 
+/// Make one event in the account's own calendar and read the calendar back
+/// **the way an app's Events page does**, app-less: a `Seat` hosts the
+/// account store, the MSEK is read out of the sealed mail custody through the
+/// shared [`fauna_client_config::dav_store_context`] (the read tui's, linux's
+/// and the FFI face's calendar pages all delegate to — never a key the caller
+/// hands in), the calendars load through the shared
+/// [`CalDavClient::list_calendars_with_personal`] (the lazy `Personal` a fresh
+/// or re-claimed account gets on its first load), and the event is sealed and
+/// put through [`CalDavClient::seal_and_put_event`], then read back through the
+/// shared decode under the same key. So a `[nest]` witness of "the calendar
+/// works again after a reset and a re-claim" drives the funnel every app
+/// drives, with no app in it. Needs mail enabled first
+/// (`fauna_harness_enable_mail`): with no MSEK in custody it fails, as an
+/// app's Events page lists no calendar.
+///
+/// `request` is the dag-cbor array `[uid, summary, dtstart, dtend]`
+/// (iCalendar UTC times, `20361102T100000Z`). `out` receives `{"ok":
+/// [calendars, [[uid, summary], …]]}` — `calendars` the number of calendars
+/// the load listed, then every event of `Personal` after the put — or
+/// `{"err": RpcError}`.
+///
+/// [`CalDavClient::list_calendars_with_personal`]: fauna_client_caldav::CalDavClient::list_calendars_with_personal
+/// [`CalDavClient::seal_and_put_event`]: fauna_client_caldav::CalDavClient::seal_and_put_event
+///
+/// # Safety
+///
+/// As `fauna_harness_create_set`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_harness_calendar_make_event(
+    nest_url: *const c_char,
+    secret: *const u8,
+    secret_len: u32,
+    request: *const u8,
+    request_len: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_client_caldav::{CalDavClient, PutEventError, personal_calendar_id, uid_hash};
+
+    let body = || {
+        // SAFETY: per the `# Safety` section above.
+        let call = unsafe { decode_call(nest_url, secret, secret_len, request, request_len)? };
+        let (uid, summary, dtstart, dtend): (String, String, String, String) =
+            decode_request!(call.req)?;
+        super::with_seat(
+            call.nest_url,
+            call.identity,
+            async |nest, identity, seat| {
+                let actor = identity.actor_id().0;
+                let ctx = fauna_client_config::dav_store_context(&seat.handle, actor)
+                    .await
+                    .ok_or_else(|| {
+                        err("no MSEK in the account's mail custody — mail is not on".to_string())
+                    })?;
+                let caldav = CalDavClient::new(Arc::clone(nest));
+                let loaded = match caldav.list_calendars_with_personal(&actor, &ctx.msek).await {
+                    Ok(loaded) => loaded,
+                    Err(e) => return outcome!(Err::<(), _>(e)),
+                };
+                if let Some(e) = loaded.personal_provision_error {
+                    return Err(err(format!("the lazy Personal calendar: {e}")));
+                }
+                let calendars = u32::try_from(loaded.calendars.len()).unwrap_or(u32::MAX);
+                let event = event_fields(uid.clone(), summary, dtstart, dtend);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+                match caldav
+                    .seal_and_put_event(
+                        &actor,
+                        &personal_calendar_id(),
+                        &uid_hash(&uid),
+                        &ctx.msek,
+                        &event,
+                        &invited_roster(&[]),
+                        "",
+                        None,
+                        timestamp,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(PutEventError::Transport(e)) => return outcome!(Err::<(), _>(e)),
+                    Err(e) => return Err(err(format!("seal and put the event: {e:?}"))),
+                }
+                let events: Vec<(String, String)> = personal_events(&caldav, &actor, &ctx.msek)
+                    .await?
+                    .into_iter()
+                    .map(|e| {
+                        let fields = fauna_core::ical::parse_ical(&e.ics).unwrap_or_default();
+                        (fields.uid, fields.summary)
+                    })
+                    .collect();
+                fauna_core::encoding::canonical_encode(&(calendars, events))
+                    .map(Outcome::Ok)
+                    .map_err(encode_err)
+            },
+        )
+    };
+    // SAFETY: per the `# Safety` section above.
+    unsafe { run(body, out) }
+}
+
 /// Send one **organizer-shaped iMIP** (`REQUEST` or `CANCEL`) from the actor
 /// `secret` names to a recipient over the sealed scheduling rail, and apply
 /// it on the **recipient's** client: the message built by the shared

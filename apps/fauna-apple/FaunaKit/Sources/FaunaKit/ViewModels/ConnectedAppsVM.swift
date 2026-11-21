@@ -82,7 +82,37 @@ public final class ConnectedAppsVM {
     /// The page-level `error-message`: the connect failure first, else the
     /// snapshot's localized `error`.
     public var errorMessage: String? {
-        firstNonNil(connectError, snapshot?.error.map(renderLocalizedText))
+        firstNonNil(refusal, firstNonNil(connectError, snapshot?.error.map(renderLocalizedText)))
+    }
+
+    /// A press this app refused before it reached the machine (`ui/README.md`
+    /// § Offer only what is possible, rule 7) — said on `error-message`,
+    /// cleared by the next gesture that goes ahead.
+    public private(set) var refusal: String?
+
+    /// `atproto-external-apps-enable`'s answer: the shared
+    /// `external_apps_possibility` — still loading until this visit's read
+    /// has returned (`connected-apps.md` § Errors & edge cases).
+    public var externalAppsAnswer: Possibility {
+        connectedAppsExternalAppsPossibility(snapshot: snapshot)
+    }
+
+    /// *Connect*'s answer: the shared `connect_code_possibility` over the
+    /// typed code — disabled with its reason until a code is typed
+    /// (`connected-apps.md` § Errors & edge cases).
+    public var connectCodeAnswer: Possibility {
+        connectedAppsConnectCodePossibility(code: code)
+    }
+
+    /// A request card's *Approve*: the shared
+    /// `ConsentCardRow::approve_possibility` over the live row, so a folder
+    /// pick re-paints it in the same frame (`connected-apps.md` § Errors &
+    /// edge cases). A card no longer listed is absent.
+    public func approveAnswer(consentIdHex: String) -> Possibility {
+        guard let row = snapshot?.requests.first(where: { $0.consentIdHex == consentIdHex }) else {
+            return .absent
+        }
+        return connectedAppsRequestApprovePossibility(consent: row)
     }
 
     /// Start a visit: drop the page-local drafts and the last visit's snapshot,
@@ -102,6 +132,7 @@ public final class ConnectedAppsVM {
         revealed = [:]
         snapshot = nil
         connectError = nil
+        refusal = nil
         machine = nil
 
         // A mail machine that fails to hydrate costs the roster its mail rows,
@@ -184,14 +215,23 @@ public final class ConnectedAppsVM {
 
     // MARK: - Gestures
 
+    /// The press and the code field's Enter both ask `connectCodeAnswer`
+    /// before the lookup, so a blank code is never sent.
     public func submitCode() async {
+        if refusePress(connectCodeAnswer, errorMessage: &refusal) { return }
+        refusal = nil
         let typed = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !typed.isEmpty else { return }
         code = ""
         await run { await $0.submitCode(code: typed) }
     }
 
+    /// Approve asks `approveAnswer` again and refuses with its reason;
+    /// Decline is never gated.
     public func resolveRequest(consentIdHex: String, approved: Bool) async {
+        if approved, refusePress(approveAnswer(consentIdHex: consentIdHex), errorMessage: &refusal) {
+            return
+        }
+        refusal = nil
         await run { await $0.resolveRequest(consentIdHex: consentIdHex, approved: approved) }
     }
 
@@ -217,8 +257,12 @@ public final class ConnectedAppsVM {
 
     /// The account's external-apps switch (`atproto-external-apps-enable`). The
     /// machine writes it and the page paints the re-read snapshot, never a local
-    /// guess.
+    /// guess: the press asks the switch's answer again and, before the read
+    /// has returned, refuses on `error-message` rather than writing the flip of
+    /// an unread default.
     public func setExternalAppsEnabled(_ enabled: Bool) async {
+        if refusePress(externalAppsAnswer, errorMessage: &refusal) { return }
+        refusal = nil
         await run { await $0.setExternalAppsEnabled(enabled: enabled) }
     }
 

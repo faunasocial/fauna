@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -32,6 +31,7 @@ import com.fauna.ffi.qrQuietZoneModules
 // namespace — only the fns live in `com.fauna.ffi`.
 import uniffi.fauna_core.QrMatrix
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
 
 /**
  * Identity export — the Settings/Account section that reveals the identity QR a second

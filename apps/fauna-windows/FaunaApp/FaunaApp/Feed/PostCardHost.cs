@@ -791,10 +791,37 @@ internal sealed class PostCardHost
             menu.Items.Add(del);
 
             BuildWebPublishVerbs(menu, post, siteLink, () => suppressClose = true);
+#if PAYMENTS
+            BuildSalePriceVerb(menu, post);
+#endif
         }
 
         menu.ShowAt(btn);
     }
+
+#if PAYMENTS
+    /// <summary>The own sold post's <i>Change price…</i> verb (monetization.md § The asking
+    /// price → <i>Re-pricing a sold post</i>): offered on every sold post of the author's own,
+    /// advertised or not — the dialog says what saving does to the advertisement, only when
+    /// the post is advertised. Sold-ness is the shared <c>post_is_sold_post</c>.</summary>
+    private void BuildSalePriceVerb(MenuFlyout menu, FeedPostItem post)
+    {
+        if (Rpc is not { } rpc || ViewModel?.FindPost(post.PostId) is not { } summary) return;
+        if (!FaunaFeedMethods.PostIsSoldPost(summary) || summary.gatedTier is not { Length: > 0 } tierName) return;
+        var advertised = summary.nostrAdvertisedAt is not null;
+        var item = new MenuFlyoutItem { Text = S.Get("sale_price/button") };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(item, Ids.FeedPostSalePriceButton);
+        item.Click += async (_, _) =>
+        {
+            if (await Views.Payments.SalePriceDialog.OpenAsync(
+                    _page.XamlRoot, rpc, tierName, advertised, _page.ReportPageError))
+            {
+                await ViewModel!.Manager.RefreshCurrentFeed();
+            }
+        };
+        menu.Items.Add(item);
+    }
+#endif
 
     /// <summary>Open the shared report sheet on <paramref name="post"/> (the ⋯ menu's
     /// <c>feed-post-report-button</c>). A landed report is acknowledged OUTSIDE the

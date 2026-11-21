@@ -31,11 +31,21 @@ use crate::dns_verifier::{LookupOutcome, RecordResolver};
 // ── STARTTLS prober seam ───────────────────────────────────────────
 
 /// Outcome of the outbound-TLS posture probe to a known peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StarttlsProbeOutcome {
     /// Connected, STARTTLS succeeded, and the cert chain verified.
     Ok,
-    /// Connection refused / STARTTLS rejected / cert path invalid / timeout —
-    /// the string is the admin-facing failure reason.
+    /// The peer's name resolved but the TCP connection to its port never
+    /// opened — refused, unreachable, or timed out before connecting. This is
+    /// the signature of a provider blocking outbound SMTP
+    /// (`installers/vps.md` § the outbound-port-25 note), so the diagnostics
+    /// row is a `fail` and the readout's `outbound_blocked` input. The string
+    /// is the admin-facing reason.
+    Unreachable(String),
+    /// Anything else: no probe in this build, the name did not resolve, or a
+    /// banner / EHLO / STARTTLS / certificate problem after the connection
+    /// opened — "we could not see", never a blocked port. The string is the
+    /// admin-facing reason.
     Failed(String),
 }
 
@@ -59,34 +69,99 @@ impl StarttlsProber for NullStarttlsProber {
     }
 }
 
-/// Live prober: TCP-connects, reads the SMTP banner, EHLOs, issues STARTTLS, and
-/// completes a cert-verifying TLS handshake (webpki roots). The whole exchange
-/// is bounded by [`PROBE_TIMEOUT`]. A failure at any step → `Failed(reason)`.
+/// Test-hooks prober whose outcome an e2e scripts through
+/// `POST /api/v1/test/mail/starttls-probe` (`starttls_probe_test_hook`); with
+/// nothing scripted it answers exactly as [`NullStarttlsProber`]. The e2e
+/// build installs it in place of the Null prober, so a tier_3 run stays off
+/// the network and can still stand in a box whose outbound port 25 is blocked.
+#[cfg(feature = "test-hooks")]
+pub struct ScriptedStarttlsProber {
+    pub script: std::sync::Arc<std::sync::Mutex<Option<StarttlsProbeOutcome>>>,
+}
+
+#[cfg(feature = "test-hooks")]
+#[async_trait]
+impl StarttlsProber for ScriptedStarttlsProber {
+    async fn probe(&self, host: &str, port: u16) -> StarttlsProbeOutcome {
+        let scripted = self
+            .script
+            .lock()
+            .expect("starttls probe script mutex")
+            .clone();
+        match scripted {
+            Some(outcome) => outcome,
+            None => NullStarttlsProber.probe(host, port).await,
+        }
+    }
+}
+
+/// Live prober: resolves the peer, TCP-connects, reads the SMTP banner, EHLOs,
+/// issues STARTTLS, and completes a cert-verifying TLS handshake (webpki
+/// roots). A connection that never opens → `Unreachable(reason)`; a failure at
+/// any other step → `Failed(reason)`.
 pub struct LiveStarttlsProber;
 
-/// Wall-clock bound on the whole probe (connect + SMTP handshake + TLS). The
-/// common CI/cloud failure — outbound `:25` blocked — usually surfaces as a
-/// connect refusal (fast) but can hang silently; this bounds it.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(12);
+/// Bound on opening the TCP connection. Outbound `:25` blocked usually
+/// surfaces as a fast refusal but can hang silently (the SYN is dropped); this
+/// bounds it, and a timeout here reads as unreachable.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// Bound on the SMTP handshake + TLS once the connection is open.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[async_trait]
 impl StarttlsProber for LiveStarttlsProber {
     async fn probe(&self, host: &str, port: u16) -> StarttlsProbeOutcome {
-        match tokio::time::timeout(PROBE_TIMEOUT, probe_starttls(host, port)).await {
+        // Resolve first, so a box with no working DNS is "could not see"
+        // (`Failed`), never a blocked port.
+        let addrs: Vec<std::net::SocketAddr> = match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio::net::lookup_host((host, port)),
+        )
+        .await
+        {
+            Ok(Ok(addrs)) => addrs.collect(),
+            Ok(Err(e)) => {
+                return StarttlsProbeOutcome::Failed(format!("could not resolve {host}: {e}"));
+            }
+            Err(_) => {
+                return StarttlsProbeOutcome::Failed(format!("timed out resolving {host}"));
+            }
+        };
+        if addrs.is_empty() {
+            return StarttlsProbeOutcome::Failed(format!("{host} resolved to no address"));
+        }
+        let stream =
+            match tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(&addrs[..]))
+                .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(e)) => {
+                    return StarttlsProbeOutcome::Unreachable(format!(
+                        "could not connect to {host}:{port}: {e}"
+                    ));
+                }
+                Err(_) => {
+                    return StarttlsProbeOutcome::Unreachable(format!(
+                        "timed out after {}s connecting to {host}:{port}",
+                        CONNECT_TIMEOUT.as_secs()
+                    ));
+                }
+            };
+        match tokio::time::timeout(EXCHANGE_TIMEOUT, probe_starttls(stream, host)).await {
             Ok(Ok(())) => StarttlsProbeOutcome::Ok,
             Ok(Err(e)) => StarttlsProbeOutcome::Failed(e.to_string()),
             Err(_) => StarttlsProbeOutcome::Failed(format!(
-                "timed out after {}s connecting to {host}:{port}",
-                PROBE_TIMEOUT.as_secs()
+                "timed out after {}s in the SMTP/TLS exchange with {host}:{port}",
+                EXCHANGE_TIMEOUT.as_secs()
             )),
         }
     }
 }
 
-async fn probe_starttls(host: &str, port: u16) -> anyhow::Result<()> {
+async fn probe_starttls(stream: tokio::net::TcpStream, host: &str) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let stream = tokio::net::TcpStream::connect((host, port)).await?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
@@ -486,19 +561,28 @@ pub async fn run_diagnostics(
     }
 
     // ── Outbound TLS posture probe to gmail ──
+    // The row's name is the shared constant the readout's fold keys on.
+    let probe_row = fauna_mail::health::OUTBOUND_PROBE_CHECK;
     match prober.probe(GMAIL_PROBE_MX_HOST, GMAIL_PROBE_MX_PORT).await {
         StarttlsProbeOutcome::Ok => out.push(pass(
-            "Outbound TLS to gmail.com",
+            probe_row,
             format!(
                 "STARTTLS to {GMAIL_PROBE_MX_HOST}:{GMAIL_PROBE_MX_PORT} succeeded, chain valid"
             ),
         )),
-        StarttlsProbeOutcome::Failed(reason) => {
-            // Outbound :25 unreachable is a deployment-network fact (the probe
-            // can't fix it) — a Warn, not a hard Fail, distinguishes "we can't
-            // see" from "their TLS is broken".
-            out.push(warn("Outbound TLS to gmail.com", reason))
-        }
+        // The connection never opened: mail cannot leave this box. A Fail,
+        // and the mail health readout's `outbound_blocked` input
+        // (`mail-deliverability.md` § Symptom diagnostics).
+        StarttlsProbeOutcome::Unreachable(reason) => out.push(fail(
+            probe_row,
+            format!(
+                "outbound port 25 is unreachable ({reason}); most cloud providers block \
+                 it by default — ask yours to lift the block"
+            ),
+        )),
+        // "We could not see" (no probe in this build, no DNS, or a problem after
+        // the connection opened) — a Warn, never read as a blocked port.
+        StarttlsProbeOutcome::Failed(reason) => out.push(warn(probe_row, reason)),
     }
 
     out
@@ -821,6 +905,89 @@ mod tests {
         assert_eq!(status_of(&checks, "Reverse-DNS matches HELO"), "fail"); // PTR mismatch
         assert_eq!(status_of(&checks, "Outbound TLS to gmail.com"), "warn"); // probe failed
         assert_eq!(status_of(&checks, "DNSSEC resolver path"), "warn"); // stripping resolver
+    }
+
+    struct UnreachableProber;
+    #[async_trait]
+    impl StarttlsProber for UnreachableProber {
+        async fn probe(&self, _host: &str, _port: u16) -> StarttlsProbeOutcome {
+            StarttlsProbeOutcome::Unreachable("timed out after 12s connecting".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_port_25_fails_the_probe_row_and_folds_to_outbound_blocked() {
+        let r = ScriptedResolver::new();
+        let input = DiagnosticInput {
+            primary_domain: "example.com".into(),
+            helo_name: "mail.example.com".into(),
+            outbound_ip: None,
+            dkim_selectors: vec![],
+            mta_sts_policy_fetch: Err("not fetched".into()),
+            dnssec_resolver_path_capable: true,
+        };
+        let checks = run_diagnostics(&r, &UnreachableProber, &input).await;
+        let row = checks
+            .iter()
+            .find(|c| c.name == fauna_mail::health::OUTBOUND_PROBE_CHECK)
+            .expect("the probe row");
+        assert_eq!(row.status, "fail");
+        assert!(
+            row.detail.contains("outbound port 25 is unreachable"),
+            "{row:?}"
+        );
+        // The readout reads the same row as the cause of undelivered mail.
+        let inputs = fauna_mail::health::HealthInputs {
+            mail_enabled: true,
+            mail_bridges_approved: 1,
+            mail_bridges_connected: 1,
+            diagnostics: Some(
+                checks
+                    .iter()
+                    .map(|c| fauna_mail::health::DiagnosticEntry {
+                        name: c.name.clone(),
+                        status: c.status.clone(),
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            fauna_mail::health::fold(&inputs),
+            fauna_mail::health::MailHealthState::OutboundBlocked
+        );
+    }
+
+    #[tokio::test]
+    async fn the_live_prober_reads_a_refused_connection_as_unreachable() {
+        // A port nothing listens on: bind, learn the port, close.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let outcome = LiveStarttlsProber.probe("127.0.0.1", port).await;
+        assert!(
+            matches!(outcome, StarttlsProbeOutcome::Unreachable(_)),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_live_prober_reads_a_bad_banner_after_connecting_as_failed_not_unreachable() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // spawn-ok(test)
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            s.write_all(b"554 go away\r\n").await.unwrap();
+        });
+        let outcome = LiveStarttlsProber.probe("127.0.0.1", port).await;
+        server.await.unwrap();
+        assert!(
+            matches!(outcome, StarttlsProbeOutcome::Failed(_)),
+            "{outcome:?}"
+        );
     }
 
     #[tokio::test]

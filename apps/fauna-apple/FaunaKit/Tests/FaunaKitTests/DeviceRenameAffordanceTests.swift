@@ -14,17 +14,27 @@ import Testing
 struct DeviceRenameAffordanceTests {
     @Test("closed: the card carries the rename button and no editor")
     func closedPaintsTheButtonOnly() {
-        #expect(DeviceRenameAffordance.controlIds(renaming: false) == ["device-rename-button"])
+        #expect(DeviceRenameAffordance.controlIds(renaming: false, offered: true) == ["device-rename-button"])
     }
 
     @Test("open: input, confirm, cancel in that order, and the button gives way")
     func openPaintsTheEditorInOrder() {
         #expect(
-            DeviceRenameAffordance.controlIds(renaming: true) == [
+            DeviceRenameAffordance.controlIds(renaming: true, offered: true) == [
                 "device-rename-input",
                 "device-rename-confirm-button",
                 "device-rename-cancel-button",
             ]
         )
+    }
+
+    // The nest's WebDAV pseudo-device row: the shared answer is Absent, so the
+    // closed card carries no rename control at all (tui's
+    // `the_webdav_pseudo_device_row_offers_no_rename`; `ui/README.md` § Offer
+    // only what is possible). The answer itself is shared Rust, pinned by
+    // `devices_lifecycle.rs::the_webdav_pseudo_device_row_offers_no_rename`.
+    @Test("not offered: the closed card carries no rename control")
+    func notOfferedPaintsNothing() {
+        #expect(DeviceRenameAffordance.controlIds(renaming: false, offered: false).isEmpty)
     }
 }

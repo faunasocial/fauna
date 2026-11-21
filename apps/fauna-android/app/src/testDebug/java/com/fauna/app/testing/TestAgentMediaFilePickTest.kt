@@ -124,6 +124,14 @@ class TestAgentMediaFilePickTest {
                     formatDate = { "date" },
                     loadThumbnail = { null },
                     syncStateLabel = "Synced",
+                    // The media machine's upload answer, as `MediaScreen` hands it
+                    // over: absent in a followed (read-only) scope, so the row —
+                    // and the handler it registers — leaves the tree.
+                    uploadPossibility = if (snap.followedScope != null) {
+                        uniffi.fauna_core.Possibility.Absent
+                    } else {
+                        uniffi.fauna_core.Possibility.Possible
+                    },
                 )
             }
         }

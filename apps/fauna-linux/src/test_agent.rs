@@ -320,9 +320,15 @@ async fn push_state(client: &reqwest::Client, bridge_url: &str, shared: &Arc<Mut
 ///   the former top-level "Peers" page here, so the legacy `{"view":"devices"}`
 ///   still lands on the roster).
 /// - `"folders"` → Folders sub-page (the folder control plane).
+/// - `"nostr"` → Nostr sub-page. ui.yaml's `navigation.pages` lists `nostr` as
+///   a page of its own (tui's top-level `Page::Nostr`, which takes
+///   `{"view":"settings","id":"nostr"}` as an alias the other way); on linux it
+///   lives in the Settings rail, so the bare view lands there. Without the
+///   alias the nav named no stack child and the actuation sweep judged the
+///   page that happened to be showing as "nostr".
 pub fn canonical_to_gtk(view: &str) -> &str {
     match view {
-        "status" | "devices" | "folders" => "settings",
+        "status" | "devices" | "folders" | "nostr" => "settings",
         other => other,
     }
 }
@@ -336,6 +342,7 @@ pub fn settings_subpage_for_view(view: &str) -> Option<&'static str> {
         "status" => Some("status"),
         "devices" => Some("devices"),
         "folders" => Some("folders"),
+        "nostr" => Some("nostr"),
         _ => None,
     }
 }
@@ -357,3 +364,16 @@ pub fn gtk_to_canonical(name: &str) -> &str {
 /// full rationale and its own copy of the same pins. Delegates rather than
 /// re-implements.
 pub use fauna_core::format::profile_nav_target;
+
+#[cfg(test)]
+mod canonical_nav_tests {
+    use super::*;
+
+    /// ui.yaml's `navigation.pages` names `nostr` a page; linux keeps it in
+    /// the Settings rail, so the bare view lands on that sub-page.
+    #[test]
+    fn the_nostr_page_lands_on_the_settings_nostr_sub_page() {
+        assert_eq!(canonical_to_gtk("nostr"), "settings");
+        assert_eq!(settings_subpage_for_view("nostr"), Some("nostr"));
+    }
+}

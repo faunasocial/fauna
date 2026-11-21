@@ -181,6 +181,25 @@ fn identity_shown(phase: &LaunchPhase) -> bool {
     )
 }
 
+/// This surface's name in `fauna_e2e_agent::ROOT_SURFACE_KEY`'s journal: its
+/// ui.yaml page, or a `launch_*` name for a surface ui.yaml gives no page of
+/// its own — the same names tui's `LaunchSurface::root_surface_name` gives. A
+/// total match, so a new phase must be named here.
+fn root_surface_name(phase: &LaunchPhase) -> &'static str {
+    match phase {
+        LaunchPhase::Launching => fauna_e2e_agent::ROOT_SURFACE_LAUNCH_PROGRESS,
+        LaunchPhase::TransientRetry { .. } => "launch_retry",
+        LaunchPhase::NeedsUpdate { .. } => "launch_needs_update",
+        LaunchPhase::SignInRefused { .. } => "launch_sign_in_refused",
+        LaunchPhase::IdentityChanged { .. } | LaunchPhase::IdentityForked { .. } => {
+            "launch_identity_changed"
+        }
+        LaunchPhase::AccountIndexUnreadable { .. } => "launch_account_index_unreadable",
+        LaunchPhase::AccountLocked { .. } => "launch_account_locked",
+        LaunchPhase::IdentityStolenEntry { .. } => "identity_stolen_entry",
+    }
+}
+
 fn retry_title_text(phase: &LaunchPhase) -> &'static str {
     match phase {
         LaunchPhase::Launching | LaunchPhase::TransientRetry { .. } => i18n::launch::RETRY_TITLE,
@@ -227,6 +246,10 @@ pub struct LaunchView {
     /// `message` on `error-message` (`None` clears it — the success arm, whose
     /// account switch replaces this window).
     pub settle_stolen: Rc<dyn Fn(Option<String>)>,
+    /// The wizard's first-setup glue when this launch is the one a wizard's
+    /// `LoggedIn` started (`crate::FirstSetup`): held through every Retry, run
+    /// by the `Online` arm, dropped with this view on any other exit.
+    pub first_setup: RefCell<Option<crate::FirstSetup>>,
 }
 
 /// What the locked surface's two gestures hand the caller.
@@ -240,7 +263,10 @@ pub struct LockedHooks {
     pub on_back: Box<dyn Fn()>,
 }
 
-/// Build the launch window. Initial phase is `Launching`.
+/// Build the launch window — in `host` when the launch runs in a window that is
+/// already on screen (the wizard's, at its `LoggedIn` exit or an append-mode
+/// switch: `onboarding.md` § Wizard exit handling → *The wizard becomes the app
+/// in place*), else in a new one. Initial phase is `Launching`.
 ///
 /// Caller is responsible for:
 /// - Calling `set_phase(TransientRetry { error })` when the silent
@@ -253,6 +279,7 @@ pub struct LockedHooks {
 #[allow(clippy::too_many_arguments)] // one callback per launch-surface exit; grouping them would only add a struct to unpack at the one call site
 pub fn build_launch_window<F, G, H, R, T, I>(
     app: &adw::Application,
+    host: Option<adw::ApplicationWindow>,
     on_retry: F,
     on_fallthrough: G,
     on_recover: H,
@@ -506,6 +533,24 @@ where
     buttons.append(&retire_btn);
 
     retry_box.append(&buttons);
+
+    // `account-switcher-list` (ui.yaml `onboarding.launch_retry.optional_elements`):
+    // the way back to another held account when this one cannot be reached —
+    // above all after an append-mode finish whose new account's launch failed
+    // (`onboarding.md` § Wizard exit handling → *The finished wizard holds*).
+    // Painted by `set_phase` on `TransientRetry` only, and only when the
+    // registry holds more than one account; rebuilt from the registry at every
+    // paint, like `launch-identity-label`. Twin of tui's
+    // `launch::switcher_elements`.
+    let switcher_group = adw::PreferencesGroup::builder()
+        .title(i18n::settings::account_page::ACCOUNTS)
+        .build();
+    switcher_group.set_margin_top(12);
+    switcher_group.set_visible(false);
+    set_test_id(&switcher_group, ids::ACCOUNT_SWITCHER_LIST);
+    let switcher_rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+    let switcher_wired = Rc::new(std::cell::Cell::new(false));
+    retry_box.append(&switcher_group);
     center.append(&retry_box);
 
     // ── The locked surface (leg 2) ───────────────────────────────────────
@@ -574,7 +619,6 @@ where
     stolen_actions.append(&stolen_back);
     let stolen_btn = Button::with_label(i18n::settings::recovery_kit::STOLEN);
     stolen_btn.add_css_class("destructive-action");
-    stolen_btn.set_sensitive(false);
     set_test_id(&stolen_btn, ids::IDENTITY_STOLEN_BUTTON);
     stolen_actions.append(&stolen_btn);
     stolen_box.append(&stolen_actions);
@@ -583,21 +627,31 @@ where
     center.append(&locked_box);
 
     // ── Window ────────────────────────────────────────────────────────
-    let window = adw::ApplicationWindow::builder()
-        .default_width(600)
-        .default_height(420)
-        .resizable(false)
-        .content(&outer)
-        .build();
-    window.set_application(Some(app));
+    let window = match host {
+        Some(host) => {
+            crate::window_host::host_content(&host, &outer);
+            host
+        }
+        None => {
+            let window = adw::ApplicationWindow::builder()
+                .default_width(600)
+                .default_height(420)
+                .resizable(false)
+                .content(&outer)
+                .build();
+            window.set_application(Some(app));
+            window
+        }
+    };
+    crate::window_host::set_root_surface(&window, root_surface_name(&LaunchPhase::Launching));
 
     // Same close-handling as the onboarding window: app.hold() in main.rs
     // keeps the process alive for the authenticated session, so on a
     // pre-onboarding launch screen we have to quit on close or we leak
-    // a headless zombie.
+    // a headless zombie. Replaces a hosting wizard's own handler.
     {
         let app_for_quit = app.clone();
-        window.connect_close_request(move |_| {
+        crate::window_host::set_close_handler(&window, move |_| {
             app_for_quit.quit();
             gtk::glib::Propagation::Proceed
         });
@@ -631,7 +685,21 @@ where
         let stolen_phrase = stolen_phrase.clone();
         let stolen_confirm = stolen_confirm.clone();
         let identity_label = identity_label.clone();
+        let switcher_group = switcher_group.clone();
+        let switcher_rows = switcher_rows.clone();
+        let switcher_wired = switcher_wired.clone();
+        // Weak: the window's own buttons hold this closure.
+        let window = window.downgrade();
         Rc::new(move |phase: LaunchPhase| {
+            if let Some(window) = window.upgrade() {
+                crate::window_host::set_root_surface(&window, root_surface_name(&phase));
+            }
+            paint_switcher(
+                &switcher_group,
+                &switcher_rows,
+                &switcher_wired,
+                matches!(phase, LaunchPhase::TransientRetry { .. }),
+            );
             let identity = identity_shown(&phase)
                 .then(|| crate::account_registry().launch_identity_line())
                 .flatten();
@@ -925,23 +993,38 @@ where
     // A busy ceremony holds the step: the button stays disabled and Back is
     // inert, so a second press cannot mint a second successor.
     let stolen_busy = Rc::new(std::cell::Cell::new(false));
+    // The button is painted from the shared draft answer (`ui/README.md`
+    // § Offer only what is possible, rule 4's form case): the kit pasted, then
+    // the confirm word, and no ceremony already on its way.
     let arm_stolen: Rc<dyn Fn()> = {
         let stolen_btn = stolen_btn.clone();
+        let stolen_phrase = stolen_phrase.clone();
         let stolen_confirm = stolen_confirm.clone();
         let stolen_back = stolen_back.clone();
         let stolen_busy = stolen_busy.clone();
         Rc::new(move || {
             let idle = !stolen_busy.get();
-            stolen_btn.set_sensitive(
-                idle && stolen_confirm.text()
-                    == fauna_client_recovery::ceremony::STOLEN_CONFIRM_WORD,
+            crate::possible::paint(
+                &stolen_btn,
+                None,
+                stolen_answer(&stolen_phrase.text(), &stolen_confirm.text()).and(
+                    fauna_core::possibility::Possibility::for_write(
+                        fauna_core::possibility::ReadState::Resolved,
+                        idle,
+                    ),
+                ),
             );
             stolen_back.set_sensitive(idle);
         })
     };
+    arm_stolen();
     {
         let arm_stolen = arm_stolen.clone();
         stolen_confirm.connect_changed(move |_| arm_stolen());
+    }
+    {
+        let arm_stolen = arm_stolen.clone();
+        stolen_phrase.connect_changed(move |_| arm_stolen());
     }
     {
         let phase_state = phase_state.clone();
@@ -976,16 +1059,9 @@ where
             {
                 return;
             }
-            let refusal =
-                if stolen_confirm.text() != fauna_client_recovery::ceremony::STOLEN_CONFIRM_WORD {
-                    Some(i18n::settings::recovery_kit::STOLEN_CONFIRM_PLACEHOLDER)
-                } else if stolen_phrase.text().trim().is_empty() {
-                    Some(i18n::settings::recovery_kit::KIT_PHRASE_REQUIRED)
-                } else {
-                    None
-                };
-            if let Some(refusal) = refusal {
-                crate::settings::render_error_label(&error_label, Some(refusal));
+            // The shared draft answer the button is painted from, asked again.
+            let draft = stolen_answer(&stolen_phrase.text(), &stolen_confirm.text());
+            if crate::possible::refused_at_press(&draft, &error_label) {
                 return;
             }
             crate::settings::render_error_label(&error_label, None);
@@ -1031,6 +1107,10 @@ where
         })
     };
 
+    // A switch from `account-switcher-list` the registry refuses is said here,
+    // on this surface's `error-message`, and the surface stays.
+    crate::settings::account::set_launch_error_label(&error_label);
+
     LaunchView {
         window,
         set_phase,
@@ -1038,7 +1118,120 @@ where
         error_label,
         phase: phase_state,
         settle_stolen,
+        first_setup: RefCell::new(None),
     }
+}
+
+/// One `account-switcher-item` of the launch surface's switcher: the actor id,
+/// the display label, and whether it is the active (unreachable) account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchSwitcherRow {
+    actor_id: String,
+    label: String,
+    is_active: bool,
+}
+
+/// The switcher rows `launch_retry` paints, in registry order, from the
+/// registry's `(actor_id, handle)` pairs and its active account — empty unless
+/// the device holds more than one account (`onboarding.md` § Wizard exit
+/// handling → *The finished wizard holds*). The active row is the registry's
+/// active pointer, as on tui: the launch that failed is that account's.
+fn launch_switcher_rows<'a>(
+    accounts: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    active: Option<&str>,
+) -> Vec<LaunchSwitcherRow> {
+    let rows: Vec<LaunchSwitcherRow> = accounts
+        .into_iter()
+        .map(|(actor_id, handle)| LaunchSwitcherRow {
+            actor_id: actor_id.to_string(),
+            label: fauna_core::format::account_display_label(handle, actor_id),
+            is_active: active.is_some_and(|a| a.eq_ignore_ascii_case(actor_id)),
+        })
+        .collect();
+    if rows.len() < 2 { Vec::new() } else { rows }
+}
+
+/// Repaint the switcher group: shown with fresh rows from the registry when
+/// `shown` and more than one account is held, else hidden and emptied. Every
+/// non-active row switches through the Settings switcher's own Stage-2 gate
+/// (`settings::account::request_switch_account` — the in-app re-auth prompt for
+/// a flagged target, then the app's switch seam, which re-runs the launch as
+/// that account). The deferred wizard work stays with its own account: it rides
+/// that account's held launch, which a switch tears down with the windows.
+fn paint_switcher(
+    group: &adw::PreferencesGroup,
+    rows: &Rc<RefCell<Vec<adw::ActionRow>>>,
+    wired: &std::cell::Cell<bool>,
+    shown: bool,
+) {
+    for row in rows.borrow_mut().drain(..) {
+        group.remove(&row);
+    }
+    let fresh = if shown {
+        let registry = crate::account_registry();
+        let entries = registry.list();
+        let active = registry.active();
+        launch_switcher_rows(
+            entries
+                .iter()
+                .map(|e| (e.actor_id.as_str(), e.handle.as_deref())),
+            active.as_deref(),
+        )
+    } else {
+        Vec::new()
+    };
+    group.set_visible(!fresh.is_empty());
+    for entry in fresh {
+        let row = adw::ActionRow::builder()
+            .title(&entry.label)
+            .activatable(!entry.is_active)
+            .build();
+        set_test_id(&row, ids::ACCOUNT_SWITCHER_ITEM);
+        if !entry.is_active {
+            // The row's own `activated` (real users, the agent's `activate()`
+            // fallback) and the group listbox's `row-activated` (the agent's
+            // path for an AdwActionRow) both land here; the prompt guard and
+            // the switch handler's re-entrancy guard dedupe the double fire,
+            // exactly as on the Settings switcher.
+            let actor = entry.actor_id.clone();
+            row.connect_activated(move |r| {
+                crate::settings::account::request_switch_account(actor.clone(), r.upcast_ref());
+            });
+        }
+        group.add(&row);
+        rows.borrow_mut().push(row);
+    }
+    wire_switcher_listbox(rows, wired);
+}
+
+/// Wire the group's internal listbox `row-activated` once (the rows' parent
+/// exists only after the first row is added): it forwards to the row's own
+/// `activated`, so both actuation paths run the one handler above.
+fn wire_switcher_listbox(rows: &Rc<RefCell<Vec<adw::ActionRow>>>, wired: &std::cell::Cell<bool>) {
+    if wired.get() {
+        return;
+    }
+    let Some(listbox) = rows
+        .borrow()
+        .first()
+        .and_then(|r| r.parent())
+        .and_downcast::<gtk::ListBox>()
+    else {
+        return;
+    };
+    wired.set(true);
+    let rows = rows.clone();
+    listbox.connect_row_activated(move |_lb, row| {
+        let target = rows
+            .borrow()
+            .iter()
+            .find(|r| r.upcast_ref::<gtk::ListBoxRow>() == row)
+            .filter(|r| r.is_activatable())
+            .cloned();
+        if let Some(r) = target {
+            r.emit_by_name::<()>("activated", &[]);
+        }
+    });
 }
 
 /// `launch-account-locked-notice`: the shared lock sentence, the unlock time
@@ -1057,9 +1250,40 @@ fn locked_notice_text(locked_until_secs: u64) -> String {
     )
 }
 
+/// `identity-stolen-button`'s draft answer on the signed-out door: the shared
+/// predicate over the kit and the confirm word as typed (kit first).
+fn stolen_answer(phrase: &str, confirm: &str) -> fauna_core::possibility::Possibility {
+    fauna_client_recovery::ceremony::stolen_entry_possibility(phrase, confirm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `launch_retry`'s switcher (`onboarding.md` § Wizard exit handling → *The
+    /// finished wizard holds*): nothing with one account; with more, one row per
+    /// account in registry order, the active (unreachable) one marked.
+    #[test]
+    fn the_launch_switcher_paints_only_with_more_than_one_account() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        assert!(launch_switcher_rows([(a.as_str(), Some("alice"))], Some(&a)).is_empty());
+        assert!(launch_switcher_rows(std::iter::empty(), None).is_empty());
+        let rows = launch_switcher_rows(
+            [(a.as_str(), Some("alice")), (b.as_str(), None)],
+            Some(&b.to_uppercase()),
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].actor_id, a);
+        assert_eq!(rows[0].label, "alice");
+        assert!(!rows[0].is_active);
+        assert_eq!(rows[1].actor_id, b);
+        assert!(rows[1].is_active);
+        assert_eq!(
+            rows[1].label,
+            fauna_core::format::account_display_label(None, &b)
+        );
+    }
 
     /// Pins each arm's retry-box title (2026-08-05 copy audit — NeedsUpdate and
     /// IdentityChanged re-label rather than reuse RETRY_TITLE, since both mean

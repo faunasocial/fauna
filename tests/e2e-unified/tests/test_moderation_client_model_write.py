@@ -26,8 +26,8 @@ The two-real-client tests run on the apps carrying the real-engine
 ``second_real_faunamls_app`` fixture and a standalone moderation queue — the
 ``moderation-queue-second-real-engine`` surface (tui is the lead app since
 2026-08-01, `testing.md` § Default app and nest mode; linux was the original
-1d-surface lead): the sealed-model correction on linux, tui, macos, ios and
-windows, the mark-as-spam undo round-trip on linux and tui (each test's marks
+1d-surface lead): the sealed-model correction on linux, tui, macos, ios,
+windows and android (the phone plays bob), the mark-as-spam undo round-trip on linux and tui (each test's marks
 say which). The single-client mark-as-spam witness at the bottom
 (``test_mark_as_spam_trains_sealed_model``) needs no second engine, so it
 speaks for every app whose automation surface carries ``inject_inbound``:
@@ -111,13 +111,14 @@ def _wait_stored_model(db_path: str, actor_id_hex: str, until, timeout: float = 
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("moderation-queue")
 def test_train_correction_writes_sealed_model_at_rest(
     real_faunamls_app, second_real_faunamls_app, nest_instance
 ):
-    alice = real_faunamls_app
-    alice.moderation.require_second_real_engine_fixture_supported(
+    alice = second_real_faunamls_app.owner_app
+    real_faunamls_app.moderation.require_second_real_engine_fixture_supported(
         flow="the moderation-queue + mail UI"
     )
     bob_app, bob = second_real_faunamls_app
@@ -262,8 +263,8 @@ def test_mark_as_spam_writes_sealed_history_row_then_undo(
     from actions.mail_settings import MailSettingsActions
     from actions.mail_spam import MailSpamActions
 
-    alice = real_faunamls_app
-    alice.moderation.require_second_real_engine_fixture_supported(
+    alice = second_real_faunamls_app.owner_app
+    real_faunamls_app.moderation.require_second_real_engine_fixture_supported(
         flow="the moderation-queue + mail UI"
     )
     bob_app, bob = second_real_faunamls_app

@@ -133,6 +133,17 @@ internal static class FeedManagerHost
             CueHydrate.Reset();
             _current = built;
             _builtOver = transport;
+            // The device's offline outbox (account-offline-mutation.md § The
+            // offline-mutation contract) is wired by the first connection word
+            // MainViewModel hands the process (`SetDeviceConnectionWord`), and a
+            // manager built after that borrows it at its construction. One built
+            // before the first word would never be lent it — the process-level
+            // word lends the outbox to no live manager — so a like tapped offline
+            // would go into the dead connection. Hand this manager the word the
+            // offline gate holds, once, here, as android's FeedManagerHost and
+            // apple's FeedVM do at their build; every later word reaches the same
+            // per-process outbox through the device door.
+            built.SetConnectionState(Services.OfflineGate.Shared.ConnectionState);
 #if DEBUG || FAUNA_E2E_AGENT
             // Armed before this manager existed (a seat signed in off the feed):
             // held from birth, so its first hydrate parks. After `_current` is set,

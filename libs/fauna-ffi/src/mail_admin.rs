@@ -284,9 +284,11 @@ pub fn set_mail_token_refresh_clock_offset_secs(offset_secs: i64) {
 /// the per-app firing of the mail provision, the three DAV toggles and their
 /// companion mints. Runs the shared
 /// `fauna_client_mail_settings::serving_enablement` plan to the end over
-/// `nest`'s connection and resolves once every step has answered (each logs its
-/// own failure, so this only errs on an undecodable `secret`). Progress is
-/// [`serving_enablement_json`].
+/// `nest`'s connection and resolves once every step has succeeded or been
+/// refused for good (a passing failure is tried again inside — `onboarding.md`
+/// § 3b *The step completes; it is not fired once*). Returns the page's
+/// `error-message` text when a step was refused for good, else `None`; errs
+/// only on an undecodable `secret`. Progress is [`serving_enablement_json`].
 #[fauna_uniffi_async::export]
 pub async fn apply_post_claim_serving_enablement(
     nest: Arc<FfiNestClient>,
@@ -296,9 +298,9 @@ pub async fn apply_post_claim_serving_enablement(
     caldav: bool,
     carddav: bool,
     webdav: bool,
-) -> Result<(), FfiError> {
+) -> Result<Option<String>, FfiError> {
     let keypair = crate::keypair_from_bytes(&secret)?;
-    fauna_client_mail_settings::rpc_glue::dispatch_post_claim_serving_enablement(
+    let report = fauna_client_mail_settings::rpc_glue::dispatch_post_claim_serving_enablement(
         nest.nest_arc(),
         keypair,
         crate::account_runtime::mail_store(),
@@ -312,7 +314,7 @@ pub async fn apply_post_claim_serving_enablement(
         },
     )
     .await;
-    Ok(())
+    Ok(report.error_message())
 }
 
 /// `fauna_e2e_agent::SERVING_ENABLEMENT_KEY`'s value as JSON text — the shared
@@ -544,6 +546,309 @@ pub fn cert_row_status_view(row: CertStatusRow) -> fauna_core::format::CertStatu
     fauna_core::format::cert_status_view(row.state.as_str(), row.is_floor, row.not_after_unix)
 }
 
+// ── admin-dns `Possibility` faces (`docs/goal/ui/README.md` § Offer only what
+// is possible; the ruling is `docs/goal/behavior/dns-management.md` § Errors &
+// edge cases) ───────────────────────────────────────────────────────────────
+//
+// Each forwards one shared answer untouched (`fauna_client_dns::affordances`,
+// `fauna_client_mail_settings::domain_forms`), so Kotlin, Swift and C# paint
+// the `admin-dns` controls from the same answer tui reads in Rust and refuse
+// the action with the same reason. The snapshots are `uniffi::Record`s and so
+// cannot carry an exported method; they cross by value, the app passing the
+// one it already holds (`None` = that read has not resolved). Gated
+// `value-format` too, for the bare-`fauna_core`-type reason
+// [`crate::offline::offline_possibility`] gives.
+
+/// `admin-dns-domain-mode` on `domain`, switching to `managed`:
+/// [`DnsSnapshot::set_mode_possibility`]. `dns` `None` = the DNS read has not
+/// resolved, never possible.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn dns_set_mode_possibility(
+    dns: Option<DnsSnapshot>,
+    domain: String,
+    managed: bool,
+) -> fauna_core::possibility::Possibility {
+    match dns {
+        Some(dns) => dns.set_mode_possibility(&domain, managed),
+        None => fauna_core::possibility::Possibility::once_read(false),
+    }
+}
+
+/// `admin-dns-manage-all-toggle`, switching to `managed`:
+/// [`fauna_client_dns::affordances::manage_all_possibility`] over the DNS read
+/// and the active domain names (`None` = that read has not resolved).
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn dns_manage_all_possibility(
+    dns: Option<DnsSnapshot>,
+    active_domains: Option<Vec<String>>,
+    managed: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_dns::affordances::manage_all_possibility(
+        dns.as_ref(),
+        active_domains.as_deref(),
+        managed,
+    )
+}
+
+/// `admin-dns-add-credential-submit-button`:
+/// [`fauna_client_dns::affordances::credential_draft_possibility`]. `values` is
+/// what has been typed into each of the picked provider's DNS fields, in any
+/// order (blank when untouched).
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn dns_credential_draft_possibility(
+    provider_picked: bool,
+    values: Vec<String>,
+) -> fauna_core::possibility::Possibility {
+    let fields: Vec<(&str, &str)> = values.iter().map(|v| ("", v.as_str())).collect();
+    fauna_client_dns::affordances::credential_draft_possibility(provider_picked, &fields)
+}
+
+/// `admin-dns-cert-issue-button` on `domain`:
+/// [`fauna_client_dns::affordances::cert_issue_possibility`] over the
+/// snapshot's `pending_cert`.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn dns_cert_issue_possibility(
+    pending: Option<PendingCertIssue>,
+    domain: String,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_dns::affordances::cert_issue_possibility(pending.as_ref(), &domain)
+}
+
+/// `admin-dns-cert-delegate-button`:
+/// [`fauna_client_dns::affordances::delegate_possibility`] — blocked until a
+/// held credential covers a zone (`dns-management.md` § Errors & edge cases,
+/// *Renewal delegation and the rename banner answer too*).
+/// `credential_zones` is every zone the snapshot's credentials cover.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn dns_delegate_possibility(
+    credential_zones: Vec<String>,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_dns::affordances::delegate_possibility(&credential_zones)
+}
+
+/// One of the rename banner's state-gated actions.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiPrimaryDomainRenameAction {
+    /// `admin-dns-rename-complete-button` and its confirm (force-complete
+    /// included).
+    Complete,
+    /// The grace extension's day input and button.
+    Extend,
+    /// `admin-dns-rename-abort-button` and its confirm.
+    Abort,
+}
+
+/// `action` on the rename banner showing `view`:
+/// `PrimaryDomainRenameView::{complete,extend,abort}_possibility` — possible
+/// in the states that take it, absent outside them (`dns-management.md`
+/// § Errors & edge cases, *Renewal delegation and the rename banner answer
+/// too*).
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn primary_domain_rename_action_possibility(
+    view: PrimaryDomainRenameView,
+    action: FfiPrimaryDomainRenameAction,
+) -> fauna_core::possibility::Possibility {
+    match action {
+        FfiPrimaryDomainRenameAction::Complete => view.complete_possibility(),
+        FfiPrimaryDomainRenameAction::Extend => view.extend_possibility(),
+        FfiPrimaryDomainRenameAction::Abort => view.abort_possibility(),
+    }
+}
+
+/// `admin-mail-enabled-toggle`:
+/// [`MailPolicySnapshot::enable_toggle_possibility`] — turning mail on is
+/// blocked by the `admin-mail-unavailable-notice` sentence on a box that
+/// cannot enable it; mail already on stays possible so it can be turned off
+/// (`admin.md` § Errors & edge cases).
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn mail_enable_toggle_possibility(
+    snapshot: MailPolicySnapshot,
+) -> fauna_core::possibility::Possibility {
+    snapshot.enable_toggle_possibility()
+}
+
+/// `admin-dns-add-domain-submit-button`:
+/// [`fauna_client_mail_settings::domain_forms::add_domain_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn local_domain_add_possibility(
+    domains: Option<LocalDomainsSnapshot>,
+    draft: String,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_mail_settings::domain_forms::add_domain_possibility(domains.as_ref(), &draft)
+}
+
+/// `admin-dns-domain-remove-button` on `row`:
+/// [`fauna_client_mail_settings::domain_forms::remove_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn local_domain_remove_possibility(
+    row: LocalDomainView,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_mail_settings::domain_forms::remove_possibility(&row)
+}
+
+/// `admin-dns-domain-rename-button` (the primary row):
+/// [`fauna_client_mail_settings::domain_forms::rename_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn local_domain_rename_possibility(
+    domains: LocalDomainsSnapshot,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_mail_settings::domain_forms::rename_possibility(&domains)
+}
+
+/// `admin-dns-domain-promote-button` (a non-primary row):
+/// [`fauna_client_mail_settings::domain_forms::promote_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn local_domain_promote_possibility(
+    domains: LocalDomainsSnapshot,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_mail_settings::domain_forms::promote_possibility(&domains)
+}
+
+/// `admin-dns-rename-submit-button`:
+/// [`fauna_client_mail_settings::domain_forms::rename_draft_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn local_domain_rename_draft_possibility(
+    domains: Option<LocalDomainsSnapshot>,
+    target: String,
+    grace_days: String,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_mail_settings::domain_forms::rename_draft_possibility(
+        domains.as_ref(),
+        &target,
+        &grace_days,
+    )
+}
+
+/// `admin-dns-rename-extend-button`:
+/// [`fauna_client_mail_settings::domain_forms::extend_draft_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn local_domain_extend_draft_possibility(days: String) -> fauna_core::possibility::Possibility {
+    fauna_client_mail_settings::domain_forms::extend_draft_possibility(&days)
+}
+
+// The mail, calendar and aliases forms' draft-validity answers (`admin.md`
+// § Errors & edge cases → *A form's submit is live only for a draft the nest
+// would accept*): the natives paint each submit from these, folded after the
+// page's read gate, and ask again at the press.
+
+/// A mail group's save (`admin.md` § 6 Mail):
+/// [`fauna_client_mail_settings::admin_policy::knobs_draft_possibility`] over
+/// the group's `u32` drafts, its `u64` drafts and its one-number-per-line
+/// lists. A group whose number does not parse is never saved with the stored
+/// value; once possible, the values are `parse_count` / `parse_count_u64` of
+/// the same drafts.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn mail_knobs_draft_possibility(
+    counts: Vec<String>,
+    counts_u64: Vec<String>,
+    lists: Vec<String>,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_mail_settings::admin_policy::knobs_draft_possibility(&counts, &counts_u64, &lists)
+}
+
+/// `admin-mail-microsoft-save-button`:
+/// [`fauna_client_mail_settings::admin_policy::microsoft_draft_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn mail_microsoft_draft_possibility(
+    client_id: String,
+    tenant: String,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_mail_settings::admin_policy::microsoft_draft_possibility(&client_id, &tenant)
+}
+
+/// `admin-calendar-caldav-port-save-button`:
+/// [`CaldavPolicyMachine::port_draft_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn caldav_port_draft_possibility(draft: String) -> fauna_core::possibility::Possibility {
+    CaldavPolicyMachine::port_draft_possibility(&draft)
+}
+
+/// The aliases page's forwarder add:
+/// [`ForwarderMachine::create_draft_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn forwarder_create_draft_possibility(
+    local_domain: String,
+    pattern: String,
+    forward_target: String,
+) -> fauna_core::possibility::Possibility {
+    ForwarderMachine::create_draft_possibility(&local_domain, &pattern, &forward_target)
+}
+
+/// The day count a grace or extend draft names:
+/// [`fauna_client_mail_settings::domain_forms::parse_rename_days`]'s `Ok`.
+/// `None` for a blank draft (the nest's default) — and for an invalid one,
+/// which the caller has already refused through the draft's answer above, so
+/// an invalid draft is never silently replaced by the default.
+#[uniffi::export]
+pub fn local_domain_rename_days(draft: String) -> Option<i64> {
+    fauna_client_mail_settings::domain_forms::parse_rename_days(&draft)
+        .ok()
+        .flatten()
+}
+
+#[cfg(all(test, feature = "value-format"))]
+mod admin_dns_possibility_face_tests {
+    use super::*;
+
+    fn key(p: &fauna_core::possibility::Possibility) -> Option<String> {
+        p.reason().map(|r| r.key.clone())
+    }
+
+    #[test]
+    fn an_unread_snapshot_is_still_loading_never_possible() {
+        assert_eq!(
+            key(&dns_set_mode_possibility(None, "a.test".into(), true)),
+            Some("common.still_loading".into())
+        );
+        assert_eq!(
+            key(&dns_manage_all_possibility(None, None, true)),
+            Some("common.still_loading".into())
+        );
+        assert_eq!(
+            key(&local_domain_add_possibility(None, "a.test".into())),
+            Some("common.still_loading".into())
+        );
+    }
+
+    #[test]
+    fn the_faces_forward_the_shared_answers() {
+        assert_eq!(
+            key(&dns_credential_draft_possibility(true, vec![" ".into()])),
+            Some(fauna_client_dns::affordances::CREDENTIAL_FIELD_REQUIRED.into())
+        );
+        assert!(dns_credential_draft_possibility(true, vec!["t".into()]).is_possible());
+        assert!(dns_cert_issue_possibility(None, "a.test".into()).is_possible());
+        assert_eq!(
+            key(&local_domain_extend_draft_possibility("31".into())),
+            Some(fauna_client_mail_settings::domain_forms::RENAME_DAYS_INVALID.into())
+        );
+    }
+
+    #[test]
+    fn rename_days_reads_blank_as_the_default_and_a_valid_count_as_itself() {
+        assert_eq!(local_domain_rename_days(" ".into()), None);
+        assert_eq!(local_domain_rename_days("14".into()), Some(14));
+        assert_eq!(local_domain_rename_days("99".into()), None);
+    }
+}
+
 #[cfg(test)]
 mod cert_row_status_view_tests {
     use super::*;
@@ -572,5 +877,68 @@ mod cert_row_status_view_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "value-format"))]
+mod rename_and_delegate_possibility_face_tests {
+    use super::*;
+    use fauna_core::possibility::Possibility;
+
+    fn view(complete: bool, force: bool, extend: bool, abort: bool) -> PrimaryDomainRenameView {
+        PrimaryDomainRenameView {
+            rename_id: vec![0; 16],
+            state: "grace".into(),
+            old_primary_domain: "old.test".into(),
+            new_primary_domain: "new.test".into(),
+            started_at: 0,
+            grace_days: 7,
+            grace_ends_at: None,
+            ready_to_complete_at: None,
+            is_post_flip_active: true,
+            is_pre_flip: false,
+            can_complete: complete,
+            can_force_complete: force,
+            can_extend: extend,
+            can_abort: abort,
+        }
+    }
+
+    #[test]
+    fn each_banner_action_answers_its_own_state() {
+        use FfiPrimaryDomainRenameAction::*;
+        let none = view(false, false, false, false);
+        for action in [Complete, Extend, Abort] {
+            assert_eq!(
+                primary_domain_rename_action_possibility(none.clone(), action),
+                Possibility::Absent
+            );
+        }
+        assert_eq!(
+            primary_domain_rename_action_possibility(view(false, true, false, false), Complete),
+            Possibility::Possible
+        );
+        assert_eq!(
+            primary_domain_rename_action_possibility(view(false, false, true, false), Extend),
+            Possibility::Possible
+        );
+        assert_eq!(
+            primary_domain_rename_action_possibility(view(false, false, false, true), Abort),
+            Possibility::Possible
+        );
+    }
+
+    #[test]
+    fn delegation_waits_for_a_credential_zone() {
+        assert_eq!(
+            dns_delegate_possibility(Vec::new())
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("admin.dns.cert.delegate_no_zones")
+        );
+        assert_eq!(
+            dns_delegate_possibility(vec!["example.test".into()]),
+            Possibility::Possible
+        );
     }
 }

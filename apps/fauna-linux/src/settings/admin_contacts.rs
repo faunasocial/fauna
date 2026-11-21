@@ -37,6 +37,7 @@ use super::admin_bool_toggle_page::admin_bool_toggle_page;
 
 admin_bool_toggle_page! {
     page_fn: build_admin_contacts_page,
+    stack_child: "admin-contacts",
     machine: CarddavPolicyMachine,
     action: CarddavPolicyAction,
     snapshot: CarddavPolicySnapshot,

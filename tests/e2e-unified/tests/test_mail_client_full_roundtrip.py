@@ -56,6 +56,7 @@ import time
 import pytest
 
 from helpers.mail_client_ui import claim_enable_and_ready, deliver_inbound
+from helpers.mail_health_seeds import post
 
 # `real_conversations`: windows (and macOS/iOS) start the REAL shared-Rust receive
 # loop only under the session-wide flag this marker sets, and the external reply
@@ -163,3 +164,57 @@ def _run_full_roundtrip(app, nest, *, credential_kind):
 @pytest.mark.feature("email-in-conversations")
 def test_full_client_ui_mail_roundtrip(app, unclaimed_mail_nest_ui, credential_kind):
     _run_full_roundtrip(app, unclaimed_mail_nest_ui, credential_kind=credential_kind)
+
+
+#: The admin-mail status line while outbound port 25 is unreachable
+#: (`admin.mail_page.health_state_outbound_blocked`).
+OUTBOUND_BLOCKED_LINE = "Mail: outgoing mail cannot leave this server"
+
+
+@pytest.mark.feature("admin-mail-health")
+def test_a_claim_on_a_box_whose_port_25_is_blocked_says_why_mail_cannot_leave(
+    app, unclaimed_mail_nest_ui
+):
+    """The fresh-cloud-box journey: the provider blocks outbound port 25
+    (`installers/vps.md`, the outbound-port-25 note), the admin claims with a
+    real-domain handle, and the claim's serving enablement turns mail on. With
+    no further step — no Check again — the admin's Mail page says outgoing mail
+    cannot leave this server, and the outgoing-queue row says why and what to
+    do: the mail enable started the box's first diagnostics run, whose probe of
+    a receiver's port 25 never connected (`mail-deliverability.md` § Symptom
+    diagnostics). The block is stood in by the `test-hooks` probe seam; the
+    network is never touched."""
+    nest = unclaimed_mail_nest_ui
+    post(nest.nest, "/api/v1/test/mail/starttls-probe", {
+        "outcome": "unreachable",
+        "reason": "timed out after 12s connecting to gmail-smtp-in.l.google.com:25",
+    })
+
+    claim_enable_and_ready(app, nest, credential_kind="plain")
+
+    # The readout is read when the page hydrates; the first run finishes in the
+    # background, so re-open the page until it shows (convention 14: an
+    # outcome poll, not a duration).
+    from helpers.waiting import wait_until
+
+    seen = {"status": ""}
+
+    def _shows_the_block() -> bool:
+        app.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
+        app.admin.navigate_mail()
+        if app.admin.mail_health_present():
+            seen["status"] = app.admin.mail_health_status()
+        return seen["status"].startswith(OUTBOUND_BLOCKED_LINE)
+
+    try:
+        wait_until(_shows_the_block, 90.0, interval=2.0)
+    except AssertionError:
+        pass
+    assert seen["status"].startswith(OUTBOUND_BLOCKED_LINE), (
+        f"after the claim's mail enable on a box whose port 25 is blocked, the "
+        f"admin-mail line reads {seen['status']!r}, not {OUTBOUND_BLOCKED_LINE!r}; "
+        f"error: {app.error_text()!r}"
+    )
+    row = app.admin.mail_health_check(2)
+    assert row["detail"].startswith("outbound port 25 is unreachable"), row
+    assert "ask yours to lift the block" in row["detail"], row

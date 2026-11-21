@@ -2,8 +2,9 @@ import SwiftUI
 
 /// New-thread composition — `dm-compose-form`: the `recipient-picker`, a
 /// `group-conversation-hint` once there are ≥2 chips, then the same
-/// `dm-compose-bar` grammar (running in its all-enabled mode — `capabilities:
-/// nil` — since the rail isn't locked until the first chip resolves). Reads the
+/// `dm-compose-bar` grammar (in its new-thread mode — `capabilities: nil` — whose
+/// Send, attach and topic paint from the shared `NewThreadControlAnswers`, since
+/// the rail is decided by who the thread goes to). Reads the
 /// shared `ConversationsVM.newThreadCompose` state; renders nothing until
 /// `startNewConversation()` has set it. Shared by the macOS + iOS conversations
 /// views — macOS embeds it in the detail pane (no modal, per the spec), iOS in a
@@ -123,7 +124,11 @@ public struct NewThreadComposeForm: View {
                     onAttachFile: { try vm.attachNewThreadFile(at: $0) },
                     onAttachError: { vm.clientErrorMessage = $0 },
                     onRemoveAttachment: { vm.removeNewThreadAttachment(at: $0) },
-                    onSend: { Task { _ = await vm.sendNewThread() } },
+                    // The VM keeps the send's error: a refusal the manager
+                    // stamped shows from the draft, any other from its detail.
+                    onSend: { Task { await vm.sendNewThread() } },
+                    // A gated control's refusal, said on the banner above.
+                    onRefuse: { vm.clientErrorMessage = $0 },
                     // The send founds a room (`fauna.conversations.room.create`,
                     // online-only) exactly when the toggle is on AND the
                     // prospective class is community — gated only then, so the

@@ -66,7 +66,7 @@ def get_repo_root() -> Path:
 
 
 def fence_cpuset_args() -> list[str]:
-    """``["--cpuset-cpus", <the build helper's CPU set>]`` for every container the
+    """``["--label", "fauna-fence=1", "--cpuset-cpus", <the build helper's CPU set>]`` for every container the
     harness ``docker run -d``s, or ``[]`` where there is no CPU set to join. Docker
     places a container in ``system.slice``, outside the two slices that set
     covers, so without this a harness nest runs on every CPU while that set
@@ -76,6 +76,11 @@ def fence_cpuset_args() -> list[str]:
     fleet tooling, or one whose copy predates it, pins nothing. Read at each
     start: the fence moves while a run lasts."""
     mod = _build_slot()
+    if mod is not None and hasattr(mod, "_docker_fence_args"):
+        # The fence label too: the agent follows a container carrying it, so a
+        # helper's container that is not the harness's (the acme venue's
+        # pebble) moves with the fence as well.
+        return mod._docker_fence_args()
     cpus = getattr(mod, "_fence_cpuset_spec", lambda: None)() if mod else None
     return ["--cpuset-cpus", cpus] if cpus else []
 
@@ -586,9 +591,23 @@ def wait_for_health(port: int, container_name: str,
 ROUTER_CHANNEL_UP = "router channel to nest established"
 
 
+def router_channel_ups(container_name: str) -> int:
+    """How many times the SNI router has logged its channel to the nest up in
+    this container's life — one per router process that got past its hello."""
+    logs = subprocess.run(
+        ["docker", "logs", container_name],
+        capture_output=True, text=True, timeout=30,
+    )
+    return (logs.stdout + logs.stderr).count(ROUTER_CHANNEL_UP)
+
+
 def _wait_for_router_channel(container_name: str, last_health: str,
-                             budget_s: float = ROUTER_CHANNEL_S) -> None:
-    """Wait until the SNI router's sidecar channel to the nest is up.
+                             budget_s: float = ROUTER_CHANNEL_S, *,
+                             seen: int = 0) -> None:
+    """Wait until the SNI router's sidecar channel to the nest is up — the
+    ``seen + 1``-th time the router logs it, so a caller that restarted the nest
+    waits for the router's own restart behind it, never the line an earlier
+    router process logged.
 
     Every fixture reaches the nest through the router's :443. On a fresh
     container the router can start before the nest has minted its token, is
@@ -609,7 +628,7 @@ def _wait_for_router_channel(container_name: str, last_health: str,
             capture_output=True, text=True, timeout=30,
         )
         out = logs.stdout + logs.stderr
-        if ROUTER_CHANNEL_UP in out:
+        if out.count(ROUTER_CHANNEL_UP) > seen:
             return
         tail = out[-800:]
         time.sleep(1.0)  # sleep-ok: the poll interval of a budget-bounded wait on the router's own log line
@@ -869,6 +888,7 @@ def factory_reset_and_reclaim_docker(nest, *, claim_code: str, timeout: float = 
     from common.nest import _wait_nest_fresh
 
     admin_sk = nest["admin"]["signing_key"]
+    routers_before = router_channel_ups(nest["name"])
     with WsRpcAdminClient(
         nest["url"], actor_id=bytes(admin_sk.verify_key), signing_key=bytes(admin_sk)
     ) as adm:
@@ -879,6 +899,15 @@ def factory_reset_and_reclaim_docker(nest, *, claim_code: str, timeout: float = 
     # The handler exits ~750ms after replying; s6 restarts fauna-nest into the
     # boot-time wipe and it comes back fresh/unclaimed.
     _wait_nest_fresh(nest["url"], timeout=timeout)
+    # The restarted nest re-minted its sidecar tokens, so the SNI router in
+    # front of :443 is refused at its next hello and exits for s6 to restart it,
+    # cutting every live connection. A call made before that restart is behind
+    # us lands on a router about to drop it — measured: the first post-reset
+    # `fauna.account.state.put` failing as a bare transport error while the same
+    # call 20 s later succeeded. So wait for the router's own word that its next
+    # life is up, as `wait_for_health` does at boot.
+    _wait_for_router_channel(nest["name"], "nest fresh after factory_reset",
+                             seen=routers_before)
     nest["admin"] = claim_admin(
         nest["port"], claim_code, base_url=nest["url"], signing_key=admin_sk
     )

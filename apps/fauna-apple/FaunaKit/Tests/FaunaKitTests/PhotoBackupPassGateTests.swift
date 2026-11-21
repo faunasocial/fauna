@@ -71,6 +71,19 @@ import Foundation
     #expect(await gate.finish() == true, "a request during the trailing pass earns its own re-run")
 }
 
+@Test func everyRefusedClaimIsCountedAndAWinningOneIsNot() async {
+    let gate = PhotoBackupPassGate()
+    #expect(await gate.coalescedRequests == 0)
+    #expect(await gate.claim() == true)
+    #expect(await gate.coalescedRequests == 0, "a winning claim is not a coalesced request")
+    #expect(await gate.claim() == false)
+    #expect(await gate.claim() == false)
+    #expect(await gate.coalescedRequests == 2, "every refusal counts, though the trailing pass is one")
+    #expect(await gate.finish() == true)
+    #expect(await gate.finish() == false)
+    #expect(await gate.coalescedRequests == 2, "the count is monotonic across passes")
+}
+
 @Test func aQuietPassEndsWithNoTrailingRun() async {
     let gate = PhotoBackupPassGate()
     #expect(await gate.claim() == true)

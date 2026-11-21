@@ -161,6 +161,28 @@ impl InviteRequestSnapshot {
     }
 }
 
+impl InviteRequestSnapshot {
+    /// `invite-request-continue-button`'s answer (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 6). Continue redeems a checked
+    /// out-of-band code and nothing else, so it is possible exactly when the
+    /// code is `Valid` — the condition `continue_enabled` mirrors, read off
+    /// the state itself so the two cannot drift. Blocked, it names the next
+    /// act: with no code checked yet, `status_idle` (ask for an invite or
+    /// paste a code — the line `invite-request-status` carries at rest);
+    /// otherwise the code row's own `oob_message` (checking, refused,
+    /// unreachable).
+    pub fn continue_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        match &self.out_of_band_code_state {
+            OobCodeState::Valid { .. } => Possibility::Possible,
+            OobCodeState::Idle => {
+                Possibility::blocked(LocalizedText::key("onboarding.invite_request.status_idle"))
+            }
+            other => Possibility::blocked(oob_message_for(other)),
+        }
+    }
+}
+
 impl Default for InviteRequestSnapshot {
     fn default() -> Self {
         Self::idle()
@@ -552,5 +574,39 @@ mod tests {
             recovered,
             InviteRequestState::PendingReview { .. }
         ));
+    }
+
+    /// Rule 6: Continue is possible only for a valid code; blocked, it names
+    /// the next act — ask or paste at rest, else the code row's own line.
+    #[test]
+    fn continue_possibility_names_the_next_act() {
+        let idle = InviteRequestSnapshot::idle();
+        assert_eq!(
+            idle.continue_possibility().reason().map(|r| r.key.as_str()),
+            Some("onboarding.invite_request.status_idle")
+        );
+        let refused_state = OobCodeState::Invalid {
+            reason: "expired".into(),
+        };
+        let refused = InviteRequestSnapshot {
+            oob_message: oob_message_for(&refused_state),
+            out_of_band_code_state: refused_state,
+            ..InviteRequestSnapshot::idle()
+        };
+        assert_eq!(
+            refused
+                .continue_possibility()
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("onboarding.invite_request.oob_invalid")
+        );
+        let valid = InviteRequestSnapshot {
+            out_of_band_code_state: OobCodeState::Valid {
+                invite_id: "inv-1".into(),
+                supervised_by: None,
+            },
+            ..InviteRequestSnapshot::idle()
+        };
+        assert!(valid.continue_possibility().is_possible());
     }
 }

@@ -1,6 +1,7 @@
 package com.fauna.app.bridge
 
 import android.app.UiAutomation
+import android.content.res.Resources
 import android.graphics.Rect
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
@@ -9,6 +10,9 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
 import com.fauna.app.testing.AutomationSemantics
+import com.fauna.app.testing.RegistryNode
+import org.json.JSONArray
+import org.json.JSONObject
 import com.fauna.automation.ScopeStep
 import com.fauna.automation.UiElements
 import com.fauna.app.testing.NodeFacts
@@ -150,7 +154,120 @@ class ElementOps(
         if (name == "options" && twin != null && AutomationSemantics.isMenuAnchor(facts)) {
             return AutomationSemantics.optionsJson(paintedOptions(target, twin, elementId))
         }
+        if (name == SELECTABLE_ATTR) return if (selectsOnLongPress(target)) "true" else "false"
         return AutomationSemantics.attrValue(facts, name)
+    }
+
+    /**
+     * The `selectable` attr — whether the element's text can be selected with
+     * the platform's own gesture (`drivers/base.py::is_text_selectable`;
+     * `docs/goal/ui/README.md` § Text the person reads can be copied). Read off
+     * what a person sees, never off a flag the app sets for the test: the bridge
+     * makes the person's gesture, a long-press on the element, and answers
+     * whether the platform's text-selection toolbar came up with its Copy
+     * action. Compose shows that toolbar only for a selection the press made
+     * inside the app's `SelectionContainer` (`ReadText.kt`'s `ReadTextRoot`),
+     * and never for a caption a control keeps in `DisableSelection`.
+     *
+     * The toolbar's Copy is found by the platform's own string
+     * (`android.R.string.copy` from the system resources, in the device's
+     * locale) and counted against the same label painted before the press, so
+     * a page's own Copy button is no reading. The selection is LEFT standing, as web's drag leaves it; a press
+     * on an element whose long-press acts acts here too, as the person's would.
+     */
+    private fun selectsOnLongPress(target: UiObject2): Boolean {
+        val copy = Resources.getSystem().getString(android.R.string.copy)
+        val before = device.findObjects(By.text(copy)).size
+        copyLabelsBeforePress = before
+        target.longClick()
+        val deadline = SystemClock.uptimeMillis() + SELECTION_TOOLBAR_WAIT_MS
+        while (true) {
+            if (device.findObjects(By.text(copy)).size > before) return true
+            if (SystemClock.uptimeMillis() >= deadline) return false
+            SystemClock.sleep(SELECT_OPTION_POLL_MS)
+        }
+    }
+
+    /** How many Copy labels the screen painted before the last
+     *  [selectsOnLongPress]; more than that now means its toolbar still stands. */
+    @Volatile private var copyLabelsBeforePress: Int? = null
+
+    /** What `POST /element/select-text` answers: the shared bridge reply
+     *  (`drivers/http_bridge.py::is_text_selectable`). */
+    data class SelectTextReply(val selected: String, val copyOffered: Boolean, val why: String?)
+
+    /**
+     * `POST /element/select-text` — the person's gesture, a long-press on the
+     * element ([selectsOnLongPress]), then what the selection it made holds,
+     * read with [copySelection]; the selection is LEFT standing for
+     * `selected_text`. No toolbar → `""` and a `why`. The toolbar came up but
+     * the copy key wrote nothing → `""` with `copyOffered` (the platform did
+     * offer its Copy on a selection) and a `why` naming the read that failed,
+     * which the driver's `diagnose` folds into a failure.
+     */
+    fun selectText(
+        elementId: String,
+        index: Int,
+        scope: List<ScopeStep>,
+        readClipboard: () -> String?,
+        writeClipboard: (String) -> Unit,
+    ): SelectTextReply {
+        val target = one(elementId, index, scope)
+        if (!selectsOnLongPress(target)) {
+            return SelectTextReply("", false, "no text-selection toolbar with Copy came up after the long-press")
+        }
+        val text = copySelection(readClipboard, writeClipboard)
+            ?: return SelectTextReply(
+                "", true,
+                "the selection toolbar came up, but the copy key (Ctrl+C) wrote nothing to the clipboard",
+            )
+        return SelectTextReply(text, false, null)
+    }
+
+    /**
+     * `POST /page/selection` — the text the standing selection holds
+     * (`drivers/base.py::selected_text`), `null` when none stands. Read with the
+     * selection's own copy, the key a person with a keyboard presses (Ctrl+C,
+     * which `SelectionContainer` handles while it holds focus — the long-press
+     * that made the selection gave it focus), into a clipboard first set to a
+     * one-off sentinel, so a copy that wrote nothing is told apart from one that
+     * wrote the same text twice.
+     *
+     * Never the toolbar's Copy: that one ends the selection as it copies, and
+     * outcome 4 of `copy-what-you-read` reads the selection twice, across a
+     * repaint. The key copy leaves the selection standing (unmeasured on a
+     * device when written — the first `e2e:android` run of the witness is its
+     * measurement). When the toolbar of the last long-press still stands but
+     * the key wrote nothing, the read REFUSES rather than answering "nothing
+     * selected": that is this reading failing, never the product.
+     */
+    fun selectedText(readClipboard: () -> String?, writeClipboard: (String) -> Unit): String? {
+        copySelection(readClipboard, writeClipboard)?.let { return it }
+        val copy = Resources.getSystem().getString(android.R.string.copy)
+        val baseline = copyLabelsBeforePress
+        if (baseline != null && device.findObjects(By.text(copy)).size > baseline) {
+            throw IllegalStateException(
+                "the selection toolbar of the last long-press still stands, but the copy key " +
+                    "(Ctrl+C) wrote nothing to the clipboard — the selection read failed, " +
+                    "not the selection"
+            )
+        }
+        return null
+    }
+
+    /** The selection's text by its own copy key into a sentinel-primed
+     *  clipboard, `null` when the key wrote nothing. */
+    private fun copySelection(readClipboard: () -> String?, writeClipboard: (String) -> Unit): String? {
+        val sentinel = "fauna-e2e-selection-sentinel-" + SystemClock.uptimeMillis()
+        writeClipboard(sentinel)
+        device.pressKeyCode(android.view.KeyEvent.KEYCODE_C, COPY_META)
+        val deadline = SystemClock.uptimeMillis() + SELECTION_COPY_WAIT_MS
+        while (true) {
+            val text = readClipboard()
+            if (text != null && text != sentinel) return text
+            if (SystemClock.uptimeMillis() >= deadline) return null
+            SystemClock.sleep(SELECT_OPTION_POLL_MS)
+        }
     }
 
     /**
@@ -197,6 +314,39 @@ class ElementOps(
         elements.count(elementId, scope)
 
     fun screenshot(name: String): String = elements.screenshot(name)
+
+    /**
+     * `GET /registry` — the whole frame as cross-app records, over the raw
+     * tree (the record rules are [AutomationSemantics.registryRecords]'s,
+     * unit-pinned; only the copy of the tree lives here).
+     */
+    fun registry(): JSONObject {
+        fun copy(node: AccessibilityNodeInfo): RegistryNode = RegistryNode(
+            facts = factsOf(node),
+            visible = node.isVisibleToUser,
+            children = (0 until node.childCount).mapNotNull { node.getChild(it)?.let(::copy) },
+        )
+        val records = AutomationSemantics.registryRecords(roots().map(::copy))
+        val elements = JSONArray()
+        for (r in records) {
+            val attrs = JSONObject()
+            r.attrs.forEach { (k, v) -> attrs.put(k, v) }
+            elements.put(
+                JSONObject()
+                    .put("id", r.id)
+                    .put("index", r.index)
+                    .put("enabled", r.enabled)
+                    .put("declares_enabled", false)
+                    .put("actuable", r.actuable)
+                    .put("editable", r.editable)
+                    .put("scope", r.scope)
+                    .put("frame", r.frame)
+                    .put("text", r.text)
+                    .put("attrs", attrs),
+            )
+        }
+        return JSONObject().put("elements", elements)
+    }
 
     // ── the raw accessibility tree ──────────────────────────────────────
 
@@ -309,6 +459,17 @@ class ElementOps(
     private companion object {
         const val SELECT_OPTION_WAIT_MS = 2000L
         const val SELECT_OPTION_POLL_MS = 50L
+        const val SELECTABLE_ATTR = "selectable"
+
+        /** How long the selection toolbar may take to paint after the long-press
+         *  is released; a ceiling on a broken surface, never a pacing sleep. */
+        const val SELECTION_TOOLBAR_WAIT_MS = 3000L
+
+        /** How long the selection's copy may take to reach the clipboard; a
+         *  ceiling on a broken surface, never a pacing sleep. */
+        const val SELECTION_COPY_WAIT_MS = 2000L
+
+        const val COPY_META = android.view.KeyEvent.META_CTRL_ON or android.view.KeyEvent.META_CTRL_LEFT_ON
     }
 }
 

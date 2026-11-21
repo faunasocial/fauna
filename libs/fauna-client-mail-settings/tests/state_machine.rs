@@ -1700,21 +1700,22 @@ async fn provision_relay_mailbox_never_deposits_plaintext_msek() {
     );
 }
 
-/// Provisioning a relay mailbox before mail is enabled (no fleet MSEK to reuse)
-/// must error rather than mint a fresh one — minting here is the very bug a
-/// second box would hit.
+/// Provisioning a relay mailbox on an account with no mailbox provisions
+/// nothing, mints nothing and answers no error — content-only multi-homing
+/// (`mail-credentials.md` § MSEK lifecycle → *Every account holds the key*,
+/// ruling 2). Minting a fresh key here is the very bug a second box would hit.
 #[tokio::test]
-async fn provision_relay_mailbox_without_enabled_mail_errors() {
-    let (machine, nest, _mail) = build_machine();
-    let err = machine
+async fn provision_relay_mailbox_without_a_mailbox_provisions_nothing() {
+    let (machine, nest, mail) = build_machine();
+    machine
         .dispatch(MailSettingsAction::ProvisionRelayMailbox)
         .await
-        .expect_err("provisioning a relay mailbox before mail is enabled must error");
-    assert!(matches!(err, DispatchError::InvalidState(_)), "got {err:?}");
+        .expect("a link with no mailbox is no error");
     assert!(
         nest.state().provision_mls_snapshot.is_empty(),
-        "nothing provisioned when there is no MSEK to reuse"
+        "nothing provisioned when there is no mailbox to carry"
     );
+    assert!(mail.current().msek.is_none(), "the link never mints a key");
 }
 
 // ─── auto_enable_mail_for_new_user: the gated first-setup new-user auto-mint ───
@@ -2005,4 +2006,30 @@ async fn the_snapshots_dav_flags_follow_the_deployment() {
     // Unread ⇒ false: a fresh machine has read nothing.
     let (fresh, _nest, _mail) = build_machine();
     assert!(!fresh.snapshot().caldav_enabled);
+}
+
+#[tokio::test]
+async fn mail_usable_follows_the_first_hydrate_and_the_enable() {
+    // The predicate every mail sub-page entry is gated on
+    // (`ui/mail-settings.md` § Errors & edge cases, the mail-usable gate):
+    // waiting before the first read, then the nest's answer — mail off names
+    // the toggle, an enable makes it possible, and a later fold keeps the read.
+    use fauna_core::possibility::Possibility;
+    let (machine, _nest, _mail) = build_machine();
+    let reason = |p: Possibility| p.reason().map(|r| r.key.clone());
+    assert_eq!(
+        reason(machine.snapshot().mail_usable()).as_deref(),
+        Some("mail_settings.usable_reading")
+    );
+    machine.hydrate().await.expect("hydrate");
+    assert!(machine.snapshot().read, "a resolved hydrate marks the read");
+    assert_eq!(
+        reason(machine.snapshot().mail_usable()).as_deref(),
+        Some("mail_settings.usable_needs_mail_on")
+    );
+    machine
+        .enable_mail_with_generated_password("Default".into())
+        .await
+        .expect("enable");
+    assert_eq!(machine.snapshot().mail_usable(), Possibility::Possible);
 }

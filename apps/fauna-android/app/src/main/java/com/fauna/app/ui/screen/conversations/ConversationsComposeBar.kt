@@ -38,17 +38,31 @@ import com.fauna.app.ui.components.RecordingVisualTransformation
 import com.fauna.app.ui.components.RevealSpan
 import com.fauna.app.ui.components.naiveMarkdownWrap
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.components.utf16IndexToUtf8Byte
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.components.DisabledControlReasonText
 import uniffi.fauna_conversations.ComposeState
+import uniffi.fauna_conversations.NewThreadControl
 import uniffi.fauna_conversations.RecipientPickerState
 import uniffi.fauna_conversations.ReplyPreview
 import uniffi.fauna_conversations.SendState
 import uniffi.fauna_conversations.ThreadCapabilities
+import uniffi.fauna_conversations.ThreadControl
+import uniffi.fauna_conversations.threadControlPossibility
+import uniffi.fauna_conversations.threadSendPossibility
 import uniffi.fauna_conversations.TypedAddress
 import uniffi.fauna_conversations.recipientResolveStatus
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AssistChip
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.InputChip
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * Shared compose primitives for the unified conversations page — the
@@ -205,6 +219,13 @@ fun ComposeBar(
     // `room.create` ceremony, so the send button gates on it, not on a channel
     // append. Always false for the reply bar.
     foundsRoom: Boolean = false,
+    // The new-thread composer's answer for Send, attach and topic — the shared
+    // `new_thread_control_possibility(compose, control)`
+    // (`ui/conversations.md` § Errors & edge cases → *The new-thread composer
+    // offers only what it can send*), injected so this Content stays FFI-free
+    // for Robolectric. `null` on the reply bar, whose controls follow
+    // [capabilities]; a thread not yet created has none.
+    newThreadAnswer: ((NewThreadControl) -> Possibility)? = null,
     // Byte-size label for a staged attachment chip, injected like
     // [claimStatusLabel]/[providerStatusLabel] in ProfileTiersTab.kt so tests can
     // swap in a non-FFI double (the .so can't load under Robolectric); production
@@ -455,6 +476,13 @@ fun ComposeBar(
         // (`ComposeFieldStyling`), and withdrawn when the field leaves the screen
         // so a read after the composer closed is a refusal, not a stale answer.
         DisposableEffect(Unit) { onDispose { ComposeFieldStyling.applied = null } }
+        // The reply bar's send answer — the shared `thread_send_possibility`
+        // (`ThreadCapabilities::send_possibility`), never `canSend` read here:
+        // blocked on a bridged room no bridge serves, with
+        // `conversations.unified.room_notice_bridge_disconnected` painted
+        // beside Send. `null` on the new-thread compose (no thread yet), whose
+        // Send follows [newThreadAnswer].
+        val replySend = if (newThreadAnswer == null) capabilities?.let { threadSendPossibility(it) } else null
         OutlinedTextField(
             value = bodyValue,
             onValueChange = { newValue ->
@@ -465,6 +493,7 @@ fun ComposeBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag(Ids.DM_TEXT_FIELD),
+            enabled = replySend?.isPossible ?: true,
             visualTransformation = RecordingVisualTransformation(bodyTransformation),
             minLines = 1,
             maxLines = 4,
@@ -489,18 +518,32 @@ fun ComposeBar(
             onToggleMarkers = if (markdownEnabled) ({ markersShown = !markersShown }) else null,
         )
 
+        // A rail with no subject has no topic toggle at all — the shared
+        // `Subject` answer is a rail absence, never a disabled control. On the
+        // new-thread compose (no rail yet) the shared new-thread answer paints
+        // Send, attach and topic instead: live for a draft not yet addressed,
+        // then as the recipient's rail allows, blocked with the reason painted
+        // below the row (rule 2).
+        val subject = capabilities?.let {
+            threadControlPossibility(it, ThreadControl.SUBJECT, null)
+        } ?: newThreadAnswer?.invoke(NewThreadControl.TOPIC)
+        val attach = newThreadAnswer?.invoke(NewThreadControl.ATTACH)
+        val sendAnswer = newThreadAnswer?.invoke(NewThreadControl.SEND)
+
         // Bottom action row: topic toggle | attach | spacer | send.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(
-                onClick = onTopicToggle,
-                enabled = capabilities?.supportsSubject ?: true,
-                modifier = Modifier.testTag(Ids.TOPIC_TOGGLE_BUTTON),
-            ) {
-                Text(stringResource(R.string.conversations_unified_topic_toggle_add))
+            if (subject == null || subject.isShown) {
+                TextButton(
+                    onClick = { if (subject == null || subject.isPossible) onTopicToggle() },
+                    enabled = newThreadAnswer == null || subject?.isPossible != false,
+                    modifier = Modifier.testTag(Ids.TOPIC_TOGGLE_BUTTON),
+                ) {
+                    Text(stringResource(R.string.conversations_unified_topic_toggle_add))
+                }
             }
             IconButton(
                 onClick = onAttach,
-                enabled = capabilities?.supportsAttachments ?: true,
+                enabled = attach?.isPossible ?: (capabilities?.supportsAttachments ?: true),
                 modifier = Modifier.testTag(Ids.ATTACHMENT_BUTTON),
             ) {
                 Icon(
@@ -514,10 +557,12 @@ fun ComposeBar(
             // startConversationsSession` builds at login (the mocks under plain
             // E2E). A refusal lands on the shared `send_state`, which the page's
             // `error-message` mirrors (conversations.md §"Per-rail backends").
-            val sendIdle = compose.sendState !is SendState.Sending
+            val sendIdle = compose.sendState !is SendState.Sending &&
+                sendAnswer?.isPossible != false && replySend?.isPossible != false
             val foundGate = if (foundsRoom) faunaGate("fauna.conversations.room.create", enabled = sendIdle) else null
             Button(
-                onClick = onSend,
+                // The press asks the same answer again (rule 6).
+                onClick = { if (replySend?.isPossible != false) onSend() },
                 enabled = foundGate?.enabled ?: sendIdle,
                 modifier = Modifier.testTag(Ids.DM_SEND_BUTTON),
             ) {
@@ -526,6 +571,16 @@ fun ComposeBar(
                 Text(stringResource(R.string.common_send))
             }
         }
+        // The blocked new-thread controls' reasons, within eyeshot of them
+        // (`ui/README.md` § Offer only what is possible, rule 2): each distinct
+        // reason once, in the row's order.
+        if (newThreadAnswer != null) {
+            listOfNotNull(subject?.blockedReason, attach?.blockedReason, sendAnswer?.blockedReason)
+                .mapNotNull { localized(it) }
+                .distinct()
+                .forEach { DisabledControlReasonText(it, Modifier.padding(horizontal = 8.dp)) }
+        }
+        DisabledControlReasonText(localized(replySend?.blockedReason), Modifier.padding(horizontal = 8.dp))
     }
 }
 

@@ -2,7 +2,7 @@
 
 > **Status — this guide describes Fauna as it is taking shape.** Most of it is
 > built and tested; the [table at the end](#where-this-stands-today) says
-exactly what is available now, what is not yet, and what is planned.
+exactly what is available now.
 >
 > Part of the [Your own cloud](your-own-cloud.md) series.
 
@@ -44,7 +44,6 @@ case), open its row in Settings → Folders, and set how your nest should keep i
   happened elsewhere is a per-device choice on the folder — leave it off and that
   device keeps every file it has ever seen. That is what an archive is, and it no
   longer requires a whole separate kind of folder.
-- **A richer schedule** — "keep hourly for a day, daily for a month, monthly for a year", the pattern borg/restic users know — is planned.
 - **Browsable and verifiable.** The Backups page lists every snapshot with when
   it was taken, how many files it holds and how big it is; open one to see the
   files inside. Running the integrity check marks the snapshots it found a
@@ -59,7 +58,7 @@ case), open its row in Settings → Folders, and set how your nest should keep i
   shows how long it stays recoverable — so the month of regret-room below is
   visible on the row, not just a promise in this guide.
 - **Restore** a single file straight back — open a snapshot, find the file in its list, press the download button next to it, and pick where to save it — or, on a computer, restore a whole snapshot into a folder you choose (the terminal app takes the folder's path); phones and the web app have no folder tree to write a whole snapshot into, so there you download files one at a time. When it finishes, the page tells you how many files it wrote and where, names any file it could not restore, and says everything else was written. Either way the files are decrypted on your device as they land. If a download cannot go ahead, the page says why rather than looking like it worked.
-- **Mail, calendar, contacts, posts and conversations, too.** Where you pick a folder on the Backups page, Mail, Calendar, Contacts, Posts and Conversations follow your folders. Pick one and press **Create Snapshot** to take a snapshot of it now. A snapshot of any of them shows up straight away under **Restore from a local snapshot**, further down the same page, where you pick it and restore it. Untick a kind there and its snapshots will not restore until you tick it again.
+- **Mail, calendar, contacts, posts and conversations, too.** On the Backups page, the list you pick a folder from shows your folders first, then Mail, Calendar, Contacts, Posts and Conversations. Pick one and press **Create Snapshot** to take a snapshot of it now. A snapshot of any of them shows up straight away under **Restore from a local snapshot**, further down the same page, where you pick it and restore it. Untick a kind there and its snapshots will not restore until you tick it again.
 
 ### Deleting backups is deliberately hard
 
@@ -197,7 +196,7 @@ Only the device that holds the copy offers the button — another of your device
 shows the banner without it. The banner goes away once the recovery is complete,
 or by itself if your nest gets everything back some other way.
 
-Three kinds of destination today, and one more planned:
+Three kinds of destination:
 
 - **A second nest you control** — if you run a nest at home with an internet nest
   in front of it, that internet nest is the obvious one: already yours, already
@@ -205,7 +204,6 @@ Three kinds of destination today, and one more planned:
   second small VPS. Off-site in the real sense.
 - **A friend's nest** — the interesting one, next section.
 - **One of your own devices** — a laptop or tablet with room to spare can hold a copy of everything a destination keeps itself, encrypted apart from a folder you have made public. See just below.
-- **S3-compatible object storage** (any provider) is a planned destination kind, for people who want a commercial deep-archive as the last-resort copy.
 
 **Your own device can be a destination, and it is the only kind that can
 restore with no nest alive anywhere.** Pick **This device** when you add a destination, set a storage limit, and that device quietly pulls a copy of everything a destination keeps — your mail, calendar, contacts and posts, and any folder you attach, encrypted apart from a folder you have made public — whenever it is awake. Two things to know before you
@@ -286,11 +284,19 @@ holding, and next to it is **Restore my data to this nest**. Confirm once and
 the device sends its copy to the new nest, which makes it live again. Your
 mail comes back into the folders it was in, with its read and flagged marks.
 Nothing is deleted along the way,
-either on the device or on the nest. If the nest already holds your data, it
-stops rather than mixing the two. When the copy has arrived in full, the device
-signs up again as that nest's backup, so you keep an offline copy from then on.
+either on the device or on the nest. Where the nest already has some of your
+mail, posts, calendar or contacts (your mail, say, if a message reached the
+mailbox before the restore), what the copy holds and the nest is missing is
+copied in beside it, mail into the folders it was in with its read and flagged
+marks, and the result says how much was copied in; running the restore again
+copies nothing twice. A folder you attached that the nest already holds is
+left as it is, and the result says what to do about it. If the Backups page
+then shows a banner saying a backup still holds data your nest lost, **Recover
+what your nest lost** on it, described above, brings that back.
+When the copy has arrived in full, the device signs up again as that nest's
+backup, so you keep an offline copy from then on.
 
-**From a copy a nest you back up to holds**, it is the same button, once your lost nest is rebuilt with its own identity (**Recover a lost box** in the app does this — for a server you set up by hand, it gives you the line its setup guide's *Rebuilding after a total loss* uses). Sign in to it and open Backups: the nest you back up to is still listed, and next to it is **Restore my data to this nest**. Confirm once and the app copies that nest's backup onto the rebuilt nest and makes it live again, the mail back in the folders it was in. Nothing is deleted on either nest. When the copy has arrived in full, that nest goes back to backing up the rebuilt one. (Copies of your account that a friend's nest holds for you under Settings → Nests come back another way, onto a new nest too: see [If you lose every device and your nest](identity-and-devices.md#if-you-lose-every-device-and-your-nest).)
+**From a copy a nest you back up to holds**, it is the same button, once your lost nest is rebuilt with its own identity (**Recover a lost box** in the app does this — for a server you set up by hand, it gives you the line its setup guide's *Rebuilding after a total loss* uses). Sign in to it and open Backups: the nest you back up to is still listed, and next to it is **Restore my data to this nest**. Press it and the app first reads that nest's copy, changing nothing: the confirm says, for each part of the copy, whether it is as new as or newer than what your device last checked, older, never checked by your device, or missing something your device checked, and, if you attached folders, that they come back as that nest holds them, which your device cannot check. If the app cannot read the copy, it says so and asks nothing. Confirm once and the app copies that nest's backup onto the rebuilt nest and makes it live again, the mail back in the folders it was in. Nothing is deleted on either nest. Where the rebuilt nest already has some of your mail, posts, calendar or contacts (your mail, say, if a message reached the mailbox before the restore), what the copy holds and the nest is missing is copied in beside it, mail into the folders it was in with its read and flagged marks, and the result says how much was copied in; running the restore again copies nothing twice. A folder you attached that the rebuilt nest already holds is left as it is, and the result says what to do about it. If the Backups page then shows a banner saying a backup still holds data your nest lost, **Recover what your nest lost** on it, described above, brings that back. When the copy has arrived in full, that nest goes back to backing up the rebuilt one. (Copies of your account that a friend's nest holds for you under Settings → Nests come back another way, onto a new nest too: see [If you lose every device and your nest](identity-and-devices.md#if-you-lose-every-device-and-your-nest).)
 
 If something is missing, for example the copy ran into the new nest's storage
 limit or part of it had not finished backing up, the Backups page lists what
@@ -300,7 +306,7 @@ nest restarted, and new mail arrived before you ran it again: the restore
 finishes, and the new mail stays in the folder it arrived in, beside the mail
 that came back.
 
-One honest note on today's state. A destination receives your mail, calendar, contacts and posts, and any folder you attach to it — a photo library included; conversations are not copied to a destination yet. A restore brings back what the copy holds. (Snapshots on your own nest cover your files and photos, and your mail, calendar, contacts, posts and conversations; this note is about the *off-site* copy.)
+One honest note on today's state. A destination receives your mail, calendar, contacts and posts, and any folder you attach to it — a photo library included; conversations are not copied to a destination. A restore brings back what the copy holds. (Snapshots on your own nest cover your files and photos, and your mail, calendar, contacts, posts and conversations; this note is about the *off-site* copy.)
 
 ## The key that matters more than the backup
 
@@ -316,7 +322,7 @@ There is deliberately no back door here: no "forgot password" flow, no support d
 | Feature | Status |
 |---|---|
 | Per-folder snapshots on your nest, automatic + manual | **Available** |
-| Retention (per folder: count + age) | **Available**; richer keep-hourly/daily/monthly schedule **planned** |
+| Retention (per folder: count + age) | **Available** |
 | Snapshot browse, integrity check, prune | **Available** |
 | Single-file restore; full-snapshot restore into a folder on computers | **Available** |
 | Delete protection (48 h + 30-day soft-delete + 3-snapshot floor + friction on immediate delete) | **Available** |
@@ -327,6 +333,5 @@ There is deliberately no back door here: no "forgot password" flow, no support d
 | Restore onto a fresh nest from a copy on your own device | **Available**: **Restore my data to this nest** on the Backups page brings your mail, calendar, contacts and posts, and any folder you attached, back onto the nest, the mail into the folders it was in |
 | Restore onto your rebuilt nest from a copy held by a nest you back up to | **Available**: **Restore my data to this nest** on that nest's row brings the copy back |
 | Snapshot coverage on your own nest | Files and photos, mail, calendar, contacts, posts and conversations **available** — your nest takes a snapshot of your mail, calendar, contacts, posts and conversations on its own, at most once an hour and only when something has changed, you can take one yourself at any time, and you can pick one under **Restore from a local snapshot** on the Backups page and restore it |
-| Destination mirroring, by data type | Mail, calendar, contacts, posts and any folder you attach (photos included) **available**; conversations **not yet** |
+| Destination mirroring, by data type | Mail, calendar, contacts, posts and any folder you attach (photos included) **available**; conversations **not mirrored** |
 | One of your own devices as a destination | **Available** on computers and phones — a device enrolled as a destination pulls and keeps a real copy, encrypted apart from a folder you have made public (a web browser cannot hold one) |
-| S3-compatible destinations | **Planned** |

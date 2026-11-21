@@ -1,13 +1,13 @@
 package com.fauna.app.ui.components
 
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import com.fauna.app.ui.util.localized
 import com.fauna.ffi.FfiShowAgain
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The reporter's show-again beside a reported placeholder

@@ -62,15 +62,23 @@ public final class MutedWordsVM {
         if fresh != page { page = fresh }
     }
 
-    /// Add `word` (trimmed; a blank add is a no-op) — as a DELTA against the
+    /// The Mute word button's answer — the shared `muted_word_add_possibility`
+    /// (a term, and no change in flight), the one tui paints (`settings.md` §
+    /// Errors & edge cases, *Personal form submits paint from their draft*).
+    public func addAnswer(_ word: String) -> Possibility {
+        mutedWordAddPossibility(term: word, busy: busy)
+    }
+
+    /// Add `word` (trimmed; the press asks `addAnswer` again and refuses with
+    /// its reason on `error-message`) — as a DELTA against the
     /// stored list, never this page's copy wholesale: the
     /// shared seam re-reads the list inside its own CAS update, so a term
     /// another device stored since this page loaded survives this click.
     /// Re-renders from the server-normalized return value.
     public func add(_ word: String) async {
+        if refusePress(addAnswer(word), errorMessage: &errorMessage) { return }
         guard let api else { return }
         let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
         do {
             page = try await api.mutedKeywordsAdd(word: trimmed)
             errorMessage = nil

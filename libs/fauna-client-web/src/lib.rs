@@ -24,6 +24,8 @@
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!("fauna_client_web");
 
+use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_protocol::RpcRequester;
 use fauna_protocol::web::{
     PublishedPost, WebDomainGetReply, WebDomainGetRequest, WebGetApexActorReply,
@@ -324,6 +326,67 @@ pub fn subdomain_view(enabled: bool, handle: Option<&str>, domain: &str) -> Subd
         enabled,
         url,
         disabled_reason,
+    }
+}
+
+/// Whether `web-settings-subdomain-toggle` can be flipped now
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rules 2, 5 and 6;
+/// `web-content-hosting.md` § Published-post management → *The subdomain
+/// toggle offers only what can serve*). Every app paints the toggle from this
+/// answer and the toggle's action asks it again before it writes.
+///
+/// - Before the page's read resolves (`read` not `Resolved`, or no view yet):
+///   [`Possibility::from_read`] — never enabled on a guess.
+/// - Switching OFF is always possible: a person must be able to withdraw an
+///   opt-in whatever else changed since they gave it.
+/// - Switching ON on a nest with no serving domain: [`Possibility::Absent`] —
+///   no handle could ever serve there and nothing on this page changes it.
+/// - Switching ON with no handle, or a reserved one: blocked, the reason
+///   naming the step (choose a handle).
+///
+/// The nest accepts the write in every one of these cases (the flag persists
+/// and serving starts once a handle and a domain exist), so this answer is
+/// the only gate, never a mirror of a refusal.
+pub fn subdomain_toggle_possibility(read: ReadState, view: Option<&SubdomainView>) -> Possibility {
+    let view = match (read, view) {
+        (ReadState::Resolved, Some(view)) => view,
+        (ReadState::Resolved, None) => return Possibility::from_read(ReadState::Pending),
+        (read, _) => return Possibility::from_read(read),
+    };
+    if view.enabled {
+        return Possibility::Possible;
+    }
+    match view.disabled_reason {
+        None => Possibility::Possible,
+        Some(SubdomainDisabledReason::NoServingDomain) => Possibility::Absent,
+        Some(SubdomainDisabledReason::NoHandle) => {
+            Possibility::blocked(LocalizedText::key("web_settings.subdomain_no_handle"))
+        }
+        Some(SubdomainDisabledReason::ReservedLabel) => {
+            Possibility::blocked(LocalizedText::key("web_settings.subdomain_reserved"))
+        }
+    }
+}
+
+/// Whether a published post's copy-link affordance can hand out a link now
+/// (`web-content-hosting.md` § Published-post management: publishing with no
+/// serving origin is legal but unreachable, and the UI must say so): possible
+/// exactly when the actor's content has an origin, else blocked with
+/// [`disabled_reason_text`]'s reason. Shared by both copy buttons.
+pub fn site_link_copy_possibility(link: &SiteLinkView) -> Possibility {
+    match link.origin {
+        Some(_) => Possibility::Possible,
+        None => Possibility::blocked(disabled_reason_text(link.disabled_reason)),
+    }
+}
+
+/// The `admin-web-apex-info` line: where the apex serves, or — on a nest that
+/// serves no web content — why there is no address, never a composed
+/// `https:///` (`admin.md` § 7 Web). `domain` is [`serving_domain`]'s answer.
+pub fn apex_info_text(domain: &str) -> LocalizedText {
+    match fauna_core::web::apex_origin(domain) {
+        Some(url) => LocalizedText::key_arg("admin.web_page.apex_info", "url", url),
+        None => LocalizedText::key("admin.web_page.apex_no_serving_domain"),
     }
 }
 
@@ -1159,6 +1222,99 @@ mod tests {
         assert_eq!(
             link.disabled_reason,
             Some(SiteLinkDisabledReason::NoServingDomain)
+        );
+    }
+
+    fn blocked(key: &str) -> Possibility {
+        Possibility::blocked(LocalizedText::key(key))
+    }
+
+    /// Rule 5: before the page's read resolves the toggle is never enabled,
+    /// and a failed read says so rather than "loading".
+    #[test]
+    fn subdomain_toggle_is_unknown_until_the_read_resolves() {
+        let view = subdomain_view(false, Some("alice"), "web.test");
+        assert_eq!(
+            subdomain_toggle_possibility(ReadState::Pending, Some(&view)),
+            blocked("common.still_loading")
+        );
+        assert_eq!(
+            subdomain_toggle_possibility(ReadState::Failed, None),
+            blocked("common.load_failed")
+        );
+        assert_eq!(
+            subdomain_toggle_possibility(ReadState::Resolved, None),
+            blocked("common.still_loading"),
+            "a resolved read with no view yet is still not an answer"
+        );
+        assert_eq!(
+            subdomain_toggle_possibility(ReadState::Resolved, Some(&view)),
+            Possibility::Possible
+        );
+    }
+
+    /// No serving domain → absent (nothing here changes it); no handle or a
+    /// reserved one → blocked, naming the step.
+    #[test]
+    fn subdomain_toggle_is_absent_without_a_domain_and_blocked_without_a_handle() {
+        let r = ReadState::Resolved;
+        assert_eq!(
+            subdomain_toggle_possibility(r, Some(&subdomain_view(false, Some("alice"), ""))),
+            Possibility::Absent
+        );
+        assert_eq!(
+            subdomain_toggle_possibility(r, Some(&subdomain_view(false, None, "web.test"))),
+            blocked("web_settings.subdomain_no_handle")
+        );
+        assert_eq!(
+            subdomain_toggle_possibility(r, Some(&subdomain_view(false, Some("www"), "web.test"))),
+            blocked("web_settings.subdomain_reserved")
+        );
+    }
+
+    /// An opt-in already given can always be withdrawn, whatever changed since.
+    #[test]
+    fn switching_the_subdomain_off_is_always_possible() {
+        let r = ReadState::Resolved;
+        for (handle, domain) in [
+            (Some("alice"), ""),
+            (None, "web.test"),
+            (Some("www"), "web.test"),
+        ] {
+            assert_eq!(
+                subdomain_toggle_possibility(r, Some(&subdomain_view(true, handle, domain))),
+                Possibility::Possible,
+                "{handle:?} on {domain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_link_answers_from_the_origin_with_the_shared_reason() {
+        let live = site_link_view(&[], true, Some("alice"), "web.test");
+        assert_eq!(site_link_copy_possibility(&live), Possibility::Possible);
+        let off = site_link_view(&[], false, Some("alice"), "web.test");
+        assert_eq!(
+            site_link_copy_possibility(&off),
+            blocked("web_settings.link_disabled_subdomain_off")
+        );
+        let none = site_link_view(&[], true, Some("alice"), "");
+        assert_eq!(
+            site_link_copy_possibility(&none),
+            blocked("web_settings.subdomain_no_serving_domain")
+        );
+    }
+
+    /// `admin-web-apex-info` never paints `https:///`.
+    #[test]
+    fn apex_info_explains_a_nest_with_no_serving_domain() {
+        assert_eq!(
+            apex_info_text("web.test"),
+            LocalizedText::key_arg("admin.web_page.apex_info", "url", "https://web.test/")
+        );
+        assert_eq!(
+            apex_info_text(""),
+            LocalizedText::key("admin.web_page.apex_no_serving_domain")
         );
     }
 

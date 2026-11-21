@@ -29,7 +29,9 @@ import time
 
 import pytest
 
+from helpers.draft_validity import refused_before_or_at_the_press
 from helpers.indexed_rows import row_count, row_texts
+from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
@@ -182,20 +184,21 @@ def test_malformed_region_is_refused_client_side(admin_app):
     _require_nest_page(admin_app)
 
     before = admin_app.admin.region_status_text().strip()
-    admin_app.admin.declare_region("no")
+    admin_app.admin.set_region_draft("no")
 
-    # A generous deadline poll, not a settle sleep: the refusal is local (no
-    # round trip), so a green run pays almost nothing, while the ceiling sits far
-    # above any non-pathological repaint delay under load (convention 14).
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline and not admin_app.has_error():
-        time.sleep(0.3)
-
-    assert admin_app.has_error(), (
-        "a malformed region code must surface on error-message, not be sent"
+    # Painted blocked on an app that has built the form case (never pressed),
+    # else refused at the press onto error-message (`admin.md` § Errors & edge
+    # cases → *A form's submit is live only for a draft the nest would
+    # accept*). The helper polls to a generous deadline, never a settle sleep
+    # (convention 14).
+    refused_before_or_at_the_press(
+        admin_app,
+        submit_id="admin-nest-region-save-button",
+        press=admin_app.admin.save_region,
+        reason=S.admin.nest_page.region_invalid,
     )
     # The refusal is client-side, so nothing was dispatched and the declaration
-    # cannot have moved — asserted after the error is visible, which is the
+    # cannot have moved — asserted after the refusal is visible, which is the
     # causal barrier that makes this a real check rather than a race the wrong
     # way round (a too-early read would pass even if the write HAD gone out).
     assert admin_app.admin.region_status_text().strip() == before, (

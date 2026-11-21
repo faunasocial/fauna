@@ -47,6 +47,46 @@ public enum LogsFormat {
     public static func renderedText(_ entries: [LogEntry]) -> String {
         logRenderedText(entries: entries, tzOffsetSecs: DeviceOffset.utcOffsetSeconds())
     }
+
+    /// The page's own empty line — `logs.empty` on the device page,
+    /// `admin.logs_page.empty` on the nest one; also the reason the ring
+    /// actions give while the filter shows nothing.
+    public static func emptyText(admin: Bool) -> String {
+        admin ? L.admin.logsPage.empty : L.logs.empty
+    }
+
+    /// Whether `log-copy-button` / `log-clear-button` can do anything now: the
+    /// shared `ring_action_possibility` over the number of entries the active
+    /// filter shows (`observability.md` § Surfaces, *Copy and clear offer only
+    /// what they can do*) — blocked with the page's own empty line on an empty
+    /// view. The buttons paint from it and both handlers ask it again (tui's
+    /// `settings::logs::ring_action_possibility` / `admin::logs::copy_possibility`).
+    public static func ringActionPossibility(shown: Int, admin: Bool) -> Possibility {
+        logRingActionPossibility(
+            shown: UInt32(clamping: shown),
+            emptyReasonKey: admin ? "admin.logs_page.empty" : "logs.empty")
+    }
+
+    /// `log-copy-button`'s press: ask `answer` again (a refusal is said on
+    /// `error-message`, nothing copied), else copy the displayed entries and
+    /// record the outcome — `copied` holds the exact string now on the
+    /// pasteboard (the button's "Copied!" + `copied` attr), `failure` the
+    /// `common.copy_failed` line; a success clears a prior failure (tui's
+    /// `record_copy_outcome`).
+    @MainActor
+    public static func copy(
+        _ displayed: [LogEntry], answer: Possibility,
+        copied: inout String?, failure: inout String?,
+        writer: (String) throws -> Void = Pasteboard.write
+    ) {
+        if refusePress(answer, errorMessage: &failure) {
+            copied = nil
+            return
+        }
+        let outcome = CopyOutcome.attempt(renderedText(displayed), writer: writer)
+        copied = outcome.copiedText
+        failure = outcome.failure
+    }
 }
 
 /// Shared **Settings → Logs** / **admin Logs** view (`observability.md` § Surfaces,
@@ -85,9 +125,18 @@ public struct LogsView: View {
     @State private var entries: [LogEntry] = []
     @State private var filterLabel: String = L.logs.filterAll
     @State private var errorText: String?
+    /// The copy/clear gestures' own line on `error-message` (a refusal or a
+    /// failed copy) — apart from the read's `errorText`, so a copy that
+    /// succeeds clears its own failure and never a load error.
+    @State private var actionError: String?
+    /// The exact string the last copy put on the pasteboard — the
+    /// `log-copy-button` "Copied!" label and `copied` attr.
+    @State private var copiedText: String?
     /// The audit section's state, held in Rust; fetched once per page entry.
     @State private var auditLog: FfiAuditLog?
     @State private var auditView: FfiAuditLogView?
+    /// The audit log could not be obtained at all (its "more" answers failed).
+    @State private var auditReadFailed = false
 
     public init(source: Source, headingId: String? = nil) {
         self.source = source
@@ -104,6 +153,13 @@ public struct LogsView: View {
     /// The displayed entries as shared `LogRow`s — already **newest-first**
     /// (`fauna_log::format::rows`), so the list iterates them in order.
     private var rows: [LogRow] { LogsFormat.rows(displayed) }
+
+    /// The copy/clear answer over what the active filter shows.
+    private var ringAnswer: Possibility {
+        LogsFormat.ringActionPossibility(shown: displayed.count, admin: !isClientRing)
+    }
+
+    private var emptyText: String { LogsFormat.emptyText(admin: !isClientRing) }
 
     public var body: some View {
         coreView
@@ -137,12 +193,14 @@ public struct LogsView: View {
 
             controls
 
-            if let errorText {
-                ErrorBanner(message: errorText)
+            if let banner = actionError ?? errorText {
+                ErrorBanner(message: banner)
             }
 
+            // The page's own empty line — also the blocked reason of the
+            // copy/clear answer, so the buttons paint no second copy of it.
             if rows.isEmpty && !hasAuditSection {
-                Text(L.logs.empty)
+                Text(emptyText)
                     .foregroundStyle(.secondary)
                     .padding(.top, 8)
             } else {
@@ -153,7 +211,7 @@ public struct LogsView: View {
                     // admin-logs 3 sits past the nest's startup lines).
                     VStack(alignment: .leading, spacing: 0) {
                         if rows.isEmpty {
-                            Text(L.logs.empty)
+                            Text(emptyText)
                                 .foregroundStyle(.secondary)
                                 .padding(.vertical, 8)
                         }
@@ -197,15 +255,20 @@ public struct LogsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            let canPageOlder = auditView?.moreBeforeId != nil
+            // The shared `audit_more_possibility` over the held log (admin.md
+            // § 2, *What a row offers*): blocked, saying so, once the whole
+            // record is shown; `auditMore` asks it again. Re-read on every
+            // render, so a newly held page repaints it.
+            let moreAnswer = auditMoreAnswer
             Button(L.admin.logsPage.auditMore) {
                 Task { await auditMore() }
             }
-            .disabled(!canPageOlder)
             .accessibilityIdentifier(Ids.adminAuditMoreButton)
-            .automationActivate(Ids.adminAuditMoreButton, isEnabled: { canPageOlder }) {
+            .automationActivate(Ids.adminAuditMoreButton) {
                 Task { await auditMore() }
             }
+            .faunaPossible(moreAnswer)
+            FaunaPossibilityReason(moreAnswer)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -238,11 +301,19 @@ public struct LogsView: View {
 
             Spacer()
 
-            Button(L.logs.copyButton) {
+            // Copy and clear paint from the shared ring answer (disabled by
+            // the page's own empty line, which is already in view — no
+            // `FaunaPossibilityReason` beside them); a copy confirms like
+            // `account-actor-id-copy-btn` ("Copied!" + the `copied` attr).
+            let answer = ringAnswer
+            Button(copiedText != nil ? L.common.copied : L.logs.copyButton) {
                 copyLogs()
             }
             .accessibilityIdentifier(Ids.logCopyButton)
-            .automationActivate(Ids.logCopyButton) { copyLogs() }
+            .automationActivate(Ids.logCopyButton, attributes: { ["copied": copiedText ?? ""] }) {
+                copyLogs()
+            }
+            .faunaPossible(answer)
 
             if isClientRing {
                 Button(L.logs.clearButton, role: .destructive) {
@@ -250,6 +321,7 @@ public struct LogsView: View {
                 }
                 .accessibilityIdentifier(Ids.logClearButton)
                 .automationActivate(Ids.logClearButton) { clearLogs() }
+                .faunaPossible(answer)
             }
         }
     }
@@ -277,15 +349,20 @@ public struct LogsView: View {
 
     /// Copy the displayed entries — shared by the `log-copy-button` Button and its
     /// `automationActivate` sibling (no drift).
+    /// The press asks the ring answer again (rule 7) before copying.
     private func copyLogs() {
-        Pasteboard.copy(LogsFormat.renderedText(displayed))
+        LogsFormat.copy(displayed, answer: ringAnswer, copied: &copiedText, failure: &actionError)
     }
 
     /// Clear the client ring — shared by the `log-clear-button` Button and its
-    /// `automationActivate` sibling (no drift).
+    /// `automationActivate` sibling (no drift). Asks the ring answer again: an
+    /// empty view refuses with the page's empty line on `error-message`.
     private func clearLogs() {
+        if refusePress(ringAnswer, errorMessage: &actionError) { return }
         logClear()
         entries = []
+        copiedText = nil
+        actionError = nil
     }
 
     @MainActor
@@ -305,15 +382,26 @@ public struct LogsView: View {
             do {
                 guard let log = try await auditLoader() else { return }
                 auditLog = log
+                auditReadFailed = false
                 auditView = try await log.load()
             } catch {
                 errorText = error.localizedDescription
+                if auditLog == nil { auditReadFailed = true }
             }
         }
     }
 
+    /// The audit "more" answer: the held log's own once it is read; before
+    /// that the read is still on its way.
+    private var auditMoreAnswer: Possibility {
+        // `auditView` is read so a newly held page re-renders this answer.
+        _ = auditView
+        return machinePossibility(auditLog, buildFailed: auditReadFailed) { $0.morePossibility() }
+    }
+
     @MainActor
     private func auditMore() async {
+        if refusePress(auditMoreAnswer, errorMessage: &errorText) { return }
         guard let log = auditLog else { return }
         do {
             auditView = try await log.more()

@@ -20,18 +20,22 @@ waits for them.
 
 ## Coverage contract
 
-Stamped 2026-11-07 at b844c771f6.
+Stamped 2026-11-18 at 9a59c630ed.
 
 1. [app] You pick a domain provider, enter its credentials, and can buy a new domain or use one you own — `docs/goal/behavior/onboarding.md` § 4. DNS configuration
    - `tests/e2e-unified/tests/test_dns_config.py::test_dns_config_select_provider_shows_credentials_form`
    - `tests/e2e-unified/tests/test_dns_config.py::test_dns_config_buy_domain_filters_providers`
    - `tests/e2e-unified/tests/test_provider_registry_parity.py::test_dns_provider_fields_visible`
    - `tests/e2e-unified/tests/test_provider_registry_parity.py::test_registrar_provider_fields_visible`
+   - `tests/e2e-unified/tests/test_provider_dialog_registry_parity.py::test_every_provider_dialog_shows_its_dns_and_server_fields_for_a_domain_brought`
+   - `tests/e2e-unified/tests/test_provider_dialog_registry_parity.py::test_every_registrar_dialog_adds_its_registrar_fields_when_a_domain_is_bought`
 2. [app] You pick a hosting provider and a server size; a mail-capable server is kept to sizes that can run mail — `docs/goal/behavior/onboarding.md` § 5. VPS configuration
    - `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_select_provider_shows_credentials_form`
    - `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_server_types_after_verify`
    - `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_mail_mode_toggle_gates_server_types`
    - `tests/e2e-unified/tests/test_provider_registry_parity.py::test_vps_provider_fields_visible`
+   - `tests/e2e-unified/tests/test_provider_dialog_registry_parity.py::test_every_provider_dialog_shows_its_dns_and_server_fields_for_a_domain_brought`
+   - `tests/e2e-unified/tests/test_provider_choice_offers.py::test_the_mail_gate_on_the_setting_up_page_keeps_a_mail_box_to_2_gb_and_up`
 3. [app] One bundled provider can be registrar, DNS and hosting in a single step — `docs/goal/architecture/provisioning/registry.md` § Bundled provider
    - `tests/e2e-unified/tests/test_bundled_provider.py::test_bundled_provider_buys_domain_and_server_through_one_row`
 4. [app] You watch the build step by step, see the price, and can cancel and retry — `docs/goal/behavior/onboarding.md` § 6. Nest provisioning
@@ -59,14 +63,18 @@ Stamped 2026-11-07 at b844c771f6.
    - `tests/e2e-unified/tests/test_provisioning_slot_recovery.py::test_the_exit_retires_the_slot_so_a_relaunch_no_longer_resumes_the_box`
 10. [app] You choose which updates the new server follows — stable releases, test builds or development builds — `docs/goal/behavior/onboarding-provisioning.md` § 5. VPS configuration
    - `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_update_channel_rows_select_one_of_three`
+   - `tests/e2e-unified/tests/test_provider_choice_offers.py::test_the_update_channel_rows_on_the_setting_up_page_select_one_of_three`
 11. [app] The setup offers a choice, off by default, to keep an SSH door to the server; turned on, your device mints a key for that box alone and the box takes key-only SSH; left off, the box has no SSH at all — `docs/goal/architecture/org-nests.md` § Implementation status today
    - `tests/e2e-unified/tests/test_ssh_door_wizard.py::test_the_door_on_reaches_the_cloud_init_and_the_key_lands_in_dot_ssh`
    - `tests/e2e-unified/tests/test_ssh_door_wizard.py::test_the_door_off_renders_no_door_and_writes_nothing`
 12. [app] Changing the server location re-lists the server sizes as that location sells them, with its prices, and a size the new location does not offer drops out of your choice — `docs/goal/architecture/provisioning/registry.md` § Server offers follow the location
    - `tests/e2e-unified/tests/test_vps_config.py::test_vps_server_types_follow_the_location`
    - `tests/e2e-unified/tests/test_vps_config_ovh.py::test_ovh_project_regions_priced_offers_and_the_resolved_create`
+   - `tests/e2e-unified/tests/test_provider_choice_offers.py::test_the_server_sizes_on_the_setting_up_page_follow_the_location`
+   - `tests/e2e-unified/tests/test_provider_choice_offers.py::test_ovh_regions_re_list_the_offers_and_the_create_lands_in_the_chosen_region`
 13. [app] When Namecheap refuses the app's address, the error names the address you must allow at Namecheap before trying again — `docs/goal/architecture/provisioning/registry.md` § Proxy boundary
    - `tests/e2e-unified/tests/test_dns_config.py::test_dns_config_namecheap_refusal_names_the_address_to_allowlist`
+   - `tests/e2e-unified/tests/test_provider_choice_offers.py::test_namecheaps_refusal_in_the_provider_dialog_names_the_address_to_allow`
 14. [app] The bundled provider signs you in on its own pages: a button opens them in your browser, with a code to type there if the browser does not open, and once you confirm the app carries on by itself with no token to paste — `docs/goal/architecture/provisioning/bundled-provider-api.md` § Authentication
    - `tests/e2e-unified/tests/test_bundled_provider.py::test_bundled_provider_buys_domain_and_server_through_one_row`
 15. [app] Retrying, starting over or relaunching while a server is being set up carries on with the same server; a second one is never rented — `docs/goal/behavior/onboarding-provisioning.md` § 6. Nest provisioning
@@ -75,6 +83,10 @@ Stamped 2026-11-07 at b844c771f6.
    - `tests/e2e-unified/tests/test_provisioning_slot_recovery.py::test_a_crash_during_online_resumes_on_the_records_less_surface`
 16. [app] The app reaches your new server by its address before its domain is live, and falls back to that address at a later launch if the domain fails — `docs/goal/behavior/onboarding-provisioning.md` § Reach hint
    - `tests/e2e-unified/tests/test_reach_hint_dial_journey.py::test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it`
+17. [app] On a domain that already has DNS records, the setup page lists every record the run will keep, add, change or remove before you commit, and the run then changes only the records that were wrong and leaves your other records alone — `docs/goal/behavior/onboarding-provisioning.md` § 6. Nest provisioning
+   - `tests/e2e-unified/tests/test_provider_choice.py::test_the_dns_plan_names_what_the_run_keeps_changes_and_removes_and_a_bought_domain_has_none`
+   - `tests/e2e-unified/tests/test_provider_choice.py::test_the_dns_plan_paints_after_the_server_choices_continue`
+   - `tests/e2e-unified/tests/test_provision_over_old_records.py::test_setup_over_a_deleted_boxs_records`
 
 ## Status
 
@@ -95,12 +107,16 @@ Stamped 2026-11-07 at b844c771f6.
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_dns_config.py::test_dns_config_select_provider_shows_credentials_form` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_dns_config.py::test_dns_config_buy_domain_filters_providers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_provider_registry_parity.py::test_dns_provider_fields_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_provider_registry_parity.py::test_registrar_provider_fields_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_provider_registry_parity.py::test_dns_provider_fields_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): skipped |
+| 1 | app | `tests/e2e-unified/tests/test_provider_registry_parity.py::test_registrar_provider_fields_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): skipped |
+| 1 | app | `tests/e2e-unified/tests/test_provider_dialog_registry_parity.py::test_every_provider_dialog_shows_its_dns_and_server_fields_for_a_domain_brought` — requires `provider-choice` (not built: windows, android-kids, ios-kids) | linux (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_provider_dialog_registry_parity.py::test_every_registrar_dialog_adds_its_registrar_fields_when_a_domain_is_bought` — requires `provider-choice` (not built: windows, android-kids, ios-kids) | linux (linux): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_select_provider_shows_credentials_form` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_server_types_after_verify` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_mail_mode_toggle_gates_server_types` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_provider_registry_parity.py::test_vps_provider_fields_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_provider_dialog_registry_parity.py::test_every_provider_dialog_shows_its_dns_and_server_fields_for_a_domain_brought` — requires `provider-choice` (not built: windows, android-kids, ios-kids) | linux (linux): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_provider_choice_offers.py::test_the_mail_gate_on_the_setting_up_page_keeps_a_mail_box_to_2_gb_and_up` — requires `provider-choice` (not built: windows, android-kids, ios-kids) | tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_bundled_provider.py::test_bundled_provider_buys_domain_and_server_through_one_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_provisioning_progress.py::test_failed_renders_error_and_retry_button` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_provisioning_progress.py::test_cancel_mid_online_then_retry_succeeds` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
@@ -120,14 +136,21 @@ Stamped 2026-11-07 at b844c771f6.
 | 9 | app | `tests/e2e-unified/tests/test_awaiting_manual_dns.py::test_awaiting_manual_dns_fallthrough_lands_on_handle_entry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_provisioning_slot_recovery.py::test_the_exit_retires_the_slot_so_a_relaunch_no_longer_resumes_the_box` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_update_channel_rows_select_one_of_three` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_ssh_door_wizard.py::test_the_door_on_reaches_the_cloud_init_and_the_key_lands_in_dot_ssh` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 11 | app | `tests/e2e-unified/tests/test_ssh_door_wizard.py::test_the_door_off_renders_no_door_and_writes_nothing` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 12 | app | `tests/e2e-unified/tests/test_vps_config.py::test_vps_server_types_follow_the_location` — requires `server-offers-follow-location` (not built: android, android-kids, ios-kids) | web (linux): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_vps_config_ovh.py::test_ovh_project_regions_priced_offers_and_the_resolved_create` — requires `server-offers-follow-location` (not built: android, android-kids, ios-kids) | web (linux): passed, windows (windows): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_dns_config.py::test_dns_config_namecheap_refusal_names_the_address_to_allowlist` | web (linux): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_provider_choice_offers.py::test_the_update_channel_rows_on_the_setting_up_page_select_one_of_three` — requires `provider-choice` (not built: windows, android-kids, ios-kids) | tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_ssh_door_wizard.py::test_the_door_on_reaches_the_cloud_init_and_the_key_lands_in_dot_ssh` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_ssh_door_wizard.py::test_the_door_off_renders_no_door_and_writes_nothing` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_vps_config.py::test_vps_server_types_follow_the_location` — requires `server-offers-follow-location` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): skipped, macos (macos): skipped, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_vps_config_ovh.py::test_ovh_project_regions_priced_offers_and_the_resolved_create` — requires `server-offers-follow-location` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): skipped, windows (windows): passed, macos (macos): skipped, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_provider_choice_offers.py::test_the_server_sizes_on_the_setting_up_page_follow_the_location` — requires `provider-choice` (not built: windows, android-kids, ios-kids); `server-offers-follow-location` (not built: android, android-kids, ios-kids) | macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_provider_choice_offers.py::test_ovh_regions_re_list_the_offers_and_the_create_lands_in_the_chosen_region` — requires `provider-choice` (not built: windows, android-kids, ios-kids); `server-offers-follow-location` (not built: android, android-kids, ios-kids) | macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_dns_config.py::test_dns_config_namecheap_refusal_names_the_address_to_allowlist` | web (linux): passed, linux (linux): skipped, macos (macos): skipped, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_provider_choice_offers.py::test_namecheaps_refusal_in_the_provider_dialog_names_the_address_to_allow` — requires `provider-choice` (not built: windows, android-kids, ios-kids) | macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_bundled_provider.py::test_bundled_provider_buys_domain_and_server_through_one_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 15 | app | `tests/e2e-unified/tests/test_provisioning_progress.py::test_cancel_mid_online_then_retry_succeeds` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 15 | app | `tests/e2e-unified/tests/test_provisioning_progress.py::test_start_over_mid_build_onto_the_same_domain_resumes_the_same_box` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_provisioning_progress.py::test_start_over_mid_build_onto_the_same_domain_resumes_the_same_box` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 | 15 | app | `tests/e2e-unified/tests/test_provisioning_slot_recovery.py::test_a_crash_during_online_resumes_on_the_records_less_surface` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 16 | app | `tests/e2e-unified/tests/test_reach_hint_dial_journey.py::test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it` — requires `registry-set-account-reach` (test harness) (not built: web) | linux (linux): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_reach_hint_dial_journey.py::test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it` — requires `registry-set-account-reach` (test harness) (not built: web) | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_provider_choice.py::test_the_dns_plan_names_what_the_run_keeps_changes_and_removes_and_a_bought_domain_has_none` — requires `provider-choice` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_provider_choice.py::test_the_dns_plan_paints_after_the_server_choices_continue` | windows (windows): failed, tui (windows): failed |
+| 17 | app | `tests/e2e-unified/tests/test_provision_over_old_records.py::test_setup_over_a_deleted_boxs_records` — requires `provider-choice` (not built: windows, android-kids, ios-kids) | tui (linux): passed |
 <!-- features-render:end -->

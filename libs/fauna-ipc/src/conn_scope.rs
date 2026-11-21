@@ -25,7 +25,13 @@ tokio::task_local! {
 /// The values one connection holds until it closes.
 #[derive(Default)]
 pub(crate) struct ConnectionScope {
-    held: Mutex<Vec<Box<dyn Any + Send>>>,
+    held: Mutex<Held>,
+}
+
+#[derive(Default)]
+struct Held {
+    values: Vec<Box<dyn Any + Send>>,
+    closed: bool,
 }
 
 impl ConnectionScope {
@@ -33,22 +39,48 @@ impl ConnectionScope {
     pub(crate) async fn run<F: std::future::Future>(self: &Arc<Self>, fut: F) -> F::Output {
         CONNECTION.scope(Arc::clone(self), fut).await
     }
+
+    /// The connection is over: drop every held value now, and refuse any
+    /// later hold. A handler still running when its client hung up keeps
+    /// this scope alive (it runs on, detached), but what the connection held
+    /// must not outlive the connection itself.
+    pub(crate) fn close(&self) {
+        let values = {
+            let mut held = self.lock();
+            held.closed = true;
+            std::mem::take(&mut held.values)
+        };
+        drop(values); // outside the lock: a value's Drop may itself take locks
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Held> {
+        self.held
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 /// Keep `value` alive until the client closes the connection the current
 /// request arrived on, then drop it. Returns `false` — and drops `value` at
 /// once — when called outside a served connection (a unit test calling a
-/// handler directly, or a task the handler spawned).
+/// handler directly, or a task the handler spawned), or after that client has
+/// already hung up.
 pub fn hold_for_connection<T: Send + 'static>(value: T) -> bool {
-    CONNECTION
+    let mut value = Some(value);
+    let held = CONNECTION
         .try_with(|scope| {
-            scope
-                .held
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(Box::new(value));
+            let mut held = scope.lock();
+            if held.closed {
+                return false;
+            }
+            if let Some(v) = value.take() {
+                held.values.push(Box::new(v));
+            }
+            true
         })
-        .is_ok()
+        .unwrap_or(false);
+    drop(value); // refused: dropped now, outside the lock
+    held
 }
 
 #[cfg(test)]
@@ -71,6 +103,20 @@ mod tests {
         assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
         drop(scope);
         assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_closed_scope_drops_what_it_held_and_refuses_more() {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let scope = Arc::new(ConnectionScope::default());
+        let flag = Flag(Arc::clone(&dropped));
+        assert!(scope.run(async move { hold_for_connection(flag) }).await);
+        scope.close();
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        let late = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Flag(Arc::clone(&late));
+        assert!(!scope.run(async move { hold_for_connection(flag) }).await);
+        assert!(late.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

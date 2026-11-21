@@ -344,17 +344,28 @@ pub fn build_bridge_detail_content(
     // dialog whose submit button was dead on arrival (`bridges.md` § Errors &
     // edge cases: disabled, not absent). The dialog's own submit keeps its
     // matching gate below as a second line of defence.
+    // The button is painted from the shared `bridge_link_possibility_of`
+    // answer, its reason on `bridge-link-blocked-reason`, and the click asks
+    // it again (`bridges.md` § Errors & edge cases, rule 4).
     let platform_modes = platform_applicable(&link_modes);
-    if let Some(block) =
-        fauna_client_bridges::link_block_of(linked, error.as_deref(), platform_modes.len())
-    {
-        link_btn.set_sensitive(false);
-        let reason = gtk::Label::new(Some(&block.text()));
+    let link_answer = fauna_client_bridges::bridge_link_possibility_of(
+        linked,
+        error.as_deref(),
+        platform_modes.len(),
+    );
+    if linked {
+        // Unlink is the action; the hidden Link is not painted (painting a
+        // possible answer would show it).
+    } else if link_answer.is_possible() {
+        crate::possible::paint(&link_btn, None, link_answer);
+    } else {
+        let reason = gtk::Label::new(None);
         reason.set_halign(gtk::Align::Start);
         reason.set_wrap(true);
         reason.add_css_class("dim-label");
         crate::testid::set_test_id(&reason, ids::BRIDGE_LINK_BLOCKED_REASON);
         scroll_content.append(&reason);
+        crate::possible::paint(&link_btn, Some(&reason), link_answer);
     }
 
     // Wire "Link" button to open the metadata-driven link dialog.
@@ -363,6 +374,9 @@ pub fn build_bridge_detail_content(
         let modes = link_modes.clone();
         let c = Rc::clone(&client);
         link_btn.connect_clicked(move |btn| {
+            if !crate::possible::painted_possible(btn) {
+                return;
+            }
             let dialog = build_link_dialog(&bid, &modes, Rc::clone(&c));
             if let Some(root) = btn.root()
                 && let Some(win) = root.downcast_ref::<gtk::Window>()
@@ -820,6 +834,7 @@ fn build_link_dialog(
         .modal(true)
         .default_width(380)
         .build();
+    crate::modal_escape::close_on_escape(&dialog);
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
     vbox.set_margin_top(16);
@@ -966,11 +981,17 @@ fn render_mode_fields(
 
 /// The follow add row: `bridge-follow-id-input`, `bridge-follow-petname-input`
 /// and `bridge-add-follow-button`. The button sends `fauna.bridges.add_follow`
-/// with the typed id (and the nickname when typed), then clears both fields; an
-/// empty id sends nothing.
+/// with the typed id (and the nickname when typed), then clears both fields.
+/// The button paints from the shared `bridge_follow_possibility` as the id is
+/// typed and the press asks it again: a blank id is refused with its reason on
+/// `error-message` (`behavior/bridges.md` § Errors & edge cases).
 fn build_add_follow_row(bridge_id: &str, client: Rc<FaunaClient>) -> gtk::Box {
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.set_margin_top(8);
+    outer.append(&row);
+    let error_label = crate::form_gate::dialog_error_label();
+    outer.append(&error_label);
 
     let id_entry = gtk::Entry::new();
     id_entry.set_hexpand(true);
@@ -990,20 +1011,38 @@ fn build_add_follow_row(bridge_id: &str, client: Rc<FaunaClient>) -> gtk::Box {
     row.append(&petname_entry);
     row.append(&add_btn);
 
+    {
+        let add_btn = add_btn.clone();
+        let paint = move |text: &str| {
+            crate::form_gate::paint_submit(
+                &add_btn,
+                &fauna_client_bridges::bridge_forms::bridge_follow_possibility(text),
+                None,
+            );
+        };
+        paint("");
+        id_entry.connect_changed(move |e| paint(&e.text()));
+    }
+
     let bid = bridge_id.to_string();
-    add_btn.connect_clicked(move |_| {
-        let id = id_entry.text().to_string();
-        if id.is_empty() {
+    let submit = move || {
+        let id = id_entry.text().trim().to_string();
+        if crate::form_gate::refuse(
+            &fauna_client_bridges::bridge_forms::bridge_follow_possibility(&id),
+            &error_label,
+        ) {
             return;
         }
+        crate::form_gate::show_error(&error_label, None);
         let petname_text = petname_entry.text().to_string();
         let petname = (!petname_text.is_empty()).then_some(petname_text.as_str());
         client.add_bridge_follow(&bid, &id, petname);
         id_entry.set_text("");
         petname_entry.set_text("");
-    });
+    };
+    add_btn.connect_clicked(move |_| submit());
 
-    row
+    outer
 }
 
 #[cfg(test)]

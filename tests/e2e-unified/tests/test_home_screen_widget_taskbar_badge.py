@@ -26,12 +26,17 @@ witness (`test_home_screen_widget_launcher_badge.py`), whose bus subscriber is
 the dock.
 
 **Identity.** Badges are keyed on package identity, which a bare build output
-lacks; the fixture lends the build the sparse identity package for the test's
-duration (`helpers/taskbar_badge.py::registered_identity` — `Add-AppxPackage
--Register`, non-elevated, Developer Mode, exactly the Store-registration test's
-path), bound to the exe by the `msix` element in `FaunaApp/app.manifest.in`. A box
-already holding a real registration of that identity (an MSI install) is left
-alone: the test steps aside as an environment skip rather than displace it.
+lacks, and the app ships with exactly one kind: the full MSIX's own. So the module
+registers the Debug build as the direct-download package under a test-only identity
+(`helpers/taskbar_badge.py::registered_package` — the packer's own manifest and
+layout, `Add-AppxPackage -Register`, non-elevated, Developer Mode) and every test
+starts the app in that package's context, the way a user's Start-menu launch does;
+the premise — the running process reports THIS package — is asserted before any
+badge is read. The Store channel's leg is
+`real_session/test_store_package_taskbar_badge.py`, the same helper on the other
+channel. A packaged process's writes under the real `%LocalAppData%` are
+virtualized, so the launch's `LOCALAPPDATA` and credential store live outside it
+(`taskbar_badge.unvirtualized_scratch`).
 
 **"Without the app being opened", on windows.** The OS keeps the badge across a
 window close and even a process exit, and the resident app keeps it current
@@ -52,6 +57,7 @@ widget and apple's WidgetKit each get their own witness.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import time
 import uuid
@@ -83,57 +89,65 @@ _FEED = {"nav": {"stack": [{"view": "feed"}]}}
 _ON_SCREEN = "feed-tab"
 
 
-def _repo_root() -> str:
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.abspath(os.path.join(here, "..", "..", ".."))
+# Test-only identity, distinct from the Store leg's and from any real build's, so a
+# registration can neither collide with nor displace an installed Fauna.
+BADGE_IDENTITY = "FaunaSocialTest.FaunaDesktopBadge"
 
 
-@pytest.fixture
-def lent_identity(windows_app_path, tmp_path):
-    """The build output registered under the sparse identity package for this
-    test; yields the app's AUMID. Give-back is unconditional."""
+@pytest.fixture(scope="module")
+def badge_package(windows_app_path):
+    """The Debug build registered as the direct-download package, once for the
+    module; yields its family name, the exe inside it, its AUMID and a scratch root
+    outside write virtualization. Give-back is unconditional."""
     if sys.platform != "win32":
         skip_environment("the taskbar badge is a Windows surface")
-    foreign = taskbar_badge.foreign_registration()
-    exe_dir = os.path.dirname(os.path.abspath(str(windows_app_path)))
-    if foreign and os.path.normcase(os.path.abspath(foreign)) != os.path.normcase(exe_dir):
-        skip_environment(
-            f"a real {taskbar_badge.IDENTITY_NAME} registration ({foreign}) holds the "
-            "identity on this box; the witness will not displace an installed Fauna"
-        )
-    repo = _repo_root()
-    aumid = taskbar_badge.registered_identity(
-        str(windows_app_path),
-        os.path.join(repo, "apps", "fauna-windows", "installer", "sparse", "AppxManifest.xml.in"),
-        os.path.join(repo, "apps", "fauna-windows", "installer", "sparse", "Assets"),
-        str(tmp_path / "identity"),
-    )
+    scratch = taskbar_badge.unvirtualized_scratch("taskbar-badge")
     try:
-        yield aumid
+        package = taskbar_badge.registered_package(
+            str(windows_app_path), scratch, BADGE_IDENTITY, channel="direct")
+        yield {**package, "scratch": scratch}
     finally:
-        taskbar_badge.remove_identity()
+        taskbar_badge.remove_package(BADGE_IDENTITY)
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 @pytest.fixture
-def badged_app(request, nest_instance, test_user, windows_app_path, lent_identity):
-    """A logged-in windows app running WITH package identity, and a reader on the
-    OS badge store for its AUMID. A test carrying the `real_conversations` marker
-    (outcome 4's journey, which needs the real FaunaMls receive loop) launches
-    behind the open gate, through the one writer of its environment; every other
-    test here launches on the mock backend, whatever else the invocation selected —
-    this app is the test's own, never the session-cached one the gate is
-    session-wide for, so the inject journeys need not share its real receive loop."""
-    reader = taskbar_badge.TaskbarBadgeReader(lent_identity)
+def badged_app(request, nest_instance, test_user, badge_package):
+    """A logged-in windows app running WITH the registered package's identity, and a
+    reader on the OS badge store for its AUMID. A test carrying the
+    `real_conversations` marker (outcome 4's journey, which needs the real FaunaMls
+    receive loop) launches behind the open gate, through the one writer of its
+    environment; every other test here launches on the mock backend, whatever else
+    the invocation selected — this app is the test's own, never the session-cached
+    one the gate is session-wide for, so the inject journeys need not share its real
+    receive loop."""
+    reader = taskbar_badge.TaskbarBadgeReader(badge_package["aumid"])
     environment = _seeded_environment(request, nest_instance)
     if request.node.get_closest_marker("real_conversations"):
         _apply_real_conversations_env(environment, request)
+    # The launch's own state roots, written by the PACKAGED app, so outside write
+    # virtualization (module doc); fresh per test, as an unpackaged launch's are. A
+    # short name: the account store nests 64-hex actor dirs under it, and MAX_PATH
+    # still binds a Windows path.
+    own = os.path.join(badge_package["scratch"], uuid.uuid4().hex[:8])
     driver = create_driver("windows")
     try:
         driver.launch({
             "url": nest_instance["url"],
-            "app_path": windows_app_path,
+            "app_path": badge_package["exe"],
             "environment": environment,
+            "package_family_name": badge_package["pfn"],
+            "package_app_id": taskbar_badge.APPLICATION_ID,
+            "local_appdata": os.path.join(own, "localappdata"),
+            "credential_dir": os.path.join(own, "creds"),
         })
+        # The premise, from the OS: the app runs with THIS package's identity. A
+        # badge read against an identity-less process would only ever time out.
+        package = driver.app_package_full_name()
+        assert package and package.startswith(f"{BADGE_IDENTITY}_"), (
+            f"FaunaApp is not running with the registered package's identity (package "
+            f"{package!r}, want {BADGE_IDENTITY}_…) — the package-context launch failed"
+        )
         secret_hex = test_user["signing_key"].encode().hex()
         driver.set_state({
             "session": {
@@ -328,8 +342,8 @@ def badge_other_device(request, test_user, nest_instance):
     launched is torn down at the end.
 
     **Why tui, not a second windows seat.** The badge is keyed on the app's AUMID,
-    and a second FaunaApp started from the same build output runs under the same
-    lent identity — so it would push ITS OWN unread total onto the very badge this
+    and a second FaunaApp started in the same registered package runs under the
+    same identity — so it would push ITS OWN unread total onto the very badge this
     test reads, and the badge would show whichever process wrote last. A real box
     runs one FaunaApp per user (the single-instance gate), so that collision is the
     harness's, never the product's; tui paints no badge (`common.md` § Home-screen

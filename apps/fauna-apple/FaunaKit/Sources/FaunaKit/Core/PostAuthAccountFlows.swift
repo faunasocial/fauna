@@ -176,6 +176,16 @@ public func escalateToLaunchSurface(
 /// `reportRefused` receives only an error thrown by `registry.addAccount`; the
 /// first-run `LoggedIn` terminal (`persistLoggedIn`) stays log-only.
 ///
+/// **The finished append wizard holds** (`onboarding.md` § Wizard exit handling →
+/// *The finished wizard holds until the session is signed in*: an append finish is
+/// the same launch, `launch_progress` until `Online`): `holdLaunch` puts the host's
+/// launch progress surface up BEFORE the wizard is dismissed, so the outgoing
+/// account's shell never paints between the wizard and the new account's launch
+/// (the switch's flush and teardown take several hops). `releaseLaunch` gives the
+/// shell back on each arm that never reaches the switch — missing identity
+/// material, a refused add; a refused activation is the host's `switchAccount`
+/// closure's to release, since this function never sees that refusal.
+///
 /// `dismissWizard`/`switchAccount` are closures: `isAddingAccount` lives on
 /// two distinct `@Observable` state classes (`AppState`/`MacAppState`), and
 /// `switchAccount` itself is genuinely platform-divergent (macOS's
@@ -186,6 +196,8 @@ public func escalateToLaunchSurface(
 @MainActor
 public func completeAppendedAccount(
     wizard: OnboardingMachine,
+    holdLaunch: () -> Void,
+    releaseLaunch: () -> Void,
     dismissWizard: () -> Void,
     switchAccount: (String, Bool) async -> Void,
     reportRefused: @MainActor (Error) -> Void
@@ -201,12 +213,14 @@ public func completeAppendedAccount(
     // persisted below once the restored identity is added — before the switch,
     // and linked to it by name since it is not active yet.
     let restoredPredecessors = wizard.restoredPredecessors()
+    holdLaunch()
     dismissWizard()
 
     guard let secretHex, !nestUrl.isEmpty,
           let actorId = try? actor_id_from_secret(secretHex) else {
         logMessage(level: .error, target: "fauna.accounts",
                    message: "[add-account] wizard finished without full identity material; dismissing")
+        releaseLaunch()
         return
     }
 
@@ -240,6 +254,7 @@ public func completeAppendedAccount(
                    message: "[add-account] addAccount failed: \(error); dismissing the wizard")
         // The wizard is already gone, so the refusal (a full account list: the shared
         // `add_refused_copy` line in `FfiError.General`) is painted on the switcher.
+        releaseLaunch()
         reportRefused(error)
         return
     }

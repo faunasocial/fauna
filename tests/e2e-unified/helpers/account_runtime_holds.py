@@ -19,8 +19,9 @@ from __future__ import annotations
 #: While this device owes the nest an own fleet row of the named kind, an
 #: unprompted publish of the fleet plane publishes nothing.
 PUBLISH_HOLD_ENV = "FAUNA_E2E_HOLD_PUBLISH_KIND"
-#: Once this process has listed the fleet scope, an unprompted walk of it walks
-#: nothing.
+#: Once the replica has listed the fleet scope — this process, or the store it
+#: shares (a sync agent hosting an app's store included) — an unprompted walk of
+#: it walks nothing.
 WALK_HOLD_ENV = "FAUNA_E2E_HOLD_FLEET_WALK"
 #: The mail custody's row kind (`fauna_protocol::merge_policy::KIND_MAIL`).
 KIND_MAIL = "fauna.state.mail"

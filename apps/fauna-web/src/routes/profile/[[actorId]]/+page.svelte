@@ -69,6 +69,7 @@
   } from '#lib/rpc';
   import {
     ensureWasm,
+    subscriptionTierFormPossibility,
     decodeProfileDisplay,
     decodeOwnProfileDisplay,
     actorHome,
@@ -84,8 +85,11 @@
     offerStatusLabel as wasmOfferStatusLabel,
     parseCount,
     wardAskRules,
+    readPossibility,
     type ProfileLinkInput,
   } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import { blockAnswer, followAnswer, readFailed, type ReadWord } from '#lib/read-gate';
   import { readProvenanceFromBytes } from '#lib/c2pa';
   import { nodeUrl, uploadBlobMultipart } from '#lib/api';
   import { resolveLocalized } from '#lib/i18n/localized';
@@ -116,6 +120,7 @@
   import { refusalText } from '#lib/guardian-refusal';
   import {
     blockEdgeBlocked,
+    blockReadWord,
     blockToggleEnabled,
     foldBlockPress,
     foldBlockRead,
@@ -149,6 +154,8 @@
 
   let activeTab = $state<Tab>('posts');
   let error = $state('');
+  // The wasm core is up (`ensureWasm` in `onMount`) — what every wasm-read gate below waits on.
+  let wasmReady = $state(false);
 
   // The viewed actor: the route param when present (OTHER), else the viewer's own
   // id (SELF). `is_self` drives edit-vs-follow + which Tiers-tab branch renders.
@@ -163,6 +170,12 @@
 
   // §1 My tiers (SELF)
   let tiers = $state<SubscriptionTier[]>([]);
+  // Where the §1 tier read stands — §4's add-provider and §5's mint paint from
+  // the shared own-tier answer over it, so a pending or failed first read says
+  // so instead of "create a tier first" (profile.md § Errors & edge cases,
+  // *A tier before what sells it*). An answered list stays answered when a
+  // later re-read (after a mutation) fails.
+  let tiersRead = $state<ReadWord>('pending');
   // §1's OWN row list excludes per-post pay-to-unlock tiers (monetization.md
   // §128; leg (2) of "sell this post" — an auto-minted unlock tier must never
   // appear in the author's tier-management list). `tiers` itself stays
@@ -226,6 +239,17 @@
   // (`profile.unfollow_confirm`); the second leaves. Another profile gesture, a
   // fresh open or the reply disarms it.
   let unfollowArmed = $state(false);
+  // Where the open-time `status.get` read stands (tui's `follow_read`): the
+  // follow waits on it (`profile.md` § Errors & edge cases, *Unread state is
+  // not possible*) — a press before it would subscribe again to an author the
+  // viewer already follows. Reset by each open.
+  let followRead = $state<ReadWord>('pending');
+  // The follow's answer, painted on the button and asked again by `follow()`
+  // (`ui/README.md` § Offer only what is possible, rules 5, 6): possible once
+  // the viewer pressed it this open or the status read answered.
+  const followGate = $derived(
+    formGate(wasmReady ? askPossibility(() => followAnswer(readPossibility, followedOverride !== null, followRead)) : null),
+  );
   // Following and the confirm gate are shared Rust (`fauna_core::format::
   // is_following` / `unfollow_ends_paid_tier` over wasm; `subscriptions.md` § The
   // free followers tier — follow and unfollow, rule 4), as is the toggle wording
@@ -247,6 +271,12 @@
   let blockEdge = $state(unknownBlockEdge());
   let blockBusy = $state(false);
   const isBlocked = $derived(blockEdgeBlocked(blockEdge));
+  // The toggle's answer (tui's `block_answer`): possible once the open-time
+  // block read, or the viewer's own press, set the edge; before it blocked
+  // still loading, its reason on `title`. A call in flight disables it too.
+  const blockGate = $derived(
+    formGate(wasmReady ? askPossibility(() => blockAnswer(readPossibility, blockReadWord(blockEdge))) : null),
+  );
   const blockEnabled = $derived(blockToggleEnabled(blockEdge, blockBusy));
   // The toggle label decision (`blocked` → "Unblock", else "Block") lives in shared
   // Rust (`fauna_core::format::contact_toggle_block_label` over wasm), so web shares
@@ -367,6 +397,16 @@
     return contactOverlays().labelSuggestions(labelDraft, privateForm.labels);
   });
   let privateSaving = $state(false);
+  // Save's answer — shared `contact_overlays::save_possibility` over this tab
+  // (still loading while the account store assembles; refused in a tab that
+  // hosts no runtime), re-asked as the overlay moves; `savePrivateSection`
+  // asks it again before saving.
+  const privateSaveGate = $derived.by(() => {
+    void $contactsRevision;
+    void $engineRoleDenied;
+    const editor = privateEditor;
+    return formGate(editor ? askPossibility(() => editor.savePossibility()) : null);
+  });
 
   $effect(() => {
     void $contactsRevision;
@@ -662,6 +702,7 @@
     if (!s) return;
     try {
       tiers = await subscriptionsTiersList(s);
+      tiersRead = 'resolved';
       requests = await subscriptionsRequestsList(s);
       selfReloadTick += 1; // §4 + §5 read themselves off this
       const names = tiers.map((tr) => tr.name);
@@ -673,6 +714,7 @@
         await loadRoster(selectedTier);
       }
     } catch (e) {
+      tiersRead = readFailed(tiersRead);
       error = e instanceof Error ? e.message : String(e);
     }
   }
@@ -710,12 +752,20 @@
     const stale = () => viewedActorId !== actor || actorHomeSlot !== home;
     try {
       try {
-        const st = await subscriptionsStatusGet(s, viewedActorId);
-        viewerStatusTier = st.tier;
-        viewerFollowPending = st.follow_pending ?? false;
+        const st = await subscriptionsStatusGet(s, actor);
+        if (viewedActorId === actor) {
+          viewerStatusTier = st.tier;
+          viewerFollowPending = st.follow_pending ?? false;
+          followRead = 'resolved';
+        }
       } catch {
-        viewerStatusTier = null;
-        viewerFollowPending = false;
+        // A failure after an answered read keeps the status already shown (the
+        // follow stays actionable); before one, the follow is blocked with it.
+        if (viewedActorId === actor && followRead !== 'resolved') {
+          viewerStatusTier = null;
+          viewerFollowPending = false;
+          followRead = readFailed(followRead);
+        }
       }
       const listed = await subscriptionsOffersListAcrossNests(s, actor, home);
       if (stale()) return;
@@ -903,7 +953,13 @@
     postsHost.destroy();
   });
 
-  let wasmReady = $state(false);
+  // `subscription-tier-form-save`, painted from the shared draft-validity
+  // answer (`fauna_client_subscriptions::forms::tier_form_possibility`,
+  // profile.md § Errors & edge cases): a nameless tier is blocked with its
+  // reason on `title`; `saveForm` asks it again before it runs.
+  const tierSaveGate = $derived(
+    formGate(wasmReady ? askPossibility(() => subscriptionTierFormPossibility(formName)) : null),
+  );
 
   onMount(async () => {
     try {
@@ -945,6 +1001,7 @@
     pendingTiers = new Set();
     followedOverride = null;
     unfollowArmed = false;
+    followRead = 'pending';
     blockEdge = unknownBlockEdge();
     blockBusy = false;
     knockAsk = knockStateFor(self ? null : id);
@@ -1027,8 +1084,12 @@
 
   async function saveForm(): Promise<void> {
     const s = secret();
+    if (!s) return;
+    // A nameless tier refuses with the painted reason on `error-message`,
+    // never a silent return and never a nest round-trip.
+    const refusal = formRefusal(askPossibility(() => subscriptionTierFormPossibility(formName)));
+    if (refusal !== null) { error = refusal; return; }
     const name = formName.trim();
-    if (!s || name === '') return;
     // Shared non-negative parse (value-formatting.md § Tier rank) — the prior
     // `parseInt(..) || 0` let a negative through (`-3` is truthy), and the wasm
     // boundary's `u32` turned it into 4294967293, a tier outranking everything.
@@ -1169,6 +1230,12 @@
   async function follow(): Promise<void> {
     const s = secret();
     if (!s || !viewedActorId) return;
+    // The answer the button is painted from, asked again (rule 6).
+    const refusal = formRefusal(askPossibility(() => followAnswer(readPossibility, followedOverride !== null, followRead)));
+    if (refusal !== null) {
+      error = refusal;
+      return;
+    }
     const leaving = isFollowing;
     if (leaving && unfollowEndsPaidTier(viewerStatusTier) && !unfollowArmed) {
       unfollowArmed = true;
@@ -1215,8 +1282,8 @@
 
   // Read the viewed actor's edge from `fauna.contacts.list` and set the toggle
   // label: a `blocked` row for this peer → "Unblock", else "Block" (mirrors linux
-  // `refresh_block_state`). A failed read is non-fatal — defaults to not-blocked
-  // ("Block"), like linux's `Err(_) => false` — and still enables the toggle.
+  // `refresh_block_state`). A failed read leaves the edge unknown: Block is
+  // blocked with `common.load_failed`, never a guessed not-blocked edge.
   // The read folds through `foldBlockRead`: it is dropped once the viewer's own
   // press authored the edge, and when the viewed actor changed while it was in
   // flight (the component is reused across `/app/profile/<a>` → `<b>`).
@@ -1224,7 +1291,7 @@
     const s = secret();
     const actor = viewedActorId;
     if (!s || !actor) return;
-    let blocked: boolean;
+    let blocked: boolean | null;
     try {
       const contacts = await contactsList(s);
       // Shared block predicate (`fauna_core::format::contact_row_blocks_actor` over
@@ -1234,7 +1301,7 @@
         contactRowBlocksActor(c.peer_id, c.status, actor),
       );
     } catch {
-      blocked = false;
+      blocked = null;
     }
     if (actor !== viewedActorId) return;
     blockEdge = foldBlockRead(blockEdge, blocked);
@@ -1250,7 +1317,14 @@
   async function toggleBlock(): Promise<void> {
     const s = secret();
     if (!s || !viewedActorId) return;
-    if (!blockEnabled) return;
+    // The answer the button is painted from, asked again (rule 6); a press
+    // while a toggle is already in flight is simply the same press.
+    const refusal = formRefusal(askPossibility(() => blockAnswer(readPossibility, blockReadWord(blockEdge))));
+    if (refusal !== null) {
+      error = refusal;
+      return;
+    }
+    if (blockBusy) return;
     const wasBlocked = isBlocked;
     const actor = viewedActorId;
     blockBusy = true;
@@ -1432,7 +1506,10 @@
         {t.profile.edit}
       </button>
     {:else}
-      <button class="btn primary" data-testid={IDS.PROFILE_FOLLOW_BUTTON} onclick={follow}>
+      <button
+        class="btn primary" data-testid={IDS.PROFILE_FOLLOW_BUTTON} onclick={follow}
+        disabled={followGate.disabled} title={followGate.reason || undefined}
+      >
         {followLabel}
       </button>
     {/if}
@@ -1453,7 +1530,8 @@
       </button>
       <button
         class="btn danger" data-testid={IDS.PROFILE_BLOCK_BUTTON}
-        onclick={toggleBlock} disabled={!blockEnabled}
+        onclick={toggleBlock} disabled={blockGate.disabled || !blockEnabled}
+        title={blockGate.reason || undefined}
       >{blockLabel}</button>
       <button
         class="btn danger" data-testid={IDS.PROFILE_REPORT_BUTTON}
@@ -1531,7 +1609,8 @@
       <div class="form-buttons">
         <button
           class="btn primary" data-testid={IDS.PROFILE_PRIVATE_SAVE_BUTTON}
-          onclick={savePrivate} disabled={privateSaving}
+          onclick={savePrivate} disabled={privateSaving || privateSaveGate.disabled}
+          title={privateSaveGate.reason || undefined}
         >{t.profile.private_save}</button>
       </div>
     </section>
@@ -1648,22 +1727,26 @@
   <h1 class="page-heading" data-testid={IDS.PAGE_HEADING}>{heading}</h1>
 
   <!-- ── tab strip ── -->
-  <nav class="tabs">
+  <nav class="tabs" role="tablist">
     <button
       class="tab"
       class:active={activeTab === 'posts'}
+      role="tab"
+      aria-selected={activeTab === 'posts'}
       data-testid={IDS.PROFILE_POSTS_TAB}
       onclick={openPostsTab}
     >{t.profile.posts}</button>
     <button
       class="tab"
       class:active={activeTab === 'tiers'}
+      role="tab"
+      aria-selected={activeTab === 'tiers'}
       data-testid={IDS.PROFILE_TIERS_TAB}
       onclick={showTiers}
     >{t.profile.tiers}</button>
   </nav>
 
-  <MessageBanner bind:error />
+  <MessageBanner bind:error standDown={!!postsHost.reply.error} />
   <ReportHost
     bind:target={reportTarget}
     onerror={(m) => (error = m)}
@@ -1745,7 +1828,8 @@
               <button class="btn" data-testid={IDS.SUBSCRIPTION_TIER_FORM_CANCEL} onclick={cancelForm}>
                 {t.subscriptions.cancel}
               </button>
-              <button class="btn primary" data-testid={IDS.SUBSCRIPTION_TIER_FORM_SAVE} onclick={saveForm}>
+              <button class="btn primary" data-testid={IDS.SUBSCRIPTION_TIER_FORM_SAVE} onclick={saveForm}
+                disabled={tierSaveGate.disabled} title={tierSaveGate.reason || undefined}>
                 {t.subscriptions.save}
               </button>
             </div>
@@ -1854,6 +1938,7 @@
         <ProviderSection
           secretHex={$identity?.secretHex ?? null}
           {tiers}
+          {tiersRead}
           actorIdHex={$identity?.actorId ?? ''}
           reloadTick={selfReloadTick}
           onerror={(m) => (error = m)}
@@ -1861,6 +1946,7 @@
         <ClaimSection
           secretHex={$identity?.secretHex ?? null}
           {tiers}
+          {tiersRead}
           reloadTick={selfReloadTick}
           onerror={(m) => (error = m)}
         />

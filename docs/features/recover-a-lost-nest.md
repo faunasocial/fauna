@@ -55,8 +55,8 @@ Stamped 2026-11-07 at 6a0ded1015.
 |---|---|---|
 | web | ✅ full | 0.1.6-dev+3aeb19b0 standalone |
 | linux | ⚠ partial | 0.1.6-dev+f2a8f7b9 standalone |
-| windows | ⚠ partial | 0.1.6 docker |
-| macos | ⚠ partial | 0.1.6 docker |
+| windows | ⚠ partial | 0.1.7 docker |
+| macos | ⚠ partial | 0.1.7 docker |
 | ios | ✅ full | 0.1.5-dev+56c8dd96.dirty standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+3bf78261.dirty standalone |
@@ -78,8 +78,8 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 4 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_every_kind_comes_back_from_a_surviving_nest` | web (linux): passed, windows (windows): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_launch_recover_button_appears_when_the_saved_nest_is_dead` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_a_rotated_away_identity_is_never_offered_for_recovery` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 7 | app | `tests/e2e-unified/tests/test_box_recovery_seed_custody.py::test_an_unconfirmed_custody_warns_the_admin_in_the_shared_words` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 8 | app | `tests/e2e-unified/tests/test_box_recovery_seed_custody.py::test_a_co_admins_device_custodies_a_box_it_did_not_claim` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 9 | app | `tests/e2e-unified/tests/test_box_recovery_seed_custody.py::test_cloud_recovery_rebuilds_with_the_saved_seed_and_repoints_the_domain` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 10 | app | `tests/e2e-unified/tests/test_box_recovery_seed_custody.py::test_the_selfhosted_command_carries_the_seed_and_copy_waits_for_it` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 7 | app | `tests/e2e-unified/tests/test_box_recovery_seed_custody.py::test_an_unconfirmed_custody_warns_the_admin_in_the_shared_words` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 8 | app | `tests/e2e-unified/tests/test_box_recovery_seed_custody.py::test_a_co_admins_device_custodies_a_box_it_did_not_claim` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_box_recovery_seed_custody.py::test_cloud_recovery_rebuilds_with_the_saved_seed_and_repoints_the_domain` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 10 | app | `tests/e2e-unified/tests/test_box_recovery_seed_custody.py::test_the_selfhosted_command_carries_the_seed_and_copy_waits_for_it` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 <!-- features-render:end -->

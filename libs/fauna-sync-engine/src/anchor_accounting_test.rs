@@ -1325,3 +1325,152 @@ fn a_nested_flat_root_base_is_never_carried_into_a_scope() {
     );
     assert!(nested.exists(), "…and is left where it rests");
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// An edit stamp reaches across the writer's own acknowledged run
+// (`conflicts.md` § the causal watermark, ruled 2026-11-19)
+// ─────────────────────────────────────────────────────────────────────
+
+/// The run grows only over rows the nest says are contiguous in the set: each
+/// ack whose `prev_set_seq` sits at or below `max(anchor, T)` moves `T` to its
+/// seq, and the next edit claims it.
+#[tokio::test]
+async fn an_acked_own_run_widens_the_edit_claim() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = engine_holding_the_key(watch.path());
+    let path = "notes/a.bin";
+    engine.db().set_anchor(100).unwrap();
+
+    engine.causal().note_own_record_ack(100, 150, Some(100));
+    assert_eq!(engine.causal().own_run_top(), 150);
+    assert_eq!(
+        engine.edit_stamp(path).derived_through,
+        Some(150),
+        "a second save inside the echo window claims the writer's own first row"
+    );
+
+    engine.causal().note_own_record_ack(100, 170, Some(150));
+    assert_eq!(
+        engine.edit_stamp(path).derived_through,
+        Some(170),
+        "the run grows ack by ack"
+    );
+
+    engine.db().set_anchor(200).unwrap();
+    assert_eq!(
+        engine.edit_stamp(path).derived_through,
+        Some(200),
+        "a run the anchor has passed is dead weight"
+    );
+}
+
+/// A foreign row inside the run — the nest's `prev_set_seq` above what this
+/// device accounts for — breaks it: claiming past it would cover a peer row
+/// this device never read.
+#[tokio::test]
+async fn a_foreign_row_in_the_echo_window_does_not_advance_the_run() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = engine_holding_the_key(watch.path());
+    engine.db().set_anchor(100).unwrap();
+
+    engine.causal().note_own_record_ack(100, 150, Some(120));
+    assert_eq!(engine.causal().own_run_top(), 0);
+    assert_eq!(engine.edit_stamp("a.bin").derived_through, Some(100));
+
+    // And a later ack chained on the broken one cannot repair it.
+    engine.causal().note_own_record_ack(100, 160, Some(150));
+    assert_eq!(engine.edit_stamp("a.bin").derived_through, Some(100));
+}
+
+/// A reply without the field (an older nest, a relay that dropped it) says
+/// nothing about the rows between, so it advances nothing: today's stamp.
+#[tokio::test]
+async fn a_record_reply_without_prev_set_seq_does_not_advance_the_run() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = engine_holding_the_key(watch.path());
+    engine.db().set_anchor(100).unwrap();
+
+    engine.causal().note_own_record_ack(100, 150, None);
+    assert_eq!(engine.causal().own_run_top(), 0);
+    assert_eq!(engine.edit_stamp("a.bin").derived_through, Some(100));
+}
+
+/// The widened claim passes both floor reductions: a live per-path skip cuts
+/// that path's claim, a set-wide one every path's.
+#[tokio::test]
+async fn the_widened_edit_claim_is_cut_by_both_floors() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = engine_holding_the_key(watch.path());
+    let path = "photos/a.jpg";
+    engine.db().set_anchor(100).unwrap();
+    engine.causal().note_own_record_ack(100, 150, Some(100));
+
+    engine
+        .causal()
+        .note_permanent_skip(Some(&hex::encode(fauna_core::sync::path_hash(path))), 90);
+    assert_eq!(
+        engine.edit_stamp(path).derived_through,
+        Some(89),
+        "the per-path floor cuts the widened claim exactly as the bare anchor"
+    );
+    assert_eq!(
+        engine.edit_stamp("elsewhere.txt").derived_through,
+        Some(150),
+        "and only that path pays"
+    );
+
+    engine.causal().note_permanent_skip(None, 80);
+    assert_eq!(
+        engine.edit_stamp("elsewhere.txt").derived_through,
+        Some(79),
+        "the set-wide floor cuts every widened claim"
+    );
+}
+
+/// Edit stamps only: a resolution's bytes are OLD, so a widened one would read
+/// as covering this device's own newer edit; the winner claim keeps its own
+/// derivation. Neither reads `T`.
+#[tokio::test]
+async fn resolution_stamps_and_the_winner_claim_do_not_read_the_run() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = engine_holding_the_key(watch.path());
+    let path = "a.bin";
+    engine.db().set_anchor(100).unwrap();
+    let winner_before = engine.causal().honest_winner_claim(path, 140, false);
+    engine.causal().note_own_record_ack(100, 150, Some(100));
+
+    assert_eq!(engine.edit_stamp(path).derived_through, Some(150));
+    assert_eq!(
+        engine.resolution_stamp(path).derived_through,
+        Some(100),
+        "a resolution keeps the bare reduced anchor"
+    );
+    assert_eq!(
+        engine.causal().honest_winner_claim(path, 140, false),
+        winner_before,
+        "the winner claim is untouched by the run"
+    );
+}
+
+/// A run top that cannot be read is no run — the conservative answer — and
+/// the next contiguous ack writes a fresh one over it.
+#[tokio::test]
+async fn an_unreadable_run_top_reads_as_no_run() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = engine_holding_the_key(watch.path());
+    engine.db().set_anchor(100).unwrap();
+    std::fs::create_dir_all(engine.causal_dir_for_test()).unwrap();
+    std::fs::write(
+        engine
+            .causal_dir_for_test()
+            .join(crate::causal::OWN_RUN_TOP_FILE),
+        b"not a seq",
+    )
+    .unwrap();
+
+    assert_eq!(engine.causal().own_run_top(), 0);
+    assert_eq!(engine.edit_stamp("a.bin").derived_through, Some(100));
+
+    engine.causal().note_own_record_ack(100, 150, Some(100));
+    assert_eq!(engine.edit_stamp("a.bin").derived_through, Some(150));
+}

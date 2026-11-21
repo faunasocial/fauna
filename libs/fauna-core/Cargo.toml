@@ -12,6 +12,8 @@ network = ["dep:redb", "dep:tokio", "dep:tokio-stream", "dep:hickory-resolver", 
 ## Locks request primitive (`web_lock`) every web lock in shared Rust rides.
 js = ["dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
 format_text = []
+## Test-only constructors other crates' tests reach (`manifest_paging::PagingRule::with_thresholds`).
+test-util = []
 ## QR module-matrix generation (`qr_matrix`). Off by default so the nest / provisioning
 ## builds don't carry a QR encoder they never render; the client-facing faces
 ## (fauna-ffi, fauna-wasm) turn it on.

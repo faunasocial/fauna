@@ -31,7 +31,14 @@ public enum FileProviderHostError: Error, Sendable {
 /// (`FileProviderCredentialStore`), lays out the extension's private working +
 /// state directories in the app-group container, and hands both — plus a fresh-read
 /// bearer provider and change-signer provider — to the Rust
-/// `FfiFileProviderHost.appDead` constructor.
+/// `heldAppDeadHost`, which hands back the process's held host for the
+/// domain when one was built from the same inputs, else builds and holds one
+/// (`relay-serving.md` § Relay serving → *Apple's File Provider replica*,
+/// point (2)): fileproviderd invalidates an extension instance seconds after
+/// its request ends, while the process lives on, so the host — its engine,
+/// relay seat and the app's lease on it — lives with the process, never with
+/// one instance. Every build first releases the held hosts of any other
+/// account (`retainHeldDomainHosts`), and a signed-out build releases them all.
 ///
 /// This is shared FaunaKit (not appex-local) so macOS and iOS build the host the
 /// same way (priority #2). It takes the registered **domain identifier** — the
@@ -53,8 +60,12 @@ public enum FileProviderHostError: Error, Sendable {
 ///   callbacks); the component is the identifier's own ref half.
 public func makeFileProviderHost(domainId: String) throws -> FfiFileProviderHost {
     guard let creds = FileProviderCredentialStore.load() else {
+        // Signed out: no held host of any account serves on.
+        try? retainHeldDomainHosts(actorId: nil, folderIds: nil)
         throw FileProviderHostError.notProvisioned
     }
+    // An account switch: the held hosts of the account that left are released.
+    try? retainHeldDomainHosts(actorId: creds.actorId, folderIds: nil)
     let identity: FileProviderDomainIdentity
     switch hostAdmission(
         domainId: domainId,
@@ -74,7 +85,7 @@ public func makeFileProviderHost(domainId: String) throws -> FfiFileProviderHost
     // through the app's mirror into this item.
     try installCapabilityHostCustody(actorId: creds.actorId, custody: KeychainRetainedKeyCustody())
 
-    return try FfiFileProviderHost.appDead(
+    return try heldAppDeadHost(
         nestUrl: creds.nestURL,
         actorId: creds.actorId,
         deviceId: creds.deviceId,

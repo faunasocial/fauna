@@ -13,8 +13,9 @@ import SwiftUI
 /// (`admin-settings-tier-cap-*`) + an `admin-settings-tier-save-button` that PUTs the
 /// row via `fauna.admin.tiers.update` and refetches. The inputs hold exact integers
 /// (bytes for the byte caps, counts otherwise), 1:1 with the `AdminTier` i64 wire
-/// type; a stray/blank edit falls back to the persisted value on Save (no silent
-/// zeroing — mirrors linux `parse_cap`). **Membership designations**
+/// type; the Save is painted from the shared `tier_caps_possibility` — blocked with
+/// its reason while any cap does not parse through `parse_cap`, never sent with the
+/// persisted cap in its place (admin.md § Errors & edge cases). **Membership designations**
 /// (monetization.md § Pillar 4) — one `admin-settings-membership-item` row per
 /// subscription tier the admin owns, linking it to an admitted/lapsed quota tier;
 /// see `MembershipDesignationRow` below.
@@ -22,7 +23,6 @@ import SwiftUI
 /// `admin-nav-back` is provided by the admin shell rail (macOS) / the navigation
 /// stack (iOS), not this page.
 public struct AdminTiersView: View {
-    @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = AdminTiersVM()
     /// Reload trigger — macOS passes the shell's `navGeneration`; iOS leaves it 0
     /// (the NavigationLink re-mounts the view, re-running the load).
@@ -51,7 +51,7 @@ public struct AdminTiersView: View {
                     ForEach(Array(vm.tiers.enumerated()), id: \.element.name) { offset, tier in
                         TierDefinitionRow(tier: tier, reloadToken: vm.snapshotVersion,
                                           isBusy: vm.isBusy,
-                                          onSave: { await vm.saveTier($0) },
+                                          onSave: { await vm.saveTier(name: $0, caps: $1) },
                                           onDelete: { await vm.deleteTier(name: $0) })
                             .accessibilityElement(children: .contain)
                             .accessibilityIdentifier(Ids.adminSettingsTierItem)
@@ -71,10 +71,15 @@ public struct AdminTiersView: View {
 
                 // The add-a-tier form (admin.md § 3 → *Defining a new tier*), a sibling
                 // of the tier rows so it shows on a fresh box with no tiers.
-                TierAddForm(isBusy: vm.isBusy) { name, inbox, storage, devices, blobSize, feeds in
+                // It waits for the `tiers.list` read (admin.md § Errors & edge
+                // cases, *Controls wait for their read*).
+                FaunaPossibilityReason(vm.addTierPossibility)
+                TierAddForm(isBusy: vm.isBusy,
+                            answer: { vm.addTierAnswer(name: $0, caps: $1) }) { name, inbox, storage, devices, blobSize, feeds in
                     await vm.addTier(name: name, inbox: inbox, storage: storage, devices: devices,
                                      blobSize: blobSize, feeds: feeds)
                 }
+                .faunaPossible(vm.addTierPossibility)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(Ids.adminSettingsTierAddSection)
@@ -102,6 +107,7 @@ public struct AdminTiersView: View {
                             quotaTierNames: vm.tierNames,
                             reloadToken: vm.snapshotVersion,
                             isBusy: vm.isBusy,
+                            clearAnswer: vm.membershipClearAnswer(tierName: tierName),
                             onSave: { await vm.saveMembershipTier(tierName: $0, adminTier: $1, lapseTier: $2) },
                             onClear: { await vm.clearMembershipTier(tierName: $0) }
                         )
@@ -120,10 +126,7 @@ public struct AdminTiersView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task(id: reloadToken) {
-            guard let client else { return }
-            await vm.configure(api: client.api)
-        }
+        .adminReadOnEntryAndReconnect(vm, reloadToken: reloadToken)
     }
 }
 
@@ -131,15 +134,14 @@ public struct AdminTiersView: View {
 
 /// One tier row: the name + five raw-i64 cap inputs + a Save button. Integer
 /// fields edit as `String` buffers seeded from the persisted caps (re-seeded on
-/// every `reloadToken` bump = each refetch), parsed on Save with a fall-back to
-/// the persisted value (`parseCap`, mirroring linux `parse_cap` — a stray edit
-/// never silently zeroes a cap). Save gathers the buffers into an `FfiAdminTier`
-/// and hands it up; the VM PUTs + refetches.
+/// every `reloadToken` bump = each refetch). The Save is painted from the shared
+/// `tier_caps_possibility` over the five drafts and hands them up as typed; the
+/// VM asks the same answer, parses through `parseCap`, PUTs + refetches.
 private struct TierDefinitionRow: View {
     let tier: FfiAdminTier
     let reloadToken: Int
     let isBusy: Bool
-    let onSave: (FfiAdminTier) async -> Void
+    let onSave: (_ name: String, _ caps: [String]) async -> Void
     let onDelete: (_ name: String) async -> Void
 
     @State private var inbox = ""
@@ -174,9 +176,15 @@ private struct TierDefinitionRow: View {
                 save()
             }
             .faunaGate("fauna.admin.tiers.update")
+            // Live only while every cap parses (admin.md § Errors & edge cases);
+            // `AdminTiersVM.saveTier` asks the same answer at the press.
+            .faunaPossible(AdminTiersVM.tierCapsAnswer(caps))
+            FaunaPossibilityReason(AdminTiersVM.tierCapsAnswer(caps))
 
-            // Delete (admin.md § 3 → *Removing a tier*): on every row, `free`'s
-            // included — which tier is removable is the nest's call. No confirm.
+            // Delete (admin.md § 3 → *Removing a tier*): absent on `free`, the
+            // one tier the nest never removes — the shared
+            // `adminTierDeletePossibility` answer, asked again in `delete()`.
+            // No confirm.
             Button(L.admin.settingsPage.deleteTier, role: .destructive) {
                 delete()
             }
@@ -187,6 +195,7 @@ private struct TierDefinitionRow: View {
                 delete()
             }
             .faunaGate("fauna.admin.tiers.delete")
+            .faunaPossible(adminTierDeletePossibility(tier: tier.name))
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -196,11 +205,15 @@ private struct TierDefinitionRow: View {
     /// The Save action — shared by the `Button` and `automationActivate` so the
     /// two can never diverge.
     private func save() {
-        Task { await onSave(gather()) }
+        Task { await onSave(tier.name, caps) }
     }
+
+    /// The five cap drafts, in the order the shared predicate takes them.
+    private var caps: [String] { [inbox, storage, devices, blobSize, feeds] }
 
     /// The Delete action — shared by the `Button` and `automationActivate`.
     private func delete() {
+        guard adminTierDeletePossibility(tier: tier.name).isPossible else { return }
         Task { await onDelete(tier.name) }
     }
 
@@ -211,33 +224,19 @@ private struct TierDefinitionRow: View {
         blobSize = String(tier.maxBlobSize)
         feeds = String(tier.maxFeeds)
     }
-
-    private func gather() -> FfiAdminTier {
-        // Shared `fauna_core::format::parse_cap` (UniFFI `parseCap`): a stray edit
-        // (empty / unparseable / negative / fractional / out-of-range) falls back
-        // to the persisted cap, so it never silently zeroes — one validator for
-        // every app (value-formatting.md § Tier cap validation), replacing the
-        // local `max(0, Int64(...))` (which on a negative edit zeroed the cap,
-        // contradicting that intent; `parseCap` conforms apple to the shared
-        // fall-back-to-prev contract linux/windows already use, #4).
-        FfiAdminTier(
-            name: tier.name,
-            maxInboxBytes: parseCap(input: inbox) ?? tier.maxInboxBytes,
-            maxStorageBytes: parseCap(input: storage) ?? tier.maxStorageBytes,
-            maxDevices: parseCap(input: devices) ?? tier.maxDevices,
-            maxBlobSize: parseCap(input: blobSize) ?? tier.maxBlobSize,
-            maxFeeds: parseCap(input: feeds) ?? tier.maxFeeds
-        )
-    }
 }
 
 // MARK: - Add-a-tier form (`admin-settings-tier-add-section`)
 
 /// The add-a-tier form: name input + the five raw-i64 cap inputs (blank until the
-/// admin types) + `admin-settings-tier-add-button`. Validation and the nest call
-/// live in `AdminTiersVM.addTier`; the buffers clear only when it reports success.
+/// admin types) + `admin-settings-tier-add-button`. The button is painted from
+/// `answer` — `AdminTiersVM.addTierAnswer`, the page read folded with the shared
+/// `tier_create_possibility` over the drafts — and the nest call lives in
+/// `AdminTiersVM.addTier`, which asks the same answer; the buffers clear only
+/// when it reports success.
 private struct TierAddForm: View {
     let isBusy: Bool
+    let answer: (_ name: String, _ caps: [String]) -> Possibility
     let onAdd: (_ name: String, _ inbox: String, _ storage: String, _ devices: String,
                 _ blobSize: String, _ feeds: String) async -> Bool
 
@@ -276,6 +275,9 @@ private struct TierAddForm: View {
                 add()
             }
             .faunaGate("fauna.admin.tiers.create")
+            .faunaPossible(answer(name, [inbox, storage, devices, blobSize, feeds]))
+            FaunaPossibilityReason(adminTierCreatePossibility(
+                name: name, caps: [inbox, storage, devices, blobSize, feeds]))
         }
         .padding(.vertical, 8)
     }
@@ -309,6 +311,9 @@ private struct MembershipDesignationRow: View {
     let quotaTierNames: [String]
     let reloadToken: Int
     let isBusy: Bool
+    /// The shared `membership_clear_possibility` for this row; the clear asks
+    /// it again (`AdminTiersVM.clearMembershipTier`).
+    let clearAnswer: Possibility
     let onSave: (_ tierName: String, _ adminTier: String, _ lapseTier: String) async -> Void
     let onClear: (_ tierName: String) async -> Void
 
@@ -345,18 +350,24 @@ private struct MembershipDesignationRow: View {
                     save()
                 }
                 .faunaGate("fauna.admin.membership_tiers.set")
+                // Live only with an admitted-at tier picked (admin.md § Errors &
+                // edge cases); `AdminTiersVM.saveMembershipTier` asks again.
+                .faunaPossible(AdminTiersVM.membershipSaveAnswer(adminTier: adminTier))
 
                 Button(L.admin.settingsPage.membershipClear, role: .destructive) {
                     clear()
                 }
-                .disabled(isBusy || existing == nil)
+                .disabled(isBusy)
                 .accessibilityIdentifier(Ids.adminSettingsMembershipClearButton)
                 .automationActivate(Ids.adminSettingsMembershipClearButton,
-                                    isEnabled: { !isBusy && existing != nil }) {
+                                    isEnabled: { !isBusy }) {
                     clear()
                 }
                 .faunaGate("fauna.admin.membership_tiers.clear")
+                .faunaPossible(clearAnswer)
             }
+            FaunaPossibilityReason(AdminTiersVM.membershipSaveAnswer(adminTier: adminTier))
+            FaunaPossibilityReason(clearAnswer)
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -370,11 +381,9 @@ private struct MembershipDesignationRow: View {
     }
 
     /// The Save action — shared by the `Button` and `automationActivate`. A blank
-    /// admin-tier means nothing has been picked yet (no quota tiers exist): a
-    /// no-op rather than a request the nest would refuse with
-    /// `fauna.admin.invalid_params` (mirrors linux's / android's early-return).
+    /// admin-tier (nothing picked — no quota tiers exist) is refused by the VM
+    /// with the shared `membership_save_possibility` reason, never sent.
     private func save() {
-        guard !adminTier.isEmpty else { return }
         Task { await onSave(selectedTierName, adminTier, lapseTier) }
     }
 

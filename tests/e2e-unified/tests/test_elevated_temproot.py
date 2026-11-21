@@ -222,7 +222,9 @@ def test_the_fleet_tooling_suite_takes_the_root_too():
 
 
 def _assert_takes_the_root_first(conftest: Path) -> None:
-    tree = ast.parse(conftest.read_text(encoding="utf-8"))
+    from helpers import source_scan
+
+    tree = source_scan.parsed(conftest)  # shared, read-only
     [configure] = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "pytest_configure"

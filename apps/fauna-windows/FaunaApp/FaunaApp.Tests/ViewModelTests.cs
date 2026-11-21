@@ -2110,8 +2110,9 @@ public class BackupsViewModelTests
             ["backups/backup_reseed_pull_back_confirm_title"] = "Restore the copy on {name} to this nest?",
             ["backups/backup_reseed_pull_back_confirm_body"] =
                 "This copies the backup {name} holds onto this nest and makes it live again. Nothing is "
-                + "deleted, here or on {name}. If this nest already holds your data, it stops rather than "
-                + "mixing the two.",
+                + "deleted, here or on {name}. Where this nest already holds some of your mail, posts, "
+                + "calendar or contacts, what is missing is copied in beside it; a folder it already "
+                + "holds is left as it is.",
             ["backups/backup_reseed_pull_back_reenroll_failed"] =
                 "Your data is back on this nest, but {name} could not be set up again as its backup: "
                 + "{reason}. Add {name} as a backup destination again to keep a copy there.",

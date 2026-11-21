@@ -1250,18 +1250,23 @@ where
                 continue;
             }
 
-            let manifest_bytes = folders.manifest_bytes(&entry.manifest_hash).await?;
-            if ContentHash::of_raw(&manifest_bytes) != entry.manifest_hash {
-                anyhow::bail!(
-                    "manifest {} failed hash verification — refusing to store corrupt bytes",
-                    manifest_hex
-                );
-            }
-            let manifest: fauna_core::chunk::ChunkManifest =
-                fauna_core::encoding::canonical_decode(&manifest_bytes)
-                    .map_err(|e| anyhow::anyhow!("manifest {manifest_hex} does not decode: {e}"))?;
+            // The one keyless walk (`file-sync.md` § Paged manifests → *One
+            // walk, used by every reader*): the root checked against its
+            // address before it is decoded, a paged root's pages fetched and
+            // checked against what it names — refusing to store corrupt bytes.
+            let fauna_core::file_download::ManifestBlobs {
+                manifest_bytes,
+                manifest,
+                pages,
+                store_keys,
+            } = fauna_core::file_download::fetch_manifest_blobs(
+                &FolderBlobs(folders),
+                &entry.manifest_hash,
+            )
+            .await
+            .with_context(|| format!("manifest {manifest_hex} failed verification"))?;
             let mut chunks = Vec::new();
-            for key in manifest.store_keys() {
+            for key in store_keys {
                 let body = folders.chunk_bytes(&key).await?;
                 if ContentHash::of_raw(&body) != key {
                     anyhow::bail!(
@@ -1276,6 +1281,10 @@ where
                 manifest_bytes,
                 manifest_hash: entry.manifest_hash,
                 chunks,
+                // Kept beside the root in the store, so the root's pages
+                // travel with it (`file-sync.md` § Paged manifests →
+                // *Compatibility*).
+                pages,
                 content_stamp: None,
             };
 
@@ -1717,6 +1726,31 @@ where
 /// it, and it is deliberately outside anything a test needs to reach.
 fn now_secs() -> i64 {
     fauna_core::data::Timestamp::now_secs_or_zero()
+}
+
+/// A covered folder's source as a
+/// [`BlobFetcher`](fauna_core::file_download::BlobFetcher) — what lets the
+/// folder pull read a manifest, and a paged root's pages, through the one
+/// shared keyless walk rather than a decode of its own.
+struct FolderBlobs<'a>(&'a dyn crate::segment_backup::FolderCorpusSource);
+
+#[async_trait::async_trait]
+impl fauna_core::file_download::BlobFetcher for FolderBlobs<'_> {
+    async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+        self.0.manifest_bytes(hash).await
+    }
+
+    async fn fetch_chunks(
+        &self,
+        store_keys: &[ContentHash],
+        _relative_path: &str,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut out = Vec::with_capacity(store_keys.len());
+        for key in store_keys {
+            out.push(self.0.chunk_bytes(key).await?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -2240,6 +2274,7 @@ mod tests {
                 stored_hashes: Some(keys),
                 sealed_hashes: None,
                 min_reader: None,
+                pages: None,
             };
             let bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
             let manifest_hash = ContentHash::of_raw(&bytes);
@@ -2257,6 +2292,28 @@ mod tests {
                 path_sealed: Some(format!("sealed:{}", hex::encode(path_hash)).into_bytes()),
             });
             manifest_hash
+        }
+
+        /// Stage one file the source holds as a paged root: its chunks, its
+        /// pages and its root in the source's blob store, and its head entry.
+        fn stage_paged(&self, path_hash: [u8; 32], held: &crate::seal::SealedBlob) {
+            let mut chunks = self.chunks.lock().unwrap();
+            for (key, body) in &held.chunks {
+                chunks.insert(*key, body.clone());
+            }
+            let mut manifests = self.manifests.lock().unwrap();
+            for (page, bytes) in &held.pages {
+                manifests.insert(*page, bytes.clone());
+            }
+            manifests.insert(held.manifest_hash, held.manifest_bytes.clone());
+            let mut head = self.head.lock().unwrap();
+            head.retain(|e| e.path_hash != path_hash.to_vec());
+            head.push(crate::segment_backup::FolderHeadEntry {
+                path_hash: path_hash.to_vec(),
+                manifest_hash: held.manifest_hash,
+                size_bytes: held.manifest.total_size as i64,
+                path_sealed: Some(format!("sealed:{}", hex::encode(path_hash)).into_bytes()),
+            });
         }
 
         fn drop_path(&self, path_hash: [u8; 32]) {
@@ -4455,6 +4512,53 @@ mod tests {
             CustodianStore::live_at(&rows, &path).is_none(),
             "the path is no longer live locally"
         );
+    }
+
+    /// **A paged root is held with its pages** (`file-sync.md` § Paged
+    /// manifests → *Compatibility*, *One walk*). The pull fetches the root's
+    /// pages through the shared walk and keeps them in the manifest store
+    /// beside it; every store read of the file's chunk list walks the root —
+    /// the as-is read hands back the source's chunks byte-identical and the
+    /// pages with them, and a reclaim sweep keeps both. Before, the pull
+    /// refused the root at its store keys and the file never reached the
+    /// custodian.
+    #[tokio::test]
+    async fn a_paged_root_is_held_with_its_pages_and_read_through_the_walk() {
+        let rig = Rig::new(&[]);
+        let folders = FakeFolders::default();
+        let path_hash = [0x6Bu8; 32];
+        let source = crate::custodian_store::paged_mirror_for_test(100, &[0x5E; 32]);
+        folders.stage_paged(path_hash, &source);
+        cover_folder(&rig);
+        let mut pull = rig.pull(None);
+        pull.folder_source = Some(&folders);
+
+        let reports = pull.run_covered_folders(0).await;
+        assert_eq!(reports[0].stored_paths, 1, "{reports:?}");
+
+        let manifests = rig._dir.path().join("custody").join("manifests");
+        let held_file = |hash: &ContentHash| {
+            let hex = hex::encode(hash.digest());
+            std::fs::read(manifests.join(&hex[0..2]).join(&hex))
+        };
+        for (page, bytes) in &source.pages {
+            assert_eq!(&held_file(page).expect("each page is held"), bytes);
+        }
+        assert_eq!(
+            held_file(&source.manifest_hash).expect("the root is held"),
+            source.manifest_bytes
+        );
+
+        let path = format!("{}/{}", folder_set(), hex::encode(path_hash));
+        let read = rig.store.read_as_is(&path).await.unwrap();
+        assert_eq!(read.manifest_hash, source.manifest_hash);
+        assert_eq!(read.chunks, source.chunks, "the chunks read back verbatim");
+        assert_eq!(read.pages, source.pages, "the pages travel with the root");
+
+        // The sweep walks the root too: nothing a live paged file names goes.
+        let swept = rig.store.reclaim(&[]).await.unwrap();
+        assert_eq!(swept.files, 0, "{swept:?}");
+        rig.store.verify_presence(&path).await.unwrap();
     }
 
     /// **Corpus gap #1, closed.** A mirrored folder row must carry the source

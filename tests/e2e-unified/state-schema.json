@@ -68,7 +68,7 @@
     },
     "compose": {
       "type": "object",
-      "description": "WRITE-ONLY. Injected during set_state to trigger test agent actions. Not returned by get_state.\n\nFull compose.file flow: set_state({compose: {file: '/path'}}) → test agent calls upload_blob(path) → receives blob hash → stores hash in compose context → next post submission includes the hash as an attachment. Web clients use Playwright set_input_files() instead.\n\ncompose.post: creates a post programmatically, bypassing compose UI. Essential for platforms where compose-text-field is inaccessible (macOS detail pane). The test agent calls the feed post creation API directly.",
+      "description": "WRITE-ONLY. Injected during set_state to trigger test agent actions. Not returned by get_state.\n\nFull compose.file flow: set_state({compose: {file: '/path'}}) → test agent calls upload_blob(path) → receives blob hash → stores hash in compose context → next post submission includes the hash as an attachment. Web clients use Playwright set_input_files() instead.\n\ncompose.post: creates a post programmatically, bypassing compose UI. Not for journeys: every app posts through compose-text-field + post-submit-button, and a post made this way records no gesture (convention 8). The test agent calls the feed post creation API directly.",
       "properties": {
         "file": {
           "type": "string",
@@ -76,7 +76,7 @@
         },
         "post": {
           "type": "object",
-          "description": "Create a post programmatically without UI interaction. The test agent calls the feed API directly. Use this on platforms where compose-text-field is inaccessible (macOS). Web clients may also use this to avoid WASM timing issues in honesty checks.",
+          "description": "Create a post programmatically without UI interaction. The test agent calls the feed API directly. Never a stand-in for the compose gestures in a journey. Web clients may also use this to avoid WASM timing issues in honesty checks.",
           "properties": {
             "body": {"type": "string", "description": "Post body text."},
             "tags": {"type": "array", "items": {"type": "string"}, "description": "Tag strings WITHOUT # prefix. The UI adds # for display; state and API store raw strings."}

@@ -49,6 +49,15 @@
                        Style="{StaticResource TitleTextBlockStyle}"
                        Text="{loc:Localize Key=atproto_settings/title}" />
 
+            <!-- The machine could not be built: nothing below could succeed, so this one
+                 line replaces every control (ui/atproto.md § Errors & edge cases; rule 7).
+                 The settings navigation beside the page is the way back. -->
+            <TextBlock x:Name="PageUnavailableText" Visibility="Collapsed" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=atproto_settings/page_unavailable}" />
+
+            <!-- Every control of the page, collapsed whole when the page is unavailable. -->
+            <StackPanel x:Name="PageBody" Spacing="12">
+
             <!-- ── 0. The recovery-fork contest ceremony (user-approved 2026-08-02;
                  mechanism: behavior/atproto-identity-custody.md § The 72 h
                  recovery-fork contest). LEADS the page, above the selector below —
@@ -131,7 +140,12 @@
                      *The rung catalog*). -->
                 <StackPanel x:Name="DepthRungsHost" Spacing="4" />
 
-                <!-- Greyed WITH a reason, never hidden (§ Reveal/greying rules). -->
+                <!-- Greyed WITH a reason, never hidden (§ Reveal/greying rules): each
+                     distinct reason a blocked rung gives, once (the machine's
+                     rung_possibility; "still loading" before the first read), then the
+                     hosted gate's own line. Untagged — the rung's own `reason` attr is
+                     what the e2e reads. -->
+                <StackPanel x:Name="RungReasonsHost" Spacing="2" />
                 <TextBlock x:Name="GateReasonText" Visibility="Collapsed" TextWrapping="Wrap"
                            Style="{StaticResource CaptionTextBlockStyle}" />
             </StackPanel>
@@ -377,6 +391,10 @@
                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDelegationRevoke}"
                             Content="{loc:Localize Key=atproto_settings/delegation_revoke_button}" />
                 </StackPanel>
+                <!-- The authorize answer's reason while it is blocked (no signing
+                     identity on this app): painted by ApplyPossibility (rule 2). -->
+                <TextBlock x:Name="DelegationAuthorizeReasonText" Visibility="Collapsed"
+                           TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
             </StackPanel>
 
             <!-- ── 4. Delete my Bluesky presence ──────────────────────────────
@@ -416,6 +434,9 @@
                             Content="{loc:Localize Key=atproto_settings/delete_cancel_button}" />
                 </StackPanel>
             </StackPanel>
+
+            </StackPanel>
+            <!-- /PageBody -->
 
         </StackPanel>
     </ScrollViewer>

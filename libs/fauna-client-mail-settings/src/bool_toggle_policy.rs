@@ -10,6 +10,27 @@
 //! this macro's one-field shape — a fork for one extra field would cost more
 //! macro-arm complexity than the ~40 lines it would save.
 
+/// The one answer every admin DAV toggle (and the CalDAV port save) gives
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rules 5 and 6):
+/// blocked until the page's first `get_mail_config` read resolves — still
+/// loading, or failed — and blocked while a change is on its way (`idle`
+/// false), so a press never writes a guessed or stale value.
+pub(crate) fn toggle_possibility(
+    read: fauna_core::possibility::ReadState,
+    idle: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_core::possibility::Possibility::for_write(read, idle)
+}
+
+/// After a failed `get_mail_config`: a page that never read stays FAILED; a
+/// re-read failing after an earlier one resolved keeps that read's answer.
+pub(crate) fn note_read_failed(read: &std::sync::Mutex<fauna_core::possibility::ReadState>) {
+    let mut read = read.lock().expect("read mutex");
+    if *read != fauna_core::possibility::ReadState::Resolved {
+        *read = fauna_core::possibility::ReadState::Failed;
+    }
+}
+
 /// Generates the `{Status, Snapshot, Action, Nest, Machine}` quintet for a
 /// single boolean admin-tier toggle. Invoke once per protocol; write the
 /// module's own `//!` doc above the invocation with the page-specific detail
@@ -109,6 +130,8 @@ macro_rules! bool_toggle_policy_machine {
         pub struct $Machine {
             nest: Arc<dyn $Nest>,
             inner: Mutex<$Snapshot>,
+            /// Where the page's `get_mail_config` read stands (rule 5).
+            read: Mutex<fauna_core::possibility::ReadState>,
         }
 
         impl $Machine {
@@ -116,6 +139,7 @@ macro_rules! bool_toggle_policy_machine {
                 Self {
                     nest,
                     inner: Mutex::new($Snapshot::defaults()),
+                    read: Mutex::new(fauna_core::possibility::ReadState::Pending),
                 }
             }
 
@@ -125,7 +149,11 @@ macro_rules! bool_toggle_policy_machine {
 
             async fn refresh(&self) -> Result<(), DispatchError> {
                 self.set_status($Status::Loading);
-                let reply = self.nest.get_mail_config().await?;
+                let reply = self.nest.get_mail_config().await.inspect_err(|_| {
+                    crate::bool_toggle_policy::note_read_failed(&self.read);
+                })?;
+                *self.read.lock().expect("read mutex") =
+                    fauna_core::possibility::ReadState::Resolved;
                 let mut snap = self.inner.lock().expect("snapshot mutex");
                 *snap = $Snapshot::from_config(&reply);
                 snap.status = $Status::Idle;
@@ -144,6 +172,22 @@ macro_rules! bool_toggle_policy_machine {
         impl $Machine {
             pub fn snapshot(&self) -> $Snapshot {
                 fauna_core::clone_locked(&self.inner, |s| s)
+            }
+
+            /// Where the `get_mail_config` read stands — whether the page has
+            /// an answer to keep, or one still to ask for when the nest
+            /// connection comes back (`docs/goal/behavior/admin.md` § Errors &
+            /// edge cases, *Controls wait for their read*).
+            pub fn read_state(&self) -> fauna_core::possibility::ReadState {
+                *self.read.lock().expect("read mutex")
+            }
+
+            /// Whether the enable toggle is live: the read resolved and no
+            /// change is on its way. The press asks the same answer.
+            pub fn toggle_possibility(&self) -> fauna_core::possibility::Possibility {
+                let idle = self.inner.lock().expect("snapshot mutex").status == $Status::Idle;
+                let read = *self.read.lock().expect("read mutex");
+                crate::bool_toggle_policy::toggle_possibility(read, idle)
             }
         }
 
@@ -210,6 +254,35 @@ macro_rules! bool_toggle_policy_machine {
                         return Err(err);
                     }
                     self.cfg.lock().unwrap().$field = enabled;
+                    Ok(())
+                }
+            }
+
+            /// Rule 5: the toggle is not live before the read, nor after a
+            /// failed one, and is live once the read resolves.
+            #[tokio::test]
+            async fn the_toggle_waits_for_the_read() {
+                let key = |m: &$Machine| m.toggle_possibility().reason().map(|r| r.key.clone());
+
+                let m = $Machine::new(Arc::new(FailingNest));
+                assert_eq!(key(&m), Some("common.still_loading".to_string()));
+                assert!(m.hydrate().await.is_err());
+                assert_eq!(key(&m), Some("common.load_failed".to_string()));
+
+                let m = $Machine::new(Arc::new(FakeNest::new()));
+                m.hydrate().await.unwrap();
+                assert!(m.toggle_possibility().is_possible());
+            }
+
+            struct FailingNest;
+
+            #[async_trait]
+            impl $Nest for FailingNest {
+                async fn get_mail_config(&self) -> Result<FetchConfigReply, NestError> {
+                    Err(NestError::Rejected("down".into()))
+                }
+
+                async fn $set_method(&self, _enabled: bool) -> Result<(), NestError> {
                     Ok(())
                 }
             }

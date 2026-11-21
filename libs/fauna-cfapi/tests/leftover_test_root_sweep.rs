@@ -114,6 +114,7 @@ fn a_sweep_removes_an_unheld_test_root_and_spares_a_held_one() {
         let entry = fauna_cfapi::ShellSyncRoot {
             id,
             path: Some(root.to_string_lossy().into_owned()),
+            ..Default::default()
         };
         // Best-effort: a sweep that wrongly took the held root has already
         // unregistered it, and the assertions below say so.

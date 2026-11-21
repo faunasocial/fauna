@@ -30,6 +30,9 @@ import com.fauna.ffi.FfiFolderActorMember
 import com.fauna.ffi.FfiFolderDevice
 import com.fauna.ffi.FfiPendingShare
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.ReadState
+import com.fauna.ffi.folderPaywallPossibility
+import com.fauna.ffi.folderWebdavServePossibility
 import uniffi.fauna_devices_machine.ConflictCandidateSummary
 import uniffi.fauna_devices_machine.ConflictSummary
 import uniffi.fauna_devices_machine.DeviceSummary
@@ -315,9 +318,15 @@ class FoldersContentTest {
         // (false = fail-safe: don't offer a control that cannot succeed); the
         // MSEK-less rendering is asserted explicitly by the needs-mail cases below.
         canServeWebdav: Boolean = true,
+        // Where the custody read stands; answered by default. The answer the Content
+        // takes is the real shared `webdav_serve_possibility` over these two.
+        webdavRead: ReadState = ReadState.RESOLVED,
         // Defaults to "the actor has a tier" (the ordinary paywall-select case);
         // the no-tiers disabled rendering is asserted explicitly below.
         ownTiers: List<String> = listOf("gold"),
+        // Where the own-tier read stands; answered by default (the real shared
+        // own-tier answer over it and the count is what the Content takes).
+        ownTiersRead: ReadState = ReadState.RESOLVED,
         defaultConflictPolicy: String? = null,
         pendingShares: List<FfiPendingShare> = emptyList(),
         conflictBadgeLabels: Map<Long, LocalizedText> = emptyMap(),
@@ -339,8 +348,9 @@ class FoldersContentTest {
                 folderActors = folderActors,
                 folderDeviceActivity = folderDeviceActivity,
                 folderDestinationPlaces = folderDestinationPlaces,
-                canServeWebdav = canServeWebdav,
+                webdavAnswer = folderWebdavServePossibility(webdavRead, canServeWebdav),
                 ownTiers = ownTiers,
+                paywallAnswer = folderPaywallPossibility(ownTiersRead, ownTiers.size.toUInt()),
                 defaultConflictPolicy = defaultConflictPolicy,
                 pendingShares = pendingShares,
                 conflictBadgeLabels = conflictBadgeLabels,
@@ -1038,7 +1048,7 @@ class FoldersContentTest {
 
     // ── 6b-2(c): disable-with-hint while the actor holds no MSEK ───────────────
     // Serving seals the WebdavKeysBlob under the mail encryption key, so an actor
-    // who has not set up mail cannot serve. `serve_set` flips the nest flag BEFORE
+    // whose key is not minted yet cannot serve. `serve_set` flips the nest flag BEFORE
     // re-provisioning the blob, so a click would commit the flag and only then fail
     // NoMsek — hence disabled, not merely error-on-click.
 
@@ -1063,17 +1073,38 @@ class FoldersContentTest {
         assertNull("a disabled toggle must not reach serve_set", served)
     }
 
+    // An answered read with no key is the connect-time mint in flight — the same
+    // still-loading wait as an unanswered read (`ui/folders.md` § Errors & edge
+    // cases, *Own-tier and mail gates*).
     @Test
-    fun webdavHintExplainsWhyTheToggleIsDisabled() {
+    fun webdavHintSaysStillLoadingWhenTheAnsweredReadHoldsNoKey() {
         render(
             snapshot(folders = listOf(folder("photos"))),
             canServeWebdav = false,
         )
-        composeTestRule
-            .onNodeWithText(
-                context.getString(R.string.devices_serve_webdav_needs_mail),
-            )
-            .assertExists()
+        composeTestRule.onNodeWithText(context.getString(R.string.common_still_loading)).assertExists()
+    }
+
+    @Test
+    fun webdavToggleSaysStillLoadingWhileTheCustodyReadIsPending() {
+        render(
+            snapshot(folders = listOf(folder("photos"))),
+            canServeWebdav = false,
+            webdavRead = ReadState.PENDING,
+        )
+        composeTestRule.onNodeWithTag("folder-webdav-toggle").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(context.getString(R.string.common_still_loading)).assertExists()
+    }
+
+    @Test
+    fun webdavToggleSaysTheReadFailedWhenTheCustodyReadFailed() {
+        render(
+            snapshot(folders = listOf(folder("photos"))),
+            canServeWebdav = false,
+            webdavRead = ReadState.FAILED,
+        )
+        composeTestRule.onNodeWithTag("folder-webdav-toggle").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(context.getString(R.string.common_load_failed)).assertExists()
     }
 
     @Test
@@ -1368,6 +1399,40 @@ class FoldersContentTest {
             .onNodeWithText(context.getString(R.string.devices_paywall_tier_needs_tier))
             .assertExists()
         composeTestRule.onNodeWithTag("folder-paywall-hint", useUnmergedTree = true).assertExists()
+    }
+
+    // ── An unanswered own-tier read is never "create a tier first" (`ui/folders.md`
+    // § Errors & edge cases, *Own-tier and mail gates*): the hint carries the
+    // answer's own reason ──────────────────────────────────────────────────────
+
+    @Test
+    fun paywallSelectSaysStillLoadingWhileTheTierReadIsPending() {
+        render(
+            snapshot(folders = listOf(folder("gallery", websiteEnabled = true))),
+            ownTiers = emptyList(),
+            ownTiersRead = ReadState.PENDING,
+        )
+        composeTestRule.onNodeWithTag("folder-paywall-tier-select").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("folder-paywall-hint", useUnmergedTree = true)
+            .assertTextEquals(context.getString(R.string.common_still_loading))
+        composeTestRule
+            .onNodeWithText(context.getString(R.string.devices_paywall_tier_needs_tier))
+            .assertDoesNotExist()
+    }
+
+    @Test
+    fun paywallSelectSaysTheReadFailedWhenTheTierReadFailed() {
+        render(
+            snapshot(folders = listOf(folder("gallery", websiteEnabled = true))),
+            ownTiers = emptyList(),
+            ownTiersRead = ReadState.FAILED,
+        )
+        composeTestRule.onNodeWithTag("folder-paywall-tier-select").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("folder-paywall-hint", useUnmergedTree = true)
+            .assertTextEquals(context.getString(R.string.common_load_failed))
+        composeTestRule
+            .onNodeWithText(context.getString(R.string.devices_paywall_tier_needs_tier))
+            .assertDoesNotExist()
     }
 
     @Test
@@ -1805,6 +1870,58 @@ class FoldersContentTest {
         assertEquals("writer", grantedAccess)
     }
 
+    // ── The form case (folders.md § Errors & edge cases; README § Offer only
+    // what is possible, rule 4): the share submit painted from the shared
+    // `share_possibility`, and the sheet closes only once the share was issued.
+
+    @Test
+    fun aBlankShareRecipientIsDisabledWithTheSharedReason() {
+        render(snapshot(folders = listOf(folder("photos", mlsGroupId = null))))
+        composeTestRule.onNodeWithText("Selective Sync").performClick()
+        composeTestRule.onNodeWithTag("folder-share-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("folder-share-confirm").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Type who to share with first.").assertExists()
+    }
+
+    @Test
+    fun aShareWithNoLiveSessionIsDisabledAndTheSheetStaysOpenWithTheInput() {
+        render(
+            snapshot(folders = listOf(folder("photos", mlsGroupId = null))),
+            // Not ready (no live conversations session); the VM's refusal answers false.
+            actions = FoldersActions(
+                onShareSet = { _, _, _, cb -> cb(false) },
+                isShareReady = { false },
+            ),
+        )
+        composeTestRule.onNodeWithText("Selective Sync").performClick()
+        composeTestRule.onNodeWithTag("folder-share-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("recipient-picker-input").performTextInput("bob")
+        composeTestRule.onNodeWithTag("folder-share-confirm").assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(
+            "Sharing needs your conversations to be ready", substring = true,
+        ).assertExists()
+        // Still open, with what was typed.
+        composeTestRule.onNodeWithTag("recipient-picker-input").assertTextContains("bob")
+        composeTestRule.onNodeWithTag("folder-share-confirm").assertExists()
+    }
+
+    @Test
+    fun aRefusedShareKeepsTheSheetOpenAndASucceededOneClosesIt() {
+        var succeed = false
+        render(
+            snapshot(folders = listOf(folder("photos", mlsGroupId = null))),
+            actions = FoldersActions(onShareSet = { _, _, _, cb -> cb(succeed) }),
+        )
+        composeTestRule.onNodeWithText("Selective Sync").performClick()
+        composeTestRule.onNodeWithTag("folder-share-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("recipient-picker-input").performTextInput("bob")
+        composeTestRule.onNodeWithTag("folder-share-confirm").assertIsEnabled().performClick()
+        composeTestRule.onNodeWithTag("recipient-picker-input").assertTextContains("bob")
+        succeed = true
+        composeTestRule.onNodeWithTag("folder-share-confirm").performClick()
+        composeTestRule.onAllNodesWithTag("folder-share-confirm").assertCountEquals(0)
+    }
+
     // ── Cross-user sharing (recipient side) — folders.md § Sharing, Recipient
     // side: the pending-knock "Shared with you" area + the shared-with-me row ───
 
@@ -1949,8 +2066,9 @@ class FoldersContentTest {
                     folderActors = emptyMap(),
                     folderDeviceActivity = emptyMap(),
                     folderDestinationPlaces = folderDestinationPlaces,
-                    canServeWebdav = canServeWebdav,
+                    webdavAnswer = folderWebdavServePossibility(ReadState.RESOLVED, canServeWebdav),
                     ownTiers = listOf("gold"),
+                    paywallAnswer = folderPaywallPossibility(ReadState.RESOLVED, 1u),
                     nestSnapshotsOptions = nestSnapshotOptions,
                 )
             }
@@ -1977,7 +2095,7 @@ class FoldersContentTest {
 
     @Test
     fun theWebdavServeToggleStaysDeadWithoutAnMsekEvenConnected() {
-        // Converse — must SURVIVE the unplug. `canServeWebdav` is the page's own
+        // Converse — must SURVIVE the unplug. The webdav answer is the page's own
         // predicate (no MSEK ⇒ `serve_set` would flip the nest flag and only
         // then fail `NoMsek`), handed INTO the gate rather than re-tested beside
         // it. A gate that replaced it would offer a click that cannot succeed.
@@ -2149,6 +2267,19 @@ class FoldersContentTest {
         succeed = true
         composeTestRule.onNodeWithTag("folder-follow-confirm").performScrollTo().performClick()
         composeTestRule.onAllNodesWithTag("folder-follow-name-input").assertCountEquals(0)
+    }
+
+    @Test
+    fun followConfirmIsPaintedFromTheSharedPredicateWithItsReason() {
+        render(actions = FoldersActions(isFollowReady = { false }))
+        composeTestRule.onNodeWithTag("folder-follow-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithText("Type the folder owner's handle first.").assertExists()
+        composeTestRule.onNodeWithTag("recipient-picker-input").performScrollTo().performTextInput("alice")
+        composeTestRule.onNodeWithText("Type the folder's name first.").assertExists()
+        composeTestRule.onNodeWithTag("folder-follow-name-input").performScrollTo().performTextInput("Holiday")
+        // Both boxes filled but the app cannot run the op: blocked, not silent.
+        composeTestRule.onNodeWithTag("folder-follow-confirm").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Sign in first, then follow the folder.").assertExists()
     }
 
     @Test

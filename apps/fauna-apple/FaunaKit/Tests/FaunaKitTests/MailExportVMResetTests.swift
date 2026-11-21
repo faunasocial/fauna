@@ -15,7 +15,11 @@ import Testing
     vm.spawnTick(onProgress: { true }, read: { reads += 1 })
     #expect(vm.tickIsRunning)
 
-    try await Task.sleep(for: .milliseconds(MailExportVM.progressTickMs * 3))
+    // The loop's first read, awaited — never a fixed window, which a loaded
+    // main actor (the full parallel run) misses (convention 14).
+    for _ in 0..<200 where reads == 0 {
+        try await Task.sleep(for: .milliseconds(MailExportVM.progressTickMs))
+    }
     #expect(reads > 0)
 
     vm.reset()

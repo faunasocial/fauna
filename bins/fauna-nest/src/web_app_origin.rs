@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use fauna_protocol::web_app_origin::{
     AdminWebAppOriginGetReply, AdminWebAppOriginGetRequest, AdminWebAppOriginSetReply,
-    AdminWebAppOriginSetRequest, WebAppOrigin, WebAppOriginServing,
+    AdminWebAppOriginSetRequest, CENTRAL_APP_ORIGIN_LIVE, WebAppOrigin, WebAppOriginServing,
 };
 
 use crate::routes::AppState;
@@ -46,6 +46,7 @@ pub fn serving(state: &AppState) -> WebAppOriginServing {
     WebAppOriginServing::resolve(
         **state.web_app_origin.load(),
         state.handle_domain_if_set().as_deref(),
+        CENTRAL_APP_ORIGIN_LIVE,
     )
 }
 
@@ -55,6 +56,7 @@ pub fn projection(state: &AppState) -> AdminWebAppOriginGetReply {
     AdminWebAppOriginGetReply::project(
         **state.web_app_origin.load(),
         state.handle_domain_if_set().as_deref(),
+        CENTRAL_APP_ORIGIN_LIVE,
     )
 }
 
@@ -221,6 +223,26 @@ fn central_redirect(
 
 // ── fauna.admin.web_app_origin.{get,set} ─────────────────────────────────────
 
+/// The nest refuses to store what it would not serve
+/// (`web-content-hosting.md` § Same-origin security model → *While the central
+/// origin is not live, the choice is not offered*, rule 4): `central` while
+/// the central origin is not live is refused with a typed error and nothing is
+/// written; `bundled` is always accepted. This is what holds for an app or a
+/// catalog client older than the ruling.
+fn refuse_unservable(
+    mode: WebAppOrigin,
+    central_live: bool,
+) -> Result<(), fauna_protocol::RpcError> {
+    match mode {
+        WebAppOrigin::Central if !central_live => Err(crate::rpc_errors::typed_refusal(
+            fauna_protocol::RpcError::CODE_ADMIN_WEB_APP_ORIGIN_CENTRAL_NOT_LIVE,
+            "the central origin does not serve the app on this nest's build; \
+             only `bundled` can be stored",
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub const KIND_WEB_APP_ORIGIN_GET: &str = "fauna.admin.web_app_origin.get";
 pub const KIND_WEB_APP_ORIGIN_SET: &str = "fauna.admin.web_app_origin.set";
 
@@ -292,6 +314,7 @@ fn set_handler() -> crate::rpc_router::RpcHandler {
             .await?;
             let req: AdminWebAppOriginSetRequest = fauna_protocol::decode_strict(&payload)
                 .map_err(|e| crate::rpc_errors::malformed_ns("web_app_origin", e))?;
+            refuse_unservable(req.mode, CENTRAL_APP_ORIGIN_LIVE)?;
             apply_web_app_origin_change(&state, req.mode)
                 .await
                 .map_err(internal)?;
@@ -308,4 +331,21 @@ fn set_handler() -> crate::rpc_router::RpcHandler {
             crate::rpc_errors::encode_reply(&reply)
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn central_is_refused_while_the_central_origin_is_not_live() {
+        let err = refuse_unservable(WebAppOrigin::Central, false).unwrap_err();
+        assert_eq!(
+            err.code,
+            fauna_protocol::RpcError::CODE_ADMIN_WEB_APP_ORIGIN_CENTRAL_NOT_LIVE
+        );
+        assert!(refuse_unservable(WebAppOrigin::Bundled, false).is_ok());
+        assert!(refuse_unservable(WebAppOrigin::Central, true).is_ok());
+        assert!(refuse_unservable(WebAppOrigin::Bundled, true).is_ok());
+    }
 }

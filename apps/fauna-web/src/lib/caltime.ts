@@ -23,11 +23,14 @@ import {
   findOverlaps as wasmFindOverlaps,
   dayColumnLayout as wasmDayColumnLayout,
   pan as wasmPan,
+  panPossibility as wasmPanPossibility,
   visibleDays as wasmVisibleDays,
   type OverlapColumn,
   type DayEventPlacement,
   type CalendarViewMode,
 } from './wasm';
+
+import type { Possibility } from './possibility.ts';
 
 export type { OverlapColumn, DayEventPlacement, CalendarViewMode };
 
@@ -123,6 +126,13 @@ export function pan(mode: CalendarViewMode, anchor: Date, direction: PanDirectio
     direction === 'forward',
   );
   return new Date(r.year, r.month - 1, r.day);
+}
+
+/** Whether the pan pair can do anything in `mode` — `fauna_core::caltime::pan_possibility`
+ *  over wasm. The page paints both buttons from it (`paintPossibility`) and the
+ *  pan handler asks it again, so the offer and the act cannot disagree. */
+export function panPossibility(mode: CalendarViewMode): Possibility {
+  return wasmPanPossibility(mode);
 }
 
 /** The dates `mode` shows for `anchor` — `fauna_core::caltime::visible_days` over

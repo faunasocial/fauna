@@ -952,10 +952,12 @@ pub const APP_DEVICE_LABELS: [&str; 6] = [
 /// `path-sealing.md` § Sealed names & paths names them in its *Deliberate
 /// non-seals* list.
 ///
-/// The exact-match is deliberate — a user is free to name their laptop
-/// `"fauna"`, and if they do, that label seals under their own root like any
-/// other. What this predicate refuses is the *writer* class, and each of
-/// those writers passes its own frozen constant.
+/// The exact-match is deliberate — only these frozen constants are the
+/// writer class, so `"fauna phone"` or `"my fauna"` seals under the owner's
+/// root like any other name. A user cannot take one of the constants
+/// themselves: the rename refuses each of them before any call
+/// (`DevicesMachine::rename_possibility`, `devices.error_rename_reserved_name`),
+/// so `"fauna"` itself is never a user-chosen label.
 pub fn is_synthetic_device_label(label: &str) -> bool {
     matches!(label, WEBDAV_PSEUDO_DEVICE_LABEL | SELF_REGISTER_LABEL)
         || APP_DEVICE_LABELS.contains(&label)

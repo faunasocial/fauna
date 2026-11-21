@@ -9,6 +9,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_media_machine.FileVersionSummary
 import uniffi.fauna_media_machine.FollowedScopeOption
 import uniffi.fauna_media_machine.MediaFolderOption
@@ -109,6 +111,7 @@ class MediaContentTest {
     private fun render(
         snapshot: MediaPageSnapshot? = snapshot(),
         actions: MediaActions = MediaActions(),
+        uploadPossibility: Possibility = Possibility.Possible,
         pickedName: String? = null,
         detailActions: MediaDetailActions = MediaDetailActions(),
         shareActions: MediaShareActions = MediaShareActions(),
@@ -117,6 +120,7 @@ class MediaContentTest {
             MediaContent(
                 snapshot = snapshot,
                 actions = actions,
+                uploadPossibility = uploadPossibility,
                 pickedName = pickedName,
                 formatSize = { "${it}B" },
                 formatDate = { "date" },
@@ -155,6 +159,24 @@ class MediaContentTest {
         composeTestRule.onAllNodesWithTag("media-item")[0].performScrollTo().performClick()
         composeTestRule.onNodeWithTag("share-link-button").performClick()
         assertEquals("photos" to "photos/pub.txt", opened)
+    }
+
+    /** `share-link-button` paints from the shared `share_link_possibility`:
+     *  `Possible` on an eligible item (live), `Absent` otherwise (not composed —
+     *  the absent half is [shareLinkButtonIsPresentOnlyOnAnEligibleItem]). */
+    @Test
+    fun shareLinkButtonPaintsTheSharedAnswer() {
+        assertEquals(
+            uniffi.fauna_core.Possibility.Possible,
+            uniffi.fauna_media_machine.shareLinkPossibility(true),
+        )
+        assertEquals(
+            uniffi.fauna_core.Possibility.Absent,
+            uniffi.fauna_media_machine.shareLinkPossibility(false),
+        )
+        render(snapshot(items = listOf(item("pub.txt", eligible = true))))
+        composeTestRule.onAllNodesWithTag("media-item")[0].performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("share-link-button").assertIsEnabled()
     }
 
     @Test
@@ -699,7 +721,8 @@ class MediaContentTest {
 
     @Test
     fun activeFollowedScopeShowsItsLabelAndWithholdsUpload() {
-        render(followedSnapshot())
+        // The machine answers the upload absent inside a followed scope.
+        render(followedSnapshot(), uploadPossibility = Possibility.Absent)
         composeTestRule.onAllNodesWithText("Holiday pics (alice)")[0].assertExists()
         composeTestRule.onNodeWithText("followed:opaque-1").assertDoesNotExist()
         composeTestRule.onNodeWithTag("file-upload").assertDoesNotExist()
@@ -730,5 +753,54 @@ class MediaContentTest {
         assertEquals("Holiday pics/pub.jpg", got?.first?.path)
         assertEquals(null, got?.second)
         assertEquals("followed:opaque-1", got?.third)
+    }
+
+    // ── What this person may write (media.md § Errors & edge cases) ──
+
+    /** Before the first read the machine answers the upload blocked "still
+     *  loading": both controls are composed but disabled, the reason beside
+     *  them (README.md § Offer only what is possible, rules 2 and 5). */
+    @Test
+    fun uploadIsDisabledWithItsReasonBeforeTheFirstRead() {
+        var uploaded = false
+        render(
+            actions = MediaActions(onUpload = { uploaded = true }),
+            uploadPossibility = Possibility.Blocked(LocalizedText("common.still_loading", emptyMap())),
+        )
+        composeTestRule.onNodeWithTag("file-upload").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("upload-button").assertIsNotEnabled().performClick()
+        assertTrue(!uploaded)
+        composeTestRule.onNodeWithText("Still loading", substring = true).assertExists()
+    }
+
+    /** A reader member's item detail offers neither delete nor restore — the
+     *  machine's write answer is absent there; the owner's own set offers both. */
+    @Test
+    fun aReadersDetailOffersNoDeleteAndNoRestore() {
+        render(
+            detailActions = MediaDetailActions(
+                loadVersions = { _, _, _ -> listOf(version(1)) },
+                writePossibility = { Possibility.Absent },
+            ),
+        )
+        composeTestRule.onAllNodesWithTag("media-item")[0].performClick()
+        composeTestRule.onAllNodesWithTag("file-version-item")[0].assertExists()
+        composeTestRule.onNodeWithTag("media-delete-button").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("file-version-restore-button").assertDoesNotExist()
+    }
+
+    @Test
+    fun aWritersDetailOffersDeleteAndRestoreLive() {
+        var askedFor: String? = null
+        render(
+            detailActions = MediaDetailActions(
+                loadVersions = { _, _, _ -> listOf(version(1)) },
+                writePossibility = { askedFor = it; Possibility.Possible },
+            ),
+        )
+        composeTestRule.onAllNodesWithTag("media-item")[0].performClick()
+        composeTestRule.onNodeWithTag("media-delete-button").assertIsEnabled()
+        composeTestRule.onAllNodesWithTag("file-version-restore-button")[0].assertIsEnabled()
+        assertEquals("photos", askedFor)
     }
 }

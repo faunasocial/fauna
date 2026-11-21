@@ -85,7 +85,21 @@ pub fn build_nav_rail(
         hbox.set_margin_start(if indent { 32 } else { 12 });
         hbox.set_margin_end(12);
         hbox.append(&icon_w);
-        hbox.append(&label_w);
+        // The label sits in a column with a caption, hidden until a gate paints
+        // a reason on the row (`row_caption`; `ui/README.md` § Offer only what
+        // is possible, rule 2: a disabled row carries its reason within eyeshot).
+        let text_col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        text_col.append(&label_w);
+        let caption = gtk::Label::new(None);
+        caption.add_css_class("caption");
+        caption.add_css_class("dim-label");
+        caption.set_wrap(true);
+        caption.set_max_width_chars(24);
+        caption.set_xalign(0.0);
+        caption.set_halign(gtk::Align::Start);
+        caption.set_visible(false);
+        text_col.append(&caption);
+        hbox.append(&text_col);
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&hbox));
         match page_key(child) {
@@ -130,4 +144,21 @@ pub fn build_nav_rail(
     }
     rail.append(&nav_list);
     rail
+}
+
+/// The `gtk::ListBox` of rows inside a rail [`build_nav_rail`] built.
+pub fn rail_list(rail: &gtk::Box) -> gtk::ListBox {
+    rail.last_child()
+        .and_downcast::<gtk::ListBox>()
+        .expect("build_nav_rail ends the rail with its row list")
+}
+
+/// The hidden caption under a rail row's label, where a gate paints the reason
+/// the row is disabled. `None` for a row [`build_nav_rail`] did not build.
+pub fn row_caption(row: &gtk::ListBoxRow) -> Option<gtk::Label> {
+    row.child()?
+        .last_child()?
+        .last_child()?
+        .downcast::<gtk::Label>()
+        .ok()
 }

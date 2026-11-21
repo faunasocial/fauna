@@ -369,66 +369,62 @@ def test_all_media_cross_set(seeded_media_app):
 @pytest.mark.tui
 @pytest.mark.android
 @pytest.mark.feature("media")
-def test_media_upload_no_set_error(empty_media_app, tmp_path):
-    """Clicking ``upload-button`` with a file chosen but no folder available runs
-    the shared ``MediaMachine::upload_selected`` gesture, which surfaces the
-    "select a folder" page error (``media.error_no_set``) — proving the upload
-    button is WIRED to the shared gesture (no longer the inert reload) and that the
-    shared "which set" target policy (the filter-selected set, else the first
-    upload-target set, else this error) fires (``docs/goal/ui/media.md``
-    § Layout & flow / § Where logic lives; spec
-    2026-06-28-sync-file-set-ui-unification § 4).
+def test_media_first_upload_makes_the_first_folder(empty_media_app, tmp_path):
+    """A fresh account owns no folder; its first upload from Media makes the
+    first folder, ``Personal``, and lands in it (``docs/goal/ui/media.md``
+    § Errors & edge cases → *No folder to upload into*, rulings 1-3: the
+    product makes the precondition true itself — ``ui/README.md`` § Offer only
+    what is possible, rule 1 — so nothing asks the person to "create a folder
+    first").
 
-    **The premise narrowed on 2026-08-03; since 2026-08-18 the fixture
-    ESTABLISHES it.** It used to rest on "no media"; the target now comes from
-    the control-plane set list, so what makes this error reachable is that the
-    actor has **no folder at all** — an *empty* set is a perfectly
-    good target and no longer lands here
-    (``test_upload_into_a_freshly_created_empty_folder`` is that case). So this
-    test is specifically the no-set-whatsoever branch. It rode the shared
-    session ``test_user`` until 2026-08-18, "honest only while nothing gives
-    test_user a file set" — and the suite falsified that premise: any
-    filesync/webdav module running first gives ``test_user`` a Sync folder,
-    this upload then SUCCEEDS into it (red), and the planted item broke the
-    sibling empty-state tests too (in-suite failure mode).
-    ``empty_media_app`` (a dedicated fresh actor) makes no-set-whatsoever true
-    by construction, in any suite order.
+    The journey, through the app UI alone (convention 8): Media is empty, the
+    upload is pressed with no filter, the item appears with no page error,
+    ``media-folder-filter`` offers ``Personal`` and scopes to the item, and
+    Settings → Folders lists ``Personal`` as an ordinary folder. The whole
+    gesture is the shared ``MediaMachine::upload_selected`` arm over the
+    headless folder create each app's builder wires, so every app runs the same
+    code; until 2026-11-17 this test pinned the retired refusal
+    (``media.error_no_set``) on the same fixture.
 
-    No seeding + no device registration needed: the dedicated actor has no
-    folders, so the all-media view has no set to default the upload target to →
-    the gesture sets the no-set error rather than uploading.
-    The success round-trip (a real blob lands + the list shows it) is
-    ``test_media_upload_into_selected_set`` below, gated on the logged-in client's
-    sync device being registered write-capable.
-
-    ``@pytest.mark.linux`` + ``@pytest.mark.windows`` — linux leads the explorer +
-    upload shape; windows wired ``upload-button`` to the
-    shared ``upload_selected`` 2026-06-30; apple
-    (macos+ios) wired the native uploader + joined 2026-06-30; web/android add their
-    mark as they wire it.
+    ``empty_media_app`` (a dedicated fresh actor) makes "no folder at all" true
+    by construction, in any suite order. The device self-heals its write
+    registration, so no registration step is needed (see
+    ``test_media_upload_into_selected_set``).
     """
     app = empty_media_app
     app.media.navigate()
     app.media.ensure_loaded()
 
-    # Pre-state: empty media, no error (the all-media default has no set).
+    # Pre-state: a folderless account's Media is empty, with no error.
     assert app.media.item_count() == 0, (
         f"expected empty media, got {app.media.item_count()}; error={app.error_text()!r}"
     )
 
-    # A real file so the client-side read succeeds and the gesture reaches the
-    # machine's target resolution (the file is never uploaded — there's no set).
-    picked = tmp_path / "snapshot.jpg"
-    picked.write_bytes(b"\xff\xd8\xff\xe0 not a real jpeg, just bytes")
+    picked = tmp_path / "first.png"
+    picked.write_bytes(FIXTURE_IMAGE.read_bytes())
     app.media.upload_file(str(picked))
 
-    assert app.media.wait_for_error(), (
-        "upload-button with no set should surface a page error; "
-        f"got none (item_count={app.media.item_count()})"
+    assert app.media.wait_for_item_count(1) == 1, (
+        "a folderless account's first upload should make Personal and land in "
+        f"it; error={app.error_text()!r}"
     )
-    assert app.error_text() == S.media.error_no_set, (
-        f"upload with no set should surface the no-set error, got {app.error_text()!r}"
+    assert not app.has_error(), (
+        f"the first upload must not error: {app.error_text()!r}"
     )
+    assert app.media.item_name(0) == "first.png", (
+        f"the uploaded file should be the item, got {app.media.item_name(0)!r}"
+    )
+
+    # The filter offers the new folder (set_filter waits for the offer) and
+    # the file is in it.
+    app.media.set_filter("Personal")
+    assert app.media.wait_for_item_count(1) == 1, (
+        f"the Personal scope should hold the upload; error={app.error_text()!r}"
+    )
+
+    # An ordinary folder from then on: Settings → Folders lists it.
+    app.backups.navigate_folders()
+    app.backups.wait_for_folder_row("Personal")
 
 
 @pytest.mark.web
@@ -446,7 +442,7 @@ def test_media_upload_with_no_file_chosen_says_so(seeded_media_app):
 
     Rides ``seeded_media_app`` so a folder to upload INTO exists: the only thing
     missing is the file, so the answer can only be the no-file one — not
-    ``test_media_upload_no_set_error``'s no-folder answer, which an empty actor
+    the first-folder path (``test_media_first_upload_makes_the_first_folder``), which an empty actor
     would reach first on an app that checks the folder before the file. The
     listing must come out of it unchanged.
     """
@@ -636,7 +632,7 @@ def test_media_upload_into_selected_set(seeded_media_app):
     Seeded off the dedicated-actor ``seeded_media_app`` fixture (NOT the shared
     session ``test_user``): a fresh actor whose owned sets the upload mutates can't
     pollute the empty-state ``test_media_explorer_chrome`` /
-    ``test_media_upload_no_set_error``, even on a mid-test failure — the same
+    ``test_media_first_upload_makes_the_first_folder``, even on a mid-test failure — the same
     isolation rationale as ``test_all_media_cross_set`` (and no fragile teardown).
     Its single-file ``media-seed-clips`` set gives the clean 1 → 2.
 

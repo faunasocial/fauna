@@ -30,6 +30,7 @@ import uniffi.fauna_client_search.SearchResultRow
 import uniffi.fauna_conversations.ConversationsManager
 import java.net.URLEncoder
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
 
 /**
  * Route an activated `search-result-item`'s typed [SearchNav] target into the

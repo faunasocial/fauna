@@ -51,6 +51,8 @@ Stamped 2026-11-07 at b844c771f6.
    - `tests/e2e-unified/tests/test_feed_creation.py::test_the_local_entry_returns_from_a_custom_feed`
 12. [app] Weighing the engagement factor orders the feed by how much engagement each post has gathered — `docs/goal/behavior/trending.md` § The `engagement` factor
    - `tests/e2e-unified/tests/test_feed_creation.py::test_a_feed_weighing_engagement_lists_the_engaged_post_first`
+13. [app] Creating a feed is disabled and says a name is needed while the name is blank, and the create page closes only once the feed is saved, a failure leaving it open with what you typed — `docs/goal/ui/feed.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_create_feed_is_blocked_while_unnamed_and_a_failed_save_keeps_the_page_open`
 
 ## Status
 
@@ -59,11 +61,11 @@ Stamped 2026-11-07 at b844c771f6.
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+1c9a6a26 standalone |
 | linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
-| windows | ✅ full | 0.1.6 docker |
+| windows | ⚠ partial | 0.1.7 docker |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.6 docker |
+| ios | ⚠ partial | 0.1.7 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6 docker |
+| tui | ✅ full | 0.1.7 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -89,4 +91,5 @@ Stamped 2026-11-07 at b844c771f6.
 | 10 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_custom_feed_never_takes_over_the_feed_page_at_the_next_launch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_the_local_entry_returns_from_a_custom_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_feed_weighing_engagement_lists_the_engaged_post_first` | windows (windows): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_create_feed_is_blocked_while_unnamed_and_a_failed_save_keeps_the_page_open` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

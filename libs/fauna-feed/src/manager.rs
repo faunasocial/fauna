@@ -123,12 +123,6 @@ fn muted_keywords_weight(composition: &[FeedCompositionEntry]) -> i64 {
     }
 }
 
-/// The poll step of the muted-words read's wait for an account store still
-/// opening (`FeedManager::muted_words_and_factors_settled`), inside
-/// [`fauna_client_config::LEDGER_READY_WAIT`] — the step the store seam's own
-/// waiting reads use.
-const PREFERENCES_READY_POLL: std::time::Duration = std::time::Duration::from_millis(100);
-
 /// How often [`FeedManager::hydrate_cues`] re-reads the e2e cue-hydration hold
 /// while it is held, and how many reads it waits at most: 3000 × 200 ms = 600 s.
 const CUE_HYDRATION_HOLD_POLL: std::time::Duration = std::time::Duration::from_millis(200);
@@ -303,7 +297,7 @@ pub struct FeedManager<R> {
     /// The test-only one-shot reload hold — see
     /// [`hold_next_reload_for_test`](Self::hold_next_reload_for_test).
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-    reload_hold: ReloadHold,
+    reload_hold: fauna_core::test_hold::OneShotHold,
     /// The test-only in-memory cue-hydration hold — see
     /// [`set_cue_hydration_hold_for_test`](Self::set_cue_hydration_hold_for_test).
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
@@ -939,7 +933,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             reload_committed_gen: std::sync::atomic::AtomicU64::new(0),
             loaded_query: RwLock::new(None),
             #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-            reload_hold: ReloadHold::default(),
+            reload_hold: fauna_core::test_hold::OneShotHold::new(),
             #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
             cue_hydration_hold: std::sync::atomic::AtomicBool::new(false),
             observers: RwLock::new(Vec::new()),
@@ -1068,22 +1062,39 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         ),
         fauna_client_config::StoreError,
     > {
-        let polls =
-            fauna_client_config::LEDGER_READY_WAIT.as_millis() / PREFERENCES_READY_POLL.as_millis();
-        for _ in 0..polls {
-            match self.muted_words_and_factors().await {
-                Err(
-                    fauna_client_config::StoreError::Load(m)
-                    | fauna_client_config::StoreError::Save(m),
-                ) if m == fauna_client_config::LEDGER_NOT_READY => {}
-                answer => return answer,
-            }
+        // The unit tests' single-poll executor has no timer; there the bound
+        // never passes and the poll count below ends the wait.
+        #[cfg(not(test))]
+        let deadline = fauna_sleep::sleep(fauna_client_config::LEDGER_READY_WAIT);
+        #[cfg(test)]
+        let deadline = std::future::pending::<()>();
+        self.muted_words_and_factors_within(deadline).await
+    }
+
+    /// [`Self::muted_words_and_factors_settled`]'s wait, bounded by `deadline`
+    /// — one bound, never one per read
+    /// ([`fauna_client_config::wait_out_not_ready`] says why).
+    async fn muted_words_and_factors_within(
+        &self,
+        deadline: impl std::future::Future<Output = ()>,
+    ) -> Result<
+        (
+            Vec<fauna_core::data::MutedKeyword>,
+            Vec<fauna_core::data::TrainedFactorMeta>,
+        ),
+        fauna_client_config::StoreError,
+    > {
+        fauna_client_config::wait_out_not_ready(
+            deadline,
             // The unit tests' single-poll executor has no timer; there each
             // poll re-reads at once, which is the loop under test.
-            #[cfg(not(test))]
-            fauna_sleep::sleep(PREFERENCES_READY_POLL).await;
-        }
-        self.muted_words_and_factors().await
+            || async {
+                #[cfg(not(test))]
+                fauna_sleep::sleep(fauna_client_config::LEDGER_READY_POLL).await;
+            },
+            || self.muted_words_and_factors(),
+        )
+        .await
     }
 
     /// The installed period-key store, or why there is none.
@@ -5225,13 +5236,20 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// Subscribe to a bridge feed (`bridge-form-subscribe-button`) over
     /// `fauna.bridges.feeds.create`. Reflects the result into
     /// `BridgeFormState` (cleared on success, error stamped on failure) and
-    /// returns the row id.
+    /// returns the row id. The display name is optional
+    /// (`forms::bridge_subscribe_possibility` never asks for it): a blank one
+    /// is the feed URI, which the nest requires non-empty.
     pub async fn subscribe_bridge(
         &self,
         kind: String,
         uri: String,
         name: String,
     ) -> Result<i64, String> {
+        let name = if name.trim().is_empty() {
+            uri.clone()
+        } else {
+            name
+        };
         {
             let mut s = self.state.write().unwrap();
             s.bridge_form.submitting = true;
@@ -7735,68 +7753,6 @@ pub const REACT_REFUSED_NOT_NATIVE: &str =
 pub fn refusal_i18n_key(err: &str) -> Option<&'static str> {
     (err == fauna_client_core::post::REFERENCE_REFUSED_RESTRICTED)
         .then_some("feed.reference_restricted")
-}
-
-/// The test-only one-shot reload hold behind
-/// [`FeedManager::hold_next_reload_for_test`]. A waker-registering park, so it
-/// wakes under any executor (tokio natively, the browser's on wasm) — the unit
-/// tests' mock gate re-polls instead, which only its own executor tolerates.
-#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-#[derive(Default)]
-struct ReloadHold {
-    inner: std::sync::Mutex<ReloadHoldState>,
-}
-
-#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-#[derive(Default)]
-struct ReloadHoldState {
-    /// The next reload to reach the park point parks there.
-    armed: bool,
-    /// The parked reload may proceed.
-    released: bool,
-    waker: Option<std::task::Waker>,
-}
-
-#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-impl ReloadHold {
-    fn arm(&self) {
-        let mut s = self.inner.lock().unwrap();
-        s.armed = true;
-        s.released = false;
-    }
-
-    fn release(&self) {
-        let mut s = self.inner.lock().unwrap();
-        s.armed = false;
-        s.released = true;
-        if let Some(waker) = s.waker.take() {
-            waker.wake();
-        }
-    }
-
-    fn is_armed(&self) -> bool {
-        self.inner.lock().unwrap().armed
-    }
-
-    /// Park until [`Self::release`] if armed, consuming the arm; return at once if not.
-    async fn park_if_armed(&self) {
-        {
-            let mut s = self.inner.lock().unwrap();
-            if !std::mem::take(&mut s.armed) {
-                return;
-            }
-        }
-        std::future::poll_fn(|cx| {
-            let mut s = self.inner.lock().unwrap();
-            if std::mem::take(&mut s.released) {
-                std::task::Poll::Ready(())
-            } else {
-                s.waker = Some(cx.waker().clone());
-                std::task::Poll::Pending
-            }
-        })
-        .await;
-    }
 }
 
 /// Whether a `fauna.posts.get` error is the nest's "no such post for this caller"
@@ -10470,6 +10426,34 @@ mod tests {
         assert!(snap.error.is_some(), "the filters are off, and it says so");
     }
 
+    /// The wait is ONE bound, never a bound per read: once the bound has
+    /// passed, no read starts again. Each read of a never-listed replica crosses
+    /// the first-listing gate and may itself wait out the gate's own bound, so a
+    /// wait counted in reads rather than in time added those bounds up — a
+    /// relaunch with no nest held its feed reload, and with it tui's agent,
+    /// for minutes, and the needs-the-nest refusal never painted.
+    #[test]
+    fn a_store_still_not_ready_at_the_bound_is_not_read_again() {
+        let nest = MockNest::arc();
+        nest.preferences
+            .not_ready_reads
+            .store(1_000, Ordering::SeqCst);
+        let m = mgr(nest.clone());
+
+        let answer = block_on(m.muted_words_and_factors_within(std::future::ready(())));
+
+        assert!(
+            answer.as_ref().is_err_and(|e| e.is_not_ready()),
+            "a store still not ready at the bound answers not-ready, got {:?}",
+            answer.map(|_| ()),
+        );
+        assert_eq!(
+            nest.preferences.not_ready_reads.load(Ordering::SeqCst),
+            999,
+            "the read in flight when the bound passed is the last one",
+        );
+    }
+
     #[test]
     fn update_compose_stores_and_clears_prior_error() {
         let nest = MockNest::arc();
@@ -12973,6 +12957,17 @@ mod tests {
             nest.req("fauna.bridges.feeds.create");
         assert_eq!(req.bridge, "bluesky");
         assert_eq!(req.feed_uri, "at://feed");
+    }
+
+    #[test]
+    fn subscribe_bridge_names_a_blank_name_after_the_uri() {
+        let nest = MockNest::arc();
+        let m = mgr(nest.clone());
+        block_on(m.subscribe_bridge("nostr".into(), "nostr://npub1x".into(), "  ".into()))
+            .expect("subscribe ok");
+        let req: fauna_protocol::bridges_ui::CreateFeedRequest =
+            nest.req("fauna.bridges.feeds.create");
+        assert_eq!(req.name, "nostr://npub1x");
     }
 
     #[test]

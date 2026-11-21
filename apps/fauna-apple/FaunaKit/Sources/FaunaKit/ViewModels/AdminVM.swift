@@ -66,14 +66,50 @@ public class AdminVM {
     /// action failures land here, per admin.md § Errors.
     public var actionError: String?
 
+    /// `admin-users-invite-code-copy-btn`'s outcome beyond the button's own
+    /// "Copied!" + `copied` attr: a failed copy is said on
+    /// `admin-users-action-error`, never dropped (`ui/README.md` § Offer only
+    /// what is possible, rule 7; tui's `Action::CopyMintedCode`).
+    public func recordMintedCodeCopy(_ outcome: CopyOutcome) {
+        if let failure = outcome.failure { actionError = failure }
+    }
+
+    // Admin take-over (`family-safety.md` § App surface → *Admin take-over*).
+    /// The viewing admin's raw actor id — what the shared take-over offer keys
+    /// on (`adminUserRowControls(user:viewer:)`); `nil` offers no take-over.
+    public private(set) var viewerActorId: Data?
+    /// The ward whose row's inline confirm is armed, captured by ACTOR ID at
+    /// arm time so a re-read that re-orders the rows cannot retarget the
+    /// confirm; one row at a time (linux `TakeOverArm`, tui's
+    /// `UsersState::take_over_armed`).
+    public private(set) var takeOverArmed: Data?
+    /// The take-over's one sender, `fauna.family.transfer { ward, self }` —
+    /// a seam so a unit test can record the dispatch; `nil` sends through the
+    /// configured family client.
+    var takeOverSender: ((_ ward: Data, _ guardian: Data) async throws -> Void)?
+    /// The app-root family-status read that gates `family-tab`, re-read after a
+    /// take-over lands (the viewer just became a guardian).
+    private var familyStatus: FamilyStatusStore?
+
     private var api: APIClient?
 
     public init() {}
 
     /// Wire the VM to the authenticated `APIClient`. The admin WS-RPC kinds are
     /// session-gated (the caller must be a nest admin) — no admin token.
-    public func configure(api: APIClient) {
+    /// `viewerActorIdHex` is the signed-in actor (the take-over offer's viewer);
+    /// `familyStatus` is re-read after a take-over.
+    public func configure(api: APIClient, viewerActorIdHex: String? = nil,
+                          familyStatus: FamilyStatusStore? = nil) {
         self.api = api
+        self.viewerActorId = viewerActorIdHex.flatMap { Data(hexString: $0) }
+        self.familyStatus = familyStatus
+        self.takeOverArmed = nil
+    }
+
+    /// Test seam: set the viewer without an `APIClient`.
+    func setViewer(_ viewer: Data?) {
+        viewerActorId = viewer
     }
 
     private func admin() async throws -> FfiAdminClient {
@@ -214,13 +250,44 @@ public class AdminVM {
         }
     }
 
+    /// `admin-users-next-page` (`forward`) / `admin-users-prev-page`: the shared
+    /// `users_page_step_possibility` (admin.md § 2, *What a row offers*) —
+    /// blocked at the last page / page 1, saying so.
+    public func pageStepAnswer(forward: Bool) -> Possibility {
+        adminUsersPageStepPossibility(offset: Int64(offset), total: Int64(totalUsers),
+                                      pageSize: Int64(pageSize), forward: forward)
+    }
+
+    /// `admin-users-admit-button`, `create-invite-code-btn` and
+    /// `create-invite-confirm-btn`: the shared `tier_pick_possibility` —
+    /// blocked, naming the Tiers page, while the tier select offers none.
+    public var tierPickAnswer: Possibility {
+        adminTierPickPossibility(tiers: tierNames)
+    }
+
+    /// `admin-users-registration-save-button`'s draft answer: the shared
+    /// `registration_ceiling_possibility` (blank, or a whole number) — the
+    /// paint and the press ask this one answer (admin.md § Errors & edge
+    /// cases, *A form's submit is live only for a draft the nest would accept*).
+    public func registrationCeilingAnswer(_ draft: String) -> Possibility {
+        adminRegistrationCeilingPossibility(raw: draft)
+    }
+
+    /// `admin-users-admit-button`: the tier select's answer first, then the
+    /// shared `admit_actor_possibility` over the typed account key (64 hex).
+    public func admitAnswer(_ actorDraft: String) -> Possibility {
+        tierPickAnswer.and(adminAdmitActorPossibility(raw: actorDraft))
+    }
+
     public func nextPage() async {
+        if refusePress(pageStepAnswer(forward: true), errorMessage: &actionError) { return }
         guard let newOffset = nextPageOffset(offset: Int64(offset), total: Int64(totalUsers), pageSize: Int64(pageSize)) else { return }
         offset = Int(newOffset)
         await loadUsers()
     }
 
     public func prevPage() async {
+        if refusePress(pageStepAnswer(forward: false), errorMessage: &actionError) { return }
         guard let newOffset = prevPageOffset(offset: Int64(offset), pageSize: Int64(pageSize)) else { return }
         offset = Int(newOffset)
         await loadUsers()
@@ -245,6 +312,7 @@ public class AdminVM {
     /// exposes (admin.md § Users Section 3). Refetch so the row flips to cancel.
     public func evictUser(_ user: FfiAdminUser) async {
         actionError = nil
+        if refusePress(rowPossibility(user, .evict), errorMessage: &actionError) { return }
         do {
             try await admin().usersEvict(
                 actorId: user.actorId,
@@ -259,6 +327,7 @@ public class AdminVM {
 
     public func cancelEviction(_ user: FfiAdminUser) async {
         actionError = nil
+        if refusePress(rowPossibility(user, .restore), errorMessage: &actionError) { return }
         do {
             try await admin().usersCancelEviction(actorId: user.actorId)
             await loadUsers()
@@ -273,6 +342,7 @@ public class AdminVM {
     /// clears the pending delete). Refetch so the row updates.
     public func suspendUser(_ user: FfiAdminUser) async {
         actionError = nil
+        if refusePress(rowPossibility(user, .suspend), errorMessage: &actionError) { return }
         do {
             try await admin().usersSuspend(
                 actorId: user.actorId,
@@ -292,6 +362,7 @@ public class AdminVM {
     /// state (the grant itself has no immediate rendered effect).
     public func makeAdmin(_ user: FfiAdminUser) async {
         actionError = nil
+        if refusePress(rowPossibility(user, .makeAdmin), errorMessage: &actionError) { return }
         do {
             try await admin().adminsAdd(actorId: user.actorId)
             await loadUsers()
@@ -309,6 +380,7 @@ public class AdminVM {
     /// row reflects persisted state either way.
     public func removeAdmin(_ user: FfiAdminUser) async {
         actionError = nil
+        if refusePress(removeAdminPossibility(user), errorMessage: &actionError) { return }
         do {
             try await admin().adminsRemove(actorId: user.actorId)
             await loadUsers()
@@ -316,6 +388,81 @@ public class AdminVM {
         } catch {
             actionError = error.localizedDescription
         }
+    }
+
+    // MARK: - Admin take-over (family-safety.md § App surface → *Admin take-over*)
+
+    /// Which lifecycle controls a Users row offers — the shared decision, with
+    /// this viewer, so the take-over offer is the shared rule's too (never
+    /// re-derived from `user.guardian` here).
+    public func rowControls(_ user: FfiAdminUser) -> FfiAdminUserRowControls {
+        adminUserRowControls(user: user, viewer: viewerActorId)
+    }
+
+    /// `control`'s answer on `user`'s row — the shared
+    /// `AdminUserRowControls::*_possibility` sibling (`admin.md` § Errors &
+    /// edge cases, *Role and state gates answer one `Possibility` too*):
+    /// possible where the row offers it, absent otherwise. The view paints
+    /// from it and the verb asks it again, refusing on
+    /// `admin-users-action-error`.
+    public func rowPossibility(_ user: FfiAdminUser, _ control: FfiAdminUserRowControl) -> Possibility {
+        adminUserRowControlPossibility(controls: rowControls(user), control: control)
+    }
+
+    /// `admin-users-remove-admin-button`'s answer: absent without the role,
+    /// blocked on the nest's last superadmin.
+    public func removeAdminPossibility(_ user: FfiAdminUser) -> Possibility {
+        adminRemoveAdminPossibility(user: user)
+    }
+
+    /// `admin-pending-action-approve-button`'s answer: absent on the viewer's
+    /// own scheduled action and on one no longer pending (`admin.md` § 2,
+    /// *What a row offers*). Without a known viewer the own-action arm cannot
+    /// fire and the nest's self-approval refusal stands behind it.
+    public func approvePossibility(_ action: FfiAdminPendingAction) -> Possibility {
+        adminPendingApprovePossibility(action: action, viewer: viewerActorId ?? Data())
+    }
+
+    /// Whether `user`'s row shows the armed confirm triple.
+    public func isTakeOverArmed(_ user: FfiAdminUser) -> Bool {
+        takeOverArmed == user.actorId
+    }
+
+    /// Arm `user`'s row, disarming any other.
+    public func armTakeOver(_ user: FfiAdminUser) {
+        actionError = nil
+        if refusePress(rowPossibility(user, .takeOver), errorMessage: &actionError) { return }
+        takeOverArmed = user.actorId
+    }
+
+    /// Disarm without sending anything.
+    public func cancelTakeOver() {
+        takeOverArmed = nil
+    }
+
+    /// Confirm the armed take-over: disarm FIRST (a second confirm can never
+    /// re-send), then `fauna.family.transfer { ward, self }`, then re-read the
+    /// users page and the viewer's family status. A refusal lands on
+    /// `admin-users-action-error`.
+    public func confirmTakeOver() async {
+        guard let ward = takeOverArmed else { return }
+        takeOverArmed = nil
+        guard let viewer = viewerActorId else { return }
+        actionError = nil
+        do {
+            if let takeOverSender {
+                try await takeOverSender(ward, viewer)
+            } else {
+                guard let api else { throw APIError.ffiError("AdminVM not configured") }
+                try await api.familyClient().transfer(
+                    supervisedActorId: ward, newGuardianActorId: viewer)
+            }
+        } catch {
+            actionError = error.localizedDescription
+            return
+        }
+        await loadUsers()
+        await familyStatus?.refresh(api: api)
     }
 
     // MARK: - Registration section (admin.md § 2 Users → Section 2)
@@ -351,6 +498,12 @@ public class AdminVM {
     /// `registration_mutation` changed-only knob).
     public func saveRegistration(mode: FfiRegistrationMode, maxFreeUsersInput: String,
                                  ageVerification: Bool? = nil) async {
+        // The press asks the draft answer the save is painted from (admin.md
+        // § Errors & edge cases, *A form's submit is live only for a draft the
+        // nest would accept*): a malformed ceiling never reaches the nest.
+        if refusePress(registrationCeilingAnswer(maxFreeUsersInput), errorMessage: &actionError) {
+            return
+        }
         let trimmed = maxFreeUsersInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let maxFree: UInt64?
         if trimmed.isEmpty {
@@ -358,7 +511,7 @@ public class AdminVM {
         } else if let parsed = UInt64(trimmed) {
             maxFree = parsed
         } else {
-            actionError = L.admin.usersPage.maxFreeUsersHint
+            // Unreachable once the answer above was possible; never sent as "no cap".
             return
         }
         actionError = nil
@@ -391,11 +544,10 @@ public class AdminVM {
     /// surfaced through `actionError`.
     public func admitUser(actorHex: String, handle: String, tier: String,
                           guardian: Data? = nil, ageBand: String? = nil) async {
+        if refusePress(admitAnswer(actorHex), errorMessage: &actionError) { return }
         let trimmed = actorHex.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count == 64, trimmed.allSatisfy({ $0.isHexDigit }) else {
-            actionError = L.admin.usersPage.admitActorHint
-            return
-        }
+        // Unreachable once the answer above was possible (it asks the same rule).
+        guard trimmed.count == 64, trimmed.allSatisfy({ $0.isHexDigit }) else { return }
         actionError = nil
         let actorId = hex_to_data(trimmed)
         let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -438,6 +590,7 @@ public class AdminVM {
     @discardableResult
     public func mintInviteCode(tier: String, uses: Int, guardian: Data? = nil,
                                ageBand: String? = nil) async -> String? {
+        if refusePress(tierPickAnswer, errorMessage: &actionError) { return nil }
         actionError = nil
         do {
             let code = try await admin().inviteCodesCreate(code: "", tier: tier, uses: Int64(uses),
@@ -487,6 +640,8 @@ public class AdminVM {
     /// `actionError`; re-list either way so the section ends on the live state.
     public func approvePendingAction(id: Int64) async {
         actionError = nil
+        if let action = pendingActions.first(where: { $0.id == id }),
+           refusePress(approvePossibility(action), errorMessage: &actionError) { return }
         do {
             try await admin().pendingActionApprove(id: id)
         } catch {

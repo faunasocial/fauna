@@ -29,6 +29,7 @@ import {
   deletePendingInvite,
 } from './pending-invite-store';
 import { logMessage, type NestRulesSummaryValue } from '#lib/wasm';
+import type { Possibility } from '#lib/possibility';
 import { commitConfirmedIdentity as commitIdentity } from './identity-commit';
 import { setNestDialOverride } from '#lib/api';
 
@@ -98,6 +99,8 @@ export type RegistrarAvailability =
 export interface DnsZone {
   id: string;
   name: string;
+  /** Filled by a zone-door provider (Hetzner, Cloudflare); empty otherwise. */
+  nameservers?: string[];
 }
 
 export interface DnsConfigState {
@@ -157,7 +160,7 @@ export interface VpsConfigState {
  * from `#lib/generated/providers.ts`'s `FieldMeta` (which is the static
  * registry shape with camelCase + a richer field set). */
 export type FieldTypePlain = 'Text' | 'Secret' | 'Select' | 'HostedAuth';
-export type CapabilityPlain = 'Dns' | 'Vps' | 'Registrar';
+export type CapabilityPlain = 'Dns' | 'Vps' | 'Registrar' | 'Zone';
 
 /** Which credential form a `hosted-auth` field is being driven on — mirrors
  * `fauna_onboarding_machine::state::CredentialForm`. The two forms hold
@@ -205,6 +208,46 @@ export interface LocalizedText {
   args: Record<string, string>;
 }
 
+// ── The choose-providers page (`onboarding-provisioning.md` § 3d) ──
+//
+// Mirrors `fauna_onboarding_machine::state::{ProviderGoal, GoalCover,
+// ProviderRow, GoalRow, HeldProviderCredential}` as the wasm `*Json` getters
+// serialize them (serde's default enum forms).
+export type ProviderGoal = 'Domain' | 'Dns' | 'Vps';
+export type GoalCover = 'Manual' | { Provider: { provider_id: string } };
+
+export interface ProviderRow {
+  provider_id: string;
+  capabilities: CapabilityPlain[];
+  connected: boolean;
+  connecting: boolean;
+  held: boolean;
+  /** The provider's own error from the last failed *Connect*. */
+  error: string | null;
+  domain_reason: LocalizedText | null;
+  dns_reason: LocalizedText | null;
+  vps_reason: LocalizedText | null;
+}
+
+export interface GoalRow {
+  goal: ProviderGoal;
+  /** `null` = open. */
+  cover: GoalCover | null;
+  /** Connected providers that can cover the goal; a choice when > 1. */
+  candidates: string[];
+  price_cents: number | null;
+  renewal_cents: number | null;
+  currency: string | null;
+  note: LocalizedText | null;
+}
+
+/** A credential a signed-in account on this device holds in its DNS record,
+ *  passed INTO the machine (§ 3d *Held credentials*). */
+export interface HeldProviderCredential {
+  provider_id: string;
+  fields: Record<string, string>;
+}
+
 // ── HandleCheck snapshot ──
 //
 // Mirrors `libs/fauna-onboarding-machine/src/snapshots/handle_check.rs`.
@@ -232,8 +275,6 @@ export interface HandleCheckSnapshot {
   outcome: HandleCheckOutcome;
   message: LocalizedText;
   continue_enabled: boolean;
-  control_checkbox_visible: boolean;
-  control_checkbox_checked: boolean;
   /** True iff `outcome` is `AlreadyOnNest` — Continue signs in, so the
    *  by-continuing terms notice shows (shared Rust derives it; never re-derive). */
   terms_notice_visible: boolean;
@@ -393,6 +434,8 @@ export type OverallStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Cance
 export type SubstepKey =
   | 'DomainCheckingAvailability'
   | 'DomainRegistering'
+  | 'DomainCreatingZone'
+  | 'DomainSettingNameservers'
   | 'DomainVerifyingZone'
   | 'ServerGeneratingDkim'
   | 'ServerCreating'
@@ -400,6 +443,7 @@ export type SubstepKey =
   | 'DnsAddingEmailRecords'
   | 'DnsSettingReverseDns'
   | 'OnlineWaiting'
+  | 'OnlineStillStarting'
   | 'OnlineClaiming'
   | 'StatusSkipped'
   | 'StatusRetrying'
@@ -411,7 +455,8 @@ export type SkipReason =
   | 'ServerAlreadyExists'
   | 'DnsRecordAlreadyExists'
   | 'PtrAlreadySet'
-  | 'NestAlreadyOnline';
+  | 'NestAlreadyOnline'
+  | 'DomainAlreadyRegistered';
 
 export interface StepSnapshot {
   kind: ProvisionStep;
@@ -434,7 +479,6 @@ export interface StepSnapshot {
    */
   shows_substep: boolean;
   shows_error: boolean;
-  shows_attempt_suffix: boolean;
 }
 
 export interface ProvisionResultPlain {
@@ -496,6 +540,28 @@ export interface BillOfMaterialsItem {
   renewal_price_cents: number | null;
 }
 
+/**
+ * `nest_provisioning`'s DNS plan (`provisioning-dns-plan`,
+ * `docs/goal/behavior/onboarding-provisioning.md` § 6 *The DNS plan*).
+ * Mirrors `fauna_onboarding_machine::snapshots::DnsPlanSnapshot`: the machine
+ * reads the zone itself on entering the page and resolves every row's
+ * sentence; the page renders rows, never derives them.
+ */
+export type DnsPlanAction = 'Keep' | 'Add' | 'Change' | 'Remove';
+export interface DnsPlanRowView {
+  /** `<name>|<type>` — the row's key in `provisioning-dns-plan-row[<key>]`. */
+  key: string;
+  action: DnsPlanAction;
+  text: LocalizedText;
+}
+export interface DnsPlanSnapshot {
+  /** `false` → no region (manual path, a bought domain's fresh zone). */
+  visible: boolean;
+  /** The heading, or the loading / read-failed line (then `rows` is empty). */
+  heading: LocalizedText;
+  rows: DnsPlanRowView[];
+}
+
 // ── Wizard outcome ──
 //
 // Mirrors `libs/fauna-onboarding-machine/src/outcome.rs`. `wizardOutcome()`
@@ -545,18 +611,32 @@ export interface Machine {
   // `dnsStatusText()` was never implemented and calling it throws. Resolve the
   // key via `resolveLocalized(dnsStatusTextKey())` at the call site instead.
   dnsPostInstructions(): string | undefined;
-  canVerifyDns(): boolean;
-  canContinueDns(): boolean;
-  canVerifyVps(): boolean;
-  canContinueVps(): boolean;
-  /** The reason `vps-config-continue-button` is disabled, or `undefined`
-   * when it's live. A disabled control owes the user a reason
-   * (`ui/README.md` § Copy comprehensibility rule 5). */
-  vpsContinueBlockedReason(): LocalizedText | undefined;
-  /** The reason `provisioning-continue-button` is disabled, or `undefined`
-   * when it's live — the four `○` step glyphs are a symbol, not a reason
-   * (`ui/README.md` rule 5). */
-  provisioningContinueBlockedReason(): LocalizedText | undefined;
+  /** `dns-verify-button`'s answer (`verify_dns_possibility`): enabled, or
+   * disabled naming the provider to pick, the check on its way or the
+   * required field left empty. Painted through `credential-possibility.ts`. */
+  verifyDnsPossibility(): Possibility;
+  /** `dns-config-continue-button`'s answer (`dns_continue_possibility`):
+   * blocked by the status line. */
+  dnsContinuePossibility(): Possibility;
+  /** `handle-entry-continue-button`'s answer (`handle_continue_possibility`). */
+  handleContinuePossibility(): Possibility;
+  /** `invite-request-continue-button`'s answer (`invite_continue_possibility`). */
+  inviteContinuePossibility(): Possibility;
+  /** `invite-request-submit-button`'s answer (`invite_submit_possibility`). */
+  inviteSubmitPossibility(): Possibility;
+  /** `nat-mode-confirm-button`'s answer (`nat_mode_submit_possibility`). */
+  natModeSubmitPossibility(): Possibility;
+  /** `vps-verify-button`'s answer (`verify_vps_possibility`). */
+  verifyVpsPossibility(): Possibility;
+  /** `vps-config-continue-button`'s answer from the shared machine
+   * (`vps_continue_possibility`; `ui/README.md` § Offer only what is
+   * possible, rule 6): enabled, or disabled with the reason to paint beside
+   * it. The page never pairs its own condition with a reason getter. */
+  vpsContinuePossibility(): Possibility;
+  /** `provisioning-continue-button`'s answer (`provisioning_continue_possibility`)
+   * — the four `○` step glyphs are a symbol, not a reason (rule 5), so a
+   * blocked answer carries the line to paint. */
+  provisioningContinuePossibility(): Possibility;
   // Typed JSON helpers (Proxy-supplied)
   dnsConfig(): DnsConfigState;
   vpsConfig(): VpsConfigState;
@@ -583,6 +663,8 @@ export interface Machine {
    * (recurring, always present). Pure computation over already-in-state
    * DNS/VPS data. See `BillOfMaterialsItem`. */
   billOfMaterials(): BillOfMaterialsItem[];
+  /** The DNS plan region's state (`OnboardingMachine::dns_plan`). */
+  dnsPlan(): DnsPlanSnapshot;
   // ── hosted-auth (a bundled provider's hosted sign-in, onboarding.md § 4) ──
   // `form` is which credential form the field lives on.
   /** Step 1: POSTs the device-authorization request. Returns the URL to
@@ -597,9 +679,17 @@ export interface Machine {
   hostedAuthWait(form: CredentialForm, fieldId: string): Promise<void>;
   /** The field's button label source. `Idle` for a field never started. */
   hostedAuthState(form: CredentialForm, fieldId: string): HostedAuthState;
-  /** Whether the sign-in button is pressable: the form's `base-url` is
-   * filled in and no attempt on this field is mid-flight. */
-  hostedAuthCanBegin(form: CredentialForm, fieldId: string): boolean;
+  /** The sign-in button's answer (`hosted_auth_possibility`): blocked while
+   * the form's `base-url` is empty or an attempt on this field is
+   * mid-flight, each with its reason. */
+  hostedAuthPossibility(form: CredentialForm, fieldId: string): Possibility;
+  /** `claim-code-submit-button`'s answer over the typed code
+   * (`claim_code_submit_possibility`): the draft, and no claim already on its
+   * way. The button paints from it and the submit asks it again. */
+  claimCodeSubmitPossibility(code: string): Possibility;
+  /** `handle-check-button`'s answer over the typed handle
+   * (`handle_check_possibility`): a handle typed, and no check running. */
+  handleCheckPossibility(handle: string): Possibility;
   /** `undefined` while the wizard is still running. */
   wizardOutcome(): WizardOutcome | undefined;
   /** The identity secret this run authenticated with, straight from the
@@ -773,7 +863,6 @@ export interface Machine {
   // Handle-check (handle-first wizard)
   startHandleCheck(handle: string): Promise<void>;
   cancelHandleCheck(): void;
-  setControlCheckbox(checked: boolean): void;
   /** handle-entry-continue-button wiring. Returns the next OnboardingStep
    * name (Debug-formatted, e.g. `"DnsConfig"` / `"InviteRequest"` /
    * `"Done"`). On `"Done"` query `wizardOutcome()` to route. */
@@ -918,6 +1007,50 @@ export interface Machine {
    * already a working default) and returns `"Done"` with a `LoggedIn`
    * outcome — there is no resume slot to persist and no unresolved state. */
   deferNatModeChoice(): string;
+  // ── Choose providers (onboarding-provisioning.md § 3d) ──
+  //
+  // App capability declaration, called once at construction (below): the
+  // handle check lands on `provider_choice` and Back from `nest_provisioning`
+  // returns there. Every rule of the page is the machine's; these are its
+  // getters and presses.
+  setRendersProviderChoice(renders: boolean): void;
+  goalRows(): GoalRow[];
+  providerRows(): ProviderRow[];
+  canOfferBuyDomain(): boolean;
+  providerGoalDomain(): string;
+  visibleProviderFields(providerId: string): FieldMeta[];
+  setProviderCred(providerId: string, fieldId: string, value: string): void;
+  /** `provider-connect-button`'s answer (`connect_provider_possibility`);
+   * absent for an unknown provider. */
+  connectProviderPossibility(providerId: string): Possibility;
+  connectProvider(providerId: string): Promise<void>;
+  disconnectProvider(providerId: string): void;
+  /** Credentials signed-in accounts hold; each is re-checked by the machine. */
+  seedHeldProviderCredentials(held: HeldProviderCredential[]): Promise<void>;
+  selectGoalCover(goal: ProviderGoal, cover: GoalCover): void;
+  /** `provider-choice-continue-button`'s answer
+   * (`providers_continue_possibility`). */
+  providersContinuePossibility(): Possibility;
+  /** A goal pick's answer (`goal_cover_possibility`; `selectGoalCover` asks
+   * the same) — the manual row's DNS cover paints from it. */
+  goalCoverPossibility(goal: ProviderGoal, cover: GoalCover): Possibility;
+  continueFromProviders(): void;
+  /** The registry's note key, `undefined` when none shows. */
+  providerRegistrarNotesKey(providerId: string): string | undefined;
+  providerShowsContactForm(providerId: string): boolean;
+  providerContact(providerId: string): ContactInfo | undefined;
+  setProviderContact(providerId: string, contact: ContactInfo): void;
+  providerHostedAuthBegin(providerId: string, fieldId: string): Promise<HostedAuthPrompt>;
+  providerHostedAuthWait(providerId: string, fieldId: string): Promise<void>;
+  providerHostedAuthState(providerId: string, fieldId: string): HostedAuthState;
+  providerHostedAuthPossibility(providerId: string, fieldId: string): Possibility;
+  /** `nest_provisioning`'s choices region shows (set-up path, run not live). */
+  provisioningChoicesVisible(): boolean;
+  /** `dns-price-confirm-checkbox` shows under the domain line (the run buys). */
+  provisioningPriceConfirmVisible(): boolean;
+  /** `provisioning-start-button`'s answer (`provisioning_start_possibility`),
+   * the choose-providers routing guard folded in. */
+  provisioningStartPossibility(): Possibility;
   // ── One-tap "trust this box" offer (onboarding.md § 3b-ter) ──
   //
   // App capability declaration, called once at construction (below) — see
@@ -1032,9 +1165,17 @@ const TYPED_JSON_HELPERS = new Set([
   'loginPhase', 'handleCheckSnapshot', 'inviteRequestSnapshot',
   'claimCodeSnapshot', 'natModeSnapshot', 'awaitingManualDnsSnapshot',
   'wizardOutcome', 'identityOrigin', 'dnsStatusTextKey',
-  'providerStatus', 'provisioningSnapshot', 'billOfMaterials',
-  'vpsContinueBlockedReason', 'provisioningContinueBlockedReason',
+  'providerStatus', 'provisioningSnapshot', 'billOfMaterials', 'dnsPlan',
+  'vpsContinuePossibility', 'provisioningContinuePossibility',
+  'verifyDnsPossibility', 'verifyVpsPossibility', 'hostedAuthPossibility',
+  'connectProviderPossibility', 'providerHostedAuthPossibility',
+  'claimCodeSubmitPossibility', 'handleCheckPossibility',
+  'providersContinuePossibility', 'provisioningStartPossibility',
+  'dnsContinuePossibility', 'handleContinuePossibility',
+  'inviteContinuePossibility', 'inviteSubmitPossibility',
+  'natModeSubmitPossibility',
   'sshDoorReadout',
+  'goalRows', 'providerRows',
 ]);
 const JSON_GETTER_FOR: Record<string, string> = {
   dnsConfig: 'dnsConfigJson',
@@ -1053,9 +1194,26 @@ const JSON_GETTER_FOR: Record<string, string> = {
   providerStatus: 'providerStatus',
   provisioningSnapshot: 'provisioningSnapshot',
   billOfMaterials: 'billOfMaterials',
-  vpsContinueBlockedReason: 'vpsContinueBlockedReasonJson',
-  provisioningContinueBlockedReason: 'provisioningContinueBlockedReasonJson',
+  dnsPlan: 'dnsPlanJson',
+  vpsContinuePossibility: 'vpsContinuePossibilityJson',
+  provisioningContinuePossibility: 'provisioningContinuePossibilityJson',
+  verifyDnsPossibility: 'verifyDnsPossibilityJson',
+  verifyVpsPossibility: 'verifyVpsPossibilityJson',
+  hostedAuthPossibility: 'hostedAuthPossibilityJson',
+  connectProviderPossibility: 'connectProviderPossibilityJson',
+  providerHostedAuthPossibility: 'providerHostedAuthPossibilityJson',
+  claimCodeSubmitPossibility: 'claimCodeSubmitPossibilityJson',
+  handleCheckPossibility: 'handleCheckPossibilityJson',
   sshDoorReadout: 'sshDoorReadoutJson',
+  goalRows: 'goalRowsJson',
+  providerRows: 'providerRowsJson',
+  providersContinuePossibility: 'providersContinuePossibilityJson',
+  provisioningStartPossibility: 'provisioningStartPossibilityJson',
+  dnsContinuePossibility: 'dnsContinuePossibilityJson',
+  handleContinuePossibility: 'handleContinuePossibilityJson',
+  inviteContinuePossibility: 'inviteContinuePossibilityJson',
+  inviteSubmitPossibility: 'inviteSubmitPossibilityJson',
+  natModeSubmitPossibility: 'natModeSubmitPossibilityJson',
 };
 
 // `m.step()` on the wasm-bindgen surface returns the Rust `Debug` name
@@ -1177,6 +1335,11 @@ export async function initOnboardingMachine(): Promise<Machine> {
         // identity routes through the kit screen. The declaration and the
         // page's two steps land together.
         _machine.setRendersRecoveryKit(true);
+        // web renders the `provider_choice` page (`onboarding-provisioning.md`
+        // § 3d; tui led): the handle check lands there in place of
+        // `dns_config` → `vps_config`, and Back from `nest_provisioning`
+        // returns to it. `vps_config` stays for cloud recovery alone.
+        _machine.setRendersProviderChoice(true);
         return _machine;
       })
       .catch((e) => {
@@ -1433,15 +1596,17 @@ if (typeof window !== 'undefined' && __FAUNA_E2E_AUTOMATION__) {
 function wrapMachine(inner: object): Machine {
   return new Proxy(inner, {
     get(target, prop, _receiver) {
-      // Typed JSON helpers — call the *Json getter, parse, return.
+      // Typed JSON helpers — call the *Json getter with the caller's
+      // arguments (none for most; the credential answers take a form,
+      // provider and/or field id), parse, return.
       // `wizardOutcomeJson` returns `string | undefined` (Rust
       // `Option<String>`); other helpers always return a non-empty
       // string. Treat `undefined` / `null` / `""` uniformly as "no value"
       // so callers can `if (!m.wizardOutcome())` to gate.
       if (typeof prop === 'string' && TYPED_JSON_HELPERS.has(prop)) {
         const jsonKey = JSON_GETTER_FOR[prop];
-        return () => {
-          const raw = (target as Record<string, () => string | null | undefined>)[jsonKey]();
+        return (...args: unknown[]) => {
+          const raw = (target as Record<string, (...a: unknown[]) => string | null | undefined>)[jsonKey](...args);
           if (raw === undefined || raw === null || raw === '') return undefined;
           return JSON.parse(raw);
         };
@@ -1473,6 +1638,65 @@ function wrapMachine(inner: object): Machine {
           return JSON.parse(raw);
         };
       }
+      // The choose-providers page's argument-taking getters and setters: the
+      // wasm surface speaks JSON strings (an empty string for `None`), the
+      // typed surface objects — same convention as the arms around them.
+      if (prop === 'visibleProviderFields') {
+        return (providerId: string) => {
+          const fn = (target as Record<string, (id: string) => string>).visibleProviderFieldsJson.bind(target);
+          const raw = fn(providerId);
+          return raw ? JSON.parse(raw) : [];
+        };
+      }
+      if (prop === 'providerContact') {
+        return (providerId: string) => {
+          const fn = (target as Record<string, (id: string) => string>).providerContactJson.bind(target);
+          const raw = fn(providerId);
+          return raw ? JSON.parse(raw) : undefined;
+        };
+      }
+      if (prop === 'setProviderContact') {
+        return (providerId: string, contact: ContactInfo) => {
+          const fn = (target as Record<string, (id: string, c: string) => void>).setProviderContact.bind(target);
+          fn(providerId, JSON.stringify(contact));
+        };
+      }
+      if (prop === 'providerRegistrarNotesKey') {
+        return (providerId: string) => {
+          const fn = (target as Record<string, (id: string) => string>).providerRegistrarNotesKey.bind(target);
+          return fn(providerId) || undefined;
+        };
+      }
+      if (prop === 'selectGoalCover') {
+        return (goal: string, cover: unknown) => {
+          const fn = (target as Record<string, (g: string, c: string) => void>).selectGoalCover.bind(target);
+          fn(goal, JSON.stringify(cover));
+        };
+      }
+      if (prop === 'goalCoverPossibility') {
+        return (goal: string, cover: unknown) => {
+          const fn = (target as Record<string, (g: string, c: string) => string>).goalCoverPossibilityJson.bind(target);
+          return JSON.parse(fn(goal, JSON.stringify(cover)));
+        };
+      }
+      if (prop === 'seedHeldProviderCredentials') {
+        return (held: unknown[]) => {
+          const fn = (target as Record<string, (h: string) => Promise<void>>).seedHeldProviderCredentials.bind(target);
+          return fn(JSON.stringify(held));
+        };
+      }
+      if (prop === 'providerHostedAuthBegin') {
+        return async (providerId: string, fieldId: string) => {
+          const fn = (target as Record<string, (p: string, id: string) => Promise<string>>).providerHostedAuthBegin.bind(target);
+          return JSON.parse(await fn(providerId, fieldId));
+        };
+      }
+      if (prop === 'providerHostedAuthState') {
+        return (providerId: string, fieldId: string) => {
+          const fn = (target as Record<string, (p: string, id: string) => string>).providerHostedAuthStateJson.bind(target);
+          return JSON.parse(fn(providerId, fieldId));
+        };
+      }
       // hostedAuthBegin: async, takes (form, fieldId) — the wasm surface
       // resolves a JSON HostedAuthPrompt string; parse before handing it
       // back so callers get the typed object, same convention as every
@@ -1494,10 +1718,9 @@ function wrapMachine(inner: object): Machine {
           return JSON.parse(fn(form, fieldId));
         };
       }
-      // hostedAuthWait / hostedAuthCanBegin: same method name on both the
-      // typed Machine surface and the wasm binding (no *Json suffix — the
-      // former resolves void, the latter returns a plain bool), so they
-      // fall through to the generic passthrough below.
+      // hostedAuthWait: same method name on both the typed Machine surface
+      // and the wasm binding (it resolves void), so it falls through to the
+      // generic passthrough below.
       // step() — translate Rust Debug CamelCase to snake_case so views
       // can compare against the substitution-rules spec idiom.
       if (prop === 'step') {

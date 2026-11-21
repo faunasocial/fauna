@@ -58,6 +58,14 @@ fauna-client-capabilities = { path = "../fauna-client-capabilities" }
 # (`docs/goal/ui/connected-apps.md` § The trust facet and history lens).
 # Wasm-clean, and does not depend back on this crate.
 fauna-client-pair = { path = "../fauna-client-pair" }
+# `wait_out_not_ready` and its bound (`LEDGER_READY_WAIT` / `_POLL`), the store
+# seam's not-ready reason keys — the page waits out an account store that has
+# not listed the account yet rather than painting it as a failure
+# (`account-client-lifecycle.md` § The client-side lifecycle → *The first
+# listing*). Already in the tree through the mail-settings machine; wasm-clean.
+fauna-client-config = { path = "../fauna-client-config" }
+# The cross-target sleep between those re-reads.
+fauna-sleep = { workspace = true }
 async-trait = "0.1"
 hex = { workspace = true }
 serde = { workspace = true }

@@ -18,8 +18,11 @@
   // renders via `error`, never faked green.
   import { identity, reconnectTick } from '#lib/store';
   import { mailSpamMachine, onPushEvent, spamThresholdOverrideGet, spamThresholdOverrideSet, staleSurfacesForPushKind } from '#lib/rpc';
-  import { ensureWasm, trainingLabelBadge, trainingSourceBadge, parseCount } from '#lib/wasm';
+  import { ensureWasm, trainingLabelBadge, trainingSourceBadge, parseCount, mailUsableUnbuilt, readPossibility } from '#lib/wasm';
   import { resolveLocalized } from '#lib/i18n/localized';
+  import { blockedReason, paintAnswer, refusal } from '#lib/mail-affordances';
+  import { readFailed, type ReadWord } from '#lib/read-gate';
+  import type { Possibility } from '#lib/possibility';
   import { onMount, onDestroy } from 'svelte';
   import { t } from '#lib/i18n/strings';
   import type { WasmMailSpamMachine } from '../../../static/fauna_wasm.js';
@@ -66,6 +69,40 @@
   // into empty.
   let thresholdInput = $state('');
 
+  // Controls wait for their reads (`mail-settings.md` § Errors & edge cases,
+  // *Controls wait for their reads*; `ui/README.md` § Offer only what is
+  // possible, rules 5–7): blocked still loading before the read that decides
+  // them, failed to load after a failed one (a failure after a success keeps
+  // the earlier answer — `readFailed`); each handler asks again at the press
+  // and refuses with the reason, sending nothing. The answers are the shared
+  // `readPossibility` over wasm; the read words live beside their reads.
+  // Matches tui's `MailSpamState::{contribute,threshold}_answer`.
+  let wasmReady = $state(false);
+  // Where the classifier snapshot's read stands — the contribute-baseline
+  // toggle waits for it.
+  let snapRead = $state<ReadWord>('pending');
+  // Where the threshold-override read stands — the input and its commit wait
+  // for it, so an empty pre-read draft is never committed as "clear the
+  // override".
+  let thresholdRead = $state<ReadWord>('pending');
+
+  function contributeAnswerNow(): Possibility | null {
+    return wasmReady ? readPossibility(snap ? 'resolved' : snapRead) : null;
+  }
+  function thresholdAnswerNow(): Possibility | null {
+    return wasmReady ? readPossibility(thresholdRead) : null;
+  }
+  const contributePaint = $derived(paintAnswer(contributeAnswerNow()));
+  const thresholdPaint = $derived(paintAnswer(thresholdAnswerNow()));
+
+  /** Refuse a press whose answer is not possible, its reason on the page's
+   *  `error-message` (rule 6). True = refused, nothing sent. */
+  function refused(answer: Possibility | null): boolean {
+    const verdict = refusal(answer);
+    if (verdict.refused && verdict.reason) error = resolveLocalized(verdict.reason);
+    return verdict.refused;
+  }
+
   function applySnapshot(): void {
     if (!machine) return;
     snap = machine.snapshot() as unknown as SpamSnapshot;
@@ -97,10 +134,13 @@
     if (!id?.secretHex) return;
     try {
       await ensureWasm();
+      wasmReady = true;
       machine = await mailSpamMachine(id.secretHex);
       await machine.hydrate();
       applySnapshot();
+      snapRead = 'resolved';
     } catch (e) {
+      snapRead = readFailed(snapRead);
       error = e instanceof Error ? e.message : String(e);
     }
     unsubPush = onPushEvent((kind) => {
@@ -115,7 +155,9 @@
     try {
       const value = await spamThresholdOverrideGet(id.secretHex);
       thresholdInput = value != null ? String(value) : '';
+      thresholdRead = 'resolved';
     } catch (e) {
+      thresholdRead = readFailed(thresholdRead);
       error = e instanceof Error ? e.message : String(e);
     }
   });
@@ -134,6 +176,7 @@
   async function commitThresholdOverride(): Promise<void> {
     const id = $identity;
     if (!id?.secretHex) return;
+    if (refused(thresholdAnswerNow())) return;
     try {
       const value = parseCount(thresholdInput) ?? null;
       const confirmed = await spamThresholdOverrideSet(id.secretHex, value);
@@ -158,7 +201,12 @@
 
   // Dispatch a fire-and-render action, then re-render from the resulting snapshot.
   async function dispatch(action: unknown): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      // Rule 7: a gesture whose machine is missing refuses with the shared
+      // unbuilt reason on the page's `error-message`, never silently.
+      error = resolveLocalized(blockedReason(mailUsableUnbuilt()));
+      return;
+    }
     try {
       await machine.dispatch(action);
       applySnapshot();
@@ -181,6 +229,7 @@
   }
 
   function onContributeToggle(): void {
+    if (refused(contributeAnswerNow())) return;
     dispatch({ SetContributeBaseline: { contribute: !(snap?.contribute_baseline ?? false) } });
   }
 
@@ -220,7 +269,8 @@
         data-testid={IDS.MAIL_SPAM_CONTRIBUTE_BASELINE_TOGGLE}
         data-state={snap?.contribute_baseline ? 'on' : 'off'}
         checked={snap?.contribute_baseline ?? false}
-        disabled={busy}
+        disabled={busy || contributePaint.disabled}
+        title={contributePaint.reason ? resolveLocalized(contributePaint.reason) : undefined}
         onchange={onContributeToggle}
       />
     </label>
@@ -239,9 +289,15 @@
       class="threshold-input"
       data-testid={IDS.MAIL_SPAM_THRESHOLD_OVERRIDE_INPUT}
       bind:value={thresholdInput}
+      disabled={thresholdPaint.disabled}
       onkeydown={(e) => { if (e.key === 'Enter') commitThresholdOverride(); }}
     />
   </div>
+  <!-- The input keeps its prompt as its label, so its reason is a line of its
+       own while it waits for the override's read. -->
+  {#if thresholdPaint.reason}
+    <p class="muted small">{resolveLocalized(thresholdPaint.reason)}</p>
+  {/if}
 
   <!-- Training-history list (mail-spam-training-history-list component). -->
   <h3 class="muted small">{t.mail_spam.history_title}</h3>

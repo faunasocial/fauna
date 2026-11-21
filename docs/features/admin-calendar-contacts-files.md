@@ -51,6 +51,8 @@ Stamped 2026-10-01 at 308c995169.
     - `tests/e2e-unified/tests/test_admin_calendar.py::test_each_dav_switch_shows_the_nest_state`
 11. [nest] An explicit setting of the contacts or files switch, or switching one of the three off while mail is on, is what the nest then reports — `docs/goal/behavior/caldav-server.md` § Independent enablement
     - `tests/e2e-unified/tests/api/test_dav_enable_independence.py::test_an_explicit_dav_setting_is_what_the_nest_reports`
+12. [app] Until each page has read the nest's setting, its switch is disabled and says it is still loading, or failed to load, and is never shown as off on a guess; pressing it says the same and changes nothing — `docs/goal/behavior/admin.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_dav_switches_wait_for_the_nests_setting`
 
 ## Status
 
@@ -59,7 +61,7 @@ Stamped 2026-10-01 at 308c995169.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | linux | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
-| windows | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| windows | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
 | ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
@@ -86,4 +88,5 @@ Stamped 2026-10-01 at 308c995169.
 | 9 | app | `tests/e2e-unified/tests/test_caldav_admin_port_rebind.py::test_admin_caldav_port_change_rebinds_listener` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_admin_calendar.py::test_each_dav_switch_shows_the_nest_state` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/api/test_dav_enable_independence.py::test_an_explicit_dav_setting_is_what_the_nest_reports` | nest (linux): passed, nest (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_dav_switches_wait_for_the_nests_setting` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

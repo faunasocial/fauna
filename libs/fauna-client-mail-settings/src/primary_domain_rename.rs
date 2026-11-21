@@ -133,6 +133,39 @@ impl PrimaryDomainRenameView {
             can_abort: parsed.is_some() && !is_terminal,
         }
     }
+
+    fn offered(on: bool) -> fauna_core::possibility::Possibility {
+        if on {
+            fauna_core::possibility::Possibility::Possible
+        } else {
+            fauna_core::possibility::Possibility::Absent
+        }
+    }
+
+    /// The [`Possibility`](fauna_core::possibility::Possibility) sibling of
+    /// [`Self::can_complete`] / [`Self::can_force_complete`] for
+    /// `admin-dns-rename-complete-button` and its confirm
+    /// (`dns-management.md` § Errors & edge cases; `docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 6): a rename state that cannot be
+    /// completed now — pre-flip, terminal, or one this build cannot name —
+    /// offers no completion at all (absent), since no step on this page
+    /// makes it completable; the state moves on its own.
+    pub fn complete_possibility(&self) -> fauna_core::possibility::Possibility {
+        Self::offered(self.can_complete || self.can_force_complete)
+    }
+
+    /// The sibling of [`Self::can_extend`] for the grace extension's day
+    /// input and button — absent outside `grace` / `ready_to_complete`. The
+    /// draft's own validity is `domain_forms::extend_draft_possibility`.
+    pub fn extend_possibility(&self) -> fauna_core::possibility::Possibility {
+        Self::offered(self.can_extend)
+    }
+
+    /// The sibling of [`Self::can_abort`] for `admin-dns-rename-abort-button`
+    /// and its confirm — absent on a terminal or unclassifiable state.
+    pub fn abort_possibility(&self) -> fauna_core::possibility::Possibility {
+        Self::offered(self.can_abort)
+    }
 }
 
 /// Resolve a 16-byte `mail_domains.domain_id` to its display name, searching the
@@ -289,6 +322,38 @@ mod tests {
         );
         assert!(v.can_extend);
         assert!(v.can_abort);
+    }
+
+    /// The siblings answer the bools: offered → possible, else absent.
+    #[test]
+    fn rename_controls_answer_possible_or_absent() {
+        use fauna_core::possibility::Possibility;
+        let ready = PrimaryDomainRenameView::project(
+            &rename_row("ready_to_complete", &[1u8; 16], &[2u8; 16]),
+            &[],
+            &[],
+        );
+        assert_eq!(ready.complete_possibility(), Possibility::Possible);
+        assert_eq!(ready.extend_possibility(), Possibility::Possible);
+        assert_eq!(ready.abort_possibility(), Possibility::Possible);
+        let grace = PrimaryDomainRenameView::project(
+            &rename_row("grace", &[1u8; 16], &[2u8; 16]),
+            &[],
+            &[],
+        );
+        assert_eq!(
+            grace.complete_possibility(),
+            Possibility::Possible,
+            "grace completes with force"
+        );
+        let done = PrimaryDomainRenameView::project(
+            &rename_row("completed", &[1u8; 16], &[2u8; 16]),
+            &[],
+            &[],
+        );
+        assert_eq!(done.complete_possibility(), Possibility::Absent);
+        assert_eq!(done.extend_possibility(), Possibility::Absent);
+        assert_eq!(done.abort_possibility(), Possibility::Absent);
     }
 
     #[test]

@@ -31,6 +31,45 @@ thread_local! {
     /// list box's header function reads it to decide where a status section
     /// starts (`contacts.md` § Where logic lives → Roster status grouping).
     static CONTACT_STATUSES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// The ward's entry-gate paints still on screen — each Find User result's
+    /// knock and ask, each knock row's accept — so a status read that lands
+    /// after the paint repaints them from the new answer
+    /// ([`repaint_entry_gate`]). A closure returns `false` once its widget is
+    /// gone, and is dropped.
+    static ENTRY_GATE: RefCell<Vec<Box<dyn Fn() -> bool>>> = RefCell::new(Vec::new());
+}
+
+/// The caller's roster edge to `peer_actor_id` (`ContactItem::status`), `None`
+/// with none — the peer half of the shared knock predicate
+/// (`fauna_client_family::knock_possibility`). Case-insensitive: the Find User
+/// form's id is whatever was typed, the roster's is canonical (tui's
+/// `roster_status`).
+pub(super) fn roster_status(peer_actor_id: &str) -> Option<String> {
+    CONTACT_STATUSES.with(|statuses| {
+        statuses
+            .borrow()
+            .iter()
+            .find(|(id, _)| id.eq_ignore_ascii_case(peer_actor_id))
+            .map(|(_, status)| status.clone())
+    })
+}
+
+/// Paint once now and again on every [`repaint_entry_gate`] while `paint`
+/// says its widget is alive.
+pub(super) fn paint_entry_gate(paint: impl Fn() -> bool + 'static) {
+    if paint() {
+        ENTRY_GATE.with_borrow_mut(|all| all.push(Box::new(paint)));
+    }
+}
+
+/// Repaint the ward's entry gate (`contacts.md` § Errors & edge cases) from
+/// the answers the latest status read gives — called beside
+/// `crate::ward_asks::set_from_status`, so the knock and accept leave
+/// `common.loading` the moment the read lands, without a navigation.
+pub fn repaint_entry_gate() {
+    let all = ENTRY_GATE.with_borrow_mut(std::mem::take);
+    let alive: Vec<_> = all.into_iter().filter(|paint| paint()).collect();
+    ENTRY_GATE.with_borrow_mut(|all| all.extend(alive));
 }
 
 /// The roster's paint order: `contacts` grouped by relationship status in
@@ -91,7 +130,17 @@ pub fn update_knocks_list(
         (
             {
                 let (c, p) = (Rc::clone(client), pid.to_string());
-                move || c.accept_knock(&p)
+                // The accept asks the predicate its button paints from first,
+                // and a refusal is never silent (`ui/README.md` § Offer only
+                // what is possible, rules 6 and 7).
+                move || match crate::ward_asks::accept_possibility().reason() {
+                    None => c.accept_knock(&p),
+                    Some(reason) => c.tx().send(crate::app::UiMessage::Action(
+                        crate::app::ActionResult::FailedLocalized {
+                            message: reason.resolve(crate::i18n::strings::lookup),
+                        },
+                    )),
+                }
             },
             {
                 let (c, p) = (Rc::clone(client), pid.to_string());
@@ -191,6 +240,20 @@ fn build_wired_knock_row(
     let accept_btn = gtk::Button::with_label(common::ACCEPT);
     accept_btn.add_css_class("suggested-action");
     crate::testid::set_test_id(&accept_btn, ids::CONTACTS_ACCEPT_BUTTON);
+    // While the guardian decides knocks (or the status read is unresolved)
+    // the accept is blocked, its reason the row's `knock-guardian-pending`
+    // words — the shared `fauna_client_family::accept_possibility`
+    // (`contacts.md` § Errors & edge cases). Block and dismiss stay the ward's.
+    {
+        let weak = accept_btn.downgrade();
+        paint_entry_gate(move || {
+            let Some(btn) = weak.upgrade() else {
+                return false;
+            };
+            crate::possible::paint(&btn, None, crate::ward_asks::accept_possibility());
+            true
+        });
+    }
 
     let dismiss_btn = gtk::Button::with_label(common::DISMISS);
     crate::testid::set_test_id(&dismiss_btn, ids::KNOCK_DISMISS);

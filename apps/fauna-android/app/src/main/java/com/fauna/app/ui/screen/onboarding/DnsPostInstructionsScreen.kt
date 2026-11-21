@@ -22,6 +22,7 @@ import com.fauna.ffi.onboarding.WizardOutcome
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
 
 /**
  * Per docs/goal/behavior/onboarding.md §7: rendered DKIM + other manual records

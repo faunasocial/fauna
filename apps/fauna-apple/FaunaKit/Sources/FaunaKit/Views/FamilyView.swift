@@ -198,6 +198,7 @@ public struct FamilyView: View {
         // Tapping a row loads that ward into the shared editor — the same
         // `loadEditor` the in-process `automationActivate` fires, so a human tap
         // and the driver can't diverge.
+        .faunaActsOnClick()
         .onTapGesture { vm.loadEditor(wardId: ward.actorId) }
         // Container id + `.contain` so the row's `family-ward-handle` child stays
         // queryable alongside the row's own id (apple container-a11y rule).
@@ -330,9 +331,14 @@ public struct FamilyView: View {
                 ) {
                     Task { await vm.savePolicy() }
                 }
+                // The screen-time cells' shared answer
+                // (`fauna_client_family::forms`), outside the automation
+                // modifier so the registry reads it too.
+                .faunaPossible(vm.policySavePossibility)
                 // A policy the nest enforces is written online
                 // (`account-offline-mutation.md` § The offline-mutation contract).
                 .faunaGate("fauna.family.policy.update")
+                FaunaPossibilityReason(vm.policySavePossibility)
 
                 // ── Feature limits — the guardian host of the shared
                 // `feature-policy-editor` (family-safety.md § App surface →
@@ -587,6 +593,8 @@ public struct FamilyView: View {
             .automationActivate(Ids.familyContactAddButton) {
                 Task { await vm.addContact() }
             }
+            // The draft's shared answer; the reason rides the control.
+            .faunaPossible(vm.contactAddPossibility)
         }
     }
 
@@ -640,6 +648,7 @@ public struct FamilyView: View {
                 .automationActivate(Ids.familyTransferButton) {
                     Task { await vm.submitTransfer() }
                 }
+                .faunaPossible(vm.transferPossibility)
                 // The handle field beside it is buffer and stays live.
                 .faunaGate("fauna.family.transfer")
             }
@@ -817,8 +826,9 @@ public struct FamilyView: View {
 /// supervised sees no indicator (the `family-tab` gate is the broader
 /// guardian-OR-supervised one).
 ///
-/// Both shells mount it in the app-root `.safeAreaInset(edge: .top)`, beside
-/// `ConnectionStatusBar` — **outside** the sidebar/tab container on purpose: the
+/// Both shells mount it at the app root — iOS in its `.safeAreaInset(edge: .top)`
+/// beside `ConnectionStatusBar`, macOS in the banner strip laid out above the
+/// split view — **outside** the sidebar/tab container on purpose: the
 /// macOS sidebar is swapped out in place by the Settings and Admin shells, so a
 /// sidebar-hosted indicator would vanish on exactly the pages a supervised user
 /// is most likely to go looking at. (Linux placed it in the header bar for the
@@ -932,14 +942,26 @@ public final class FamilyStatusStore {
     /// `FamilyState::own_policy` at its knock loop; android's
     /// `WardAsks.knocksAwaitGuardian` is the twin.
     public private(set) var knocksAwaitGuardian = false
+    /// Whether this run's `fauna.family.status` read has succeeded — the shared
+    /// knock and accept predicates answer "loading" until it has
+    /// (`contacts.md` § Errors & edge cases, the ward's entry gate). Stays true
+    /// through a failed re-read (the last policy stands); cleared on teardown.
+    public private(set) var statusRead = false
+    /// The last successful read's own policy — the input the shared knock and
+    /// accept predicates take beside ``statusRead``.
+    public private(set) var ownPolicy: FfiReachPolicy?
 
-    /// The Fauna Kids eligibility verdict (`account-age-band.md` § The account age
-    /// band, the kids-app bullet, item (3)): the shared `kidsAppEligible` over the
-    /// last SUCCESSFUL live status read, never a Swift re-derivation. `nil` until a
-    /// read has landed (and after a teardown) — a failed re-read keeps the last
-    /// verdict, so a connection blip never refuses a supervised child; the nest
-    /// enforces supervision either way. Mirrors android's `KidsEligibilityVM`.
-    public private(set) var kidsEligible: Bool?
+    /// The Fauna Kids eligibility answer (`account-age-band.md` § The account age
+    /// band → *Kids-app eligibility while it is unknown*): the shared three-way
+    /// `kidsAppEligibility` over this run's latest SUCCESSFUL status read and the
+    /// persisted supervision snapshot, never a Swift re-derivation. Seeded from the
+    /// snapshot by ``seed(from:)`` (a supervised child opening the app offline gets
+    /// the shell); `.unknown` until then and after a teardown. A failed read never
+    /// changes an answer already given. Mirrors android's `KidsEligibilityVM`.
+    public private(set) var kidsEligibility: FfiKidsAppEligibility = .unknown
+    /// Whether a read failed while ``kidsEligibility`` was `.unknown` — the kids
+    /// gate's `error-message`; the read that succeeds (or a re-seed) clears it.
+    public private(set) var kidsReadFailedWhileUnknown = false
 
     public var supervisedByHandle: String? { liveSupervisedByHandle ?? restoredGuardianHandle }
     public var hasRelationship: Bool { liveHasWardOrGuardianRelationship || restoredGuardianHandle != nil }
@@ -1015,6 +1037,8 @@ public final class FamilyStatusStore {
     @MainActor
     func seed(from snapshot: FfiSupervisionSnapshot?) {
         restoredGuardianHandle = snapshot?.supervisedBy.handle
+        kidsEligibility = kidsAppEligibility(latestRead: nil, snapshot: snapshot)
+        kidsReadFailedWhileUnknown = false
     }
 
     @MainActor
@@ -1026,9 +1050,14 @@ public final class FamilyStatusStore {
         do {
             let status = try await api.familyStatus()
             liveSupervisedByHandle = status.supervisedBy?.handle
-            kidsEligible = kidsAppEligible(status: status)
-            liveHasWardOrGuardianRelationship = status.supervisedBy != nil || !status.wards.isEmpty
-                || !status.incomingTransfers.isEmpty
+            kidsEligibility = kidsAppEligibility(latestRead: status, snapshot: api.supervisionSnapshot())
+            kidsReadFailedWhileUnknown = false
+            // The one shared rule (`fauna_client_family::forms::has_family_surface`),
+            // never a Swift re-derivation.
+            liveHasWardOrGuardianRelationship = familyHasSurface(
+                supervised: status.supervisedBy != nil,
+                wards: UInt32(clamping: status.wards.count),
+                incomingTransfers: UInt32(clamping: status.incomingTransfers.count))
             // The live reply supersedes any restored fallback — the choke
             // point has already re-persisted the snapshot from it.
             restoredGuardianHandle = nil
@@ -1039,6 +1068,8 @@ public final class FamilyStatusStore {
             contactRequests = supervised ? status.contactRequests : []
             feedRequests = supervised ? status.feedRequests : []
             knocksAwaitGuardian = supervised && wardKnocksAwaitGuardian(ownPolicy: status.policy)
+            ownPolicy = status.policy
+            statusRead = true
         } catch {
             // Fail closed on the guardian/wards/transfer half only; the
             // supervised half (`supervisedByHandle`) keeps whatever live or
@@ -1047,17 +1078,23 @@ public final class FamilyStatusStore {
             // dropping it would repaint a live "asked — waiting" as an offer to ask
             // again.
             liveHasWardOrGuardianRelationship = false
+            // Clause (d): no information — an answer already given stands; while
+            // unknown the page says the read failed.
+            if kidsEligibility == .unknown { kidsReadFailedWhileUnknown = true }
         }
     }
 
     @MainActor
     private func clear() {
         liveSupervisedByHandle = nil
-        kidsEligible = nil
+        kidsEligibility = .unknown
+        kidsReadFailedWhileUnknown = false
         liveHasWardOrGuardianRelationship = false
         restoredGuardianHandle = nil
         contactRequests = []
         feedRequests = []
         knocksAwaitGuardian = false
+        statusRead = false
+        ownPolicy = nil
     }
 }

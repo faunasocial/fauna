@@ -478,7 +478,7 @@ snapshot-specific. The five-to-six per-app re-implementations (each a "twin of
   agreed everywhere).
 - `step_label(ProvisionStep) -> LocalizedText` — the step name's i18n key. The
   **canonical key family is `onboarding.provision.step.*`** (the cohesive home
-  alongside `substep.*` / `step_failed` / `step_attempt_template`); the
+  alongside `substep.*` / `step_failed`); the
   identical-valued `onboarding.nest_provisioning.step.*` entries were a stray
   duplicate, **removed 2026-06-14** once android (the last remaining consumer)
   swapped onto `provisioning_step_label`.
@@ -487,9 +487,8 @@ snapshot-specific. The five-to-six per-app re-implementations (each a "twin of
   the step's `last_error` (`status_retrying` = "Retrying after error: {cause}") so
   every app substitutes it; previously only web did — linux/apple/windows
   showed the user a literal `{cause}`. (The Skipped-row "already configured"
-  placeholder and the `step_attempt_template` suffix stay client-side text
-  assembly — they concatenate two i18n strings, which one `LocalizedText` can't
-  represent.)
+  placeholder stays client-side text assembly. No attempt count is shown —
+  `onboarding-provisioning.md` § 6.)
 
 Exposed at both boundaries as UniFFI `provisioning_status_glyph` /
 `provisioning_step_label` / `provisioning_substep_label`
@@ -1129,7 +1128,10 @@ feedback and no revert, is not. The negative clamp is **not** part of this
 latitude: a negative is parseable, so it is a real edit and clamps to `0` under
 both shapes. The remaining six apps adopting tui's error surfacing is a UI
 question for `admin.md` § 3, not a validation one, and is not tracked as an open
-leg here.
+leg here. **Superseded for the save itself (2026-11-17):** a malformed cap now blocks
+the save before the press, from `fauna_client_admin::tier_caps_possibility`
+(`admin.md` § Errors & edge cases → *A form's submit is live only for a draft the
+nest would accept*); this section still owns only the parse.
 
 **The nest refuses a negative cap too, and the app clamp is not what makes that
 unnecessary (2026-08-17).** `fauna.admin.tiers.{create,update}` answer
@@ -1162,7 +1164,15 @@ fractional, or out-of-range input. Like [`parse_port`] / [`parse_cap`] these are
 `parse_count(text).unwrap_or(prev)` on the **full-PUT** mail-policy save (the page
 starts from the persisted snapshot and overwrites each field), so an
 empty/unparseable edit keeps the persisted value and **never silently zeroes a
-knob**.
+knob**. **That consume shape is retired (2026-11-17):** keeping the stored value
+drops the admin's edit under a reported success, the silent failure
+[`../ui/README.md`](../ui/README.md) § Offer only what is possible, rule 7 names. A
+save now consumes `None` as a refusal through
+`fauna_client_mail_settings::admin_policy::parse_knob` / `parse_knob_u64` /
+`parse_knob_u64_lines`, and the group's save is blocked while any of its drafts
+does not parse (`admin.md` § Errors & edge cases → *A form's submit is live only
+for a draft the nest would accept*, which owns the rule and its implementation
+status — built on tui; the other apps still fall back until their lift).
 
 `parse_count_u64` exists for the single mail knob whose range can exceed `u32` —
 the IMAP per-mailbox storage ceiling (`admin-mail-imap-storage-bytes-input` →

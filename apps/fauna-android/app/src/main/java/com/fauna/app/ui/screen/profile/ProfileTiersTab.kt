@@ -19,7 +19,10 @@ import com.fauna.app.payments.ClaimItem
 import com.fauna.app.payments.ProviderItem
 import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.formRefusal
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.ProfileTiersVM
@@ -27,7 +30,16 @@ import com.fauna.ffi.FfiPendingRequest
 import com.fauna.ffi.FfiSubscriberEntry
 import com.fauna.ffi.FfiTierItem
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
+import com.fauna.app.ui.util.isPossible
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The profile Tiers-tab **SELF** author-management sections (subscriptions Slice
@@ -72,6 +84,7 @@ fun ProfileTiersSection(
     val providers by vm.providers.collectAsState()
     val claims by vm.claims.collectAsState()
     val selectedTier by vm.selectedTier.collectAsState()
+    val tiersRead by vm.tiersRead.collectAsState()
     val siteOrigin by vm.siteOrigin.collectAsState()
     val approving by vm.approving.collectAsState()
     val working by vm.working.collectAsState()
@@ -92,6 +105,7 @@ fun ProfileTiersSection(
         providerKinds = vm.knownProviderKinds(),
         claims = claims,
         selectedTier = selectedTier,
+        tiersRead = tiersRead,
         approving = approving,
         working = working,
         onCreate = vm::createTier,
@@ -108,6 +122,7 @@ fun ProfileTiersSection(
         onFormOpened = vm::ensureSiteOrigin,
         onMintClaim = vm::mintClaim,
         onVoidClaim = vm::voidClaim,
+        onFormRefused = { vm.errorMessage.value = it },
     )
 }
 
@@ -172,6 +187,22 @@ fun ProfileTiersContent(
     // that the shared parser now covers it — the filter is what keeps the two
     // equivalent, and removing it would make this a real behaviour change.
     parseRank: (String) -> UInt? = { com.fauna.ffi.parseCount(it) },
+    // `subscription-tier-form-save`'s draft validity — the shared
+    // `tier_form_possibility` (profile.md § Errors & edge cases; README § Offer
+    // only what is possible, rule 4), injected like the parsers above.
+    tierFormPossibility: (String) -> Possibility =
+        { com.fauna.ffi.subscriptionTierFormPossibility(it) },
+    // A refused tier-form save's reason, for the page's `error-message`.
+    onFormRefused: (String) -> Unit = {},
+    // Where the §1 tier read stands (the VM's `tiersRead`): the two controls that
+    // need a tier are painted from the shared own-tier answer over it and the
+    // tier count (`profile.md` § Errors & edge cases, *A tier before what sells
+    // it*), injected like the predicates above.
+    tiersRead: ReadState = ReadState.PENDING,
+    claimMintPossibility: (ReadState, UInt) -> Possibility =
+        { read, count -> com.fauna.ffi.subscriptionClaimMintPossibility(read, count) },
+    providerAddPossibility: (ReadState, UInt) -> Possibility =
+        { read, count -> com.fauna.ffi.subscriptionProviderAddPossibility(read, count) },
 ) {
     var form by remember { mutableStateOf<FormMode>(FormMode.Closed) }
     var providerFormOpen by remember { mutableStateOf(false) }
@@ -206,6 +237,8 @@ fun ProfileTiersContent(
                     },
                     onCancel = { form = FormMode.Closed },
                     parseRank = parseRank,
+                    possibility = tierFormPossibility,
+                    onRefuse = onFormRefused,
                 )
                 is FormMode.Edit -> TierForm(
                     editing = mode.tier,
@@ -215,6 +248,8 @@ fun ProfileTiersContent(
                     },
                     onCancel = { form = FormMode.Closed },
                     parseRank = parseRank,
+                    possibility = tierFormPossibility,
+                    onRefuse = onFormRefused,
                 )
                 FormMode.Closed -> {}
             }
@@ -325,6 +360,12 @@ fun ProfileTiersContent(
         // `subscription-claim-*` id as a string literal (dead is not absent;
         // § What "completely compiled away" means, criterion 1).
         if (BuildConfig.PAYMENTS) {
+            val context = LocalContext.current
+            // `subscription-provider-add-button`'s answer: a provider sells one of
+            // the author's tiers, so with none (or the read unanswered) the form
+            // never opens — the gate is at the entry.
+            val providerAdd = askForm { providerAddPossibility(tiersRead, tiers.size.toUInt()) }
+            val providerAddGate = faunaFormGate(providerAdd)
             // ── §4 Payment providers (monetization.md § Pillar 3) ─────────
             Column(
                 modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_PROVIDER_SECTION),
@@ -335,12 +376,25 @@ fun ProfileTiersContent(
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Button(
-                    onClick = { providerFormOpen = true; onFormOpened() },
-                    enabled = !working,
+                    onClick = {
+                        // The press asks the answer it was painted from (rule 6).
+                        val refusal = formRefusal(
+                            context,
+                            askForm { providerAddPossibility(tiersRead, tiers.size.toUInt()) },
+                        )
+                        if (refusal != null) {
+                            refusal.reason?.let(onFormRefused)
+                        } else {
+                            providerFormOpen = true
+                            onFormOpened()
+                        }
+                    },
+                    enabled = providerAddGate.enabled && !working,
                     modifier = Modifier.testTag(Ids.SUBSCRIPTION_PROVIDER_ADD_BUTTON),
                 ) { Text(stringResource(R.string.subscriptions_add_provider)) }
+                DisabledControlReasonText(providerAddGate.reason)
 
-                if (providerFormOpen) {
+                if (providerFormOpen && providerAdd.isPossible) {
                     ProviderForm(
                         kinds = providerKinds,
                         tierNames = tiers.map { it.name },
@@ -381,6 +435,8 @@ fun ProfileTiersContent(
                 onMint = onMintClaim,
                 onVoid = onVoidClaim,
                 claimStatusLabel = claimStatusLabel,
+                mintPossibility = { claimMintPossibility(tiersRead, tiers.size.toUInt()) },
+                onRefuse = onFormRefused,
             )
         }
     }
@@ -807,7 +863,10 @@ private fun LabeledSelect(
  * serves create + edit; on edit the tier name is the server key (read-only,
  * mirrors linux). [onSubmit] hands back `(rank, description, priceHint,
  * paymentUrl, autoApprove, name, askingPriceSats)` — name is meaningful only
- * on create.
+ * on create. Save is painted from the shared `tier_form_possibility`
+ * ([possibility]): a blank name disables it with the reason beside it, and a
+ * press asks the same predicate first and refuses with that reason through
+ * [onRefuse] (the page's `error-message`) — never sent to the nest.
  */
 @Composable
 private fun TierForm(
@@ -816,7 +875,10 @@ private fun TierForm(
     onSubmit: (UInt, String?, String?, String?, Boolean, String, ULong?) -> Unit,
     onCancel: () -> Unit,
     parseRank: (String) -> UInt?,
+    possibility: (String) -> Possibility,
+    onRefuse: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     var name by remember(editing) { mutableStateOf(editing?.name ?: "") }
     var rank by remember(editing) { mutableStateOf(editing?.rank?.toString() ?: "") }
     var description by remember(editing) { mutableStateOf(editing?.description ?: "") }
@@ -898,9 +960,14 @@ private fun TierForm(
                     modifier = Modifier.testTag(Ids.SUBSCRIPTION_TIER_FORM_AUTO_APPROVE),
                 )
             }
+            val saveSubmit = faunaFormGate(askForm { possibility(name) })
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
+                        formRefusal(context, askForm { possibility(name) })?.let { refusal ->
+                            refusal.reason?.let(onRefuse)
+                            return@Button
+                        }
                         onSubmit(
                             parseRank(rank) ?: 0u,
                             description.ifBlank { null },
@@ -916,7 +983,7 @@ private fun TierForm(
                             askingPrice.trim().toULongOrNull(),
                         )
                     },
-                    enabled = !working && name.isNotBlank(),
+                    enabled = !working && saveSubmit.enabled,
                     modifier = Modifier.testTag(Ids.SUBSCRIPTION_TIER_FORM_SAVE),
                 ) { Text(stringResource(R.string.subscriptions_save)) }
                 OutlinedButton(
@@ -924,6 +991,7 @@ private fun TierForm(
                     modifier = Modifier.testTag(Ids.SUBSCRIPTION_TIER_FORM_CANCEL),
                 ) { Text(stringResource(R.string.subscriptions_cancel)) }
             }
+            DisabledControlReasonText(saveSubmit.reason)
         }
     }
 }
@@ -945,7 +1013,11 @@ private fun ClaimSection(
     onMint: (String) -> Unit,
     onVoid: (String) -> Unit,
     claimStatusLabel: (Boolean, Boolean) -> LocalizedText,
+    // The shared own-tier answer (use `ClaimCode`) over the tab's tier read.
+    mintPossibility: () -> Possibility,
+    onRefuse: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     var tier by remember(tierNames) { mutableStateOf(tierNames.firstOrNull().orEmpty()) }
     // The claim CODE whose Void is armed (first press) — keyed by code, not row
     // index, and cleared by every landed re-read (a new `claims` list).
@@ -973,12 +1045,22 @@ private fun ClaimSection(
         // The commit gates, not the buffer: the tier select above stays live so
         // a tier can be picked with no nest — only the mint issues
         // `fauna.payments.claims.mint`.
-        val mintGate = faunaGate(
-            "fauna.payments.claims.mint",
-            enabled = !working && tier.isNotEmpty(),
+        // Painted from the shared answer — no tier, a tier read still pending, or
+        // one that failed each say so (`profile.md` § Errors & edge cases).
+        val mint = askForm(mintPossibility)
+        val mintGate = faunaFormGate(
+            mint,
+            faunaGate(
+                "fauna.payments.claims.mint",
+                enabled = mint.isPossible && !working && tier.isNotEmpty(),
+            ),
         )
         Button(
-            onClick = { onMint(tier) },
+            onClick = {
+                // The press asks the same answer and refuses with its reason.
+                val refusal = formRefusal(context, askForm(mintPossibility))
+                if (refusal != null) refusal.reason?.let(onRefuse) else onMint(tier)
+            },
             enabled = mintGate.enabled,
             modifier = Modifier.testTag(Ids.SUBSCRIPTION_CLAIM_MINT_BUTTON),
         ) { Text(stringResource(R.string.subscriptions_mint_claim)) }

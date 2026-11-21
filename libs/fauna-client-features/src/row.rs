@@ -23,6 +23,7 @@ use fauna_core::feature_gate::{
     Availability, GatedFeature, MagnitudeUnit, QuotaDimension, RuleTier, Window,
 };
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_protocol::features::FeatureStatusItem;
 
 use crate::view_model::{Affordance, FeatureLimits, LimitCell, affordance, feature_limits};
@@ -306,27 +307,51 @@ fn row_from(limits: &FeatureLimits, decision: Affordance) -> FeatureRow {
     }
 }
 
-/// Why `feature`'s own UI affordance (a button, an add-action) is disabled,
-/// or `None` when it isn't — `available` and "no such row yet" (rows not
-/// hydrated, or the key absent) both read as nothing to show. The decision
-/// is READ off the row's own `affordance`, never re-derived: `hidden` still
-/// disables here exactly like `disabled` does (the *removal* story is the
-/// orthogonal compile-time cargo feature, not this render-time courtesy).
-pub fn gate_reason<F, S>(rows: &[FeatureRow], feature: &str, lookup: F) -> Option<String>
+/// Whether `feature`'s own UI affordance can succeed now — the
+/// [`Possibility`] an app paints the button from and its action asks again
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rules 2, 5 and 6).
+///
+/// * `rows` is `None` until the courtesy read has answered: **blocked**,
+///   still loading (rule 5). An app never offers the button on a guess.
+/// * A loaded read that holds no row for `feature`, or whose row's affordance
+///   is `hidden`, means the nest does not have the feature for this person:
+///   **absent** (rule 2 — a disabled control nobody can ever enable is a
+///   choice that is not possible).
+/// * `disabled` is **blocked**, with the row's own restriction (or its status
+///   word). The restriction's `{window}` substitution is itself a key, so it
+///   is resolved through `lookup` here and the answer carries the finished
+///   words: a plain [`LocalizedText::resolve`] then reads the same sentence
+///   [`LocalizedText::resolve_nested`] would.
+/// * `available` is **possible**.
+pub fn gate_possibility<F, S>(rows: Option<&[FeatureRow]>, feature: &str, lookup: F) -> Possibility
 where
     F: Fn(&str) -> Option<S> + Copy,
     S: AsRef<str>,
 {
-    let row = rows.iter().find(|r| r.feature == feature)?;
-    if row.affordance == "available" {
-        return None;
+    let Some(rows) = rows else {
+        return Possibility::from_read(ReadState::Pending);
+    };
+    let Some(row) = rows.iter().find(|r| r.feature == feature) else {
+        return Possibility::Absent;
+    };
+    match row.affordance.as_str() {
+        "available" => Possibility::Possible,
+        "hidden" => Possibility::Absent,
+        _ => {
+            let text = row.restriction.as_ref().unwrap_or(&row.status);
+            let args = text
+                .args
+                .iter()
+                .map(|(name, value)| {
+                    let word = lookup(value)
+                        .map(|s| s.as_ref().to_string())
+                        .unwrap_or_else(|| value.clone());
+                    (name.clone(), word)
+                })
+                .collect::<Vec<_>>();
+            Possibility::blocked(LocalizedText::key_args(text.key.clone(), args))
+        }
     }
-    Some(
-        row.restriction
-            .as_ref()
-            .map(|r| r.resolve_nested(lookup))
-            .unwrap_or_else(|| row.status.resolve(lookup)),
-    )
 }
 
 /// Every registry member's stable key, in registry order — for a surface that
@@ -423,23 +448,43 @@ mod tests {
         );
     }
 
+    fn no_lookup(_: &str) -> Option<&'static str> {
+        None
+    }
+
     #[test]
-    fn gate_reason_is_none_when_the_row_is_available() {
-        let rows = vec![feature_row(&item(GatedFeature::P2pShare), &p2p())];
+    fn gate_possibility_is_blocked_loading_before_the_read() {
         assert_eq!(
-            gate_reason(&rows, "p2p-share", |_: &str| None::<&str>),
-            None
+            gate_possibility(None, "p2p-share", no_lookup),
+            Possibility::blocked(LocalizedText::key("common.still_loading"))
         );
     }
 
     #[test]
-    fn gate_reason_is_none_for_a_feature_key_absent_from_the_rows() {
+    fn gate_possibility_is_possible_when_the_row_is_available() {
         let rows = vec![feature_row(&item(GatedFeature::P2pShare), &p2p())];
-        assert_eq!(gate_reason(&rows, "payments", |_: &str| None::<&str>), None);
+        assert_eq!(
+            gate_possibility(Some(&rows), "p2p-share", no_lookup),
+            Possibility::Possible
+        );
     }
 
     #[test]
-    fn gate_reason_resolves_the_restriction_when_disabled() {
+    fn gate_possibility_is_absent_for_a_hidden_row_or_a_missing_one() {
+        let rows = vec![feature_row(&item(GatedFeature::P2pShare), &[])];
+        assert_eq!(rows[0].affordance, "hidden");
+        assert_eq!(
+            gate_possibility(Some(&rows), "p2p-share", no_lookup),
+            Possibility::Absent
+        );
+        assert_eq!(
+            gate_possibility(Some(&rows), "payments", no_lookup),
+            Possibility::Absent
+        );
+    }
+
+    #[test]
+    fn gate_possibility_carries_the_restriction_with_its_nested_words_resolved() {
         let denied = FeaturePolicy {
             availability: Availability::Deny,
             ..Default::default()
@@ -452,9 +497,18 @@ mod tests {
             extra: Default::default(),
         };
         let rows = vec![feature_row(&it, &p2p())];
+        let answer = gate_possibility(Some(&rows), "p2p-share", fauna_i18n::strings::lookup);
+        let reason = answer.reason().expect("a disabled row is blocked");
+        assert_eq!(reason.key, "features.denied_by_admin");
+        // The plain resolve an app's seam uses reads the same sentence the
+        // nested resolve of the row's own restriction gives.
         assert_eq!(
-            gate_reason(&rows, "p2p-share", |_: &str| None::<&str>).as_deref(),
-            Some("features.denied_by_admin")
+            reason.resolve(fauna_i18n::strings::lookup),
+            rows[0]
+                .restriction
+                .as_ref()
+                .unwrap()
+                .resolve_nested(fauna_i18n::strings::lookup)
         );
     }
 

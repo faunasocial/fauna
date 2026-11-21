@@ -118,15 +118,77 @@ def test_the_licence_page_names_only_files_the_msi_installs_on_every_feature():
     assert group.get("Directory") == "INSTALLFOLDER"
     installed = {f.get("Name") for f in group.iter(f"{_WIX}File")}
     assert named <= installed, f"the licence page names {sorted(named - installed)}, not installed"
-    package = ET.parse(_INSTALLER / "Package.wxs").getroot()
-    for feature in package.iter(f"{_WIX}Feature"):
-        if feature in {c for f in package.iter(f"{_WIX}Feature") for c in f.findall(f"{_WIX}Feature")}:
-            continue
-        refs = {r.get("Id") for r in feature.findall(f"{_WIX}ComponentGroupRef")}
-        assert "NoticesComponents" in refs, f"feature {feature.get('Id')} installs no licence files"
+    # Both packages show the one licence page: the full-feature MSI and the nest MSI.
+    for wxs in (_INSTALLER / "Package.wxs", _INSTALLER / "nest" / "Package.wxs"):
+        package = ET.parse(wxs).getroot()
+        nested = {c for f in package.iter(f"{_WIX}Feature") for c in f.findall(f"{_WIX}Feature")}
+        for feature in package.iter(f"{_WIX}Feature"):
+            if feature in nested:
+                continue
+            refs = {r.get("Id") for r in feature.findall(f"{_WIX}ComponentGroupRef")}
+            assert "NoticesComponents" in refs, (
+                f"{wxs.relative_to(_INSTALLER)} feature {feature.get('Id')} installs no licence files")
 
 
 def test_the_welcome_override_is_the_one_the_wizard_reads():
     wxl = _INSTALLER / "Strings.wxl"
     ids = {el.get("Id") for el in ET.parse(wxl).getroot().iter(f"{_WXL}String")}
     assert "WelcomeDlgDescription" in ids
+
+
+def test_the_shared_wizard_texts_name_the_product_through_productname():
+    """The welcome string and the uninstall dialog are shared by the full-feature MSI
+    (`Fauna`) and the nest MSI (`Fauna Nest`), so each names the package being
+    installed or removed through `[ProductName]`, never a literal product name
+    (the inventory's `windows-installer-descriptions` entry)."""
+    welcome = next(
+        el.get("Value") for el in ET.parse(_INSTALLER / "Strings.wxl").getroot().iter(f"{_WXL}String")
+        if el.get("Id") == "WelcomeDlgDescription")
+    assert welcome.startswith("The Setup Wizard will install [ProductName] on your computer."), welcome
+    dialog = next(
+        d for d in ET.parse(_INSTALLER / "UI.wxs").getroot().iter(f"{_WIX}Dialog")
+        if d.get("Id") == "RemoveDataDlg")
+    texts = {c.get("Id"): c.get("Text", "") for c in dialog.iter(f"{_WIX}Control")}
+    assert texts["Title"].endswith("Remove [ProductName]"), texts["Title"]
+    assert texts["Description"].startswith("[ProductName] will be uninstalled."), texts["Description"]
+    names = {ET.parse(p).getroot().find(f"{_WIX}Package").get("Name")
+             for p in (_INSTALLER / "Package.wxs", _INSTALLER / "nest" / "Package.wxs")}
+    assert names == {"Fauna", "Fauna Nest"}, names
+
+
+#: The one condition every route into the uninstall dialog carries: the Remove path,
+#: and a data folder recorded at install (`FAUNA_PROGRAMDATA_DIR`, read back from the
+#: `DataDir` value the `DataCleanup` group writes). A bare property is true in an MSI
+#: condition exactly when it is not empty.
+_REMOVE_DATA_ROUTE = 'WixUI_InstallMode = "Remove" AND FAUNA_PROGRAMDATA_DIR'
+
+
+def test_the_uninstall_dialog_offers_its_delete_only_where_a_data_folder_is_recorded():
+    """`RemoveDataDlg` offers "Also permanently delete this data", which sets
+    `REMOVE_USER_DATA` for `DataCleanup`'s `RemoveFolderEx`. That group rides only the
+    features that make machine data (the nest MSI's Nest; the full-feature MSI's Sync
+    and Nest), so a Terminal-App-only install records no data folder and the box would
+    delete nothing: the dialog is reached only when `FAUNA_PROGRAMDATA_DIR` is set, and
+    otherwise the Remove path goes straight to WiX's own confirm page. An install that
+    recorded the folder routes through the dialog as before
+    (docs/goal/architecture/installers/windows.md § Uninstall → Full Removal)."""
+    routes = []
+    for wxs in sorted(_INSTALLER.glob("*.wxs")) + sorted((_INSTALLER / "nest").glob("*.wxs")):
+        for el in ET.parse(wxs).getroot().iter(f"{_WIX}Publish"):
+            if el.get("Value") == "RemoveDataDlg" and el.get("Event") in ("NewDialog", "SpawnDialog"):
+                routes.append((wxs.name, el.get("Dialog"), el.get("Control"),
+                               " ".join((el.get("Condition") or "").split())))
+    assert {(d, c) for _, d, c, _ in routes} == {("MaintenanceTypeDlg", "RemoveButton"),
+                                                 ("VerifyReadyDlg", "Back")}, routes
+    for where, dialog, control, condition in routes:
+        assert condition == _REMOVE_DATA_ROUTE, (
+            f"{where}: {dialog}/{control} opens RemoveDataDlg on {condition!r}; "
+            f"expected {_REMOVE_DATA_ROUTE!r}")
+    # The property the routes test is the one the removal itself reads back.
+    ui = ET.parse(_INSTALLER / "UI.wxs").getroot()
+    prop = next(p for p in ui.iter(f"{_WIX}Property") if p.get("Id") == "FAUNA_PROGRAMDATA_DIR")
+    search = prop.find(f"{_WIX}RegistrySearch")
+    assert (search.get("Root"), search.get("Key"), search.get("Name")) == (
+        "HKLM", "SOFTWARE\\Fauna\\Install", "DataDir"), search.attrib
+    removal = next(r for r in ui.iter("{http://wixtoolset.org/schemas/v4/wxs/util}RemoveFolderEx"))
+    assert removal.get("Property") == "FAUNA_PROGRAMDATA_DIR", removal.attrib

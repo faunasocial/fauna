@@ -474,6 +474,114 @@ async fn delete_breaches_hard_floor() {
     assert_eq!(err.code, "fauna.filesync.snapshot.hard_floor_breach");
 }
 
+/// A repeat delete of a pending row folds to the first pending action
+/// (backup-restore.md § 7) — also on a folder at the floor, where the
+/// state check must precede the floor check.
+#[tokio::test]
+async fn delete_twice_folds_to_the_first_pending_action() {
+    let (router, state) = router_and_state().await;
+    let fs = state.db.create_folder("docs", &ACTOR_A).await.unwrap();
+    let mut ids = Vec::new();
+    for ts in [100, 200, 300, 400] {
+        ids.push(state.db.insert_snapshot_at(fs, ts).await.unwrap());
+    }
+    let mut replies = Vec::new();
+    for _ in 0..2 {
+        replies.push(
+            decode::<SnapshotDeleteReply>(
+                &dispatch(
+                    &router,
+                    state.clone(),
+                    ACTOR_A,
+                    "fauna.filesync.snapshot.delete",
+                    encode(&SnapshotDeleteRequest {
+                        snapshot_id: ids[0],
+                        extra: Default::default(),
+                    }),
+                )
+                .await
+                .expect("delete (or its fold) ok"),
+            )
+            .unwrap(),
+        );
+    }
+    assert_eq!(replies[0].pending_action_id, replies[1].pending_action_id);
+    assert_eq!(replies[0].execute_after, replies[1].execute_after);
+    assert_eq!(replies[1].status, "pending");
+    let target = ids[0].to_string();
+    let rows = state
+        .db
+        .find_pending_actions_for_target("snapshot.delete", &target)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "exactly one SnapshotDelete action");
+}
+
+/// The § 7 Layer 1 floor counts a deletion-pending row as RELEASED (Layer 2:
+/// a pending row releases its active count): on a four-snapshot folder the
+/// first delete pends (three active remain), and a second delete of a
+/// different row is refused at the floor — two pendings never leave fewer
+/// than three active.
+#[tokio::test]
+async fn pending_rows_release_their_count_toward_the_hard_floor() {
+    let (router, state) = router_and_state().await;
+    let fs = state.db.create_folder("docs", &ACTOR_A).await.unwrap();
+    let mut ids = Vec::new();
+    for ts in [100, 200, 300, 400] {
+        ids.push(state.db.insert_snapshot_at(fs, ts).await.unwrap());
+    }
+    let delete = |id: i64| {
+        dispatch(
+            &router,
+            state.clone(),
+            ACTOR_A,
+            "fauna.filesync.snapshot.delete",
+            encode(&SnapshotDeleteRequest {
+                snapshot_id: id,
+                extra: Default::default(),
+            }),
+        )
+    };
+    delete(ids[0]).await.expect("first delete pends");
+    assert_eq!(state.db.count_active_snapshots(fs).await.unwrap(), 3);
+    let err = delete(ids[1])
+        .await
+        .expect_err("second pending breaches the floor");
+    assert_eq!(err.code, "fauna.filesync.snapshot.hard_floor_breach");
+    assert_eq!(state.db.count_active_snapshots(fs).await.unwrap(), 3);
+}
+
+/// A delete of a soft-deleted row is refused and re-pends nothing.
+#[tokio::test]
+async fn delete_of_a_soft_deleted_row_is_refused() {
+    let (router, state) = router_and_state().await;
+    let fs = state.db.create_folder("docs", &ACTOR_A).await.unwrap();
+    let mut ids = Vec::new();
+    for ts in [100, 200, 300, 400, 500] {
+        ids.push(state.db.insert_snapshot_at(fs, ts).await.unwrap());
+    }
+    state.db.soft_delete_snapshot(ids[0]).await.unwrap();
+    let err = dispatch(
+        &router,
+        state.clone(),
+        ACTOR_A,
+        "fauna.filesync.snapshot.delete",
+        encode(&SnapshotDeleteRequest {
+            snapshot_id: ids[0],
+            extra: Default::default(),
+        }),
+    )
+    .await
+    .expect_err("already soft-deleted");
+    assert_eq!(err.code, "fauna.filesync.snapshot.already_deleted");
+    let rows = state
+        .db
+        .find_pending_actions_for_target("snapshot.delete", &ids[0].to_string())
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "nothing scheduled");
+}
+
 #[tokio::test]
 async fn undelete_rejects_non_soft_deleted() {
     let (router, state) = router_and_state().await;

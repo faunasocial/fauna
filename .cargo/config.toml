@@ -106,17 +106,33 @@ rustflags = ["-Zthreads=4"]
 # These resolve to NDK clang wrappers on PATH (api26, matching minSdk in
 # apps/fauna-android/app/build.gradle.kts). Wrappers come from the NDK at
 # $ANDROID_HOME/ndk/<version>/toolchains/llvm/prebuilt/<host>/bin.
+#
+# The NDK clang stays the DRIVER, but the LINK runs on the pinned toolchain's
+# own self-contained lld (the same three flags as the aarch64 Linux table
+# above), never the NDK's `ld.lld`. On an arm64 Linux dev VM the NDK's is an x86-64 binary run
+# under Rosetta, and under load it corrupts its own heap and aborts
+# (`realloc(): invalid pointer` / `invalid next size`): 1 abort in 120 replays
+# of the same armv7 `fauna-ffi` link at 6-way concurrency, against 0 in 120
+# for the native rust-lld, which also linked in half the time (owner:
+# build-system.md § UniFFI app bindings → *The Android link runs on the
+# toolchain's own lld*). Nothing is installed: rust-lld ships with the
+# rust-toolchain.toml pin. These flags move every Android unit's `-C metadata`
+# once, when edited; re-verify them at every pin bump, like the Linux table's.
 [target.aarch64-linux-android]
 linker = "aarch64-linux-android26-clang"
+rustflags = ["-Clink-self-contained=+linker", "-Clinker-features=+lld", "-Zunstable-options"]
 
 [target.armv7-linux-androideabi]
 linker = "armv7a-linux-androideabi26-clang"
+rustflags = ["-Clink-self-contained=+linker", "-Clinker-features=+lld", "-Zunstable-options"]
 
 [target.x86_64-linux-android]
 linker = "x86_64-linux-android26-clang"
+rustflags = ["-Clink-self-contained=+linker", "-Clinker-features=+lld", "-Zunstable-options"]
 
 [target.i686-linux-android]
 linker = "i686-linux-android26-clang"
+rustflags = ["-Clink-self-contained=+linker", "-Clinker-features=+lld", "-Zunstable-options"]
 
 # Statically link the MSVC C runtime into every Windows binary we ship (the 3
 # service exes, the fauna_shell.dll shell-ext cdylib, and fauna_ffi.dll).

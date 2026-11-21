@@ -29,11 +29,31 @@ import kotlinx.coroutines.delay
 import com.fauna.app.R
 import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.ActorOption
 import com.fauna.app.ui.viewmodel.AdminDnsVM
+import com.fauna.ffi.FfiPrimaryDomainRenameAction
+import com.fauna.ffi.dnsCertIssuePossibility
+import com.fauna.ffi.dnsDelegatePossibility
+import com.fauna.ffi.primaryDomainRenameActionPossibility
+import com.fauna.ffi.dnsCredentialDraftPossibility
+import com.fauna.ffi.dnsManageAllPossibility
+import com.fauna.ffi.dnsSetModePossibility
+import com.fauna.ffi.localDomainAddPossibility
+import com.fauna.ffi.localDomainExtendDraftPossibility
+import com.fauna.ffi.localDomainPromotePossibility
+import com.fauna.ffi.localDomainRemovePossibility
+import com.fauna.ffi.localDomainRenameDays
+import com.fauna.ffi.localDomainRenameDraftPossibility
+import com.fauna.ffi.localDomainRenamePossibility
 import social.fauna.generated.Capability
 import social.fauna.generated.FieldType
 import social.fauna.generated.PROVIDERS
@@ -46,12 +66,15 @@ import uniffi.fauna_client_dns.CredentialSummary
 import uniffi.fauna_client_dns.DelegationView
 import uniffi.fauna_client_dns.DnsCredentialField
 import uniffi.fauna_client_dns.DnsRecordRow
+import uniffi.fauna_client_dns.DnsSnapshot
 import uniffi.fauna_client_dns.DomainView
 import uniffi.fauna_client_dns.PendingCertIssue
 import uniffi.fauna_client_dns.RecordVerdict
 import uniffi.fauna_client_dns.VerifyStatus
 import uniffi.fauna_client_dns.recordRecheckSecs
 import uniffi.fauna_client_mail_settings.LocalDomainView
+import uniffi.fauna_client_mail_settings.LocalDomainsSnapshot
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_client_mail_settings.PrimaryDomainRenameView
 import uniffi.fauna_client_mail_settings.DomainDmarcPolicy
 import uniffi.fauna_client_mail_settings.RoleAddressKind
@@ -60,6 +83,15 @@ import uniffi.fauna_client_mail_settings.removeConfirmBody
 import uniffi.fauna_client_mail_settings.removeConfirmTitle
 import uniffi.fauna_client_mail_settings.roleAddressOptions
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.AssistChip
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.FilterChip
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The admin `admin-dns` page (dns-management.md § App surface,
@@ -98,6 +130,8 @@ fun AdminDnsScreen(
     val pendingCert by vm.pendingCert.collectAsState()
     val working by vm.working.collectAsState()
     val error by vm.error.collectAsState()
+    val dnsSnapshot by vm.dnsSnapshot.collectAsState()
+    val localDomainsSnapshot by vm.localDomainsSnapshot.collectAsState()
 
     // The open page's background re-check (`dns-management.md` § Manual + live
     // verification — the slow cadence): the effect lives exactly as long as the
@@ -128,6 +162,9 @@ fun AdminDnsScreen(
         pendingCert = pendingCert,
         working = working,
         error = error,
+        dnsSnapshot = dnsSnapshot,
+        localDomainsSnapshot = localDomainsSnapshot,
+        onRefuse = vm::refuse,
         onBack = { navController.exitAdminToPrimary() },
         onRefresh = vm::refresh,
         onAddDomain = vm::addDomain,
@@ -175,14 +212,23 @@ fun AdminDnsContent(
     working: Boolean,
     error: String?,
     certIssuanceErrors: List<CertIssuanceErrorRow> = emptyList(),
+    // The two whole snapshots the page's `Possibility` answers read
+    // (`dns-management.md` § Errors & edge cases): `null` until that read has
+    // resolved, which is never possible and never "No domains yet".
+    dnsSnapshot: DnsSnapshot? = null,
+    localDomainsSnapshot: LocalDomainsSnapshot? = null,
+    // A refused action's reason, for the page's `error-message`.
+    onRefuse: (String?) -> Unit = {},
     onBack: () -> Unit,
     onRefresh: () -> Unit,
-    onAddDomain: (String) -> Unit,
+    // Each form's save takes an `onSaved` the VM calls only once the save
+    // succeeded: the form closes there, and a failed save keeps what was typed.
+    onAddDomain: (String, () -> Unit) -> Unit,
     onArmRemoveDomain: (String) -> Unit,
     onConfirmRemoveDomain: () -> Unit = {},
     onCancelRemoveDomain: () -> Unit = {},
     onRestoreDomain: (String) -> Unit,
-    onStartRename: (ByteArray, Long?) -> Unit,
+    onStartRename: (ByteArray, Long?, () -> Unit) -> Unit,
     onCompleteRename: (ByteArray, Boolean) -> Unit,
     onExtendRename: (ByteArray, Long) -> Unit,
     onAbortRename: (ByteArray) -> Unit,
@@ -191,7 +237,7 @@ fun AdminDnsContent(
     onSetDmarcPolicy: (String, DomainDmarcPolicy) -> Unit,
     onSetMode: (String, Boolean) -> Unit,
     onSetManageAll: (Boolean) -> Unit,
-    onPutCredential: (String, List<DnsCredentialField>, String) -> Unit,
+    onPutCredential: (String, List<DnsCredentialField>, String, () -> Unit) -> Unit,
     onClearCredential: (UInt) -> Unit,
     onIssueCert: (String) -> Unit,
     onBeginManualIssue: (String) -> Unit,
@@ -201,6 +247,20 @@ fun AdminDnsContent(
     onRemoveDelegation: (String) -> Unit,
     onSetAutoRenew: (String, Boolean) -> Unit,
 ) {
+    // `docs/goal/ui/README.md` § Offer only what is possible: every gated control
+    // below is painted from one shared answer (`fauna_client_dns::affordances`,
+    // `fauna_client_mail_settings::domain_forms`, over their UniFFI faces) and its
+    // action asks the SAME answer first, refusing with its reason on
+    // `error-message` — the shape tui's `refuse_dns` gives. Nothing is
+    // re-derived here.
+    val context = LocalContext.current
+    val refused: (Possibility) -> Boolean = { answer ->
+        val refusal = formRefusal(context, answer)
+        if (refusal != null) onRefuse(refusal.reason)
+        refusal != null
+    }
+    val activeNames = localDomainsSnapshot?.active?.map { it.domain }
+
     // Primary-domain rename wizard state (mail-primary-domain-rename.md § UX
     // surface). `renameSheetOpen` gates the start-a-rename sheet; `renameTarget`
     // is the picked new-primary domain name (pre-set when opened via a row's
@@ -278,6 +338,7 @@ fun AdminDnsContent(
                 RenameBanner(
                     rename = rename,
                     working = working,
+                    refused = refused,
                     onComplete = { force -> onCompleteRename(rename.renameId, force) },
                     onExtend = { days -> onExtendRename(rename.renameId, days) },
                     onAbort = { onAbortRename(rename.renameId) },
@@ -285,6 +346,12 @@ fun AdminDnsContent(
             }
 
             // ── Deployment master switch ──
+            // Painted from the answer for the flip it would make: waits for both
+            // reads, needs a domain, and its "on" needs every active domain
+            // covered by a held credential.
+            val manageAllAnswer = askForm {
+                dnsManageAllPossibility(dnsSnapshot, activeNames, !manageAll)
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -297,8 +364,12 @@ fun AdminDnsContent(
                 )
                 Switch(
                     checked = manageAll,
-                    onCheckedChange = onSetManageAll,
-                    enabled = !working,
+                    onCheckedChange = { on ->
+                        if (!refused(askForm { dnsManageAllPossibility(dnsSnapshot, activeNames, on) })) {
+                            onSetManageAll(on)
+                        }
+                    },
+                    enabled = !working && manageAllAnswer.isPossible,
                     // The checked-state mirror (`state` = `on`/`off`), off the
                     // shared `all_domains_managed` projection.
                     modifier = Modifier
@@ -306,6 +377,7 @@ fun AdminDnsContent(
                         .semantics { stateDescription = if (manageAll) "on" else "off" },
                 )
             }
+            DisabledControlReasonText(localized(manageAllAnswer.blockedReason))
 
             // The remove-confirm dialog, painted only while the shared machine holds
             // a domain armed (`remove_confirm_domain`; mail-multidomain.md §
@@ -322,11 +394,14 @@ fun AdminDnsContent(
             AddDomainForm(
                 working = working,
                 addingFirstDomain = addingFirstDomain,
+                localDomainsSnapshot = localDomainsSnapshot,
+                refused = refused,
                 onAddDomain = onAddDomain,
             )
             CredentialsSection(
                 credentials = credentials,
                 working = working,
+                refused = refused,
                 onPutCredential = onPutCredential,
                 onClearCredential = onClearCredential,
             )
@@ -347,7 +422,16 @@ fun AdminDnsContent(
             }
 
             // ── Active domains: merge ld (name/primary/catch-all) + dns (records/mode) ──
-            if (activeDomains.isEmpty()) {
+            // Loading is not empty: before the domains read resolves the page says
+            // it is loading, never "No domains yet" (`dns-management.md` § Errors
+            // & edge cases).
+            val ld = localDomainsSnapshot
+            if (ld == null) {
+                Text(
+                    stringResource(R.string.common_loading),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else if (activeDomains.isEmpty()) {
                 Text(
                     stringResource(R.string.admin_dns_empty),
                     style = MaterialTheme.typography.bodyMedium,
@@ -363,9 +447,18 @@ fun AdminDnsContent(
                 val credZones = credentials.flatMap { it.zones }.distinct().sorted()
                 activeDomains.forEach { domain ->
                     val dns = dnsDomains.firstOrNull { it.domain == domain.domain }
+                    val managed = dns?.mode == "managed"
                     DomainRow(
                         domain = domain,
-                        managed = dns?.mode == "managed",
+                        managed = managed,
+                        removeAnswer = askForm { localDomainRemovePossibility(domain) },
+                        renameAnswer = askForm { localDomainRenamePossibility(ld) },
+                        promoteAnswer = askForm { localDomainPromotePossibility(ld) },
+                        // For the flip the switch would make: opting out is always
+                        // possible, opting in needs a covering credential.
+                        modeAnswer = askForm { dnsSetModePossibility(dnsSnapshot, domain.domain, !managed) },
+                        certIssueAnswer = askForm { dnsCertIssuePossibility(pendingCert, domain.domain) },
+                        refused = refused,
                         autoRenew = dns?.autoRenew ?: false,
                         records = dns?.records ?: emptyList(),
                         actors = actors,
@@ -374,27 +467,46 @@ fun AdminDnsContent(
                         pending = pendingCert?.takeIf { it.domain == domain.domain },
                         credZones = credZones,
                         working = working,
-                        renameAvailable = renameAvailable,
                         activeRename = activeRename,
                         onOpenRename = {
                             // "Rename primary" from the primary row: seed the picker
                             // with the first non-primary (the admin can re-pick).
-                            renameTarget = nonPrimary.firstOrNull()?.domain ?: ""
-                            renameSheetOpen = true
+                            if (!refused(askForm { localDomainRenamePossibility(ld) })) {
+                                renameTarget = nonPrimary.firstOrNull()?.domain ?: ""
+                                renameSheetOpen = true
+                            }
                         },
                         onOpenPromote = {
                             // "Promote to primary" from a non-primary row: pre-target it.
-                            renameTarget = domain.domain
-                            renameSheetOpen = true
+                            if (!refused(askForm { localDomainPromotePossibility(ld) })) {
+                                renameTarget = domain.domain
+                                renameSheetOpen = true
+                            }
                         },
-                        onRemove = { onArmRemoveDomain(domain.domain) },
+                        onRemove = {
+                            if (!refused(askForm { localDomainRemovePossibility(domain) })) {
+                                onArmRemoveDomain(domain.domain)
+                            }
+                        },
                         onSetCatchAll = { onSetCatchAll(domain.domain, it) },
                         onSetRoleAddress = { role, hex -> onSetRoleAddress(domain.domain, role, hex) },
                         onSetDmarcPolicy = { onSetDmarcPolicy(domain.domain, it) },
-                        onSetMode = { onSetMode(domain.domain, it) },
+                        onSetMode = { to ->
+                            if (!refused(askForm { dnsSetModePossibility(dnsSnapshot, domain.domain, to) })) {
+                                onSetMode(domain.domain, to)
+                            }
+                        },
                         onSetAutoRenew = { onSetAutoRenew(domain.domain, it) },
-                        onIssueCert = { onIssueCert(domain.domain) },
-                        onBeginManualIssue = { onBeginManualIssue(domain.domain) },
+                        onIssueCert = {
+                            if (!refused(askForm { dnsCertIssuePossibility(pendingCert, domain.domain) })) {
+                                onIssueCert(domain.domain)
+                            }
+                        },
+                        onBeginManualIssue = {
+                            if (!refused(askForm { dnsCertIssuePossibility(pendingCert, domain.domain) })) {
+                                onBeginManualIssue(domain.domain)
+                            }
+                        },
                         onCompleteManualIssue = onCompleteManualIssue,
                         onCancelManualIssue = onCancelManualIssue,
                         onDelegateRenewal = { zone -> onDelegateRenewal(domain.domain, zone) },
@@ -434,11 +546,18 @@ fun AdminDnsContent(
                 target = renameTarget,
                 onTargetChange = { renameTarget = it },
                 working = working,
+                localDomainsSnapshot = localDomainsSnapshot,
+                refused = refused,
                 onSubmit = { graceDays ->
+                    // The sheet closes only once the nest started the rename; a
+                    // refusal leaves it open with the pick and the grace typed.
                     nonPrimary.firstOrNull { it.domain == renameTarget }
-                        ?.let { onStartRename(it.domainId, graceDays) }
-                    renameSheetOpen = false
-                    renameTarget = ""
+                        ?.let {
+                            onStartRename(it.domainId, graceDays) {
+                                renameSheetOpen = false
+                                renameTarget = ""
+                            }
+                        }
                 },
                 onCancel = {
                     renameSheetOpen = false
@@ -499,7 +618,9 @@ private fun RemoveConfirmDialog(
 private fun AddDomainForm(
     working: Boolean,
     addingFirstDomain: Boolean,
-    onAddDomain: (String) -> Unit,
+    localDomainsSnapshot: LocalDomainsSnapshot?,
+    refused: (Possibility) -> Boolean,
+    onAddDomain: (String, () -> Unit) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
@@ -538,19 +659,25 @@ private fun AddDomainForm(
             }
             // Only the submit reaches the nest (`fauna.bridges.add_local_domain`);
             // the opener above, this input and the cancel are the form's buffer
-            // and stay live with no nest.
-            val addGate = faunaGate("fauna.bridges.add_local_domain", enabled = !working)
+            // and stay live with no nest. The submit is painted from the shared
+            // draft answer (the domains read resolved, a well-formed name, not
+            // already active), folded with the offline gate.
+            val draft = askForm { localDomainAddPossibility(localDomainsSnapshot, input) }
+            val addGate = faunaGate("fauna.bridges.add_local_domain", enabled = !working && draft.isPossible)
+            val addSubmit = faunaFormGate(draft, addGate)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
-                        val d = input.trim().lowercase()
-                        if (d.isNotEmpty()) {
-                            onAddDomain(d)
+                        if (refused(askForm { localDomainAddPossibility(localDomainsSnapshot, input) })) {
+                            return@Button
+                        }
+                        // Closes, dropping what was typed, only once the nest added it.
+                        onAddDomain(input.trim().lowercase()) {
                             input = ""
                             expanded = false
                         }
                     },
-                    enabled = addGate.enabled,
+                    enabled = addSubmit.enabled,
                     modifier = Modifier.testTag(Ids.ADMIN_DNS_ADD_DOMAIN_SUBMIT_BUTTON),
                 ) { Text(stringResource(R.string.admin_dns_add_domain_submit)) }
                 OutlinedButton(
@@ -558,7 +685,7 @@ private fun AddDomainForm(
                     modifier = Modifier.testTag(Ids.ADMIN_DNS_ADD_DOMAIN_CANCEL_BUTTON),
                 ) { Text(stringResource(R.string.common_cancel)) }
             }
-            DisabledControlReasonText(addGate.reason)
+            DisabledControlReasonText(addSubmit.reason)
         }
     }
 }
@@ -570,7 +697,8 @@ private fun AddDomainForm(
 private fun CredentialsSection(
     credentials: List<CredentialSummary>,
     working: Boolean,
-    onPutCredential: (String, List<DnsCredentialField>, String) -> Unit,
+    refused: (Possibility) -> Boolean,
+    onPutCredential: (String, List<DnsCredentialField>, String, () -> Unit) -> Unit,
     onClearCredential: (UInt) -> Unit,
 ) {
     Column(
@@ -594,7 +722,7 @@ private fun CredentialsSection(
                 }
             }
         }
-        AddCredentialForm(working = working, onPutCredential = onPutCredential)
+        AddCredentialForm(working = working, refused = refused, onPutCredential = onPutCredential)
     }
 }
 
@@ -632,7 +760,8 @@ private fun CredentialItem(cred: CredentialSummary, working: Boolean, onClear: (
 @Composable
 private fun AddCredentialForm(
     working: Boolean,
-    onPutCredential: (String, List<DnsCredentialField>, String) -> Unit,
+    refused: (Possibility) -> Boolean,
+    onPutCredential: (String, List<DnsCredentialField>, String, () -> Unit) -> Unit,
 ) {
     val ctx = LocalContext.current
     val dnsProviders = remember { PROVIDERS.filter { Capability.DNS in it.capabilities } }
@@ -699,25 +828,36 @@ private fun AddCredentialForm(
                 }
             }
 
+            val provider = selected
+            val fields = provider?.fields?.filter { Capability.DNS in it.kinds } ?: emptyList()
+            // Resolve the label in the composable scope (resolveKey is @Composable).
+            val providerLabel = provider?.let { resolveKey(it.displayNameKey) } ?: ""
+            // The shared draft answer: a provider picked and every one of its DNS
+            // fields typed.
+            val draftOf = {
+                askForm {
+                    dnsCredentialDraftPossibility(provider != null, fields.map { values[it.id].orEmpty() })
+                }
+            }
+            val credentialSubmit = faunaFormGate(draftOf())
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                val provider = selected
-                val fields = provider?.fields?.filter { Capability.DNS in it.kinds } ?: emptyList()
-                // Resolve the label in the composable scope (resolveKey is @Composable).
-                val providerLabel = provider?.let { resolveKey(it.displayNameKey) } ?: ""
-                val canSubmit = provider != null && !working &&
-                    fields.all { !it.required || values[it.id]?.isNotBlank() == true }
                 Button(
                     onClick = {
+                        if (refused(draftOf())) return@Button
                         val p = provider ?: return@Button
                         val creds = fields.map {
                             DnsCredentialField(id = it.id, value = values[it.id].orEmpty())
                         }
-                        onPutCredential(p.id, creds, providerLabel)
-                        selected = null
-                        values.clear()
-                        expanded = false
+                        // The write-only form, and the secrets typed into it, stay
+                        // until the provider verified the credential and it is
+                        // sealed; a rejection leaves it open to correct.
+                        onPutCredential(p.id, creds, providerLabel) {
+                            selected = null
+                            values.clear()
+                            expanded = false
+                        }
                     },
-                    enabled = canSubmit,
+                    enabled = !working && credentialSubmit.enabled,
                     modifier = Modifier.testTag(Ids.ADMIN_DNS_ADD_CREDENTIAL_SUBMIT_BUTTON),
                 ) { Text(stringResource(R.string.admin_dns_add_credential_submit)) }
                 OutlinedButton(
@@ -725,6 +865,7 @@ private fun AddCredentialForm(
                     modifier = Modifier.testTag(Ids.ADMIN_DNS_ADD_CREDENTIAL_CANCEL_BUTTON),
                 ) { Text(stringResource(R.string.common_cancel)) }
             }
+            DisabledControlReasonText(credentialSubmit.reason)
         }
     }
 }
@@ -736,6 +877,12 @@ private fun AddCredentialForm(
 private fun DomainRow(
     domain: LocalDomainView,
     managed: Boolean,
+    removeAnswer: Possibility,
+    renameAnswer: Possibility,
+    promoteAnswer: Possibility,
+    modeAnswer: Possibility,
+    certIssueAnswer: Possibility,
+    refused: (Possibility) -> Boolean,
     autoRenew: Boolean,
     records: List<DnsRecordRow>,
     actors: List<ActorOption>,
@@ -744,7 +891,6 @@ private fun DomainRow(
     pending: PendingCertIssue?,
     credZones: List<String>,
     working: Boolean,
-    renameAvailable: Boolean,
     activeRename: PrimaryDomainRenameView?,
     onOpenRename: () -> Unit,
     onOpenPromote: () -> Unit,
@@ -784,20 +930,21 @@ private fun DomainRow(
                     )
                 }
                 OutlinedButton(
-                    // Only opens the confirm (no nest); the primary cannot be
-                    // removed (mail-multidomain.md § Additional).
+                    // Only opens the confirm (no nest); the primary is renamed
+                    // away, never removed — the shared answer says so.
                     onClick = onRemove,
-                    enabled = !working && !domain.isPrimary,
+                    enabled = !working && removeAnswer.isPossible,
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.testTag(Ids.ADMIN_DNS_DOMAIN_REMOVE_BUTTON),
                 ) { Text(stringResource(R.string.admin_dns_remove)) }
             }
+            DisabledControlReasonText(localized(removeAnswer.blockedReason))
 
             // Primary-domain rename affordances (mail-primary-domain-rename.md
-            // § UX surface). Primary row: "Rename primary" (disabled until a
-            // non-primary exists — the two-step rule) + the in-flight state badge.
-            // Non-primary row: "Promote to primary" (hidden while a rename runs).
-            val renameInFlight = activeRename != null
+            // § UX surface). Primary row: "Rename primary" (disabled with its
+            // reason while a rename runs or until a second domain exists — the
+            // two-step rule) + the in-flight state badge. Non-primary row:
+            // "Promote to primary" (disabled with its reason while a rename runs).
             if (domain.isPrimary) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -805,7 +952,7 @@ private fun DomainRow(
                 ) {
                     OutlinedButton(
                         onClick = onOpenRename,
-                        enabled = !working && renameAvailable && !renameInFlight,
+                        enabled = !working && renameAnswer.isPossible,
                         modifier = Modifier.testTag(Ids.ADMIN_DNS_DOMAIN_RENAME_BUTTON),
                     ) { Text(stringResource(R.string.admin_dns_rename_button)) }
                     if (activeRename != null) {
@@ -821,12 +968,14 @@ private fun DomainRow(
                         )
                     }
                 }
-            } else if (!renameInFlight) {
+                DisabledControlReasonText(localized(renameAnswer.blockedReason))
+            } else {
                 OutlinedButton(
                     onClick = onOpenPromote,
-                    enabled = !working,
+                    enabled = !working && promoteAnswer.isPossible,
                     modifier = Modifier.testTag(Ids.ADMIN_DNS_DOMAIN_PROMOTE_BUTTON),
                 ) { Text(stringResource(R.string.admin_dns_rename_promote)) }
+                DisabledControlReasonText(localized(promoteAnswer.blockedReason))
             }
 
             // Managed / manual mode control.
@@ -844,10 +993,13 @@ private fun DomainRow(
                 Switch(
                     checked = managed,
                     onCheckedChange = onSetMode,
-                    enabled = !working,
+                    enabled = !working && modeAnswer.isPossible,
                     modifier = Modifier.testTag(Ids.ADMIN_DNS_DOMAIN_MODE),
                 )
             }
+            // Opting in needs a covering credential; the add-credential button
+            // above stays offered as the step that unblocks it.
+            DisabledControlReasonText(localized(modeAnswer.blockedReason))
 
             // Per-domain auto-renew checkbox (admin-dns-domain-auto-renew,
             // tls-certificates.md § C.3). Shown ONLY for managed/delegated rows — the
@@ -933,11 +1085,13 @@ private fun DomainRow(
             // § B tier 2/3). Mirrors linux build_cert_issuance + build_cert_delegation.
             CertSection(
                 managed = managed,
+                issueAnswer = certIssueAnswer,
                 cert = cert,
                 delegation = delegation,
                 pending = pending,
                 credZones = credZones,
                 working = working,
+                refused = refused,
                 onIssueCert = onIssueCert,
                 onBeginManualIssue = onBeginManualIssue,
                 onCompleteManualIssue = onCompleteManualIssue,
@@ -964,11 +1118,13 @@ private fun DomainRow(
 @Composable
 private fun CertSection(
     managed: Boolean,
+    issueAnswer: Possibility,
     cert: CertStatusRow?,
     delegation: DelegationView?,
     pending: PendingCertIssue?,
     credZones: List<String>,
     working: Boolean,
+    refused: (Possibility) -> Boolean,
     onIssueCert: () -> Unit,
     onBeginManualIssue: () -> Unit,
     onCompleteManualIssue: () -> Unit,
@@ -998,16 +1154,20 @@ private fun CertSection(
     // with no nest, and greying it would be the gate over-claiming). tui rules
     // the same split on the same flag (`admin/mod.rs` wire_kind, `IssueDnsCert
     // { single_issue }`); never a Kotlin class test in place of the table.
+    // The page's own answer (not while this domain's manual order waits to be
+    // finished or cancelled — `cert_issue_possibility`) is folded with the gate;
+    // its reason, the more specific one, wins.
     val issueGate = faunaGate(
         if (singleIssue) "fauna.tls.publish_cert" else "fauna.account.state.put",
-        enabled = !working && pending == null,
+        enabled = !working && issueAnswer.isPossible,
     )
+    val issue = faunaFormGate(issueAnswer, issueGate)
     OutlinedButton(
         onClick = { if (singleIssue) onIssueCert() else onBeginManualIssue() },
-        enabled = issueGate.enabled,
+        enabled = !working && issue.enabled,
         modifier = Modifier.testTag(Ids.ADMIN_DNS_CERT_ISSUE_BUTTON),
     ) { Text(stringResource(R.string.admin_dns_cert_issue)) }
-    DisabledControlReasonText(issueGate.reason)
+    DisabledControlReasonText(issue.reason)
 
     // Manual-paste surface — only while an order for this domain awaits the admin.
     if (pending != null) {
@@ -1043,7 +1203,9 @@ private fun CertSection(
     CertDelegation(
         delegation = delegation,
         credZones = credZones,
+        delegateAnswer = dnsDelegatePossibility(credZones),
         working = working,
+        refused = refused,
         onDelegateRenewal = onDelegateRenewal,
         onRemoveDelegation = onRemoveDelegation,
     )
@@ -1061,7 +1223,12 @@ private fun CertSection(
 private fun CertDelegation(
     delegation: DelegationView?,
     credZones: List<String>,
+    // The shared `delegate_possibility` (dns-management.md § Errors & edge
+    // cases, *Renewal delegation and the rename banner answer too*): blocked
+    // until a held credential covers a zone; the reveal asks it again.
+    delegateAnswer: Possibility,
     working: Boolean,
+    refused: (Possibility) -> Boolean,
     onDelegateRenewal: (String) -> Unit,
     onRemoveDelegation: () -> Unit,
 ) {
@@ -1090,17 +1257,11 @@ private fun CertDelegation(
     var formOpen by remember { mutableStateOf(false) }
     if (!formOpen) {
         OutlinedButton(
-            onClick = { formOpen = true },
-            enabled = !working && credZones.isNotEmpty(),
+            onClick = { if (!refused(delegateAnswer)) formOpen = true },
+            enabled = !working && delegateAnswer.isPossible,
             modifier = Modifier.testTag(Ids.ADMIN_DNS_CERT_DELEGATE_BUTTON),
         ) {
-            Text(
-                if (credZones.isEmpty()) {
-                    stringResource(R.string.admin_dns_cert_delegate_no_zones)
-                } else {
-                    stringResource(R.string.admin_dns_cert_delegate)
-                },
-            )
+            Text(localized(delegateAnswer.blockedReason) ?: stringResource(R.string.admin_dns_cert_delegate))
         }
         return
     }
@@ -1472,6 +1633,7 @@ private fun RemovedDomainRow(domain: LocalDomainView, working: Boolean, onRestor
 private fun RenameBanner(
     rename: PrimaryDomainRenameView,
     working: Boolean,
+    refused: (Possibility) -> Boolean,
     onComplete: (Boolean) -> Unit,
     onExtend: (Long) -> Unit,
     onAbort: () -> Unit,
@@ -1479,6 +1641,14 @@ private fun RenameBanner(
     var confirmingComplete by remember { mutableStateOf(false) }
     var confirmingAbort by remember { mutableStateOf(false) }
     var extendDays by remember { mutableStateOf("7") }
+    // Each control is the shared rename view's answer (dns-management.md
+    // § Errors & edge cases, *Renewal delegation and the rename banner answer
+    // too*): absent outside the states that take it, and the dispatching press
+    // asks it again. Possible-or-absent only, so the reveal → confirm swap
+    // keeps its own visibility.
+    val complete = primaryDomainRenameActionPossibility(rename, FfiPrimaryDomainRenameAction.COMPLETE)
+    val extend = primaryDomainRenameActionPossibility(rename, FfiPrimaryDomainRenameAction.EXTEND)
+    val abort = primaryDomainRenameActionPossibility(rename, FfiPrimaryDomainRenameAction.ABORT)
 
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_DNS_RENAME_BANNER)) {
         Column(
@@ -1512,7 +1682,7 @@ private fun RenameBanner(
 
             // Complete now (reveal-then-confirm). `force` iff still in grace
             // (can_force_complete); a plain complete once the window has elapsed.
-            if (rename.canComplete || rename.canForceComplete) {
+            if (complete.isShown) {
                 if (confirmingComplete) {
                     if (rename.canForceComplete) {
                         Text(
@@ -1530,7 +1700,10 @@ private fun RenameBanner(
                         enabled = !working,
                     )
                     Button(
-                        onClick = { confirmingComplete = false; onComplete(rename.canForceComplete) },
+                        onClick = {
+                            confirmingComplete = false
+                            if (!refused(complete)) onComplete(rename.canForceComplete)
+                        },
                         enabled = completeGate.enabled,
                         modifier = Modifier.testTag(Ids.ADMIN_DNS_RENAME_COMPLETE_CONFIRM_BUTTON),
                     ) { Text(stringResource(R.string.admin_dns_rename_complete_confirm)) }
@@ -1545,15 +1718,20 @@ private fun RenameBanner(
             }
 
             // Extend grace by N days ([1, 30]).
-            if (rename.canExtend) {
+            if (extend.isShown) {
                 // The days input beside it is the buffer and stays live; only the
                 // commit issues `fauna.bridges.extend_primary_domain_rename_grace`.
                 // Hoisted out of the Row so the reason can render BENEATH the pair
                 // rather than as a third horizontal item (§ R11: beside itself).
+                // The draft is held to the nest's day range (blank or 1–30) by
+                // the shared answer; an invalid one is refused, never replaced
+                // by the default.
+                val extendDraft = askForm { localDomainExtendDraftPossibility(extendDays) }
                 val extendGate = faunaGate(
                     "fauna.bridges.extend_primary_domain_rename_grace",
-                    enabled = !working,
+                    enabled = !working && extendDraft.isPossible,
                 )
+                val extendSubmit = faunaFormGate(extendDraft, extendGate)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1571,18 +1749,22 @@ private fun RenameBanner(
                     )
                     OutlinedButton(
                         onClick = {
-                            extendDays.trim().toLongOrNull()?.takeIf { it >= 1 }?.let(onExtend)
+                            if (!refused(extend) && !refused(askForm { localDomainExtendDraftPossibility(extendDays) })) {
+                                // Blank → the default extension (tui's
+                                // `DEFAULT_RENAME_EXTEND_DAYS`, the nest's own window).
+                                onExtend(localDomainRenameDays(extendDays) ?: DEFAULT_RENAME_EXTEND_DAYS)
+                            }
                         },
-                        enabled = extendGate.enabled,
+                        enabled = extendSubmit.enabled,
                         modifier = Modifier.testTag(Ids.ADMIN_DNS_RENAME_EXTEND_BUTTON),
                     ) { Text(stringResource(R.string.admin_dns_rename_extend)) }
                 }
-                DisabledControlReasonText(extendGate.reason)
+                DisabledControlReasonText(extendSubmit.reason)
             }
 
             // Abort (reveal-then-confirm). The post-flip inverse-re-flip cost is
             // named in the confirm warning (only when !is_pre_flip).
-            if (rename.canAbort) {
+            if (abort.isShown) {
                 if (confirmingAbort) {
                     if (!rename.isPreFlip) {
                         Text(
@@ -1598,7 +1780,7 @@ private fun RenameBanner(
                         enabled = !working,
                     )
                     Button(
-                        onClick = { confirmingAbort = false; onAbort() },
+                        onClick = { confirmingAbort = false; if (!refused(abort)) onAbort() },
                         enabled = abortGate.enabled,
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.testTag(Ids.ADMIN_DNS_RENAME_ABORT_CONFIRM_BUTTON),
@@ -1631,6 +1813,8 @@ private fun RenameSheet(
     target: String,
     onTargetChange: (String) -> Unit,
     working: Boolean,
+    localDomainsSnapshot: LocalDomainsSnapshot?,
+    refused: (Possibility) -> Boolean,
     onSubmit: (Long?) -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -1645,10 +1829,15 @@ private fun RenameSheet(
     // the gate only AFTER picking a target, or it passes against an ungated app.
     // Computed here rather than in the `confirmButton` slot so the reason can
     // render at the foot of the sheet body (§ R11) instead of in the button row.
+    // The sheet's own predicate is the shared draft answer (no rename in
+    // flight, the pick an active non-primary domain, the grace blank or 1–30).
+    val draftOf = { askForm { localDomainRenameDraftPossibility(localDomainsSnapshot, target, graceDays) } }
+    val draft = draftOf()
     val submitGate = faunaGate(
         "fauna.bridges.start_primary_domain_rename",
-        enabled = !working && target.isNotEmpty(),
+        enabled = !working && draft.isPossible,
     )
+    val submit = faunaFormGate(draft, submitGate)
     AlertDialog(
         onDismissRequest = onCancel,
         modifier = Modifier.testTag(Ids.ADMIN_DNS_RENAME_SHEET),
@@ -1697,13 +1886,17 @@ private fun RenameSheet(
                     ),
                     modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_DNS_RENAME_GRACE_DAYS_INPUT),
                 )
-                DisabledControlReasonText(submitGate.reason)
+                DisabledControlReasonText(submit.reason)
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onSubmit(graceDays.trim().toLongOrNull()) },
-                enabled = submitGate.enabled,
+                onClick = {
+                    // Blank → the nest's default window; anything else passed the
+                    // answer above, so it is never silently replaced by a default.
+                    if (!refused(draftOf())) onSubmit(localDomainRenameDays(graceDays))
+                },
+                enabled = submit.enabled,
                 modifier = Modifier.testTag(Ids.ADMIN_DNS_RENAME_SUBMIT_BUTTON),
             ) { Text(stringResource(R.string.admin_dns_rename_submit)) }
         },
@@ -1715,6 +1908,11 @@ private fun RenameSheet(
         },
     )
 }
+
+/** How many days `admin-dns-rename-extend-button` extends the grace window by
+ *  when its input is blank — the nest's own default window (tui's
+ *  `DEFAULT_RENAME_EXTEND_DAYS`). */
+private const val DEFAULT_RENAME_EXTEND_DAYS = 7L
 
 /**
  * Client-rendered countdown to `grace_ends_at` (epoch-millis). The rename state is

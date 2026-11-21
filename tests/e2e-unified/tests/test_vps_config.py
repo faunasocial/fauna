@@ -24,7 +24,12 @@ from helpers import budgets
 from helpers.waiting import wait_until
 from i18n.strings import S
 
-pytestmark = pytest.mark.tier_2
+# The old set-up path (dns_config -> vps_config) exists only on an app whose
+# `provider-choice` surface is unbuilt - windows today (surfaces.toml); the
+# choose-providers page replaced both pages elsewhere (onboarding-provisioning.md
+# § 3d). Successors: test_provider_choice*.py and
+# test_provider_dialog_registry_parity.py. Keep this mark equal to that set.
+pytestmark = [pytest.mark.tier_2, pytest.mark.windows]
 
 
 def test_vps_config_renders_provider_row(app):
@@ -91,6 +96,10 @@ def test_vps_config_preselects_dns_provider_when_capable(app, fake_cloud):
         "vps_config should preselect the VPS-capable DNS provider (hetzner): "
         f"{app.driver.diagnose('vps-provider-row[hetzner]')}"
     )
+    # The carried-over token is checked and the plans listed with no second
+    # entry and no Verify press (onboarding-provisioning.md § 3d → *Why one
+    # provider's token was asked for twice*).
+    app.driver.wait_for("vps-server-type-radio[0]", timeout=20)
 
 
 @pytest.mark.feature("set-up-a-nest-from-the-app")
@@ -196,7 +205,8 @@ def test_vps_config_mail_mode_toggle_gates_server_types(app):
     a mail box offers only plans with ``mem_gb >= 2`` (the clamd/rspamd
     scanners need the RAM), and turning mail OFF unlocks the cheap 1 GB tier.
 
-    Runs end-to-end on web + linux + windows + macos + ios + tui. mail-ON
+    Ran end-to-end on web + linux + windows + macos + ios + tui while they all
+    walked the old path; marked windows-only since (module mark). mail-ON
     renders one radio (the >=2 GB plan); the toggle click flips mail OFF and
     re-renders the 1 GB plan as a SECOND radio. The apple in-process path
     required a registry re-registration fix: the enumerated

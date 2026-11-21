@@ -16,7 +16,7 @@ import SwiftUI
 /// Target state: `docs/goal/behavior/mail-aliases.md`; the lead-client
 /// renderer is linux (`apps/fauna-linux/src/settings/mail_aliases.rs`).
 @MainActor @Observable
-public final class MailAliasesVM: MachineBackedVM {
+public final class MailAliasesVM: MachineBackedVM, MailUnbuiltRefusing {
     /// Latest snapshot; `nil` until `configure`. The view reads its fields
     /// (`aliases`, `defaultDomain`, `lastMintedAddress`, `status`, `error`).
     public internal(set) var snapshot: MailAliasesSnapshot?
@@ -41,6 +41,16 @@ public final class MailAliasesVM: MachineBackedVM {
     /// The canonical default domain new aliases are minted on; `nil` until the
     /// actor has at least one exact alias (add/generate disabled in that case).
     public var defaultDomain: String? { snapshot?.defaultDomain }
+
+    /// The add / import / mint paths' shared answer (`mail-settings.md` § Errors & edge
+    /// cases, *The in-page predicates*): blocked with the page's domain reason
+    /// until a domain exists, and — before the first snapshot — blocked while
+    /// the read is under way (rule 5). The view paints from this, never from
+    /// the domain field.
+    public var createAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return mailAliasesCreatePossibility(snapshot: snapshot)
+    }
 
     /// Vend the machine from APIClient and load the first snapshot. Idempotent
     /// (the machine is built once).

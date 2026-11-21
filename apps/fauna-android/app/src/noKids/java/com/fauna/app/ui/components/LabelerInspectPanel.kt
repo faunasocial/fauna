@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -15,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import com.fauna.app.R
 import uniffi.fauna_labeler_catalog_machine.LabelerInspectView
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * The `labeler-inspect-panel` — the decoded, client-re-verified signed

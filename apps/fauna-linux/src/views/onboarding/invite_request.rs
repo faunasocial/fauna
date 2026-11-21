@@ -116,11 +116,26 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
 
     let code_check_btn = Button::with_label(crate::i18n::strings::common::CHECK);
     set_test_id(&code_check_btn, ids::INVITE_CODE_CHECK_BUTTON);
+    // Painted from the shared draft answer as the code is typed
+    // (`ui/README.md` § Offer only what is possible, rule 4's form case).
+    crate::possible::paint(&code_check_btn, None, code_answer(""));
+    {
+        let code_check_btn = code_check_btn.clone();
+        code_input.connect_changed(move |e| {
+            crate::possible::paint(&code_check_btn, None, code_answer(&e.text()));
+        });
+    }
     {
         let m = m.clone();
         let code_input = code_input.clone();
         code_check_btn.connect_clicked(move |_| {
             let code = code_input.text().to_string();
+            // The press asks the answer it was painted from again (rule 6);
+            // a blocked draft's line goes on `error-message`.
+            if let Some(reason) = crate::possible::reason_text(&code_answer(&code)) {
+                m.set_error_message(reason);
+                return;
+            }
             let m = m.clone();
             async_helper::run_on_tokio(async move { m.verify_oob_invite_code(code).await }, |_| {});
         });
@@ -190,7 +205,7 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
 
     let continue_btn = Button::with_label(crate::i18n::strings::common::CONTINUE);
     continue_btn.add_css_class("suggested-action");
-    continue_btn.set_sensitive(false); // driven by snapshot.continue_enabled
+    continue_btn.set_sensitive(false); // painted from the machine's answer on refresh
     set_test_id(&continue_btn, ids::INVITE_REQUEST_CONTINUE_BUTTON);
     {
         let m = m.clone();
@@ -213,6 +228,7 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
     let refresh: Rc<dyn Fn()> = Rc::new({
         let m = m.clone();
         let invite_status = invite_status.clone();
+        let submit_btn = submit_btn.clone();
         let recheck_btn = recheck_btn.clone();
         let code_status = code_status.clone();
         let supervised_notice = supervised_notice.clone();
@@ -231,6 +247,9 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
             // button visibility.
             invite_status.set_text(&snap.message.resolve(crate::i18n::strings::lookup));
             recheck_btn.set_visible(snap.recheck_visible);
+            // Submit is dead while a wizard call is on its way, so a second
+            // press never chases the first: the machine's answer.
+            crate::possible::paint(&submit_btn, None, m.invite_submit_possibility());
 
             // Bottom row: OOB code status.
             code_status.set_text(&snap.oob_message.resolve(crate::i18n::strings::lookup));
@@ -251,8 +270,9 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
                 }
             }
 
-            // Continue button sensitivity.
-            continue_btn.set_sensitive(snap.continue_enabled);
+            // Continue, from the machine's answer (`ui/README.md` § Offer only
+            // what is possible, rule 6).
+            crate::possible::paint(&continue_btn, None, m.invite_continue_possibility());
 
             // Error banner.
             let msg = m.error_message().filter(|msg| !msg.is_empty());
@@ -261,4 +281,10 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
     });
 
     (root, refresh)
+}
+
+/// `invite-code-check-button`'s answer: the shared draft predicate over the
+/// code as typed.
+fn code_answer(code: &str) -> fauna_core::possibility::Possibility {
+    fauna_onboarding_machine::invite_code_draft_possibility(code.to_string())
 }

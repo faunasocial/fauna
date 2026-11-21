@@ -106,12 +106,52 @@ def test_bundled_provider_buys_domain_and_server_through_one_row(
             "args": {"domain": HANDLE_DOMAIN},
         },
         "continue_enabled": True,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     }, handle=f"alice@{HANDLE_DOMAIN}")
     wait_until(lambda: app.is_enabled("handle-entry-continue-button"), 10.0,
                diagnose=lambda: drv.diagnose("handle-entry-continue-button"))
     drv.click("handle-entry-continue-button")
+    if app.onboarding.renders_provider_choice():
+        _walk_provider_choice(app, drv, bundled)
+    else:
+        _walk_dns_and_vps_config(app, drv, bundled)
+
+    # ── nest_provisioning: the BoM discloses the renewal price ───────────
+    app.wait_for("provisioning-start-button")
+    domain_line = drv.get_text("provisioning-bom-domain-line")
+    assert "10.99" in domain_line and "14.99" in domain_line and "then" in domain_line, domain_line
+    assert "5.99" in drv.get_text("provisioning-bom-vps-line")
+
+    drv.click("provisioning-start-button")
+    wait_until(
+        lambda: app.is_enabled("provisioning-continue-button"),
+        ORCHESTRATION_STEP_S,
+        diagnose=lambda: "provisioning never Succeeded; snapshot=" + str(drv.call_machine_method("provisioning_snapshot")),
+    )
+
+    # ── what the intermediary saw ────────────────────────────────────────
+    assert len(bundled.registered) == 1
+    reg = bundled.registered[0]
+    assert reg["name"] == HANDLE_DOMAIN
+    assert reg["years"] == 1
+    assert reg["agreed_price_cents"] == bundled.registration_cents
+    assert reg["contact"]["first_name"] == CONTACT["first_name"], "the registrant is the user"
+    assert reg["whois_privacy"] is True
+    servers = list(bundled.servers.values())
+    assert len(servers) == 1
+    srv = servers[0]
+    assert srv["labels"].get("managed-by") == "fauna"
+    assert srv["server_type"] == "small" and srv["location"] == "eu-1"
+    assert "#cloud-config" in srv["user_data"], "cloud-init passed through verbatim"
+    zone_id = next(z["id"] for z in bundled.zones.values() if z["name"] == HANDLE_DOMAIN)
+    recs = bundled.records[zone_id]
+    assert any(r["type"] == "A" and r["name"] == "@" and r["value"] == "203.0.113.5" for r in recs), recs
+    assert any(r["type"] == "MX" for r in recs), recs
+    assert bundled.ptr[srv["id"]] == f"mail.{HANDLE_DOMAIN}"
+
+
+def _walk_dns_and_vps_config(app, drv, bundled) -> None:
+    """The set-up path of an app whose choose-providers page has not landed:
+    ``dns_config`` → ``vps_config`` → ``nest_provisioning``."""
     app.wait_for("dns-buy-domain-checkbox")
     # DomainAvailable landing: buy_domain=true AND same_provider_for_vps=true
     # (machine defaults) — exactly the state in which the bundled row is the
@@ -211,35 +251,71 @@ def test_bundled_provider_buys_domain_and_server_through_one_row(
     wait_until(lambda: app.is_enabled("vps-config-continue-button"), 10.0)
     drv.click("vps-config-continue-button")
 
-    # ── nest_provisioning: the BoM discloses the renewal price ───────────
-    app.wait_for("provisioning-start-button")
-    domain_line = drv.get_text("provisioning-bom-domain-line")
-    assert "10.99" in domain_line and "14.99" in domain_line and "then" in domain_line, domain_line
-    assert "5.99" in drv.get_text("provisioning-bom-vps-line")
 
-    drv.click("provisioning-start-button")
-    wait_until(
-        lambda: app.is_enabled("provisioning-continue-button"),
-        ORCHESTRATION_STEP_S,
-        diagnose=lambda: "provisioning never Succeeded; snapshot=" + str(drv.call_machine_method("provisioning_snapshot")),
+
+def _walk_provider_choice(app, drv, bundled) -> None:
+    """The set-up path through the choose-providers page
+    (``onboarding-provisioning.md`` § 3d): one dialog connects the bundled
+    provider whole, its three goals covered by it; the price is agreed on
+    ``nest_provisioning``, beside the button that buys."""
+    app.wait_for("dns-buy-domain-checkbox")
+    for goal in ("domain", "dns", "vps"):
+        app.wait_for(f"provider-goal-row[{goal}]")
+    drv.click("provider-row[bundled]")
+    app.wait_for("provider-credentials-form-base-url")
+    drv.fill("provider-credentials-form-base-url", bundled.base_url())
+    app.wait_for("provider-credentials-form-api-token")
+    assert "Sign in" in drv.get_text("provider-credentials-form-api-token"), (
+        drv.diagnose("provider-credentials-form-api-token")
     )
+    drv.click("provider-credentials-form-api-token")
+    wait_until(
+        lambda: drv.get_text("provider-credentials-form-api-token").strip() == "Connected",
+        ORCHESTRATION_STEP_S,
+        diagnose=lambda: "hosted-auth never reached Connected: "
+        + drv.get_text("provider-credentials-form-api-token"),
+    )
+    assert bundled.device_codes, "the wizard must have started the device flow at the typed address"
+    drv.wait_until_enabled("provider-connect-button", timeout=10)
+    drv.click("provider-connect-button")
+    wait_until(
+        lambda: drv.get_attr("provider-row[bundled]", "state") == "connected",
+        ORCHESTRATION_STEP_S,
+        diagnose=lambda: (
+            f"bundled never connected: {drv.get_text('provider-dialog-status-text')!r}"
+            f" | error={app.error_text()!r}"
+        ),
+    )
+    # One provider covers all three goals; the registration line states the
+    # registrar's price, first year and renewal.
+    for goal in ("domain", "dns", "vps"):
+        assert drv.get_attr(f"provider-goal-row[{goal}]", "provider") == "bundled", (
+            drv.diagnose(f"provider-goal-row[{goal}]")
+        )
+    domain_row = drv.get_text("provider-goal-row[domain]")
+    assert "10.99" in domain_row and "14.99" in domain_row, domain_row
+    # registrant = the user → the contact form is in the registrar's dialog.
+    app.wait_for("dns-contact-form")
+    app.onboarding.fill_dns_contact(CONTACT)
+    drv.click("provider-dialog-close-button")
+    wait_until(lambda: app.is_enabled("provider-choice-continue-button"), 10.0,
+               diagnose=lambda: "Continue stayed disabled: "
+               + drv.get_text("provider-choice-status-text"))
+    drv.click("provider-choice-continue-button")
 
-    # ── what the intermediary saw ────────────────────────────────────────
-    assert len(bundled.registered) == 1
-    reg = bundled.registered[0]
-    assert reg["name"] == HANDLE_DOMAIN
-    assert reg["years"] == 1
-    assert reg["agreed_price_cents"] == bundled.registration_cents
-    assert reg["contact"]["first_name"] == CONTACT["first_name"], "the registrant is the user"
-    assert reg["whois_privacy"] is True
-    servers = list(bundled.servers.values())
-    assert len(servers) == 1
-    srv = servers[0]
-    assert srv["labels"].get("managed-by") == "fauna"
-    assert srv["server_type"] == "small" and srv["location"] == "eu-1"
-    assert "#cloud-config" in srv["user_data"], "cloud-init passed through verbatim"
-    zone_id = next(z["id"] for z in bundled.zones.values() if z["name"] == HANDLE_DOMAIN)
-    recs = bundled.records[zone_id]
-    assert any(r["type"] == "A" and r["name"] == "@" and r["value"] == "203.0.113.5" for r in recs), recs
-    assert any(r["type"] == "MX" for r in recs), recs
-    assert bundled.ptr[srv["id"]] == f"mail.{HANDLE_DOMAIN}"
+    # ── nest_provisioning: the choices, and the price agreed at the purchase ──
+    app.wait_for("provisioning-start-button")
+    assert drv.is_visible_scrolled("dns-price-confirm-checkbox"), (
+        drv.diagnose("dns-price-confirm-checkbox")
+    )
+    assert "withdraw" in drv.get_text("dns-price-confirm-checkbox").lower()
+    assert not app.is_enabled("provisioning-start-button"), (
+        "Buy and set up waits for the price to be agreed"
+    )
+    if drv.is_visible("vps-location-picker"):
+        drv.select("vps-location-picker", "Europe 1")
+    # Mail mode is on for a real domain → the ≥ 2 GB tier; `small` is 2 GB.
+    drv.click("vps-server-type-radio[0]")
+    drv.click("dns-price-confirm-checkbox")
+    wait_until(lambda: app.is_enabled("provisioning-start-button"), 10.0,
+               diagnose=lambda: drv.diagnose("provisioning-start-button"))

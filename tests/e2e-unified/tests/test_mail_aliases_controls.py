@@ -27,7 +27,7 @@ import pytest
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.copy_button import read_clipboard_or_copied
 from helpers.mail_aliases import default_alias_domain
-from helpers.mail_client_ui import plain_message, route_inbound_mail_to_app
+from helpers.mail_client_ui import plain_message, route_inbound_mail_to_app, turn_mail_on
 from helpers.mail_wire import _connect_smtp_starttls
 from i18n.strings import S
 
@@ -43,6 +43,13 @@ SEED_DOMAIN = "aliases-controls-e2e.test"
 ROW_LABEL = "mail-aliases-list-item-label"
 ROW_KIND = "mail-aliases-list-item-kind"
 ROW_HITS = "mail-aliases-list-item-hits"
+
+
+@pytest.fixture(autouse=True)
+def _mail_on(logged_in_app):
+    """Every test here opens a mail sub-page on the session-shared account, and
+    each opens behind the mail-usable gate — see `helpers.mail_client_ui.turn_mail_on`."""
+    turn_mail_on(logged_in_app)
 
 
 def _user_client(nest_instance, user):

@@ -85,8 +85,8 @@ Stamped 2026-11-01 at a6047fbd8b.
 | web | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.5-dev+f0ab40ba standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+fa996fbb standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+fa996fbb standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+2f2257c1 standalone |
 | android-kids |  no run recorded | |
@@ -123,5 +123,5 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 27 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_a_lock_request_more_than_five_minutes_old_is_refused` | nest (linux): passed, nest (macos): passed |
 | 28 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 29 | app | `tests/e2e-unified/tests/test_emergency_lockout_door.py::test_the_door_locks_an_account_from_a_device_that_holds_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 29 | app | `tests/e2e-unified/tests/test_emergency_lockout_door.py::test_a_recovery_phrase_is_not_a_secret_key_and_nothing_is_locked` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 29 | app | `tests/e2e-unified/tests/test_emergency_lockout_door.py::test_a_recovery_phrase_is_not_a_secret_key_and_nothing_is_locked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 <!-- features-render:end -->

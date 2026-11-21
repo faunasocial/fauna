@@ -24,6 +24,8 @@ import uniffi.fauna_client_mail_settings.MailImportSnapshot
 import uniffi.fauna_client_mail_settings.MicrosoftSignInState
 import uniffi.fauna_client_mail_settings.MicrosoftSignInView
 import uniffi.fauna_client_mail_settings.SourceMailboxOption
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [MailImportContent] (the `mail-import`
@@ -95,8 +97,15 @@ class MailImportContentTest {
         importDuplicates = importDuplicates,
     )
 
+    /** A transcription of `MailImportSnapshot::outlook_source_possibility` for
+     *  a build WITH a sign-in transport (the wrapper asks the real one). */
+    private fun outlookAnswerOf(snapshot: MailImportSnapshot): Possibility =
+        if (snapshot.microsoftSigninAvailable) Possibility.Possible
+        else Possibility.Blocked(LocalizedText("mail_import.microsoft_unavailable", emptyMap()))
+
     private fun render(
         snapshot: MailImportSnapshot,
+        outlookAnswer: Possibility = outlookAnswerOf(snapshot),
         onConnect: (ImportSourceKind, String, String, String, String) -> Unit = { _, _, _, _, _ -> },
         onScopeNext: (String, String) -> Unit = { _, _ -> },
         onStart: () -> Unit = {},
@@ -110,6 +119,7 @@ class MailImportContentTest {
         composeTestRule.setContent {
             MailImportContent(
                 snapshot = snapshot,
+                outlookAnswer = outlookAnswer,
                 // Pure FFI-free stubs for the two shared label maps.
                 sourceKindLabel = { it.name },
                 tlsModeLabel = { it.name },
@@ -237,7 +247,33 @@ class MailImportContentTest {
     fun signInWithMicrosoftIsInertWhereTheRegistrationIsMissing() {
         render(snap(ImportStep.SOURCE, sourceKind = ImportSourceKind.OUTLOOK))
         composeTestRule.onNodeWithTag("mail-import-source-oauth-button").assertIsNotEnabled()
-        composeTestRule.onNodeWithText("Microsoft sign-in is not available in this version of Fauna.").assertExists()
+        composeTestRule.onNodeWithText("Microsoft sign-in works once your nest's admin has entered a Microsoft app registration.").assertExists()
+    }
+
+    /**
+     * A build with no Microsoft sign-in transport: the shared answer is absent,
+     * so the picker leaves Outlook out and no sign-in button is painted
+     * (`ui/README.md` § Offer only what is possible, rule 2).
+     */
+    @Test
+    fun anAbsentOutlookAnswerLeavesOutlookOutOfThePicker() {
+        render(snap(ImportStep.SOURCE, sourceKind = ImportSourceKind.OUTLOOK), outlookAnswer = Possibility.Absent)
+        composeTestRule.onAllNodesWithText(ImportSourceKind.OUTLOOK.name).assertCountEquals(0)
+        composeTestRule.onNodeWithText(ImportSourceKind.GMAIL.name).assertExists()
+        composeTestRule.onAllNodesWithTag("mail-import-source-oauth-button").assertCountEquals(0)
+    }
+
+    /** Possible: Outlook offered and the button live. */
+    @Test
+    fun aPossibleOutlookAnswerOffersOutlookWithALiveButton() {
+        render(
+            snap(ImportStep.SOURCE, sourceKind = ImportSourceKind.OUTLOOK, microsoftSigninAvailable = true),
+            outlookAnswer = Possibility.Possible,
+        )
+        composeTestRule.onNodeWithText(ImportSourceKind.OUTLOOK.name).assertExists()
+        composeTestRule.onNodeWithTag("mail-import-source-oauth-button").performScrollTo().assertIsEnabled()
+        composeTestRule.onAllNodesWithText("Microsoft sign-in works once your nest's admin has entered a Microsoft app registration.")
+            .assertCountEquals(0)
     }
 
     /** While Microsoft's code is out it paints with its attributes and the button waits. */
@@ -501,6 +537,7 @@ class MailImportContentTest {
         composeTestRule.setContent {
             MailImportContent(
                 snapshot = snapshot,
+                outlookAnswer = outlookAnswerOf(snapshot),
                 sourceKindLabel = { it.name },
                 tlsModeLabel = { it.name },
                 onBack = {},
@@ -674,6 +711,7 @@ class MailImportContentTest {
         composeTestRule.setContent {
             MailImportContent(
                 snapshot = snapshot,
+                outlookAnswer = outlookAnswerOf(snapshot),
                 sourceKindLabel = { it.name },
                 tlsModeLabel = { it.name },
                 onBack = {},

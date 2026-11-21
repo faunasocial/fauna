@@ -60,13 +60,17 @@
   import { nodeUrl } from '#lib/api';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
+  import { readOnEntryAndReconnect } from '#lib/admin-reread';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import {
-    offlineAffordance,
+    offlinePossibility,
     osMaintenanceStatusLabel,
     parsePort,
     adminParseRegionCode,
+    adminServingPortPossibility,
+    writeAfterReadPossibility,
+    adminRegionPossibility,
     takedownFormView,
     takedownVerdict,
     issuerKeyRowLabel,
@@ -81,6 +85,11 @@
     type BlockedRow,
   } from '#lib/wasm';
   import { makeOfflineGate } from '#lib/offline-gate';
+  import { afterGate, askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import { webAppOriginPaint } from '#lib/admin-web-app-origin-paint';
+  import { reasonAttr, type Possibility } from '#lib/admin-read-gate';
+  import { readFailed, type ReadWord } from '#lib/read-gate';
+  import { adminWebAppOriginSetPossibility, adminUpdateChannelSetPossibility } from '#lib/wasm';
   import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import { relativeTime } from '#lib/value-format';
   import { IDS } from '#lib/generated/uiIds';
@@ -98,7 +107,7 @@
   // declines to encode). Declaring it would gate nothing while reading as proof
   // the control is gated — the shape `check-offline-gate-kinds.py` rule 2
   // forbids — so the opener declares nothing and its confirm carries the kind.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // admin-nest (admin.md § N Nest) — nest-wide settings that aren't a feature
   // page, introduced by the per-page-services redesign (admin.md § Admin IA
@@ -119,6 +128,17 @@
   // admin's only pairing control.
   let pairingEnabled = $state<boolean | null>(null);
   let pairingToggling = $state(false);
+  /** Where the pairing flag's reflective read stands (rule 5). */
+  let pairingRead = $state<ReadWord>('pending');
+  /** The pairing toggle's answer (admin.md § Errors & edge cases, *Controls
+   *  wait for their read*): `Possibility::for_write` over the reflective
+   *  read — still loading, failed to load — and its own flip in flight. One
+   *  answer paints the toggle and refuses its press; it never flips from a
+   *  guessed state. */
+  const pairingAnswer = $derived(
+    askPossibility(() => writeAfterReadPossibility(pairingRead, !pairingToggling)),
+  );
+  const pairingGate = $derived(formGate(pairingAnswer));
 
   // ── Admin-set client-facing API serving port (`fauna.admin.set_serving_port`) ──
   // The nest's own HTTPS listener port (the WS-RPC transport + the served SPA),
@@ -134,6 +154,23 @@
   // where the chosen port is inert (the nest rejects a write). The field renders
   // read-only with a hint then; editable only on a direct listener (default).
   let servingPortFronted = $state(false);
+  /** Where the serving port's reflective read stands (rule 5): a failed read
+   *  leaves the field and save blocked — never a save of the default over a
+   *  port the page did not read. */
+  let servingPortRead = $state<ReadWord>('pending');
+  /** The serving-port input's and save's read gate (admin.md § Errors & edge
+   *  cases, *Controls wait for their read*): `Possibility::for_write` over the
+   *  read and the save in flight. */
+  const servingPortReadAnswer = $derived(
+    askPossibility(() => writeAfterReadPossibility(servingPortRead, !servingPortSaving)),
+  );
+  const servingPortReadGate = $derived(formGate(servingPortReadAnswer));
+  /** The serving-port save's answer — the read gate first, then the shared
+   *  `adminServingPortPossibility` (a port in [1, 65535]; admin.md § Errors &
+   *  edge cases). One answer paints the save and refuses at its press. */
+  const servingPortAnswer = $derived(
+    afterGate(servingPortReadAnswer, () => adminServingPortPossibility(servingPort)),
+  );
 
   // ── Host-OS maintenance (`nest-os-*`, installers/vps.md § Host OS Maintenance § 4) ──
   // Read-only patch/reboot status for the host Ubuntu box of an onboarded VPS,
@@ -164,8 +201,16 @@
   let natMachine: AdminNatModeMachine | null = null;
   let natMode = $state<'public' | 'private'>('public');
   let natStatusText = $state('');
-  let natSaveEnabled = $state(false);
-  let natInflight = $state(false);
+  // The radios' and save's answers — `AdminNatModeMachine::select_possibility`
+  // / `save_possibility` (admin.md § Errors & edge cases, *Controls wait for
+  // their read*): blocked until `fauna.setup.status` answered, a failed read
+  // leaving them blocked (the pre-selected `public` is not a mode the page
+  // read), the save also while one is on its way. `null` until the machine
+  // exists. Each press asks the same answer again.
+  let natSelectAnswer = $state<Possibility | null>(null);
+  let natSaveAnswer = $state<Possibility | null>(null);
+  const natSelectGate = $derived(formGate(natSelectAnswer));
+  const natSaveGate = $derived(formGate(natSaveAnswer));
 
   // The caught value as the `{message}` every admin page-error string carries
   // (ui/README.md § Copy comprehensibility — the banner must name the gesture AND
@@ -178,8 +223,8 @@
     if (!natMachine) return;
     const snap = JSON.parse(natMachine.snapshotJson());
     natMode = snap.selected_mode;
-    natSaveEnabled = !!snap.submit_enabled;
-    natInflight = snap.state === 'Submitting';
+    natSelectAnswer = JSON.parse(natMachine.selectPossibilityJson()) as Possibility;
+    natSaveAnswer = JSON.parse(natMachine.savePossibilityJson()) as Possibility;
     natStatusText = resolveLocalized(snap.message);
   }
 
@@ -193,13 +238,29 @@
   }
 
   function selectNatMode(mode: 'public' | 'private') {
-    natMachine?.select(mode);
+    natRender();
+    const refusal = formRefusal(natSelectAnswer);
+    if (refusal !== null || !natMachine) {
+      if (refusal) error = refusal;
+      return;
+    }
+    natMachine.select(mode);
     natRender();
   }
 
   async function saveNatMode() {
-    if (!natMachine) return;
-    await natMachine.submit();
+    natRender();
+    const refusal = formRefusal(natSaveAnswer);
+    if (refusal !== null || !natMachine) {
+      if (refusal) error = refusal;
+      return;
+    }
+    const running = natMachine.submit();
+    // The submit's first poll marks it in flight: repaint so the save says
+    // still saving while it is on its way.
+    await Promise.resolve();
+    natRender();
+    await running;
     natRender();
   }
 
@@ -207,9 +268,11 @@
   // What this nest's own address answers: the app it ships, or a redirect to the
   // central origin (admin.md § N Nest → Web-app origin). Every sentence and the
   // `can_set` verdict are the shared `admin_web_app_origin_view` fold (tui
-  // `admin/nest.rs`, the reference leg); this file paints and wires. Radios stay
-  // unmarked and disabled until the read lands — pre-marking bundled would state a
-  // choice the nest may not hold. The save repaints from the set's own reply.
+  // `admin/nest.rs`, the reference leg); this file paints and wires. Whether the
+  // section and its central radio exist are the fold's `section_possibility` /
+  // `central_possibility` (`web-content-hosting.md` § While the central origin is
+  // not live, the choice is not offered, rule 5): nothing is painted until the read
+  // lands, and nothing re-derived here. The save repaints from the set's own reply.
   let webOrigin = $state<AdminWebAppOriginView | null>(null);
   let webOriginDraft = $state<'bundled' | 'central' | null>(null);
   let webOriginSaving = $state(false);
@@ -225,9 +288,33 @@
     }
   }
 
+  /** The radios and save are painted from the shared `set_possibility`
+   *  answers — blocked by the section's own status sentence where the choice
+   *  cannot be set, "still loading" before the read (`admin.md` § Errors &
+   *  edge cases); each save asks its answer again. */
+  const webOriginGate = $derived(
+    formGate(askPossibility(() => adminWebAppOriginSetPossibility(webOrigin))),
+  );
+  /** The save's own answer asks the draft too: a `central` draft is refused
+   *  with the nest's sentence while the central origin is not live. */
+  const webOriginSaveGate = $derived(
+    formGate(askPossibility(() => adminWebAppOriginSetPossibility(webOrigin, webOriginDraft))),
+  );
+  const webOriginShown = $derived(webAppOriginPaint(webOrigin));
+  const updateChannelGate = $derived(
+    formGate(askPossibility(() => adminUpdateChannelSetPossibility(updateChannel))),
+  );
+
   async function saveWebOrigin() {
     const id = $identity;
-    if (!id?.secretHex || !webOrigin?.can_set || !webOriginDraft) return;
+    if (!id?.secretHex || !webOriginDraft) return;
+    const refusal = formRefusal(
+      askPossibility(() => adminWebAppOriginSetPossibility(webOrigin, webOriginDraft)),
+    );
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
     error = '';
     webOriginSaving = true;
     try {
@@ -264,7 +351,14 @@
 
   async function saveUpdateChannel() {
     const id = $identity;
-    if (!id?.secretHex || !updateChannel?.can_set || !updateChannelDraft) return;
+    if (!id?.secretHex || !updateChannelDraft) return;
+    const refusal = formRefusal(
+      askPossibility(() => adminUpdateChannelSetPossibility(updateChannel)),
+    );
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
     error = '';
     updateChannelSaving = true;
     try {
@@ -291,6 +385,14 @@
   let region = $state<AdminRegionView | null>(null);
   let regionInput = $state('');
   let regionWorking = $state(false);
+  /** The region read settled (answered or failed). */
+  let regionRead = $state(false);
+  /** The region save's draft answer — the shared `adminRegionPossibility`,
+   *  unreadable until the read settled; painted on the save and asked again at
+   *  its press. */
+  const regionAnswer = $derived(
+    regionRead ? askPossibility(() => adminRegionPossibility(regionInput)) : null,
+  );
 
   async function loadRegion() {
     const id = $identity;
@@ -304,6 +406,8 @@
       // Non-fatal: the section stays at its fresh-install defaults if
       // fauna.admin.region.get is unreachable — mirrors loadServingPort.
       error = t.admin.nest_page.region_load_error({ message: detail(e) });
+    } finally {
+      regionRead = true;
     }
   }
 
@@ -329,16 +433,17 @@
     }
   }
 
-  // Validate client-side via the shared `adminParseRegionCode` (invalid →
-  // `error-message`, no dispatch — the serving-port shape); the `Err` this
-  // discards is the shared engine's own i18n KEY, not a display string, so
-  // this always renders its own local `region_invalid` message.
+  // The shared `regionAnswer` refuses a malformed code on `error-message`
+  // with its own reason, no dispatch (the serving-port shape); once possible
+  // the shared `adminParseRegionCode` names the code to send.
   function saveRegion() {
-    const code = adminParseRegionCode(regionInput);
-    if (code === undefined) {
-      error = t.admin.nest_page.region_invalid;
+    const refusal = formRefusal(regionAnswer);
+    if (refusal !== null) {
+      if (refusal) error = refusal;
       return;
     }
+    const code = adminParseRegionCode(regionInput);
+    if (code === undefined) return;
     setRegion(code);
   }
 
@@ -816,19 +921,37 @@
   let factoryResetting = $state(false);
   let factoryResetError = $state('');
 
+  // Every entry reads the whole page (a `goto()` of this route does not
+  // remount it); when the nest comes back, the read-gated reads still
+  // unanswered read again, so a control painted *failed to load* recovers
+  // without a navigation. A re-read that fails after one succeeded keeps the
+  // earlier answer (`readFailed`).
+  readOnEntryAndReconnect(
+    async () => {
+      await Promise.allSettled([
+        loadPairing(),
+        loadServingPort(),
+        loadRegion(),
+        loadFeatureLimits(),
+        loadWebOrigin(),
+        loadUpdateChannel(),
+        loadOsMaintenance(),
+        loadNatMode(),
+        loadOauthKeys(),
+        loadReports(),
+        loadRules(),
+        loadBlocked(),
+      ]);
+    },
+    async () => {
+      await Promise.allSettled([
+        pairingRead === 'resolved' ? null : loadPairing(),
+        servingPortRead === 'resolved' ? null : loadServingPort(),
+      ]);
+    },
+  );
+
   onMount(() => {
-    loadPairing();
-    loadServingPort();
-    loadRegion();
-    loadFeatureLimits();
-    loadWebOrigin();
-    loadUpdateChannel();
-    loadOsMaintenance();
-    loadNatMode();
-    loadOauthKeys();
-    loadReports();
-    loadRules();
-    loadBlocked();
     // Re-count the retired keys' minutes while the page stays open; the rows
     // re-read the clock on each tick (`oauthRows`).
     const oauthTicker = setInterval(() => (oauthTick += 1), 15_000);
@@ -840,7 +963,9 @@
     if (!id?.secretHex) return;
     try {
       pairingEnabled = (await adminServicesList(id.secretHex)).pairing;
+      pairingRead = 'resolved';
     } catch (e) {
+      pairingRead = readFailed(pairingRead);
       error = t.admin.nest_page.load_settings_error({ message: detail(e) });
     }
   }
@@ -849,6 +974,11 @@
   // state (proving the write landed in the nest, not merely echoed) — mirroring
   // linux's reflective service-row pattern.
   async function togglePairing() {
+    const refusal = formRefusal(pairingAnswer);
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
     const id = $identity;
     if (!id?.secretHex || pairingEnabled === null) return;
     error = '';
@@ -870,25 +1000,30 @@
       const status = await setupStatus(id.secretHex);
       servingPort = String(status.serving_port);
       servingPortFronted = status.fronted_by_router === true;
+      servingPortRead = 'resolved';
     } catch (e) {
-      // Non-fatal: the field stays at its default if setup-status is unreachable.
+      // The field and save stay blocked with the failure: the default in the
+      // field is not a port the nest holds.
+      servingPortRead = readFailed(servingPortRead);
       error = t.admin.nest_page.load_serving_port_error({ message: detail(e) });
     }
   }
 
-  // Validate a u16 in [1, 65535] client-side via fauna_core::format::parse_port
-  // (invalid → `error-message`, no dispatch), else write via `set_serving_port`
+  // The shared `servingPortAnswer` refuses a port outside [1, 65535] on
+  // `error-message` with its reason (no dispatch), else write via `set_serving_port`
   // and re-read the persisted port (proving the write landed, not merely
   // echoed). The new port binds on the next nest restart. Mirrors the
   // admin-calendar CalDAV-port save.
   async function saveServingPort() {
+    const refusal = formRefusal(servingPortAnswer);
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
     const id = $identity;
     if (!id?.secretHex) return;
     const port = parsePort(servingPort);
-    if (port === undefined) {
-      error = t.admin.nest_page.serving_port_invalid;
-      return;
-    }
+    if (port === undefined) return;
     error = '';
     servingPortSaving = true;
     try {
@@ -1053,10 +1188,12 @@
         class="btn toggle"
         class:on={pairingEnabled === true}
         data-testid={IDS.ADMIN_SERVICE_PAIRING_TOGGLE}
+        title={pairingGate.reason}
+        data-reason={reasonAttr(pairingGate)}
         onclick={togglePairing}
         use:offlineGate={{
           kind: 'fauna.admin.services.update',
-          disabled: pairingToggling || pairingEnabled === null,
+          disabled: pairingGate.disabled || pairingEnabled === null,
         }}
       >{pairingEnabled ? t.common.disable : t.common.enable}</button>
     </div>
@@ -1077,15 +1214,19 @@
         class="port-input"
         data-testid={IDS.ADMIN_NEST_SERVING_PORT_INPUT}
         bind:value={servingPort}
-        disabled={servingPortSaving || servingPortFronted}
+        disabled={servingPortReadGate.disabled || servingPortFronted}
+        title={servingPortReadGate.reason}
+        data-reason={reasonAttr(servingPortReadGate)}
       />
       <button
         type="button"
         class="btn"
         data-testid={IDS.ADMIN_NEST_SERVING_PORT_SAVE_BUTTON}
+        title={formGate(servingPortAnswer).reason}
+        data-reason={reasonAttr(formGate(servingPortAnswer))}
         use:offlineGate={{
           kind: 'fauna.admin.set_serving_port',
-          disabled: servingPortSaving || servingPortFronted,
+          disabled: servingPortSaving || servingPortFronted || formGate(servingPortAnswer).disabled,
         }}
         onclick={saveServingPort}
       >
@@ -1108,8 +1249,10 @@
         name="admin-nat-mode"
         value="public"
         data-testid={IDS.ADMIN_NEST_NAT_MODE_PUBLIC_RADIO}
-        checked={natMode === 'public'}
-        disabled={natInflight}
+        checked={natSelectAnswer?.state === 'possible' && natMode === 'public'}
+        disabled={natSelectGate.disabled}
+        title={natSelectGate.reason}
+        data-reason={reasonAttr(natSelectGate)}
         onchange={() => selectNatMode('public')}
       />
       {t.onboarding.nat_mode.public_label}
@@ -1121,8 +1264,10 @@
         name="admin-nat-mode"
         value="private"
         data-testid={IDS.ADMIN_NEST_NAT_MODE_PRIVATE_RADIO}
-        checked={natMode === 'private'}
-        disabled={natInflight}
+        checked={natSelectAnswer?.state === 'possible' && natMode === 'private'}
+        disabled={natSelectGate.disabled}
+        title={natSelectGate.reason}
+        data-reason={reasonAttr(natSelectGate)}
         onchange={() => selectNatMode('private')}
       />
       {t.onboarding.nat_mode.private_label}
@@ -1134,7 +1279,9 @@
         type="button"
         class="btn"
         data-testid={IDS.ADMIN_NEST_NAT_MODE_SAVE_BUTTON}
-        use:offlineGate={{ kind: 'fauna.setup.nat_mode', disabled: !natSaveEnabled }}
+        title={natSaveGate.reason}
+        data-reason={reasonAttr(natSaveGate)}
+        use:offlineGate={{ kind: 'fauna.setup.nat_mode', disabled: natSaveGate.disabled }}
         onclick={saveNatMode}
       >
         {t.admin.nest_page.nat_mode_save}
@@ -1144,7 +1291,11 @@
 </section>
 
 <!-- Web-app origin (fauna.admin.web_app_origin.{get,set}) — admin.md § N Nest →
-     Web-app origin. Placed directly after NAT mode, mirroring its radio shape. -->
+     Web-app origin. Placed directly after NAT mode, mirroring its radio shape.
+     Painted only where the shared view's section_possibility is shown, the central
+     radio only where central_possibility is (web-content-hosting.md § While the
+     central origin is not live, the choice is not offered). -->
+{#if webOrigin && webOriginShown.section}
 <section class="section" data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_SECTION}>
   <div class="nat-mode-card">
     <div class="service-name">{t.admin.nest_page.web_app_origin_label}</div>
@@ -1156,30 +1307,30 @@
         value="bundled"
         data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_BUNDLED_RADIO}
         checked={webOriginDraft === 'bundled'}
-        disabled={!webOrigin?.can_set || webOriginSaving}
+        disabled={webOriginGate.disabled || webOriginSaving}
+        title={webOriginGate.reason}
         onchange={() => (webOriginDraft = 'bundled')}
       />
       {t.admin.nest_page.web_app_origin_bundled}
     </label>
-    <label class="nat-radio">
-      <input
-        type="radio"
-        name="admin-web-app-origin"
-        value="central"
-        data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_CENTRAL_RADIO}
-        checked={webOriginDraft === 'central'}
-        disabled={!webOrigin?.can_set || webOriginSaving}
-        onchange={() => (webOriginDraft = 'central')}
-      />
-      {webOrigin
-        ? resolveLocalized(webOrigin.central_label)
-        : t.admin.nest_page.web_app_origin_loading}
-    </label>
+    {#if webOriginShown.central}
+      <label class="nat-radio">
+        <input
+          type="radio"
+          name="admin-web-app-origin"
+          value="central"
+          data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_CENTRAL_RADIO}
+          checked={webOriginDraft === 'central'}
+          disabled={webOriginGate.disabled || webOriginSaving}
+          title={webOriginGate.reason}
+          onchange={() => (webOriginDraft = 'central')}
+        />
+        {resolveLocalized(webOrigin.central_label)}
+      </label>
+    {/if}
     <div class="nat-actions">
       <span class="service-desc" data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_STATUS}>
-        {webOrigin
-          ? resolveLocalized(webOrigin.status)
-          : t.admin.nest_page.web_app_origin_loading}
+        {resolveLocalized(webOrigin.status)}
       </span>
       <button
         type="button"
@@ -1187,18 +1338,18 @@
         data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_SAVE_BUTTON}
         use:offlineGate={{
           kind: 'fauna.admin.web_app_origin.set',
-          disabled: !webOrigin?.can_set || !webOriginDraft || webOriginSaving,
+          disabled: webOriginSaveGate.disabled || !webOriginDraft || webOriginSaving,
         }}
+        title={webOriginSaveGate.reason}
         onclick={saveWebOrigin}
       >
         {t.admin.nest_page.web_app_origin_save}
       </button>
     </div>
-    {#if webOrigin}
-      <div class="service-desc">{resolveLocalized(webOrigin.scope)}</div>
-    {/if}
+    <div class="service-desc">{resolveLocalized(webOrigin.scope)}</div>
   </div>
 </section>
+{/if}
 
 <!-- Update channel (fauna.admin.update_channel.{get,set}) — admin.md § N Nest →
      Update channel. Placed directly after the web-app origin, mirroring its radio
@@ -1219,7 +1370,8 @@
               ? IDS.ADMIN_NEST_UPDATE_CHANNEL_TEST_RADIO
               : IDS.ADMIN_NEST_UPDATE_CHANNEL_DEV_RADIO}
           checked={updateChannelDraft === option.channel}
-          disabled={!updateChannel?.can_set || updateChannelSaving}
+          disabled={updateChannelGate.disabled || updateChannelSaving}
+          title={updateChannelGate.reason}
           onchange={() => (updateChannelDraft = option.channel)}
         />
         {resolveLocalized(option.label)}
@@ -1238,8 +1390,9 @@
         data-testid={IDS.ADMIN_NEST_UPDATE_CHANNEL_SAVE_BUTTON}
         use:offlineGate={{
           kind: 'fauna.admin.update_channel.set',
-          disabled: !updateChannel?.can_set || !updateChannelDraft || updateChannelSaving,
+          disabled: updateChannelGate.disabled || !updateChannelDraft || updateChannelSaving,
         }}
+        title={updateChannelGate.reason}
         onclick={saveUpdateChannel}
       >
         {t.admin.nest_page.update_channel_save}
@@ -1289,7 +1442,11 @@
         type="button"
         class="btn"
         data-testid={IDS.ADMIN_NEST_REGION_SAVE_BUTTON}
-        use:offlineGate={{ kind: 'fauna.admin.region.set', disabled: regionWorking }}
+        title={formGate(regionAnswer).reason}
+        use:offlineGate={{
+          kind: 'fauna.admin.region.set',
+          disabled: regionWorking || formGate(regionAnswer).disabled,
+        }}
         onclick={saveRegion}
       >
         {t.admin.nest_page.region_save}

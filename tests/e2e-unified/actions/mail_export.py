@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from helpers.budgets import UI_SETTLE_S
 from helpers.waiting import wait_until
 
 if TYPE_CHECKING:
@@ -36,6 +37,42 @@ class MailExportActions:
     def __init__(self, driver: PlatformDriver):
         self.driver = driver
 
+    def _press_live(self, element_id: str) -> None:
+        """Wait for ``element_id`` to be live, then press it.
+
+        A press the app refuses as disabled after the wait saw it live means
+        the control went blocked in between; the refusal alone says only
+        "disabled", so the failure names what the app painted at that moment —
+        the control's enabled state and reason, the connection word and its
+        report count (convention 6)."""
+        self.driver.wait_until_enabled(element_id, timeout=UI_SETTLE_S)
+        try:
+            self.driver.click(element_id)
+        except RuntimeError as e:
+            if "element is disabled" not in str(e):
+                raise
+            raise AssertionError(
+                f"{element_id} was live, then refused the press as disabled: "
+                f"{self._why_blocked(element_id)}"
+            ) from e
+
+    def _why_blocked(self, element_id: str) -> str:
+        parts = []
+        try:
+            parts.append(self.driver.diagnose(element_id, attrs=("enabled", "reason")))
+        except Exception as e:  # noqa: BLE001 — diagnostic only
+            parts.append(f"<diagnose: {type(e).__name__}: {e}>")
+        for key in ("connection", "connection_reports"):
+            try:
+                parts.append(f"{key}={self.driver.get_state(key)!r}")
+            except Exception as e:  # noqa: BLE001 — diagnostic only
+                parts.append(f"{key}=<{type(e).__name__}: {e}>")
+        try:
+            parts.append(f"error-message={self.error_text()!r}")
+        except Exception as e:  # noqa: BLE001 — diagnostic only
+            parts.append(f"error-message=<{type(e).__name__}: {e}>")
+        return " | ".join(parts)
+
     def navigate(self) -> None:
         """Navigate to the mail-export Settings sub-page (sidebar-swap shell on
         linux; the sub-id is ignored on single-scroll clients)."""
@@ -57,10 +94,12 @@ class MailExportActions:
 
         ``error-message`` is built hidden — absent from the registry, not
         merely empty — when there's nothing to show (`ErrorBanner.swift`), so
-        an unguarded `get_text` 404s on a clean page. Check visibility first,
-        matching `ActionLayer._message_from_element`.
+        an unguarded `get_text` 404s on a clean page. Check presence first,
+        with ``is_absent``, never ``is_visible`` — windows' ``is_visible`` is
+        ``!IsOffscreen``, so an error bar scrolled above the viewport would read
+        as ``""`` (`MailImportActions.error_text`, the same page shape).
         """
-        if not self.driver.is_visible("error-message"):
+        if self.driver.is_absent("error-message"):
             return ""
         try:
             return self.driver.get_text("error-message")
@@ -78,7 +117,8 @@ class MailExportActions:
         self.driver.select("mail-export-format-picker", label)
         wait_until(
             lambda: self.selected_format() == label, 5.0, interval=0.1,
-            diagnose=lambda: f"picker shows {self.selected_format()!r}, wanted {label!r}",
+            diagnose=lambda: f"picker shows {self.selected_format()!r}, wanted {label!r}; "
+            f"{self._why_blocked('mail-export-format-picker')}",
         )
 
     def selected_format(self) -> str:
@@ -96,10 +136,38 @@ class MailExportActions:
         serve the ``options`` attr (`drivers/base.py::option_texts`)."""
         return self.driver.option_texts("mail-export-format-picker")
 
+    # (an id only one step paints, the id the step its Next opens paints) —
+    # Format → Scope, Scope → Confirm.
+    _NEXT_OPENS = (
+        ("mail-export-format-picker", "mail-export-scope-strip-headers-toggle"),
+        ("mail-export-scope-strip-headers-toggle", "mail-export-start-button"),
+    )
+
     def next(self) -> None:
-        """Step 1→2 or step 2→3 — the shared wizard Next (same id both steps)."""
-        self.driver.wait_for("wizard-next-button", timeout=10.0)
-        self.driver.click("wizard-next-button")
+        """Step 1→2 or step 2→3 — the shared wizard Next (same id both steps).
+
+        Waits for it to be live, as the person does: the Scope step's Next is
+        painted from the machine's scope answer (`mail-export.md` § *Next and
+        Start offer only an export that can start*) — blocked until the
+        mailbox list has arrived — and every app paints a nest-bound control
+        blocked while its connection is not up. A test that means to witness a
+        blocked Next reads it with ``is_enabled`` instead.
+
+        Returns once the next step has painted. The press reaches the machine
+        as an asynchronous op (tui's ``Op::MailExportDispatch``), so the click
+        answers while the old step is still on screen under the same Next id;
+        a second ``next()`` straight after would read the Format step's Next as
+        live, press it, and land the press on a Scope step whose Next is still
+        blocked — refused, and the wizard stays on Scope. Where a step's id is
+        not painted (or both are), the wait degrades to none."""
+        self.driver.wait_until_enabled("wizard-next-button", timeout=UI_SETTLE_S)
+        opens = next(
+            (there for here, there in self._NEXT_OPENS if self.driver.is_visible(here)),
+            None,
+        )
+        self._press_live("wizard-next-button")
+        if opens is not None:
+            self.driver.wait_for(opens, timeout=UI_SETTLE_S)
 
     def back(self) -> None:
         """Step 2→1 or step 3→2 — the shared wizard Back."""
@@ -152,11 +220,26 @@ class MailExportActions:
         self.driver.clear_and_type("mail-export-scope-date-to", value)
 
     def toggle_strip_headers(self) -> None:
+        """Flip the transit-header strip; returns once the toggle paints the
+        flipped state. The press reaches the machine as an asynchronous op and
+        the toggle reads back from its snapshot (never a click echo), so a read
+        straight after the click can still show the old state."""
+        # The Scope step paints a beat after the Next that opens it.
+        self.driver.wait_for("mail-export-scope-strip-headers-toggle", timeout=10.0)
+        was_on = self.strip_headers_on()
         self.driver.click("mail-export-scope-strip-headers-toggle")
+        wait_until(
+            lambda: self.strip_headers_on() != was_on, UI_SETTLE_S, interval=0.2,
+            diagnose=lambda: (
+                f"the strip toggle still reads {'on' if was_on else 'off'} after the "
+                f"press; error-message: {self.error_text()!r}"
+            ),
+        )
 
     def strip_headers_on(self) -> bool:
         """Whether the transit-header strip is on — the toggle's ``state``
         attribute, the contract every app serves (as for the mailbox rows)."""
+        self.driver.wait_for("mail-export-scope-strip-headers-toggle", timeout=10.0)
         return self.driver.get_attr("mail-export-scope-strip-headers-toggle", "state") == "on"
 
     # ── step 3 — confirm / commit ─────────────────────────────────────────
@@ -216,7 +299,8 @@ class MailExportActions:
         return self.driver.get_text("mail-export-done-summary")
 
     def download(self) -> None:
-        self.driver.click("mail-export-download-button")
+        # Painted blocked while it cannot run — waited for, as the person does.
+        self._press_live("mail-export-download-button")
 
     def discard(self) -> None:
         self.driver.click("mail-export-discard-button")

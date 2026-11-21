@@ -2250,8 +2250,12 @@ class TestActivityPubInboundIngest:
         actor on ANOTHER server than the post's, leaves the post as it was in
         your feed; the post's own author's `Update` and `Delete` then land.
 
-        Flow: bob's note ingested (`deliver_note`) → mallory on `127.0.0.2`
-        (another host to `inbox_routes::same_origin`, which ignores ports)
+        Flow: bob's note ingested (`deliver_note`) → mallory on `localhost`
+        (another host to `inbox_routes::same_origin`, which compares host
+        strings and ignores ports; the nest dials the name `localhost` at
+        `127.0.0.1` — `fauna_core::resolve::loopback_dial_addr` — so it is a
+        second server on every platform, macOS included, whose loopback holds
+        `127.0.0.1` alone and refuses a bind on `127.0.0.2`)
         signs a `Delete`, then an `Update{Note}` claiming bob's authorship →
         the by-id read still answers bob's words and the feed lists them once
         → bob's own `Update` replaces the words → bob's own `Delete` removes
@@ -2266,7 +2270,7 @@ class TestActivityPubInboundIngest:
         assert any(original in b for b in feed_bodies(nest_a, user)), "precondition"
 
         forged = "words bob never wrote"
-        with FakeFollower(find_free_port(), username="mallory", host="127.0.0.2") as mallory:
+        with FakeFollower(find_free_port(), username="mallory", host="localhost") as mallory:
             self._delete(mallory, inbox, note_id)
             self._update_note(mallory, inbox, note_id, fake_follower.actor_uri, forged)
 

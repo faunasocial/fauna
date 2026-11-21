@@ -311,7 +311,7 @@ async fn a_writes_with_the_nest_down() -> WriterA {
         fauna_core::encoding::canonical_decode(&retained.bytes).unwrap();
     let mut chunks = HashMap::new();
     let mut nest_chunks = Vec::new();
-    for key in manifest.store_keys() {
+    for key in manifest.store_keys().unwrap() {
         let body = engine
             .serve_chunk(&key.digest())
             .await

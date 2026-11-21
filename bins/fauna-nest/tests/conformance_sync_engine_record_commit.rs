@@ -113,6 +113,7 @@ fn nest_router_swallowing_deletes() -> (RpcRouter, Arc<std::sync::atomic::Atomic
             {
                 let reply = fauna_protocol::encode_canonical(&SyncChangeRecordReply {
                     seq,
+                    prev_set_seq: None,
                     extra: Default::default(),
                 })
                 .unwrap();

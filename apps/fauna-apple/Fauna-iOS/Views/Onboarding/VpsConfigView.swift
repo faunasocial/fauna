@@ -15,7 +15,7 @@ struct VpsConfigView: View {
                     ErrorBanner(message: error)
                 }
 
-                ProviderRow(
+                ProviderButtonRow(
                     providers: PROVIDERS.filter { $0.capabilities.contains(.vps) && !$0.curatedOffers.isEmpty },
                     selectedId: vm.machine.vpsConfig().selectedProviderId,
                     kind: "vps",
@@ -36,19 +36,14 @@ struct VpsConfigView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .frame(maxWidth: .infinity)
-                .disabled(!vm.machine.canContinueVps())
                 .accessibilityIdentifier(Ids.vpsConfigContinueButton)
-                .automationActivate(Ids.vpsConfigContinueButton,
-                                    isEnabled: { vm.machine.canContinueVps() }) {
+                .automationActivate(Ids.vpsConfigContinueButton) {
                     Task { try? await vm.machine.continueFromVps() }
                 }
-                // Copy comprehensibility rule 5 — why Continue is disabled
-                // (`ui/README.md` § Copy comprehensibility).
-                if !vm.machine.canContinueVps(), let reason = vm.machine.vpsContinueBlockedReason() {
-                    Text(renderLocalizedText(reason))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                // Enabled and the reason are the shared answer's
+                // (`ui/README.md` § Offer only what is possible, rule 6).
+                .faunaPossible(vm.machine.vpsContinuePossibility())
+                FaunaPossibilityReason(vm.machine.vpsContinuePossibility())
             }
             .padding()
         }

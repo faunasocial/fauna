@@ -556,6 +556,7 @@ def test_a_switched_off_topic_learns_nothing_and_switching_off_keeps_what_it_lea
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("learn-from-my-activity")
 def test_what_one_device_collected_informs_the_feeds_on_your_other_device(
     request, logged_in_app, nest_instance, test_user
@@ -1782,6 +1783,7 @@ def _video_cards(app) -> str:
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("learn-from-my-activity")
 def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
     logged_in_app, nest_instance, test_user
@@ -2218,6 +2220,7 @@ UNOPENABLE_ROLLUP = b"not a sealed cue rollup -- the open must refuse it"
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("learn-from-my-activity")
 def test_saved_activity_data_that_cannot_be_opened_is_reported_not_started_over(
     logged_in_app, nest_instance, test_user

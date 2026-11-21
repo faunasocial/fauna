@@ -58,9 +58,9 @@ Stamped 2026-11-07 at 6a0ded1015.
 | linux | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
 | windows | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
 | macos | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
-| ios | ⚠ partial | 0.1.5-dev+662ece79 standalone |
+| ios | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| tui | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

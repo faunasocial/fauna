@@ -3926,6 +3926,7 @@ async fn seed_delivered_segment(state: &Arc<AppState>) -> [u8; 32] {
         stored_hashes: None,
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     let body = fauna_core::encoding::canonical_encode(&manifest).unwrap();
     seed_blob(state, &body, "manifest").await

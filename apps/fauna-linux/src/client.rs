@@ -1,19 +1,19 @@
 use fauna_client::{AuthClient, MultipartBlob, NestClient, NestClientError};
 use fauna_client_caldav::{
-    AnonAttendeeDiscovery, AttendeeInfo, CalDavClient, DavRecipientKeys, DecodedEventsPage,
+    AnonAttendeeDiscovery, AttendeeInfo, CalDavClient, CalendarsRead, DavRecipientKeys,
+    DecodedEventsPage,
     bridge_routing::{DeleteEventRequest, ProvisionCalendarRequest, QueryEventsRequest},
     delta_sync::{BackstopVerdict, CalendarSyncTokens, backstop_probe},
     dispatch_imip_request, imip_reply_for_rsvp, imip_request_for_invite, uid_hash,
 };
 use fauna_client_carddav::{
-    CardDavClient, DecodedCardsPage, addressbook_row,
-    bridge_routing::{ListAddressbooksRequest, QueryCardsRequest},
-    vcard_row,
+    CardDavClient, DecodedCardsPage, addressbook_row, bridge_routing::QueryCardsRequest, vcard_row,
 };
 use fauna_client_config::{DavStoreContext, dav_store_context};
 use fauna_client_conversations::{ConversationsClient, NestImipDispatch};
 use fauna_client_recovery::linked_fanout::native::NativeLinkedNestDial;
 use fauna_core::identity::{ActorId, ActorKeypair};
+use fauna_core::possibility::ReadState;
 use fauna_core::rsvp::RsvpResponse;
 use fauna_core::secret::SecretString;
 use fauna_nest_http::paths;
@@ -531,19 +531,28 @@ impl FaunaClient {
     }
 
     #[cfg(test)]
-    fn offline_for_test() -> Self {
-        let (tx, rx) = ui_channel();
+    pub(crate) fn offline_for_test() -> Self {
+        let (client, rx) = Self::offline_for_test_with_rx();
         std::mem::forget(rx);
+        client
+    }
+
+    /// [`Self::offline_for_test`] keeping the receiver, so a test can read
+    /// what a press sent (a local refusal is a `FailedLocalized` message).
+    #[cfg(test)]
+    pub(crate) fn offline_for_test_with_rx() -> (Self, mpsc::Receiver<UiMessage>) {
+        let (tx, rx) = ui_channel();
         let machine = fauna_launch_machine::LaunchMachine::new(
             std::sync::Arc::new(fauna_launch_machine::NullObserver),
             std::sync::Arc::new(fauna_launch_machine::InMemoryPersistence::new()),
         );
-        Self::new(
+        let client = Self::new(
             "http://127.0.0.1:1".to_string(),
             "22".repeat(32),
             tx,
             machine,
-        )
+        );
+        (client, rx)
     }
 
     /// Build a dedicated `AuthClient` for the in-process file-sync engine.
@@ -612,22 +621,28 @@ impl FaunaClient {
     /// connects as on any launch — or the machine reaches a verdict a retry
     /// cannot change (refused, identity changed, outdated, …), where it stops.
     /// The loop lives on this client's runtime, so it ends with the session.
+    ///
+    /// **A retried failure is a gap in reaching the nest, not an
+    /// authentication verdict** ([`session_mint_failure_message`]): it shows on
+    /// the `connection-status` indicator — "Connecting…", then "Cannot
+    /// connect" — and never on the app-wide error banner, which outlived the
+    /// sign-in it described. Only a verdict a retry cannot
+    /// change paints `AuthFailed`.
     pub fn authenticate(&self) {
-        use fauna_launch_machine::LaunchPhase;
         use fauna_protocol::reconnect::{Backoff, JitterRng};
         use fauna_ws_substrate::supervisor::{INITIAL_BACKOFF, MAX_BACKOFF};
 
         let tx = self.tx.clone();
         let machine = Arc::clone(&self.machine);
 
-        self.spawn_bg(async move {
+        self.spawn_untracked(async move {
             machine.refresh_token().await;
             let mut backoff = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
             let mut jitter = JitterRng::from_entropy();
-            let mut failure_painted = false;
+            let mut failures: u32 = 0;
             loop {
                 if machine.current_bearer().is_some() {
-                    if failure_painted {
+                    if failures > 0 {
                         // The FaunaClient was built off `Online`, so the TTL
                         // refresh loop it spawned returned at once; arm it now
                         // the machine holds a bearer again.
@@ -638,16 +653,11 @@ impl FaunaClient {
                     }));
                     return;
                 }
+                failures = failures.saturating_add(1);
                 let snapshot = machine.snapshot();
-                let retryable = matches!(snapshot.phase, LaunchPhase::Offline { transient: true })
-                    && !snapshot.sign_in_refused;
-                if !failure_painted || !retryable {
-                    let error = snapshot
-                        .last_error
-                        .unwrap_or_else(|| crate::i18n::strings::errors::AUTH_FAILED.to_string());
-                    tx.send(UiMessage::Data(DataMessage::AuthFailed { error }));
-                    failure_painted = true;
-                }
+                let message = session_mint_failure_message(&snapshot, failures);
+                let retryable = matches!(message, UiMessage::Realtime(_));
+                tx.send(message);
                 if !retryable {
                     return;
                 }
@@ -684,7 +694,7 @@ impl FaunaClient {
             return;
         };
         let tx = self.tx.clone();
-        self.spawn_bg(async move {
+        self.spawn_untracked(async move {
             // The shared follower judges every value against the session's
             // actor (`fauna_client::SelfIdentityFollower`) and ends on
             // another's.
@@ -1210,34 +1220,25 @@ impl FaunaClient {
 
     /// Fetch all calendars for the authenticated user from the encrypted
     /// `bridge_caldav_*` store via `fauna.bridges.list_calendars` (events.md
-    /// Decision B). When the actor has no calendars yet, the Personal calendar
-    /// is lazily provisioned (`personal_calendar_id()`, byte-identical to the
-    /// MDA's) so the page always has at least one selectable calendar. Degrades
-    /// to an empty list when the calendar key is unavailable (mail/CalDAV not
-    /// enabled — see [`caldav_context`]).
+    /// Decision B), as the shared four-answer read (`ui/events.md` § Errors &
+    /// edge cases → *No calendar to hold an event*, ruling 2): custody decides
+    /// *unresolved* and *no key* without a call; with the key the shared load
+    /// (the lazy `Personal` included) answers *loaded* or *provision failed*.
+    /// An empty list is none of the answers, so the page never paints one as
+    /// "No calendars yet.". `fauna.setup.status` is read only on *no key*,
+    /// the one answer whose reason it changes.
     pub fn fetch_calendars(&self) {
         self.fetch_refused_changes();
         let nest = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         let secret_hex = self.secret_hex.clone();
         self.spawn_bg(async move {
-            let Some(DavStoreContext { actor_id, msek, prior_mseks }) = caldav_context(&nest, &secret_hex).await else {
-                tx.send(UiMessage::Data(DataMessage::CalendarsLoaded {
-                    calendars: vec![],
-                }));
-                return;
-            };
-            let client = CalDavClient::new(Arc::clone(&nest));
-            // The shared load: lazy-provisions Personal so a fresh actor
-            // always has a calendar, and hands back the provision error to
-            // log — a silent failure reads as "no calendars".
-            let entries = match client.list_calendars_with_personal(&actor_id, &msek).await {
-                Ok(reply) => {
-                    if let Some(e) = &reply.personal_provision_error {
-                        tracing::error!("fetch_calendars: lazy Personal: {e}");
-                    }
-                    reply.calendars
-                }
+            let custody = caldav_custody(&secret_hex).await;
+            let read = match CalDavClient::new(Arc::clone(&nest))
+                .read_calendars(&custody)
+                .await
+            {
+                Ok(read) => read,
                 Err(e) => {
                     tx.send(UiMessage::Action(ActionResult::Failed {
                         context: "fauna.bridges.list_calendars".into(),
@@ -1246,30 +1247,25 @@ impl FaunaClient {
                     return;
                 }
             };
-            // Surface (don't silently `.ok()`-drop) an entry that fails to
-            // decode: a calendar whose sealed metadata the client can't open —
-            // e.g. a non-canonical-CBOR producer (the MDA lazy-Personal bug) or
-            // an msek mismatch — would otherwise just vanish from the list.
-            // Derived once for the whole list — every row's metadata reuses it
-            // instead of paying its own X-Wing keygen .
-            let dav_keys = DavRecipientKeys::from_mseks(fauna_client_caldav::DavKind::Calendar, &msek, &prior_mseks);
-            let calendars: Vec<_> = entries
-                .iter()
-                .filter_map(
-                    |e| match caldav_backend::calendar_row_from_entry(e, &dav_keys) {
-                        Ok(row) => Some(row),
-                        Err(err) => {
-                            tracing::error!(
-                                "fetch_calendars: decode entry (cal_id={}, meta_len={}) failed: {err}",
-                                fauna_core::format::hex_full(&e.calendar_id),
-                                e.encrypted_metadata.len()
-                            );
-                            None
-                        }
-                    },
-                )
-                .collect();
-            tx.send(UiMessage::Data(DataMessage::CalendarsLoaded { calendars }));
+            if let CalendarsRead::ProvisionFailed { error } = &read {
+                tracing::error!("fetch_calendars: lazy Personal: {error}");
+            }
+            let (calendars, unreadable) = match (&custody, &read) {
+                (
+                    fauna_client_config::DavCustody::Ready(DavStoreContext {
+                        msek,
+                        prior_mseks,
+                        ..
+                    }),
+                    CalendarsRead::Loaded { calendars: entries },
+                ) => calendar_rows(entries, msek, prior_mseks),
+                _ => (vec![], 0),
+            };
+            tx.send(UiMessage::Data(DataMessage::CalendarsLoaded {
+                read: read.state(),
+                calendars,
+                unreadable,
+            }));
         });
     }
 
@@ -1285,12 +1281,18 @@ impl FaunaClient {
         let secret_hex = self.secret_hex.clone();
         let name = name.to_string();
         self.spawn_bg(async move {
-            let Some(DavStoreContext { actor_id, msek, .. }) =
-                caldav_context(&nest, &secret_hex).await
+            // A key lost between the paint and the act refuses as the
+            // predicate's "loading" — the mint is in flight — never as
+            // "calendar requires mail" (`ui/events.md` § *The other calendar
+            // writes*, rule 1).
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
             else {
-                tx.send(UiMessage::Action(ActionResult::Failed {
-                    context: "calendar_created".into(),
-                    error: crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.into(),
+                tx.send(UiMessage::Action(ActionResult::FailedLocalized {
+                    message: calendar_key_not_ready(),
                 }));
                 return;
             };
@@ -1309,7 +1311,7 @@ impl FaunaClient {
             // the only deterministic one (shared with the MDA).
             let calendar_id = uid_hash(&format!("{}@fauna-desktop", uuid::Uuid::new_v4()));
             let client = CalDavClient::new(nest);
-            let msg = match client
+            if let Err(e) = client
                 .provision_calendar(ProvisionCalendarRequest {
                     actor_id: actor_id.to_vec(),
                     calendar_id: calendar_id.to_vec(),
@@ -1318,15 +1320,45 @@ impl FaunaClient {
                 })
                 .await
             {
-                Ok(_) => UiMessage::Action(ActionResult::Success {
-                    context: "calendar_created".into(),
-                }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
+                tx.send(UiMessage::Action(ActionResult::Failed {
                     context: "fauna.bridges.provision_calendar".into(),
                     error: e.to_string(),
-                }),
+                }));
+                return;
+            }
+            // The re-listing is the read: one with no calendar is its
+            // *provision failed* answer and says that sentence (rule 3, never
+            // only logged); a loaded one repaints the page, its unreadable
+            // calendars counted.
+            let listing = match client.list_calendars_with_personal(&actor_id, &msek).await {
+                Ok(listing) => listing,
+                Err(e) => {
+                    tx.send(UiMessage::Action(ActionResult::Failed {
+                        context: "fauna.bridges.list_calendars".into(),
+                        error: e.to_string(),
+                    }));
+                    return;
+                }
             };
-            tx.send(msg);
+            let read = CalendarsRead::from_listing(listing);
+            match &read {
+                CalendarsRead::Loaded { calendars: entries } => {
+                    let (calendars, unreadable) = calendar_rows(entries, &msek, &prior_mseks);
+                    tx.send(UiMessage::Data(DataMessage::CalendarsLoaded {
+                        read: read.state(),
+                        calendars,
+                        unreadable,
+                    }));
+                    tx.send(UiMessage::Action(ActionResult::Success {
+                        context: "calendar_created".into(),
+                    }));
+                }
+                _ => {
+                    tx.send(UiMessage::Action(ActionResult::FailedLocalized {
+                        message: calendar_write_refusal(&read.state()),
+                    }));
+                }
+            }
         });
     }
 
@@ -1444,39 +1476,23 @@ impl FaunaClient {
     /// `cfg.mail.msek` as CalDAV, so [`caldav_context`] supplies both the actor
     /// id and the sealing key. Read-only (slice 4b): no lazy provisioning — the
     /// lazy "Contacts" book appears once a CardDAV MUA (or a future write slice)
-    /// PUTs the first card. Degrades to an empty list when mail/CardDAV isn't
-    /// enabled (no `msek` minted yet), mirroring `fetch_calendars`.
+    /// PUTs the first card. Goes through the shared typed read
+    /// (`CardDavClient::read_addressbooks`): a custody with no key yet (the
+    /// mint at first connect in flight) or not readable yet answers
+    /// *unresolved* with no call — the segment paints loading, never an empty
+    /// address book (`ui/contacts.md` § Errors & edge cases), and the
+    /// store-change notice re-runs it — mirroring `fetch_calendars`.
     pub fn fetch_addressbooks(&self) {
         let nest = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         let secret_hex = self.secret_hex.clone();
         self.spawn_bg(async move {
-            let Some(DavStoreContext {
-                actor_id,
-                msek,
-                prior_mseks,
-            }) = caldav_context(&nest, &secret_hex).await
-            else {
-                tx.send(UiMessage::Data(DataMessage::AddressbooksLoaded {
-                    addressbooks: vec![],
-                }));
-                return;
-            };
-            let client = CardDavClient::new(Arc::clone(&nest));
-            let decoded = match client
-                .list_addressbooks_decoded(
-                    ListAddressbooksRequest {
-                        actor_id: actor_id.to_vec(),
-                    },
-                    &DavRecipientKeys::from_mseks(
-                        fauna_client_caldav::DavKind::Card,
-                        &msek,
-                        &prior_mseks,
-                    ),
-                )
+            let custody = caldav_custody(&secret_hex).await;
+            let read = match CardDavClient::new(Arc::clone(&nest))
+                .read_addressbooks(&custody)
                 .await
             {
-                Ok(books) => books,
+                Ok(read) => read,
                 Err(e) => {
                     tx.send(UiMessage::Action(ActionResult::Failed {
                         context: "fauna.bridges.list_addressbooks".into(),
@@ -1485,8 +1501,9 @@ impl FaunaClient {
                     return;
                 }
             };
-            let addressbooks = decoded.iter().map(addressbook_row).collect();
+            let addressbooks = read.addressbooks().iter().map(addressbook_row).collect();
             tx.send(UiMessage::Data(DataMessage::AddressbooksLoaded {
+                read: read.state(),
                 addressbooks,
             }));
         });
@@ -1628,66 +1645,47 @@ impl FaunaClient {
     /// Create a new event in the encrypted store: build the canonical VEVENT
     /// from the form params (the reused `fauna_core::ical` writer), seal it, and
     /// PUT it via `fauna.bridges.put_event_ciphertext`. `params` carries the
-    /// `calendar_id` and a freshly-minted `uid` (its `blake3` is the dedup key).
-    pub fn create_event(&self, params: serde_json::Value) {
+    /// `calendar_id` (resolved by the compose through the shared
+    /// `event_create_target`, so never empty) and a freshly-minted `uid` (its
+    /// `blake3` is the dedup key).
+    ///
+    /// The result goes back to the compose that sent it, `on_done` running on
+    /// the GTK thread with `Err(cause)` when the create was refused
+    /// (`ui/events.md` § *No calendar to hold an event*, ruling 4: the form
+    /// says so and stays open, never a toast or the app-wide banner). A
+    /// success also posts `ActionResult::Success { context: "event_created" }`,
+    /// whose handler re-reads the calendars and clears the drafts rail.
+    pub fn create_event(
+        &self,
+        params: serde_json::Value,
+        on_done: impl FnOnce(Result<(), String>) + 'static,
+    ) {
         let nest = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         let secret_hex = self.secret_hex.clone();
         let self_email = self.self_email();
-        self.spawn_bg(async move {
-            let cal_hex = params
-                .get("calendar_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let uid = params
-                .get("uid")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("{}@fauna-desktop", uuid::Uuid::new_v4()));
-            let Some(cal_id) = hex32(&cal_hex) else {
-                tx.send(UiMessage::Action(ActionResult::Failed {
-                    context: "event_created".into(),
-                    error: crate::i18n::strings::errors::NO_CALENDAR_SELECTED.into(),
-                }));
-                return;
-            };
-            let Some(DavStoreContext { actor_id, msek, .. }) =
-                caldav_context(&nest, &secret_hex).await
-            else {
-                tx.send(UiMessage::Action(ActionResult::Failed {
-                    context: "event_created".into(),
-                    error: crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.into(),
-                }));
-                return;
-            };
-            let fields = caldav_backend::event_fields_from_params(&params, &uid);
-            let client = CalDavClient::new(nest);
-            let msg = match client
-                .seal_and_put_event(
-                    &actor_id,
-                    &cal_id,
-                    &uid_hash(&uid),
-                    &msek,
-                    &fields,
-                    &[],
-                    &self_email,
-                    None,
-                    now_secs(),
-                    None,
-                )
-                .await
-            {
-                Ok(_) => UiMessage::Action(ActionResult::Success {
-                    context: "event_created".into(),
-                }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.bridges.put_event_ciphertext".into(),
-                    error: e.to_string(),
-                }),
-            };
-            tx.send(msg);
-        });
+        crate::async_helper::spawn_with_snapshot(
+            &self.runtime_handle(),
+            move || async move {
+                let result = put_new_event(nest, secret_hex, self_email, params).await;
+                if result.is_ok() {
+                    tx.send(UiMessage::Action(ActionResult::Success {
+                        context: "event_created".into(),
+                    }));
+                }
+                result
+            },
+            on_done,
+        );
+    }
+
+    /// Report a failure on the page's own `error-message` (and its toast) as
+    /// a whole sentence — for a compose whose result arrived after the person
+    /// closed it (`ui/events.md` § *No calendar to hold an event*, ruling 4:
+    /// the page takes the report only when no form is open).
+    pub fn report_on_page(&self, message: String) {
+        self.tx
+            .send(UiMessage::Action(ActionResult::FailedLocalized { message }));
     }
 
     /// Delete an event from the encrypted store via `fauna.bridges.delete_event`,
@@ -2162,12 +2160,12 @@ impl FaunaClient {
             let Some(cal_id) = hex32(&cal_hex) else {
                 return;
             };
+            // No key at the act is the predicate's "loading" (rule 1).
             let Some(DavStoreContext { actor_id, msek, .. }) =
                 caldav_context(&nest, &secret_hex).await
             else {
-                tx.send(UiMessage::Action(ActionResult::Failed {
-                    context: "ics_import".into(),
-                    error: crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.into(),
+                tx.send(UiMessage::Action(ActionResult::FailedLocalized {
+                    message: calendar_key_not_ready(),
                 }));
                 return;
             };
@@ -2244,12 +2242,23 @@ impl FaunaClient {
     /// shape. What the shared `FeedComposeState::clear_sent` then decides the
     /// composer paints from the snapshot (`ui/feed.md` § User actions,
     /// `post-submit-button`).
-    pub fn submit_post(&self, manager: Arc<LinuxFeedManager>, text: String, tags: String) {
+    ///
+    /// `on_done` runs on the GTK thread with whether the post was saved — the
+    /// compose dialog closes on `true` only (`ui/README.md` § Offer only what
+    /// is possible, rule 7); a failure is already stamped on `compose-error`.
+    pub fn submit_post(
+        &self,
+        manager: Arc<LinuxFeedManager>,
+        text: String,
+        tags: String,
+        on_done: impl FnOnce(bool) + 'static,
+    ) {
         let nest = Arc::clone(&self.content_api);
-        let staged = self.staged_attachment.borrow_mut().take();
         let Some(rt) = self.runtime.borrow().as_ref().map(|r| r.handle().clone()) else {
+            on_done(false);
             return;
         };
+        let staged = self.staged_attachment.borrow_mut().take();
         crate::async_helper::spawn_with_snapshot(
             &rt,
             move || async move {
@@ -2365,7 +2374,7 @@ impl FaunaClient {
                     Err(_) => false,
                 }
             },
-            |_sent: bool| {},
+            on_done,
         );
     }
 
@@ -2503,20 +2512,45 @@ impl FaunaClient {
         post_id: &str,
         text: &str,
         public_confirmed: bool,
+        on_done: impl FnOnce(Result<(), String>) + 'static,
     ) {
         let manager = Arc::clone(manager);
         let nest = Arc::clone(&self.content_api);
         let tx = self.tx.clone();
         let (post_id, text) = (post_id.to_string(), text.to_string());
-        self.spawn_bg(async move {
-            let msg = match send_reply(&manager, &nest, post_id, text, public_confirmed).await {
-                Ok(()) => UiMessage::Action(ActionResult::Success {
-                    context: "post_reply".into(),
-                }),
-                Err(e) => UiMessage::Action(interact_failure(e)),
-            };
-            tx.send(msg);
-        });
+        let Some(rt) = self.runtime.borrow().as_ref().map(|r| r.handle().clone()) else {
+            on_done(Err(crate::i18n::strings::common::ERROR.to_string()));
+            return;
+        };
+        // `on_done` gets the save's own result on the GTK thread: the reply
+        // dialog closes only on `Ok`, and a failure stays in it with the typed
+        // text (`ui/README.md` § Offer only what is possible, rule 7). The
+        // action message still goes out as before.
+        crate::async_helper::spawn_with_snapshot(
+            &rt,
+            move || async move {
+                let result = send_reply(&manager, &nest, post_id, text, public_confirmed).await;
+                let (msg, shown) = match &result {
+                    Ok(()) => (
+                        UiMessage::Action(ActionResult::Success {
+                            context: "post_reply".into(),
+                        }),
+                        Ok(()),
+                    ),
+                    Err(e) => {
+                        let failure = interact_failure(e.clone());
+                        let shown = match &failure {
+                            ActionResult::FailedLocalized { message } => message.clone(),
+                            _ => e.clone(),
+                        };
+                        (UiMessage::Action(failure), Err(shown))
+                    }
+                };
+                tx.send(msg);
+                shown
+            },
+            on_done,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2542,16 +2576,7 @@ impl FaunaClient {
             .map(|s| s.moderation_local_detections())
             .unwrap_or_default();
         self.spawn_bg(async move {
-            let client = fauna_client_moderation::ModerationClient::new(nest_rpc);
-            let msg = match client.actions().await {
-                Ok(reply) => UiMessage::Data(DataMessage::ModerationActionsLoaded {
-                    rows: fauna_client_moderation::merge_queue(&reply.actions, &local),
-                }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.moderation.actions".into(),
-                    error: e.to_string(),
-                }),
-            };
+            let msg = moderation_queue_message(nest_rpc, &local).await;
             tx.send(msg);
         });
     }
@@ -2577,60 +2602,71 @@ impl FaunaClient {
     /// ham correction to the tier-1 model with the same post-decrypt text the
     /// classifier saw (`mail-spam.md` § Encrypted-mode interaction — only the
     /// client can train on content the nest cannot read).
+    ///
+    /// The local correction trains FIRST and removes the flag only after
+    /// ([`correct_local_detection`]): a train dispatch that FAILED keeps the
+    /// flag and says so on `error-message`, so the person can try again rather
+    /// than lose the correction (`moderation.md` § Errors & edge cases;
+    /// `docs/goal/ui/README.md` § Offer only what is possible, rule 7). A
+    /// degraded `Ok` (mail not enabled, a nest without sealed-at-rest) stays
+    /// silent and removes the flag, as does a body that aged out or no
+    /// machine — the tui `moderation::Op::Correct` twin.
     pub fn correct_moderation_row(&self, content_id: &str, is_local: bool) {
-        if is_local {
-            if let Some(session) = crate::conversations::conv_backend::active_session() {
-                // Read the retained plaintext BEFORE removing the flag (the
-                // detection row and the message store are independent, but keep
-                // the read-then-clear order obvious). `None` once the message
-                // aged out — the correction is then flag-removal only, as it
-                // was before the client write path existed.
-                let body = session.moderation_message_body(content_id.to_string());
-                session.moderation_remove_local_detection(content_id.to_string());
-                if let Some(text) = body {
-                    self.train_spam_model_client_side(text, false);
-                }
-            }
-            self.fetch_moderation_actions();
-        } else {
+        if !is_local {
             self.train_moderation(content_id, "ham");
+            return;
         }
-    }
-
-    /// Feed one train event to the **client-side** sealed tier-1 model write
-    /// (`MailSettingsMachine::train_spam_model_client`) for text the client
-    /// already holds (a post-decrypt local detection). Fire-and-forget off the
-    /// UI thread: a `sealed` outcome surfaces the standard `moderation_trained`
-    /// toast; a `ServerPath` outcome is silent — for client-only content there
-    /// is no server row to train against (the nest cannot read it), so the
-    /// flag removal alone was the correction, exactly as before 1d.
-    fn train_spam_model_client_side(&self, text: String, is_spam: bool) {
-        let Ok(machine) = crate::mail_glue::build_mail_settings_machine(self) else {
+        let Some(session) = crate::conversations::conv_backend::active_session() else {
+            self.fetch_moderation_actions();
             return;
         };
+        let content_id = content_id.to_string();
+        // Read the retained plaintext BEFORE the flag can go. `None` once the
+        // message aged out — the correction is then flag-removal only.
+        let body = session
+            .moderation_message_body(content_id.clone())
+            .filter(|text| !text.trim().is_empty());
+        let machine = body
+            .as_ref()
+            .and_then(|_| crate::mail_glue::build_mail_settings_machine(self).ok());
+        let train = body.zip(machine).map(|(text, machine)| async move {
+            machine
+                .train_spam_model_client(text, false)
+                .await
+                .map(|res| res.sealed)
+                .map_err(|e| e.to_string())
+        });
+        let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            match machine.train_spam_model_client(text, is_spam).await {
-                Ok(res) if res.sealed => {
-                    tx.send(UiMessage::Action(ActionResult::Success {
-                        context: "moderation_trained".into(),
-                    }));
-                }
-                Ok(_) => {}
-                Err(e) => {
+            let flag_session = Arc::clone(&session);
+            let outcome = correct_local_detection(train, move || {
+                flag_session.moderation_remove_local_detection(content_id);
+            })
+            .await;
+            match outcome {
+                LocalCorrection::Trained => tx.send(UiMessage::Action(ActionResult::Success {
+                    context: "moderation_trained".into(),
+                })),
+                LocalCorrection::Silent => {}
+                LocalCorrection::Failed(error) => {
                     tx.send(UiMessage::Action(ActionResult::Failed {
                         context: "moderation_trained".into(),
-                        error: e.to_string(),
-                    }));
+                        error,
+                    }))
                 }
             }
+            // Repaint the queue from the store as it now stands (the flag
+            // gone, or kept after a failed train).
+            let local = session.moderation_local_detections();
+            tx.send(moderation_queue_message(nest_rpc, &local).await);
         });
     }
 
     /// Mark a received **conversation/mail message** as spam — the live `Insert`
     /// consumer (`mail-spam.md` § Encrypted-mode interaction + § Wire shapes
     /// `put_spam_model` `history_op`). The mail-surface twin of
-    /// [`Self::train_spam_model_client_side`]: it trains the sealed tier-1 model
+    /// the local moderation correction ([`Self::correct_moderation_row`]): it trains the sealed tier-1 model
     /// over the message's retained decrypted `body` **and** writes a **sealed
     /// training-history row** (subject + n-gram delta sealed to the actor's own
     /// key) via `train_spam_model_client_mail`, so the `mail-spam` page renders it
@@ -4518,6 +4554,19 @@ impl FaunaClient {
         &self,
         action: fauna_client_mail_settings::local_domains::LocalDomainAction,
     ) {
+        self.dispatch_admin_local_domain_form(action, None);
+    }
+
+    /// [`Self::dispatch_admin_local_domain`] for a form's save: once the
+    /// dispatch succeeded (and only then), `form` is reported saved after the
+    /// snapshot ships, so the page closes it and drops what was typed; a failed
+    /// save leaves it open with the typed input (`dns-management.md` § Errors &
+    /// edge cases, *Forms close only once saved*).
+    fn dispatch_admin_local_domain_form(
+        &self,
+        action: fauna_client_mail_settings::local_domains::LocalDomainAction,
+        form: Option<crate::views::admin::DnsForm>,
+    ) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
         let machine = self.admin_local_domain_machine();
         let dns = action
@@ -4537,6 +4586,9 @@ impl FaunaClient {
             tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
                 snapshot: machine.snapshot(),
             }));
+            if let Some(form) = form.filter(|_| ok) {
+                tx.send(UiMessage::Data(DataMessage::AdminDnsFormSaved { form }));
+            }
         });
     }
 
@@ -4572,10 +4624,13 @@ impl FaunaClient {
     /// (`mail-bridge-lifecycle.md` § DKIM provisioning) — the client mints no key.
     pub fn add_local_domain(&self, domain: String) {
         use fauna_client_mail_settings::local_domains::{DEFAULT_CERT_MODE, LocalDomainAction};
-        self.dispatch_admin_local_domain(LocalDomainAction::AddDomain {
-            domain,
-            mta_sts_cert_mode: DEFAULT_CERT_MODE.to_string(),
-        });
+        self.dispatch_admin_local_domain_form(
+            LocalDomainAction::AddDomain {
+                domain,
+                mta_sts_cert_mode: DEFAULT_CERT_MODE.to_string(),
+            },
+            Some(crate::views::admin::DnsForm::AddDomain),
+        );
     }
 
     /// Open the remove-confirm dialog for `domain` on the persistent machine
@@ -4682,10 +4737,13 @@ impl FaunaClient {
     /// (mail-primary-domain-rename.md § UX surface). No HTTP.
     pub fn start_primary_rename(&self, new_primary_domain_id: Vec<u8>, grace_days: Option<i64>) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        self.dispatch_admin_local_domain(LocalDomainAction::StartPrimaryRename {
-            new_primary_domain_id,
-            grace_days,
-        });
+        self.dispatch_admin_local_domain_form(
+            LocalDomainAction::StartPrimaryRename {
+                new_primary_domain_id,
+                grace_days,
+            },
+            Some(crate::views::admin::DnsForm::RenameSheet),
+        );
     }
 
     /// Finalize the in-flight primary-domain rename (admin) from the `admin-dns`
@@ -4756,6 +4814,7 @@ impl FaunaClient {
             let _ = machine.dispatch(BridgeApprovalAction::Refresh).await;
             tx.send(UiMessage::Data(DataMessage::AdminPendingBridgesLoaded {
                 snapshot: machine.snapshot(),
+                read: machine.read_state(),
             }));
         });
     }
@@ -4775,6 +4834,7 @@ impl FaunaClient {
                 .await;
             tx.send(UiMessage::Data(DataMessage::AdminPendingBridgesLoaded {
                 snapshot: machine.snapshot(),
+                read: machine.read_state(),
             }));
         });
     }
@@ -4798,16 +4858,25 @@ impl FaunaClient {
     /// rotation — the rotated bridge re-enrolls and auto-approves on a
     /// mail-enabled box, `mail-bridge-lifecycle.md` § Service-user re-keying),
     /// re-reads, and the shipped snapshot reflects the post-mutation rosters.
-    pub fn confirm_bridge(&self) {
+    ///
+    /// The press's synchronous half claims the armed act first
+    /// (`BridgeApprovalMachine::begin_confirm`): a press while an act is on its
+    /// way — or with nothing armed — returns the machine's
+    /// `confirm_possibility` answer and sends nothing (`admin.md` § Errors &
+    /// edge cases, *Controls wait for their read*).
+    pub fn confirm_bridge(&self) -> Result<(), fauna_core::possibility::Possibility> {
         use fauna_client_mail_settings::BridgeApprovalAction;
         let machine = self.bridge_machine();
+        crate::views::admin::begin_bridge_confirm(&machine)?;
         let tx = self.tx.clone();
         self.spawn_bg(async move {
             let _ = machine.dispatch(BridgeApprovalAction::Confirm).await;
             tx.send(UiMessage::Data(DataMessage::AdminPendingBridgesLoaded {
                 snapshot: machine.snapshot(),
+                read: machine.read_state(),
             }));
         });
+        Ok(())
     }
 
     /// Fetch the nest-wide custody-hosting registry
@@ -4886,6 +4955,7 @@ impl FaunaClient {
             let _ = machine.dispatch(ForwarderAction::Refresh).await;
             tx.send(UiMessage::Data(DataMessage::AdminForwardersLoaded {
                 snapshot: machine.snapshot(),
+                read: machine.read_state(),
             }));
         });
     }
@@ -4910,6 +4980,7 @@ impl FaunaClient {
                 .await;
             tx.send(UiMessage::Data(DataMessage::AdminForwardersLoaded {
                 snapshot: machine.snapshot(),
+                read: machine.read_state(),
             }));
         });
     }
@@ -4928,6 +4999,7 @@ impl FaunaClient {
                 .await;
             tx.send(UiMessage::Data(DataMessage::AdminForwardersLoaded {
                 snapshot: machine.snapshot(),
+                read: machine.read_state(),
             }));
         });
     }
@@ -5097,6 +5169,13 @@ impl FaunaClient {
             tx.send(UiMessage::Data(DataMessage::AdminDnsRecordsLoaded {
                 snapshot: machine.snapshot(),
             }));
+            // The write-only form closes, and its secrets go, only once the
+            // credential verified and was sealed; a rejection leaves it open.
+            if put_result.is_ok() {
+                tx.send(UiMessage::Data(DataMessage::AdminDnsFormSaved {
+                    form: crate::views::admin::DnsForm::AddCredential,
+                }));
+            }
         });
     }
 
@@ -5457,7 +5536,7 @@ impl FaunaClient {
     /// once, at the AuthSuccess post-auth hook (tui's `session::establish`
     /// spawns the same). Best-effort / log-only.
     pub fn spawn_mail_epoch_refresh_on_every_connect(&self) {
-        self.spawn_bg(
+        self.spawn_untracked(
             fauna_client_mail_settings::rpc_glue::refresh_epoch_schedule_on_every_connect(
                 self.nest_rpc(),
                 crate::account_runtime::mail_store(),
@@ -5548,7 +5627,7 @@ impl FaunaClient {
         };
         let identity = format!("{}@{}", actor_id.to_hex(), nest_rpc.nest_url());
         let (arm, ticket) = LOOP_CLAIM.claim(&identity, &nest_rpc, &alerts);
-        self.spawn_bg(async move {
+        self.spawn_untracked(async move {
             let _ticket = ticket;
             match arm {
                 SweepArm::OnePass => {
@@ -5704,16 +5783,24 @@ impl FaunaClient {
                 return;
             }
         };
-        self.spawn_bg(
-            fauna_client_mail_settings::rpc_glue::dispatch_post_claim_serving_enablement(
-                Arc::clone(&self.nest_rpc),
-                keypair,
-                crate::account_runtime::mail_store(),
-                self.node_url().to_string(),
-                crate::account_runtime::ledger_seam(),
-                intents,
-            ),
+        let run = fauna_client_mail_settings::rpc_glue::dispatch_post_claim_serving_enablement(
+            Arc::clone(&self.nest_rpc),
+            keypair,
+            crate::account_runtime::mail_store(),
+            self.node_url().to_string(),
+            crate::account_runtime::ledger_seam(),
+            intents,
         );
+        // The step retries a passing failure itself; a refusal for good is
+        // logged by the step and said on the current page's `error-message`
+        // (`onboarding.md` § 3b *The step completes*), as tui does.
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let report = run.await;
+            if let Some(msg) = serving_enablement_refusal_message(&report) {
+                tx.send(msg);
+            }
+        });
     }
 
     /// Factory-reset this nest (admin "Danger zone" affordance, `admin-settings`).
@@ -6136,18 +6223,25 @@ impl FaunaClient {
     /// Every account on the nest for the admin actor pickers
     /// (`fauna_client_admin::users_list_all`; `admin.md` § 2 → *Which accounts a
     /// picker offers*), read beside each users page so the page and the pickers
-    /// arrive in one `AdminUsersLoaded`. `None` on failure — the pickers then keep
-    /// the list they had rather than an emptied one.
+    /// arrive in one `AdminUsersLoaded`. A failure is the error line, never a
+    /// silently empty picker (`admin.md` § 2 → *Which accounts a picker
+    /// offers*): the caller sends it to `error-message` and the pickers keep the
+    /// list they had rather than an emptied one.
     async fn picker_users_read<R: fauna_protocol::RpcRequester>(
         admin: &fauna_client_admin::AdminClient<R>,
-    ) -> Option<Vec<fauna_client_admin::AdminUser>> {
-        match fauna_client_admin::users_list_all(admin).await {
-            Ok(users) => Some(users),
-            Err(e) => {
-                tracing::warn!("fauna.admin.users.list (every account, for the pickers): {e}");
-                None
-            }
-        }
+    ) -> Result<Vec<fauna_client_admin::AdminUser>, String> {
+        fauna_client_admin::users_list_all(admin)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// A failed every-account read reaches `error-message` (rule 7 of
+    /// `docs/goal/ui/README.md` § Offer only what is possible).
+    fn report_picker_users_failure(tx: &UiSender, error: String) {
+        tx.send(UiMessage::Action(ActionResult::Failed {
+            context: "load accounts".into(),
+            error,
+        }));
     }
 
     /// Fetch registered users (admin only) over `fauna.admin.users.list`.
@@ -6161,7 +6255,10 @@ impl FaunaClient {
             let msg = match admin.users_list(None, 0).await {
                 Ok(reply) => UiMessage::Data(DataMessage::AdminUsersLoaded {
                     reply,
-                    picker_users: Self::picker_users_read(&admin).await,
+                    picker_users: Self::picker_users_read(&admin)
+                        .await
+                        .map_err(|error| Self::report_picker_users_failure(&tx, error))
+                        .ok(),
                 }),
                 Err(e) => UiMessage::Action(ActionResult::Failed {
                     context: "fauna.admin.users.list".into(),
@@ -6185,7 +6282,10 @@ impl FaunaClient {
             let msg = match admin.users_list(limit, offset).await {
                 Ok(reply) => UiMessage::Data(DataMessage::AdminUsersLoaded {
                     reply,
-                    picker_users: Self::picker_users_read(&admin).await,
+                    picker_users: Self::picker_users_read(&admin)
+                        .await
+                        .map_err(|error| Self::report_picker_users_failure(&tx, error))
+                        .ok(),
                 }),
                 Err(e) => UiMessage::Action(ActionResult::Failed {
                     context: "fauna.admin.users.list".into(),
@@ -7329,7 +7429,30 @@ impl FaunaClient {
     /// has already been torn down by `shutdown()` — so a leaked GTK signal
     /// closure that fires after sign-out (the window widget-tree cycle keeps a
     /// few alive) silently does nothing instead of panicking on a dead handle.
+    ///
+    /// A one-shot read: owed in [`crate::async_helper::reads_owed`] until the
+    /// future has finished, i.e. after its last `UiSender::send`. A task that
+    /// never finishes by design goes through [`Self::spawn_untracked`].
+    #[track_caller]
     fn spawn_bg<F>(&self, fut: F)
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        if let Some(rt) = self.runtime.borrow().as_ref() {
+            let owed = crate::async_helper::ReadOwed::new();
+            rt.spawn(async move {
+                let out = fut.await;
+                drop(owed);
+                out
+            });
+        }
+    }
+
+    /// [`Self::spawn_bg`] for a task that lives as long as the session (a push
+    /// listener, a reconnect or retry-until-signed-in loop): never counted as
+    /// a read owed, or the count would never return to zero.
+    fn spawn_untracked<F>(&self, fut: F)
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
@@ -7553,7 +7676,7 @@ impl FaunaClient {
         }
         let nest_rpc_state = Arc::clone(&nest_rpc);
         let session_actor = self.actor_id();
-        self.spawn_bg(async move {
+        self.spawn_untracked(async move {
             let mut cs_rx = nest_rpc_state.connection_state();
             // Emit the initial state once.
             let initial = *cs_rx.borrow_and_update();
@@ -7584,7 +7707,7 @@ impl FaunaClient {
         // which fires `Connected` on the initial connect too. transport.md § Push
         // events: observers re-pull through their snapshot-refresh path.
         let nest_rpc_reconn = Arc::clone(&nest_rpc);
-        self.spawn_bg(async move {
+        self.spawn_untracked(async move {
             let mut rx = nest_rpc_reconn.subscribe_reconnects();
             while rx.changed().await.is_ok() {
                 let _ = *rx.borrow_and_update();
@@ -7598,7 +7721,7 @@ impl FaunaClient {
         // when every sender is dropped (the broker is `Arc`d alongside
         // `NestClient`), so it indicates terminal shutdown.
         let nest_rpc_push = Arc::clone(&nest_rpc);
-        self.spawn_bg(async move {
+        self.spawn_untracked(async move {
             let mut pushes = nest_rpc_push.subscribe_pushes();
             loop {
                 match pushes.recv().await {
@@ -7639,7 +7762,7 @@ impl FaunaClient {
             // fired by nothing.
             let wake = fauna_core::loop_wake::LoopWake::default();
             *self.auto_renew_wake.borrow_mut() = Some(wake.clone());
-            self.spawn_bg(async move {
+            self.spawn_untracked(async move {
                 let machine = crate::mail_glue::build_dns_management_machine_with_credentials(
                     Arc::clone(&nest_rpc_renew),
                     keypair,
@@ -8322,6 +8445,21 @@ impl FaunaClient {
     /// a follow-on). Owner-only per `docs/goal/ui/folders.md` § Sharing.
     /// `access`: the invited member's grant from `folder-share-role-select` —
     /// `Some("writer")` for read-write, `None` = reader (multi-writer Phase 1).
+    /// Whether the folder follow/share ops have what they need from this
+    /// client: the signed-in identity secret (the nest channel and the devices
+    /// machine are held whenever a `FaunaClient` is) — the `ready` input of
+    /// `fauna_client_folders::forms::follow_possibility`.
+    pub fn folder_ops_ready(&self) -> bool {
+        ActorKeypair::from_secret_hex(&self.secret_hex).is_ok()
+    }
+
+    /// The share's `ready`: [`Self::folder_ops_ready`] AND the live
+    /// conversations session the share admits the recipient through
+    /// (`fauna_client_folders::forms::share_possibility`).
+    pub fn folder_share_ready(&self) -> bool {
+        self.folder_ops_ready() && crate::conversations::conv_backend::active_session().is_some()
+    }
+
     pub fn share_folder(
         &self,
         machine: Arc<fauna_devices_machine::DevicesMachine>,
@@ -8642,18 +8780,26 @@ impl FaunaClient {
     /// The creator's own subscription tier names (ascending by rank) — the option
     /// set the `folder-paywall-tier-select` offers. Returns a `Send`
     /// future the Folders view drives off the GTK thread and caches, mirroring
-    /// [`can_serve_webdav`](Self::can_serve_webdav). A failed read (or no tiers)
-    /// degrades to an empty list — the select renders disabled with a "create a
-    /// tier first" hint, since there is nothing to paywall to.
+    /// [`can_serve_webdav`](Self::can_serve_webdav), with where the read
+    /// stands: a failed read is `Failed` with no names, so the select is painted
+    /// from the shared `own_tiers_possibility` as "failed to load", never as
+    /// "create a tier first" (`folders.md` § Errors & edge cases, *Own-tier and
+    /// mail gates*).
     pub fn fetch_own_tier_names(
         &self,
-    ) -> impl std::future::Future<Output = Vec<String>> + Send + 'static {
+    ) -> impl std::future::Future<Output = (ReadState, Vec<String>)> + Send + 'static {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         async move {
             let subs = fauna_client_subscriptions::SubscriptionsClient::new(nest_rpc);
             match subs.tiers_list().await {
-                Ok(tiers) => tiers.into_iter().map(|t| t.name).collect(),
-                Err(_) => Vec::new(),
+                Ok(tiers) => (
+                    ReadState::Resolved,
+                    tiers.into_iter().map(|t| t.name).collect(),
+                ),
+                Err(e) => {
+                    tracing::warn!("folders: own tiers read failed: {e}");
+                    (ReadState::Failed, Vec::new())
+                }
             }
         }
     }
@@ -8663,18 +8809,35 @@ impl FaunaClient {
     /// the Folders view can drive it off the GTK thread through
     /// `async_helper::spawn_with_snapshot` and cache the answer.
     ///
-    /// A failed read degrades to `false` — the toggle stays disabled + hinted.
-    /// Not offering a control is the safe failure; offering one that cannot
-    /// succeed is not (`serve_set_folder` commits the nest flag before it can
-    /// discover the missing MSEK).
-    pub fn can_serve_webdav(&self) -> impl std::future::Future<Output = bool> + Send + 'static {
+    /// Answers where the custody read stands beside what it found: a failed
+    /// read is `Failed`, which the toggle paints (through the shared
+    /// `webdav_serve_possibility`) as "failed to load" — still not offered,
+    /// since `serve_set_folder` commits the nest flag before it can discover a
+    /// missing MSEK, but never mistold as "set up mail".
+    pub fn can_serve_webdav(
+        &self,
+    ) -> impl std::future::Future<Output = (ReadState, bool)> + Send + 'static {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let secret_hex = self.secret_hex.clone();
         async move {
-            do_can_serve_webdav(&nest_rpc, &secret_hex)
-                .await
-                .unwrap_or(false)
+            match do_can_serve_webdav(&nest_rpc, &secret_hex).await {
+                Ok(holds) => (ReadState::Resolved, holds),
+                Err(e) => {
+                    tracing::warn!("folders: mail custody read failed: {e}");
+                    (ReadState::Failed, false)
+                }
+            }
         }
+    }
+
+    /// Refuse a gesture with its possibility answer's reason on the shared
+    /// `error-message` banner — the press half of a painted control, never a
+    /// silent return.
+    pub fn refuse_gesture(&self, context: &str, reason: String) {
+        self.tx.send(UiMessage::Action(ActionResult::Failed {
+            context: context.into(),
+            error: reason,
+        }));
     }
 
     /// Fetch the recipient-side **pending folder shares** — the staged
@@ -9008,6 +9171,99 @@ impl FaunaClient {
                 })),
             }
         });
+    }
+}
+
+/// The moderation queue's read, as the message the GTK loop paints: the
+/// server `fauna.moderation.actions` rows merged with the client's `local`
+/// detections through the shared `merge_queue`, or the read's failure.
+async fn moderation_queue_message(
+    nest_rpc: Arc<NestClient>,
+    local: &[fauna_client_moderation::LocalDetection],
+) -> UiMessage {
+    let client = fauna_client_moderation::ModerationClient::new(nest_rpc);
+    match client.actions().await {
+        Ok(reply) => UiMessage::Data(DataMessage::ModerationActionsLoaded {
+            rows: fauna_client_moderation::merge_queue(&reply.actions, local),
+        }),
+        Err(e) => UiMessage::Action(ActionResult::Failed {
+            context: "fauna.moderation.actions".into(),
+            error: e.to_string(),
+        }),
+    }
+}
+
+/// What a local moderation correction came to.
+#[derive(Debug, PartialEq, Eq)]
+enum LocalCorrection {
+    /// The sealed model trained; the flag is gone (the `moderation_trained` toast).
+    Trained,
+    /// No train ran, or it degraded to an `Ok` no-op; the flag is gone, silently.
+    Silent,
+    /// The train dispatch failed; the flag STAYS, and this is said on
+    /// `error-message`.
+    Failed(String),
+}
+
+/// The local correction's order: train first (`train` answers whether the
+/// sealed model took it), and only then `remove_flag` — never on a failed
+/// train, so the person can try again (`moderation.md` § Errors & edge cases).
+/// `train` is `None` when there is nothing to train on (a body that aged out,
+/// no mail-settings machine): the correction is then flag-removal only.
+async fn correct_local_detection<F>(train: Option<F>, remove_flag: impl FnOnce()) -> LocalCorrection
+where
+    F: std::future::Future<Output = Result<bool, String>>,
+{
+    let outcome = match train {
+        Some(train) => match train.await {
+            Ok(true) => LocalCorrection::Trained,
+            Ok(false) => LocalCorrection::Silent,
+            Err(error) => return LocalCorrection::Failed(error),
+        },
+        None => LocalCorrection::Silent,
+    };
+    remove_flag();
+    outcome
+}
+
+#[cfg(test)]
+mod local_correction_tests {
+    use super::{LocalCorrection, correct_local_detection};
+    use std::cell::Cell;
+
+    type Train = std::future::Ready<Result<bool, String>>;
+
+    #[tokio::test]
+    async fn a_failed_train_keeps_the_flag_and_says_why() {
+        let removed = Cell::new(false);
+        let outcome = correct_local_detection(
+            Some(std::future::ready(Err::<bool, _>("no token".to_string()))),
+            || removed.set(true),
+        )
+        .await;
+        assert_eq!(outcome, LocalCorrection::Failed("no token".to_string()));
+        assert!(!removed.get(), "the flag stays after a failed train");
+    }
+
+    #[tokio::test]
+    async fn a_train_then_removes_the_flag_and_a_degraded_one_is_silent() {
+        let removed = Cell::new(false);
+        let outcome =
+            correct_local_detection(Some(std::future::ready(Ok(true))), || removed.set(true)).await;
+        assert_eq!(outcome, LocalCorrection::Trained);
+        assert!(removed.get());
+
+        let removed = Cell::new(false);
+        let outcome =
+            correct_local_detection(Some(std::future::ready(Ok(false))), || removed.set(true))
+                .await;
+        assert_eq!(outcome, LocalCorrection::Silent);
+        assert!(removed.get());
+
+        let removed = Cell::new(false);
+        let outcome = correct_local_detection(None::<Train>, || removed.set(true)).await;
+        assert_eq!(outcome, LocalCorrection::Silent);
+        assert!(removed.get(), "nothing to train on: flag-removal only");
     }
 }
 
@@ -10182,6 +10438,119 @@ fn attendee_rows(attendees: &[AttendeeInfo]) -> Vec<caldav_backend::CalDavAttend
         .collect()
 }
 
+/// Seal and put one new event — [`FaunaClient::create_event`]'s work, its
+/// refusal the cause the compose's sentence carries.
+async fn put_new_event(
+    nest: Arc<NestClient>,
+    secret_hex: SecretString,
+    self_email: String,
+    params: serde_json::Value,
+) -> Result<(), String> {
+    let cal_hex = params
+        .get("calendar_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let uid = params
+        .get("uid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{}@fauna-desktop", uuid::Uuid::new_v4()));
+    let cal_id = hex32(&cal_hex)
+        .ok_or_else(|| crate::i18n::strings::errors::NO_CALENDAR_SELECTED.to_string())?;
+    let DavStoreContext { actor_id, msek, .. } = caldav_context(&nest, &secret_hex)
+        .await
+        .ok_or_else(|| crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.to_string())?;
+    let fields = caldav_backend::event_fields_from_params(&params, &uid);
+    CalDavClient::new(nest)
+        .seal_and_put_event(
+            &actor_id,
+            &cal_id,
+            &uid_hash(&uid),
+            &msek,
+            &fields,
+            &[],
+            &self_email,
+            None,
+            now_secs(),
+            None,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Unseal each listed calendar's metadata into a row; a row that will not
+/// unseal is left out, logged and counted, so the page says so on
+/// `error-message` (`ui/events.md` § *The other calendar writes*, rule 3 —
+/// tui's `calendar_rows`). The recipient keys are derived once for the whole
+/// list — every row's metadata reuses them instead of paying its own X-Wing
+/// keygen.
+pub(crate) fn calendar_rows(
+    entries: &[fauna_client_caldav::bridge_routing::CalendarEntry],
+    msek: &[u8; 32],
+    prior_mseks: &[[u8; 32]],
+) -> (Vec<crate::rows::CalendarRow>, usize) {
+    let dav_keys =
+        DavRecipientKeys::from_mseks(fauna_client_caldav::DavKind::Calendar, msek, prior_mseks);
+    let rows: Vec<_> = entries
+        .iter()
+        .filter_map(
+            |e| match caldav_backend::calendar_row_from_entry(e, &dav_keys) {
+                Ok(row) => Some(row),
+                Err(err) => {
+                    tracing::error!(
+                        "calendar_rows: decode entry (cal_id={}, meta_len={}) failed: {err}",
+                        fauna_core::format::hex_full(&e.calendar_id),
+                        e.encrypted_metadata.len()
+                    );
+                    None
+                }
+            },
+        )
+        .collect();
+    let unreadable = entries.len() - rows.len();
+    (rows, unreadable)
+}
+
+/// The words a calendar write refuses on for a read that is not *loaded*:
+/// the shared write predicate's reason (`ui/events.md` § *The other calendar
+/// writes*, rule 1).
+pub(crate) fn calendar_write_refusal(read: &fauna_client_caldav::CalendarsReadState) -> String {
+    crate::form_gate::reason_text(&fauna_client_caldav::calendar_write_possibility(read))
+        .unwrap_or_else(calendar_key_not_ready)
+}
+
+/// The words a calendar write refuses on when custody holds no key at the act
+/// (lost between the paint and the act): the mint is in flight, so it is the
+/// predicate's "loading", never a step for the person (tui's `key_not_ready`).
+pub(crate) fn calendar_key_not_ready() -> String {
+    crate::form_gate::reason_text(&fauna_client_caldav::calendar_write_possibility(
+        &fauna_client_caldav::CalendarsReadState::Unresolved,
+    ))
+    .unwrap_or_default()
+}
+
+/// The calendar custody answer for the Events page's read (`ui/events.md`
+/// § *No calendar to hold an event*, rulings 2 and 5). A connection secret
+/// that does not parse is no answer about custody, so it reads as
+/// *unresolved* (logged) — tui's `caldav_custody`.
+async fn caldav_custody(secret_hex: &str) -> fauna_client_config::DavCustody {
+    match secret_to_keypair(secret_hex) {
+        Ok(kp) => {
+            fauna_client_config::dav_custody(
+                crate::account_runtime::mail_store().as_ref(),
+                kp.actor_id().0,
+            )
+            .await
+        }
+        Err(e) => {
+            tracing::error!("events: the connection secret does not parse: {e}");
+            fauna_client_config::DavCustody::Unreadable(e.to_string())
+        }
+    }
+}
+
 /// The actor's identity (`actor_id`) and mail-sealing key (`msek`) — the two
 /// inputs every encrypted-CalDAV op needs. `None` when the secret is malformed,
 /// the mail custody read fails, or mail/CalDAV is not enabled (no `msek` minted yet —
@@ -10344,6 +10713,72 @@ async fn apply_self_identity(handle: String, domain: String, tier: String, tx: &
         domain,
         tier,
     }));
+}
+
+/// What one failed sign-in of [`FaunaClient::authenticate`]'s loop says, after
+/// `consecutive_failures` in a row: the shared rule
+/// ([`fauna_launch_machine::LaunchSnapshot::session_mint_gap_word`]) reads a
+/// failure the machine will retry as a gap on the `connection-status` indicator
+/// (`transport-connection.md` § Connection-status indicator: a transient gap is
+/// never an error banner), so it is the matching `WsEvent`; anything else is the
+/// verdict, `AuthFailed` with the machine's own words. The loop retries exactly
+/// when this is a `Realtime` message.
+fn session_mint_failure_message(
+    snapshot: &fauna_launch_machine::LaunchSnapshot,
+    consecutive_failures: u32,
+) -> UiMessage {
+    use crate::app::WsEvent;
+    match snapshot.session_mint_gap_word(consecutive_failures) {
+        Some("unreachable") => UiMessage::Realtime(WsEvent::Unreachable),
+        Some(_) => UiMessage::Realtime(WsEvent::Connecting),
+        None => UiMessage::Data(DataMessage::AuthFailed {
+            error: snapshot
+                .last_error
+                .clone()
+                .unwrap_or_else(|| crate::i18n::strings::errors::AUTH_FAILED.to_string()),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod session_mint_failure_message_tests {
+    use super::*;
+    use crate::app::WsEvent;
+    use fauna_launch_machine::{LaunchPhase, LaunchSnapshot};
+
+    /// The 0.1.7 walk's failure — the nest's name did not resolve — reads
+    /// "Connecting…", then "Cannot connect", and never paints the banner; a
+    /// refusal still does.
+    #[test]
+    fn a_reach_failure_goes_on_the_indicator_and_a_refusal_on_the_banner() {
+        let gap = LaunchSnapshot {
+            phase: LaunchPhase::Offline { transient: true },
+            last_error: Some(
+                "WebSocket error: ws connect: IO error: failed to lookup address information"
+                    .into(),
+            ),
+            ..LaunchSnapshot::initial()
+        };
+        assert!(matches!(
+            session_mint_failure_message(&gap, 1),
+            UiMessage::Realtime(WsEvent::Connecting)
+        ));
+        let settled = fauna_core::format::CONNECTION_UNREACHABLE_AFTER_CONSECUTIVE_FAILURES;
+        assert!(matches!(
+            session_mint_failure_message(&gap, settled),
+            UiMessage::Realtime(WsEvent::Unreachable)
+        ));
+        let refused = LaunchSnapshot {
+            phase: LaunchPhase::Offline { transient: false },
+            sign_in_refused: true,
+            last_error: Some("refused".into()),
+            ..LaunchSnapshot::initial()
+        };
+        assert!(matches!(
+            session_mint_failure_message(&refused, 1),
+            UiMessage::Data(DataMessage::AuthFailed { error }) if error == "refused"
+        ));
+    }
 }
 
 /// The message a stopped supervisor's reason escalates as, if it is a
@@ -10532,7 +10967,9 @@ pub async fn load_selfhosted_recovery_command(
 /// recovery floor → *(c) The writes*) over `nest` and the account-store
 /// handle, mapping a run that ends with custody unconfirmed onto linux's
 /// app-wide `warning-message` banner (`UiMessage::RecoveryCustodyWarning`,
-/// app.rs) in the shared words, never a silent drop. Called from both edges: [`FaunaClient::run_deployment_seed_custody_leg`]
+/// app.rs) in the shared words, never a silent drop — and a later run that
+/// confirms custody (a reconnect's retry) onto taking that warning down
+/// (`UiMessage::RecoveryCustodyCleared`). Called from both edges: [`FaunaClient::run_deployment_seed_custody_leg`]
 /// (post-auth, when the store is already up) and `account_runtime::install`'s
 /// installed arm (store-ready, when post-auth already landed).
 pub async fn run_deployment_seed_custody_leg(
@@ -10540,13 +10977,19 @@ pub async fn run_deployment_seed_custody_leg(
     store: fauna_sync_engine::account_runtime::AccountStoreHandle,
     tx: UiSender,
 ) {
-    if let Some(warning) =
-        fauna_client_account_runtime::deployment_seeds::run_custody_leg(&nest, &store).await
-    {
-        tx.send(UiMessage::RecoveryCustodyWarning(
-            warning.resolve(crate::i18n::strings::lookup),
-        ));
-    }
+    fauna_client_account_runtime::deployment_seeds::run_custody_leg_signalled(
+        &nest,
+        store,
+        move |signal| {
+            tx.send(match signal {
+                fauna_client_config::CustodyLegSignal::Warning(warning) => {
+                    UiMessage::RecoveryCustodyWarning(warning.resolve(crate::i18n::strings::lookup))
+                }
+                fauna_client_config::CustodyLegSignal::Cleared => UiMessage::RecoveryCustodyCleared,
+            });
+        },
+    )
+    .await;
 }
 
 /// Derive the hex actor_id from a hex secret. Returns None when the
@@ -12234,3 +12677,42 @@ mod keyring_guard_tests {
 //   replaced the per-call `ensure_token` + `bearer_auth` + status-match
 //   pattern; carries the 401-reactive refresh and is wiremock-tested in
 //   `nest_content_api::reqwest_impl`'s `#[cfg(test)]` module.
+
+/// The UI message a serving-enablement report earns: its refusals-for-good as
+/// the page text (the nest's own sentences), `None` when nothing was refused.
+fn serving_enablement_refusal_message(
+    report: &fauna_client_mail_settings::serving_enablement::ServingEnablementReport,
+) -> Option<UiMessage> {
+    report
+        .error_message()
+        .map(|m| UiMessage::Data(DataMessage::ServingEnablementRefused(m)))
+}
+
+#[cfg(test)]
+mod serving_enablement_refusal_tests {
+    use super::serving_enablement_refusal_message;
+    use crate::app::{DataMessage, UiMessage};
+    use fauna_client_mail_settings::serving_enablement::{ServingEnablementReport, StepRefusal};
+
+    #[test]
+    fn a_refusal_for_good_becomes_the_page_error_message() {
+        let report = ServingEnablementReport {
+            refusals: vec![StepRefusal {
+                step: "caldav",
+                message: "CalDAV is not available here.".to_string(),
+            }],
+            abandoned: false,
+        };
+        match serving_enablement_refusal_message(&report) {
+            Some(UiMessage::Data(DataMessage::ServingEnablementRefused(m))) => {
+                assert_eq!(m, "CalDAV is not available here.")
+            }
+            _ => panic!("a refusal must reach the UI as ServingEnablementRefused"),
+        }
+    }
+
+    #[test]
+    fn a_clean_run_says_nothing() {
+        assert!(serving_enablement_refusal_message(&ServingEnablementReport::default()).is_none());
+    }
+}

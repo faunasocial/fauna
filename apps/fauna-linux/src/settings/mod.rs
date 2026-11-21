@@ -8,6 +8,8 @@ pub mod admin_mail_reports;
 pub mod admin_web;
 pub mod archive_import;
 pub mod atproto;
+#[cfg(feature = "payments")]
+pub mod claim_redeem;
 pub mod connected_apps;
 pub mod email_filters;
 pub mod encryption;
@@ -18,6 +20,7 @@ pub mod logs;
 pub mod mail;
 pub mod mail_aliases;
 pub mod mail_export;
+pub mod mail_gate;
 pub mod mail_import;
 pub mod mail_list_members;
 pub mod mail_lists;
@@ -438,6 +441,11 @@ type AtprotoRehydrateHandler = Rc<dyn Fn()>;
 /// marks the stored mode instead of a guess; the argument is the wire value
 /// (`"open"`, `"allow_knock"`, `"contacts_only"`, `"closed"`).
 type InboxModeLoadedHandler = Rc<dyn Fn(&str)>;
+/// Repaint hook for the Privacy page's spam thresholds: `Some(prefs)` when the
+/// nest confirmed them (the fetch's reply or a save's echo), `None` when the
+/// `fauna.spam.get_preferences` read failed. `save-spam-prefs` is painted from
+/// it (`fauna_client_spam::possibility::save_preferences_possibility`).
+type SpamPrefsLoadedHandler = Rc<dyn Fn(Option<&fauna_client_spam::spam::SpamPreferences>)>;
 
 thread_local! {
     static SETTINGS_CLIENT: RefCell<Option<Weak<FaunaClient>>> = const { RefCell::new(None) };
@@ -477,6 +485,12 @@ thread_local! {
     /// the four, so guessing it is the worst direction to be wrong in.
     static INBOX_MODE: RefCell<Option<String>> = const { RefCell::new(None) };
     static INBOX_MODE_LOADED_HANDLER: RefCell<Option<InboxModeLoadedHandler>> =
+        const { RefCell::new(None) };
+    /// The spam preferences the nest last confirmed in this process (`None` =
+    /// not yet known) and the Privacy page's repaint hook for them.
+    static SPAM_PREFS: RefCell<Option<fauna_client_spam::spam::SpamPreferences>> =
+        const { RefCell::new(None) };
+    static SPAM_PREFS_LOADED_HANDLER: RefCell<Option<SpamPrefsLoadedHandler>> =
         const { RefCell::new(None) };
     static SIGN_OUT_HANDLER: RefCell<Option<SignOutHandler>> = const { RefCell::new(None) };
     static FACTORY_RESET_HANDLER: RefCell<Option<FactoryResetHandler>> = const { RefCell::new(None) };
@@ -753,6 +767,29 @@ pub fn apply_loaded_inbox_mode(mode: &str) {
     let handler = INBOX_MODE_LOADED_HANDLER.with(|cell| cell.borrow().clone());
     if let Some(handler) = handler {
         handler(mode);
+    }
+}
+
+/// The spam preferences the nest last confirmed, or `None` before any read.
+pub fn get_spam_preferences() -> Option<fauna_client_spam::spam::SpamPreferences> {
+    SPAM_PREFS.with(|cell| cell.borrow().clone())
+}
+
+/// Register the Privacy page's repaint hook for the nest-confirmed spam prefs.
+pub fn set_spam_prefs_loaded_handler(handler: SpamPrefsLoadedHandler) {
+    SPAM_PREFS_LOADED_HANDLER.with(|cell| *cell.borrow_mut() = Some(handler));
+}
+
+/// Record the nest-confirmed spam preferences (`Some`) or a failed read
+/// (`None`) and repaint the Privacy page. Called by `app.rs`'s
+/// `SpamPreferencesLoaded` fold and its `fauna.spam.get_preferences` failure.
+pub fn apply_loaded_spam_preferences(prefs: Option<&fauna_client_spam::spam::SpamPreferences>) {
+    if let Some(prefs) = prefs {
+        SPAM_PREFS.with(|cell| *cell.borrow_mut() = Some(prefs.clone()));
+    }
+    let handler = SPAM_PREFS_LOADED_HANDLER.with(|cell| cell.borrow().clone());
+    if let Some(handler) = handler {
+        handler(prefs);
     }
 }
 

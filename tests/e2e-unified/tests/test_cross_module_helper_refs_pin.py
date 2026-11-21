@@ -10,6 +10,7 @@ Test taxonomy: tier_1 (in-process, no binary or driver).
 """
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -74,8 +75,21 @@ def dangling_refs(path: Path) -> list[str]:
     return bad
 
 
+#: `from . import mod` in any spacing — the only import a sibling alias comes
+#: from. A module whose text has none has no alias, so it is never parsed
+#: (`helpers/source_scan.py`; a parse of every test module is most of a minute
+#: on Windows).
+_SIBLING_IMPORT = re.compile(r"\bfrom\s*\.\s*import\b")
+
+
 def test_sibling_test_module_attribute_references_resolve():
+    from helpers import source_scan
+
     bad: list[str] = []
-    for path in sorted(TESTS_DIR.glob("test_*.py")):
-        bad += dangling_refs(path)
+    texts = source_scan.sources(TESTS_DIR.parent)
+    for path, text in texts.items():
+        if path.parent != TESTS_DIR or not path.name.startswith("test_"):
+            continue
+        if _SIBLING_IMPORT.search(text):
+            bad += dangling_refs(path)
     assert not bad, "dangling cross-module helper references:\n" + "\n".join(bad)

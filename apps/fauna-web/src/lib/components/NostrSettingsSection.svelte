@@ -48,11 +48,15 @@
     type ZapSignerEntry,
   } from '#lib/nostr';
   import { npubConfirmationOwed, confirmNostrNpub } from '#lib/conversations';
-  import { fetchFeatures } from '#lib/api';
+  import { fetchFeatures, type FeatureRow } from '#lib/api';
   import { onMount } from 'svelte';
   import { t } from '#lib/i18n/strings';
-  import { nostrKeySourceLabel, nostrLinkModeLabel, relayUrlError, trimmedRelayInput, relayListAppending, shortNestId, shortId, qrMatrix, qrQuietZoneModules, ensureWasm, nostrContentToggleOptions, type BridgeToggleOption } from '#lib/wasm';
+  import { nostrKeySourceLabel, nostrLinkModeLabel, trimmedRelayInput, relayListAppending, shortNestId, shortId, qrMatrix, qrQuietZoneModules, ensureWasm, nostrContentToggleOptions, type BridgeToggleOption } from '#lib/wasm';
   import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
+  import { nostrLinkPossibility, nostrAddFollowPossibility, nostrZapSignerAddPossibility, nostrConnectedAppsPossibility, nostrAddRelayPossibility } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import { featuresGatePossibility, readPossibility } from '#lib/wasm';
+  import { andPossibility, featureAnswer, readFailed, type ReadWord } from '#lib/read-gate';
   import { IDS } from '#lib/generated/uiIds';
 
   const BRIDGE_ID = 'nostr';
@@ -109,14 +113,16 @@
   // Zap signers (the NIP-57 trust root, `monetization.md` § Zap receipts —
   // the trust model). Gated on LINKED alone — unlike Connected apps below,
   // NOT custodial: designating who may speak for your money is orthogonal to
-  // where your key lives. `zapSignerGateReason` is the Dim-3 courtesy
-  // why-line for the add button (`zaps.signer.designate`); `null` while
-  // available OR un-hydrated — an un-hydrated read must leave the button
-  // LIVE, since the nest, not the app, is the enforcement floor.
+  // where your key lives. `zapFeatureRows` is the Dim-3 courtesy read the add
+  // button (`zaps.signer.designate`) is gated on — `null` until it answers,
+  // which keeps the button blocked still loading (`ui/README.md` § Offer only
+  // what is possible, rule 5: unknown is not possible); a nest with no `zaps`
+  // row leaves the button out (rule 2).
   let zapSigners: ZapSignerEntry[] = $state([]);
   let newZapSignerPubkey = $state('');
   let newZapSignerLabel = $state('');
-  let zapSignerGateReason: string | null = $state(null);
+  let zapFeatureRows: FeatureRow[] | null = $state(null);
+  let zapFeatureRead: ReadWord = $state('pending');
 
   // Connected apps (NIP-46 bunker, `nostr.md` § The nest as the user's NIP-46
   // signer). The connections themselves are rows of Settings → Connected apps;
@@ -131,7 +137,15 @@
   let bunkerInvite = $state<BunkerInvite | null>(null);
   let bunkerConnectCopied = $state(false);
   let bunkerQr = $state<{ side: number; darkModules: { key: number; x: number; y: number }[] } | null>(null);
-  let showConnectedApps = $derived(linked && (mode === 'generated' || mode === 'imported'));
+  // Whether the section is offered at all is the shared
+  // `fauna_client_bridges::connected_apps_possibility` over the stored signing
+  // mode (`nostr.md` § Errors & edge cases): absent for a `remote`/`nip07`
+  // account or with nothing linked — never a check of this app's own.
+  let wasmUp = $state(false);
+  let connectedAppsAnswer = $derived(
+    wasmUp ? askPossibility(() => nostrConnectedAppsPossibility(linked && mode ? mode : undefined)) : null,
+  );
+  let showConnectedApps = $derived(connectedAppsAnswer !== null && formGate(connectedAppsAnswer).shown);
 
   // Link form
   let linkMode = $state('generate');
@@ -141,6 +155,41 @@
 
   // Relay management
   let newRelay = $state('');
+
+  // The page's form submits, painted from their shared draft-validity answers
+  // (`libs/fauna-client-bridges/src/nostr_forms.rs` and
+  // `fauna_protocol::nostr_relay::add_relay_possibility`; `nostr.md` § Errors &
+  // edge cases): disabled with the reason on `title`, re-asked as the user
+  // types; each submit asks the same predicate again and refuses with that
+  // reason on `error-message`. The web link picker has no remote mode, so the
+  // bunker URL is always empty here.
+  let linkGate = $derived(
+    formGate(wasmUp ? askPossibility(() => nostrLinkPossibility(linkMode, importNsec, '')) : null),
+  );
+  let addRelayGate = $derived(
+    formGate(wasmUp ? askPossibility(() => nostrAddRelayPossibility(relayList, newRelay)) : null),
+  );
+  let addFollowGate = $derived(
+    formGate(wasmUp ? askPossibility(() => nostrAddFollowPossibility(newFollowPubkey)) : null),
+  );
+  // `nostr-zap-signer-add-btn`'s whole answer (tui's `zap_signer_add_answer`):
+  // the `zaps` plane's shared gate first — it is the account, not the draft,
+  // that can say no — then the shared draft rule. Its reason may carry the
+  // gate's nested window word, so it resolves nested.
+  function zapSignerPlaneAnswer() {
+    return featureAnswer({ readPossibility, featuresGatePossibility }, zapFeatureRows, zapFeatureRead, 'zaps');
+  }
+  function zapSignerAddAnswer() {
+    return andPossibility(zapSignerPlaneAnswer(), nostrZapSignerAddPossibility(newZapSignerPubkey));
+  }
+  let zapSignerAddGate = $derived(
+    formGate(wasmUp ? askPossibility(() => zapSignerAddAnswer()) : null, resolveLocalizedNested),
+  );
+  // The plane's own reason, shown within eyeshot below the form while the
+  // plane (not the draft) blocks the button.
+  let zapSignerPlaneGate = $derived(
+    formGate(wasmUp ? askPossibility(() => zapSignerPlaneAnswer()) : null, resolveLocalizedNested),
+  );
 
   // --- API helpers ---
   //
@@ -221,39 +270,30 @@
     }
   }
 
-  /** The `zaps` row's affordance, courtesy-read for the add button. Mirrors
-   *  linux's `zap_signer_add_gate_reason`: read the shared decision, never
-   *  re-derive it, and leave the button live on any failure to hydrate. */
+  /** The courtesy read the add button's `zaps` gate waits on. The decision
+   *  is the shared `featuresGatePossibility` over these rows; a failed read
+   *  with no rows in hand blocks the button with the failure. */
   async function fetchZapSignerGate() {
     const secret = $identity?.secretHex;
     if (!secret) return;
     try {
-      const rows = await fetchFeatures(secret);
-      const row = rows.find((r) => r.feature === 'zaps');
-      if (!row || row.affordance === 'available') {
-        zapSignerGateReason = null;
-      } else {
-        zapSignerGateReason = row.restriction
-          ? resolveLocalizedNested(row.restriction)
-          : resolveLocalized(row.status);
-      }
+      zapFeatureRows = await fetchFeatures(secret);
+      zapFeatureRead = 'resolved';
     } catch {
-      zapSignerGateReason = null;
+      zapFeatureRead = readFailed(zapFeatureRead);
     }
   }
 
   async function addZapSigner() {
     const secret = $identity?.secretHex;
-    if (!secret || !newZapSignerPubkey.trim()) return;
+    if (!secret) return;
+    // The answer the button is painted from — the plane's gate, then the
+    // shared draft rule (`zap_signer_add_possibility`: empty, or not the
+    // 64-hex shape the nest stores) — refused with its reason (rule 6).
+    const refusal = formRefusal(askPossibility(() => zapSignerAddAnswer()), resolveLocalizedNested);
+    if (refusal !== null) { error = refusal; return; }
     error = '';
     const pubkey = newZapSignerPubkey.trim();
-    // Client-glue validation, mirroring the relay check above: the nest
-    // refuses a non-64-hex key anyway, so this only spares a guaranteed
-    // round trip and names the rule.
-    if (!/^[0-9a-fA-F]{64}$/.test(pubkey)) {
-      error = t.nostr.zap_signers.invalid_pubkey;
-      return;
-    }
     try {
       // Idempotent — a re-add REFRESHES the label, so re-entering a
       // designated key is the only rename path there is.
@@ -300,6 +340,7 @@
     // the shared error banner instead of leaving the spinner up forever.
     try {
       await ensureWasm();
+      wasmUp = true;
       contentToggles = nostrContentToggleOptions();
       // Seed from the catalog's defaults so the first paint is the nest's own
       // posture rather than a row of undefineds; `fetchStatus` overwrites with
@@ -344,11 +385,9 @@
       // `mode` is its own typed field; the per-mode params ride `fields`
       // (generate → {}, import → {nsec}, nip07 → {pubkey, proof_json}).
       let fields: Record<string, string> = {};
+      const refusal = formRefusal(askPossibility(() => nostrLinkPossibility(linkMode, importNsec, '')));
+      if (refusal !== null) { error = refusal; return; }
       if (linkMode === 'import') {
-        if (!importNsec.trim()) {
-          error = t.nostr.link_account.enter_nsec;
-          return;
-        }
         fields.nsec = importNsec.trim();
       }
       if (linkMode === 'nip07') {
@@ -426,13 +465,13 @@
   // --- Relay management ---
 
   function addRelay() {
+    // Blank, invalid and duplicate drafts each refuse with their reason
+    // (`add_relay_possibility`) — a duplicate no longer clears silently.
+    const refusal = formRefusal(askPossibility(() => nostrAddRelayPossibility(relayList, newRelay)));
+    if (refusal !== null) { error = refusal; return; }
+    error = '';
     const url = trimmedRelayInput(newRelay);
     if (!url) return;
-    const refusal = relayUrlError(url);
-    if (refusal) {
-      error = resolveLocalized(refusal);
-      return;
-    }
     const next = relayListAppending(relayList, url);
     if (!next) return;
     relayList = next;
@@ -449,7 +488,9 @@
 
   async function addFollow() {
     const secret = $identity?.secretHex;
-    if (!secret || !newFollowPubkey.trim()) return;
+    if (!secret) return;
+    const refusal = formRefusal(askPossibility(() => nostrAddFollowPossibility(newFollowPubkey)));
+    if (refusal !== null) { error = refusal; return; }
     error = '';
     try {
       // The provider accepts an npub or hex id.
@@ -575,7 +616,7 @@
       <p class="muted">{t.nostr.link_account.nip07_prompt}</p>
     {/if}
 
-    <button class="btn primary" data-testid={IDS.NOSTR_LINK_BUTTON} onclick={linkAccount}>{t.nostr.link_account.link_button}</button>
+    <button class="btn primary" data-testid={IDS.NOSTR_LINK_BUTTON} disabled={linkGate.disabled} title={linkGate.reason || undefined} onclick={linkAccount}>{t.nostr.link_account.link_button}</button>
   </section>
 {:else}
   <!-- Account Status -->
@@ -656,7 +697,7 @@
         placeholder={t.nostr.relays.placeholder}
         onkeydown={(e) => { if (e.key === 'Enter') addRelay(); }}
       />
-      <button class="btn" data-testid={IDS.NOSTR_ADD_RELAY} onclick={addRelay}>{t.nostr.relays.add}</button>
+      <button class="btn" data-testid={IDS.NOSTR_ADD_RELAY} disabled={addRelayGate.disabled} title={addRelayGate.reason || undefined} onclick={addRelay}>{t.nostr.relays.add}</button>
     </div>
   </section>
 
@@ -693,7 +734,7 @@
         bind:value={newFollowPetname}
         placeholder={t.nostr.follows.petname_placeholder}
       />
-      <button class="btn" data-testid={IDS.NOSTR_ADD_FOLLOW} onclick={addFollow}>{t.common.follow}</button>
+      <button class="btn" data-testid={IDS.NOSTR_ADD_FOLLOW} disabled={addFollowGate.disabled} title={addFollowGate.reason || undefined} onclick={addFollow}>{t.common.follow}</button>
     </div>
   </section>
 
@@ -777,15 +818,23 @@
         bind:value={newZapSignerLabel}
         placeholder={t.nostr.zap_signers.label_placeholder}
       />
-      <!-- The Dim-3 courtesy gate: disabled with its why-line only once a
-           restricted verdict actually resolves — never eagerly, which is
-           what leaves an un-hydrated read live. -->
-      <button class="btn" data-testid={IDS.NOSTR_ZAP_SIGNER_ADD_BTN} disabled={!!zapSignerGateReason} onclick={addZapSigner}>
-        {t.nostr.zap_signers.add}
-      </button>
+      <!-- The `zaps` plane's gate AND the shared draft rule, one answer:
+           blocked still loading before the courtesy read, its reason on
+           `title`; absent (not shown) on a nest without the plane. -->
+      {#if zapSignerAddGate.shown}
+        <button
+          class="btn"
+          data-testid={IDS.NOSTR_ZAP_SIGNER_ADD_BTN}
+          disabled={zapSignerAddGate.disabled}
+          title={zapSignerAddGate.reason || undefined}
+          onclick={addZapSigner}
+        >
+          {t.nostr.zap_signers.add}
+        </button>
+      {/if}
     </div>
-    {#if zapSignerGateReason}
-      <p class="muted">{zapSignerGateReason}</p>
+    {#if zapSignerPlaneGate.shown && zapSignerPlaneGate.reason}
+      <p class="muted">{zapSignerPlaneGate.reason}</p>
     {/if}
   </section>
 {/if}

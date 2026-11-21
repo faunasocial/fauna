@@ -146,6 +146,8 @@ public struct ConnectedAppsView: View {
                 Task { await vm.setExternalAppsEnabled(!isOn) }
             }
             .faunaGate("fauna.bridges.atproto.set_external_apps_enabled")
+            .faunaPossible(vm.externalAppsAnswer)
+            FaunaPossibilityReason(vm.externalAppsAnswer)
             Text(L.atprotoSettings.externalAppsHint)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -164,21 +166,20 @@ public struct ConnectedAppsView: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier(Ids.connectedAppsConnectCode)
                 .automationField(Ids.connectedAppsConnectCode, text: $vm.code)
+                .onSubmit { Task { await vm.submitCode() } }
             // Typing a code claims a live, minutes-long request on the nest, so the
             // submit is an online-only commit; the field itself is a buffer and
             // stays live.
             Button(L.connectedApps.connectSubmit) {
                 Task { await vm.submitCode() }
             }
-            .disabled(vm.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityIdentifier(Ids.connectedAppsConnectSubmit)
-            .automationActivate(
-                Ids.connectedAppsConnectSubmit,
-                isEnabled: { !vm.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            ) {
+            .automationActivate(Ids.connectedAppsConnectSubmit) {
                 Task { await vm.submitCode() }
             }
             .faunaGate("fauna.oauth.consent.lookup_code")
+            .faunaPossible(vm.connectCodeAnswer)
+            FaunaPossibilityReason(vm.connectCodeAnswer)
             FaunaOfflineReason("fauna.oauth.consent.lookup_code")
         }
     }
@@ -218,15 +219,9 @@ public struct ConnectedAppsView: View {
         let cardText = (lines.map(\.text) + [noneEligible].compactMap { $0 })
             .joined(separator: "\n")
         let codeText = L.atprotoSettings.consentCode(code: request.code)
-        // A bare folder card is approvable only once a folder is chosen; read
-        // live for the driver, so a pick enables it in the same frame.
-        let consentIdHex = request.consentIdHex
-        let approvable = { () -> Bool in
-            guard let picker = vm.snapshot?.requests
-                .first(where: { $0.consentIdHex == consentIdHex })?.folderPicker
-            else { return true }
-            return picker.chosen != nil
-        }
+        // Approve's shared answer over the live row: a pick re-paints it in
+        // the same frame.
+        let approveAnswer = vm.approveAnswer(consentIdHex: request.consentIdHex)
         return VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 switch line.role {
@@ -275,12 +270,12 @@ public struct ConnectedAppsView: View {
                     Task { await vm.resolveRequest(consentIdHex: request.consentIdHex, approved: true) }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!approvable())
                 .accessibilityIdentifier(Ids.connectedAppsRequestApprove)
-                .automationActivate(Ids.connectedAppsRequestApprove, isEnabled: approvable) {
+                .automationActivate(Ids.connectedAppsRequestApprove) {
                     Task { await vm.resolveRequest(consentIdHex: request.consentIdHex, approved: true) }
                 }
                 .faunaGate("fauna.bridges.atproto.resolve_consent")
+                .faunaPossible(approveAnswer)
                 Button(L.atprotoSettings.consentDenyButton, role: .destructive) {
                     Task { await vm.resolveRequest(consentIdHex: request.consentIdHex, approved: false) }
                 }
@@ -290,6 +285,7 @@ public struct ConnectedAppsView: View {
                 }
                 .faunaGate("fauna.bridges.atproto.resolve_consent")
             }
+            FaunaPossibilityReason(approveAnswer)
             FaunaOfflineReason("fauna.bridges.atproto.resolve_consent")
             Button(L.connectedApps.block) {
                 Task { await vm.blockRequest(consentIdHex: request.consentIdHex) }

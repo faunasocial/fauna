@@ -51,6 +51,8 @@ import pathlib
 
 import pytest
 
+from helpers import source_scan
+
 pytestmark = [pytest.mark.tier_1]
 
 _E2E_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -76,7 +78,7 @@ def _general_path_fixtures() -> set[str]:
     """Fixture names that route to `_dedicated_mail_nest_impl` — directly, or
     via `_start_mail_venue`'s mode-routing seam — WITHOUT `caldav_only=True`:
     i.e. the ones whose bridges cold-boot idling."""
-    tree = ast.parse(_CONFTEST.read_text())
+    tree = source_scan.parsed(_CONFTEST)  # shared, read-only
     found: set[str] = set()
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef) or node.name in (_IMPL, _VENUE_START):
@@ -107,27 +109,45 @@ def _functions_reaching_rebind() -> set[str]:
     rebind — so a consumer delegating to a shared preamble counts as covered."""
     covering: set[str] = set()
     callers: dict[str, set[str]] = {}
-    for path in sorted(_TESTS_DIR.glob("*.py")) + sorted(_HELPERS_DIR.glob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            if _REBIND in ast.dump(node):
-                covering.add(node.name)
-            callers.setdefault(node.name, set()).update(
-                getattr(c.func, "id", None) or getattr(c.func, "attr", None)
-                for c in ast.walk(node)
-                if isinstance(c, ast.Call)
-            )
-    # Transitive: a module-private preamble (`_connect_journey`) that calls a
-    # covering function covers the tests that delegate to it — "reaching", not
-    # "containing".
-    grew = True
-    while grew:
-        grew = False
-        for name, called in callers.items():
-            if name not in covering and called & covering:
-                covering.add(name)
-                grew = True
+    # Only the files that can add to the answer are parsed
+    # (`helpers/source_scan.py`; a parse of both directories is most of a
+    # minute on Windows): first those spelling the rebind, then, round by round,
+    # those spelling a name found covering — a function can only call a name
+    # its file spells — until a round finds no new file.
+    parsed: set = set()
+    wanted = {_REBIND}
+    while True:
+        batch = [
+            (path, text)
+            for path, text in source_scan.spelling(
+                wanted, root=_E2E_ROOT, within=("tests", "helpers"))
+            if path.parent in (_TESTS_DIR, _HELPERS_DIR) and path not in parsed
+        ]
+        if not batch:
+            break
+        for path, text in batch:
+            parsed.add(path)
+            for node in ast.walk(ast.parse(text)):
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                if _REBIND in ast.dump(node):
+                    covering.add(node.name)
+                callers.setdefault(node.name, set()).update(
+                    getattr(c.func, "id", None) or getattr(c.func, "attr", None)
+                    for c in ast.walk(node)
+                    if isinstance(c, ast.Call)
+                )
+        # Transitive: a module-private preamble (`_connect_journey`) that calls a
+        # covering function covers the tests that delegate to it — "reaching",
+        # not "containing".
+        grew = True
+        while grew:
+            grew = False
+            for name, called in callers.items():
+                if name not in covering and called & covering:
+                    covering.add(name)
+                    grew = True
+        wanted = {_REBIND} | covering
     return covering
 
 
@@ -151,8 +171,13 @@ def test_every_general_path_consumer_plays_supervisor():
 
     offenders: list[str] = []
     checked = 0
-    for path in sorted(_TESTS_DIR.glob("*.py")):
-        tree = ast.parse(path.read_text())
+    # A consumer takes one of the fixtures as an argument, so its module spells
+    # the name (`helpers/source_scan.py`: only those modules are parsed).
+    for path, text in (source_scan.spelling(fixtures, root=_E2E_ROOT, within=("tests",))
+                       if fixtures else ()):
+        if path.parent != _TESTS_DIR:
+            continue
+        tree = ast.parse(text)
         for node in tree.body:
             if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
                 continue

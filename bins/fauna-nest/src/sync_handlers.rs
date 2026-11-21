@@ -2161,8 +2161,11 @@ fn changes_record_handler() -> RpcHandler {
                 )
                 .await
                 {
-                    Ok(Ok(seq)) => encode_reply(&SyncChangeRecordReply {
-                        seq,
+                    // The home nest's `prev_set_seq` rides back verbatim; an
+                    // older home nest that does not say leaves it absent.
+                    Ok(Ok(recorded)) => encode_reply(&SyncChangeRecordReply {
+                        seq: recorded.seq,
+                        prev_set_seq: recorded.prev_set_seq,
                         extra: Default::default(),
                     }),
                     Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
@@ -2226,7 +2229,7 @@ fn changes_record_handler() -> RpcHandler {
             // above; the federated plane's structural foreign-member + writer
             // gate) and is the caller's job; the core takes an already-resolved,
             // already-authorized set.
-            let seq = record_change_core(
+            let recorded = record_change_core(
                 &state,
                 &actor_id,
                 &fs,
@@ -2252,11 +2255,23 @@ fn changes_record_handler() -> RpcHandler {
             .await?;
 
             encode_reply(&SyncChangeRecordReply {
-                seq,
+                seq: recorded.seq,
+                prev_set_seq: recorded.prev_set_seq,
                 extra: Default::default(),
             })
         })
     })
+}
+
+/// What [`record_change_core`] answers: the assigned `seq` and, where the
+/// record landed in `sync_changes`, the newest row of the same set below it
+/// (`docs/goal/behavior/conflicts.md` § the causal watermark, *An edit stamp
+/// reaches across the writer's own acknowledged run*). A backup destination
+/// assigns no seq and answers no `prev_set_seq`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedChange {
+    pub seq: i64,
+    pub prev_set_seq: Option<i64>,
 }
 
 /// The depositor a record request names (`folder-deposit.md` ruling 3), parsed
@@ -2281,7 +2296,8 @@ pub(crate) fn parse_deposited_by(hex: Option<&str>) -> Result<Option<[u8; 32]>, 
 ///
 /// Returns the assigned `seq` (0 for a backup destination; on a
 /// content-identical replay, the existing row's `seq` — the exactly-once
-/// guarantee lives in `record_sync_change_metered`).
+/// guarantee lives in `record_sync_change_metered`) and the
+/// set's `prev_set_seq` beside it ([`RecordedChange`]).
 ///
 /// `path_sealed` is the client's opaque `SealedLabel` over `path`
 /// (`docs/goal/behavior/file-sync.md` § Sealed names & paths). Both record
@@ -2304,7 +2320,7 @@ pub(crate) async fn record_change_core(
     is_resolution: Option<bool>,
     carried: crate::change_signature::CarriedSignature<'_>,
     carriage: crate::change_signature::CertCarriage<'_>,
-) -> Result<i64, RpcError> {
+) -> Result<RecordedChange, RpcError> {
     let path_hash: [u8; 32] = fauna_core::sync::path_hash(path);
     let manifest_hash = manifest_hash_hex.and_then(parse_device_id);
 
@@ -2542,7 +2558,10 @@ pub(crate) async fn record_change_core(
                 .await
                 .map_err(internal)?,
         }
-        return Ok(0);
+        return Ok(RecordedChange {
+            seq: 0,
+            prev_set_seq: None,
+        });
     }
 
     // Past the backup branch, every record lands in `sync_changes` — and a
@@ -2651,7 +2670,7 @@ pub(crate) async fn record_change_core(
             .map_err(refuse)?
     };
 
-    let seq = state
+    let recorded = state
         .db
         .record_sync_change_metered_signed(
             // Recorder (row attribution — the wire `author_actor_id`).
@@ -2707,7 +2726,10 @@ pub(crate) async fn record_change_core(
     // of the set to pull now instead of waiting out the rescan interval.
     notify_sync_changed(state, fs).await;
 
-    Ok(seq)
+    Ok(RecordedChange {
+        seq: recorded.seq,
+        prev_set_seq: Some(recorded.prev_set_seq),
+    })
 }
 
 /// Best-effort same-nest push nudge on a new sync record: fire
@@ -4096,6 +4118,7 @@ mod sync_nudge_tests {
             crate::change_signature::CertCarriage::ByReference,
         )
         .await
+        .map(|recorded| recorded.seq)
     }
 
     /// Receive exactly one `fauna.sync.changed` push (bounded) and assert it
@@ -4820,6 +4843,7 @@ mod unservable_change_tests {
             crate::change_signature::CertCarriage::ByReference,
         )
         .await
+        .map(|recorded| recorded.seq)
     }
 
     /// What the door measures for `req`: the row it would store.

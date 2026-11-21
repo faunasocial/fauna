@@ -34,8 +34,10 @@ import SwiftUI
 ///
 /// ## The rule is not reimplemented here
 ///
-/// The verdict comes from `offlineAffordance(kind:connectionState:)`, the UniFFI
-/// face of `fauna_protocol::offline_class::affordance`. Its three rulings — only
+/// The verdict comes from `offlinePossibility(kind:connectionState:)`, the UniFFI
+/// face of `fauna_protocol::offline_class::affordance` in the shared answer
+/// type, painted by ``SwiftUI/View/faunaPossible(_:)`` (`Possibility.swift`) —
+/// the one painter every gated affordance on these apps goes through. Its three rulings — only
 /// class 3 desensitizes, an unregistered kind stays available, only *known*
 /// offline words count as offline — are deliberately **not** restated in Swift;
 /// that per-app copy is exactly what priority #2 forbids, and ruling 3 in
@@ -50,7 +52,7 @@ import SwiftUI
 /// registered `isEnabled`. That key is **gone**, and its removal is the proof of
 /// the general fix that replaced it: the registry now reads SwiftUI's own
 /// `\.isEnabled`, which is exactly "has any ancestor disabled me" — so
-/// `.disabled(!verdict.available)` below *already* tells the automation surface
+/// the `.disabled(!answer.isPossible)` `faunaPossible` applies *already* tells the automation surface
 /// everything the key used to, and every OTHER cause of disablement (a busy-state
 /// container, a `Form` section) is answered by the same read instead of being
 /// invisible to the driver. See `AutomationRegistry.folding`.
@@ -86,9 +88,10 @@ struct FaunaOfflineGate: ViewModifier {
     @Environment(FaunaClient.self) private var client: FaunaClient?
 
     func body(content: Content) -> some View {
-        // One call, both halves — the FFI face returns `available` and `reason`
-        // together precisely so a caller cannot ask twice and get two answers
-        // that disagree (`libs/fauna-ffi/src/offline.rs` module docs).
+        // One call, one answer — `offlinePossibility` returns the shared
+        // `Possibility` whole, so the paint, the reason and the automation
+        // surface cannot get two answers that disagree
+        // (`libs/fauna-ffi/src/offline.rs`).
         //
         // ⚠ **No client in the environment is an UNKNOWN state, never
         // "connecting".** `connecting` is a known offline word, so treating a
@@ -105,40 +108,38 @@ struct FaunaOfflineGate: ViewModifier {
         // reported. A client that IS present and reports `.connecting` still
         // gates — that is a real transport state, not an unknown.
         let state = client.map { connectionStateWord(state: $0.connectionState) } ?? "unknown"
-        let verdict = offlineAffordance(kind: kind, connectionState: state)
-        let reason = verdict.reason.map(renderLocalizedText)
 
-        // NOTE the modifier order: `.disabled` wraps `content`, so an inner
-        // `automation*` registration is a descendant and reads the resulting
-        // `\.isEnabled` — which is the WHOLE mechanism now that the dedicated key
-        // is gone. `.disabled` is cumulative in SwiftUI and a descendant cannot
-        // re-enable, which gives linux's "never *enables* what the page disabled"
-        // rule for free rather than by convention.
-        return content
-            .disabled(!verdict.available)
-            // The reason rides the control itself, per affordance — never a
-            // global banner (§ R11). `.help` is macOS's twin of the tooltip
-            // linux attaches (`offline_gate.rs`: "the reason likewise rides the
-            // widget's tooltip"); the accessibility hint carries it on **both**
-            // targets, so assistive tech is told why on iOS too.
-            //
-            // ⚠ These two carry the reason but do not RENDER it: `.help` is a
-            // hover tooltip (no hover on iOS) and a hint is only spoken. The
-            // visible half is `FaunaOfflineReason` below — a sibling view the
-            // author places, deliberately NOT folded in here.
-            //
-            // This comment used to say a visible iOS reason was owed and
-            // approval-gated, "since it would need a new element id in
-            // `tests/e2e-unified/ui.yaml`". **That premise was refuted
-            // 2026-08-23**: android answered the same question with no element
-            // id at all, because the blocker was the reason's *addressability*,
-            // not its visibility (`account-data-plane.md` § Implementation
-            // status → the android leg). Its second half still stands and is
-            // why the caption is a sibling: wrapping every gated control would
-            // restructure hierarchies that existing `.accessibilityElement
-            // (children: .contain)` scoping depends on.
-            .help(reason ?? "")
-            .accessibilityHint(reason ?? "")
+        // The painting — `.disabled` wrapping `content` so an inner
+        // `automation*` registration reads the resulting `\.isEnabled` (the
+        // WHOLE mechanism now that the dedicated key is gone; cumulative, so a
+        // descendant cannot re-enable — linux's "never *enables* what the page
+        // disabled" for free), and the reason riding the control itself as
+        // `.help` (macOS's twin of linux's tooltip) and the accessibility hint
+        // (both targets) — is `faunaPossible`'s, shared with every other gated
+        // affordance. Per affordance, never a global banner (§ R11).
+        //
+        // ⚠ Those two carry the reason but do not RENDER it: `.help` is a
+        // hover tooltip (no hover on iOS) and a hint is only spoken. The
+        // visible half is `FaunaOfflineReason` below — a sibling view the
+        // author places, deliberately NOT folded in here.
+        //
+        // This comment used to say a visible iOS reason was owed and
+        // approval-gated, "since it would need a new element id in
+        // `tests/e2e-unified/ui.yaml`". **That premise was refuted
+        // 2026-08-23**: android answered the same question with no element
+        // id at all, because the blocker was the reason's *addressability*,
+        // not its visibility (`account-data-plane.md` § Implementation
+        // status → the android leg). Its second half still stands and is
+        // why the caption is a sibling: wrapping every gated control would
+        // restructure hierarchies that existing `.accessibilityElement
+        // (children: .contain)` scoping depends on.
+        // `isOfflineGate`: a page's own blocked reason (a read still loading,
+        // a draft not yet valid) stands over this one, the more specific
+        // first, whichever modifier encloses the other — tui's
+        // `declared.and(offline)`.
+        return content.modifier(FaunaPossibleModifier(
+            answer: offlinePossibility(kind: kind, connectionState: state),
+            isOfflineGate: true))
     }
 }
 
@@ -174,7 +175,7 @@ struct FaunaOfflineGate: ViewModifier {
 /// ## The kind is written twice, and that is checked, not trusted
 ///
 /// This takes the same `kind` its neighbouring `.faunaGate(_:)` takes and
-/// resolves it through the **same** `offlineAffordance(kind:connectionState:)`
+/// resolves it through the **same** `offlinePossibility(kind:connectionState:)`
 /// call, so the caption cannot claim one verdict while the paint shows another.
 /// Writing the kind twice is a real drift risk, and it is closed the way the
 /// first one already was: the same dev-fleet checker (`offline-gate-check`)
@@ -215,12 +216,7 @@ public struct FaunaOfflineReason: View {
     /// `OfflineReasonCaptionTests`, and the human is left only the last inch —
     /// whether the caption *looks* right where it sits.
     static func captionText(kind: String, connectionState: String) -> String? {
-        let verdict = offlineAffordance(kind: kind, connectionState: connectionState)
-        guard !verdict.available else { return nil }
-        guard let reason = verdict.reason.map(renderLocalizedText), !reason.isEmpty else {
-            return nil
-        }
-        return reason
+        offlinePossibility(kind: kind, connectionState: connectionState).reasonText
     }
 
     public var body: some View {
@@ -232,8 +228,11 @@ public struct FaunaOfflineReason: View {
         let state = client.map { connectionStateWord(state: $0.connectionState) } ?? "unknown"
         if let reason = Self.captionText(kind: kind, connectionState: state) {
             Text(reason)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
+                // Read-only text: selectable and copyable (ui/README.md § Text the
+                // person reads can be copied).
+                .textSelection(.enabled)
                 // Chrome, not an addressable element: no
                 // `accessibilityIdentifier` and no `automation*` registration.
                 // The gate already carries this same string as the control's
@@ -243,4 +242,18 @@ public struct FaunaOfflineReason: View {
                 .accessibilityHidden(true)
         }
     }
+}
+
+/// The offline half of a **carve-out** fetch — a snapshot file's download, the
+/// whole-snapshot restore — which reads its bytes over the bulk-binary
+/// carve-out and issues no wire kind of its own, so it cannot be a
+/// ``SwiftUI/View/faunaGate(_:)``: the shared `carveOutPossibility` over the
+/// client's connection word (`docs/goal/ui/backups.md` § Errors & edge cases →
+/// *What the page offers*). The same "no client is an UNKNOWN word" rule as
+/// `FaunaOfflineGate`. Paint it with ``SwiftUI/View/faunaPossible(_:)`` and hand
+/// the same answer to the gesture, which refuses on it.
+@MainActor
+public func carveOutAnswer(_ client: FaunaClient?) -> Possibility {
+    let state = client.map { connectionStateWord(state: $0.connectionState) } ?? "unknown"
+    return carveOutPossibility(connectionState: state)
 }

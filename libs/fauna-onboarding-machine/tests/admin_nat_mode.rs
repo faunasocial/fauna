@@ -57,9 +57,10 @@ async fn hydrate_unknown_node_mode_defaults_public() {
 }
 
 #[tokio::test]
-async fn hydrate_failure_surfaces_error_but_keeps_save_enabled() {
-    // The set is a mutable upsert — safe to submit without a successful read,
-    // so a load failure must not brick the save button.
+async fn hydrate_failure_surfaces_error_and_blocks_save() {
+    // Unknown is not possible (docs/goal/ui/README.md § Offer only what is
+    // possible, rule 5): a page that never read the mode must not save the
+    // pre-selected default `public` over it.
     let (m, fake) = machine_with_fake(SECRET);
     fake.set_probe_setup_status_response(Err(ProbeError::Transient {
         reason: "boom".into(),
@@ -79,7 +80,54 @@ async fn hydrate_failure_surfaces_error_but_keeps_save_enabled() {
         snap.message.args.get("cause").map(String::as_str),
         Some("boom")
     );
-    assert!(snap.submit_enabled);
+    assert!(!snap.submit_enabled);
+    assert_eq!(
+        m.save_possibility().reason().map(|r| r.key.as_str()),
+        Some("common.load_failed")
+    );
+    assert_eq!(
+        m.select_possibility().reason().map(|r| r.key.as_str()),
+        Some("common.load_failed")
+    );
+
+    // The action asks the same answer: nothing is sent.
+    m.select(NodeMode::Private);
+    assert_eq!(m.snapshot().selected_mode, NodeMode::Public);
+    m.submit().await;
+    assert!(fake.submit_nat_mode_bodies().is_empty());
+}
+
+#[tokio::test]
+async fn before_the_read_the_radios_and_save_are_still_loading() {
+    let (m, _fake) = machine_with_fake(SECRET);
+    assert_eq!(
+        m.save_possibility().reason().map(|r| r.key.as_str()),
+        Some("common.still_loading")
+    );
+    assert_eq!(
+        m.select_possibility().reason().map(|r| r.key.as_str()),
+        Some("common.still_loading")
+    );
+}
+
+#[tokio::test]
+async fn a_resolved_read_makes_the_radios_and_save_possible() {
+    let (m, fake) = machine_with_fake(SECRET);
+    fake.set_probe_setup_status_response(Ok(SetupStatus {
+        claimed: true,
+        node_mode: Some(NodeMode::Public),
+        ..Default::default()
+    }));
+    m.hydrate().await;
+    assert!(m.select_possibility().is_possible());
+    assert!(m.save_possibility().is_possible());
+
+    // A later re-read that fails keeps the mode the first read gave.
+    fake.set_probe_setup_status_response(Err(ProbeError::Transient {
+        reason: "boom".into(),
+    }));
+    m.hydrate().await;
+    assert!(m.save_possibility().is_possible());
 }
 
 // ── select ──────────────────────────────────────────────────────────────────
@@ -87,10 +135,16 @@ async fn hydrate_failure_surfaces_error_but_keeps_save_enabled() {
 #[tokio::test]
 async fn select_flips_mode_and_recovers_from_error() {
     let (m, fake) = machine_with_fake(SECRET);
-    fake.set_probe_setup_status_response(Err(ProbeError::Transient {
-        reason: "boom".into(),
+    fake.set_probe_setup_status_response(Ok(SetupStatus {
+        claimed: true,
+        node_mode: Some(NodeMode::Public),
+        ..Default::default()
     }));
     m.hydrate().await;
+    fake.set_submit_nat_mode_response(Err(NatModeError::Transient {
+        cause: "boom".into(),
+    }));
+    m.submit().await;
 
     m.select(NodeMode::Private);
     let snap = m.snapshot();
@@ -160,6 +214,7 @@ async fn submit_invalid_lands_terminal_error_with_save_enabled() {
     fake.set_submit_nat_mode_response(Err(NatModeError::Invalid {
         reason: "signature mismatch".into(),
     }));
+    m.hydrate().await;
 
     m.select(NodeMode::Private);
     m.submit().await;
@@ -182,6 +237,7 @@ async fn submit_transient_lands_retryable_error() {
     fake.set_submit_nat_mode_response(Err(NatModeError::Transient {
         cause: "boom".into(),
     }));
+    m.hydrate().await;
 
     m.submit().await;
 
@@ -201,6 +257,7 @@ async fn submit_transient_lands_retryable_error() {
 async fn submit_with_invalid_secret_is_terminal_and_sends_nothing() {
     let (m, fake) = machine_with_fake("not-hex");
     fake.set_submit_nat_mode_response(Ok(()));
+    m.hydrate().await;
 
     m.submit().await;
 

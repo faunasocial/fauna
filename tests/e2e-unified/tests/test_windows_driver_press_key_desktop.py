@@ -11,6 +11,9 @@ own connect state when, and only when, the bridge reports that failure — so:
 
 * on a disconnected session the press is `skip_environment` (convention 7), as the
   driver's `double_click` already declares;
+* so it is on a connected session whose input desktop this process cannot open (a
+  locked workstation reads `Active`, but `OpenInputDesktop` answers Access is denied,
+  as `SendInput` does — `windows_session.input_desktop_reachable`);
 * on an attached session the bridge's error still surfaces, since there it names a
   real input fault;
 * a press the bridge refuses before any input ("not actuable", the inert-element 409)
@@ -44,12 +47,13 @@ PHYSICAL_DENIED = (
 )
 
 
-def _driver(monkeypatch, *, raises, state):
+def _driver(monkeypatch, *, raises, state, reachable=True):
     def press(self, element_id, key, *, scope=None):
         raise raises
 
     monkeypatch.setattr(HttpBridgeDriver, "press_key", press)
     monkeypatch.setattr(windows_session, "connect_state", lambda: state)
+    monkeypatch.setattr(windows_session, "input_desktop_reachable", lambda: reachable)
     return object.__new__(WindowsBridgeDriver)
 
 
@@ -68,6 +72,30 @@ def test_a_physical_press_failing_on_an_attached_session_still_fails(monkeypatch
         monkeypatch,
         raises=RuntimeError(PHYSICAL_DENIED),
         state=(windows_session.WTS_ACTIVE, "Active"),
+    )
+    with pytest.raises(RuntimeError, match="requires the physical SendInput path"):
+        driver.press_key("image-lightbox", "Escape")
+
+
+def test_a_physical_press_on_a_connected_but_locked_session_is_an_environment_skip(monkeypatch):
+    # A locked workstation reads `Active` yet its input desktop is the secure one:
+    # `OpenInputDesktop` answers Access is denied, as `SendInput` does.
+    driver = _driver(
+        monkeypatch,
+        raises=RuntimeError(PHYSICAL_DENIED),
+        state=(windows_session.WTS_ACTIVE, "Active"),
+        reachable=False,
+    )
+    with pytest.raises(Skipped, match="input desktop is out of reach"):
+        driver.press_key("image-lightbox", "Escape")
+
+
+def test_an_unreadable_input_desktop_is_no_evidence(monkeypatch):
+    driver = _driver(
+        monkeypatch,
+        raises=RuntimeError(PHYSICAL_DENIED),
+        state=(windows_session.WTS_ACTIVE, "Active"),
+        reachable=None,
     )
     with pytest.raises(RuntimeError, match="requires the physical SendInput path"):
         driver.press_key("image-lightbox", "Escape")
@@ -92,6 +120,7 @@ def test_a_press_that_lands_asks_nothing(monkeypatch):
 
     monkeypatch.setattr(HttpBridgeDriver, "press_key", lambda self, i, k, *, scope=None: None)
     monkeypatch.setattr(windows_session, "connect_state", probe)
+    monkeypatch.setattr(windows_session, "input_desktop_reachable", probe)
     object.__new__(WindowsBridgeDriver).press_key("image-lightbox", "Escape")
 
 
@@ -105,12 +134,13 @@ COMMIT_DENIED = (
 )
 
 
-def _clicking(monkeypatch, *, raises, state):
+def _clicking(monkeypatch, *, raises, state, reachable=True):
     def click(self, element_id, index=0, *, scope=None):
         raise raises
 
     monkeypatch.setattr(HttpBridgeDriver, "click", click)
     monkeypatch.setattr(windows_session, "connect_state", lambda: state)
+    monkeypatch.setattr(windows_session, "input_desktop_reachable", lambda: reachable)
     return object.__new__(WindowsBridgeDriver)
 
 
@@ -125,6 +155,13 @@ def test_a_click_whose_commit_fails_on_an_attached_session_still_fails(monkeypat
     driver = _clicking(monkeypatch, raises=RuntimeError(COMMIT_DENIED),
                        state=(windows_session.WTS_ACTIVE, "Active"))
     with pytest.raises(RuntimeError, match="physical-Enter fallback then failed"):
+        driver.click("folder-member-save-button")
+
+
+def test_a_click_whose_commit_needs_physical_enter_on_a_locked_session_skips(monkeypatch):
+    driver = _clicking(monkeypatch, raises=RuntimeError(COMMIT_DENIED),
+                       state=(windows_session.WTS_ACTIVE, "Active"), reachable=False)
+    with pytest.raises(Skipped, match="input desktop is out of reach"):
         driver.click("folder-member-save-button")
 
 

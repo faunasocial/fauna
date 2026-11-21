@@ -18,13 +18,20 @@ import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.resolveLocalizedNested
 import com.fauna.app.ui.viewmodel.BackupDestinationsVM
 import com.fauna.ffi.FfiBackupDestinationStatus
 import com.fauna.ffi.FfiBackupDestinationView
 import com.fauna.ffi.FfiDestinationAuditRow
+import com.fauna.ffi.FfiDestinationForm
+import com.fauna.ffi.destinationFormPossibility
+import com.fauna.ffi.parseDestinationCapacity
 import com.fauna.ffi.backupAuditAlertLabel
 import com.fauna.ffi.backupBacklogLabel
 import com.fauna.ffi.backupDestinationKindLabel
@@ -39,9 +46,11 @@ import com.fauna.ffi.destinationKindClientDevice
 import com.fauna.ffi.destinationRowIsAClientDevice
 import com.fauna.ffi.everyDestinationIsAClientDevice
 import com.fauna.ffi.orphanedStoreLabel
-import com.fauna.ffi.parseByteSize
 import social.fauna.generated.Ids
 import uniffi.fauna_core.BackupAuditAlertReason
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The backup-destination management section on the Backups page
@@ -154,6 +163,7 @@ fun BackupDestinationsSection(
         onAdd = vm::add,
         onEdit = vm::edit,
         onRemove = vm::remove,
+        onKeep = vm::keep,
         // `backup-destination-last-upload-time` text: the never-vs-real decision +
         // epoch-0 guard + seconds→ms conversion live once in shared Rust
         // (backupLastUploadLabel); the returned label's `{when}` placeholder is
@@ -255,10 +265,10 @@ fun BackupDestinationsSection(
         // unrecognised kind counts as NOT a client device (it may well BE the
         // off-site copy the warning would otherwise deny the user has).
         soleClientDestinations = everyDestinationIsAClientDevice(destinations),
-        // The shared `parse_byte_size` — liberal in what a person may type,
-        // strict about what counts as a number. `null` is a REFUSAL the user
-        // sees, never a substituted default.
-        parseCapacity = { typed -> parseByteSize(typed) },
+        // The shared `parse_destination_capacity` — the one reading both the
+        // confirm's paint (`destination_form_possibility`) and its submit use.
+        // `null` for a non-blank draft is a REFUSAL, never a substituted default.
+        parseCapacity = { typed -> parseDestinationCapacity(typed) },
         // The one `error-message` surface on this page — the same shell banner
         // every other failure in this section reaches (via the VM's errorMessage).
         onError = appMessages::showError,
@@ -523,6 +533,11 @@ fun BackupDestinationsContent(
      * this composable's.
      */
     onRemove: (String, Boolean) -> Unit,
+    /**
+     * Keep a row the post-succession review raised (`dest.unattested`). No
+     * confirm: Keep is non-destructive and re-decidable.
+     */
+    onKeep: (String) -> Unit = {},
     statuses: Map<String, FfiBackupDestinationStatus> = emptyMap(),
     lastUploadText: (FfiBackupDestinationStatus?) -> String = { "" },
     backlogText: (FfiBackupDestinationStatus?) -> String = { "" },
@@ -798,6 +813,7 @@ fun BackupDestinationsContent(
                     isClientDevice = isClientDevice,
                     onEdit = { form = FormMode.Edit(dest) },
                     onRemove = { removing = dest },
+                    onKeep = { onKeep(dest.destinationId) },
                     offerReseed = dest.destinationId in reseedRows,
                     reseedEnabled = !working && !reseedRunning,
                     onReseed = { armReseed(dest.destinationId) },
@@ -1014,6 +1030,7 @@ private fun DestinationRow(
     isClientDevice: (FfiBackupDestinationView) -> Boolean,
     onEdit: () -> Unit,
     onRemove: () -> Unit,
+    onKeep: () -> Unit = {},
     /** This row names a copy this device holds (the shared `backupReseedRows`). */
     offerReseed: Boolean = false,
     reseedEnabled: Boolean = true,
@@ -1082,6 +1099,28 @@ private fun DestinationRow(
                     enabled = !working,
                     modifier = Modifier.testTag(Ids.BACKUP_DESTINATION_REMOVE_BUTTON),
                 ) { Text(stringResource(R.string.backups_backup_destination_remove_button)) }
+            }
+            // The post-succession review mark and its Keep half — present ONLY
+            // while this row is raised (succession-aftermath.md § Re-key scope →
+            // Adjudicating what the aftermath carries across). The shape rules
+            // web and tui carry: ABSENT, never empty, on an ordinary row (a
+            // permanent element trains the user past the one succession that
+            // matters); Remove is not re-rendered — the row's own Remove above
+            // is the other answer; Keep has no confirm (non-destructive).
+            // `dest.unattested` is resolved by the shared FFI projection, never
+            // derived here.
+            if (dest.unattested) {
+                Text(
+                    stringResource(R.string.backups_backup_destination_unattested_mark),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag(Ids.BACKUP_DESTINATION_UNATTESTED_MARK),
+                )
+                OutlinedButton(
+                    onClick = onKeep,
+                    enabled = !working,
+                    modifier = Modifier.testTag(Ids.BACKUP_DESTINATION_KEEP_BUTTON),
+                ) { Text(stringResource(R.string.backups_backup_destination_keep_button)) }
             }
             if (offerReseed) {
                 ReseedButton(enabled = reseedEnabled, onClick = onReseed)
@@ -1243,26 +1282,43 @@ private fun DestinationForm(
             // behaves as tui describes, the correct half is what the gate reasons
             // about.
             //
-            // The page's own predicate is handed over verbatim; note the
-            // custodian carve-out inside it (a custodian has no URL, so the
-            // nest kind's non-blank-URL gate must not apply to it — it would
-            // disable the button forever on a form that never shows a URL box).
+            // The draft's own answer is the shared
+            // `destination_form_possibility` (`ui/backups.md` § Errors & edge
+            // cases → *What the page offers*): a nest form needs its URL, the
+            // add-device form a readable capacity if one was typed, and a
+            // this-device EDIT is a rename that needs nothing — its row has no
+            // URL, so a blank URL never blocks it. Painted disabled with that
+            // reason; the offline gate composes on top and the draft's reason,
+            // the more specific one, wins.
+            val formKind = destinationFormOf(editing = editing != null, custodian = custodian)
+            val draft = askForm { destinationFormPossibility(formKind, url, capacity) }
             val registerGate = faunaGate(
                 when {
                     editing != null -> "fauna.account.state.put"
                     custodian -> "fauna.backup.destination.register"
                     else -> "fauna.backup.nest_key.grant"
                 },
-                enabled = !working && (custodian || url.isNotBlank()),
+                enabled = !working && draft.isPossible,
             )
+            val confirm = faunaFormGate(draft, registerGate)
+            val context = LocalContext.current
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
-                        if (custodian && editing == null) {
-                            // A blank cap is a real choice: null is uncapped. A
-                            // non-blank one that cannot be read is a REFUSAL the
-                            // user sees, never a substituted default — guessing a
-                            // cap is how a device's disk fills.
+                        // Rule 4's second half: the submit asks the SAME answer
+                        // and refuses with its reason on the page's one
+                        // `error-message` surface, never silently.
+                        val asked = askForm { destinationFormPossibility(formKind, url, capacity) }
+                        formRefusal(context, asked)?.let { refusal ->
+                            if (formKind == FfiDestinationForm.ADD_CLIENT_DEVICE) capacityError = true
+                            refusal.reason?.let(onError)
+                            return@Button
+                        }
+                        if (formKind == FfiDestinationForm.ADD_CLIENT_DEVICE) {
+                            // A blank cap is a real choice: null is uncapped. The
+                            // answer above has already said a typed one reads —
+                            // never a substituted default, because guessing a cap
+                            // is how a device's disk fills.
                             val typed = capacity.trim()
                             if (typed.isEmpty()) {
                                 onSubmitCustodian(name, null)
@@ -1276,10 +1332,13 @@ private fun DestinationForm(
                                 }
                             }
                         } else {
+                            // Both edits and the nest add: a this-device rename
+                            // reaches the shared edit with its blank URL, which
+                            // re-resolves only a URL that changed.
                             onSubmit(url, name)
                         }
                     },
-                    enabled = registerGate.enabled,
+                    enabled = confirm.enabled,
                     modifier = Modifier.testTag(Ids.BACKUP_DESTINATION_ADD_CONFIRM_BUTTON),
                 ) { Text(stringResource(R.string.backups_backup_destination_add_confirm)) }
                 OutlinedButton(
@@ -1287,7 +1346,7 @@ private fun DestinationForm(
                     modifier = Modifier.testTag(Ids.BACKUP_DESTINATION_ADD_CANCEL_BUTTON),
                 ) { Text(stringResource(R.string.backups_backup_destination_add_cancel)) }
             }
-            DisabledControlReasonText(registerGate.reason)
+            DisabledControlReasonText(confirm.reason)
         }
     }
 }

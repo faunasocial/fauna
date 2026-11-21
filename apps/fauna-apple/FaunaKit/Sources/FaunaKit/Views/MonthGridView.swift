@@ -38,6 +38,9 @@ public struct MonthGridView: View {
             Divider()
             // Eager rows (NOT a LazyVGrid) so every day cell registers its id with
             // the in-process driver regardless of scroll position.
+            // The six rows share the height the grid is given (each cell is
+            // height-flexible above its 64pt floor), so the grid fills its area
+            // the way Outlook's does instead of stopping at a fixed cell size.
             ForEach(weeks, id: \.self) { week in
                 HStack(spacing: 0) {
                     ForEach(week, id: \.self) { day in
@@ -45,7 +48,6 @@ public struct MonthGridView: View {
                     }
                 }
             }
-            Spacer(minLength: 0)
         }
         .accessibilityIdentifier(Ids.eventsMonthGrid)
         .automationValue(Ids.eventsMonthGrid, text: { "" })
@@ -104,12 +106,13 @@ public struct MonthGridView: View {
             Spacer(minLength: 0)
         }
         .padding(3)
-        .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 64, maxHeight: .infinity, alignment: .topLeading)
         .background(calendar.isDateInToday(day) ? Color.accentColor.opacity(0.06) : .clear)
         .overlay(Rectangle().stroke(Color(white: 0.5).opacity(0.18), lineWidth: 0.5))
         .opacity(inMonth ? 1 : 0.5)
         .contentShape(Rectangle())
         // Real-user gestures: double-tap an empty cell → new event; single → day.
+        .faunaActsOnClick()
         .onTapGesture(count: 2) { onNewEventOnDay(day) }
         .onTapGesture(count: 1) { onSelectDay(day) }
         .accessibilityIdentifier("events-day-cell-\(iso)")

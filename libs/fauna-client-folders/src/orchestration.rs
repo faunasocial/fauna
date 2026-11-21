@@ -636,8 +636,8 @@ type AuthorResult<T, R, G> =
 /// Error from the composed per-set WebDAV serve toggle
 /// ([`FoldersAuthor::serve_set`] — the `folder-webdav-toggle` production
 /// caller). Distinguishes the two legs so a client can react to each: a
-/// `Provision(NoMsek)` in particular means the actor has no mail credential yet,
-/// so the UI keeps the toggle disabled with a "set up mail first" hint rather
+/// `Provision(NoMsek)` in particular means the actor's mail key is not minted yet,
+/// so the UI keeps the toggle disabled "still loading" rather
 /// than surfacing a raw failure (webdav-server.md § Independent enablement).
 #[cfg(feature = "mls")]
 #[derive(Debug)]

@@ -27,6 +27,7 @@ pub mod compose;
 pub mod cue_tracker;
 pub mod cues;
 pub mod drafts;
+pub mod forms;
 pub mod manager;
 pub mod observer;
 pub mod personalization;
@@ -69,10 +70,10 @@ pub use fauna_text_model::topic::TopicModel;
 pub use snapshot::{
     ArchiveCommentRecord, ArchiveCommentSource, ArchiveCommentView, ArchiveCommentsFuture,
     AuthorDisplayView, AvailableBridge, BlobHome, BridgeFeedView, CardGate, FeedEmptyState,
-    FeedSnapshot, FeedStatus, FeedSummaryView, HeldVideo, LikeState, NostrAdvertiseVerb,
-    PlaybackSource, PostReactionGroup, PostResolution, PostSummary, QuotedPostView, ReplyAudience,
-    TipSenderView, TipView, UnlockOfferView, feed_empty_state, held_video_source, post_card_gate,
-    post_nostr_advertise_verb,
+    FeedSelectorChoice, FeedSnapshot, FeedStatus, FeedSummaryView, HeldVideo, LikeState,
+    NostrAdvertiseVerb, PlaybackSource, PostReactionGroup, PostResolution, PostSummary,
+    QuotedPostView, ReplyAudience, TipSenderView, TipView, UnlockOfferView, feed_empty_state,
+    held_video_source, post_card_gate, post_nostr_advertise_verb,
 };
 
 use fauna_core::source_glyph::{BridgeIdentitySnapshot, SourceGlyph};

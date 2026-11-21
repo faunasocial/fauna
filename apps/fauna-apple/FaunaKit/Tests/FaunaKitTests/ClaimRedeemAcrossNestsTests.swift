@@ -38,6 +38,12 @@ private final class ScriptedRedeemAPI: APIClient {
 
     override func subscriptionMineList() async throws -> [FfiMineSubscription] { [] }
 
+    /// The features courtesy read the redeem answer waits on: a nest whose
+    /// `payments` plane is available, so the press goes.
+    override func featureRows() async throws -> [FfiFeatureRow] {
+        [unreadStateFeatureRow("payments", affordance: "available")]
+    }
+
     override func redeemPaymentClaimAcrossNests(
         code: String, authorIdHex: String, authorHomeUrl: String?
     ) async throws -> FfiClaimRedeemReply {

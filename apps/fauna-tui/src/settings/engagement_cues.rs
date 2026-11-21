@@ -32,6 +32,7 @@
 //! This also keeps tui uniform with linux/windows/apple, all of which drive
 //! these three affordances through the shared `FeedManager` faces (priority #3).
 
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_ui_ids as ids;
 use std::sync::Arc;
 
@@ -55,13 +56,39 @@ pub(crate) struct EngagementCuesState {
     /// The ≥k published aggregates (`signal:*` **and** `report:*` — the export
     /// view is one list; `signal_published_description` says so to the user).
     pub(crate) published: Vec<ReportShareEntry>,
+    /// Where the `signal_share.status` read stands: the toggle's answer waits
+    /// on it, so the pre-read `share_signals` default of `false` is never
+    /// flipped into a guessed `true` (`ui/README.md` § Offer only what is
+    /// possible, rule 5).
+    pub(crate) share_read: ReadState,
 }
 
 impl EngagementCuesState {
     /// Fold a nest-confirmed `fauna.moderation.signal_share.status` reply.
     pub(super) fn apply(&mut self, reply: ModerationSignalShareStatusReply) {
         self.share_signals = reply.share;
+        self.share_read = ReadState::Resolved;
         self.published = reply.published;
+    }
+
+    /// A status read that failed: still unknown, unless an earlier read
+    /// answered (that confirmed value stays the toggle's).
+    pub(super) fn read_failed(&mut self) {
+        self.share_read = super::mail_spam::read_failed(self.share_read);
+    }
+
+    /// `personalization-share-signals-toggle`'s answer — the shared predicate
+    /// over whether the live feed manager is up and the read resolved.
+    pub(crate) fn share_answer(&self, manager_ready: bool) -> Possibility {
+        fauna_client_personalization::engagement::share_signals_possibility(
+            manager_ready,
+            self.share_read,
+        )
+    }
+
+    /// `personalization-clear-engagement-data-button`'s answer.
+    pub(crate) fn clear_answer(manager_ready: bool) -> Possibility {
+        fauna_client_personalization::engagement::clear_engagement_possibility(manager_ready)
     }
 }
 
@@ -93,7 +120,10 @@ pub(super) async fn clear_engagement_data(manager: Arc<CliFeedManager>) -> Resul
     manager.delete_cue_rollup().await
 }
 
-/// The facet's elements, appended to the Personalization home.
+/// The facet's elements, appended to the Personalization home. Both controls
+/// declare their answers with the manager taken as up; the page's builder in
+/// `settings/mod.rs`, which can see `App`'s live feed manager, re-declares them
+/// over the real manager.
 ///
 /// Row shape is **FLAT-indexed**, matching `actions/personalization.py`'s
 /// `signal_published_*` readers, which use plain `get_text(id, index=i)` — the
@@ -111,7 +141,8 @@ pub(super) fn engagement_cue_elements(state: &EngagementCuesState) -> Vec<Elemen
             p::CLEAR_ENGAGEMENT_DATA,
             true,
             Gesture::Settings(super::Action::ClearEngagementData),
-        ),
+        )
+        .possible(EngagementCuesState::clear_answer(true)),
         // ── Layer B: the opt-in (default off — the frame's D6 rule) ──
         Element::chrome(p::SHARE_SIGNALS_TITLE),
         Element::checkbox_gesture(
@@ -122,7 +153,9 @@ pub(super) fn engagement_cue_elements(state: &EngagementCuesState) -> Vec<Elemen
         )
         // The shared action reads `state`, not the checkbox glyph — the
         // "on"/"off" wire contract apple/windows already answer.
-        .attr("state", if state.share_signals { "on" } else { "off" }),
+        .attr("state", if state.share_signals { "on" } else { "off" })
+        // Not live before the read (rule 5); the seam disables it with why.
+        .possible(state.share_answer(true)),
         Element::chrome(p::SHARE_SIGNALS_SUBTITLE),
     ];
 
@@ -227,6 +260,7 @@ mod tests {
             attr(&EngagementCuesState {
                 share_signals: true,
                 published: vec![],
+                ..Default::default()
             })
             .as_deref(),
             Some("on")
@@ -245,6 +279,7 @@ mod tests {
                 entry("aa11", "signal:watch-complete", 4),
                 entry("bb22", "signal:skip", 7),
             ],
+            ..Default::default()
         };
         let els = engagement_cue_elements(&state);
         assert_eq!(

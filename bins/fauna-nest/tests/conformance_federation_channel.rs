@@ -1315,6 +1315,7 @@ async fn inbox_deliver_over_channel() {
     let req = FedInboxDeliverRequest {
         recipient_actor_id: hex::encode(recipient.0),
         payload_bytes: payload.clone(),
+        origin_nest_url: None,
     };
     let reply: FedInboxDeliverReply = from_value(
         &conn
@@ -1371,6 +1372,7 @@ async fn group_v1_schema_does_not_bypass_inbox_mode_over_the_channel() {
     let req = FedInboxDeliverRequest {
         recipient_actor_id: hex::encode(recipient.0),
         payload_bytes: build_inbox_payload(&sender, &recipient, "group/v1"),
+        origin_nest_url: None,
     };
     let err = conn
         .dispatcher
@@ -1420,6 +1422,7 @@ async fn inbox_deliver_closed_inbox_is_forbidden() {
     let req = FedInboxDeliverRequest {
         recipient_actor_id: hex::encode(recipient.0),
         payload_bytes: build_inbox_payload(&sender, &recipient, "email/v1"),
+        origin_nest_url: None,
     };
     let err = conn
         .dispatcher
@@ -3017,6 +3020,100 @@ async fn inbox_send_cross_nest_stores_a_knock_for_a_stranger() {
         edge.home_nest_url.as_deref(),
         Some(h_url.as_str()),
         "the contact row carries the knocker's home"
+    );
+}
+
+/// **A knocker whose nest this nest never dialed still has a home on the
+/// roster.** The test above seeds H's address on F by hand; in the field F
+/// learns nothing of H's address from an inbound channel alone (only its own
+/// dial proves one), so a stranger's first knock — the common case, contacts
+/// outcome 12 — left the row with no home. The knocking nest declares its own
+/// base URL on `fauna.federation.inbox.deliver`, as the Welcome and
+/// room-invite relays do, and F records it as an unproven sighting bound to
+/// the channel's VERIFIED origin (`resolve_origin_home_url`), so the edge
+/// resolves (`docs/goal/ui/contacts.md` § State & data shape).
+#[tokio::test]
+async fn a_cross_nest_knock_from_a_never_dialed_nest_resolves_its_declared_home() {
+    let (_h_url, h_state) = start_nest().await;
+    let (f_url, f_state) = start_nest().await;
+    h_state
+        .identity_domain
+        .store(Some(Arc::new("home-h.example".to_string())));
+
+    let router = {
+        let mut b = fauna_nest::rpc_router::RpcRouter::builder();
+        fauna_nest::inbox_handlers::register_inbox_handlers(&mut b);
+        b.build()
+    };
+    let sender = ActorKeypair::from_secret([0x23u8; 32]);
+    let caller = sender.actor_id().0;
+    let recipient = ActorId([0x89u8; 32]);
+    f_state
+        .db
+        .create_user_with_handle(&recipient.0, "free", "recipient", None)
+        .await
+        .unwrap();
+    let req = InboxSendRequest {
+        extra: Default::default(),
+        recipient_actor_id: hex::encode(recipient.0),
+        recipient_nest_url: Some(f_url.clone()),
+        payload_bytes: build_inbox_payload(&sender, &recipient, "note/v1"),
+    };
+    common::seed_dispatch_actor(&h_state.db, &caller).await;
+    let meta = router
+        .kind_meta("fauna.inbox.send")
+        .expect("send registered");
+    (meta.handler)(
+        h_state.clone(),
+        caller,
+        bytes::Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+    )
+    .await
+    .expect("a cross-nest knock to a stranger is accepted");
+
+    // F never dialed H: no address of H is recorded by anything but the knock.
+    let h_nest_id = h_state.nest_identity.public_key_bytes();
+    assert_eq!(
+        f_state
+            .db
+            .resolve_foreign_nest_urls(&h_nest_id, 4)
+            .await
+            .unwrap(),
+        vec!["https://home-h.example".to_string()],
+        "F records the knocking nest's declared home, bound to its verified id"
+    );
+
+    let contacts_router = {
+        let mut b = fauna_nest::rpc_router::RpcRouter::builder();
+        fauna_nest::contacts_handlers::register_contacts_handlers(&mut b);
+        b.build()
+    };
+    let meta = contacts_router
+        .kind_meta("fauna.contacts.list")
+        .expect("list registered");
+    let reply_bytes = (meta.handler)(
+        f_state.clone(),
+        recipient.0,
+        bytes::Bytes::from(
+            encode_canonical(&fauna_protocol::contacts::ContactListRequest {
+                extra: Default::default(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+    )
+    .await
+    .expect("contacts.list ok");
+    let reply: fauna_protocol::contacts::ContactListReply = decode_strict(&reply_bytes).unwrap();
+    let edge = reply
+        .contacts
+        .iter()
+        .find(|c| c.peer_id == hex::encode(caller))
+        .expect("the knocker's pending edge is listed");
+    assert_eq!(
+        edge.home_nest_url.as_deref(),
+        Some("https://home-h.example"),
+        "the contact row carries the home the knocking nest declared"
     );
 }
 

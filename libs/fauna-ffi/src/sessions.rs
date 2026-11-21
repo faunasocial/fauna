@@ -76,6 +76,24 @@ pub fn sessions_lockout_confirm_word() -> String {
     fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD.to_string()
 }
 
+/// `sessions-revoke-others-button`'s answer — the FFI face of
+/// [`sessions_view::revoke_others_possibility`]: still loading before the
+/// first read (`snapshot` absent), the read's failure while it holds no rows,
+/// `sessions.no_other_sessions` when only this app's own row is listed, and in
+/// flight while an act is on its way (`busy`) (`ui/sessions.md` § Errors &
+/// edge cases). The arm and the confirm both ask it again.
+#[uniffi::export]
+pub fn sessions_revoke_others_possibility(
+    snapshot: Option<FfiSessionsSnapshot>,
+    busy: bool,
+) -> fauna_core::possibility::Possibility {
+    let shared = snapshot.map(|s| sessions_view::SessionsSnapshot {
+        rows: s.rows.into_iter().map(row_view).collect(),
+        error: s.error,
+    });
+    sessions_view::revoke_others_possibility(shared.as_ref(), busy)
+}
+
 /// The nav-edge hydrate: read and fold. `devices` is the app's Devices machine
 /// (it names device-minted sessions and owns the sealed-label render), absent
 /// before it is built; `own_device_id` is the app's locally-stored device id,
@@ -226,9 +244,52 @@ fn row(r: &SessionRowView) -> FfiSessionRow {
     }
 }
 
+/// The fold's row back from its FFI mirror — the answer reads only the row
+/// count and `can_revoke`, but every field crosses so the mirror cannot drift.
+fn row_view(r: FfiSessionRow) -> SessionRowView {
+    SessionRowView {
+        token_id: r.token_id,
+        kind: r.kind,
+        mark: r.mark,
+        created_at: r.created_at,
+        last_used_at: r.last_used_at,
+        expires_at: r.expires_at,
+        ip_address: r.ip_address,
+        can_revoke: r.can_revoke,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revoke_others_waits_for_a_read_with_another_sign_in() {
+        let key = |p: fauna_core::possibility::Possibility| p.reason().map(|r| r.key.clone());
+        assert_eq!(
+            key(sessions_revoke_others_possibility(None, false)),
+            Some("common.still_loading".into())
+        );
+        let mut own = row(&view("own"));
+        own.can_revoke = false;
+        let only_own = FfiSessionsSnapshot {
+            rows: vec![own.clone()],
+            error: None,
+        };
+        assert_eq!(
+            key(sessions_revoke_others_possibility(Some(only_own), false)),
+            Some(sessions_view::keys::NO_OTHER_SESSIONS.into())
+        );
+        let two = FfiSessionsSnapshot {
+            rows: vec![own, row(&view("other"))],
+            error: None,
+        };
+        assert!(sessions_revoke_others_possibility(Some(two.clone()), false).is_possible());
+        assert_eq!(
+            key(sessions_revoke_others_possibility(Some(two), true)),
+            Some("common.in_flight".into())
+        );
+    }
 
     fn view(id: &str) -> SessionRowView {
         SessionRowView {

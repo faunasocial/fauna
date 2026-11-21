@@ -282,14 +282,18 @@
             <!-- Web-app origin (fauna.admin.web_app_origin.{get,set}; admin.md § N
                  Nest → Web-app origin), directly after NAT mode. Every rendering
                  decision is the shared fauna_client_admin::admin_web_app_origin_view
-                 fold — this page paints what it hands back: radios unmarked and
-                 disabled until the read lands and whenever can_set is false, the
-                 central radio's label and the status + scope lines are the view's,
-                 and a save repaints from the set's own reply. A radio pick is local;
-                 the save commits it. Mirrors android's WebAppOriginSection. -->
+                 fold — this page paints what it hands back: the section collapsed
+                 until the read lands and wherever section_possibility is absent
+                 (web-content-hosting.md, while the central origin is not live),
+                 the central radio wherever central_possibility is, each radio and
+                 the save from the shared draft predicate, the central radio's label
+                 and the status + scope lines the view's, and a save repaints from
+                 the set's own reply. A radio pick is local; the save commits it.
+                 Mirrors android's WebAppOriginSection. -->
             <StackPanel x:Name="WebAppOriginSection"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestWebAppOriginSection}"
                         AutomationProperties.Name="admin-nest-web-app-origin-section"
+                        Visibility="Collapsed"
                         Spacing="8">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
                            Text="{loc:Localize Key=admin/nest_page/web_app_origin_label}" />

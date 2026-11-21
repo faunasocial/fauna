@@ -1,5 +1,8 @@
 package com.fauna.app.ui.screen.settings
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import com.fauna.app.core.HexUtil
@@ -82,6 +85,30 @@ class SubscriptionSettingsContentTest {
         composeTestRule.onNodeWithTag("page-heading").assertExists()
         composeTestRule.onNodeWithTag("subscription-mine-section").assertExists()
         composeTestRule.onNodeWithText("You have no subscriptions yet").assertIsDisplayed()
+    }
+
+    /** `subscriptions.md` § Consumer side: before the `mine.list` read answers
+     *  the list says loading, never "no subscriptions"; a failed first read
+     *  paints neither (its reason is on `error-message`). */
+    @Test
+    fun theMineListIsThreeState() {
+        var read by mutableStateOf(uniffi.fauna_core.ReadState.PENDING)
+        composeTestRule.setContent {
+            SubscriptionSettingsContent(
+                subscriptions = emptyList(),
+                working = false,
+                onBack = {},
+                onUnsubscribe = {},
+                mineRead = read,
+            )
+        }
+        composeTestRule.onNodeWithText("You have no subscriptions yet").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Loading...").assertExists()
+        read = uniffi.fauna_core.ReadState.FAILED
+        composeTestRule.onNodeWithText("You have no subscriptions yet").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Loading...").assertDoesNotExist()
+        read = uniffi.fauna_core.ReadState.RESOLVED
+        composeTestRule.onNodeWithText("You have no subscriptions yet").assertExists()
     }
 
     @Test

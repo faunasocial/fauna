@@ -48,12 +48,14 @@ public func dnsProviderSection(vm: OnboardingVM, provider: ProviderMeta) -> some
             Task { try? await vm.machine.verifyDns() }
         }
         .buttonStyle(.bordered)
-        .disabled(!vm.machine.canVerifyDns())
         .accessibilityIdentifier(Ids.dnsVerifyButton)
-        .automationActivate(Ids.dnsVerifyButton,
-                            isEnabled: { vm.machine.canVerifyDns() }) {
+        .automationActivate(Ids.dnsVerifyButton) {
             Task { try? await vm.machine.verifyDns() }
         }
+        // The shared answer names the step a blocked Verify waits on
+        // (`ui/README.md` § Offer only what is possible, rules 2 and 6).
+        .faunaPossible(vm.machine.verifyDnsPossibility())
+        FaunaPossibilityReason(vm.machine.verifyDnsPossibility())
 
         automationText(Ids.dnsStatusText, renderLocalizedText(vm.machine.dnsStatusTextKey()))
 

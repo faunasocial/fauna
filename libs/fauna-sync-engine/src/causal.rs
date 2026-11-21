@@ -565,6 +565,11 @@ pub const LEDGER_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Held versions per path (newest kept).
 pub const LEDGER_KEEP: usize = 8;
 
+/// The file under the store's directory holding the own-run top `T`
+/// ([`CausalStore::own_run_top`]). One per store: the directory is the set
+/// scope.
+pub(crate) const OWN_RUN_TOP_FILE: &str = "own-run-top";
+
 /// Written into a per-path floor file, beside the new seq, when a skip is
 /// recorded over a floor that could not be read. It is not a seq, so every
 /// reader parses the file as [`FloorRead::Unreadable`] — the loss stays on
@@ -1062,6 +1067,64 @@ impl CausalStore {
     pub fn honest_anchor(&self, relative_path: &str, anchor: i64) -> i64 {
         self.set_wide_reduced(self.per_path_reduced(relative_path, anchor))
             .max(0)
+    }
+
+    /// The claim a fresh local EDIT to `relative_path` may make:
+    /// `max(anchor, T)` — `T` the top of this device's own acknowledged run
+    /// ([`Self::own_run_top`]) — passed through the SAME two floor reductions
+    /// as [`Self::honest_anchor`] (`conflicts.md` § the causal watermark, *An
+    /// edit stamp reaches across the writer's own acknowledged run*). A live
+    /// floor sits at or below the anchor, so the widening never lifts a claim
+    /// across one.
+    ///
+    /// Edit stamps only: a resolution stamp's bytes are OLD, so a widened one
+    /// would read as covering this device's own newer edit — every resolution
+    /// keeps [`Self::honest_anchor`], and the winner claim
+    /// ([`Self::honest_winner_claim`]) keeps its own derivation.
+    pub fn honest_edit_claim(&self, relative_path: &str, anchor: i64) -> i64 {
+        self.honest_anchor(relative_path, anchor.max(self.own_run_top()))
+    }
+
+    fn own_run_top_file(&self) -> std::path::PathBuf {
+        self.dir.join(OWN_RUN_TOP_FILE)
+    }
+
+    /// `T`, the top of this device's own acknowledged run: the newest seq such
+    /// that every row of the set above the anchor and at or below it is a row
+    /// this device recorded and holds the record-ack for. 0 when no run was
+    /// ever recorded or the file cannot be read — "no run", today's stamp, the
+    /// conservative answer. Dead weight once the anchor passes it.
+    pub fn own_run_top(&self) -> i64 {
+        std::fs::read_to_string(self.own_run_top_file())
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0)
+            .max(0)
+    }
+
+    /// Fold one record-ack into the run: the record was assigned `seq`, and
+    /// the nest said the newest row of the set below it is `prev_set_seq`.
+    /// `T` advances to `seq` only when that row is at or below
+    /// `max(anchor, T)` — no foreign row lies between. A foreign row in
+    /// between, or a reply that did not say (`None` — an older nest, a relay
+    /// that dropped it), leaves `T` where it was. Persisted temp-plus-rename
+    /// like the floors; a failed write leaves the older, lower `T` — an
+    /// under-claim, never an over-claim.
+    pub fn note_own_record_ack(&self, anchor: i64, seq: i64, prev_set_seq: Option<i64>) {
+        let Some(prev) = prev_set_seq else {
+            return;
+        };
+        let bound = anchor.max(self.own_run_top());
+        if prev > bound || seq <= bound {
+            return;
+        }
+        create_scoped_store_dir(&self.dir);
+        if let Err(e) = self.write_floor_atomically(&self.own_run_top_file(), &seq.to_string()) {
+            tracing::warn!(
+                error = %e,
+                "could not persist the own-run top; the next edit stamps at the anchor"
+            );
+        }
     }
 
     /// The per-path floor's reduction — the arm that RELEASES, shared by every

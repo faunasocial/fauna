@@ -17,11 +17,20 @@ import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
 import com.fauna.app.ui.util.faunaGate
-import com.fauna.app.ui.util.stringResourceFmt
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.ActorOption
 import com.fauna.app.ui.viewmodel.AdminWebVM
+import com.fauna.app.ui.viewmodel.AdminEntryRereadEffect
 import social.fauna.generated.Ids
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The admin `admin-web` page (`web-content-hosting.md` § Admin apex hosting): the
@@ -42,9 +51,11 @@ fun AdminWebScreen(
     navController: NavController,
     vm: AdminWebVM = hiltViewModel(),
 ) {
+    AdminEntryRereadEffect(vm.entryReread)
     val currentActorHex by vm.currentActorHex.collectAsState()
     val actors by vm.actors.collectAsState()
-    val apexUrl by vm.apexUrl.collectAsState()
+    val apexInfo by vm.apexInfo.collectAsState()
+    val readState by vm.readState.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val appMessages = LocalAppMessages.current
 
@@ -53,7 +64,10 @@ fun AdminWebScreen(
     AdminWebContent(
         currentActorHex = currentActorHex,
         actors = actors,
-        apexUrl = apexUrl,
+        apexInfo = apexInfo,
+        // Not enabled before the read lands, nor after the apex read failed
+        // (rule 5, admin.md § 7 Web): the read alone decides.
+        pickerAnswer = askForm { com.fauna.ffi.readPossibility(readState) },
         onBack = { navController.exitAdminToPrimary() },
         onSetApex = vm::setApex,
     )
@@ -64,7 +78,8 @@ fun AdminWebScreen(
 fun AdminWebContent(
     currentActorHex: String?,
     actors: List<ActorOption>,
-    apexUrl: String,
+    apexInfo: LocalizedText?,
+    pickerAnswer: Possibility,
     onBack: () -> Unit,
     onSetApex: (String?) -> Unit,
 ) {
@@ -113,12 +128,15 @@ fun AdminWebContent(
             ApexActorPicker(
                 current = currentActorHex,
                 actors = actors,
+                answer = pickerAnswer,
                 onSetApex = onSetApex,
             )
 
             // ── Apex-URL explainer ──
             Text(
-                stringResourceFmt(R.string.admin_web_page_apex_info, apexUrl),
+                // Where the apex serves, or why there is no address — the
+                // shared `web_apex_info_text`, never a composed `https:///`.
+                apexInfo?.let { localized(it) } ?: "",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.ADMIN_WEB_APEX_INFO),
@@ -132,6 +150,7 @@ fun AdminWebContent(
 private fun ApexActorPicker(
     current: String?,
     actors: List<ActorOption>,
+    answer: Possibility,
     onSetApex: (String?) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -145,7 +164,7 @@ private fun ApexActorPicker(
     // select IS the commit for `fauna.web.set_apex_actor` — there is no Save to
     // carry the declaration. Desensitizing the anchor field closes the whole
     // control, menu included, because the menu only opens from this anchor.
-    val apexGate = faunaGate("fauna.web.set_apex_actor")
+    val apexGate = faunaGate("fauna.web.set_apex_actor", enabled = answer.isPossible)
     ExposedDropdownMenuBox(
         expanded = expanded && apexGate.enabled,
         onExpandedChange = { if (apexGate.enabled) expanded = !expanded },
@@ -175,5 +194,6 @@ private fun ApexActorPicker(
             }
         }
     }
-    DisabledControlReasonText(apexGate.reason)
+    // The read's own reason is the more specific one, so it wins.
+    DisabledControlReasonText(answer.blockedReason?.let { localized(it) } ?: apexGate.reason)
 }

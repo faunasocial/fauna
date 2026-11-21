@@ -10,10 +10,16 @@
 //!     the zone.
 //!   * `provision_with_registration_snapshot` — extends the above with a
 //!     `Registrar` call in step 1.
+//!   * `provision_with_purchase_snapshot` — the general buying path: the
+//!     registration, and DNS at the registrar or at another provider
+//!     (`DomainPurchase::delegate`).
 //!   * `provision_nest_no_dns` — "Set up DNS later"; runs only step 2,
 //!     emits markdown for the user to add records manually.
+//!   * `provision_registered_no_dns` — the same, registering a bought domain
+//!     in step 1.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -23,7 +29,7 @@ use crate::dns::{DnsProvider, DnsRecord, DnsZone};
 use crate::error::ProvisionError;
 use crate::progress::{
     CancelFlag, ProvisionResultPlain, ProvisionStep, ProvisioningSnapshot, SkipReason, StepOutcome,
-    SubstepKey, run_step, set_cancelled, set_run_succeeded,
+    SubstepKey, run_step, set_cancelled, set_run_succeeded, set_substep,
 };
 use crate::registrar::{ContactInfo, Registrar};
 use crate::update_channel::UpdateChannel;
@@ -61,6 +67,37 @@ pub struct DeferredDnsResult {
     pub result: ProvisionResult,
     pub records: Vec<DnsRecord>,
     pub instructions_markdown: String,
+}
+
+/// What the Domain step did that outlives the run — told to the caller the
+/// moment it happens, so a later Retry or Back knows it
+/// (`docs/goal/behavior/onboarding-provisioning.md` § 3d, the wizard-life
+/// memory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainEvent {
+    /// `register` succeeded: the domain is bought.
+    Registered,
+    /// `set_nameservers` succeeded: the domain points at the DNS provider's
+    /// zone.
+    Pointed,
+}
+
+/// The run's purchase of its domain: the registrar, the agreed price, and how
+/// the Domain step treats it (`onboarding-provisioning.md` § 6).
+pub struct DomainPurchase<'a, R> {
+    pub registrar: &'a R,
+    pub years: u32,
+    pub agreed_price_cents: u64,
+    pub contact: Option<&'a ContactInfo>,
+    /// This wizard already registered the domain (a Retry after a later
+    /// failure): `register` is skipped.
+    pub already_registered: bool,
+    /// The DNS provider is not the registrar (§ 6 → *The Domain step when DNS
+    /// runs at another provider*): the step creates the zone there and sets
+    /// the domain's nameservers to it.
+    pub delegate: bool,
+    /// Fired once per [`DomainEvent`] as it happens.
+    pub on_event: &'a (dyn Fn(DomainEvent) + Send + Sync),
 }
 
 /// Determine the DNS record name for a domain within a zone.
@@ -210,6 +247,30 @@ fn build_records(domain: &str, zone: Option<&str>, instance_ipv4: &str) -> Vec<D
         .collect()
 }
 
+/// The records the Dns step publishes into `zone_id` for `domain`, named the
+/// way `dns` wants them (zone-relative or fully qualified — the same choice the
+/// step makes), with `ipv4` the box's address or, before the box exists,
+/// [`crate::dns_plan::UNKNOWN_ADDRESS`]. What the DNS plan is computed over
+/// (onboarding-provisioning.md § 6 *The DNS plan*).
+pub fn planned_records<D: DnsProvider>(
+    dns: &D,
+    domain: &str,
+    zone_id: &str,
+    zone_name: Option<&str>,
+    ipv4: Option<&str>,
+) -> Vec<DnsRecord> {
+    let zone: Option<&str> = if dns.record_names_relative_to_zone() {
+        Some(zone_name.unwrap_or(zone_id))
+    } else {
+        None
+    };
+    build_records(
+        domain,
+        zone,
+        ipv4.unwrap_or(crate::dns_plan::UNKNOWN_ADDRESS),
+    )
+}
+
 /// Standard provisioning flow with pre-existing DNS zone.
 ///
 /// Drives the four-step snapshot model. Caller passes the same `state`,
@@ -260,7 +321,7 @@ where
         registry,
         vps,
         dns,
-        None::<&NoRegistrar>, // no registration in standard flow
+        None::<&DomainPurchase<'_, NoRegistrar>>, // no registration in standard flow
         domain,
         nest_base_url,
         zone_id,
@@ -274,8 +335,6 @@ where
         on_server_ready,
         cancel,
         &sleep_fn,
-        None,
-        0,
     )
     .await;
     finalize_run(state, &notify, cancel, &result);
@@ -328,13 +387,82 @@ where
     F: Fn(&str) -> Client,
     Fut: std::future::Future<Output = ()>,
 {
+    let no_events = |_: DomainEvent| {};
+    let purchase = DomainPurchase {
+        registrar,
+        years,
+        agreed_price_cents,
+        contact,
+        already_registered: false,
+        delegate: false,
+        on_event: &no_events,
+    };
+    provision_with_purchase_snapshot(
+        client,
+        probe_for_ip,
+        registry,
+        vps,
+        dns,
+        &purchase,
+        domain,
+        nest_base_url,
+        server_name,
+        location,
+        server_type,
+        cloud_init_params,
+        labels,
+        state,
+        notify,
+        on_server_ready,
+        cancel,
+        sleep_fn,
+    )
+    .await
+}
+
+/// A run that buys its domain, as [`DomainPurchase`] says: registered at the
+/// registrar (unless this wizard already did), its zone found at `dns` — the
+/// registrar's own, or, when `purchase.delegate`, one created at another DNS
+/// provider and pointed at by setting the domain's nameservers
+/// (`docs/goal/behavior/onboarding-provisioning.md` § 6 → *The Domain step
+/// when DNS runs at another provider*) — then the Server, Dns and Online
+/// steps as on every path. Nothing waits for the delegation to spread.
+#[allow(clippy::too_many_arguments)]
+pub async fn provision_with_purchase_snapshot<V, D, R, S, F, Fut>(
+    client: &Client,
+    probe_for_ip: F,
+    registry: Option<&Registry>,
+    vps: &V,
+    dns: &D,
+    purchase: &DomainPurchase<'_, R>,
+    domain: &str,
+    nest_base_url: &str,
+    server_name: &str,
+    location: &str,
+    server_type: &str,
+    cloud_init_params: &CloudInitParams,
+    labels: &[(String, String)],
+    state: &Mutex<ProvisioningSnapshot>,
+    notify: impl Fn() + Send + Sync,
+    on_server_ready: impl Fn(&str, ServerOrigin) + Send + Sync,
+    cancel: &CancelFlag,
+    sleep_fn: S,
+) -> Result<ProvisionResult, ProvisionError>
+where
+    V: VpsProvider,
+    D: DnsProvider,
+    R: Registrar,
+    S: Fn(u64) -> Fut,
+    F: Fn(&str) -> Client,
+    Fut: std::future::Future<Output = ()>,
+{
     let result = run_all_steps(
         client,
         probe_for_ip,
         registry,
         vps,
         dns,
-        Some(registrar),
+        Some(purchase),
         domain,
         nest_base_url,
         "", // zone_id is rediscovered post-registration
@@ -348,13 +476,56 @@ where
         on_server_ready,
         cancel,
         &sleep_fn,
-        contact,
-        agreed_price_cents,
     )
     .await;
     finalize_run(state, &notify, cancel, &result);
-    let _ = years; // years is registrar-specific; carried via register call
     result
+}
+
+/// The deferred-DNS run for a domain this wizard buys — the manual DNS cover
+/// while buying (`onboarding-provisioning.md` § 3d, *The manual row*): the
+/// Domain step registers the domain (unless this wizard already did) and
+/// publishes nothing, the Server step runs, Dns and Online are skipped, and
+/// the records to add by hand come back as on [`provision_nest_no_dns`]. The
+/// domain stays on its registrar's own nameservers.
+#[allow(clippy::too_many_arguments)]
+pub async fn provision_registered_no_dns<V, R>(
+    client: &Client,
+    registry: Option<&Registry>,
+    vps: &V,
+    purchase: &DomainPurchase<'_, R>,
+    domain: &str,
+    server_name: &str,
+    location: &str,
+    server_type: &str,
+    cloud_init_params: &CloudInitParams,
+    labels: &[(String, String)],
+    state: &Mutex<ProvisioningSnapshot>,
+    notify: impl Fn() + Send + Sync,
+    on_server_ready: impl Fn(&str, ServerOrigin) + Send + Sync,
+    cancel: &CancelFlag,
+) -> Result<DeferredDnsResult, ProvisionError>
+where
+    V: VpsProvider,
+    R: Registrar,
+{
+    deferred_run(
+        client,
+        registry,
+        vps,
+        Some(purchase),
+        domain,
+        server_name,
+        location,
+        server_type,
+        cloud_init_params,
+        labels,
+        state,
+        notify,
+        on_server_ready,
+        cancel,
+    )
+    .await
 }
 
 /// "Set up DNS later" path. Step 1 is `Skipped` (no DNS provider), step 2
@@ -388,19 +559,91 @@ pub async fn provision_nest_no_dns<V>(
 where
     V: VpsProvider,
 {
-    let sleep_fn = |_secs: u64| async move {};
-    // Step 1: Skipped (no DNS provider available).
-    let _ = run_step(
+    deferred_run(
+        client,
+        registry,
+        vps,
+        None::<&DomainPurchase<'_, NoRegistrar>>,
+        domain,
+        server_name,
+        location,
+        server_type,
+        cloud_init_params,
+        labels,
         state,
-        &notify,
+        notify,
+        on_server_ready,
         cancel,
-        ProvisionStep::Domain,
-        ProvisionStep::Domain.default_retry_policy(),
-        Some(SubstepKey::DomainVerifyingZone),
-        |_| async move { Ok(StepOutcome::Skipped(SkipReason::ZoneAlreadyVerified)) },
-        &sleep_fn,
     )
-    .await;
+    .await
+}
+
+/// The deferred-DNS run behind [`provision_nest_no_dns`] and
+/// [`provision_registered_no_dns`]: the Domain step registers the domain when
+/// one is bought and is skipped otherwise; the Server step runs; Dns and
+/// Online are skipped.
+#[allow(clippy::too_many_arguments)]
+async fn deferred_run<V, R>(
+    client: &Client,
+    registry: Option<&Registry>,
+    vps: &V,
+    purchase: Option<&DomainPurchase<'_, R>>,
+    domain: &str,
+    server_name: &str,
+    location: &str,
+    server_type: &str,
+    cloud_init_params: &CloudInitParams,
+    labels: &[(String, String)],
+    state: &Mutex<ProvisioningSnapshot>,
+    notify: impl Fn() + Send + Sync,
+    on_server_ready: impl Fn(&str, ServerOrigin) + Send + Sync,
+    cancel: &CancelFlag,
+) -> Result<DeferredDnsResult, ProvisionError>
+where
+    V: VpsProvider,
+    R: Registrar,
+{
+    let sleep_fn = |_secs: u64| async move {};
+    // Step 1: register a bought domain (nothing is published), else Skipped
+    // (no DNS provider available). A failed registration stops the run before
+    // any server is bought.
+    match purchase {
+        Some(p) => {
+            let registered = AtomicBool::new(p.already_registered);
+            let registered = &registered;
+            run_step(
+                state,
+                &notify,
+                cancel,
+                ProvisionStep::Domain,
+                ProvisionStep::Domain.default_retry_policy(),
+                Some(SubstepKey::DomainRegistering),
+                |_| async move {
+                    if registered.load(Ordering::SeqCst) {
+                        return Ok(StepOutcome::Skipped(SkipReason::DomainAlreadyRegistered));
+                    }
+                    register_once(client, registry, cloud_init_params, p, domain, registered)
+                        .await?;
+                    Ok(StepOutcome::Succeeded)
+                },
+                &sleep_fn,
+            )
+            .await?;
+        }
+        None => {
+            let _ = run_step(
+                state,
+                &notify,
+                cancel,
+                ProvisionStep::Domain,
+                ProvisionStep::Domain.default_retry_policy(),
+                Some(SubstepKey::DomainVerifyingZone),
+                |_| async move { Ok(StepOutcome::Skipped(SkipReason::ZoneAlreadyVerified)) },
+                &sleep_fn,
+            )
+            .await;
+        }
+    }
 
     // Step 2: Server create.
     let (instance, origin) = run_server_step(
@@ -470,6 +713,27 @@ where
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// The purchase itself: the no-build refusal first (the registration is the
+/// run's first purchase), then `register`, then the flag and the
+/// [`DomainEvent::Registered`] event — so neither a retry inside this run nor a
+/// later Retry buys the domain again.
+async fn register_once<R: Registrar>(
+    client: &Client,
+    registry: Option<&Registry>,
+    cloud_init_params: &CloudInitParams,
+    p: &DomainPurchase<'_, R>,
+    domain: &str,
+    registered: &AtomicBool,
+) -> Result<(), ProvisionError> {
+    refuse_tag_with_no_build(registry, &cloud_init_params.image_tag).await?;
+    p.registrar
+        .register(client, domain, p.years, p.agreed_price_cents, p.contact)
+        .await?;
+    registered.store(true, Ordering::SeqCst);
+    (p.on_event)(DomainEvent::Registered);
+    Ok(())
+}
+
 /// Stand-in registrar type used to satisfy the generic parameter in the
 /// non-registration path. Never instantiated.
 struct NoRegistrar;
@@ -514,7 +778,7 @@ async fn run_all_steps<V, D, R, S, F, Fut>(
     registry: Option<&Registry>,
     vps: &V,
     dns: &D,
-    registrar: Option<&R>,
+    purchase: Option<&DomainPurchase<'_, R>>,
     domain: &str,
     nest_base_url: &str,
     initial_zone_id: &str,
@@ -548,8 +812,6 @@ async fn run_all_steps<V, D, R, S, F, Fut>(
     on_server_ready: impl Fn(&str, ServerOrigin) + Send + Sync,
     cancel: &CancelFlag,
     sleep_fn: &S,
-    contact: Option<&ContactInfo>,
-    agreed_price_cents: u64,
 ) -> Result<ProvisionResult, ProvisionError>
 where
     V: VpsProvider,
@@ -561,14 +823,74 @@ where
 {
     // Step 1: Domain — register (if applicable) and verify the zone exists. A
     // terminal failure stops the run here: nothing after it may be bought.
+    // `registered` outlives the step's attempts, so a transient failure after
+    // the purchase never buys the domain twice.
+    let registered = AtomicBool::new(purchase.is_some_and(|p| p.already_registered));
+    let registered = &registered;
+    let delegate = purchase.is_some_and(|p| p.delegate);
+    let note = &notify;
+    let first_substep = match purchase {
+        Some(p) if !p.already_registered => SubstepKey::DomainRegistering,
+        _ if delegate => SubstepKey::DomainCreatingZone,
+        _ => SubstepKey::DomainVerifyingZone,
+    };
     run_step(
         state,
         &notify,
         cancel,
         ProvisionStep::Domain,
         ProvisionStep::Domain.default_retry_policy(),
-        Some(SubstepKey::DomainVerifyingZone),
+        Some(first_substep),
         |_attempt| async move {
+            if let Some(p) = purchase.filter(|p| p.delegate) {
+                // DNS at another provider (§ 6): register, create the zone
+                // there, point the domain at it — each pre-flighted, so Retry
+                // runs the step from the top and skips what exists.
+                if !registered.load(Ordering::SeqCst) {
+                    set_substep(state, ProvisionStep::Domain, SubstepKey::DomainRegistering);
+                    note();
+                    register_once(client, registry, cloud_init_params, p, domain, registered)
+                        .await?;
+                }
+                set_substep(state, ProvisionStep::Domain, SubstepKey::DomainCreatingZone);
+                note();
+                let zone = match dns
+                    .verify(client)
+                    .await?
+                    .into_iter()
+                    .find(|z| z.name == domain)
+                {
+                    Some(zone) => zone,
+                    None => dns.create_zone(client, domain).await?,
+                };
+                if zone.nameservers.is_empty() {
+                    return Err(ProvisionError::Other(format!(
+                        "the DNS provider assigned no nameservers to the zone of {domain}"
+                    )));
+                }
+                // A replace, so never skipped on the strength of the zone
+                // existing: a run that stopped after the create must still
+                // point the domain.
+                set_substep(
+                    state,
+                    ProvisionStep::Domain,
+                    SubstepKey::DomainSettingNameservers,
+                );
+                note();
+                p.registrar
+                    .set_nameservers(client, domain, &zone.nameservers)
+                    .await?;
+                (p.on_event)(DomainEvent::Pointed);
+                set_substep(
+                    state,
+                    ProvisionStep::Domain,
+                    SubstepKey::DomainVerifyingZone,
+                );
+                note();
+                stash_zone(state, zone.id.clone(), Some(zone.name.clone()));
+                return Ok(StepOutcome::Succeeded);
+            }
+
             // List the provider's zones once (each carries id + name). We stash
             // BOTH: the id keys the provider's API paths, and the NAME is the
             // base `build_records` relativizes owner names against (a numeric or
@@ -582,12 +904,11 @@ where
                 return Ok(StepOutcome::Skipped(SkipReason::ZoneAlreadyVerified));
             }
 
-            if let Some(reg) = registrar {
-                // The registration is the run's first purchase, so the no-build
-                // refusal comes before it, not only at the Server step.
-                refuse_tag_with_no_build(registry, &cloud_init_params.image_tag).await?;
-                reg.register(client, domain, 1, agreed_price_cents, contact)
-                    .await?;
+            if let Some(p) = purchase {
+                if !registered.load(Ordering::SeqCst) {
+                    register_once(client, registry, cloud_init_params, p, domain, registered)
+                        .await?;
+                }
                 // Re-discover the zone after registration completes.
                 let zone = dns
                     .verify(client)
@@ -656,12 +977,13 @@ where
     // fully-qualified owners). The `unwrap_or` fallback to the threaded id
     // preserves the prior behavior for the registrar-style providers whose id
     // equals the zone name, should the name lookup ever come up empty.
-    let zone_for_records: Option<&str> = if dns.record_names_relative_to_zone() {
-        Some(zone_name.as_deref().unwrap_or(zone_id.as_str()))
-    } else {
-        None
-    };
-    let records = build_records(domain, zone_for_records, &instance.ipv4);
+    let records = planned_records(
+        dns,
+        domain,
+        &zone_id,
+        zone_name.as_deref(),
+        Some(&instance.ipv4),
+    );
     // The FCrDNS / EHLO hostname the mail server presents (mail-multidomain.md
     // § One MX target; dns-management.md § Records covered) — the rDNS pointer
     // target, not the apex.
@@ -681,10 +1003,10 @@ where
             let mail_fqdn = mail_fqdn.clone();
             async move {
                 // Forward-zone records, in build order (apex A, mail A, MX, SPF,
-                // DMARC); all idempotent.
-                for rec in records.iter() {
-                    create_record_idempotent(client, dns, &zone_id, rec).await?;
-                }
+                // DMARC), converged: kept when right, added when absent, a
+                // competing value replaced, a stale AAAA removed
+                // (onboarding-provisioning.md § 6 *The DNS plan*).
+                converge_records(client, dns, &zone_id, &records).await?;
                 // Reverse DNS (PTR) → `mail.<primary>` for FCrDNS. Skip if already
                 // set to the correct FQDN.
                 match vps.get_ptr(client, &instance).await {
@@ -901,25 +1223,59 @@ fn with_managed_by(labels: &[(String, String)]) -> Vec<(String, String)> {
     out
 }
 
-async fn create_record_idempotent<D: DnsProvider>(
+/// Read the zone's current records at every pair the plan needs.
+pub async fn read_current_records<D: DnsProvider>(
     client: &Client,
     dns: &D,
     zone_id: &str,
-    record: &DnsRecord,
+    records: &[DnsRecord],
+) -> Result<Vec<DnsRecord>, ProvisionError> {
+    let mut current = Vec::new();
+    for (name, ty) in crate::dns_plan::lookups(records) {
+        current.extend(dns.find_records(client, zone_id, &name, &ty).await?);
+    }
+    Ok(current)
+}
+
+/// Bring the zone's records to `records`: plan against what the zone holds
+/// now, delete each stale value, create each missing one. Idempotent — a second
+/// run plans every row `Keep`.
+async fn converge_records<D: DnsProvider>(
+    client: &Client,
+    dns: &D,
+    zone_id: &str,
+    records: &[DnsRecord],
 ) -> Result<(), ProvisionError> {
-    // Find by name+type; if a record with the same value already exists,
-    // skip creation. Mismatched values fall through to create_record (the
-    // provider may reject duplicates, which is the right answer — the
-    // user can resolve it manually).
-    let existing = dns
-        .find_records(client, zone_id, &record.name, &record.record_type)
+    use crate::dns_plan::{needs_create, plan, stale_values};
+    // A zone that cannot be read converges as far as it can be seen: every
+    // record reads as absent, so each is created and a provider holding a
+    // competing one refuses it as it did before converging existed — never a
+    // blind delete.
+    let current = read_current_records(client, dns, zone_id, records)
         .await
         .unwrap_or_default();
-    let already_correct = existing.iter().any(|r| r.value == record.value);
-    if already_correct {
-        return Ok(());
+    let rows = plan(records, |n, t| {
+        current
+            .iter()
+            .filter(|r| r.name == n && r.record_type == t)
+            .cloned()
+            .collect()
+    });
+    for (row, rec) in rows
+        .iter()
+        .zip(records.iter().map(Some).chain(std::iter::repeat(None)))
+    {
+        for stale in stale_values(row) {
+            dns.delete_record(client, zone_id, &row.name, &row.record_type, &stale)
+                .await?;
+        }
+        if needs_create(row)
+            && let Some(rec) = rec
+        {
+            dns.create_record(client, zone_id, rec).await?;
+        }
     }
-    dns.create_record(client, zone_id, record).await
+    Ok(())
 }
 
 fn finalize_run(
@@ -1168,10 +1524,12 @@ mod tests {
             DnsZone {
                 id: "42".into(),
                 name: "example.net".into(),
+                nameservers: Vec::new(),
             },
             DnsZone {
                 id: "7".into(),
                 name: "other.example".into(),
+                nameservers: Vec::new(),
             },
         ];
         assert_eq!(

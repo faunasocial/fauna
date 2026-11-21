@@ -21,10 +21,23 @@ Deno.test('the view starts null, so the toggle starts disabled', () => {
   check(/let view = \$state<SubdomainView \| null>\(null\);/.test(src), 'view must start null');
 });
 
+// Since apps 6161 the toggle paints from the shared Possibility answer:
+// `subdomain_toggle_possibility` (libs/fauna-client-web) answers Pending —
+// disabled — for a resolved read with no view, and the pre-wasm fallback is
+// disabled too. So the contract is: `disabled` comes from that answer, and
+// the answer is fed the `view` state.
 Deno.test('the toggle button is disabled while the view is null', () => {
   const m = src.match(/<button[^>]*data-testid=\{IDS\.WEB_SETTINGS_SUBDOMAIN_TOGGLE\}[\s\S]*?>/);
   check(m !== null, 'toggle button not found');
-  check(/disabled=\{view === null\}/.test(m![0]), 'toggle must carry disabled={view === null}');
+  check(/disabled=\{toggleAnswer\.disabled\}/.test(m![0]), 'toggle must carry disabled={toggleAnswer.disabled}');
+  check(
+    /webSubdomainTogglePossibility\(readState, view\)/.test(src),
+    'the toggle answer must be asked over the view state',
+  );
+  check(
+    /:\s*\{ shown: true, disabled: true, reason: null \}/.test(src),
+    'before wasm is ready the toggle must paint disabled',
+  );
 });
 
 Deno.test('applyView (run by hydrate) is what sets the view, enabling the toggle', () => {

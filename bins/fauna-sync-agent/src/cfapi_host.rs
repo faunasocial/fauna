@@ -521,12 +521,16 @@ fn connect_registered(
     })
 }
 
-/// Startup janitor: unregister **ghost** Fauna shell registrations — entries
-/// whose folder no longer resolves on disk (deleted while the service was down,
-/// or leaked by a crashed test run). Anything with a live folder is left alone,
-/// which is what makes this safe on a shared dev box: a parallel session's
-/// served root has a folder that exists. Best-effort — a failed unregister is
-/// logged and retried at the next startup. Returns how many ghosts were removed.
+/// Startup janitor: unregister **ghost** Fauna shell registrations whole —
+/// entries whose folder no longer resolves on disk (deleted while the service
+/// was down, or leaked by a crashed test run), and entries a package registered
+/// that is no longer installed for this user, folder or not (an MSIX has no
+/// uninstall action, and removing the package leaves its roots registered —
+/// `installers/windows.md` § Direct download, 5, *Removal*). Anything else is
+/// left alone, which is what makes this safe on a shared dev box: a parallel
+/// session's served root has a folder that exists, and a packaged one's package
+/// is installed. Best-effort — a failed unregister is logged and retried at the
+/// next startup. Returns how many ghosts were removed.
 pub fn sweep_ghost_shell_registrations() -> usize {
     let roots = match fauna_cfapi::list_shell_sync_roots() {
         Ok(r) => r,
@@ -535,24 +539,57 @@ pub fn sweep_ghost_shell_registrations() -> usize {
             return 0;
         }
     };
+    let me = fauna_ipc::win_token::current_user_sid_string().ok();
     let mut removed = 0;
     for r in roots {
-        let is_ghost = match &r.path {
-            None => true, // the OS can no longer resolve the folder
-            Some(p) => !Path::new(p).exists(),
-        };
-        if !is_ghost {
+        let Some(why) = ghost_reason(
+            &r,
+            me.as_deref(),
+            |p| p.exists(),
+            fauna_cfapi::package_family_installed,
+        ) else {
             continue;
-        }
+        };
         match fauna_cfapi::unregister_shell_root(&r) {
             Ok(()) => {
-                tracing::info!(id = %r.id, path = ?r.path.as_deref().map(fauna_core::log_redact::log_path), "swept ghost shell sync root");
+                tracing::info!(id = %r.id, why, path = ?r.path.as_deref().map(fauna_core::log_redact::log_path), "swept ghost shell sync root");
                 removed += 1;
             }
-            Err(e) => tracing::warn!(id = %r.id, error = %e, "ghost shell unregister failed"),
+            Err(e) => tracing::warn!(id = %r.id, why, error = %e, "ghost shell unregister failed"),
         }
     }
     removed
+}
+
+/// Why the startup janitor removes `r`, or `None` to leave it: no folder
+/// recorded, the folder gone, or — for an entry of this user (`me`, the SID the
+/// Id carries) — the package its `AUMID` names no longer installed. Another
+/// user's entry is never judged by this user's package catalogue, an
+/// unpackaged entry (no `AUMID`) has no package to be gone, and a failed
+/// catalogue query leaves the entry (logged; the next start asks again).
+fn ghost_reason(
+    r: &fauna_cfapi::ShellSyncRoot,
+    me: Option<&str>,
+    exists: impl Fn(&Path) -> bool,
+    installed: impl Fn(&str) -> anyhow::Result<bool>,
+) -> Option<&'static str> {
+    match &r.path {
+        None => return Some("no folder recorded"),
+        Some(p) if !exists(Path::new(p)) => return Some("folder gone"),
+        Some(_) => {}
+    }
+    let family = r.package_family()?;
+    if !me.is_some_and(|me| r.sid().is_some_and(|sid| sid.eq_ignore_ascii_case(me))) {
+        return None;
+    }
+    match installed(family) {
+        Ok(true) => None,
+        Ok(false) => Some("package no longer installed"),
+        Err(e) => {
+            tracing::warn!(id = %r.id, error = %format!("{e:#}"), "package catalogue query failed; root left");
+            None
+        }
+    }
 }
 
 /// Uninstall-time cleanup: unregister **every** Fauna shell sync-root
@@ -1078,6 +1115,90 @@ unsafe extern "system" fn notify_rename_callback(
 mod tests {
     use super::*;
     use crate::bridge::HydrationCommand;
+
+    // ── the startup janitor's choice ──
+
+    /// What the startup janitor removes: no folder or a gone folder (any
+    /// entry, as before), and a folder still there whose registering package is
+    /// no longer installed for this user — never another user's entry, an
+    /// unpackaged one, or one whose package query failed.
+    #[test]
+    fn the_janitor_removes_a_removed_packages_root_and_only_that() {
+        const ME: &str = "S-1-5-21-1-2-3-1001";
+        const GONE: &str = "FaunaSocialTest.RootWitnessDirect9_gmah1na7r5dfy";
+        let root =
+            |sid: &str, path: Option<&str>, aumid: Option<&str>| fauna_cfapi::ShellSyncRoot {
+                id: format!("Fauna!{sid}!acct"),
+                path: path.map(str::to_string),
+                aumid: aumid.map(str::to_string),
+                ..Default::default()
+            };
+        let exists = |p: &Path| !p.to_string_lossy().contains("deleted");
+        let installed = |family: &str| -> anyhow::Result<bool> {
+            match family {
+                GONE => Ok(false),
+                "Query.Fails_gmah1na7r5dfy" => anyhow::bail!("catalogue down"),
+                _ => Ok(true),
+            }
+        };
+        let gone_aumid = format!("{GONE}!FaunaApp");
+        let reason = |r: &fauna_cfapi::ShellSyncRoot| ghost_reason(r, Some(ME), exists, installed);
+
+        assert_eq!(reason(&root(ME, None, None)), Some("no folder recorded"));
+        assert_eq!(
+            reason(&root(ME, Some(r"C:\deleted"), None)),
+            Some("folder gone")
+        );
+        assert_eq!(
+            reason(&root(ME, Some(r"C:\Users\u\Docs"), Some(&gone_aumid))),
+            Some("package no longer installed")
+        );
+        // Kept: an unpackaged root, an installed package's, another user's, a
+        // failed query's, and every packaged one when this user's SID is unknown.
+        assert_eq!(reason(&root(ME, Some(r"C:\Users\u\Docs"), None)), None);
+        assert_eq!(
+            reason(&root(
+                ME,
+                Some(r"C:\Users\u\Docs"),
+                Some("FaunaSocial.FaunaDesktop_x!FaunaApp")
+            )),
+            None
+        );
+        assert_eq!(
+            reason(&root(
+                "S-1-5-21-9-9-9-1002",
+                Some(r"C:\Users\v\Docs"),
+                Some(&gone_aumid)
+            )),
+            None
+        );
+        assert_eq!(
+            reason(&root(
+                ME,
+                Some(r"C:\Users\u\Docs"),
+                Some("Query.Fails_gmah1na7r5dfy!FaunaApp")
+            )),
+            None
+        );
+        assert_eq!(
+            ghost_reason(
+                &root(ME, Some(r"C:\Users\u\Docs"), Some(&gone_aumid)),
+                None,
+                exists,
+                installed
+            ),
+            None
+        );
+        // Another user's gone folder is still a ghost, as before.
+        assert_eq!(
+            reason(&root(
+                "S-1-5-21-9-9-9-1002",
+                Some(r"C:\deleted"),
+                Some(&gone_aumid)
+            )),
+            Some("folder gone")
+        );
+    }
 
     // ── shell-registration identity ──
 

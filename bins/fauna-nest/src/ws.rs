@@ -1016,6 +1016,30 @@ impl DispatchSink for RpcConnection {
         self.revoke();
         true
     }
+
+    /// The per-actor plane is the one whose caller is a UI window, so it is
+    /// the one that announces a park — through [`WsState::push_to_connection`],
+    /// the ordinary push path, so the frame takes this connection's next `seq`
+    /// and its overflow accounting (`rpc_hold_test_hook` § Announcing the park).
+    #[cfg(feature = "test-hooks")]
+    fn announce_held(self: Arc<Self>, correlation_id: u64) -> bool {
+        let payload = fauna_protocol::push_events::RpcHeldPayload {
+            correlation_id,
+            extra: Default::default(),
+        };
+        let payload = match fauna_protocol::encode_canonical(&payload)
+            .ok()
+            .and_then(|b| fauna_cbor::decode_strict::<fauna_protocol::Value>(&b).ok())
+        {
+            Some(v) => v,
+            None => return false,
+        };
+        let event = fauna_protocol::PushEvent::Unknown(fauna_protocol::unknown::Unknown {
+            kind: fauna_protocol::push_events::RPC_HELD_PUSH_KIND.to_string(),
+            payload,
+        });
+        WsState::push_to_connection(&self, &event)
+    }
 }
 
 /// The **server half** of the spec heartbeat: how often the nest sends a WS

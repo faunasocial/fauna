@@ -57,7 +57,8 @@
 //! registry has no row filter to say which: the purge walk carries a
 //! hand-written predicate and a dedicated test owns the row rule (`outbox`,
 //! the first; `abuse_reports`, whose leg withdraws open rows rather than
-//! deleting them).
+//! deleting them; `sync_changes` and `sync_signer_certs`, whose rows in
+//! another owner's set stay).
 //!
 //! **Who reads this list today.** [`CacheDb::purge_orphaned_actor_rows`] and —
 //! since 2026-08-12 — **the succession ceremony**, which executes every
@@ -4351,6 +4352,25 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
              of the owner's that the archive does not already carry",
         ),
     },
+    // The materialize receipt (`db/materialize_receipts.rs`;
+    // `backup-destinations.md` § *A lived-in segment set is completed by
+    // record in the same gesture*, rule (2)): one row per (actor, set) whose
+    // flip committed. It names the account's own corpus and moves with it, as
+    // the marker does, so a successor's repeat of a finished flip is still
+    // answered `already_materialized`.
+    ActorTable {
+        table: "materialize_receipts",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        succession: Succession::Move(MoveShape::Plain),
+        export: Export::WithheldOperational(
+            "the record that a restore ceremony on this box finished: which custody set it made \
+             live, at which ledger generation and manifest anchor. It is about this box's own \
+             bookkeeping, meaningless off it, and holds nothing of the owner's that the archive \
+             does not already carry as mail, events, cards or files",
+        ),
+    },
     // The per-message scan record for mail this account was DELIVERED. Its own
     // per-actor consumer is what rules it: `seed_factor_backlog` selects on
     // `delivered_to_actor` to enumerate "the owner's mail item universe" and seed
@@ -5319,7 +5339,20 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         table: "sync_changes",
         column: "actor_id",
         key: ActorKey::Blob,
-        policy: Policy::Purge,
+        // DELETION RULING (`writer-signed-change-records.md` ruling (12), the
+        // deletion leg). `actor_id` is the RECORDING actor, so a writer
+        // member's rows sit in the owner's set under the member's id.
+        policy: Policy::Partial(
+            "a writer's rows outlive the grant (writer-signed-change-records.md ruling \
+             (12)), and an account deletion ends the grant: the rows this actor recorded \
+             in a set ANOTHER owner holds stay, admitted on every reader by the \
+             `folder_former_writers` mark the same walk records, while every row with no \
+             set or in a set the deleted person (or a local predecessor) owns goes. The \
+             predicated leg is `keep_writer_of_record_rows_for_deleted_actor`; pinned by \
+             `actor_tables::tests::a_deleted_writers_rows_stay_only_in_other_owners_sets` \
+             and, through the finalize path, \
+             `conformance_writer_signed_changes::a_deleted_current_writers_rows_stay_admitted_in_the_owners_set`",
+        ),
         succession: Succession::Move(MoveShape::Plain),
         // EXPORT RULING (the sync plane). The account's own
         // file-change journal, and the table the `restore_history` entry already
@@ -5481,7 +5514,16 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         table: "sync_signer_certs",
         column: "actor_id",
         key: ActorKey::Blob,
-        policy: Policy::Purge,
+        // DELETION RULING: the certs follow the rows they verify on this axis
+        // too, as they do on the succession axis below.
+        policy: Policy::Partial(
+            "the certs follow the `sync_changes` rows they verify: a reader looks one up by \
+             (row actor, signer key), so a cert whose device key signed a row the deletion \
+             keeps in another owner's set (writer-signed-change-records.md ruling (12)) \
+             stays, and every other cert of the actor goes — \
+             `keep_writer_of_record_rows_for_deleted_actor`, run after the rows' own leg; \
+             pinned by `actor_tables::tests::a_deleted_writers_rows_stay_only_in_other_owners_sets`",
+        ),
         // Move, not the `sync_devices` Stay, because the certs FOLLOW THE ROWS
         // THEY VERIFY: `sync_changes` is `Move(Plain)`, and the side table is
         // looked up by `(row.actor_id, signer_key)`, so a stayed cert would
@@ -8778,8 +8820,11 @@ impl CacheDb {
     /// requests as a READER, a second person the author-keyed
     /// `subscribe_requests` entry cannot reach — and withdraws the actor's
     /// open abuse reports by `abuse_reports`' [`Policy::Partial`] leg, a
-    /// deletion of words plus a queued propagation rather than of rows: the
-    /// three legs here a plain `Purge` cannot express.
+    /// deletion of words plus a queued propagation rather than of rows — and
+    /// records the actor's writer-of-record marks and keeps the change rows
+    /// and certs they admit in other owners' sets
+    /// ([`Self::keep_writer_of_record_rows_for_deleted_actor`]): the four legs
+    /// here a plain `Purge` cannot express.
     ///
     /// All of that runs for `actor_id` AND for every local predecessor this
     /// nest's successions retired into it, back to the chain's first identity
@@ -8802,17 +8847,24 @@ impl CacheDb {
     pub async fn purge_orphaned_actor_rows(&self, actor_id: &[u8; 32]) -> Result<u64> {
         let conn = self.conn.lock().await;
         let mut total = 0u64;
-        for id in std::iter::once(*actor_id)
+        let chain: Vec<[u8; 32]> = std::iter::once(*actor_id)
             .chain(super::successions::local_predecessors(&conn, actor_id)?)
-        {
-            total += Self::purge_one_identitys_rows(&conn, &id)?;
+            .collect();
+        for id in &chain {
+            total += Self::purge_one_identitys_rows(&conn, id, &chain)?;
         }
         Ok(total)
     }
 
     /// [`Self::purge_orphaned_actor_rows`]'s walk for ONE id, under the
-    /// caller's lock.
-    fn purge_one_identitys_rows(conn: &rusqlite::Connection, actor_id: &[u8; 32]) -> Result<u64> {
+    /// caller's lock. `chain` is every identity the deletion reaches (the
+    /// account and its local predecessors): a set any of them owns is the
+    /// deleted person's own, and every other set is someone else's.
+    fn purge_one_identitys_rows(
+        conn: &rusqlite::Connection,
+        actor_id: &[u8; 32],
+        chain: &[[u8; 32]],
+    ) -> Result<u64> {
         let actor = actor_id.to_vec();
         // The bridge families spell the same id as lowercase hex TEXT — one
         // encoding per registry entry, not per call site (`ActorKey`).
@@ -8858,6 +8910,14 @@ impl CacheDb {
             super::now_epoch_secs(),
         )
         .context("withdraw the deleted reporter's open abuse reports")?;
+        // Ruling (12)'s deletion leg (`writer-signed-change-records.md`): the
+        // deletion takes `writer` away in every set someone shared with this
+        // actor, so it records the writer of record as every such write does
+        // — BEFORE the registry loop drops `folder_member_access` — and keeps
+        // what the mark admits: the rows this actor recorded in another
+        // owner's set, and the certs those rows verify under (the
+        // `sync_changes` and `sync_signer_certs` `Policy::Partial` reasons).
+        total += Self::keep_writer_of_record_rows_for_deleted_actor(conn, actor_id, chain)?;
         for entry in ACTOR_TABLES {
             if !matches!(entry.policy, Policy::Purge) {
                 continue;
@@ -8877,6 +8937,66 @@ impl CacheDb {
             total += deleted as u64;
         }
         Ok(total)
+    }
+
+    /// The deletion leg of `writer-signed-change-records.md` ruling (12): a
+    /// writer's rows outlive the grant, and an account deletion is one more
+    /// write that ends the grant.
+    ///
+    /// 1. Every `writer` grant `actor_id` holds becomes a `folder_former_writers`
+    ///    row (`record_former_writer_if_writer`'s statement over all of the
+    ///    actor's grants at once), before the registry loop purges
+    ///    `folder_member_access`.
+    /// 2. `sync_changes` (`Policy::Partial`): the actor's rows go, except those
+    ///    in a set whose owner is not in `chain` — another owner's set, where
+    ///    the owner's and every member's readers admit them by the mark. A row
+    ///    with no set, or in a set the deleted person owns, goes.
+    /// 3. `sync_signer_certs` (`Policy::Partial`): the actor's certs go, except
+    ///    one whose device key signed a row step 2 kept — a reader looks the
+    ///    cert up by `(row actor, signer key)`, so the row stays verifiable.
+    ///
+    /// Returns the rows deleted.
+    fn keep_writer_of_record_rows_for_deleted_actor(
+        conn: &rusqlite::Connection,
+        actor_id: &[u8; 32],
+        chain: &[[u8; 32]],
+    ) -> Result<u64> {
+        let actor = actor_id.to_vec();
+        conn.execute(
+            "INSERT OR IGNORE INTO folder_former_writers (channel_id, actor_id)
+             SELECT channel_id, actor_id FROM folder_member_access
+              WHERE actor_id = ?1 AND access = 'writer'",
+            rusqlite::params![actor],
+        )
+        .context("record the deleted writer's writer-of-record marks")?;
+        // `?1` is the actor; `?2..` the chain, whose sets are the person's own.
+        let owners = (2..chain.len() + 2)
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut params: Vec<Vec<u8>> = vec![actor.clone()];
+        params.extend(chain.iter().map(|id| id.to_vec()));
+        let changes = conn
+            .execute(
+                &format!(
+                    "DELETE FROM sync_changes WHERE actor_id = ?1
+                       AND (folder_id IS NULL
+                            OR folder_id NOT IN
+                               (SELECT id FROM folders WHERE actor_id NOT IN ({owners})))"
+                ),
+                rusqlite::params_from_iter(params.iter()),
+            )
+            .context("purge the deleted actor's change rows outside other owners' sets")?;
+        let certs = conn
+            .execute(
+                "DELETE FROM sync_signer_certs WHERE actor_id = ?1
+                   AND NOT EXISTS (SELECT 1 FROM sync_changes c
+                                    WHERE c.actor_id = ?1
+                                      AND c.signer_key = sync_signer_certs.device_key)",
+                rusqlite::params![actor],
+            )
+            .context("purge the deleted actor's certs no kept row verifies under")?;
+        Ok((changes + certs) as u64)
     }
 
     /// The per-actor export's registry-driven half: every
@@ -14688,5 +14808,105 @@ mod tests {
             .filter(|e| matches!(e.export, Export::Verbatim | Export::Redacted { .. }))
             .count();
         assert_eq!(export_emit_legs().count(), emitting);
+    }
+
+    /// The `sync_changes` / `sync_signer_certs` `Policy::Partial` rule
+    /// (`writer-signed-change-records.md` ruling (12), the deletion leg): a
+    /// deleted actor's change rows stay only in a set ANOTHER owner holds,
+    /// with the certs those rows verify under; its rows in its own set, with
+    /// no set, and its other certs go; a `writer` grant becomes a mark and a
+    /// `reader` grant does not; nobody else's rows move.
+    #[tokio::test]
+    async fn a_deleted_writers_rows_stay_only_in_other_owners_sets() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let (gone, owner) = ([0xD1u8; 32], [0xD2u8; 32]);
+        let (writes, reads) = ([0xC1u8; 32], [0xC2u8; 32]);
+        let own_set = db.create_folder("mine", &gone).await.unwrap();
+        let their_set = db.create_folder("theirs", &owner).await.unwrap();
+        db.create_user(&gone, "free", "gone").await.unwrap();
+        let (kept_key, own_key, unused_key) = ([0xE1u8; 32], [0xE2u8; 32], [0xE3u8; 32]);
+        {
+            let conn = db.conn.lock().await;
+            let row = |actor: &[u8; 32], folder: Option<i64>, signer: &[u8; 32], path: u8| {
+                conn.execute(
+                    "INSERT INTO sync_changes
+                        (actor_id, path_hash, change_type, created_at, folder_id, signer_key)
+                     VALUES (?1, ?2, 'create', 1, ?3, ?4)",
+                    rusqlite::params![&actor[..], &[path; 32][..], folder, &signer[..]],
+                )
+                .unwrap();
+            };
+            row(&gone, Some(their_set), &kept_key, 1);
+            row(&gone, Some(own_set), &own_key, 2);
+            row(&gone, None, &own_key, 3);
+            row(&owner, Some(their_set), &owner, 4);
+            for key in [kept_key, own_key, unused_key] {
+                conn.execute(
+                    "INSERT INTO sync_signer_certs
+                        (actor_id, device_key, cert_actor_id, cert, updated_at)
+                     VALUES (?1, ?2, ?1, x'00', 1)",
+                    rusqlite::params![&gone[..], &key[..]],
+                )
+                .unwrap();
+            }
+            for (channel, access) in [(writes, "writer"), (reads, "reader")] {
+                conn.execute(
+                    "INSERT INTO folder_member_access (channel_id, actor_id, access, updated_at)
+                     VALUES (?1, ?2, ?3, 1)",
+                    rusqlite::params![&channel[..], &gone[..], access],
+                )
+                .unwrap();
+            }
+        }
+
+        db.purge_orphaned_actor_rows(&gone).await.unwrap();
+
+        let conn = db.conn.lock().await;
+        let paths = |actor: &[u8; 32]| -> Vec<u8> {
+            conn.prepare("SELECT path_hash FROM sync_changes WHERE actor_id = ?1 ORDER BY seq")
+                .unwrap()
+                .query_map(rusqlite::params![&actor[..]], |r| r.get::<_, Vec<u8>>(0))
+                .unwrap()
+                .map(|r| r.unwrap()[0])
+                .collect()
+        };
+        assert_eq!(
+            paths(&gone),
+            vec![1],
+            "only the row in another owner's set stays; its own set's and the setless go"
+        );
+        assert_eq!(paths(&owner), vec![4], "nobody else's rows move");
+        let certs: Vec<Vec<u8>> = conn
+            .prepare("SELECT device_key FROM sync_signer_certs WHERE actor_id = ?1")
+            .unwrap()
+            .query_map(rusqlite::params![&gone[..]], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            certs,
+            vec![kept_key.to_vec()],
+            "only the cert a kept row verifies under stays"
+        );
+        let marks: Vec<Vec<u8>> = conn
+            .prepare("SELECT channel_id FROM folder_former_writers WHERE actor_id = ?1")
+            .unwrap()
+            .query_map(rusqlite::params![&gone[..]], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            marks,
+            vec![writes.to_vec()],
+            "a writer grant becomes the mark"
+        );
+        let grants: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM folder_member_access WHERE actor_id = ?1",
+                rusqlite::params![&gone[..]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(grants, 0, "the grants themselves still go");
     }
 }

@@ -533,7 +533,8 @@ impl EngineSpec for LocationEngineSpec {
             // Per-file completed-sync notification (sync-agent.md § Implementation
             // status): the engine's transfer pool emits `FileDone` on this channel;
             // `drive_progress_notifications` re-broadcasts it as a subscribable
-            // `FileStatusChanged{Synced}` event. Ends when `engine` drops.
+            // `FileStatusChanged{Synced}` event, and an upload's as `UploadComplete`
+            // too (the notice's feed). Ends when `engine` drops.
             //
             // The same drain carries the mass-delete floor's per-pass verdict
             // into `SyncServiceState::deletes_held` for `ListEngines` to read —
@@ -1109,7 +1110,7 @@ impl ProgressFold {
                     self.moved = true;
                 }
             }
-            P::FileDone { path } => {
+            P::FileDone { path, .. } => {
                 // Settle the file to its full size. `ChunkDone` fires only for
                 // chunks that actually *moved*, and the upload pipeline skips
                 // every chunk the nest already holds — so a fully-deduped file
@@ -1220,9 +1221,11 @@ fn flush_progress(
     }
 }
 
-/// Re-surface an engine's per-file upload completions as desktop-notification
-/// events: [`fauna_sync_engine::progress::ProgressEvent::FileDone`] becomes a
-/// broadcast [`EventKind::FileStatusChanged`] (`status: Synced`) — the pushed-event
+/// Re-surface an engine's per-file transfer completions as pushed events:
+/// [`fauna_sync_engine::progress::ProgressEvent::FileDone`] becomes a broadcast
+/// [`EventKind::FileStatusChanged`] (`status: Synced`) whichever way it went, and
+/// an upload's also an [`EventKind::UploadComplete`] — the desktop notice's
+/// feed, which a download never takes. The pushed-event
 /// half of the socket a client subscribes to (`sync-agent.md` § Implementation
 /// status: the notification the in-app `SyncDriver` used to emit directly before
 /// the A3 cutover retired it). Runs for both modes: both roots watch+upload, so
@@ -1276,19 +1279,29 @@ async fn drive_progress_notifications(
                 let Some(event) = received else { break };
                 fold.observe(&event);
                 match event {
-                    fauna_sync_engine::progress::ProgressEvent::FileDone { path: rel } => {
+                    fauna_sync_engine::progress::ProgressEvent::FileDone { path: rel, direction } => {
                         let mut abs = path.clone();
                         for part in rel.split('/') {
                             if !part.is_empty() {
                                 abs.push(part);
                             }
                         }
+                        let abs = abs.to_string_lossy().into_owned();
+                        // The overlay feed: every settle, either direction.
                         let _ = event_tx.send(Event {
                             event: fauna_ipc::sync::EventKind::FileStatusChanged {
-                                path: abs.to_string_lossy().into_owned(),
+                                path: abs.clone(),
                                 status: fauna_ipc::sync::FileStatus::Synced,
                             },
                         });
+                        // The "{filename} uploaded" notice's feed: uploads alone
+                        // (`file-sync.md` § Files Appear Automatically). A download
+                        // settling the file must not announce it as uploaded.
+                        if direction == fauna_sync_engine::progress::TransferDirection::Upload {
+                            let _ = event_tx.send(Event {
+                                event: fauna_ipc::sync::EventKind::UploadComplete { path: abs },
+                            });
+                        }
                     }
                     // The mass-delete floor's verdict for the pass that just ran
                     // (`file-sync.md` § Files Appear Automatically). Written on EVERY
@@ -1617,7 +1630,12 @@ async fn run_on_demand_root(
     // binding, not the serve-session); on that full teardown it first clears the
     // seen marks, since the unregister removes every cloud-only placeholder and
     // that removal is never a user's delete (decision (e)). If registration fails
-    // the engine still runs but receives no callbacks (serves nothing) — logged.
+    // the engine still runs but receives no callbacks (serves nothing) — logged —
+    // and the loop tries the registration again at its connect-retry edge
+    // (`crate::bridge::Connected::Retry`): the OS refuses a freshly deployed
+    // package's `Register` for a while (`installers/windows.md` § Direct
+    // download, 5, *Removal*), so a root bound right after an install connects at
+    // a later try instead of serving nothing until the next engine start.
     //
     // A reader's presence root is refused by the OS between its registration and
     // its connection — its access list and the read-only attribute
@@ -1628,17 +1646,22 @@ async fn run_on_demand_root(
     let connect = {
         let (path, folder, cmd_tx) = (path.clone(), folder.clone(), cmd_tx.clone());
         move || match crate::cfapi_host::register_and_connect_product_root(
-            &path, &folder, cmd_tx, db_path, read_only,
+            &path,
+            &folder,
+            cmd_tx.clone(),
+            db_path.clone(),
+            read_only,
         ) {
-            Ok(conn) => Some(conn),
+            Ok(conn) => crate::bridge::Connected::Up(conn),
             Err(e) => {
                 tracing::error!(
                     folder = %fauna_core::log_redact::log_folder_name(&folder),
                     path = %fauna_core::log_redact::log_path(&path.to_string_lossy()),
                     error = %e,
-                    "cfapi sync-root registration failed; root serves nothing"
+                    "cfapi sync-root registration failed; root serves nothing until a later \
+                     try connects it"
                 );
-                None
+                crate::bridge::Connected::Retry
             }
         }
     };
@@ -1646,15 +1669,18 @@ async fn run_on_demand_root(
     // cfapi registration, its guard unmounting when the loop's future ends. A
     // failed mount (no `fusermount3`, a sandbox without `/dev/fuse`) leaves the
     // root running unmounted: the hydrated files keep syncing two-way, and no
-    // placeholder is listed.
+    // placeholder is listed — until the next engine start, never tried again
+    // (`crate::bridge::Connected::Down`: the box's failures, not the OS's).
     #[cfg(target_os = "linux")]
     let connect = {
         let (reach, folder, cmd_tx) = (reach.as_ref(), folder.clone(), cmd_tx.clone());
         let mount_report = &mount_report;
         move || {
-            let reach = reach?;
-            match crate::fuse_host::mount_over(reach, &folder, cmd_tx) {
-                Ok(mounted) => Some(mounted),
+            let Some(reach) = reach else {
+                return crate::bridge::Connected::Down;
+            };
+            match crate::fuse_host::mount_over(reach, &folder, cmd_tx.clone()) {
+                Ok(mounted) => crate::bridge::Connected::Up(mounted),
                 Err(e) => {
                     mount_report.failed(&e);
                     tracing::error!(
@@ -1663,13 +1689,13 @@ async fn run_on_demand_root(
                         error = %e,
                         "mounting the on-demand root failed; root lists no placeholders"
                     );
-                    None
+                    crate::bridge::Connected::Down
                 }
             }
         }
     };
     #[cfg(not(any(windows, target_os = "linux")))]
-    let connect = || ();
+    let connect = || crate::bridge::Connected::Up(());
 
     // Keep the send half alive for the whole serve loop so `cmd_rx` stays open. The
     // platform binding holds a clone too (the cfapi callback context, the FUSE
@@ -2789,6 +2815,7 @@ mod tests {
         progress_tx
             .send(fauna_sync_engine::progress::ProgressEvent::FileDone {
                 path: "sub/report.bin".to_string(),
+                direction: fauna_sync_engine::progress::TransferDirection::Upload,
             })
             .unwrap();
         drop(progress_tx); // let the drain end once it has processed the event
@@ -2808,6 +2835,78 @@ mod tests {
             }
             other => panic!("expected FileStatusChanged, got {other:?}"),
         }
+    }
+
+    /// The "{filename} uploaded" notice keys on `UploadComplete` alone, so the
+    /// drain must push it for an upload's `FileDone` and never for a
+    /// download's — the download still flips the overlay to `Synced`. Before
+    /// this, both directions pushed only `FileStatusChanged{Synced}` and the
+    /// apps announced a file that came DOWN as uploaded.
+    #[tokio::test]
+    async fn only_an_upload_file_done_pushes_upload_complete() {
+        use fauna_sync_engine::progress::{ProgressEvent, TransferDirection};
+        let (event_tx, mut event_rx) = broadcast::channel::<Event>(16);
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        let folder = PathBuf::from("/home/user/Fauna");
+
+        let drain = tokio::spawn(drive_progress_notifications(
+            progress_rx,
+            event_tx,
+            folder.clone(),
+            "documents".to_string(),
+            test_ref("documents"),
+            std::sync::Weak::new(),
+        ));
+
+        progress_tx
+            .send(ProgressEvent::FileDone {
+                path: "down.bin".to_string(),
+                direction: TransferDirection::Download,
+            })
+            .unwrap();
+        progress_tx
+            .send(ProgressEvent::FileDone {
+                path: "up.bin".to_string(),
+                direction: TransferDirection::Upload,
+            })
+            .unwrap();
+        drop(progress_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(2), drain)
+            .await
+            .expect("the drain ends once its sender drops")
+            .unwrap();
+
+        let mut synced = Vec::new();
+        let mut uploaded = Vec::new();
+        while let Ok(ev) = event_rx.try_recv() {
+            match ev.event {
+                fauna_ipc::sync::EventKind::FileStatusChanged { path, status } => {
+                    assert_eq!(status, fauna_ipc::sync::FileStatus::Synced);
+                    synced.push(path);
+                }
+                fauna_ipc::sync::EventKind::UploadComplete { path } => uploaded.push(path),
+                _ => {}
+            }
+        }
+        let abs = |name: &str| folder.join(name).to_string_lossy().into_owned();
+        assert_eq!(
+            synced,
+            [abs("down.bin"), abs("up.bin")],
+            "both settles flip the overlay"
+        );
+        assert_eq!(
+            uploaded,
+            [abs("up.bin")],
+            "only the upload feeds the notice"
+        );
+        // And through the apps' shared filter: the download names no file.
+        assert_eq!(
+            fauna_ipc::events::uploaded_filename(&fauna_ipc::sync::EventKind::FileStatusChanged {
+                path: abs("down.bin"),
+                status: fauna_ipc::sync::FileStatus::Synced,
+            }),
+            None
+        );
     }
 
     /// The link between the engine's report and the `ListEngines` projection:
@@ -3145,9 +3244,11 @@ mod tests {
         });
         fold.observe(&PE::FileDone {
             path: "a.bin".to_string(),
+            direction: fauna_sync_engine::progress::TransferDirection::Upload,
         });
         fold.observe(&PE::FileDone {
             path: "b.bin".to_string(),
+            direction: fauna_sync_engine::progress::TransferDirection::Upload,
         });
         let snap = fold.snapshot("documents");
         assert_eq!(snap.files_done, 2);
@@ -3169,6 +3270,7 @@ mod tests {
         });
         fold.observe(&PE::FileDone {
             path: "dedup.bin".to_string(),
+            direction: fauna_sync_engine::progress::TransferDirection::Upload,
         });
 
         let snap = fold.snapshot("documents");
@@ -3227,6 +3329,7 @@ mod tests {
         fold.observe(&started("a.bin", 100));
         fold.observe(&PE::FileDone {
             path: "a.bin".to_string(),
+            direction: fauna_sync_engine::progress::TransferDirection::Upload,
         });
         assert!(fold.is_idle(), "nothing is open between the two files");
 
@@ -3247,6 +3350,7 @@ mod tests {
         fold.observe(&started("a.bin", 100));
         fold.observe(&PE::FileDone {
             path: "a.bin".to_string(),
+            direction: fauna_sync_engine::progress::TransferDirection::Upload,
         });
         fold.close_window();
 
@@ -3306,6 +3410,7 @@ mod tests {
         fold.observe(&started("a.bin", 100));
         fold.observe(&PE::FileDone {
             path: "a.bin".to_string(),
+            direction: fauna_sync_engine::progress::TransferDirection::Upload,
         });
         flush_progress(&mut fold, "documents", &event_tx, &mut idle_since, t0);
         flush_progress(
@@ -3339,6 +3444,7 @@ mod tests {
         // Now let the grace genuinely elapse with nothing transferring.
         fold.observe(&PE::FileDone {
             path: "b.bin".to_string(),
+            direction: fauna_sync_engine::progress::TransferDirection::Upload,
         });
         flush_progress(
             &mut fold,
@@ -3430,6 +3536,7 @@ mod tests {
         progress_tx
             .send(fauna_sync_engine::progress::ProgressEvent::FileDone {
                 path: "big.bin".to_string(),
+                direction: fauna_sync_engine::progress::TransferDirection::Upload,
             })
             .unwrap();
 

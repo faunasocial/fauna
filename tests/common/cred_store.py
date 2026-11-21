@@ -456,6 +456,12 @@ class AndroidCredStore(CredStore):
     def clear(self) -> None:
         self._seed = {}
 
+    def attach(self, driver) -> None:
+        """Bind the launched driver whose bridge reads the device file back —
+        what a launch harness does once its launch is up, so the store it
+        minted for the launch answers from the device from then on."""
+        self._driver = driver
+
     def read_map(self) -> dict[str, str]:
         """The device file's whole ``native_key -> value`` map, read live over
         the bridge — the file backends' ``read_map`` twin."""

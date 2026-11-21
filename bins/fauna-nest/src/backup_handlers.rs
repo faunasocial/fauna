@@ -997,6 +997,15 @@ fn materialize_error(
         R::ScopeNotEmpty { .. } | R::FolderNotEmpty { .. } | R::PlacementNotFresh { .. } => {
             crate::rpc_errors::coded_ns("backup", "target_not_empty", detail)
         }
+        // A repeat of a flip that committed here, on the nest's receipt — its
+        // own code, so `target_not_empty` keeps meaning live content this
+        // ceremony did not put there, and a driver says *already restored* on
+        // this one alone (`backup-destinations.md` § Third destination kind →
+        // *A lived-in segment set is completed by record in the same gesture*,
+        // rule (2)).
+        R::AlreadyMaterialized { .. } => {
+            crate::rpc_errors::coded_ns("backup", "already_materialized", detail)
+        }
         // The empty-target rule's OTHER half, and its own code on purpose: the
         // target here is genuinely empty, so `target_not_empty` would send the
         // owner hunting for records that are not there. This one says "the
@@ -1340,6 +1349,13 @@ mod tests {
                     property: "audience",
                 },
                 RpcError::CODE_BACKUP_TARGET_NOT_FRESH,
+            ),
+            (
+                R::AlreadyMaterialized {
+                    set_name: "__landing/mail".into(),
+                    ledger_generation: 3,
+                },
+                RpcError::CODE_BACKUP_ALREADY_MATERIALIZED,
             ),
             (
                 R::CustodyPathUnsealed {

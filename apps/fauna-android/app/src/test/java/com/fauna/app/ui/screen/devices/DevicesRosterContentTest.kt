@@ -21,6 +21,7 @@ import uniffi.fauna_client_capabilities.CustodyScopesView
 import uniffi.fauna_client_capabilities.CustodyReceiptRowView
 import uniffi.fauna_client_capabilities.CustodyReceiptStateView
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_devices_machine.DeviceFolderRole
 import uniffi.fauna_devices_machine.DeviceSummary
 import uniffi.fauna_devices_machine.DevicesSnapshot
@@ -180,7 +181,8 @@ class DevicesRosterContentTest {
         localDeviceId: String? = null,
         actorId: String? = "cd".repeat(32),
         onRemoveDevice: (Int) -> Unit = {},
-        onRenameDevice: (String, String) -> Unit = { _, _ -> },
+        onRenameDevice: (String, String, (Boolean) -> Unit) -> Unit = { _, _, _ -> },
+        renamePossibility: (String, String) -> Possibility = { _, _ -> Possibility.Possible },
         deviceName: (String) -> String? = { null },
         keylessPrincipals: Set<String> = emptySet(),
         custodyRows: List<CustodyHolderRowView> = emptyList(),
@@ -188,6 +190,7 @@ class DevicesRosterContentTest {
         custodyOffers: List<CustodyOfferRowView> = emptyList(),
         custodyOfferTargets: Set<String> = emptySet(),
         mintCandidates: List<CustodyMintCandidateView>? = null,
+        mintEntry: Possibility = Possibility.Possible,
         onCustodyGesture: (CustodyGesture) -> Unit = {},
         receiptStatusLine: (CustodyReceiptRowView) -> String = { "STATUS:${it.statusLabel.key}" },
         heldBytesLine: (CustodyReceiptRowView) -> String = { "HELD:${it.heldBytes}" },
@@ -203,6 +206,7 @@ class DevicesRosterContentTest {
                 actorId = actorId,
                 onRemoveDevice = onRemoveDevice,
                 onRenameDevice = onRenameDevice,
+                renamePossibility = renamePossibility,
                 deviceName = deviceName,
                 statusLabel = { online -> if (online) "Online" else "Offline" },
                 placeLabel = { o, a, d -> "PLACE:$o/$a/$d" },
@@ -212,6 +216,7 @@ class DevicesRosterContentTest {
                 custodyOffers = custodyOffers,
                 custodyOfferTargets = custodyOfferTargets,
                 mintCandidates = mintCandidates,
+                mintEntry = mintEntry,
                 onCustodyGesture = onCustodyGesture,
                 receiptStatusLine = receiptStatusLine,
                 heldBytesLine = heldBytesLine,
@@ -329,7 +334,7 @@ class DevicesRosterContentTest {
         val id = "cd".repeat(32)
         render(
             snapshot(devices = listOf(device("Phone", deviceId = id), device("Laptop"))),
-            onRenameDevice = { d, t -> renamed = d to t },
+            onRenameDevice = { d, t, done -> renamed = d to t; done(true) },
             deviceName = { if (it == id) "Phone" else null },
         )
         composeTestRule.onNodeWithTag("device-rename-input").assertDoesNotExist()
@@ -350,6 +355,65 @@ class DevicesRosterContentTest {
         composeTestRule.onNodeWithTag("device-rename-confirm-button").performClick()
         assertEquals(id to "Desk phone", renamed)
         composeTestRule.onNodeWithTag("device-rename-input").assertDoesNotExist()
+    }
+
+    // `device-rename-confirm-button` paints from the shared draft answer, and the
+    // editor closes only once the save went through (`ui/devices.md` § Errors &
+    // edge cases): a blocked draft disables Save, a refused save keeps the editor
+    // open with the text.
+    @Test
+    fun renameSaveIsGatedByTheDraftAnswerAndARefusedSaveKeepsTheEditorOpen() {
+        val id = "cd".repeat(32)
+        var saves = 0
+        render(
+            snapshot(devices = listOf(device("Phone", deviceId = id))),
+            onRenameDevice = { _, _, done -> saves += 1; done(false) },
+            renamePossibility = { _, draft ->
+                if (draft.isBlank()) {
+                    Possibility.Blocked(LocalizedText(key = "devices.rename_blank", args = emptyMap()))
+                } else {
+                    Possibility.Possible
+                }
+            },
+            deviceName = { "Phone" },
+        )
+        composeTestRule.onNodeWithTag("device-rename-button").performClick()
+        composeTestRule.onNodeWithTag("device-rename-input").performTextReplacement("")
+        composeTestRule.onNodeWithTag("device-rename-confirm-button").assertIsNotEnabled()
+
+        composeTestRule.onNodeWithTag("device-rename-input").performTextReplacement("Desk")
+        composeTestRule.onNodeWithTag("device-rename-confirm-button").assertIsEnabled().performClick()
+        assertEquals(1, saves)
+        composeTestRule.onNodeWithTag("device-rename-input").assertTextContains("Desk")
+    }
+
+    // A row no rename can ever reach (the nest's WebDAV pseudo-device) carries no
+    // `device-rename-button`: the shared answer over its unchanged name is Absent;
+    // every other card keeps the button (`ui/devices.md` § Device names).
+    @Test
+    fun theWebdavPseudoDeviceCardCarriesNoRenameButton() {
+        val pseudo = "ab".repeat(32)
+        val phone = "cd".repeat(32)
+        render(
+            snapshot(devices = listOf(device("Phone", deviceId = phone), device("WebDAV", deviceId = pseudo))),
+            renamePossibility = { id, _ ->
+                if (id == pseudo) Possibility.Absent else Possibility.Possible
+            },
+            deviceName = { "x" },
+        )
+        composeTestRule.onAllNodesWithTag("device-rename-button").assertCountEquals(1)
+    }
+
+    // `custody-mint-button` is gated at the entry: disabled while the VM's answer
+    // is blocked (unread candidates, or no 1:1 conversation).
+    @Test
+    fun custodyMintButtonIsDisabledWhileTheEntryAnswerIsBlocked() {
+        render(
+            mintEntry = Possibility.Blocked(
+                LocalizedText(key = "devices.custody_mint_no_contacts", args = emptyMap()),
+            ),
+        )
+        composeTestRule.onNodeWithTag("custody-mint-button").assertIsNotEnabled()
     }
 
     // `peer-actor-id-copy-btn` copies the CLIENT'S OWN actor ID, not any

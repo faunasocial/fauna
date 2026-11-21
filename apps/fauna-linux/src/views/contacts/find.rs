@@ -87,13 +87,43 @@ pub fn build_find_result_row(
     crate::testid::set_test_id(&knock_btn, ids::CONTACTS_ADD_BUTTON);
 
     let ask = GuardianAsk::new(actor_id);
+    // The ward's entry gate (`contacts.md` § Errors & edge cases): the knock
+    // paints from the shared knock predicate over this peer's roster edge, and
+    // the ask is offered here, before anything was refused, when the guardian
+    // decides this peer — repainted when a later status read lands.
+    let peer_status = super::list::roster_status(actor_id);
+    {
+        let weak_btn = knock_btn.downgrade();
+        let weak_ask = Rc::downgrade(&ask);
+        let peer_status = peer_status.clone();
+        super::list::paint_entry_gate(move || {
+            let (Some(btn), Some(ask)) = (weak_btn.upgrade(), weak_ask.upgrade()) else {
+                return false;
+            };
+            paint_entry(&btn, &ask, peer_status.as_deref());
+            true
+        });
+    }
 
     {
         let c = Rc::clone(client);
         let aid = actor_id.to_string();
         let ask = Rc::clone(&ask);
+        let peer_status = peer_status.clone();
         knock_btn.connect_clicked(move |btn| {
+            // The knock asks the predicate its button paints from before it
+            // sends, and a refusal is never silent (rules 6 and 7).
+            if let Some(reason) =
+                crate::ward_asks::knock_possibility(peer_status.as_deref()).reason()
+            {
+                c.tx()
+                    .send(UiMessage::Action(ActionResult::FailedLocalized {
+                        message: reason.resolve(crate::i18n::strings::lookup),
+                    }));
+                return;
+            }
             btn.set_sensitive(false);
+            let peer_status = peer_status.clone();
             let btn = btn.clone();
             let ask = Rc::clone(&ask);
             let tx = c.tx();
@@ -103,7 +133,9 @@ pub fn build_find_result_row(
             // lookup, never re-derived — a second derivation can name a different
             // nest than the one that found the actor.
             c.send_knock_classified(&aid, recipient_nest_url.clone(), move |outcome| {
-                if let Some(error) = apply_knock_outcome(&btn, &ask, outcome) {
+                if let Some(error) =
+                    apply_knock_outcome(&btn, &ask, peer_status.as_deref(), outcome)
+                {
                     tx.send(UiMessage::Action(ActionResult::FailedLocalized {
                         message: error,
                     }));
@@ -160,14 +192,33 @@ pub fn build_find_result_row(
     row
 }
 
+/// Paint the result's knock and ask from the shared answers. A knock already
+/// sent keeps its "Sent" state: the gate answers whether a knock may be sent,
+/// and this one was.
+fn paint_entry(knock_btn: &gtk::Button, ask: &GuardianAsk, peer_status: Option<&str>) {
+    if knock_btn.label().as_deref() == Some(contacts_strings::SENT) {
+        return;
+    }
+    crate::possible::paint(
+        knock_btn,
+        None,
+        crate::ward_asks::knock_possibility(peer_status),
+    );
+    if crate::ward_asks::guardian_decides(peer_status) {
+        ask.offer();
+    }
+}
+
 /// Fold one classified knock outcome into the Find User row: `Sent` flips the
 /// knock button to "Sent" and keeps it disabled; the TYPED guardian refusal
-/// re-enables the knock and offers the ask; any other failure only re-enables.
-/// Returns the text for `error-message`, if any — the refusal STAYS a real
-/// error (rule (b)): the send did not happen, it is just no longer a dead end.
+/// repaints the knock from the predicate and offers the ask; any other failure
+/// only repaints. Returns the text for `error-message`, if any — the refusal
+/// STAYS a real error (rule (b)): the send did not happen, it is just no
+/// longer a dead end.
 fn apply_knock_outcome(
     knock_btn: &gtk::Button,
     ask: &GuardianAsk,
+    peer_status: Option<&str>,
     outcome: KnockSend,
 ) -> Option<String> {
     match outcome {
@@ -179,12 +230,12 @@ fn apply_knock_outcome(
             None
         }
         KnockSend::RefusedByGuardian => {
-            knock_btn.set_sensitive(true);
+            paint_entry(knock_btn, ask, peer_status);
             ask.refused();
             Some(contacts_strings::GUARDIAN_APPROVAL_REQUIRED.to_string())
         }
         KnockSend::Failed(e) => {
-            knock_btn.set_sensitive(true);
+            paint_entry(knock_btn, ask, peer_status);
             Some(e)
         }
     }
@@ -260,6 +311,9 @@ mod tests {
     fn only_the_typed_refusal_offers_the_guardian_ask() {
         crate::testid::run_on_gtk_thread(|| {
             crate::ward_asks::clear_for_identity_change();
+            // An unsupervised account's read: the knock is possible, so only
+            // the typed refusal can reveal the ask.
+            crate::ward_asks::set_from_status(false, None, Vec::new(), Vec::new());
             let peer = "cd".repeat(32);
             let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let knock = gtk::Button::with_label(contacts_strings::KNOCK);
@@ -270,13 +324,17 @@ mod tests {
             let asks =
                 || crate::automation::find::count_in(r, ids::CONTACT_REQUEST_GUARDIAN_BUTTON);
 
-            let err =
-                apply_knock_outcome(&knock, &ask, KnockSend::Failed("inbox send: boom".into()));
+            let err = apply_knock_outcome(
+                &knock,
+                &ask,
+                None,
+                KnockSend::Failed("inbox send: boom".into()),
+            );
             assert_eq!(err.as_deref(), Some("inbox send: boom"));
             assert_eq!(asks(), 0, "a transport failure must not imply supervision");
             assert!(knock.is_sensitive(), "a failed knock can be retried");
 
-            let err = apply_knock_outcome(&knock, &ask, KnockSend::RefusedByGuardian);
+            let err = apply_knock_outcome(&knock, &ask, None, KnockSend::RefusedByGuardian);
             assert_eq!(
                 err.as_deref(),
                 Some(contacts_strings::GUARDIAN_APPROVAL_REQUIRED),
@@ -296,9 +354,56 @@ mod tests {
             let knock = gtk::Button::with_label(contacts_strings::KNOCK);
             let ask = GuardianAsk::new(&"cd".repeat(32));
             knock.set_sensitive(false); // in flight
-            assert_eq!(apply_knock_outcome(&knock, &ask, KnockSend::Sent), None);
+            assert_eq!(
+                apply_knock_outcome(&knock, &ask, None, KnockSend::Sent),
+                None
+            );
             assert_eq!(knock.label().as_deref(), Some(contacts_strings::SENT));
             assert!(!knock.is_sensitive());
+        });
+    }
+
+    /// The ward's entry gate (`contacts.md` § Errors & edge cases): before the
+    /// status read the knock waits as loading and no ask shows; with contact
+    /// approval on, the knock to a stranger is blocked with the refusal's own
+    /// words and the ask is offered before anything was refused.
+    #[test]
+    fn a_wards_knock_is_gated_at_the_entry_and_the_ask_offered() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::ward_asks::clear_for_identity_change();
+            let peer = "cd".repeat(32);
+            let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let knock = gtk::Button::with_label(contacts_strings::KNOCK);
+            let ask = GuardianAsk::new(&peer);
+            root.append(&knock);
+            root.append(ask.widget());
+            let r: &gtk::Widget = root.upcast_ref();
+            let visible_asks = || {
+                crate::automation::find::find_in(r, ids::CONTACT_REQUEST_GUARDIAN_BUTTON)
+                    .is_some_and(|w| w.is_visible() && w.parent().is_some_and(|p| p.is_visible()))
+            };
+
+            paint_entry(&knock, &ask, None);
+            assert!(!knock.is_sensitive(), "unknown is not possible");
+            assert_eq!(
+                knock.tooltip_text().as_deref(),
+                Some(crate::i18n::strings::common::LOADING)
+            );
+            assert!(!visible_asks(), "no ask on a guess");
+
+            let approval_on = fauna_client_family::family::ReachPolicy {
+                contact_approval: true,
+                ..Default::default()
+            };
+            crate::ward_asks::set_from_status(true, Some(&approval_on), Vec::new(), Vec::new());
+            paint_entry(&knock, &ask, None);
+            assert!(!knock.is_sensitive(), "the guardian decides a stranger");
+            assert_eq!(
+                knock.tooltip_text().as_deref(),
+                Some(contacts_strings::GUARDIAN_APPROVAL_REQUIRED)
+            );
+            assert!(visible_asks(), "the ask is the result's one step");
+            crate::ward_asks::clear_for_identity_change();
         });
     }
 }

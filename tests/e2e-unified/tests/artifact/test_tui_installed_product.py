@@ -217,10 +217,14 @@ def test_install_scripts_branch_on_no_build_configuration():
     `install.sh` installs from beside itself. So: read both and assert no
     *control flow* tests a build configuration — the linux leg's pin, widened
     to the channel's two scripts."""
-    packaging = Path(get_repo_root()) / "apps" / "fauna-tui" / "packaging"
+    repo = Path(get_repo_root())
     control_flow = re.compile(r"^\s*(if|elif|while|until|case)\b")
-    for name in ("assemble-archive.sh", "install.sh"):
-        script = (packaging / name).read_text()
+    scripts = {
+        "assemble-archive.sh": repo / "installer" / "assemble-archive.sh",
+        "install.sh": repo / "apps" / "fauna-tui" / "packaging" / "install.sh",
+    }
+    for name, path in scripts.items():
+        script = path.read_text()
         offenders = [
             line for line in script.splitlines()
             if control_flow.match(line) and re.search(r"\b(debug|release)\b", line, re.I)
@@ -234,7 +238,7 @@ def test_install_scripts_branch_on_no_build_configuration():
         )
     # And install.sh really does read from beside itself — the seam this module
     # stages through.
-    install = (packaging / "install.sh").read_text()
+    install = scripts["install.sh"].read_text()
     assert (
         'BINARY="$SCRIPT_DIR/fauna-tui"' in install
         and 'AGENT_BINARY="$SCRIPT_DIR/fauna-sync-agent"' in install

@@ -290,6 +290,7 @@ fn nest_over(rows: Vec<SyncChange>, role: &str) -> Arc<TableNest> {
                 "fauna.sync.changes.record",
                 &SyncChangeRecordReply {
                     seq: 50,
+                    prev_set_seq: None,
                     extra: Default::default(),
                 },
             ),

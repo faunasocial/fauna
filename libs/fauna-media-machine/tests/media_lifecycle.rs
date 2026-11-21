@@ -11,9 +11,9 @@ use fauna_media_machine::nest_api::fake::FAKE_PREDECESSOR_ID;
 use fauna_media_machine::nest_api::{ForeignListing, MediaApiError};
 use fauna_media_machine::observer::CountingObserver;
 use fauna_media_machine::{
-    FakeMediaBlobUploader, FakeMediaNestApi, FolderKeyResolver, MediaBlobUploader, MediaFolder,
-    MediaItem, MediaMachine, MediaNestCall, MediaSnapshot, ResolvedCustody, ResolvedFolderKeys,
-    SettlePolicy,
+    FakeFolderMaker, FakeMakeOutcome, FakeMediaBlobUploader, FakeMediaNestApi, FolderKeyResolver,
+    MediaBlobUploader, MediaFolder, MediaItem, MediaMachine, MediaNestCall, MediaSnapshot,
+    ResolvedCustody, ResolvedFolderKeys, SettlePolicy,
 };
 
 fn item(folder: &str, path: &str, size: i64, updated: i64) -> MediaItem {
@@ -251,7 +251,7 @@ async fn loaded_never_regresses_once_a_later_refresh_fails() {
 // can verify no signed row: `fauna.media.list` returns, every row held back
 // (`ProjectionTally::held`), and an own set's sealed name opens under no
 // custody yet. Committing that as a loaded page painted `media-empty-state`
-// over a user's media and refused an upload with `media.error_no_set` ("create a
+// over a user's media and refused an upload with the since-retired `media.error_no_set` ("create a
 // folder first") although the folder existed (`ui/README.md` § List pages:
 // loading is not empty, rule 2; `media.md` § Errors & edge cases).
 
@@ -475,11 +475,31 @@ async fn an_upload_whose_folders_never_load_is_not_refused_as_no_folder() {
 
     assert_eq!(recorded_member(&api), None, "nothing uploaded");
     let err = machine.snapshot().error.expect("a page error");
-    assert_ne!(
-        err.key, "media.error_no_set",
+    assert_eq!(
+        err.key, "media.error_refresh",
         "an incomplete read cannot say the user has no folder"
     );
-    assert_eq!(err.key, "media.error_refresh");
+}
+
+/// *No folder to upload into*, ruling 2: a folder is never made on a guess —
+/// a read that never completed makes nothing (it could mint `Personal` beside
+/// folders that only had not loaded yet) and still reports the refresh error.
+#[tokio::test]
+async fn an_incomplete_read_makes_no_first_folder() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![]);
+    api.fail_folder_reads(usize::MAX);
+    let (machine, maker, uploader) = first_folder_machine(&api);
+
+    upload_c_jpg(&machine).await;
+
+    assert!(maker.made().is_empty(), "no folder made on a guess");
+    assert_eq!(recorded_member(&api), None, "nothing uploaded");
+    assert!(uploader.chunks().is_empty());
+    assert_eq!(
+        machine.snapshot().error.expect("a page error").key,
+        "media.error_refresh"
+    );
 }
 
 /// A press's answer (`report_error` — linux's "choose a file first") must
@@ -507,6 +527,29 @@ async fn a_reported_press_error_survives_a_successful_re_read_until_the_next_ges
     assert!(
         machine.snapshot().error.is_none(),
         "the next gesture drops the held answer"
+    );
+}
+
+/// A press's answer belongs to the visit it answered: leaving the page and
+/// coming back is a new visit, whose entry read (`refresh_on_visit`, every
+/// app's become-visible door) drops the held answer, so the page is met as it
+/// is, never with an answer to a press made on an earlier visit. A
+/// background re-read inside the visit still keeps it (the test above).
+#[tokio::test]
+async fn a_new_visit_drops_a_held_press_error() {
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(fixture());
+    let machine = MediaMachine::new(observer, api, None, None, None);
+    machine.refresh(None).await;
+
+    machine.report_error(fauna_core::localized::LocalizedText::key(
+        "media.file_required",
+    ));
+    machine.refresh_on_visit(None).await;
+    assert!(
+        machine.snapshot().error.is_none(),
+        "a new visit meets the page without the last visit's press answer"
     );
 }
 
@@ -1300,8 +1343,188 @@ async fn upload_selected_all_media_defaults_to_first_set() {
     assert!(machine.snapshot().error.is_none());
 }
 
+/// A machine for the first-folder tests: the fake uploader and a
+/// [`FakeFolderMaker`] over `api`, wired as every app's builder wires the
+/// production maker.
+fn first_folder_machine(
+    api: &Arc<FakeMediaNestApi>,
+) -> (
+    Arc<MediaMachine>,
+    Arc<FakeFolderMaker>,
+    Arc<FakeMediaBlobUploader>,
+) {
+    let uploader = Arc::new(FakeMediaBlobUploader::new("beef"));
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+    );
+    machine.set_settle_policy(fast_settle(3));
+    let maker = Arc::new(FakeFolderMaker::new(Arc::clone(api)));
+    machine.set_folder_maker(maker.clone());
+    (machine, maker, uploader)
+}
+
+async fn upload_c_jpg(machine: &MediaMachine) {
+    machine
+        .upload_selected(
+            "dev-1".into(),
+            "c.jpg".into(),
+            b"raw".to_vec(),
+            KEY.to_vec(),
+        )
+        .await;
+}
+
+/// *No folder to upload into*, rulings 1-3: an upload on an account a
+/// complete read found folderless makes the first folder, `Personal`, once,
+/// and lands in it — no "create a folder first".
 #[tokio::test]
-async fn upload_selected_with_no_set_sets_error_and_uploads_nothing() {
+async fn a_folderless_upload_makes_personal_and_lands_in_it() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![]);
+    let (machine, maker, uploader) = first_folder_machine(&api);
+    machine.refresh(None).await;
+
+    upload_c_jpg(&machine).await;
+
+    assert_eq!(
+        maker.made(),
+        vec!["Personal".to_string()],
+        "one folder, once"
+    );
+    assert_eq!(
+        recorded_member(&api),
+        Some(("Personal".into(), "c.jpg".into())),
+        "the upload lands in the folder it made"
+    );
+    assert!(
+        !uploader.chunks().is_empty(),
+        "the file was sealed and POSTed"
+    );
+    assert!(machine.snapshot().error.is_none());
+    assert!(
+        machine
+            .snapshot()
+            .folder_options
+            .iter()
+            .any(|o| o.value == "Personal"),
+        "the filter offers the new folder"
+    );
+}
+
+/// Ruling 2: the condition is read at the press, not at the page load — a page
+/// that never loaded reads first, and its complete answer licenses the make.
+#[tokio::test]
+async fn a_folderless_upload_before_any_read_reads_then_makes_personal() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![]);
+    let (machine, maker, _) = first_folder_machine(&api);
+
+    upload_c_jpg(&machine).await;
+
+    assert_eq!(maker.made(), vec!["Personal".to_string()]);
+    assert_eq!(
+        recorded_member(&api),
+        Some(("Personal".into(), "c.jpg".into()))
+    );
+}
+
+/// Ruling 2: an account that owns any folder is never handed another — the
+/// upload takes the default target and nothing is made.
+#[tokio::test]
+async fn an_account_with_an_own_folder_makes_no_first_folder() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![folder("photos")]);
+    let (machine, maker, _) = first_folder_machine(&api);
+    machine.refresh(None).await;
+
+    upload_c_jpg(&machine).await;
+
+    assert!(maker.made().is_empty());
+    assert_eq!(
+        recorded_member(&api),
+        Some(("photos".into(), "c.jpg".into()))
+    );
+}
+
+/// Ruling 2: the upload had a SELECTED target — a reader's shared set — so
+/// it is refused with that set's own reason and no folder is made.
+#[tokio::test]
+async fn a_selected_reader_set_makes_no_first_folder() {
+    let (machine, api) = same_named_machine(Some(vec!["g9"]), None, None, false).await;
+    let maker = Arc::new(FakeFolderMaker::new(Arc::clone(&api)));
+    machine.set_folder_maker(maker.clone());
+    machine.clone().set_filter(Some("local:9".into()));
+
+    upload_c_jpg(&machine).await;
+
+    assert!(maker.made().is_empty());
+    assert_eq!(recorded_member(&api), None);
+    assert_eq!(
+        machine.snapshot().error.expect("refused").key,
+        "media.error_read_only_shared_folder"
+    );
+}
+
+/// Ruling 4: a make whose re-read does not carry the folder refuses the upload
+/// — a phantom target would send the record into `not_found`.
+#[tokio::test]
+async fn a_first_folder_the_re_read_does_not_carry_refuses_the_upload() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![]);
+    let (machine, maker, uploader) = first_folder_machine(&api);
+    maker.set_outcome(FakeMakeOutcome::Phantom);
+    machine.refresh(None).await;
+
+    upload_c_jpg(&machine).await;
+
+    assert_eq!(recorded_member(&api), None, "nothing uploaded");
+    assert!(uploader.chunks().is_empty());
+    assert_eq!(
+        machine.snapshot().error.expect("a page error").key,
+        "media.error_first_folder"
+    );
+}
+
+/// Ruling 6: a create that fails says so — `media.error_first_folder` carrying
+/// the create's own reason — and nothing is uploaded; the next press tries
+/// again.
+#[tokio::test]
+async fn a_failed_first_folder_says_why_and_uploads_nothing() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![]);
+    let (machine, maker, uploader) = first_folder_machine(&api);
+    maker.set_outcome(FakeMakeOutcome::Fails("nest unreachable".into()));
+    machine.refresh(None).await;
+
+    upload_c_jpg(&machine).await;
+
+    let err = machine.snapshot().error.expect("a page error");
+    assert_eq!(err.key, "media.error_first_folder");
+    assert_eq!(
+        err.args.get("message").map(String::as_str),
+        Some("nest unreachable")
+    );
+    assert_eq!(recorded_member(&api), None, "nothing uploaded");
+    assert!(uploader.chunks().is_empty());
+
+    maker.set_outcome(FakeMakeOutcome::Lands);
+    upload_c_jpg(&machine).await;
+    assert_eq!(maker.made().len(), 2, "the next upload tries again");
+    assert_eq!(
+        recorded_member(&api),
+        Some(("Personal".into(), "c.jpg".into()))
+    );
+}
+
+/// A machine built with no maker (a seam no app ships) cannot make the folder:
+/// it says so with the first-folder sentence and uploads nothing — never the
+/// retired "create a folder first".
+#[tokio::test]
+async fn upload_selected_with_no_set_and_no_maker_uploads_nothing() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new()); // default empty snapshot — no sets
     let uploader = Arc::new(FakeMediaBlobUploader::new("beef"));
@@ -1312,28 +1535,12 @@ async fn upload_selected_with_no_set_sets_error_and_uploads_nothing() {
         None,
         None,
     );
-    // No refresh → no readable set has media → nothing to default the target to.
-    machine
-        .upload_selected(
-            "dev-1".into(),
-            "c.jpg".into(),
-            b"raw".to_vec(),
-            KEY.to_vec(),
-        )
-        .await;
+    upload_c_jpg(&machine).await;
 
-    let err = machine
-        .snapshot()
-        .error
-        .expect("no set → page error (media.error_no_set)");
-    assert_eq!(
-        err.key, "media.error_no_set",
-        "the caller has NO sets at all — the create-one-first copy"
-    );
+    let err = machine.snapshot().error.expect("a page error");
+    assert_eq!(err.key, "media.error_first_folder");
     assert!(uploader.posts().is_empty(), "nothing sealed / POSTed");
     assert!(uploader.chunks().is_empty(), "nothing sealed / POSTed");
-    // The page had never loaded, so the gesture read it first — "no folder"
-    // is only said of a complete read — and recorded nothing.
     assert!(
         api.calls()
             .iter()
@@ -1914,6 +2121,7 @@ fn seal_file_under_owner(
         stored_hashes: Some(store_keys.clone()),
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     let manifest_bytes =
         fauna_core::encoding::canonical_encode(&manifest.wire_form(Some(&root)).unwrap()).unwrap();
@@ -1961,6 +2169,7 @@ fn seal_shared_file(
         stored_hashes: Some(store_keys.clone()),
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     let manifest_bytes =
         fauna_core::encoding::canonical_encode(&manifest.wire_form(Some(&root)).unwrap()).unwrap();
@@ -7813,4 +8022,185 @@ async fn a_readers_restore_inside_a_foreign_scope_is_refused_read_only() {
     assert_eq!(err.key, "media.error_read_only_shared_folder");
     assert!(foreign_records(&api).is_empty());
     assert_eq!(own_records(&api), 0);
+}
+
+// ── offer only what is possible (`ui/README.md` § Offer only what is
+//    possible; `ui/media.md` § Errors & edge cases → *What this person may
+//    write*) ────────────────────────────────────────────────────────────────
+
+use fauna_core::possibility::Possibility;
+
+fn blocked_key(answer: &Possibility) -> Option<&str> {
+    answer.reason().map(|r| r.key.as_str())
+}
+
+/// Rule 5: before the first read resolves the upload is not offered on a
+/// guess — it is blocked "still loading".
+#[tokio::test]
+async fn the_upload_is_blocked_loading_before_the_first_read() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![folder("photos")]);
+    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None);
+    let answer = machine.upload_possibility();
+    assert_eq!(blocked_key(&answer), Some("common.still_loading"));
+}
+
+/// Ruling 5 of *No folder to upload into*: a folderless account's complete
+/// read leaves the upload possible — no "create a folder first" gate.
+#[tokio::test]
+async fn a_folderless_account_may_upload_once_read() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![]);
+    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None);
+    machine.refresh(None).await;
+    assert!(machine.snapshot().loaded);
+    assert_eq!(machine.upload_possibility(), Possibility::Possible);
+}
+
+/// An own set takes the upload, by default and when selected.
+#[tokio::test]
+async fn an_own_set_takes_the_upload() {
+    let (machine, _) = same_named_machine(Some(vec!["g9"]), None, None, false).await;
+    assert_eq!(machine.upload_possibility(), Possibility::Possible);
+    machine.clone().set_filter(Some("photos".into()));
+    assert_eq!(machine.upload_possibility(), Possibility::Possible);
+}
+
+/// A selected reader-member set blocks the upload with the reason the action
+/// refuses with — the person can pick another folder.
+#[tokio::test]
+async fn a_selected_reader_set_blocks_the_upload_with_its_reason() {
+    let (machine, _) = same_named_machine(Some(vec!["g9"]), None, None, false).await;
+    machine.clone().set_filter(Some("local:9".into()));
+    assert_eq!(
+        blocked_key(&machine.upload_possibility()),
+        Some("media.error_read_only_shared_folder")
+    );
+}
+
+/// A metadata-only target blocks the upload with its reason.
+#[tokio::test]
+async fn a_metadata_only_target_blocks_the_upload_with_its_reason() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![metadata_only_folder("local-only")]);
+    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None);
+    machine.refresh(None).await;
+    assert_eq!(
+        blocked_key(&machine.upload_possibility()),
+        Some("media.error_metadata_only_folder"),
+        "the all-media default target is the metadata-only own set"
+    );
+}
+
+/// Inside a foreign scope the answer reads the set's custody record: a
+/// reader's is blocked read-only, a metadata-only one metadata-only first, a
+/// writer's possible.
+#[tokio::test]
+async fn a_foreign_scope_answers_from_its_custody_record() {
+    let (reader, _, _) = foreign_writer_machine(Some("reader"), None).await;
+    assert_eq!(
+        blocked_key(&reader.upload_possibility()),
+        Some("media.error_read_only_shared_folder")
+    );
+    let (metadata, _, _) = foreign_writer_machine(Some("writer"), Some(true)).await;
+    assert_eq!(
+        blocked_key(&metadata.upload_possibility()),
+        Some("media.error_metadata_only_folder")
+    );
+    let (writer, _, _) = foreign_writer_machine(Some("writer"), None).await;
+    assert_eq!(writer.upload_possibility(), Possibility::Possible);
+}
+
+/// A followed scope is structurally read-only: no upload and no write at all.
+#[tokio::test]
+async fn a_followed_scope_offers_no_upload_and_no_write() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(fixture());
+    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None);
+    machine.set_followed_media_source(FakeFollowedSource::new(
+        vec![followed_scope("photos", 7)],
+        Ok(vec![followed_entry("a.jpg", 1)]),
+    ));
+    machine.refresh(None).await;
+    let value = machine.snapshot().followed[0].value.clone();
+    machine.select_followed_scope(value.clone()).await;
+    assert_eq!(machine.upload_possibility(), Possibility::Absent);
+    assert_eq!(machine.write_possibility(value), Possibility::Absent);
+}
+
+/// Delete and restore: possible in an own set (a metadata-only one included —
+/// they write no bytes) and for a writer member, absent for a reader.
+#[tokio::test]
+async fn the_write_answer_is_absent_for_a_reader_and_possible_for_a_writer() {
+    let (machine, _) = same_named_machine(Some(vec!["g9"]), None, None, false).await;
+    assert_eq!(
+        machine.write_possibility("photos".into()),
+        Possibility::Possible
+    );
+    assert_eq!(
+        machine.write_possibility("local:9".into()),
+        Possibility::Absent
+    );
+    let (writer, _) = same_named_machine(Some(vec!["g9"]), None, None, true).await;
+    assert_eq!(
+        writer.write_possibility("local:9".into()),
+        Possibility::Possible
+    );
+
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![metadata_only_folder("local-only")]);
+    let metadata = MediaMachine::new(CountingObserver::new(), api, None, None, None);
+    metadata.refresh(None).await;
+    assert_eq!(
+        metadata.write_possibility("local-only".into()),
+        Possibility::Possible
+    );
+
+    let (foreign_reader, _, _) = foreign_writer_machine(Some("reader"), None).await;
+    assert_eq!(
+        foreign_reader.write_possibility(foreign_value()),
+        Possibility::Absent
+    );
+    let (foreign_writer, _, _) = foreign_writer_machine(Some("writer"), None).await;
+    assert_eq!(
+        foreign_writer.write_possibility(foreign_value()),
+        Possibility::Possible
+    );
+}
+
+/// The delete asks the same answer: a reader's delete in a same-nest shared
+/// set is refused with the read-only reason, and nothing is recorded.
+#[tokio::test]
+async fn a_readers_delete_is_refused_by_the_same_answer() {
+    let (machine, api) = same_named_machine(Some(vec!["g9"]), None, None, false).await;
+    machine
+        .delete("local:9".into(), "dev-1".into(), "theirs.jpg".into())
+        .await;
+    assert_eq!(
+        machine.snapshot().error.map(|e| e.key).as_deref(),
+        Some("media.error_read_only_shared_folder")
+    );
+    assert_eq!(own_records(&api), 0);
+}
+
+/// The restore asks the same answer: a reader's restore of a same-nest shared
+/// set's version is refused before anything is sealed or recorded.
+#[tokio::test]
+async fn a_readers_restore_is_refused_by_the_same_answer() {
+    let (machine, api) = same_named_machine(Some(vec!["g9"]), None, None, false).await;
+    let mut v = version(1, hex::encode([0x21u8; 32]));
+    v.folder_id = Some(SHARED_PHOTOS);
+    machine
+        .restore_version("photos".into(), "dev-1".into(), "theirs.jpg".into(), v)
+        .await;
+    assert_eq!(
+        machine.snapshot().error.map(|e| e.key).as_deref(),
+        Some("media.error_read_only_shared_folder")
+    );
+    assert!(
+        !api.calls()
+            .iter()
+            .any(|c| matches!(c, MediaNestCall::RestoreMember { .. })),
+        "nothing recorded"
+    );
 }

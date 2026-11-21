@@ -72,6 +72,20 @@ private func days(from a: Date, to b: Date) -> Int {
     #expect(v.currentDateLabel == labelBefore)
 }
 
+/// The pan pair paints from the shared `calendar_pan_possibility`: blocked
+/// with its reason in agenda (and a pan reaching the handler refuses on the
+/// same reason on `error-message`), possible in the ranged modes.
+@Test @MainActor func agendaPanPairIsBlockedWithItsReason() {
+    let v = vm(mode: .agenda, at: anchor)
+    #expect(!v.panPossibility.isPossible)
+    #expect(v.panPossibility.reasonText == L.events.panNoneInAgenda)
+    v.nextPeriod()
+    #expect(v.errorMessage == L.events.panNoneInAgenda)
+    for mode in [FfiCalendarViewMode.month, .week, .day] {
+        #expect(vm(mode: mode, at: anchor).panPossibility.isPossible)
+    }
+}
+
 // `calendar-date-label` describes the VISIBLE RANGE, not always the month. It
 // used to be the month in every mode, which made it useless as an observable for
 // the finer modes: seven day-view pans inside one month left it unchanged, so a

@@ -6,6 +6,7 @@ import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -50,16 +51,22 @@ import com.fauna.app.ui.screen.notifications.NotificationsScreen
 import com.fauna.app.ui.screen.settings.*
 import com.fauna.app.ui.screen.status.*
 import com.fauna.app.ui.util.LocalConnectionState
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.AccountSettingsVM
+import com.fauna.app.core.findFragmentActivity
 import com.fauna.app.ui.viewmodel.ConnectionStatusVM
 import com.fauna.app.ui.viewmodel.ScreenTimeLockVM
 import com.fauna.app.ui.viewmodel.SupervisedIndicatorVM
 import com.fauna.ffi.connectionStateLabel
 import kotlinx.coroutines.launch
 import social.fauna.generated.Ids
+import androidx.compose.foundation.text.selection.DisableSelection
 
 val LocalSnackbarHostState = staticCompositionLocalOf<SnackbarHostState> {
     error("No SnackbarHostState provided")
@@ -248,12 +255,15 @@ private fun BannerRow(text: String, background: Color, testTag: String, onDismis
             .testTag(testTag),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = text,
-            color = Color.White,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f)
-        )
+        // ui/README.md § Text the person reads can be copied: the banner's
+        // text is read, not acted on; the dismiss button stays a control.
+        SelectionContainer(Modifier.weight(1f)) {
+            Text(
+                text = text,
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
         IconButton(onClick = onDismiss) {
             Icon(Icons.Default.Close, contentDescription = stringResource(R.string.common_dismiss), tint = Color.White)
         }
@@ -436,6 +446,9 @@ private fun OnboardingWizardNavHost(
         // Nest setup talks to a hosting or DNS provider the user names; the kids
         // build never registers it (a child joins their guardian's nest by invite).
         if (!BuildConfig.KIDS) {
+            composable("onboarding/provider-choice") {
+                ProviderChoiceScreen(navController)
+            }
             composable("onboarding/dns-config") {
                 DnsConfigScreen(navController)
             }
@@ -505,6 +518,7 @@ fun FaunaNavHost(
         // for a NEW identity, not a launch-routing decision for the current one.
         val addAccountVm: AccountSettingsVM = hiltViewModel()
         val appendNavController = rememberNavController()
+        RootSurface(ROOT_SURFACE_WIZARD)
         OnboardingWizardNavHost(
             navController = appendNavController,
             startDestination = "onboarding/identity-choice",
@@ -530,8 +544,16 @@ fun FaunaNavHost(
         val snapshot by launchVm.snapshot.collectAsState()
         LaunchedEffect(Unit) { launchVm.start() }
 
+        // The finished wizard holds until the session is signed in
+        // (`onboarding.md` § Wizard exit handling): its exit is a launch — a
+        // fresh machine over the identity the wizard just persisted — so the
+        // shell mounts only through `NavTarget.Authenticated`, the progress view
+        // stands meanwhile and a failure lands on the retry screen. The intents
+        // the wizard latched on `OnboardingHost` wait for the shell's post-auth
+        // glue, so they survive every Retry and run once at `Online`.
+        val launchScope = rememberCoroutineScope()
         val onWizardExit = { _: com.fauna.ffi.onboarding.WizardOutcome ->
-            appState.isOnboarding = false
+            launchScope.launch { launchVm.launchAfterWizard() }
             Unit
         }
 
@@ -548,8 +570,12 @@ fun FaunaNavHost(
         // painting the retry's refusal line (`account-scoping.md` § Erasure
         // follows scope → *The sign-out record is on all 7 apps*, decision 4).
         val failedClosed by launchVm.failedClosed.collectAsState()
+        val sessionStartFailed by launchVm.sessionStartFailed.collectAsState()
         val routed = if (failedClosed) {
             com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.Wizard("onboarding/identity-choice")
+        } else if (sessionStartFailed) {
+            // The session start after `Online` threw: Retry runs the launch again.
+            com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.TransientError
         } else {
             launchVm.navTargetFor(
                 snapshot.phase,
@@ -571,10 +597,12 @@ fun FaunaNavHost(
             null -> {
                 // In flight (`launch_progress`): the bound account's cached
                 // identity, absent while nothing is cached.
+                RootSurface(rootSurfaceName(null))
                 val line = remember { launchVm.launchIdentityLine() }
                 LaunchProgressScreen(identityLine = line)
             }
             is com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.AccountLocked -> {
+                RootSurface(rootSurfaceName(target, stolenEntry = stolenEntry))
                 LockedSurfaceHost(
                     launchVm = launchVm,
                     lockedUntilSecs = target.lockedUntilSecs,
@@ -587,9 +615,15 @@ fun FaunaNavHost(
                 )
             }
             com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.Authenticated -> {
+                // The session start between the silent challenge and the app
+                // (an authenticate round trip) keeps the launch progress view
+                // up — never a blank activity (`onboarding.md` § Wizard exit
+                // handling → *The wizard becomes the app in place*).
+                RootSurface(rootSurfaceName(target))
+                val line = remember { launchVm.launchIdentityLine() }
+                LaunchProgressScreen(identityLine = line)
                 LaunchedEffect(Unit) {
-                    launchVm.connectActiveSession()
-                    appState.isOnboarding = false
+                    if (launchVm.connectActiveSession()) appState.isOnboarding = false
                 }
             }
             com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.TransientError -> {
@@ -599,6 +633,7 @@ fun FaunaNavHost(
                 // `nest_retire` is hosted over the retry surface (`launch-retire-button`);
                 // leaving it puts the surface back as it was.
                 var retiring by remember { mutableStateOf(false) }
+                RootSurface(rootSurfaceName(target, retiring = !BuildConfig.KIDS && retiring))
                 if (!BuildConfig.KIDS && retiring) {
                     NestRetireScreen(
                         entry = RetireEntry.Launch,
@@ -606,6 +641,27 @@ fun FaunaNavHost(
                     )
                 } else {
                     val identityLine = remember { launchVm.launchIdentityLine() }
+                    // The account switcher `launch_retry` carries with more than
+                    // one account (`onboarding.md` § Wizard exit handling → *The
+                    // finished wizard holds*): the Settings switcher's own VM and
+                    // gate, read fresh at the surface's mount. A switch that lands
+                    // re-runs the launch as that account (`AppLaunchVM.start` —
+                    // a fresh machine); a refused one paints `error-message` and
+                    // the surface stays. The work a finished append wizard
+                    // deferred stays with its own account
+                    // (`OnboardingHost.deferredWorkOwner`).
+                    val switcherVm: AccountSettingsVM = hiltViewModel()
+                    LaunchedEffect(Unit) {
+                        switcherVm.switchError.value = null
+                        switcherVm.reloadAccounts()
+                    }
+                    val switchAccounts by switcherVm.accounts.collectAsState()
+                    val switchActive by switcherVm.activeActorId.collectAsState()
+                    val switchError by switcherVm.switchError.collectAsState()
+                    val reauthContext = androidx.compose.ui.platform.LocalContext.current
+                    val reauthActivity = remember(reauthContext) { reauthContext.findFragmentActivity() }
+                    val reauthTitle = stringResource(R.string.settings_account_page_reauth_prompt_title)
+                    val reauthSubtitle = stringResource(R.string.settings_account_page_reauth_reason)
                     LaunchRetryScreen(
                         identityLine = identityLine,
                         onRetry = { scope.launch { launchVm.retry() } },
@@ -618,10 +674,26 @@ fun FaunaNavHost(
                             navController.navigate(launchVm.seedForRecovery(recoverableBoxes))
                         },
                         onRetire = { retiring = true },
+                        accounts = switchAccounts,
+                        activeActorId = switchActive,
+                        accountLabel = switcherVm::accountLabel,
+                        onSwitch = { targetActorId ->
+                            switcherVm.reloadAccounts()
+                            com.fauna.app.core.AccountReauth.gatedSwitch(
+                                scope, switcherVm.requiresConfirm(targetActorId),
+                                reauthActivity, reauthTitle, reauthSubtitle,
+                            ) { confirmed ->
+                                switcherVm.switchAccount(targetActorId, confirmed) {
+                                    scope.launch { launchVm.start() }
+                                }
+                            }
+                        },
+                        switchError = switchError,
                     )
                 }
             }
             com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.NeedsUpdate -> {
+                RootSurface(rootSurfaceName(target))
                 // The nest reported it is outdated — a non-retry surface that
                 // renders the localized `last_error` in `error-message`, no Retry
                 // (version-compatibility.md Dim 4). Only "Use a different nest".
@@ -634,6 +706,7 @@ fun FaunaNavHost(
                 )
             }
             com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.SignInRefused -> {
+                RootSurface(rootSurfaceName(target))
                 // The nest no longer signs this identity in (suspended or
                 // removed — deliberately unsaid). Unlike NeedsUpdate this one
                 // HAS Retry: the admin's restore is the way back in
@@ -648,6 +721,7 @@ fun FaunaNavHost(
                 )
             }
             com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.IdentityChanged -> {
+                RootSurface(rootSurfaceName(target))
                 // The nest's pinned deployment identity changed (security.md §
                 // Transport trust) — no Retry CTA, only "trust this
                 // nest" or "use a different nest".
@@ -661,6 +735,7 @@ fun FaunaNavHost(
                 )
             }
             is com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.IdentityForked -> {
+                RootSurface(rootSurfaceName(target))
                 // Rotation-chain fork evidence (box-recovery.md § Client
                 // acceptance): the warning naming both heads, the fallthrough
                 // only — no trust button, no Retry.
@@ -674,6 +749,7 @@ fun FaunaNavHost(
                 )
             }
             is com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.Superseded -> {
+                RootSurface(rootSurfaceName(target))
                 // This identity was succeeded (identity-succession.md § Propagation
                 // → *Own device fleet*): the import flow, with the machine-held
                 // reason on its `error-message` — claim-free first, naming the
@@ -691,6 +767,7 @@ fun FaunaNavHost(
                 OnboardingWizardNavHost(navController, "onboarding/identity-import", onWizardExit)
             }
             is com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.AccountIndexUnreadable -> {
+                RootSurface(rootSurfaceName(target))
                 // The saved account index is present and this build cannot use
                 // it (version-compatibility.md § 5 item 9) — never a retry or
                 // fallthrough. `resetAccountIndex()` re-runs the launch machine
@@ -704,6 +781,7 @@ fun FaunaNavHost(
                 )
             }
             is com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.Wizard -> {
+                RootSurface(rootSurfaceName(target))
                 val scope = rememberCoroutineScope()
                 // What the cold boot's sign-out finish left — re-swept before
                 // routing, by the launch's own call (`AppLaunchVM.start`) — paints
@@ -730,6 +808,7 @@ fun FaunaNavHost(
             }
         }
     } else {
+        RootSurface(ROOT_SURFACE_APP)
         val drawerState = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
 
@@ -752,7 +831,7 @@ fun FaunaNavHost(
         // The bridge legs of the same hook (mail / CalDAV / CardDAV / WebDAV
         // first-setup enables, the mail epoch refresh, the critical-alert
         // sweep) — compiled out of the kids build type.
-        KidsExcisedPostAuthEffects()
+        KidsExcisedPostAuthEffects(appState.messages)
 
         // security.md § Post-auth surfacing: one-shot post-auth identity
         // re-check, at the same universal post-auth hook — the android leg
@@ -802,13 +881,17 @@ fun FaunaNavHost(
         // unconfirmed for an admin is surfaced as a warning banner — the
         // android idiom of linux's toast (cleared on the next navigation, like
         // the page-scoped errors). Nothing shows when custody is held or this
-        // identity is not an admin here. The warning is the shared Rust
-        // `LocalizedText`; this only renders it.
+        // identity is not an admin here, and a later run (the reconnect
+        // retry) that confirms custody takes the custody warning down — only
+        // that warning. The warning is the shared Rust `LocalizedText`; this
+        // only renders it.
         val custodyContext = androidx.compose.ui.platform.LocalContext.current
         LaunchedEffect(Unit) {
-            postAuthGlue.runDeploymentSeedCustodyLeg()
-                ?.let { com.fauna.app.ui.util.resolveLocalized(custodyContext, it) }
-                ?.let { appState.messages.showWarning(it) }
+            postAuthGlue.runDeploymentSeedCustodyLeg(
+                postAuthGlue.custodySink(appState.messages) {
+                    com.fauna.app.ui.util.resolveLocalized(custodyContext, it)
+                },
+            )
         }
         // domains-and-tls-bootstrap.md § Host-address acquisition: fire-and-forget
         // leg at the same universal post-auth hook. Best-effort, logged only.
@@ -824,27 +907,32 @@ fun FaunaNavHost(
         // The Fauna Kids build refuses an account that is not supervised
         // (`account-age-band.md` § The account age band, the kids-app bullet,
         // item (3)): one explanatory surface with a sign-out replaces the whole
-        // shell. The verdict is the shared `kidsAppEligible`, re-read with every
-        // family status read. `BuildConfig.KIDS`-gated, so R8 folds this out of
-        // the other build types.
+        // shell. The verdict is the shared three-way `kidsAppEligibility`
+        // (§ *Kids-app eligibility while it is unknown*): the shell mounts only
+        // on ELIGIBLE; UNKNOWN shows the same surface without its message —
+        // never the shell on a guess, never the refusal on one. `BuildConfig.KIDS`-gated,
+        // so R8 folds this out of the other build types.
         if (BuildConfig.KIDS) {
             val kidsEligibilityVm: com.fauna.app.ui.viewmodel.KidsEligibilityVM = hiltViewModel()
-            val kidsEligible by kidsEligibilityVm.eligible.collectAsState()
-            if (kidsEligible == false) {
+            val kidsEligibility by kidsEligibilityVm.eligibility.collectAsState()
+            if (kidsEligibility != com.fauna.ffi.FfiKidsAppEligibility.ELIGIBLE) {
                 val kidsAccountVm: AccountSettingsVM = hiltViewModel()
+                val kidsReadFailed by kidsEligibilityVm.readFailedWhileUnknown.collectAsState()
                 var signOutError by remember { mutableStateOf<String?>(null) }
+                val kidsContext = androidx.compose.ui.platform.LocalContext.current
                 KidsIneligibleScreen(
                     onSignOut = {
-                        try {
-                            kidsAccountVm.signOut { residue ->
-                                appState.signOutResidue = residue
-                                appState.isOnboarding = true
-                            }
-                        } catch (e: Exception) {
-                            signOutError = e.message
+                        signOutError = null
+                        kidsAccountVm.signOut(
+                            onError = { signOutError = it.render(kidsContext) },
+                        ) { residue ->
+                            appState.signOutResidue = residue
+                            appState.isOnboarding = true
                         }
                     },
-                    error = signOutError,
+                    showMessage = kidsEligibility == com.fauna.ffi.FfiKidsAppEligibility.INELIGIBLE,
+                    error = signOutError
+                        ?: if (kidsReadFailed) androidx.compose.ui.res.stringResource(R.string.launch_retry_title) else null,
                 )
                 return
             }
@@ -902,7 +990,7 @@ fun FaunaNavHost(
                             val itemLabel = item.resolveLabel()
                             NavigationDrawerItem(
                                 icon = { Icon(item.icon, contentDescription = itemLabel) },
-                                label = { Text(itemLabel) },
+                                label = { DisableSelection { Text(itemLabel) } },
                                 selected = currentRoute?.startsWith(item.route) == true,
                                 onClick = {
                                     navController.navigateToDrawerRoute(item.route)
@@ -920,16 +1008,31 @@ fun FaunaNavHost(
                     snackbarHost = { SnackbarHost(snackbarHostState) },
                     topBar = {
                         if (!BuildConfig.KIDS && isSearchActive) {
+                            // `search-submit-button` is painted from the shared
+                            // `query_possibility` (blank -> `search_page.query_required`,
+                            // the reason under the bar) and the submit — the button
+                            // and the keyboard's search action alike — asks it again
+                            // and refuses with that reason on `error-message`
+                            // (search.md § Errors & edge cases).
+                            val searchContext = androidx.compose.ui.platform.LocalContext.current
+                            val searchSubmit = faunaFormGate(askForm { searchSubmitPossibility(searchQuery) })
+                            val submitSearch: () -> Unit = {
+                                val refusal = formRefusal(
+                                    searchContext,
+                                    askForm { searchSubmitPossibility(searchQuery) },
+                                )
+                                if (refusal != null) {
+                                    refusal.reason?.let { appState.messages.showError(it) }
+                                } else {
+                                    navController.navigate("search/${java.net.URLEncoder.encode(searchQuery, "UTF-8")}")
+                                    isSearchActive = false
+                                    searchQuery = ""
+                                }
+                            }
                             SearchBar(
                                 query = searchQuery,
                                 onQueryChange = { searchQuery = it },
-                                onSearch = {
-                                    if (searchQuery.isNotBlank()) {
-                                        navController.navigate("search/${java.net.URLEncoder.encode(searchQuery, "UTF-8")}")
-                                        isSearchActive = false
-                                        searchQuery = ""
-                                    }
-                                },
+                                onSearch = { submitSearch() },
                                 active = true,
                                 onActiveChange = { if (!it) isSearchActive = false },
                                 placeholder = { Text(stringResource(R.string.search_page_search_messages)) },
@@ -950,14 +1053,11 @@ fun FaunaNavHost(
                                             ) {
                                                 Icon(Icons.Default.Close, "Clear search")
                                             }
+                                        }
+                                        if (searchSubmit.shown) {
                                             IconButton(
-                                                onClick = {
-                                                    if (searchQuery.isNotBlank()) {
-                                                        navController.navigate("search/${java.net.URLEncoder.encode(searchQuery, "UTF-8")}")
-                                                        isSearchActive = false
-                                                        searchQuery = ""
-                                                    }
-                                                },
+                                                onClick = submitSearch,
+                                                enabled = searchSubmit.enabled,
                                                 modifier = Modifier.testTag(Ids.SEARCH_SUBMIT_BUTTON)
                                             ) {
                                                 Icon(Icons.Default.Search, "Submit search")
@@ -966,7 +1066,12 @@ fun FaunaNavHost(
                                     }
                                 },
                                 modifier = Modifier.testTag(Ids.SEARCH_QUERY_FIELD)
-                            ) {}
+                            ) {
+                                DisabledControlReasonText(
+                                    searchSubmit.reason,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                )
+                            }
                         } else {
                             TopAppBar(
                                 title = { Text(currentTitle, modifier = Modifier.testTag(Ids.PAGE_HEADING)) },
@@ -1299,7 +1404,6 @@ private fun LockedSurfaceHost(
     com.fauna.app.ui.screen.IdentityStolenEntryScreen(
         phrase = phrase,
         confirm = confirm,
-        confirmWord = com.fauna.app.ui.viewmodel.RecoveryKitVM.STOLEN_CONFIRM_WORD,
         busy = busy,
         error = error,
         onPhraseChange = { phrase = it },
@@ -1327,10 +1431,8 @@ private fun lockedCeremonyMessage(
     result: com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult,
 ): String? = when (result) {
     com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.SignedIn -> null
-    com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.NotArmed ->
-        context.getString(R.string.settings_recovery_kit_stolen_confirm_placeholder)
-    com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.NoPhrase ->
-        context.getString(R.string.settings_recovery_kit_kit_phrase_required)
+    is com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.Blocked ->
+        com.fauna.app.ui.util.resolveLocalized(context, result.reason)
     is com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.Refused ->
         com.fauna.app.ui.util.resolveLocalized(context, result.outcome.message) ?: result.outcome.kind
     is com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.PersistFailed ->

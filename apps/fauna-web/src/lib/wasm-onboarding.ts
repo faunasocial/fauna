@@ -1,6 +1,7 @@
 import { asset } from '$app/paths';
 import { joinChunk } from './chunk-join';
 import type { LocalizedText } from '#lib/i18n/localized';
+import type { Possibility } from '#lib/possibility';
 
 let wasmModule: typeof import('../../static/fauna_wasm_onboarding.js') | null = null;
 let wasmInit: Promise<void> | null = null;
@@ -109,6 +110,13 @@ export interface AdminNatModeMachine {
   snapshotJson(): string;
   /** Radio wiring; `mode` is the lowercase wire form (`"public"`/`"private"`). */
   select(mode: string): void;
+  /** `AdminNatModeMachine::select_possibility` — the radios' answer, in
+   *  `Possibility`'s serde JSON: blocked until `fauna.setup.status` answered
+   *  (a failed read leaves them blocked). */
+  selectPossibilityJson(): string;
+  /** `AdminNatModeMachine::save_possibility` — the save's answer: the read's,
+   *  then still saving while a save is on its way. */
+  savePossibilityJson(): string;
   /** Page load: read `fauna.setup.status`, pre-select the current mode. */
   hydrate(): Promise<void>;
   /** Sign + commit the selected mode via the mutable `fauna.setup.nat_mode`. */
@@ -200,11 +208,11 @@ export interface NestRetireMachine {
   resolveCurrentHost(host: string): Promise<boolean>;
   hostedAuthBegin(fieldId: string): Promise<string | null>;
   hostedAuthWait(fieldId: string): Promise<void>;
-  hostedAuthCanBegin(fieldId: string): boolean;
+  hostedAuthPossibilityJson(fieldId: string): string;
   hostedAuthButtonText(fieldId: string): string;
   selectedProvider(): string | undefined;
   visibleFieldsJson(): string;
-  canVerify(): boolean;
+  verifyPossibilityJson(): string;
   expectAppInputs(): void;
   appInputsLanded(): void;
   setInputError(message: string): void;
@@ -408,4 +416,49 @@ export async function registrarRegister(
 ): Promise<string> {
   await ensureOnboardingWasm();
   return wasm().registrar_register(providerId, credsJson, domain, years, agreedPriceCents, contactJson);
+}
+
+// ── The signed-out forms' draft answers ────────────────────────────────────
+//
+// `docs/goal/ui/README.md` § Offer only what is possible, rule 4's form case:
+// each signed-out submit paints from its shared draft predicate
+// (`fauna_onboarding_machine::drafts`) and its handler asks the same one, so the
+// SPA keeps no emptiness or confirm-word gate of its own. Each throws until
+// `ensureOnboardingWasm()` resolves — ask through `#lib/form-gate`'s
+// `askPossibility`.
+
+type DraftFaces = {
+  identityImportPossibilityJson(pasted: string): string;
+  recoveryEntryPossibilityJson(phrase: string, account: string): string;
+  emergencyLockoutPossibilityJson(secret: string, account: string, confirmWord: string): string;
+  inviteCodeDraftPossibilityJson(code: string): string;
+};
+
+function drafts(): DraftFaces {
+  return wasm() as unknown as DraftFaces;
+}
+
+/** `import-submit-button` over the pasted identity. */
+export function identityImportPossibility(pasted: string): Possibility {
+  return JSON.parse(drafts().identityImportPossibilityJson(pasted)) as Possibility;
+}
+
+/** `recovery-entry-submit-button` over the pasted kit and the account typed. */
+export function recoveryEntryPossibility(phrase: string, account: string): Possibility {
+  return JSON.parse(drafts().recoveryEntryPossibilityJson(phrase, account)) as Possibility;
+}
+
+/** The signed-out door's `sessions-lockout-button`: secret, then account,
+ *  then the confirm word. */
+export function emergencyLockoutPossibility(
+  secret: string,
+  account: string,
+  confirmWord: string,
+): Possibility {
+  return JSON.parse(drafts().emergencyLockoutPossibilityJson(secret, account, confirmWord)) as Possibility;
+}
+
+/** `invite-code-check-button` over the typed code. */
+export function inviteCodeDraftPossibility(code: string): Possibility {
+  return JSON.parse(drafts().inviteCodeDraftPossibilityJson(code)) as Possibility;
 }

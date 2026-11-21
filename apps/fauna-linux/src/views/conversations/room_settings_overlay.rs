@@ -28,9 +28,10 @@ use std::rc::Rc;
 type Repaint = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
 use fauna_conversations::{
-    HistoryPolicy, JoinRule, RoomSettingsDraft, TypedAddress, history_policy_label,
+    HistoryPolicy, JoinRule, RoomSettingsDraft, ThreadControl, TypedAddress, history_policy_label,
     join_rule_label, snapshot::ThreadDetail,
 };
+use fauna_core::possibility::Possibility;
 
 /// The two token pickers, built the `event-detail-reminder-select` way: the
 /// model holds the driver-facing TOKENS (so `select`/`get_text` round-trip
@@ -84,17 +85,19 @@ fn selected_token(dropdown: &gtk::DropDown) -> String {
 }
 
 /// One member's row: the admin switch and the hand-over control, indexed like
-/// the chips. Both are painted for every member and merely GREYED where the
-/// viewer's capability or the row's own eligibility says no — never hidden,
-/// and never live on the owner's own row (`ui/conversations.md`
-/// § Architectural rules 5; the eligibility itself is the shared draft's).
+/// the chips. Each is painted from its shared answer (`AppointAdmins`,
+/// `TransferOwnership`): absent for a viewer whose role does not hold it, and
+/// where shown, on every member's row — the owner's own row and any other
+/// ineligible row dead — so `[i]` stays the chip's index (`ui/conversations.md`
+/// § Errors & edge cases → *Controls this person can never use*; the
+/// eligibility itself is the shared draft's).
 fn member_row(
     index: usize,
     display: &str,
     draft: &Rc<RefCell<RoomSettingsDraft>>,
     participants: &Rc<Vec<TypedAddress>>,
-    can_appoint_admins: bool,
-    can_transfer_ownership: bool,
+    appoint: &Possibility,
+    transfer: &Possibility,
     repaint: &Rc<dyn Fn()>,
 ) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -119,7 +122,10 @@ fn member_row(
         crate::i18n::strings::conversations::unified::ROOM_ADMIN_NO
     });
     admin_btn.set_active(staged_admin);
-    admin_btn.set_sensitive(can_appoint_admins && eligible);
+    crate::possible::paint(&admin_btn, None, appoint.clone());
+    if !eligible {
+        admin_btn.set_sensitive(false);
+    }
     crate::testid::set_test_id(&admin_btn, ids::ROOM_ADMIN_TOGGLE);
     crate::testid::set_test_attr(
         &admin_btn,
@@ -130,7 +136,11 @@ fn member_row(
         let draft = Rc::clone(draft);
         let participants = Rc::clone(participants);
         let repaint = Rc::clone(repaint);
+        let may = appoint.is_possible();
         admin_btn.connect_clicked(move |_| {
+            if !may {
+                return;
+            }
             draft.borrow_mut().toggle_admin(index, &participants);
             repaint();
         });
@@ -143,7 +153,10 @@ fn member_row(
         crate::i18n::strings::conversations::unified::ROOM_TRANSFER_MARK
     });
     transfer_btn.set_active(staged_owner);
-    transfer_btn.set_sensitive(can_transfer_ownership && eligible);
+    crate::possible::paint(&transfer_btn, None, transfer.clone());
+    if !eligible {
+        transfer_btn.set_sensitive(false);
+    }
     crate::testid::set_test_id(&transfer_btn, ids::ROOM_OWNER_TRANSFER_BUTTON);
     crate::testid::set_test_attr(
         &transfer_btn,
@@ -154,7 +167,11 @@ fn member_row(
         let draft = Rc::clone(draft);
         let participants = Rc::clone(participants);
         let repaint = Rc::clone(repaint);
+        let may = transfer.is_possible();
         transfer_btn.connect_clicked(move |_| {
+            if !may {
+                return;
+            }
             draft.borrow_mut().toggle_transfer(index, &participants);
             repaint();
         });
@@ -221,6 +238,26 @@ fn paint_pending(pending_box: &gtk::Box, detail: &ThreadDetail, on_withdraw: &Rc
     }
 }
 
+/// The editor's two immediate acts, painted from their shared answers and
+/// re-painted off every live tick: the walk-out (`LeaveRoom`, its blocked
+/// reason on `leave_reason`) and the local remove (`LocalRemove`). The cells
+/// hold what each click re-asks.
+fn paint_departures(
+    detail: &ThreadDetail,
+    leave_btn: &gtk::Button,
+    leave_reason: &gtk::Label,
+    can_leave: &Cell<bool>,
+    remove_btn: &gtk::Button,
+    can_remove: &Cell<bool>,
+) {
+    let leave = super::thread_control(detail, ThreadControl::LeaveRoom);
+    let remove = super::thread_control(detail, ThreadControl::LocalRemove);
+    can_leave.set(leave.is_possible());
+    can_remove.set(remove.is_possible());
+    crate::possible::paint(leave_btn, Some(leave_reason), leave);
+    crate::possible::paint(remove_btn, None, remove);
+}
+
 /// The nest-read toggle's `checked` attribute and label, off the staged value.
 fn paint_nest_read(toggle: &gtk::ToggleButton, reads: bool) {
     toggle.set_active(reads);
@@ -240,14 +277,19 @@ pub struct RoomSettingsEditor {
     pending_box: gtk::Box,
     on_withdraw: Rc<dyn Fn(String)>,
     leave_btn: gtk::Button,
-    /// The live `can_leave_room`, re-read at the confirm's open and not only
-    /// at paint (a greyed control must not be openable by a driver).
+    /// The walk-out's reason line: the owner's blocked answer names the
+    /// hand-over here, within eyeshot of the dead button.
+    leave_reason: gtk::Label,
+    /// Whether the live `LeaveRoom` answer is possible, re-asked at the
+    /// confirm's open and not only at paint (a control that is not offered
+    /// live must not be openable by a driver).
     can_leave: Rc<Cell<bool>>,
-    /// `room-remove-button` — greyed unless `capabilities.supports_local_remove`
-    /// (`bridged-adapter.md` § Removing bridged rows, rule 6).
+    /// `room-remove-button` — the shared `LocalRemove` answer: painted on a
+    /// bridged room, absent elsewhere (`bridged-adapter.md` § Removing bridged
+    /// rows, rule 6).
     remove_btn: gtk::Button,
-    /// The live `supports_local_remove`, re-read at the confirm's open like
-    /// [`Self::can_leave`].
+    /// Whether the live `LocalRemove` answer is possible, re-asked at the
+    /// confirm's open like [`Self::can_leave`].
     can_remove: Rc<Cell<bool>>,
     /// Held so the section's weak self-references stay upgradable for as long
     /// as the editor lives.
@@ -273,13 +315,14 @@ impl RoomSettingsEditor {
     /// ABSENT while `pending_invites` is `None` (not served) or empty alike.
     pub fn sync_live(&self, detail: &ThreadDetail) {
         paint_pending(&self.pending_box, detail, &self.on_withdraw);
-        self.can_leave.set(detail.capabilities.can_leave_room);
-        self.leave_btn
-            .set_sensitive(detail.capabilities.can_leave_room);
-        self.can_remove
-            .set(detail.capabilities.supports_local_remove);
-        self.remove_btn
-            .set_sensitive(detail.capabilities.supports_local_remove);
+        paint_departures(
+            detail,
+            &self.leave_btn,
+            &self.leave_reason,
+            &self.can_leave,
+            &self.remove_btn,
+            &self.can_remove,
+        );
     }
 
     /// A commit was refused. The editor STAYS OPEN with the refused value
@@ -334,10 +377,16 @@ pub fn show<
     // `ui/conversations.md` § Element IDs).
     let esc = gtk::EventControllerKey::new();
     {
-        let window = window.clone();
+        // Every closure the window's own tree holds takes the window WEAKLY:
+        // a strong capture is a cycle (window → widget → closure → window)
+        // that outlives the close, and with it every painted control stays in
+        // the possibility registry the walk's I9 reads.
+        let window = window.downgrade();
         esc.connect_key_pressed(move |_, key, _, _| {
             if key == gtk::gdk::Key::Escape {
-                window.close();
+                if let Some(window) = window.upgrade() {
+                    window.close();
+                }
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -370,12 +419,22 @@ pub fn show<
         ids::ROOM_JOIN_RULE_SELECT,
     );
     select_token(&join_rule_dd, draft.borrow().join_rule.token());
-    // Every policy control is greyed — never hidden — for a plain member, who
-    // opens this editor to read it and to leave (`ui/conversations.md`
-    // § Architectural rules 5).
-    let can_set_policy = detail.capabilities.can_set_policy;
-    join_rule_dd.set_sensitive(can_set_policy);
+    // Every policy control is the shared `SetPolicy` answer: absent for a
+    // plain member, who opens this editor to read it and to leave, and who
+    // reads each value as a plain line where the control would sit
+    // (`ui/conversations.md` § Errors & edge cases → *Controls this person can
+    // never use*).
+    let set_policy = super::thread_control(detail, ThreadControl::SetPolicy);
+    let reads_only = !set_policy.is_shown();
+    crate::possible::paint(&join_rule_dd, None, set_policy.clone());
     join_rule_row.append(&join_rule_dd);
+    if reads_only {
+        let rule = draft.borrow().join_rule;
+        let line = gtk::Label::new(Some(join_rule_label(rule)));
+        crate::testid::set_test_id(&line, ids::ROOM_JOIN_RULE_LINE);
+        crate::testid::set_test_attr(&line, "value", rule.token());
+        join_rule_row.append(&line);
+    }
     policy_area.append(&join_rule_row);
 
     let history_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -395,8 +454,15 @@ pub fn show<
         ids::ROOM_HISTORY_POLICY_SELECT,
     );
     select_token(&history_dd, draft.borrow().history_policy.token());
-    history_dd.set_sensitive(can_set_policy);
+    crate::possible::paint(&history_dd, None, set_policy.clone());
     history_row.append(&history_dd);
+    if reads_only {
+        let policy = draft.borrow().history_policy;
+        let line = gtk::Label::new(Some(history_policy_label(policy)));
+        crate::testid::set_test_id(&line, ids::ROOM_HISTORY_POLICY_LINE);
+        crate::testid::set_test_attr(&line, "value", policy.token());
+        history_row.append(&line);
+    }
     policy_area.append(&history_row);
 
     // The per-member rows are torn down and rebuilt on every staging gesture,
@@ -408,15 +474,35 @@ pub fn show<
     // The home nest's read, only where there is one to stage: a community room
     // whose answer this device has read (`RoomSettingsDraft::nest_read`).
     // Staged like the admin switches — Save commits it as a rotation.
-    if let Some(reads) = draft.borrow().nest_read {
+    // A viewer who may never stage it reads the same sentence as a line.
+    if let Some(reads) = draft.borrow().nest_read
+        && reads_only
+    {
+        let line = gtk::Label::new(Some(if reads {
+            crate::i18n::strings::conversations::unified::ROOM_NEST_READ_YES
+        } else {
+            crate::i18n::strings::conversations::unified::ROOM_NEST_READ_NO
+        }));
+        line.set_halign(gtk::Align::Start);
+        crate::testid::set_test_id(&line, ids::ROOM_NEST_READ_LINE);
+        crate::testid::set_test_attr(&line, "checked", if reads { "true" } else { "false" });
+        policy_area.append(&line);
+    }
+    if let Some(reads) = draft.borrow().nest_read
+        && !reads_only
+    {
         let toggle = gtk::ToggleButton::new();
         toggle.set_halign(gtk::Align::Start);
-        toggle.set_sensitive(detail.capabilities.can_set_policy);
+        crate::possible::paint(&toggle, None, set_policy.clone());
         crate::testid::set_test_id(&toggle, ids::ROOM_NEST_READ_TOGGLE);
         paint_nest_read(&toggle, reads);
         {
             let draft = Rc::clone(&draft);
+            let may = set_policy.is_possible();
             toggle.connect_clicked(move |btn| {
+                if !may {
+                    return;
+                }
                 let mut d = draft.borrow_mut();
                 d.toggle_nest_read();
                 paint_nest_read(btn, d.nest_read.unwrap_or(false));
@@ -432,7 +518,7 @@ pub fn show<
 
     // The room's labeler set: staged like the rest, committed by Save. Absent
     // where the draft carries no set. Its inspect view opens in place.
-    let labeler_section = LabelerSection::new(&draft, labelers, detail.capabilities.can_set_policy);
+    let labeler_section = LabelerSection::new(&draft, labelers, set_policy.clone());
     policy_area.append(&labeler_section.root);
     {
         let weak = Rc::downgrade(&labeler_section);
@@ -456,8 +542,11 @@ pub fn show<
     // every gesture and every read resolves by identity rather than position
     // (`RoomSettingsDraft::slot_of`).
     let participants: Rc<Vec<TypedAddress>> = Rc::new(detail.participants.clone());
-    let can_appoint_admins = detail.capabilities.can_appoint_admins;
-    let can_transfer_ownership = detail.capabilities.can_transfer_ownership;
+    let appoint = super::thread_control(detail, ThreadControl::AppointAdmins);
+    let transfer = super::thread_control(detail, ThreadControl::TransferOwnership);
+    // A whole per-participant list is absent for a viewer without the role
+    // behind it; with neither list held, no member rows are painted at all.
+    members_box.set_visible(appoint.is_shown() || transfer.is_shown());
 
     let repaint: Repaint = Rc::new(RefCell::new(None));
     {
@@ -479,8 +568,8 @@ pub fn show<
                     display,
                     &draft,
                     &participants,
-                    can_appoint_admins,
-                    can_transfer_ownership,
+                    &appoint,
+                    &transfer,
                     &inner,
                 ));
             }
@@ -496,23 +585,44 @@ pub fn show<
     // Every edit Save issues is a policy commit on the channel — one constant
     // kind for all five, so the button itself declares it.
     crate::offline_gate::declare_wire_kind(&save_btn, "fauna.conversations.channel.send");
-    save_btn.set_sensitive(can_set_policy);
+    // Absent for a member: every staged edit behind Save is owner-or-admin
+    // work.
+    crate::possible::paint(&save_btn, None, set_policy.clone());
     if has_policy {
         content.append(&save_btn);
     }
 
     // The walk-out, below Save and outside the staged set: leaving is an
-    // immediate act, not a policy edit. Greyed for the owner, who hands the
-    // room over first; the capability is re-checked when the confirm opens.
-    let can_leave = Rc::new(Cell::new(detail.capabilities.can_leave_room));
+    // immediate act, not a policy edit. The shared `LeaveRoom` answer is
+    // blocked for the owner — painted dead with the hand-over as its reason on
+    // the line below it, the hand-over controls live above — and the answer
+    // is re-asked when the confirm opens. The remove beside it is the
+    // `LocalRemove` answer: absent off a bridged rail.
+    let can_leave = Rc::new(Cell::new(false));
+    let can_remove = Rc::new(Cell::new(false));
     let leave_btn =
         gtk::Button::with_label(crate::i18n::strings::conversations::unified::ROOM_LEAVE);
     leave_btn.set_halign(gtk::Align::End);
-    leave_btn.set_sensitive(detail.capabilities.can_leave_room);
     crate::testid::set_test_id(&leave_btn, ids::ROOM_LEAVE_BUTTON);
+    let leave_reason = gtk::Label::new(None);
+    leave_reason.set_halign(gtk::Align::End);
+    leave_reason.set_wrap(true);
+    leave_reason.add_css_class("dim-label");
+    let remove_btn =
+        gtk::Button::with_label(crate::i18n::strings::conversations::unified::ROOM_REMOVE);
+    remove_btn.set_halign(gtk::Align::End);
+    crate::testid::set_test_id(&remove_btn, ids::ROOM_REMOVE_BUTTON);
+    paint_departures(
+        detail,
+        &leave_btn,
+        &leave_reason,
+        &can_leave,
+        &remove_btn,
+        &can_remove,
+    );
     {
         let can_leave = Rc::clone(&can_leave);
-        let window = window.clone();
+        let window = window.downgrade();
         let label = detail.label.clone();
         let on_leave = Rc::new(on_leave);
         leave_btn.connect_clicked(move |btn| {
@@ -533,26 +643,21 @@ pub fn show<
                 .with_confirm_id(ids::ROOM_LEAVE_CONFIRM)
                 .with_wire_kind("fauna.conversations.room.leave"),
                 move || {
-                    window.close();
+                    if let Some(window) = window.upgrade() {
+                        window.close();
+                    }
                     on_leave();
                 },
             );
         });
     }
     content.append(&leave_btn);
+    content.append(&leave_reason);
 
-    // The local remove, beside the walk-out and outside the staged set:
-    // greyed unless the room's capabilities say `supports_local_remove`, and
-    // re-checked when the confirm opens. Its confirm is immediate.
-    let can_remove = Rc::new(Cell::new(detail.capabilities.supports_local_remove));
-    let remove_btn =
-        gtk::Button::with_label(crate::i18n::strings::conversations::unified::ROOM_REMOVE);
-    remove_btn.set_halign(gtk::Align::End);
-    remove_btn.set_sensitive(detail.capabilities.supports_local_remove);
-    crate::testid::set_test_id(&remove_btn, ids::ROOM_REMOVE_BUTTON);
+    // The local remove's confirm is immediate.
     {
         let can_remove = Rc::clone(&can_remove);
-        let window = window.clone();
+        let window = window.downgrade();
         let label = detail.label.clone();
         let on_remove = Rc::new(on_remove);
         remove_btn.connect_clicked(move |btn| {
@@ -573,7 +678,9 @@ pub fn show<
                 .with_confirm_id(ids::ROOM_REMOVE_CONFIRM)
                 .with_wire_kind(fauna_protocol::bridged_conversations::KIND_ROOMS_REMOVE),
                 move || {
-                    window.close();
+                    if let Some(window) = window.upgrade() {
+                        window.close();
+                    }
                     on_remove();
                 },
             );
@@ -583,7 +690,11 @@ pub fn show<
 
     {
         let draft = Rc::clone(&draft);
+        let may = set_policy.is_possible();
         save_btn.connect_clicked(move |_| {
+            if !may {
+                return;
+            }
             // The two pickers are read at Save (the dropdowns hold the staged
             // tokens; the toggles staged straight into the draft as they were
             // pressed), so the whole staged state reaches the caller as one
@@ -609,9 +720,163 @@ pub fn show<
         pending_box,
         on_withdraw,
         leave_btn,
+        leave_reason,
         can_leave,
         remove_btn,
         can_remove,
         _labelers: labeler_section,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fauna_conversations::room::RoomRole;
+    use fauna_labeler_catalog_machine::{FakeLabelerCatalogNestApi, LabelerCatalogMachine};
+    use std::sync::Arc;
+
+    /// The editor over `detail`, with a catalog that serves nothing.
+    fn open(detail: &ThreadDetail) -> (Rc<RoomSettingsEditor>, tokio::runtime::Runtime) {
+        let rt = tokio::runtime::Runtime::new().expect("a runtime for the catalog seam");
+        let machine = LabelerCatalogMachine::new(
+            Arc::new(fauna_labeler_catalog_machine::observer::NullObserver),
+            Arc::new(FakeLabelerCatalogNestApi::new()),
+        );
+        let parent = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let editor = show(
+            &parent,
+            detail,
+            |_| {},
+            |_| {},
+            || {},
+            || {},
+            LabelerSeams {
+                machine,
+                rt: rt.handle().clone(),
+            },
+        )
+        .expect("a governed room opens its editor");
+        (editor, rt)
+    }
+
+    fn find(editor: &RoomSettingsEditor, id: &str) -> Option<gtk::Widget> {
+        let root: gtk::Widget = editor.window.clone().upcast();
+        crate::automation::find::find_in(&root, id)
+    }
+
+    fn count(editor: &RoomSettingsEditor, id: &str) -> usize {
+        let root: gtk::Widget = editor.window.clone().upcast();
+        let mut found = Vec::new();
+        crate::automation::find::collect_in(&root, id, &mut found);
+        found.len()
+    }
+
+    /// `ui/conversations.md` § Errors & edge cases → *Controls this person can
+    /// never use*: a plain member reads the room's settings, with no policy
+    /// control, no per-participant control and no Save, and the walk-out
+    /// live; the local remove is absent off a bridged rail.
+    #[test]
+    fn a_plain_member_reads_the_policy_and_may_only_leave() {
+        crate::testid::run_on_gtk_thread(|| {
+            let detail = super::super::thread_header::tests::governed_two_seats(RoomRole::Member);
+            let (editor, _rt) = open(&detail);
+            for id in [
+                ids::ROOM_JOIN_RULE_SELECT,
+                ids::ROOM_HISTORY_POLICY_SELECT,
+                ids::ROOM_ADMIN_TOGGLE,
+                ids::ROOM_OWNER_TRANSFER_BUTTON,
+                ids::ROOM_SETTINGS_SAVE_BUTTON,
+                ids::ROOM_REMOVE_BUTTON,
+            ] {
+                assert!(
+                    find(&editor, id).is_none(),
+                    "{id} is not offered to a member"
+                );
+            }
+            let leave = find(&editor, ids::ROOM_LEAVE_BUTTON).expect("the walk-out is painted");
+            assert!(leave.is_sensitive(), "a member may walk out");
+            assert!(
+                !editor.leave_reason.is_visible(),
+                "no reason under a live walk-out"
+            );
+            assert!(editor.can_leave.get() && !editor.can_remove.get());
+            // The values are read as lines where the pickers would sit.
+            let root: gtk::Widget = editor.window.clone().upcast();
+            let mut texts = Vec::new();
+            let mut stack = vec![root];
+            while let Some(w) = stack.pop() {
+                if let Some(label) = w.downcast_ref::<gtk::Label>() {
+                    texts.push(label.text().to_string());
+                }
+                let mut child = w.first_child();
+                while let Some(c) = child {
+                    child = c.next_sibling();
+                    stack.push(c);
+                }
+            }
+            assert!(
+                texts.iter().any(|t| t == join_rule_label(JoinRule::Invite)),
+                "the join rule is read as a line: {texts:?}"
+            );
+            // Each line carries its id and the select's token, exactly where
+            // the control is absent.
+            let join_line =
+                find(&editor, ids::ROOM_JOIN_RULE_LINE).expect("the join rule line is tagged");
+            assert!(join_line.has_css_class("test-attr-value-invite"));
+            assert!(
+                find(&editor, ids::ROOM_HISTORY_POLICY_LINE).is_some(),
+                "the history policy line is tagged"
+            );
+            // Destroyed, not closed: a test window left alive keeps its painted
+            // widgets in the possibility registry the walk reads after it.
+            editor.window.destroy();
+        });
+    }
+
+    /// The owner holds every policy control, one per-participant row per
+    /// chip, and a walk-out BLOCKED with the hand-over sentence painted on its
+    /// reason line — the one control of the set that is shown dead.
+    #[test]
+    fn the_owners_walk_out_is_blocked_with_the_hand_over_in_view() {
+        crate::testid::run_on_gtk_thread(|| {
+            let detail = super::super::thread_header::tests::governed_two_seats(RoomRole::Owner);
+            let (editor, _rt) = open(&detail);
+            assert!(find(&editor, ids::ROOM_JOIN_RULE_SELECT).is_some_and(|w| w.is_sensitive()));
+            for id in [ids::ROOM_JOIN_RULE_LINE, ids::ROOM_HISTORY_POLICY_LINE] {
+                assert!(
+                    find(&editor, id).is_none(),
+                    "{id} is absent beside the control"
+                );
+            }
+            assert!(
+                find(&editor, ids::ROOM_SETTINGS_SAVE_BUTTON).is_some_and(|w| w.is_sensitive())
+            );
+            assert_eq!(
+                count(&editor, ids::ROOM_ADMIN_TOGGLE),
+                2,
+                "one row per chip"
+            );
+            assert_eq!(count(&editor, ids::ROOM_OWNER_TRANSFER_BUTTON), 2);
+            let leave = find(&editor, ids::ROOM_LEAVE_BUTTON).expect("blocked, never hidden");
+            assert!(!leave.is_sensitive(), "a room is never owner-less");
+            assert!(editor.leave_reason.is_visible());
+            assert_eq!(
+                editor.leave_reason.text().as_str(),
+                crate::i18n::strings::error::send::ROOM_OWNER_CANNOT_LEAVE,
+                "the blocked walk-out names its remedy within eyeshot"
+            );
+            assert!(
+                !editor.can_leave.get(),
+                "and its click re-asks the same answer"
+            );
+            let leave_weak = editor.leave_btn.downgrade();
+            drop(leave);
+            editor.window.destroy();
+            drop(editor);
+            assert!(
+                leave_weak.upgrade().is_none(),
+                "a closed editor frees its controls: no closure in its tree holds the window"
+            );
+        });
+    }
 }

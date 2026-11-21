@@ -266,11 +266,13 @@ fn ext_grant(lasts_until: i64, liveness: fauna_client_pair::TrustLiveness) -> Tr
                 class: "content.read".into(),
                 kind: Some("ext.example.com.notes".into()),
                 tier: None,
+                folder: None,
             },
             fauna_client_pair::TrustScope {
                 class: "content.write".into(),
                 kind: Some("ext.example.com.notes".into()),
                 tier: None,
+                folder: None,
             },
         ],
         lasts_until,
@@ -953,6 +955,9 @@ fn a_revoked_row_takes_its_shown_secret_off_screen() {
             mail_row("phone", "Phone", false),
         ]
     });
+    // The fold paints the machine's snapshot when a machine is held (the
+    // late-fold rule); this fixture's rows live only in the folded copy.
+    app.settings.connected_apps.machine = None;
     let c = &mut app.settings.connected_apps;
     c.revealed
         .insert("mail:phone".into(), SecretString::new("gone".into()));
@@ -1576,7 +1581,7 @@ fn a_bare_folder_card_paints_the_picker_and_holds_approve_until_a_choice() {
         _ => panic!("the picker is a real select"),
     }
     assert_eq!(attr(picker, "options"), Some(r#"["notes","photos"]"#));
-    assert!(!approve(&els).enabled, "no choice, no approve");
+    assert!(!approve(&els).offered(), "no choice, no approve");
     assert!(find(&els, ids::CONNECTED_APPS_REQUEST_DECLINE).enabled);
 
     let app = app_with(|s| {
@@ -1588,7 +1593,10 @@ fn a_bare_folder_card_paints_the_picker_and_holds_approve_until_a_choice() {
     });
     let els = super::connected_apps_elements(&app.settings);
     assert_eq!(find(&els, ids::CONNECTED_APPS_REQUEST_FOLDER).text, "42");
-    assert!(approve(&els).enabled, "a chosen folder enables the approve");
+    assert!(
+        approve(&els).offered(),
+        "a chosen folder enables the approve"
+    );
 }
 
 /// A card no folder can be chosen on says why in its own text and cannot be
@@ -1605,7 +1613,7 @@ fn a_card_with_no_eligible_folder_says_why_and_cannot_be_approved() {
     let els = els(&app);
     let card = find(&els, ids::CONNECTED_APPS_REQUEST_CARD);
     assert!(card.text.contains(card_t::CONSENT_FOLDER_NONE_DEPOSIT));
-    assert!(!approve(&els).enabled);
+    assert!(!approve(&els).offered());
 }
 
 /// An ordinary card paints no picker and its Approve is live.
@@ -1614,7 +1622,7 @@ fn an_ordinary_card_paints_no_picker() {
     let app = app_with(|s| s.requests = vec![request("abcd", "ABC-DEF", None)]);
     let els = els(&app);
     assert!(!has(&els, ids::CONNECTED_APPS_REQUEST_FOLDER));
-    assert!(approve(&els).enabled);
+    assert!(approve(&els).offered());
 }
 
 /// Choosing an option sends the card's consent id and the folder's row id to

@@ -702,7 +702,15 @@ impl FileDownloadKeys {
     fn check_sealed_only(&self, manifest: &ChunkManifest) -> Result<()> {
         // A group set's bytes always rest sealed under a generation key: a
         // plaintext manifest there authenticates nothing, whoever served it.
-        if (self.sealed_only || self.group_keys.is_some()) && manifest.stored_hashes.is_none() {
+        // A paged root carries no chunk list of its own, so its sealedness is
+        // its sealed file hash — the walk then holds every page to the root's
+        // seal (`file-sync.md` § Paged manifests → *Sealing*).
+        let plaintext = if manifest.is_paged() {
+            !manifest.is_sealed()
+        } else {
+            manifest.stored_hashes.is_none()
+        };
+        if (self.sealed_only || self.group_keys.is_some()) && plaintext {
             return Err(crate::apply_failure::permanent(
                 crate::apply_failure::PermanentApplyFailure::PLAINTEXT_REFUSED,
                 "plaintext manifest (no stored_hashes) refused by a sealed-only reader — \
@@ -1152,6 +1160,37 @@ pub async fn fetch_manifest(
     manifest_hash: &ContentHash,
     content_stamp: Option<SealStamp>,
 ) -> Result<ChunkManifest> {
+    match open_fetched_manifest(fetcher, keys, manifest_hash, content_stamp).await? {
+        OpenedManifest::Single(manifest) => Ok(manifest),
+        OpenedManifest::Paged { walk, sealed } => {
+            let pages = 0..walk.page_count();
+            open_paged_pages(fetcher, &walk, sealed, pages).await
+        }
+    }
+}
+
+/// A manifest as [`open_fetched_manifest`] hands it on: a single manifest's
+/// plaintext view, or a paged root opened for walking (no page fetched yet),
+/// with whether its chunks are sealed.
+enum OpenedManifest {
+    Single(ChunkManifest),
+    Paged {
+        walk: crate::manifest_paging::PageWalk,
+        sealed: bool,
+    },
+}
+
+/// [`fetch_manifest`]'s checks up to the pages: the address, the reader
+/// gate, the shape and size checks, the sealed-only refusal and the opening
+/// under the selected roots — every refusal that needs no page. A paged root
+/// comes back as its walk, so a ranged reader fetches only the pages it needs
+/// (`file-sync.md` § Paged manifests → *One walk, used by every reader*).
+async fn open_fetched_manifest(
+    fetcher: &dyn BlobFetcher,
+    keys: &FileDownloadKeys,
+    manifest_hash: &ContentHash,
+    content_stamp: Option<SealStamp>,
+) -> Result<OpenedManifest> {
     let manifest_bytes = fetcher
         .fetch_manifest(manifest_hash)
         .await
@@ -1206,14 +1245,162 @@ pub async fn fetch_manifest(
     // Before the `is_sealed()` early return — that return is exactly the
     // passthrough a sealed-only reader exists to refuse.
     keys.check_sealed_only(&manifest)?;
+    if manifest.is_paged() {
+        let sealed = manifest.is_sealed();
+        let walk = if sealed {
+            keys.finalize_open(
+                content_stamp,
+                open_sealed_root(keys, manifest, content_stamp),
+            )?
+        } else {
+            crate::manifest_paging::PageWalk::open(manifest, None)?
+        };
+        return Ok(OpenedManifest::Paged { walk, sealed });
+    }
     if !manifest.is_sealed() {
-        return Ok(manifest);
+        return Ok(OpenedManifest::Single(manifest));
     }
     keys.finalize_open(
         content_stamp,
         open_sealed_manifest(keys, manifest, content_stamp),
     )
+    .map(OpenedManifest::Single)
 }
+
+/// The pages `pages` of an opened paged root, read through the one walk
+/// (`file-sync.md` § Paged manifests → *One walk, used by every reader*):
+/// each page is fetched from the manifest route and verified against the
+/// hash, entry count and byte length its root names, and the plaintext view
+/// of those pages is put back together — the single manifest every reader
+/// below [`fetch_manifest`] already takes, so no reader past it learns a
+/// second shape. Given every page it is the whole file's view; given a
+/// sub-range ([`crate::manifest_paging::PageWalk::pages_for_range`]) its
+/// `total_size` and `file_hash` are still the whole file's while its chunk
+/// lists cover only those pages — a ranged reader's view, never a manifest
+/// to post.
+async fn open_paged_pages(
+    fetcher: &dyn BlobFetcher,
+    walk: &crate::manifest_paging::PageWalk,
+    sealed: bool,
+    pages: std::ops::Range<usize>,
+) -> Result<ChunkManifest> {
+    let file_hash = walk
+        .file_hash()
+        .ok_or_else(|| anyhow::anyhow!("paged manifest opened without its file hash"))?;
+    let (mut chunk_hashes, mut chunk_sizes, mut store_keys) = (Vec::new(), Vec::new(), Vec::new());
+    for index in pages {
+        let page_hash = walk
+            .page_to_fetch(index)
+            .ok_or_else(|| anyhow::anyhow!("paged manifest: page {index} names no blob"))?;
+        let bytes = fetcher
+            .fetch_manifest(&page_hash)
+            .await
+            .with_context(|| format!("downloading manifest page {index}"))?;
+        // A page that is not the one its root names recurs on every refetch:
+        // PERMANENT, as the manifest's own shape refusals are.
+        let page = walk.open_page(index, Some(&bytes)).map_err(|e| {
+            crate::apply_failure::permanent(
+                crate::apply_failure::PermanentApplyFailure::MANIFEST_SHAPE_REFUSED,
+                format!("{e:#}"),
+            )
+        })?;
+        chunk_hashes.extend(
+            page.chunk_hashes
+                .ok_or_else(|| anyhow::anyhow!("manifest page {index} did not open"))?,
+        );
+        chunk_sizes.extend(page.chunk_sizes);
+        store_keys.extend(page.store_keys);
+    }
+    Ok(ChunkManifest {
+        file_hash,
+        total_size: walk.total_size(),
+        chunk_hashes,
+        chunk_sizes,
+        stored_hashes: sealed.then_some(store_keys),
+        sealed_hashes: None,
+        min_reader: None,
+        pages: None,
+    })
+}
+
+/// A manifest of either shape as a keyless reader holds it: the root (or
+/// single manifest) bytes exactly as fetched, its pages' bytes in root order
+/// (empty for a single manifest), and the file's store keys — what a reader
+/// that moves or checks stored bytes without opening them needs (the
+/// pull-back, the backup audit, a custodian or share leg).
+#[derive(Debug, Clone)]
+pub struct ManifestBlobs {
+    /// The manifest's own bytes, address-checked against the hash asked for.
+    pub manifest_bytes: Vec<u8>,
+    /// The decoded manifest (a root keeps its page list, no chunk entries).
+    pub manifest: ChunkManifest,
+    /// Each page's address and bytes, in file order, each verified by the walk
+    /// against the hash, entry count and byte length its root names.
+    pub pages: Vec<(ContentHash, Vec<u8>)>,
+    /// The file's store keys, in file order, across every page.
+    pub store_keys: Vec<ContentHash>,
+}
+
+/// Fetch a manifest and, for a paged root, every page it names, through the
+/// one walk without any key (`file-sync.md` § Paged manifests → *One walk,
+/// used by every reader*): the shared seam for every reader that moves or
+/// checks a file's stored bytes and never opens them. The manifest's bytes are
+/// checked against `manifest_hash` before they are decoded, and each page
+/// against the address, entry count and byte length its root names, so a
+/// counterparty serving the wrong bytes is refused before anything in them is
+/// used. A single manifest reads exactly as before — its store keys straight
+/// off it.
+pub async fn fetch_manifest_blobs(
+    fetcher: &dyn BlobFetcher,
+    manifest_hash: &ContentHash,
+) -> Result<ManifestBlobs> {
+    let manifest_bytes = fetcher
+        .fetch_manifest(manifest_hash)
+        .await
+        .context("downloading manifest")?;
+    let actual = ContentHash::of_raw(&manifest_bytes);
+    if actual != *manifest_hash {
+        anyhow::bail!(
+            "manifest hash mismatch: asked for {}, got bytes hashing to {}",
+            hex::encode(manifest_hash.digest()),
+            hex::encode(actual.digest())
+        );
+    }
+    let manifest: ChunkManifest =
+        crate::encoding::canonical_decode(&manifest_bytes).context("deserializing manifest")?;
+    if !manifest.is_paged() {
+        let store_keys = manifest.store_keys()?;
+        return Ok(ManifestBlobs {
+            manifest_bytes,
+            manifest,
+            pages: Vec::new(),
+            store_keys,
+        });
+    }
+    let walk = crate::manifest_paging::PageWalk::open(manifest.clone(), None)?;
+    let (mut pages, mut store_keys) = (Vec::with_capacity(walk.page_count()), Vec::new());
+    for index in 0..walk.page_count() {
+        let page_hash = walk
+            .page_to_fetch(index)
+            .ok_or_else(|| anyhow::anyhow!("paged manifest: page {index} names no blob"))?;
+        let bytes = fetcher
+            .fetch_manifest(&page_hash)
+            .await
+            .with_context(|| format!("downloading manifest page {index}"))?;
+        store_keys.extend(walk.open_page(index, Some(&bytes))?.store_keys);
+        pages.push((page_hash, bytes));
+    }
+    Ok(ManifestBlobs {
+        manifest_bytes,
+        manifest,
+        pages,
+        store_keys,
+    })
+}
+
+#[cfg(test)]
+#[path = "file_download_blobs_tests.rs"]
+mod manifest_blobs_tests;
 
 /// [`FileDownloadKeys::finalize_open`]'s classification, for a walk that
 /// resolved the bound once and opens window by window ([`ManifestWalk`]).
@@ -1235,6 +1422,29 @@ fn open_sealed_manifest(
     manifest: ChunkManifest,
     content_stamp: Option<SealStamp>,
 ) -> Result<ChunkManifest> {
+    let roots = manifest_open_roots(keys, content_stamp)?;
+    open_under_roots(&roots, |root| manifest.clone().unseal_hashes(root))
+}
+
+/// [`open_sealed_manifest`] for a paged root: the same roots, each tried by
+/// opening the root's sealed file hash ([`crate::manifest_paging::PageWalk::open`]).
+fn open_sealed_root(
+    keys: &FileDownloadKeys,
+    root: ChunkManifest,
+    content_stamp: Option<SealStamp>,
+) -> Result<crate::manifest_paging::PageWalk> {
+    let roots = manifest_open_roots(keys, content_stamp)?;
+    open_under_roots(&roots, |secret| {
+        crate::manifest_paging::PageWalk::open(root.clone(), Some(secret))
+    })
+}
+
+/// The roots a sealed manifest (single or root) of `content_stamp` may open
+/// under, in the order they are tried.
+fn manifest_open_roots(
+    keys: &FileDownloadKeys,
+    content_stamp: Option<SealStamp>,
+) -> Result<Vec<[u8; 32]>> {
     let owner_roots = keys.owner_open_roots();
     let roots = if let Some(roots) = keys.group_open_roots(content_stamp)? {
         roots
@@ -1254,13 +1464,20 @@ fn open_sealed_manifest(
                 )
             })?
     };
-    // Try every same-version candidate root (normally one; two after a
-    // concurrent-rotation custody merge — the AEAD tag disambiguates).
+    Ok(roots)
+}
+
+/// Try `open` under every candidate root (normally one; two after a
+/// concurrent-rotation custody merge — the AEAD tag disambiguates).
+fn open_under_roots<T>(
+    roots: &[[u8; 32]],
+    mut open: impl FnMut(&[u8; 32]) -> Result<T>,
+) -> Result<T> {
     // A marked error wins: once one root authenticated the blob, another
     // root's tag failure says nothing about it.
     let mut last_err: Option<anyhow::Error> = None;
-    for root in &roots {
-        match manifest.clone().unseal_hashes(root) {
+    for root in roots {
+        match open(root) {
             Ok(m) => return Ok(m),
             Err(e) => {
                 if last_err
@@ -1329,7 +1546,7 @@ pub async fn fetch_decoded_chunks(
     // PLAINTEXT hash — `chunk_crypto` derives its key+nonce from the plaintext
     // content hash (FS-BIND, PIECE 6).
     let chunk_data = fetcher
-        .fetch_chunks(&manifest.store_keys(), relative_path)
+        .fetch_chunks(&manifest.store_keys()?, relative_path)
         .await?;
 
     keys.finalize_open(
@@ -1551,7 +1768,7 @@ impl ManifestWalk {
             signer_bound_is_final,
             resolve_chunk_open_policy(keys, &manifest, relative_path, content_stamp),
         )?;
-        let store_keys = manifest.store_keys();
+        let store_keys = manifest.store_keys()?;
         if store_keys.len() != manifest.chunk_hashes.len()
             || manifest.chunk_sizes.len() != manifest.chunk_hashes.len()
         {
@@ -1857,7 +2074,25 @@ pub async fn download_file_range_by_manifest(
     if !crate::path_guard::is_safe_relative_path(relative_path) {
         anyhow::bail!("unsafe path rejected: {relative_path}");
     }
-    let manifest = fetch_manifest(fetcher, keys, &manifest_hash, content_stamp).await?;
+    // A paged root is opened for walking and only the pages the range
+    // touches are fetched (`file-sync.md` § Paged manifests → *One walk*,
+    // `byte_len`): the view below then covers those pages, starting at the
+    // first one's file offset, under the same address, seal and signer checks
+    // a whole read gets.
+    let (manifest, base) =
+        match open_fetched_manifest(fetcher, keys, &manifest_hash, content_stamp).await? {
+            OpenedManifest::Single(manifest) => (manifest, 0u64),
+            OpenedManifest::Paged { walk, sealed } => {
+                let pages = walk.pages_for_range(offset, len);
+                if pages.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let base = walk
+                    .page_offset(pages.start)
+                    .ok_or_else(|| anyhow::anyhow!("paged manifest: range page out of bounds"))?;
+                (open_paged_pages(fetcher, &walk, sealed, pages).await?, base)
+            }
+        };
     let end = offset.saturating_add(len).min(manifest.total_size);
     if offset >= end {
         return Ok(Vec::new());
@@ -1865,7 +2100,7 @@ pub async fn download_file_range_by_manifest(
     // Locate the overlapping window of chunk indices from the size table.
     let mut first = None;
     let mut last = 0usize;
-    let mut cursor = 0u64;
+    let mut cursor = base;
     let mut first_start = 0u64;
     for (i, size) in manifest.chunk_sizes.iter().enumerate() {
         let chunk_end = cursor + size;
@@ -1888,7 +2123,7 @@ pub async fn download_file_range_by_manifest(
         content_stamp,
         resolve_chunk_open_policy(keys, &manifest, relative_path, content_stamp),
     )?;
-    let store_keys = manifest.store_keys();
+    let store_keys = manifest.store_keys()?;
     let window = &store_keys[first..=last];
     let bodies = fetcher.fetch_chunks(window, relative_path).await?;
     let hashes = &manifest.chunk_hashes[first..=last];
@@ -2267,7 +2502,7 @@ mod tests {
     /// exercised end to end with no nest, no HTTP and no `SyncDb` — which is
     /// exactly the shape it runs in on wasm.
     #[derive(Default)]
-    struct FakeFetcher {
+    pub(super) struct FakeFetcher {
         blobs: HashMap<Vec<u8>, Vec<u8>>,
         /// Every `fetch_chunks` call's store-key batch, in call order — lets a
         /// test assert exactly which chunks a walk fetched (the O(range), not
@@ -2281,14 +2516,18 @@ mod tests {
         /// body list" shape `open_chunk_window`'s hash-vs-body count check
         /// exists to catch (a range read has no whole-file hash behind it).
         drop_last: AtomicBool,
+        /// Every `fetch_manifest` address, in call order — a paged root's
+        /// page fetches included, so a ranged read can be held to the pages
+        /// its range covers.
+        pub(super) manifests_fetched: Mutex<Vec<ContentHash>>,
     }
 
     impl FakeFetcher {
-        fn put(&mut self, hash: &ContentHash, bytes: Vec<u8>) {
+        pub(super) fn put(&mut self, hash: &ContentHash, bytes: Vec<u8>) {
             self.blobs.insert(hash.digest().to_vec(), bytes);
         }
 
-        fn get(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+        pub(super) fn get(&self, hash: &ContentHash) -> Result<Vec<u8>> {
             self.blobs
                 .get(hash.digest().as_slice())
                 .cloned()
@@ -2296,7 +2535,7 @@ mod tests {
         }
 
         /// Every `fetch_chunks` batch recorded so far, in call order.
-        fn fetched(&self) -> Vec<Vec<ContentHash>> {
+        pub(super) fn fetched(&self) -> Vec<Vec<ContentHash>> {
             self.fetched.lock().unwrap().clone()
         }
 
@@ -2316,6 +2555,7 @@ mod tests {
     #[async_trait::async_trait]
     impl BlobFetcher for FakeFetcher {
         async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+            self.manifests_fetched.lock().unwrap().push(*hash);
             self.get(hash)
         }
 
@@ -2365,6 +2605,7 @@ mod tests {
             stored_hashes: Some(store_keys.clone()),
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes =
             crate::encoding::canonical_encode(&manifest.wire_form(Some(root)).unwrap()).unwrap();
@@ -2378,7 +2619,7 @@ mod tests {
         (fetcher, manifest_hash, file_data)
     }
 
-    fn owner_key() -> crate::crypto::BackupKey {
+    pub(super) fn owner_key() -> crate::crypto::BackupKey {
         crate::crypto::BackupKey::from_bytes([0x51u8; 32])
     }
 
@@ -2600,6 +2841,7 @@ mod tests {
             stored_hashes: Some(vec![store_key]),
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes =
             crate::encoding::canonical_encode(&manifest.wire_form(Some(&root)).unwrap()).unwrap();
@@ -2713,7 +2955,7 @@ mod tests {
         let keys = FileDownloadKeys::owner(key);
         let manifest: ChunkManifest =
             crate::encoding::canonical_decode(&fetcher.get(&manifest_hash).unwrap()).unwrap();
-        let store_keys = manifest.store_keys();
+        let store_keys = manifest.store_keys().unwrap();
         let read = |offset: u64, len: u64| {
             let fetcher = &fetcher;
             let keys = &keys;
@@ -2789,7 +3031,7 @@ mod tests {
         );
         let manifest: ChunkManifest =
             crate::encoding::canonical_decode(&fetcher.get(&manifest_hash).unwrap()).unwrap();
-        let keys_of = manifest.store_keys();
+        let keys_of = manifest.store_keys().unwrap();
         let second = fetcher.get(&keys_of[1]).unwrap();
         fetcher.put(&keys_of[0], second);
         let err = download_file_range_by_manifest(
@@ -2832,6 +3074,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = crate::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&manifest_bytes);
@@ -2882,6 +3125,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = crate::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&manifest_bytes);
@@ -3419,7 +3663,7 @@ mod tests {
         .unwrap();
         let manifest: ChunkManifest =
             crate::encoding::canonical_decode(&fetcher.get(&manifest_hash).unwrap()).unwrap();
-        let victim = manifest.store_keys()[0];
+        let victim = manifest.store_keys().unwrap()[0];
         fetcher.put(&victim, decoy_sealed);
 
         download_file_bytes_by_manifest(
@@ -3454,6 +3698,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = crate::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&manifest_bytes);
@@ -3569,6 +3814,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let decoy_bytes = crate::encoding::canonical_encode(&decoy).unwrap();
         assert_ne!(
@@ -3624,6 +3870,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = crate::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&manifest_bytes);
@@ -3655,6 +3902,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = crate::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&manifest_bytes);
@@ -3788,6 +4036,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = crate::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&manifest_bytes);
@@ -4390,6 +4639,7 @@ mod tests {
                 stored_hashes: Some(stored.clone()),
                 sealed_hashes: Some(sealed),
                 min_reader: Some(crate::chunk::MANIFEST_READER_VERSION),
+                pages: None,
             };
             let bytes = crate::encoding::canonical_encode(&manifest).unwrap();
             let hash = ContentHash::of_raw(&bytes);
@@ -4420,3 +4670,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "file_download_range_paged_tests.rs"]
+mod range_paged_tests;

@@ -599,6 +599,9 @@ pub fn a_mail_import_snapshot(step: crate::ImportStep) -> crate::MailImportSnaps
         rebuilt_mailboxes: Vec::new(),
         resume_needs_credentials: false,
         microsoft_signin_available: false,
+        // The native apps that use this fixture all give the machine a
+        // sign-in transport (`with_oauth_http`); web is the one without.
+        microsoft_signin_transport: true,
         microsoft_signin: None,
         source_remembered: false,
     }

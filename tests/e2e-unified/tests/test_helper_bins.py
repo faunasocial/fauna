@@ -261,10 +261,70 @@ def test_a_stamp_left_by_other_cargo_args_reads_stale(tmp_path):
     def sources():
         return stamp.stat().st_mtime - 60
 
-    assert helper_bins._stamp_is_fresh(binary, stamp, sources, helper_bins.cargo_args(entry))
+    assert helper_bins._stamp_is_fresh(binary, stamp, sources, helper_bins.stamp_args(entry))
     flavoured = dataclasses.replace(entry, features=("e2e-agent",))
     assert not helper_bins._stamp_is_fresh(
-        binary, stamp, sources, helper_bins.cargo_args(flavoured)
+        binary, stamp, sources, helper_bins.stamp_args(flavoured)
     )
+    # The resolution is part of the shape: the same arguments resolved another
+    # way build other units, so the stamp names it too.
+    debug = dataclasses.replace(entry, profile="debug")
+    assert helper_bins.cargo_env(debug) != helper_bins.cargo_env(entry)
+    assert "CARGO_RESOLVER_FEATURE_UNIFICATION=selected" in helper_bins.stamp_args(entry)
     stamp.write_text(f"stamp\nbinary-mtime-ns: {binary.stat().st_mtime_ns}\n")
-    assert not helper_bins._stamp_is_fresh(binary, stamp, sources, helper_bins.cargo_args(entry))
+    assert not helper_bins._stamp_is_fresh(binary, stamp, sources, helper_bins.stamp_args(entry))
+
+
+def _shipped_line(recipe: str) -> tuple[dict[str, str], set[str], set[str]]:
+    """The cargo line the justfile's `recipe` ships with, read from the recipe
+    body: its `VAR=value` prefixes, its `-p` packages and its `--features`."""
+    import re
+
+    root = Path(helper_bins.__file__).resolve().parents[3]
+    lines = (root / "justfile").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, l in enumerate(lines) if re.match(rf"^{re.escape(recipe)}\b.*:", l))
+    body = []
+    for line in lines[start + 1:]:
+        if line and not line[0].isspace():
+            break
+        body.append(line)
+    cargo = next(l for l in body if " cargo build " in l)
+    words = cargo.split()
+    env = dict(w.split("=", 1) for w in words if re.fullmatch(r"[A-Z_]+=\S+", w))
+    packages = {words[i + 1] for i, w in enumerate(words) if w == "-p"}
+    features = {
+        f for i, w in enumerate(words) if w == "--features" for f in words[i + 1].split(",")
+    }
+    return env, packages, features
+
+
+@pytest.mark.parametrize(
+    "names, recipe",
+    [(("fauna-desktop", "fauna-sync-agent"), "linux-release"), (("fauna-nest",), "nest")],
+)
+def test_the_linux_installer_inputs_build_as_the_shipped_recipe_builds_them(names, recipe):
+    """The linux installer packages what release.yml ships, so its release
+    inputs are built by the shipped recipe's own cargo line: the same packages
+    in one invocation, the same features, the same `--locked`, and the same
+    per-invocation feature resolution (`selected` — the repository's cargo
+    config resolves `workspace`). Built any other way, every unit's compile key
+    differs from the shipped build's and the shared compile cache serves none
+    of them: the 0.1.7 candidate run's warm pass rebuilt 134 release units, 76
+    compile minutes, that the release rehearsal had compiled at the same
+    commit (build-compile-cache-linux.md, its 2026-11-16 status entry)."""
+    env, packages, features = _shipped_line(recipe)
+    assert env.get("CARGO_RESOLVER_FEATURE_UNIFICATION") == "selected", env
+    for name in names:
+        entry = helper_bins.REGISTRY[name]
+        args = helper_bins.cargo_args(entry, platform="linux")
+        assert {args[i + 1] for i, a in enumerate(args) if a == "-p"} == packages, args
+        assert set(helper_bins.entry_features(entry, "linux")) == features, args
+        assert "--locked" in args and "--release" in args, args
+        assert helper_bins.cargo_env(entry) == {"CARGO_RESOLVER_FEATURE_UNIFICATION": "selected"}
+
+
+def test_a_debug_entry_keeps_the_repository_resolution():
+    """Only a release entry — a shipped artifact's input — takes the shipped
+    resolution; a debug helper resolves as every other dev build does, so it
+    shares their units."""
+    assert helper_bins.cargo_env(helper_bins.HelperBin("x", "x", "bin")) == {}

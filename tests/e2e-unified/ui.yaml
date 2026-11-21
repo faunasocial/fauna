@@ -512,12 +512,16 @@ pages:
       - room-invitation                # view, indexed — a community-room invitation standing for this account, atop the list; `role` attribute admin | member; absent while none stands (user-approved 2026-09-25)
       - room-invitation-accept-button  # button, indexed — accepts the invitation on the same row; the room opens as a thread (user-approved 2026-09-25)
       - room-invitation-decline-button # button, indexed — declines the invitation on the same row; the room is not told (user-approved 2026-09-25)
+      - room-history-policy-line       # text — the history rule read as a plain line where the select would sit, for a viewer the policy editor is absent for; `value` attribute none | full (declared 2026-11-17)
       - room-history-policy-select     # select — the room_settings editor's history-for-joiners rule; tokens none | full; greyed unless capabilities.can_set_policy (user-approved 2026-09-09)
+      - room-join-rule-line            # text — the who-can-invite rule read as a plain line where the select would sit, for a viewer the policy editor is absent for; `value` attribute invite | member-invite (declared 2026-11-17)
       - room-join-rule-select          # select — the room_settings editor's who-can-invite rule; tokens invite | member-invite; greyed unless capabilities.can_set_policy (user-approved 2026-09-09)
       - room-labeler-inspect-button    # button, indexed — beside room-labeler-toggle[i]; opens that labeler's catalog inspect view (labeler-inspect-panel) in place inside the room_settings editor (user-approved 2026-09-25)
+      - room-labeler-line              # text, indexed — one labeler row read as a plain line where room-labeler-toggle[i] would sit, for a viewer the policy editor is absent for; `checked` attribute true | false (declared 2026-11-17)
       - room-labeler-toggle            # button, indexed — the room_settings editor's per-labeler switch, one row per wasm or text-model labeler the nest's catalog publishes; `checked` attribute true | false; greyed unless capabilities.can_set_policy, and an unchecked row greyed once four are named; absent on a room with no labeler set to stage (user-approved 2026-09-25)
       - room-leave-button              # button — the room_settings editor's walk-out control; greyed unless capabilities.can_leave_room (owner must hand over first) (user-approved 2026-09-20)
       - room-leave-confirm             # button — confirms the departure; the class picks the door beneath it (roster report / room.leave ceremony) (user-approved 2026-09-20)
+      - room-nest-read-line            # text — the home nest's read read as a plain line where the toggle would sit, for a viewer the policy editor is absent for; `checked` attribute true | false (declared 2026-11-17)
       - room-nest-read-toggle          # button — the room_settings editor's home-nest read on a community room; `checked` attribute true | false; painted only when the draft carries a nest read; greyed unless capabilities.can_set_policy (user-approved 2026-09-25)
       - room-owner-transfer-button     # button, indexed — the room_settings editor's hand-over control per participant, index-parallel with thread-member-chip; `checked` attribute true | false (at most one row staged); greyed unless capabilities.can_transfer_ownership (owner only) (user-approved 2026-09-09)
       - room-remove-button             # button — the room_settings editor's local remove of the whole conversation from my nest, beside room-leave-button; greyed unless capabilities.supports_local_remove (a bridged room today); never staged through Save (declared 2026-11-14 under rule A's advisory class; behavior owner bridged-adapter.md § Removing bridged rows)
@@ -602,7 +606,7 @@ pages:
         elements: [dm-message-text, dm-message-timestamp, dm-text-field, dm-send-button, dm-attachment-image, dm-attachment-file, subject-divider, subject-input, topic-toggle-button, attachment-button, thread-header, thread-member-chip, thread-add-participant-button, thread-rename-button, thread-rename-field, thread-rename-confirm, thread-room-class, thread-room-settings-button, room-search-button, add-participant-confirm, markdown-bold-button]
       room_settings:
         trigger: "click thread-room-settings-button"
-        elements: [room-join-rule-select, room-history-policy-select, room-admin-toggle, room-owner-transfer-button, room-pending-invite, room-pending-invite-withdraw-button, room-nest-read-toggle, room-labeler-toggle, room-labeler-inspect-button, room-settings-save-button, room-leave-button, room-leave-confirm, room-remove-button, room-remove-confirm, error-message]
+        elements: [room-join-rule-select, room-join-rule-line, room-history-policy-select, room-history-policy-line, room-admin-toggle, room-owner-transfer-button, room-pending-invite, room-pending-invite-withdraw-button, room-nest-read-toggle, room-nest-read-line, room-labeler-toggle, room-labeler-line, room-labeler-inspect-button, room-settings-save-button, room-leave-button, room-leave-confirm, room-remove-button, room-remove-confirm, error-message]
     notes:
       ios: >
         conversation-search-box is inside the List (first Section row), hittable
@@ -716,6 +720,13 @@ pages:
       - refused-change-item        # view, indexed — one refused change
       - refused-change-title       # text, indexed — what was tried, to which event
       - refused-change-author      # text, indexed — the ATTESTED sender (never read off the .ics)
+      # The calendar list's empty state (declared 2026-11-16, events.md
+      # § Errors & edge cases → No calendar to hold an event, ruling 3).
+      # Present only while no calendar can hold an event, which a working
+      # account never rests in — so optional. The step id is present only
+      # when the reason names a step this person takes on another page.
+      - calendar-list-empty-state  # text — why no event can be made yet
+      - calendar-list-empty-state-step # button — one-press jump to the step's place
       - refused-change-reason      # text, indexed — why it was refused
       - refused-change-time        # text, indexed — when it was last attempted
       - refused-change-dismiss     # button, indexed — the row's only control
@@ -1922,6 +1933,7 @@ pages:
       - admin-aliases-forwarder-add-pattern-input # text_input — the local-part (e.g. "info")
       - admin-aliases-forwarder-add-target-input  # text_input — the external destination address
       - admin-aliases-forwarder-add-submit-button # button — fauna.bridges.create_forwarder
+      - admin-aliases-forwarder-add-domains-step  # button — the one step that unblocks the form while no domain is hosted: opens admin-dns
     components:
       - admin-aliases-forwarder-list   # indexed forwarder rows
 
@@ -1964,11 +1976,8 @@ pages:
       # fauna.admin.web_app_origin.{get,set}). Directly after NAT mode, mirroring
       # its radio shape; adds no nav entry on any of the 7 apps. Built on tui
       # (lead app) first; the other six follow in their batched trickle-down.
-      - admin-nest-web-app-origin-section      # view — container / scope for the section
-      - admin-nest-web-app-origin-bundled-radio  # radio — serve the SPA this nest ships (the default)
-      - admin-nest-web-app-origin-central-radio  # radio — redirect /app/ to the central origin with this nest pre-filled
-      - admin-nest-web-app-origin-save-button  # button — commits the selection (fauna.admin.web_app_origin.set)
-      - admin-nest-web-app-origin-status       # text — what this nest's address answers now (the exact target in central mode)
+      # The five admin-nest-web-app-origin-* ids are CONDITIONAL since 2026-11-19
+      # and listed under optional_elements below (declared, rule A).
       # Update channel (IDs user-approved 2026-10-16) — which builds this box's
       # updater follows (nest/update-channel.md § The UI;
       # fauna.admin.update_channel.{get,set}). Directly after the web-app origin,
@@ -2079,6 +2088,19 @@ pages:
       - admin-factory-reset-section    # view — danger-zone container
       - admin-factory-reset-button     # button — opens the confirm dialog
     optional_elements:
+      # The web-app origin section's five conditional members (ruled 2026-11-19,
+      # web-content-hosting.md § Same-origin security model → While the central
+      # origin is not live, the choice is not offered; declared under rule A).
+      # The whole section is absent while the nest's reply is not central_live
+      # and its stored mode is bundled, and on a nest that predates the choice;
+      # the central radio is present only when the reply says central_live.
+      # Painted from AdminWebAppOriginView's section_possibility and
+      # central_possibility, never re-derived per app.
+      - admin-nest-web-app-origin-section      # view — container / scope for the section
+      - admin-nest-web-app-origin-bundled-radio  # radio — serve the SPA this nest ships (the default)
+      - admin-nest-web-app-origin-central-radio  # radio — redirect /app/ to the central origin with this nest pre-filled
+      - admin-nest-web-app-origin-save-button  # button — commits the selection (fauna.admin.web_app_origin.set)
+      - admin-nest-web-app-origin-status       # text — what this nest's address answers now (the exact target in central mode)
       # The region's three conditional members: the authority line exists only
       # once a region is declared (before that there is no channel to describe),
       # withdraw only when there is a declaration to withdraw, and the staleness
@@ -2744,6 +2766,9 @@ pages:
       # ── Web paywall (per-set) — folders.md § Web paywall / monetization.md § Pillar 2 ──
       - folder-paywall-tier-select # select, indexed — "paywall this set to a tier", website-enabled rows only (keyed on folder-website-toggle's state since 2026-09-28; formerly web-type rows); picks one of the creator's own subscription tiers → content-key genesis/re-seal + the web-serve-holder content.read{folder:set} grant mint (FoldersAuthor::paywall_set). v1 SET-ONLY: no "No paywall" clear affordance until the nest-side revoke/rotation leg lands. Persisted on the set row (web_paywall_tier)
       - folder-paywall-hint     # text, indexed — the "create a tier first" line beside folder-paywall-tier-select, present exactly while the select is disabled for want of an own tier (user-approved 2026-10-16)
+      # ── One-press jumps to each gate's unblocking step (README.md § Offer only what is possible, rule 3; declared 2026-11-17) ──
+      - folder-webdav-step      # button, indexed — beside folder-webdav-toggle's hint while it reads "set up mail first" (fauna_client_folders::webdav_provision::webdav_serve_step) → Settings → Mail
+      - folder-paywall-step     # button, indexed — beside folder-paywall-hint while it reads "create a tier first" (fauna_client_subscriptions::own_tiers::own_tiers_step) → the own profile's Tiers tab
       # ── Create wizard (name entered ONCE, here) ──
       - wizard-name-input        # text_input — folder name (entered once, at create)
       # Create-time audience (born public; folders.md § Audience and website serving → Born public; IDs user-approved 2026-11-08).
@@ -2771,6 +2796,8 @@ pages:
       - folder-destination-detach-button # button, indexed — remove this folder's destination place (within its folder-destination-row)
       - folder-destination-attach-select # select, indexed — enrolled-but-unattached destinations (value = destination_id; label = display name)
       - folder-destination-attach-button # button, indexed — attach the selected destination to this folder
+      - folder-destination-hint          # text, indexed — in place of the attach pair while the owner has no enrolled destination (fauna_client_config::folder_destination_attach_possibility; declared 2026-11-17)
+      - folder-destination-step          # button, indexed — beside folder-destination-hint: one press opens the Backups page (folder_destination_step; declared 2026-11-17)
       # ── The nest place's snapshot policy (phase 2 slice e) — backup-restore.md § 8b owns the behavior ──
       # Available on ANY folder; replaces the wizard's backup-type-only retention step.
       - folder-nest-snapshots-select   # select, indexed — three-state: Use default | Keep snapshots | Don't keep
@@ -3255,6 +3282,7 @@ pages:
     heading: S.mail_aliases.title  # "Aliases"
     elements:
       - page-heading
+      - mail-subpage-gate-reason                  # only while mail_usable() is not possible: the page is heading, this, Back
       - mail-aliases-add-button                   # opens the add-alias sheet
       - mail-aliases-import-button                # opens the bulk paste-import sheet
       - mail-aliases-generate-disposable-button   # one-click disposable mint
@@ -3309,6 +3337,7 @@ pages:
     heading: S.mail_lists.title  # "Lists"
     elements:
       - page-heading
+      - mail-subpage-gate-reason                  # only while mail_usable() is not possible: the page is heading, this, Back
       - mail-lists-add-button                     # opens the add-list sheet
       - mail-lists-add-sheet-name-input           # free text, max 64
       - mail-lists-add-sheet-local-part-input      # the list's send-from local-part
@@ -3343,6 +3372,7 @@ pages:
     heading: S.mail_lists.members_title  # "<list> · Members"
     elements:
       - page-heading
+      - mail-subpage-gate-reason                  # only while mail_usable() is not possible: the page is heading, this, Back
       - mail-list-members-summary                 # subscribed / unsubscribed counts
       - mail-list-members-add-button
       - mail-list-members-add-sheet-address-input
@@ -3388,6 +3418,7 @@ pages:
     heading: S.mail_export.title  # "Export mailbox"
     elements:
       - page-heading
+      - mail-subpage-gate-reason                  # only while mail_usable() is not possible: the page is heading, this, Back
       - mail-export-format-picker                 # step 1: mbox / Maildir++ / EML-zip
       - mail-export-scope-mailboxes               # step 2: multi-select CONTAINER of source mailboxes
       - mail-export-scope-mailbox-item             # step 2: one mailbox row (indexed checkbox), user-approved 2026-08-29
@@ -3443,6 +3474,7 @@ pages:
     heading: S.mail_import.title  # "Import mailbox"
     elements:
       - page-heading
+      - mail-subpage-gate-reason                  # only while mail_usable() is not possible: the page is heading, this, Back
       - mail-import-source-picker             # step 1: Gmail / Outlook / iCloud / Generic IMAP
       - mail-import-source-app-password        # step 1: Gmail/iCloud app-password field + deep-link help
       - mail-import-source-oauth-button        # step 1: Outlook — Sign in with Microsoft (device-code grant)
@@ -3567,6 +3599,7 @@ pages:
     heading: S.mail_spam.title  # "Spam"
     elements:
       - page-heading
+      - mail-subpage-gate-reason                  # only while mail_usable() is not possible: the page is heading, this, Back
       - mail-spam-reset-model-button              # destructive; two-click inline confirm relabels to "cannot be undone"
       - mail-spam-contribute-baseline-toggle      # opt in to the deployment baseline; default off
       - mail-spam-share-reports-toggle            # opt in to k-anonymized report sharing; default off
@@ -4005,8 +4038,9 @@ pages:
     elements:
       - kids-ineligible-message         # text — explains the app is for supervised accounts
       - sign-out-button                 # button — the ordinary sign-out; returns to onboarding
-      - error-message                   # text — a failed sign-out
+      - error-message                   # text — a failed or refused sign-out; while unknown, a failed eligibility read
     notes:
+      states: "Unknown (account-age-band.md § Kids-app eligibility while it is unknown): no successful read yet and no supervised snapshot — the frame WITHOUT kids-ineligible-message, sign-out-button live, error-message once a read has failed. Never the kids shell on a guess."
       android: "Kids build type only (BuildConfig.KIDS); replaces the tab shell."
       ios: "Kids target only; on android's approved ids."
 
@@ -4233,6 +4267,20 @@ onboarding:
       # guaranteed local, so it drops straight into nest_recovery. Shown only
       # when the admin custodies ≥1 deployment seed (the account plane's deployment-seeds rows).
       - launch-recover-button
+      # onboarding.md § Wizard exit handling → The finished wizard holds: a
+      # failed append-mode finish leaves the NEW account's launch_retry
+      # standing, and the way back to the previous account is the account
+      # switcher. Shown only when the device holds more than one account —
+      # one account-switcher-item per account, the active (unreachable) one a
+      # plain row, every other one a switch that re-runs the launch as it.
+      # Switching to an account flagged require_confirm_to_activate shows the
+      # in-app re-auth prompt here first, on the apps that use it (long-term-
+      # store.md § Per-account re-auth). Declared under rule A's advisory class.
+      - account-switcher-list
+      - account-switcher-item
+      - account-activate-reauth-prompt
+      - account-activate-reauth-confirm-button
+      - account-activate-reauth-cancel-button
     platform_elements:
       # macOS's LaunchRetryView pairs its own title text with the shared
       # launch-retry-button (user-approved 2026-08-11 under rule A —
@@ -4244,6 +4292,8 @@ onboarding:
       - { on: "click launch-fallthrough-button", to: "handle_entry" }
       - { on: "click launch-recover-button", to: "nest_recovery" }
       - { on: "click launch-retire-button", to: "nest_retire" }
+      - { on: "click account-switcher-item", success: true, to: "(authenticated app)" }
+      - { on: "click account-switcher-item", success: false, to: "launch_retry" }
 
   # (docs/goal/architecture/security.md § Transport trust): the
   # SSH `known_hosts` warning — shown when the nest's pinned deployment identity
@@ -4560,7 +4610,6 @@ onboarding:
       - handle-entry-continue-button
       - handle-entry-back-button
     optional_elements:
-      - handle-control-checkbox     # visible only on RegisteredNoNest outcome
       - onboarding-nest-rules       # text — the nest's published rules, while Continue signs in (outcome already-on-nest); above the bottom row (nest-rules.md § Acceptance at joining; approved 2026-10-17; tui first)
       - onboarding-nest-rules-item  # text, indexed — one rule: verdict, level, the nest's reason
       - onboarding-terms-notice     # text — the by-continuing sentence, above the bottom row and below the nest's rules, only while Continue signs in (handle_check_snapshot().terms_notice_visible; terms-and-content-guidelines.md § The decisions, item 3 (iv); user-approved 2026-10-20 under rule A; tui first)
@@ -4575,10 +4624,18 @@ onboarding:
       # case below so recovery never falls through to Done/LoggedIn.
       - { on: "click handle-entry-continue-button",
           condition: "outcome.already-on-nest && recovery-intent", to: "nest_recovery" }
+      # The set-up path lands on provider_choice (onboarding-provisioning.md
+      # § 3d) on an app that renders it (the machine's
+      # set_renders_provider_choice); the dns_config rows below are the path of
+      # an app whose trickle-down has not landed, removed with page dns_config.
+      - { on: "click handle-entry-continue-button",
+          condition: "outcome.domain-available && renders-provider-choice", to: "provider_choice" }
+      - { on: "click handle-entry-continue-button",
+          condition: "outcome.registered-no-nest && renders-provider-choice", to: "provider_choice" }
       - { on: "click handle-entry-continue-button",
           condition: "outcome.domain-available",                  to: "dns_config" }
       - { on: "click handle-entry-continue-button",
-          condition: "outcome.registered-no-nest && checkbox-on", to: "dns_config" }
+          condition: "outcome.registered-no-nest",               to: "dns_config" }
       - { on: "click handle-entry-continue-button",
           condition: "outcome.already-on-nest",                   to: "Done" }
       - { on: "click handle-entry-continue-button",
@@ -4587,6 +4644,56 @@ onboarding:
           condition: "outcome.unregistered-unclaimed-nest",       to: "claim_code" }
       - { on: "click handle-entry-back-button", condition: "came-from-create", to: "identity_created" }
       - { on: "click handle-entry-back-button", condition: "came-from-import", to: "identity_import" }
+
+  # -------------------------------------------------------------------------
+  # Stage 4d: Choose providers (onboarding-provisioning.md § 3d; element IDs
+  # answered by the owner 2026-11-16, no objection to the list)
+  # -------------------------------------------------------------------------
+
+  provider_choice:
+    # One page between the handle check and nest_provisioning: the goals of
+    # the set-up at the top (registration only while a domain is bought, DNS,
+    # a server), each covered or open and by whom; below, one row per
+    # providers.yaml entry plus the manual row, each opening its own dialog
+    # (the sign-in pop-up) whose Connect runs every check of the provider's
+    # capabilities. Every rule — coverage, the assignment, the Continue
+    # predicate and its status line — is OnboardingMachine's (§ 3d *Where
+    # logic lives*).
+    elements:
+      - provider-goal-row             # keyed [domain|dns|vps]; state covered/open, the covering provider, on domain the price; domain only while buying
+      - provider-row                  # keyed [<provider-id>|manual]; state connected/available, capability labels as text; an un-id'd cannot-cover reason line beneath
+      - provider-choice-status-text   # what is still open while Continue is dead (rule 5)
+      - provider-choice-back-button
+      - provider-choice-continue-button
+    optional_elements:
+      - provider-goal-select          # keyed [domain|dns|vps]; only when more than one connected provider can cover the goal
+      - dns-buy-domain-checkbox       # moved from dns_config; only when the handle check found the domain unregistered
+      - dns-no-provider-message       # moved from dns_config; § 4's rule
+      - provider-dialog               # only while a provider row is open
+      - provider-dialog-link
+      - provider-dialog-open-browser-button
+      - provider-dialog-help-text
+      - provider-credentials-form     # fields provider-credentials-form-{field.id}, generated from providers.yaml
+      - provider-connect-button
+      - provider-disconnect-button    # only on a connected provider
+      - provider-dialog-status-text
+      - provider-dialog-close-button
+      - dns-registrar-notes-text      # moved from dns_config, inside provider-dialog
+      - dns-contact-form              # moved from dns_config, inside provider-dialog
+      - dns-contact-first-name-input
+      - dns-contact-last-name-input
+      - dns-contact-email-input
+      - dns-contact-phone-input
+      - dns-contact-address1-input
+      - dns-contact-city-input
+      - dns-contact-state-input
+      - dns-contact-postal-code-input
+      - dns-contact-country-input
+    generated_from: i18n/providers.yaml
+    errors: [error-message]
+    transitions:
+      - { on: "click provider-choice-continue-button", success: true, to: "nest_provisioning" }
+      - { on: "click provider-choice-back-button", to: "handle_entry" }
 
   # -------------------------------------------------------------------------
   # Stage 5: Configure DNS
@@ -4691,6 +4798,19 @@ onboarding:
       - provisioning-ssh-door-command # only after a successful door run, on the device that ran it (owner-approved 2026-10-20 under rule A; tui first)
     optional_elements:
       - provisioning-bom-domain-line # only when buying a new domain (dns_config's buy-domain path)
+      - provisioning-dns-plan        # list — the records the run will keep/add/change/remove, between the price recap and the start button; only on the provider path with an existing zone (onboarding-provisioning.md § 6 *The DNS plan*; owner-approved 2026-11-17)
+      - provisioning-dns-plan-row    # text, keyed [<name>|<type>] — one record: name, type, action, old → new value
+      # The choices region (onboarding-provisioning.md § 3d *The choices on the
+      # setting-things-up page*): between the price summary and the start
+      # button, only on a run entered from provider_choice that has not
+      # started (or failed / was cancelled). Every control has a default.
+      - vps-location-picker
+      - vps-server-type-radio
+      - vps-config-mail-mode-toggle
+      - vps-config-update-channel-row
+      - vps-config-ssh-door-toggle
+      - vps-config-ssh-door-warning   # only while the door is on
+      - dns-price-confirm-checkbox    # moved from dns_config: under the domain line when the run registers a domain; gates provisioning-start-button
     platform_elements:
       # The apps with no ~/.ssh hand the door key over once (onboarding-provisioning.md § 5).
       ios: [provisioning-ssh-door-save-key-button]
@@ -4707,6 +4827,7 @@ onboarding:
       # (onboarding.md § 6 *Provisioning = build + claim*, ratified 2026-08-29.)
       - { on: "click provisioning-continue-button", condition: "succeeded-buy", to: "nat_mode_choice" }
       - { on: "click provisioning-continue-button", success: true, condition: "succeeded-no-dns", to: "dns_post_instructions" }
+      - { on: "click provisioning-back-button", condition: "from-provider-choice", to: "provider_choice" }
       - { on: "click provisioning-back-button", to: "vps_config" }
 
   dns_post_instructions:
@@ -5131,7 +5252,7 @@ components:
       linux: "Sidebar icon+label pair mirroring connection_status_icon/connection_status_label, plus a dim version/uptime subtitle line (apps/fauna-linux/src/app.rs) — built 2026-07-20."
       tui: "Sidebar status header, second line under connection-status, with the version/uptime subtitle dim beneath it (apps/fauna-tui/src/ui.rs::render_sidebar) — built 2026-07-23, and on windows too since 2026-07-24 (the shared client resolves the per-SID named pipe through fauna_ipc::endpoint)."
       windows: "The canonical, AutomationId-bearing location is the always-visible sidebar per this component (matches linux/macOS). StatusPage's existing VersionText/UptimeText/SyncDot/SyncStatusText fields have no ui.yaml/AutomationId presence and read the wrong source today (DirectNestClient.GetServiceStatusAsync(), a nest-reachability proxy, not the local agent) — repoint them at the real GetServiceStatus pipe op as part of this work (StatusPage's own dedicated IDs are a separate, optional follow-up, not required for this rider)."
-      macos: "No existing competing concept to reconcile — new."
+      macos: "Top of the sidebar column under connection-status (both left-aligned, one block), outside SidebarView so the Settings/Admin rail swap keeps them, with the dim version/uptime line beneath (apps/fauna-apple/Fauna-macOS/Views/MainWindow/ContentView.swift, statusIndicators); with the sidebar collapsed both move to the top of the detail column. Real layout, never a safe-area inset over the split view."
 
   markdown-toolbar:
     description: "Toolbar with text formatting buttons (bold, italic, code, link; heading/list optional)"
@@ -5421,6 +5542,7 @@ components:
       - delegated-origin-badge
       - content-label-badge
       - feed-post-actions-menu
+      - report-sheet                 # opened by feed-post-report-button from feed-post-actions-menu, so it travels with the card (report-sheet's used_in; scope declared 2026-11-19 under rule A, moderation.md § User-initiated reporting → App surface)
     used_in: [feed, profile]   # profile: the Posts tab's rows, identical paint (profile.md § Layout & flow → The Posts tab; scope user-approved 2026-10-16; unbuilt there on every app — tui leads)
     notes:
       web: "Inline in feed page markup."
@@ -5764,6 +5886,7 @@ components:
     children:
       - content-label-badge
       - dm-message-actions-menu
+      - report-sheet                 # opened by dm-message-report-button from dm-message-actions-menu (report-sheet's used_in; scope declared 2026-11-19 under rule A, moderation.md § User-initiated reporting → App surface)
       - link-preview-card            # render-model.md § D4 — the bare-url link-preview card (title/description/domain + reveal-gated og:image), the SAME component the feed paints; the og:image reveals via the bubble's load-remote-content-button (painted on all 7 apps — tui's conversation_detail leg landed 2026-07-30 alongside load-remote-content-button, see render-model.md § D3/D4)
     used_in: [conversations.conversation_detail]
     notes:
@@ -7595,13 +7718,13 @@ elements:
     description: "Status line for the NAT-mode control: renders the AdminNatModeMachine snapshot message — idle/saved texts carry the live-vs-restart-applied caveat, submit/error states render their admin.nest_page.nat_mode_* strings."
     type: text
   admin-nest-web-app-origin-section:
-    description: "Container/scope for the web-app origin section on admin-nest (admin.md § N Nest → Web-app origin; IDs user-approved 2026-09-25). The admin's one-click choice of what this nest's own /app/ answers — the bundled SPA (the default) or a 302 to the central origin with nest=<this nest's handle domain> (web-content-hosting.md § Same-origin security model → The nest-served /app/ and the central origin). Nest state behind fauna.admin.web_app_origin.{get,set}, Admin-class; read on the same nav-edge read as pairing/serving-port/region. Every rendering decision is the shared fauna_client_admin::admin_web_app_origin_view; its scope sentence states that the choice changes only what this nest's own address answers (front-door.md § Which origin a user loads the app from)."
+    description: "Container/scope for the web-app origin section on admin-nest (admin.md § N Nest → Web-app origin; IDs user-approved 2026-09-25). The admin's one-click choice of what this nest's own /app/ answers — the bundled SPA (the default) or a 302 to the central origin with nest=<this nest's handle domain> (web-content-hosting.md § Same-origin security model → The nest-served /app/ and the central origin). Nest state behind fauna.admin.web_app_origin.{get,set}, Admin-class; read on the same nav-edge read as pairing/serving-port/region. CONDITIONAL (ruled 2026-11-19): absent while the nest's reply is not central_live and the stored mode is bundled, and on a nest predating the choice (AdminWebAppOriginView.section_possibility). Every rendering decision is the shared fauna_client_admin::admin_web_app_origin_view; its scope sentence states that the choice changes only what this nest's own address answers (front-door.md § Which origin a user loads the app from)."
     type: view
   admin-nest-web-app-origin-bundled-radio:
     description: "Web-app origin radio: bundled — this nest's /app/ serves the SPA it ships (the works-out-of-the-box default). Pre-selected from AdminWebAppOriginView.selected; the select is local (no network); neither radio is marked on a nest that predates the choice or names a mode this build cannot. Disabled when the view's can_set is false. String: S.admin.nest_page.web_app_origin_bundled."
     type: radio
   admin-nest-web-app-origin-central-radio:
-    description: "Web-app origin radio: central — this nest's /app/ answers a 302 to the central origin with this nest pre-filled. Sibling of admin-nest-web-app-origin-bundled-radio; its label names the central origin from the one constant (AdminWebAppOriginView.central_label, S.admin.nest_page.web_app_origin_central)."
+    description: "Web-app origin radio: central — this nest's /app/ answers a 302 to the central origin with this nest pre-filled. CONDITIONAL (ruled 2026-11-19): present only when the nest's reply says central_live (AdminWebAppOriginView.central_possibility). Sibling of admin-nest-web-app-origin-bundled-radio; its label names the central origin from the one constant (AdminWebAppOriginView.central_label, S.admin.nest_page.web_app_origin_central)."
     type: radio
   admin-nest-web-app-origin-save-button:
     description: "Commits the selected mode via fauna.admin.web_app_origin.set (Admin-class, OnlineOnly). The reply is the same projection the read answers, so the status repaints from it with no second read. Disabled when the view's can_set is false (a nest predating the choice answers the read with unknown-kind)."
@@ -8114,12 +8237,58 @@ elements:
   handle-message-area:
     description: "Auto-sizing message panel rendering the HandleCheckSnapshot.message."
     type: text
-  handle-control-checkbox:
-    description: "Hidden checkbox: 'I control this domain'. Visible only on RegisteredNoNest."
+  # Choose providers: provider_choice (onboarding-provisioning.md § 3d)
+  provider-goal-row:
+    description: "Keyed goal line at the top of provider_choice — [domain] (only while a domain is bought; states the covering registrar's price, first year and renewal), [dns], [vps]. State covered/open and the covering provider's name, from OnboardingMachine::goal_rows()."
+    type: text
+    indexed: true
+  provider-goal-select:
+    description: "Keyed per goal [domain|dns|vps]: the choice among the connected providers that can cover the goal, shown only when there is more than one (on dns the manual row is one of them). Forwards to select_goal_cover()."
+    type: button
+    indexed: true
+  provider-row:
+    description: "Keyed provider row on provider_choice — one per providers.yaml entry plus [manual] ('I will set DNS up later', DNS only). State connected/available; its text names the capabilities (register domains, run DNS, rent servers). Pressing it opens provider-dialog; an un-id'd line beneath says why it cannot cover a goal."
+    type: button
+    indexed: true
+  provider-dialog:
+    description: "The provider's own dialog (the sign-in pop-up) on provider_choice, present only while a provider row is open: link, open-in-browser, help, credential fields (DNS and server always, registrar while buying), Connect / Disconnect, the registrar note or contact form, its status line and Close."
+    type: view
+  provider-dialog-link:
+    description: "Link inside provider-dialog to the provider's sign-up page."
+    type: button
+  provider-dialog-open-browser-button:
+    description: "Button inside provider-dialog that opens the provider's sign-up page in the system browser."
+    type: button
+  provider-dialog-help-text:
+    description: "The provider's help text inside provider-dialog."
+    type: text
+  provider-credentials-form:
+    description: "Container of the provider's credential fields inside provider-dialog; each field is provider-credentials-form-{field.id}, a hosted-auth field a sign-in button. From OnboardingMachine::visible_provider_fields()."
+    type: view
+  provider-connect-button:
+    description: "Connect inside provider-dialog: runs every check of the provider's capabilities with the one credential set (connect_provider). Enabled by can_connect_provider()."
+    type: button
+  provider-disconnect-button:
+    description: "Disconnect inside provider-dialog, on a connected provider: drops the credential from the wizard and uncovers any goal it covered."
+    type: button
+  provider-dialog-status-text:
+    description: "The dialog's status line: connected, connecting, or the provider's own error from a failed check."
+    type: text
+  provider-dialog-close-button:
+    description: "Closes provider-dialog, back to the provider list."
+    type: button
+  provider-choice-status-text:
+    description: "Status line on provider_choice naming what is still open while Continue is disabled (providers_continue_blocked_reason())."
+    type: text
+  provider-choice-back-button:
+    description: "Back on provider_choice, to handle_entry."
+    type: button
+  provider-choice-continue-button:
+    description: "Continue on provider_choice, straight to nest_provisioning (continue_from_providers). Enabled when every goal is covered and the covering registrar has its contact."
     type: button
   # Stage 5: dns_config
   dns-buy-domain-checkbox:
-    description: "Checkbox at top of dns_config: 'Buy domain on Continue (this page)'. Auto-checked when domain is unregistered, disabled otherwise. When checked, providers that cannot buy via API are disabled."
+    description: "Checkbox on provider_choice (formerly at top of dns_config): 'Buy domain'. Auto-checked when domain is unregistered, disabled otherwise. When checked, providers that cannot buy via API are disabled."
     type: button
   dns-same-provider-checkbox:
     description: "Checkbox at top of dns_config: 'Buy VPS with same provider (next page)'. Default checked. When checked, only providers with both [dns] and [vps] capabilities are enabled."
@@ -9408,7 +9577,7 @@ elements:
     description: "The room's standing notice on the thread header (conversations.md § Element IDs; user-approved 2026-09-25). One text element, painted only while a notice holds, its state exposed via the `state` attribute: moderation-unverified (ThreadDetail.room.moderation_unverified — this device could not verify some of the room's moderation; conversation-rooms.md § Members verify what they paint) | awaiting-key (ThreadDetail.room.awaiting_key — a newcomer waiting to be keyed in; community-rooms.md) | rekey-pending (ThreadDetail.room.severance_owed — someone was removed and the room's re-key has not landed yet, from the floor's `severance_owed` on every seated device, cleared by the floor read that shows it paid; community-rooms.md § The three classes → A removal's re-key is owed until it lands; fourth state DECLARED 2026-11-14 under rule A's additive carve-out, built on tui the same day — the shared RoomNoticeFor answers it on every app, the six's paint unwitnessed) | bridge-disconnected (ThreadDetail.room.bridge_disconnected — a bridged room no live bridge principal serves, from rooms.list's `disconnected`: readable, never writable; apps/bridges.md § Phase G → When the bridge stops serving; third state user-approved 2026-10-16, built on tui 2026-10-17 — the shared RoomNoticeFor answers it on every app, the six's paint unwitnessed). awaiting-key wins over the other two community-room states, and rekey-pending wins over moderation-unverified; bridge-disconnected holds only on a transport-only room, where none of the others can, so no precedence question arises there. Never a mark on a message a parked record targets."
     type: text
   thread-room-settings-button:
-    description: "Opens the room policy editor (the room_settings sub-page). Painted AND LIVE whenever the thread is a room — any member opens it (user-approved 2026-09-20): the surface carries room-leave-button, a plain member's verb, so a door gated on capabilities.can_set_policy put the one control a member needs behind the one capability a member never has. The greying is per control INSIDE (conversations.md § Architectural rules 5); a member sees every policy control and Save greyed, and only the walk-out live."
+    description: "Opens the room policy editor (the room_settings sub-page). Painted AND LIVE whenever the thread is a room — any member opens it (user-approved 2026-09-20): the surface carries room-leave-button, a plain member's verb, so a door gated on capabilities.can_set_policy put the one control a member needs behind the one capability a member never has. The gating is per control INSIDE (conversations.md § Errors & edge cases → Controls this person can never use, ruled 2026-11-16): a control the viewer's role never gives is absent, a member reads the policy as plain lines where the controls would sit, and only the walk-out is live."
     type: button
   room-join-rule-select:
     description: "The room policy editor's who-can-invite rule (conversation-rooms.md § Join rules and invites). Token round-trip on select/get_text: invite (owner and admins) | member-invite (any member)."
@@ -9416,25 +9585,38 @@ elements:
   room-history-policy-select:
     description: "The room policy editor's history-for-new-members rule (conversation-rooms.md § History for joiners). Token round-trip on select/get_text: none | full."
     type: select
+  room-join-rule-line:
+    description: "The who-can-invite rule read as a plain line where room-join-rule-select would sit, for a viewer the policy editor is absent for (declared 2026-11-17 under rule A's advisory class; behavior owner conversations.md § Errors & edge cases → Controls this person can never use). Its text is the rule's shared value label (join_rule_label: Owner and admins | Any member); `value` attribute the select's token (invite | member-invite). Painted exactly when room-join-rule-select is absent — never both."
+    type: text
+  room-history-policy-line:
+    description: "The history-for-new-members rule read as a plain line where room-history-policy-select would sit, for a viewer the policy editor is absent for (declared 2026-11-17 under rule A's advisory class; same owner). Its text is the rule's shared value label (history_policy_label); `value` attribute the select's token (none | full). Painted exactly when room-history-policy-select is absent — never both."
+    type: text
+  room-nest-read-line:
+    description: "The home nest's read of a community room read as a plain line where room-nest-read-toggle would sit, for a viewer the policy editor is absent for (declared 2026-11-17 under rule A's advisory class; same owner). The toggle's own sentence; `checked` attribute true | false as on the toggle. Painted only when the draft carries a nest read, and exactly when room-nest-read-toggle is absent."
+    type: text
+  room-labeler-line:
+    description: "One room labeler row read as a plain line where room-labeler-toggle[i] would sit, for a viewer the policy editor is absent for (declared 2026-11-17 under rule A's advisory class; same owner). The toggle's own text (kind, id prefix, on/off mark); `checked` attribute true | false as on the toggle. Same rows, order and section absence as room-labeler-toggle, and painted exactly when it is absent; room-labeler-inspect-button[i] stays beside it."
+    type: text
+    indexed: true
   room-admin-toggle:
-    description: "The room policy editor's admin switch for one participant, index-parallel with thread-member-chip[i]; `checked` attribute true | false. Greyed unless capabilities.can_appoint_admins (owner only), and never live on the owner's own row."
+    description: "The room policy editor's admin switch for one participant, index-parallel with thread-member-chip[i]; `checked` attribute true | false. Absent unless capabilities.can_appoint_admins (owner only; conversations.md § Errors & edge cases → Controls this person can never use), and never live on the owner's own row."
     type: button
     indexed: true
   room-owner-transfer-button:
-    description: "The room policy editor's hand-over control for one participant, index-parallel with thread-member-chip[i]; `checked` attribute true | false, at most one row staged at a time (conversation-rooms.md § Roles and authorization → Ownership transfer). Greyed unless capabilities.can_transfer_ownership (owner only), and never live on the owner's own row. Save posts the countersigned offer; the roles flip on every seat once the new owner's device has committed it."
+    description: "The room policy editor's hand-over control for one participant, index-parallel with thread-member-chip[i]; `checked` attribute true | false, at most one row staged at a time (conversation-rooms.md § Roles and authorization → Ownership transfer). Absent unless capabilities.can_transfer_ownership (owner only; conversations.md § Errors & edge cases → Controls this person can never use), and never live on the owner's own row. Save posts the countersigned offer; the roles flip on every seat once the new owner's device has committed it."
     type: button
     indexed: true
   room-settings-save-button:
-    description: "Commits every change staged in the room policy editor, one policy commit each (set_room_join_rule / set_room_history_policy / appoint_admin / demote_admin / transfer_room_ownership, the hand-over last); closes the editor only when all landed — a refusal keeps it open with the page's error-message. Greyed, never hidden, unless capabilities.can_set_policy: since 2026-09-20 any member opens this surface, and every edit behind Save is owner-or-admin work."
+    description: "Commits every change staged in the room policy editor, one policy commit each (set_room_join_rule / set_room_history_policy / appoint_admin / demote_admin / transfer_room_ownership, the hand-over last); closes the editor only when all landed — a refusal keeps it open with the page's error-message. Absent unless capabilities.can_set_policy (conversations.md § Errors & edge cases → Controls this person can never use, ruled 2026-11-16): since 2026-09-20 any member opens this surface, and every edit behind Save is owner-or-admin work."
     type: button
   room-leave-button:
-    description: "The room policy editor's walk-out control (user-approved 2026-09-20 under rule A; behavior owner conversation-rooms.md § Roles and authorization → Leaving — the mechanism). Greyed, never hidden, unless capabilities.can_leave_room — which the roles table closes for the owner, who hands the room over first because a room is never owner-less. Opens room-leave-confirm; deliberately NOT staged through room-settings-save-button, because leaving is an immediate act rather than a policy edit."
+    description: "The room policy editor's walk-out control (user-approved 2026-09-20 under rule A; behavior owner conversation-rooms.md § Roles and authorization → Leaving — the mechanism). Live when capabilities.can_leave_room; for the owner, whom the roles table refuses because a room is never owner-less, shown DISABLED with error.send.room_owner_cannot_leave as its reason (the one blocked, not absent, room control — conversations.md § Errors & edge cases → Controls this person can never use), the hand-over live above it. Opens room-leave-confirm; deliberately NOT staged through room-settings-save-button, because leaving is an immediate act rather than a policy edit."
     type: button
   room-leave-confirm:
     description: "Commits the departure room-leave-button opened — the thread-rename-confirm / add-participant-confirm shape this page already uses (user-approved 2026-09-20). One gesture, and the room's class picks the door beneath it: an end-to-end room reports its roster minus this account, a community room opens the room.leave ceremony; no app branches on class. The thread stays in the leaver's own list afterwards — the user keeps their copy of the conversation. A refusal surfaces on the page's error-message."
     type: button
   room-remove-button:
-    description: "The room policy editor's local remove of the whole conversation from my nest, beside room-leave-button (declared 2026-11-14 under rule A's advisory class; behavior owner bridged-adapter.md § Removing bridged rows). Greyed, never hidden, unless capabilities.supports_local_remove — a bridged room today, whose policy-less room still opens the editor for it (RoomSettingsDraft::seed), the policy controls absent there. Opens room-remove-confirm; NOT staged through room-settings-save-button — a remove is an immediate act."
+    description: "The room policy editor's local remove of the whole conversation from my nest, beside room-leave-button (declared 2026-11-14 under rule A's advisory class; behavior owner bridged-adapter.md § Removing bridged rows). Absent unless capabilities.supports_local_remove (conversations.md § Errors & edge cases → Controls this person can never use) — a bridged room today, whose policy-less room still opens the editor for it (RoomSettingsDraft::seed), the policy controls absent there. Opens room-remove-confirm; NOT staged through room-settings-save-button — a remove is an immediate act."
     type: button
   room-remove-confirm:
     description: "Commits the remove room-remove-button opened: one manager.remove_thread call; the thread leaves the list when the nest answers, the far side keeps its copy and is not told, and the next arrival from the peer brings the conversation back holding only what arrived since. A refusal surfaces on the page's error-message."
@@ -9448,7 +9630,7 @@ elements:
     type: button
     indexed: true
   room-nest-read-toggle:
-    description: "The room policy editor's home-nest read control on a community room (user-approved 2026-09-25 under rule A; behavior owner community-rooms.md § Implementation status today → The nest's read is the members' standing choice). `checked` attribute true | false — whether the room's tip generation wraps to the home nest (RoomSettingsDraft::nest_read). Staged like the other controls and committed on room-settings-save-button as a rotation with the nest in or out, before any hand-over; withdrawing it deletes every view the nest built (room.search then answers empty). Painted only when the draft carries a nest read (a community room whose answer this device has read); greyed unless capabilities.can_set_policy (owner or admin)."
+    description: "The room policy editor's home-nest read control on a community room (user-approved 2026-09-25 under rule A; behavior owner community-rooms.md § Implementation status today → The nest's read is the members' standing choice). `checked` attribute true | false — whether the room's tip generation wraps to the home nest (RoomSettingsDraft::nest_read). Staged like the other controls and committed on room-settings-save-button as a rotation with the nest in or out, before any hand-over; withdrawing it deletes every view the nest built (room.search then answers empty). Painted only when the draft carries a nest read (a community room whose answer this device has read); absent unless capabilities.can_set_policy (owner or admin; conversations.md § Errors & edge cases → Controls this person can never use)."
     type: button
   room-invitation:
     description: "One community-room invitation standing for this account, atop the conversation list (user-approved 2026-09-25 under rule A; behavior owner community-rooms.md § Implementation status today → the invitation entry). One row per ConversationsSnapshot.room_invitations entry, already verified against its signer; its text names who invited and the rank on offer (RoomInvitationSnapshot::text), with a `role` attribute admin | member. Absent while no invitation stands."
@@ -11009,6 +11191,12 @@ elements:
   provisioning-bom-domain-line:
     description: "One-time domain-registration price line in provisioning-price-bom (e.g. 'Domain: €5.00 for the first year, then €7.00/year' — the renewal price + term are disclosed here when the registrar quoted them, docs/goal/behavior/onboarding.md §6; 'Domain: €5.00' when it did not). Visible only when the wizard is buying a new domain (dns_config's buy-domain path, price already confirmed via dns-price-confirm-checkbox) — absent when the domain is already registered/owned or the deferred-DNS path was taken."
     type: text
+  provisioning-dns-plan:
+    description: "List on nest_provisioning, between provisioning-price-bom and provisioning-start-button: every DNS record the run will publish and what it does to it — keep, add, change (old value → new), remove (an AAAA at a name pointed at the new box). Rows from OnboardingMachine::dns_plan(); absent when the plan is empty (a bought domain's fresh zone, the manual DNS path). docs/goal/behavior/onboarding-provisioning.md § 6 The DNS plan."
+    type: view
+  provisioning-dns-plan-row:
+    description: "One row of provisioning-dns-plan, keyed [<name>|<type>] (e.g. [@|A], [_dmarc|TXT]). States the record's name and type, its action (keep/add/change/remove) and, for change, the old value and the new; a value unknown before the box exists reads as the new server's address."
+    type: text
   provisioning-bom-vps-line:
     description: "Recurring VPS price line in provisioning-price-bom (e.g. 'VPS: €6.00/month') — the selected server type's monthly price, recapping what the vps_config radio option already showed. Always present on nest_provisioning (vps_config's Continue requires a server-type selection)."
     type: text
@@ -11223,6 +11411,14 @@ elements:
   folder-paywall-hint:
     type: text
     description: "The hint beside folder-paywall-tier-select on a website-enabled owner row: the 'create a subscription tier first' line (i18n devices.paywall_tier_needs_tier), present exactly while the select is disabled because the creator holds no tier of their own — absent once a tier exists. The structural sibling of folder-website-hint. User-approved 2026-10-16. Behavior authority docs/goal/ui/folders.md § Element IDs → Web paywall"
+    indexed: true
+  folder-webdav-step:
+    type: button
+    description: "Beside folder-webdav-toggle's hint on an owner row: the one-press jump to Settings → Mail, where the first mail credential mints the key serving seals under. Present exactly while fauna_client_folders::webdav_provision::webdav_serve_step names a step — the custody read answered with no mail key — never while that read is out or failed. Declared 2026-11-17 (advisory, ui rule A). Behavior authority docs/goal/ui/folders.md § Errors & edge cases → Own-tier and mail gates"
+    indexed: true
+  folder-paywall-step:
+    type: button
+    description: "Beside folder-paywall-hint: the one-press jump to the person's own profile on its Tiers tab, where a tier is created. Present exactly while fauna_client_subscriptions::own_tiers::own_tiers_step names a step — the tier read answered with none. Declared 2026-11-17 (advisory, ui rule A). Behavior authority docs/goal/ui/folders.md § Errors & edge cases → Own-tier and mail gates"
     indexed: true
   folder-delete-confirm:
     type: button
@@ -11495,6 +11691,14 @@ elements:
     type: button
     description: "Attach the selected destination to this folder (fauna.backup.destination.attach_folder); disabled until a pick is staged."
     indexed: true
+  folder-destination-hint:
+    type: text
+    description: "On an expanded owner row, in place of the absent attach pair while the owner has no enrolled backup destination: the reason fauna_client_config::folder_destination_attach_possibility answers (i18n devices.folder_destination_needs_destination). Never painted while the destination read is out or failed. Declared 2026-11-17 (advisory, ui rule A). Behavior authority docs/goal/ui/folders.md § Errors & edge cases → Own-tier and mail gates"
+    indexed: true
+  folder-destination-step:
+    type: button
+    description: "Beside folder-destination-hint: the one-press jump to the Backups page, where a destination is enrolled (fauna_client_config::folder_destination_step). Declared 2026-11-17 (advisory, ui rule A). Behavior authority docs/goal/ui/folders.md § Errors & edge cases → Own-tier and mail gates"
+    indexed: true
   folder-place-originates:
     type: checkbox
     description: "Edit PlaceFlags.originates on an existing seat, in place (fauna.folders.places.set)."
@@ -11705,6 +11909,14 @@ elements:
     description: "Per-calendar show/hide display filter (beside calendar-item)"
     type: toggle
     indexed: true
+  # Declared 2026-11-16 (rule A, an additive id the goal doc designs:
+  # events.md § Errors & edge cases → No calendar to hold an event, ruling 3).
+  calendar-list-empty-state:
+    description: "The calendar list's empty state while no calendar can hold an event: the reason fauna_client_caldav::event_create_possibility answers (no key / provision failed / not served here). Never painted while the calendar read is still unresolved (the page's loading state) and never the bare 'No calendars yet.'"
+    type: text
+  calendar-list-empty-state-step:
+    description: "Beside calendar-list-empty-state: the one-press jump to the place the reason's step is taken (fauna_client_caldav::event_create_step — Settings → Mail & Calendar, or the admin Calendar page). Absent when the reason names no such step"
+    type: button
   # Calendar-level .ics import/export (user-approved 2026-09-25, UI-consistency
   # rule A; placement confirmed calendar-level, beside the calendar list, shown
   # while a calendar is selected). Behavior: goal/ui/events.md § Import / Export.
@@ -13265,6 +13477,9 @@ elements:
   admin-aliases-forwarder-add-submit-button:
     type: button
     description: "Create the external forwarder — fauna.bridges.create_forwarder { local_domain, pattern, forward_target }"
+  admin-aliases-forwarder-add-domains-step:
+    type: button
+    description: "While the nest hosts no local domain (fauna_client_mail_settings::forwarders::forwarder_form_possibility blocked): the one-press jump to admin-dns, where a domain is added. Absent once a domain is hosted and before the read resolves (admin.md § 4, A forwarder needs a hosted domain)"
   admin-aliases-forwarder-list:
     type: view
     description: "Admin list of external mail forwarders — the forwarders section of admin-aliases (admin.md § 4 / mail-aliases.md § Kind 7)."
@@ -14192,6 +14407,9 @@ elements:
   mail-settings-over-quota-notice:
     type: text
     description: "Present only when the mailbox is full (bytes or messages at or past the limit) or today's sending allowance is spent, from the same get_mail_quotas read; the shared mail_quota_view decides it and names which limit ran out (S.mail_settings.over_quota_mailbox / over_quota_sending), each with its own remedy. User-approved 2026-10-16."
+  mail-subpage-gate-reason:
+    type: text
+    description: "The mail-usable gate at a mail sub-page's entry (ui/mail-settings.md § Errors & edge cases, the mail-usable gate; ui/README.md § Offer only what is possible, rule 4): painted under page-heading, in place of every form and wizard, on the six mail sub-pages (mail-aliases, mail-spam, mail-export, mail-import, mail-lists, mail-list-members) while the shared MailSettingsSnapshot::mail_usable() is not possible — the page is then page-heading, this line and settings-nav-back, nothing else. Text is the blocked answer's own reason (S.mail_settings.usable_needs_mail_on while mail is off), or S.mail_settings.unavailable_notice on a box that can never serve mail. Absent once mail is usable. Declared 2026-11-18 under rule A (advisory)."
   web-settings-subdomain-toggle:
     type: toggle
     description: "User-set toggle (default OFF): whether THIS nest serves the calling actor's `web` content at https://<handle>.<domain>/. Backed by fauna.web.set_subdomain_enabled(bool) (User-class, caller-scoped) / get_subdomain_enabled. Default OFF (privacy / user-controls-their-data), unlike the admin-only nest-wide apex. Renders SubdomainView.enabled (web-content-hosting.md § Implementation status, Slice 4). Copy: S.web_settings.subdomain_toggle_label / subdomain_toggle_subtitle."

@@ -93,19 +93,21 @@ Stamped 2026-11-07 at 6a0ded1015.
    - `tests/e2e-unified/tests/test_advertise_post_nostr.py::test_an_advertised_sold_post_reaches_nostr_with_its_price_and_stopping_retracts_it`
 31. [nest] Changing or removing the price of a post you advertise on Nostr withdraws the note that carried the old price, so a price out on Nostr never misstates your offer — `docs/goal/behavior/monetization.md` § The Nostr advertisement of a sold post
    - `tests/e2e-unified/tests/api/test_nostr_advertise_price_lifecycle.py::test_a_price_edit_or_a_cleared_price_withdraws_the_note_that_carried_the_old_price`
+32. [app] Linking an account, adding a follow, adding a zap signer and adding a relay are each disabled with the reason beside them while their field is blank or malformed, or the relay is already listed; pressing one says the same, and a duplicate relay no longer clears the field silently — `docs/goal/ui/nostr.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_nostr_link_follow_zap_signer_and_relay_are_blocked_with_their_reasons`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+962dc452 standalone |
-| linux | ✅ full | 0.1.5-dev+962dc452 standalone |
+| web | ⚠ partial | 0.1.5-dev+962dc452 standalone |
+| linux | ⚠ partial | 0.1.5-dev+962dc452 standalone |
 | windows | 🚧 unbuilt | 0.1.2-dev+d6ff0673 standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+962dc452 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.5-dev+962dc452 standalone |
+| tui | ✅ full | 0.1.5-dev+962dc452 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -150,6 +152,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 28 | app | `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_signer_connect_string_suppresses_capture_until_left` | windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 28 | app | absent by design on web, linux, tui | — |
 | 29 | nest | `tests/e2e-unified/tests/api/test_nostr_silent_relay_bounded.py::test_a_relay_that_never_answers_is_given_up_on_sat_out_and_tried_again_later` | nest (linux): passed |
-| 30 | app | `tests/e2e-unified/tests/test_advertise_post_nostr.py::test_an_advertised_sold_post_reaches_nostr_with_its_price_and_stopping_retracts_it` — requires `feed-post-advertise-nostr` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed |
+| 30 | app | `tests/e2e-unified/tests/test_advertise_post_nostr.py::test_an_advertised_sold_post_reaches_nostr_with_its_price_and_stopping_retracts_it` — requires `feed-post-advertise-nostr` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, tui (macos): passed |
 | 31 | nest | `tests/e2e-unified/tests/api/test_nostr_advertise_price_lifecycle.py::test_a_price_edit_or_a_cleared_price_withdraws_the_note_that_carried_the_old_price` | nest (linux): passed |
+| 32 | app | `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_nostr_link_follow_zap_signer_and_relay_are_blocked_with_their_reasons` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

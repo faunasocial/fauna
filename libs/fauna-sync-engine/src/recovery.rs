@@ -236,6 +236,60 @@ pub async fn recover_from_own_store(
     .await
 }
 
+/// The re-seed from this device's own store, with the store end of the
+/// recovery leg to hand a lived-in segment set to
+/// (`backup-destinations.md` § Third destination kind → *A lived-in segment set
+/// is completed by record in the same gesture*, rule (1)): the shared
+/// [`fauna_client_backup::reseed::run_reseed_with_recovery`] over the host's
+/// own `leg` and the leg [`recover_from_own_store`] runs, composed over the
+/// same store, connection and key — one composition for every host of the
+/// store (the desktop agent's re-seed job, the phone's in-process call).
+///
+/// The target is `input.source`: the nest being seeded is the nest a lived-in
+/// set is recovered into. The leg's duties are the recovery's own — the
+/// store's regression entries for a recovered set are cleared (none stand on a
+/// fresh rebuild) and the copy's paths the target does not name are retired on
+/// the local grace clock, the pull converging the copy onto the target from
+/// its next pass. The verb floors the target's counter at the copy's ledger
+/// before it appends (`fauna.backup.custody.recover`, step 6), so a device's
+/// next pull after a recovered set finds no regression.
+pub async fn reseed_with_own_store_recovery<L>(
+    input: OwnStoreRecovery<'_>,
+    leg: &L,
+) -> Result<fauna_client_backup::reseed::ReseedOutcome, fauna_client_backup::reseed::ReseedError>
+where
+    L: fauna_client_backup::reseed::ReseedDeliveryLeg + ?Sized,
+{
+    let sink = SyncClientSink {
+        client: input.bytes,
+    };
+    let regression = CustodianStoreRegressionRecord {
+        store: input.store,
+        scope_id: input.scope_id,
+    };
+    let store = RecoveryStore::new(input.store, input.local, input.now);
+    let records = NestRecords::new(input.source);
+    let recovery = NativeRecoveryLeg(RecoveryDelivery::from_store(
+        &store,
+        RecoverySource {
+            bytes: &sink,
+            nest: input.source,
+            records: &records,
+            device_id: input.device_id,
+        },
+        input.scope_id,
+        input.nest_key,
+        &regression,
+    ));
+    fauna_client_backup::reseed::run_reseed_with_recovery(
+        &fauna_client_backup::BackupClient::new(input.source),
+        input.nest_key.to_bytes().to_vec(),
+        leg,
+        Some(&recovery),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,7 +4,7 @@
 # store app is signed*; release-integrity.md § Release signing → *A store upload
 # is built from a recorded public commit*).
 #
-#   just ios-store-upload <version> [export|upload|build|sign] [--tree DIR]
+#   just ios-store-upload <version> [export|upload|build|ffi|archive|sign] [--tree DIR]
 #        [--out DIR] [--profiles-dir DIR] [--keychain KC]
 #
 # The BUILD half (`build`), which holds no credential:
@@ -21,6 +21,10 @@
 #    archived app goes to `<out>/unsigned/Fauna-iOS.app` (with the archive's
 #    `Signatures/` beside it), its debug symbols to `<out>/dSYMs/`. No exporter:
 #    nothing signs here.
+# `build` runs steps 2 and 3 together; `ffi` runs step 2 alone and `archive`
+# step 3 alone, over the xcframework an earlier `ffi` left in the tree — the
+# release workflow's two credential-free jobs, so neither sits near a hosted
+# runner's ceiling (the FFI alone measured 2 h 18 min on one).
 #
 # The SIGN half (`sign`), in the approved job or on macOS:
 # 4. `scripts/ios-store-sign.py` — the tree's own signer — signs the unsigned
@@ -63,8 +67,8 @@ MODE="${2:-export}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || die 2 "usage FAILED — the version is MAJOR.MINOR.PATCH (e.g. 0.1.6), got '${VERSION}'"
 case "$MODE" in
-    export|upload|build|sign|send) ;;
-    *) die 2 "usage FAILED — the mode is export, upload, build, sign or send, got '${MODE}'" ;;
+    export|upload|build|ffi|archive|sign|send) ;;
+    *) die 2 "usage FAILED — the mode is export, upload, build, ffi, archive, sign or send, got '${MODE}'" ;;
 esac
 shift $(( $# < 2 ? $# : 2 ))
 TREE_ARG="" OUT_ARG="" PROFILES_DIR="" KEYCHAIN=""
@@ -132,17 +136,31 @@ versions="$(grep -o 'MARKETING_VERSION = [^;]*;' "${PROJECT}/project.pbxproj" | 
     || die 2 "version FAILED — the tree carries MARKETING_VERSION ${versions:-none}, not ${VERSION}"
 say "version OK — MARKETING_VERSION ${VERSION}"
 
+# $1 = all (default) | ffi | archive
 build_half() {
-    rm -rf "$OUT"; mkdir -p "$LOGS"
+    local part="${1:-all}"
+    if [ "$part" != "archive" ]; then
+        rm -rf "$OUT"; mkdir -p "$LOGS"
 
-    # --- step 2: the store-safe device FFI, built by the tree's own recipe ---
-    slot 16 just --justfile "$CLONE/justfile" --working-directory "$CLONE" \
-            apple-ffi-store-safe >"$LOGS/ffi.log" 2>&1 \
-        || { tail -40 "$LOGS/ffi.log" >&2; die 1 "ffi FAILED — the tree's apple-ffi-store-safe; log ${LOGS}/ffi.log"; }
-    say "ffi OK — apple-ffi-store-safe in the tree"
+        # --- step 2: the store-safe device FFI, built by the tree's own recipe ---
+        slot 16 just --justfile "$CLONE/justfile" --working-directory "$CLONE" \
+                apple-ffi-store-safe >"$LOGS/ffi.log" 2>&1 \
+            || { tail -40 "$LOGS/ffi.log" >&2; die 1 "ffi FAILED — the tree's apple-ffi-store-safe; log ${LOGS}/ffi.log"; }
+        say "ffi OK — apple-ffi-store-safe in the tree"
+        [ "$part" != "ffi" ] || return 0
+    fi
 
     # --- step 3: the UNSIGNED store-safe archive ------------------------------
+    mkdir -p "$LOGS"
+    [ -d "${CLONE}/apps/fauna-apple/FaunaFFI.xcframework" ] \
+        || die 1 "archive FAILED — no FaunaFFI.xcframework in ${CLONE}; run the ffi part first"
+    # apple-ffi also writes the generated Swift bindings beside the tracked
+    # FFICompat.swift (gitignored), and the archive compiles against them.
+    find "${CLONE}/apps/fauna-apple/FaunaFFISwift/Sources" -maxdepth 1 -name '*.swift' \
+            ! -name FFICompat.swift | grep -q . \
+        || die 1 "archive FAILED — no generated Swift bindings in ${CLONE}/apps/fauna-apple/FaunaFFISwift/Sources; run the ffi part first"
     local archive="${OUT}/${SCHEME}.xcarchive"
+    rm -rf "$archive" "${OUT}/unsigned" "${OUT}/dSYMs"
     slot 10 xcodebuild archive \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
@@ -245,6 +263,8 @@ EOF
 
 case "$MODE" in
     build) build_half; say "done — build half only; nothing signed"; exit 0 ;;
+    ffi) build_half ffi; say "done — the build half's FFI only; nothing archived, nothing signed"; exit 0 ;;
+    archive) build_half archive; say "done — the build half's archive only; nothing signed"; exit 0 ;;
     sign) sign_half; say "done — sign half only; nothing left this machine"; exit 0 ;;
     export) build_half; sign_half; say "done — export only; nothing left this machine"; exit 0 ;;
     send) send_half ;;

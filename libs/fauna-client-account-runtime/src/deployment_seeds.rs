@@ -3,10 +3,13 @@
 //! and writes run through the account plane with one composition per edge
 //! (`nest/box-recovery.md` § The plane-era recovery floor).
 //!
-//! - [`run_custody_leg`] — the custody leg over the bound nest, run at the
-//!   second of the post-auth and store-ready edges and at every later
-//!   post-auth edge (*(c) The writes*). Answers the warning the host owes the
-//!   admin as one shared [`LocalizedText`].
+//! - [`run_custody_leg_signalled`] — the custody leg over the bound nest, run
+//!   at the second of the post-auth and store-ready edges and at every later
+//!   post-auth edge (*(c) The writes*), waiting out a store still settling
+//!   and, after a warned run, retrying at every later connection. Hands the
+//!   host every run's [`CustodyLegSignal`] — the warning it owes the admin as
+//!   one shared [`LocalizedText`], or the cleared mark that takes it down.
+//!   [`run_custody_leg`] is its first-run-only form.
 //! - [`rotate_deployment_seed`] — the plane rotation drive behind the admin
 //!   surface's "Rotate deployment identity" action: custody before dispatch
 //!   over the host's per-call store resolver, one [`LocalizedText`] verdict.
@@ -28,8 +31,8 @@ use fauna_account_plane::deployment_seed_recovery::{
 };
 use fauna_client::NestClient;
 use fauna_client_config::{
-    DeploymentSeedCustody, DeploymentSeedStore, ResolvingLedgerStore, SeedRotation,
-    SupersessionMarks, custody_leg_unattempted_warning, custody_leg_warning, seed_rotation_verdict,
+    CustodyLegSignal, DeploymentSeedCustody, DeploymentSeedStore, ResolvingLedgerStore,
+    SeedRotation, SupersessionMarks, custody_leg_unattempted_warning, seed_rotation_verdict,
 };
 use fauna_client_pair::{LinkedNestsMachine, deployment_seed};
 use fauna_core::data::DeploymentSeedEntry;
@@ -53,16 +56,87 @@ fn identity_of(nest: &Arc<NestClient>) -> LinkedNestsMachine {
 }
 
 /// **The custody leg** over the bound nest (`fauna_client_config::
-/// run_deployment_seed_custody_leg`), logged, answering the warning the host
-/// renders through its own `LocalizedText` resolver onto its existing warning
-/// surface — `None` when nothing is owed. A bound id that does not resolve
-/// answers [`custody_leg_unattempted_warning`].
+/// run_deployment_seed_custody_leg_settling`), logged, answering the warning
+/// the host renders through its own `LocalizedText` resolver onto its
+/// existing warning surface — `None` when nothing is owed. A bound id that
+/// does not resolve answers [`custody_leg_unattempted_warning`].
+///
+/// The first run's answer only: a later retry ([`retry_on_next_connections`])
+/// that lands custody is logged, and nothing tells this caller to take the
+/// warning down. A host with a warning surface it can clear calls
+/// [`run_custody_leg_signalled`] instead; this form stays for the glue that
+/// has no channel back yet (fauna-ffi's one-shot export).
+pub async fn run_custody_leg<S>(nest: &Arc<NestClient>, store: S) -> Option<LocalizedText>
+where
+    S: DeploymentSeedStore + Send + Sync + 'static,
+{
+    let mut first = None;
+    drive_custody_leg(nest, store, |signal| first = Some(signal), Arc::new(|_| {})).await;
+    match first {
+        Some(CustodyLegSignal::Warning(warning)) => Some(warning),
+        Some(CustodyLegSignal::Cleared) | None => None,
+    }
+}
+
+/// **The custody leg**, every run's [`CustodyLegSignal`] handed to `sink` —
+/// this run's, then each retry's at a later connection of `nest` — so the
+/// host paints a warning while custody is unconfirmed and takes it down when
+/// a later run confirms it (`box-recovery.md` § The plane-era recovery
+/// floor, *(c) The writes*). The host maps [`CustodyLegSignal::Cleared`] onto
+/// clearing its warning surface only while that surface still shows a
+/// custody warning (`fauna_client_config::is_custody_leg_warning`).
 ///
 /// The host calls it at whichever of its post-auth edge and its store-ready
 /// edge lands second, and at every later post-auth edge; the steady state
 /// makes no round trip. `store` is the account-store handle, or the host's
 /// per-call resolver over it (`fauna_client_config::ResolvingLedgerStore`).
-pub async fn run_custody_leg<S>(nest: &Arc<NestClient>, store: &S) -> Option<LocalizedText>
+///
+/// **The warning's promise is kept here.** A store that refuses the write
+/// while it settles is waited out inside the run (bounded by
+/// `fauna_client_config::CUSTODY_STORE_SETTLE_WAIT`), so the first
+/// connection after provisioning confirms custody without warning. A run
+/// that still ends unconfirmed and retryable warns, and leaves a retry on
+/// every later connection of `nest` ([`retry_on_next_connections`]) — the
+/// warning's "the app tries again on the next connection", true on every
+/// host whether or not its own glue re-runs the leg at a reconnect. `sink`
+/// is called from whichever task ran the run: a host hops to its UI thread
+/// itself (a channel send).
+pub async fn run_custody_leg_signalled<S, F>(nest: &Arc<NestClient>, store: S, sink: F)
+where
+    S: DeploymentSeedStore + Send + Sync + 'static,
+    F: Fn(CustodyLegSignal) + Send + Sync + 'static,
+{
+    let sink: SignalSink = Arc::new(sink);
+    let later = Arc::clone(&sink);
+    drive_custody_leg(nest, store, move |signal| sink(signal), later).await;
+}
+
+/// Where the runs after the first send their signal.
+type SignalSink = Arc<dyn Fn(CustodyLegSignal) + Send + Sync>;
+
+/// One run, its signal to `first` — before any retry exists, so a retry's
+/// signal can never overtake it — then, after a warned retryable run, the
+/// retry at every later connection, its signals to `later`.
+async fn drive_custody_leg<S>(
+    nest: &Arc<NestClient>,
+    store: S,
+    first: impl FnOnce(CustodyLegSignal),
+    later: SignalSink,
+) where
+    S: DeploymentSeedStore + Send + Sync + 'static,
+{
+    let store = Arc::new(store);
+    let (signal, retryable) = run_custody_leg_once(nest, &*store).await;
+    let retry = retryable && matches!(signal, CustodyLegSignal::Warning(_));
+    first(signal);
+    if retry {
+        tokio::spawn(retry_on_next_connections(nest, store, later));
+    }
+}
+
+/// One logged run of the leg: the signal it owes the host, and whether a
+/// later run can land what this one did not.
+async fn run_custody_leg_once<S>(nest: &Arc<NestClient>, store: &S) -> (CustodyLegSignal, bool)
 where
     S: DeploymentSeedStore + ?Sized,
 {
@@ -71,7 +145,10 @@ where
             Ok(report) => report,
             Err(e) => {
                 tracing::warn!("deployment-seed custody leg: bound nest id unresolved: {e}");
-                return Some(custody_leg_unattempted_warning());
+                return (
+                    CustodyLegSignal::Warning(custody_leg_unattempted_warning()),
+                    true,
+                );
             }
         };
     match &report.custody {
@@ -100,7 +177,45 @@ where
         }
         _ => {}
     }
-    custody_leg_warning(&report.custody)
+    (
+        CustodyLegSignal::of(&report.custody),
+        report.custody.retryable(),
+    )
+}
+
+/// After a warned, retryable run: re-run the leg at every reconnect of
+/// `nest` until a run owes no warning or is not retryable, or the client is
+/// dropped (signed out). Holds the client only weakly between connections.
+/// Each run's signal goes to `sink`: the run that lands custody sends
+/// [`CustodyLegSignal::Cleared`], which takes down the warning the first run
+/// painted.
+fn retry_on_next_connections<S>(
+    nest: &Arc<NestClient>,
+    store: Arc<S>,
+    sink: SignalSink,
+) -> impl std::future::Future<Output = ()> + Send + 'static
+where
+    S: DeploymentSeedStore + Send + Sync + 'static,
+{
+    let mut reconnects = nest.subscribe_reconnects();
+    let nest = Arc::downgrade(nest);
+    async move {
+        loop {
+            if reconnects.changed().await.is_err() {
+                return; // The client is gone: signed out.
+            }
+            let Some(client) = nest.upgrade() else {
+                return;
+            };
+            tracing::info!("deployment-seed custody leg: retrying on this connection");
+            let (signal, retryable) = run_custody_leg_once(&client, &*store).await;
+            let done = !retryable || signal == CustodyLegSignal::Cleared;
+            sink(signal);
+            if done {
+                return;
+            }
+        }
+    }
 }
 
 /// **The plane rotation drive** behind the admin surface's rotate action.

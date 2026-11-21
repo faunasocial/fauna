@@ -37,7 +37,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
@@ -47,6 +46,9 @@ import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.shareFileBytes
 import com.fauna.app.ui.util.stringResourceFmt
@@ -58,15 +60,22 @@ import com.fauna.ffi.syncDisplayStateLabel
 import kotlinx.coroutines.launch
 import uniffi.fauna_core.SyncDisplayState
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_media_machine.FileVersionSummary
 import uniffi.fauna_media_machine.FollowedScopeOption
 import uniffi.fauna_media_machine.MediaFolderOption
+import uniffi.fauna_media_machine.shareLinkPossibility
 import uniffi.fauna_media_machine.MediaItemSummary
 import uniffi.fauna_media_machine.MediaPageSnapshot
 import uniffi.fauna_media_machine.ShareCreateSnapshot
 import uniffi.fauna_media_machine.ShareLinkSummary
 import uniffi.fauna_media_machine.ShareLinksSnapshot
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.Dialog
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * Media page (`docs/goal/ui/media.md`) — the unified cross-set **Windows-Explorer**
@@ -109,6 +118,7 @@ fun MediaScreen(
             onRestoreVersion = vm::restoreVersion,
             onDeleteItem = vm::deleteItem,
             onUndeleteVersion = vm::undeleteVersion,
+            writePossibility = vm::writePossibility,
             // media-item-detail-download-button: the shared query fetches the
             // plaintext, then android's save path — the share sheet, the same
             // one the backups single-file download uses — takes it.
@@ -172,6 +182,8 @@ fun MediaScreen(
         MediaContent(
             modifier = Modifier.padding(padding),
             snapshot = snapshot,
+            // Re-read on every snapshot tick: the machine's one upload answer.
+            uploadPossibility = remember(snapshot) { vm.uploadPossibility() },
             pickedName = pickedUri?.lastPathSegment,
             actions = MediaActions(
                 onToggleView = vm::toggleView,
@@ -275,6 +287,11 @@ data class MediaDetailActions(
     /** `file-version-undelete-button` — restore a soft-pruned version to the
      *  listable population (`file-versions.md` § Retention (3), apps row 323). */
     val onUndeleteVersion: suspend (path: String, versionNum: Long) -> Boolean = { _, _ -> false },
+    /** Whether delete and restore can succeed on an item of the set `filterValue`
+     *  names — the shared `MediaMachine::write_possibility` (media.md § Errors &
+     *  edge cases → *What this person may write*): absent in a set this person
+     *  may only read. Both controls paint from it; neither re-derives it. */
+    val writePossibility: (filterValue: String) -> Possibility = { Possibility.Possible },
     /**
      * `media-item-detail-download-button` — fetch the item's plaintext and hand it
      * to the platform save path. `latest` is the newest version row (keys the
@@ -316,6 +333,11 @@ data class ShareDetailUi(
 fun MediaContent(
     snapshot: MediaPageSnapshot?,
     actions: MediaActions,
+    /** `file-upload` / `upload-button`'s answer — the shared
+     *  `MediaMachine::upload_possibility` (media.md § Errors & edge cases →
+     *  *What this person may write*; README.md § Offer only what is possible,
+     *  rule 6). */
+    uploadPossibility: Possibility = Possibility.Possible,
     pickedName: String?,
     formatSize: (Long) -> String,
     formatDate: (Long) -> String,
@@ -345,7 +367,7 @@ fun MediaContent(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         // ── Explorer chrome ──────────────────────────────────────────────────
-        MediaToolbar(snapshot, actions, pickedName, shareActions)
+        MediaToolbar(snapshot, actions, pickedName, shareActions, uploadPossibility)
 
         // ── Items / empty state ──────────────────────────────────────────────
         // A non-lazy layout (all rows realized) so the e2e count-all over
@@ -405,6 +427,7 @@ private fun MediaToolbar(
     actions: MediaActions,
     pickedName: String?,
     shareActions: MediaShareActions,
+    upload: Possibility,
 ) {
     val grid = snapshot?.viewGrid ?: false
     val sort = snapshot?.sort ?: "name"
@@ -412,7 +435,6 @@ private fun MediaToolbar(
     val filterLabel = snapshot?.filterLabel
     val options = snapshot?.folderOptions.orEmpty()
     val followed = snapshot?.followed.orEmpty()
-    val followedScope = snapshot?.followedScope
 
     // Row 1: view toggle + sort select.
     Row(
@@ -442,10 +464,12 @@ private fun MediaToolbar(
         modifier = Modifier.testTag(Ids.SHARE_LINK_LIST_BUTTON),
     ) { Text(stringResource(R.string.share_link_list_button)) }
 
-    // Row 3: file picker + upload into the selected set. A followed scope is
-    // read-only, structurally — the row leaves the tree rather than disabling
-    // (media.md § Followed public folders; linux/apple/windows do the same).
-    if (followedScope == null) Row(
+    // Row 3: file picker + upload into the selected set, painted from the
+    // machine's one answer: absent in a followed scope (read-only, structurally
+    // — the row leaves the tree, media.md § Followed public folders), disabled
+    // with its reason before the first read and on a reader's or metadata-only
+    // target (media.md § Errors & edge cases → *What this person may write*).
+    if (upload.isShown) Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -473,6 +497,7 @@ private fun MediaToolbar(
         }
         IconButton(
             onClick = actions.onPickFile,
+            enabled = upload.isPossible,
             modifier = Modifier.testTag(Ids.FILE_UPLOAD),
         ) {
             Icon(Icons.Default.AttachFile, contentDescription = stringResource(R.string.media_choose_file))
@@ -485,15 +510,18 @@ private fun MediaToolbar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        // Always enabled: pressed with nothing picked, the caller surfaces
-        // `media.file_required` (media.md § User actions — the empty-path guard).
+        // Live whenever the upload is possible, nothing picked included:
+        // pressed with nothing picked, the caller surfaces `media.file_required`
+        // (media.md § User actions — the empty-path guard).
         Button(
             onClick = actions.onUpload,
+            enabled = upload.isPossible,
             modifier = Modifier.testTag(Ids.UPLOAD_BUTTON),
         ) {
             Text(stringResource(R.string.media_upload))
         }
     }
+    if (upload.isShown) DisabledControlReasonText(localized(upload.blockedReason))
 }
 
 @Composable
@@ -676,6 +704,9 @@ private fun MediaItemDetail(
     // A followed item is head-only (media.md § Followed public folders): no
     // version read, history, recovery browse, restore or delete — download alone.
     val followed = followedScope != null
+    // Whether this person may write into the item's set — the machine's one
+    // answer for delete and every row's restore; a followed item is head-only.
+    val write = if (followed) Possibility.Absent else detailActions.writePossibility(item.filterValue)
     // The download's own status line: a failure lands here, not on the page
     // banner the modal hides (linux `download_to`'s reasoning).
     var downloadError by remember(item.folder, item.path) { mutableStateOf<String?>(null) }
@@ -738,6 +769,7 @@ private fun MediaItemDetail(
                                     author = detailActions.versionAuthor(version),
                                     formatSize = formatSize,
                                     formatTimestamp = formatVersionTimestamp,
+                                    restore = write,
                                     onRestore = { restoreTarget = version },
                                     onUndelete = {
                                         scope.launch {
@@ -774,16 +806,25 @@ private fun MediaItemDetail(
                     // share-link-button — present ONLY on an eligible file (a
                     // public-audience folder), absent otherwise, never inert; the
                     // verdict is the machine's (`share-links.md` § Which files
-                    // can be linked).
-                    if (!followed && item.shareLinkEligible && share.create == null) {
+                    // can be linked), painted from its shared answer
+                    // `share_link_possibility` (absent → not composed).
+                    val shareLink = shareLinkPossibility(item.shareLinkEligible)
+                    if (!followed && shareLink.isShown && share.create == null) {
                         TextButton(
-                            onClick = { share.actions.onOpenCreate(item.folder, item.path) },
+                            onClick = {
+                                if (shareLinkPossibility(item.shareLinkEligible).isPossible) {
+                                    share.actions.onOpenCreate(item.folder, item.path)
+                                }
+                            },
+                            enabled = shareLink.isPossible,
                             modifier = Modifier.testTag(Ids.SHARE_LINK_BUTTON),
                         ) { Text(stringResource(R.string.share_link_button)) }
+                        DisabledControlReasonText(localized(shareLink.blockedReason))
                     }
-                    if (!followed) {
+                    if (write.isShown) {
                         TextButton(
                             onClick = { showDeleteConfirm = true },
+                            enabled = write.isPossible,
                             modifier = Modifier.testTag(Ids.MEDIA_DELETE_BUTTON),
                         ) { Text(stringResource(R.string.media_file_detail_delete_file)) }
                     }
@@ -1097,6 +1138,7 @@ private fun FileVersionRow(
     author: LocalizedText?,
     formatSize: (Long) -> String,
     formatTimestamp: (Long) -> String,
+    restore: Possibility,
     onRestore: () -> Unit,
     onUndelete: () -> Unit,
 ) {
@@ -1141,10 +1183,13 @@ private fun FileVersionRow(
                 modifier = Modifier.testTag(Ids.FILE_VERSION_UNDELETE_BUTTON),
             ) { Text(stringResource(R.string.media_version_undelete)) }
         }
-        TextButton(
-            onClick = onRestore,
-            modifier = Modifier.testTag(Ids.FILE_VERSION_RESTORE_BUTTON),
-        ) { Text(stringResource(R.string.media_version_restore)) }
+        if (restore.isShown) {
+            TextButton(
+                onClick = onRestore,
+                enabled = restore.isPossible,
+                modifier = Modifier.testTag(Ids.FILE_VERSION_RESTORE_BUTTON),
+            ) { Text(stringResource(R.string.media_version_restore)) }
+        }
     }
 }
 

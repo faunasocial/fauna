@@ -30,7 +30,10 @@ import com.fauna.app.core.E2eProviderOverride
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.SessionAccount
 import com.fauna.app.core.UrlOpener
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.rememberCopyToClipboard
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.resolveLocalizedNested
@@ -47,6 +50,10 @@ import com.fauna.ffi.onboarding.retireStepStatus
 import com.fauna.ffi.provisioning.StepStatus
 import com.fauna.ffi.retireHeldInputs
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.URI
+import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,10 +65,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import social.fauna.generated.Capability
 import social.fauna.generated.Ids
 import social.fauna.generated.PROVIDERS
-import java.net.Inet4Address
-import java.net.InetAddress
-import java.net.URI
-import javax.inject.Inject
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.FilledTonalButton
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /** Which surface opened the page (`nest-retirement.md` § Layout & flow). */
 enum class RetireEntry { Launch, Admin }
@@ -421,6 +428,7 @@ private fun CredentialsState(
         Spacer(Modifier.height(8.dp))
         val fields: List<FieldMetaPlain> = remember(tick) { m.visibleFields() }
         val hostedFields = fields.filter { it.fieldType == FieldTypePlain.HOSTED_AUTH }
+        val verifyAnswer = remember(tick) { m.verifyPossibility() }
         CredentialsForm(
             fields = fields,
             creds = vm.creds,
@@ -428,19 +436,22 @@ private fun CredentialsState(
             enabled = !listing,
             onChange = { id, v -> vm.setCred(id, v) },
             hostedAuthLabels = hostedFields.associate { it.id to m.hostedAuthButtonText(it.id) },
-            hostedAuthEnabled = hostedFields.associate { it.id to m.hostedAuthCanBegin(it.id) },
+            hostedAuth = hostedFields.associate { it.id to m.hostedAuthPossibility(it.id) },
             onHostedAuthClick = { fieldId -> vm.hostedAuth(fieldId) { url -> UrlOpener.open(ctx, url) } },
         )
         Spacer(Modifier.height(8.dp))
         Button(
             onClick = { vm.verify() },
-            enabled = m.canVerify() && !listing,
+            // The machine's answer alone decides, the listing in flight
+            // included (it answers blocked "checking" then).
+            enabled = verifyAnswer.isPossible,
             modifier = Modifier.testTag(Ids.VPS_VERIFY_BUTTON),
         ) {
             if (listing) {
                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
             } else Text(stringResource(R.string.provisioning_verify_credentials))
         }
+        DisabledControlReasonText(localized(verifyAnswer.blockedReason))
     }
     BackButton(onBack)
 }

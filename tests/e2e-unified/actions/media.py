@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from drivers.http_bridge import SelectOptionNotOffered
 from i18n.strings import S
@@ -39,6 +39,13 @@ _TUI_HALF_BLOCK = "▀"
 #: socket on its own schedule, then the page must re-read. Generous on purpose
 #: (convention 14): a green run returns on the first matching read.
 SOURCE_STATUS_BUDGET_S = 60.0
+
+#: Ceiling for a selected foreign scope's one relayed listing to land on the
+#: page before :meth:`MediaActions.foreign_scope_until` gives the round up and
+#: its caller re-enters (convention 14: a green read returns at once). Long
+#: enough that a re-entering poll stays far under the home nest's per-peer
+#: federation budget of 30 page reads a minute.
+FOREIGN_SCOPE_LAND_S = 20.0
 
 
 class MediaActions:
@@ -84,6 +91,56 @@ class MediaActions:
             self.driver.click("media-item-detail-close-button")
         self.driver.navigate_to("feed")
         self.driver.navigate_to("media")
+
+    def foreign_scope_names(
+        self, value: str, expect: str, *, land_timeout: float = FOREIGN_SCOPE_LAND_S
+    ) -> list[str] | None:
+        """Re-enter Media, select the foreign scope ``value`` and return the
+        names it lists once ``expect`` is among them — ``None`` when it is not
+        within ``land_timeout`` (or the page never loaded), for an outer
+        deadline poll to re-enter and ask again. The waiting is
+        :meth:`foreign_scope_until`'s."""
+        return self.foreign_scope_until(
+            value, lambda names: expect in names, land_timeout=land_timeout
+        )
+
+    def foreign_scope_until(
+        self,
+        value: str,
+        landed: Callable[[list[str]], bool],
+        *,
+        land_timeout: float = FOREIGN_SCOPE_LAND_S,
+    ) -> list[str] | None:
+        """Re-enter Media, select the foreign scope ``value`` and return the
+        names it lists once ``landed(names)`` holds — ``None`` when it does not
+        within ``land_timeout`` (or the page never loaded), for an outer
+        deadline poll to re-enter and ask again.
+
+        Why the inner wait: selecting a foreign scope fires ONE relayed
+        listing on demand (``ui/media.md`` § Cross-nest shared sets — the
+        foreign browse scope). tui's agent awaits it, but a GUI app's select
+        returns at once and the listing lands later, while ``wait_for_loaded``
+        is already true from the aggregate read. And the macOS page is
+        recreated on every sidebar navigation (``MediaSplitView``), so a
+        re-enter starts a fresh machine that has lost the scope. A poll that
+        reads straight after the select and then re-enters never sees the
+        listing, and each round spends two more relayed page reads against the
+        home nest's per-peer federation budget (30 a minute), which trips
+        ``fauna.protocol.rate_limited`` within a minute.
+        So read the scope here until it has landed, re-entering only when this
+        wait gives up."""
+        self.reenter()
+        self.set_filter(value)
+        if not self.wait_for_loaded():
+            return None
+        deadline = time.monotonic() + land_timeout
+        while True:
+            names = self.item_names()
+            if landed(names):
+                return names
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.5)
 
     # ── Explorer chrome ──────────────────────────────────────────────────
 
@@ -516,7 +573,7 @@ class MediaActions:
         so we set the file on the input (Playwright ``set_input_files``) rather than
         typing it (platform branch lives in the action layer, never the test).
         ``upload-button`` runs the shared ``MediaMachine::upload_selected`` gesture —
-        resolve the target set (or the ``media.error_no_set`` policy), seal under the
+        resolve the target set (making a folderless account's first folder), seal under the
         owner BackupKey, POST the blob, record the manifest member, then refresh.
         ``path`` is a local filesystem path.
 

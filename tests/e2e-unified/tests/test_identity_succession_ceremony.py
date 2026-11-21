@@ -669,8 +669,12 @@ def test_a_real_member_re_points_the_succeeded_participant_on_their_own_client(
     """
     from tests.test_fauna_mls_cross_device_sync import _wait_thread_snippet
 
-    alice, alice_user = succeedable_app
+    # alice is the member fixture's `owner_app`, not `succeedable_app`'s app:
+    # on android the phone plays bob (the member, this test's subject) and
+    # alice signs in on a tui seat of her own identity.
+    _, alice_user = succeedable_app
     bob, bob_actor = succession_member_app
+    alice = succession_member_app.owner_app
     old_actor = alice_user["actor_id_hex"]
 
     # Skip-gate FIRST (before any nest-side setup): an app without the

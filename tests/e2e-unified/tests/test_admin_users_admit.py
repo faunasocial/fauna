@@ -40,6 +40,7 @@ from nacl.signing import SigningKey
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from common.auth import mint_token_via_handshake
 from conftest import MAIL_PRIMARY_DOMAIN
+from helpers.draft_validity import refused_before_or_at_the_press
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
@@ -263,17 +264,16 @@ def test_a_mistyped_person_id_is_caught_on_the_page_and_nothing_is_sent(admin_ap
     typo = actor_hex[:-1] + "g"
 
     admin_app.admin.navigate_users()
-    admin_app.admin.admit_user(typo, handle=f"typo-{actor_hex[:10]}", tier="free")
+    admin_app.admin.fill_admit_form(typo, handle=f"typo-{actor_hex[:10]}", tier="free")
 
     hint = S.admin.users_page.admit_actor_hint
-    last: list = []
-    shown = _poll(time.time() + ADMIT_BUDGET_S,
-                  lambda: admin_app.admin.users_action_error_text() == hint, last)
-    assert shown, (
-        f"a mistyped id must be caught on the page with {hint!r}; the page shows "
-        f"{admin_app.admin.users_action_error_text()!r} (global banner: "
-        f"{admin_app.error_text()!r}; last probe error: {last!r})"
-    )
+    # Painted blocked on an app that has built the form case (never pressed),
+    # refused at the press with the hint elsewhere (`admin.md` § Errors & edge
+    # cases → *A form's submit is live only for a draft the nest would accept*).
+    refused_before_or_at_the_press(
+        admin_app, submit_id="admin-users-admit-button",
+        press=admin_app.admin.press_admit, reason=hint,
+        error_id="admin-users-action-error", timeout=ADMIT_BUDGET_S)
     assert not admin_app.has_error(), (
         f"the hint belongs on the Users page's own line, not the global banner: "
         f"{admin_app.error_text()!r}"

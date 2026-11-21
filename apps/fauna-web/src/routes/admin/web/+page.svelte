@@ -14,14 +14,24 @@
   // *Which accounts a picker offers*); the current designation + set/clear
   // ride the shared `WebClient` over the singleton WS-RPC client (the
   // `webGet/SetApexActor` calls in `#lib/rpc`, the WASM twin of the linux native
-  // `WebClient` + `fauna-ffi`'s `FfiWebClient`). The apex URL hint is the shared
-  // `webApexUrl` projection (`fauna_core::web::apex_url`), one source of truth with
-  // the nest's routing (priority #2). Per-user subdomain hosting is the user
+  // `WebClient` + `fauna-ffi`'s `FfiWebClient`). The apex info line is the shared
+  // `webApexInfoText` (`fauna_client_web::apex_info_text`): where the apex
+  // serves, or why there is no address — never `https:///` (admin.md § 7 Web).
+  // The picker paints from the read's own answer (`readPossibility`): blocked
+  // before the read lands and after a failed apex read. Per-user subdomain hosting is the user
   // `web-settings` page, not here. Lifts the linux lead
   // (apps/fauna-linux/src/settings/admin_web.rs). IDs: ui.yaml § admin-web.
   import { identity } from '#lib/store';
   import { webGetApexActor, webSetApexActor, webServingDomain, adminUsersListAll } from '#lib/rpc';
-  import { ensureWasm, webApexUrl, hexFull, adminPickerOption } from '#lib/wasm';
+  import {
+    ensureWasm,
+    webApexInfoText,
+    hexFull,
+    adminPickerOption,
+    readPossibility,
+  } from '#lib/wasm';
+  import { paintPossibility } from '#lib/possibility';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { toBytes, actorHex } from '#lib/hex';
   import { onMount } from 'svelte';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
@@ -31,7 +41,10 @@
   interface ActorOption { id: Uint8Array; label: string; hex: string }
 
   let error = $state('');
-  let loading = $state(true);
+  // Where the apex-designation read stands (rule 5): the picker is not enabled
+  // before it resolves, nor after it failed.
+  let readState = $state<'pending' | 'failed' | 'resolved'>('pending');
+  let wasmReady = $state(false);
   // The current nest-wide apex designation (`null` ⇒ the built-in info page) +
   // the pickable deployment actors. Both set only from nest-confirmed reads.
   let current: Uint8Array | null = $state(null);
@@ -71,21 +84,37 @@
   // The nest's own `web_serving_domain` (`fauna.nest.info`, via the shared
   // `WebClient::serving_domain`) — never the sign-in/handle domain, which can be
   // a placeholder or differ from the address the nest actually serves at
-  // (admin.md § 7). Empty until read; `webApexUrl('')` renders the no-domain form.
+  // (admin.md § 7). Empty until read; the info line then explains the nest
+  // has no web address rather than composing one.
   let servingDomain = $state('');
-  let apexUrl = $derived(webApexUrl(servingDomain));
+  let apexInfo = $derived(wasmReady ? resolveLocalized(webApexInfoText(servingDomain)) : '');
+  // The picker's answer: the read alone decides (blocked while pending or
+  // failed). Before wasm loads it is shown disabled, never enabled on a guess.
+  let pickerAnswer = $derived(
+    wasmReady
+      ? paintPossibility(readPossibility(readState))
+      : { shown: true, disabled: true, reason: null },
+  );
 
-  // Fetch the current apex + the actor list, then rebuild the picker.
+  // Fetch the current apex + the actor list, then rebuild the picker. The
+  // account list and the serving domain degrade rather than blank the page —
+  // the designation the admin came to set still shows — but neither failure is
+  // silent: each reaches `error-message` (`docs/goal/ui/README.md` § Offer only
+  // what is possible, rule 7; admin.md § 7 Web).
   async function load(): Promise<void> {
     const secretHex = $identity?.secretHex ?? '';
-    current = await webGetApexActor(secretHex);
+    try {
+      current = await webGetApexActor(secretHex);
+    } catch (e) {
+      readState = 'failed';
+      throw e;
+    }
+    const failures: string[] = [];
     try {
       servingDomain = await webServingDomain(secretHex);
-    } catch {
-      // Non-fatal: the hint stays in its no-domain form.
+    } catch (e) {
+      failures.push(`load web serving domain: ${e instanceof Error ? e.message : String(e)}`);
     }
-    // A failed actor-list read must not break the page — the picker degrades to
-    // "None" + any current designation kept visible.
     try {
       // Every account on the nest, never one page (admin.md § 2 → *Which
       // accounts a picker offers*). Option text is `adminPickerOption` (the
@@ -97,25 +126,32 @@
         label: adminPickerOption(u),
         hex: actorHex(u.actor_id),
       }));
-    } catch {
-      // Non-fatal: the picker just can't offer new actors yet.
+    } catch (e) {
+      failures.push(`load accounts: ${e instanceof Error ? e.message : String(e)}`);
     }
+    readState = 'resolved';
+    if (failures.length > 0) error = failures.join('; ');
   }
 
   onMount(async () => {
     try {
       await ensureWasm();
+      wasmReady = true;
       await load();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-    } finally {
-      loading = false;
     }
   });
 
   // Designate (or clear, when `actorId` is null) the apex actor, then re-read so
   // the snapshot reflects the nest-confirmed designation.
   async function setApex(actorId: Uint8Array | null): Promise<void> {
+    // The pick asks the same answer the picker paints from, and a refusal
+    // says why (rules 6 and 7).
+    if (pickerAnswer.disabled) {
+      if (pickerAnswer.reason) error = resolveLocalized(pickerAnswer.reason);
+      return;
+    }
     error = '';
     try {
       await webSetApexActor($identity?.secretHex ?? '', actorId);
@@ -138,14 +174,18 @@
     class="apex-select"
     data-testid={IDS.ADMIN_WEB_APEX_ACTOR_SELECT}
     value={apex.selected}
-    disabled={loading}
+    disabled={pickerAnswer.disabled}
     onchange={(e) => setApex(apex.ids[(e.currentTarget as HTMLSelectElement).selectedIndex])}
   >
     {#each apex.options as opt}<option value={opt}>{opt}</option>{/each}
   </select>
 </div>
+{#if pickerAnswer.reason}
+  <!-- The picker's blocked reason, within eyeshot (rule 2). -->
+  <p class="muted small">{resolveLocalized(pickerAnswer.reason)}</p>
+{/if}
 
-<p class="muted small" data-testid={IDS.ADMIN_WEB_APEX_INFO}>{t.admin.web_page.apex_info({ url: apexUrl })}</p>
+<p class="muted small" data-testid={IDS.ADMIN_WEB_APEX_INFO}>{apexInfo}</p>
 
 <style>
   h1 { margin-bottom: 0.75rem; font-size: 1.25rem; }

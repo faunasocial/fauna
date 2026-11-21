@@ -9,7 +9,7 @@
     {
       "id": "web",
       "label": "Web app",
-      "channel": "Served by each nest at its own address under /app/ by default, and later also from the project's own address for the app, which serves the app's code and holds nothing of yours.",
+      "channel": "Served by each nest at its own address under /app/ by default.",
       "identities": [
         {
           "kind": "front-door-app-host",
@@ -196,7 +196,7 @@
     {
       "id": "linux",
       "label": "Linux",
-      "channel": "The Linux app as a single program file, one for x64 and one for arm64, published with the pre-releases and releases; no desktop packages yet, and not on Flathub.",
+      "channel": "The Linux app as an archive with an install script, one for x64 and one for arm64, each carrying the app and its sync agent, published with the pre-releases and releases; no desktop packages yet, and not on Flathub.",
       "identities": [
         {
           "kind": "linux-app-id",

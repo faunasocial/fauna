@@ -6,6 +6,7 @@ import { hexToBytes } from './hex';
 import { sharedAccountPort } from './account-runtime';
 import { nodeUrl } from './api';
 import { localTimestamp } from './value-format';
+import type { Possibility } from './form-gate';
 
 // Re-export so route/component files consume the machine type via
 // `#lib/wasm-connected-apps` rather than a fragile relative path into
@@ -140,6 +141,20 @@ export function composeRequestInstall(card: ConsentCardRow): InstallSectionText 
   return JSON.parse(wasm().requestInstallTextJson(JSON.stringify(card))) as InstallSectionText | null;
 }
 
+/** `connected-apps-connect-submit` and the code input's Enter: the shared
+ *  `connect_code_possibility` — asked before the lookup, so a blank code is
+ *  never sent (`docs/goal/ui/connected-apps.md` § Errors & edge cases). */
+export function connectCodePossibility(code: string): Possibility {
+  return JSON.parse(wasm().connectCodePossibilityJson(code)) as Possibility;
+}
+
+/** `connected-apps-request-approve`: the card's shared
+ *  `ConsentCardRow::approve_possibility` — a folder card approves once a folder
+ *  is chosen. */
+export function requestApprovePossibility(card: ConsentCardRow): Possibility {
+  return JSON.parse(wasm().requestApprovePossibilityJson(JSON.stringify(card))) as Possibility;
+}
+
 /** What the install section's multi-line leaves put between their lines. */
 export function lineSeparator(): string {
   return wasm().lineSeparator();
@@ -202,7 +217,14 @@ export interface ConnectedAppRow {
   trust?: PrincipalTrust | null;
 }
 
-export type TrustScopeTuple = { class: string; kind: string | null; tier: string | null };
+/** One scope tuple (`fauna_client_pair::TrustScope`); `folder` names a
+ *  keyless `deposit` tuple's folder, absent on every other tuple. */
+export type TrustScopeTuple = {
+  class: string;
+  kind: string | null;
+  tier: string | null;
+  folder?: TrustFolderRef | null;
+};
 /** The folder a folder read grant covers (`fauna_client_pair::TrustFolder`). */
 export type TrustFolderRef = { Named: { name: string } } | 'Deleted';
 

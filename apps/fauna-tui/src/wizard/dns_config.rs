@@ -23,7 +23,7 @@
 //! | Show the registrar notes line? | `should_show_registrar_notes()` |
 //! | Show the "no registrar carries .tld" line? | `should_show_no_provider_message()` |
 //! | What does the status line say? | `dns_status_text_key()` |
-//! | Can we verify / continue? | `can_verify_dns()` / `can_continue_dns()` |
+//! | Can we verify / continue? | `verify_dns_possibility()` / `can_continue_dns()` |
 //!
 //! (Section anchors, not line numbers, on purpose: this header's former
 //! `onboarding.md:NNN` citations had all rotted past their claims as the doc
@@ -200,12 +200,15 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
             );
         }
 
-        out.push(Element::button(
-            ids::DNS_VERIFY_BUTTON,
-            fauna_i18n::strings::provisioning::VERIFY_CREDENTIALS,
-            m.can_verify_dns(),
-            Action::VerifyDns,
-        ));
+        out.push(
+            Element::button(
+                ids::DNS_VERIFY_BUTTON,
+                fauna_i18n::strings::provisioning::VERIFY_CREDENTIALS,
+                true,
+                Action::VerifyDns,
+            )
+            .possible(m.verify_dns_possibility()),
+        );
     }
 
     // Also the provider group's `explains-unset` line (walk.rs I5): at entry no
@@ -272,12 +275,18 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         true,
         Action::Back,
     ));
-    out.push(Element::button(
-        ids::DNS_CONFIG_CONTINUE_BUTTON,
-        common::CONTINUE,
-        m.can_continue_dns(),
-        Action::ContinueFromDns,
-    ));
+    // Enabled is the seam's to decide (`ui/README.md` § Offer only what is
+    // possible, rule 6): the machine's answer, blocked by the status line the
+    // page already paints.
+    out.push(
+        Element::button(
+            ids::DNS_CONFIG_CONTINUE_BUTTON,
+            common::CONTINUE,
+            true,
+            Action::ContinueFromDns,
+        )
+        .possible(m.dns_continue_possibility()),
+    );
     out
 }
 
@@ -377,7 +386,7 @@ mod tests {
             els.iter()
                 .find(|e| e.id == "dns-config-continue-button")
                 .expect("continue")
-                .enabled
+                .offered()
         };
 
         let els = app.wizard.elements();

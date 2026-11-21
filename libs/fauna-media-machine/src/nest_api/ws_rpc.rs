@@ -2386,6 +2386,7 @@ mod tests {
                     }
                     fauna_protocol::encode_canonical(&SyncChangeRecordReply {
                         seq: 1,
+                        prev_set_seq: None,
                         extra: Default::default(),
                     })
                     .expect("encode record reply")

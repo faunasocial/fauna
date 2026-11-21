@@ -27,13 +27,20 @@ import secrets
 import zipfile
 
 import pytest
+from helpers.use_case_walk import assert_use_case_walked
 
 pytestmark = pytest.mark.tier_3
 
 
+@pytest.mark.use_case("export-my-data")
 @pytest.mark.feature("export-my-data")
 def test_export_button_delivers_a_wellformed_archive(logged_in_app):
     app = logged_in_app
+    # The use case starts on the feed (use-cases.yaml) and reaches the Account
+    # page by its clicks: the settings tab, then the Account rail row.
+    app.feed.navigate()
+    app.settings.open_rail_row_by_click("account-settings-link",
+                                        "settings-export-data-button")
     data = app.settings.export_my_data()
 
     # Convention 6: put the page's own error text in the failure message —
@@ -51,6 +58,7 @@ def test_export_button_delivers_a_wellformed_archive(logged_in_app):
         f"archive carries no export/manifest.json; first entries: "
         f"{sorted(names)[:20]}; error-message: {err!r}"
     )
+    assert_use_case_walked(logged_in_app.driver, "export-my-data")
 
 
 @pytest.mark.feature("export-my-data")

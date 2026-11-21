@@ -76,14 +76,6 @@ public struct WebSettingsView: View {
                         get: { webPublish.view?.enabled ?? false },
                         set: { on in Task { await webPublish.setSubdomainEnabled(on) } }
                     ))
-                    // Live only once the page has hydrated: before that there is
-                    // no nest-confirmed state to flip from and no client to send
-                    // the write on, so a flip would be dropped and the hydrate
-                    // landing after it would paint OFF over the user's gesture
-                    // (tui's `ToggleWebSubdomain` refuses an un-hydrated flip the
-                    // same way). Disabled, the early click is refused loudly
-                    // instead — the driver's 409, the user's greyed switch.
-                    .disabled(!webPublish.isHydrated)
                     .accessibilityIdentifier(Ids.webSettingsSubdomainToggle)
                     // In-process driver: one Entry so `/element/click` flips the
                     // opt-in and `/element/attr?attr=state` reads the cross-app
@@ -93,15 +85,20 @@ public struct WebSettingsView: View {
                     // toggle's own state is the round-trip proof the test asserts.
                     .automationActivate(
                         Ids.webSettingsSubdomainToggle,
-                        // Mirrors the `.disabled` above by hand: it sits INSIDE
-                        // this modifier, so the inherited-enabled fold cannot see it.
-                        isEnabled: { webPublish.isHydrated },
                         value: { (webPublish.view?.enabled ?? false) ? "on" : "off" }
                     ) { Task { await webPublish.setSubdomainEnabled(!(webPublish.view?.enabled ?? false)) } }
                     // A dispatch-on-change toggle whose value is deliberately
                     // non-optimistic: it only flips once the nest round-trips, so
                     // with no nest it could never move — the gate says why.
                     .faunaGate("fauna.web.set_subdomain_enabled")
+                    // The shared answer (`web-content-hosting.md` § Published-post
+                    // management, the toggle ruling): not enabled before the read
+                    // resolves, switching ON absent with no serving domain and
+                    // blocked with the step on no or a reserved handle, switching
+                    // OFF always possible. Outside the `automation*` modifier so
+                    // the registry folds the same enabled-ness.
+                    .faunaPossible(webPublish.subdomainToggleAnswer)
+                    FaunaPossibilityReason(webPublish.subdomainToggleAnswer)
 
                     Text(L.webSettings.subdomainToggleSubtitle)
                         .font(.caption)
@@ -207,11 +204,7 @@ public struct WebSettingsView: View {
                     // Why the copy buttons below are dead, in the user's own
                     // terms. Placed above the rows so it reads as a statement
                     // about the section, not about whichever row is last.
-                    if webPublish.siteLink.origin == nil {
-                        Text(Self.disabledReasonText(webPublish.siteLink.disabledReason))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+                    FaunaPossibilityReason(webPublish.copyLinkAnswer)
                     // The row container — the landmark
                     // `wait_for_published_posts_section` waits on alongside
                     // the empty state (a separate id from it, mirroring tui's
@@ -232,6 +225,7 @@ public struct WebSettingsView: View {
     @ViewBuilder
     private func publishedPostRow(_ post: FfiPublishedPost, index: Int) -> some View {
         let origin = webPublish.siteLink.origin
+        let copyAnswer = webPublish.copyLinkAnswer
         VStack(alignment: .leading, spacing: 4) {
             automationText(Ids.webPublishedPostSlug, post.slug)
                 .font(.callout.monospaced())
@@ -242,13 +236,12 @@ public struct WebSettingsView: View {
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
-                .disabled(origin == nil)
                 .accessibilityIdentifier(Ids.webPublishedPostCopyLinkButton)
                 .automationActivate(
                     Ids.webPublishedPostCopyLinkButton,
-                    isEnabled: { origin != nil },
                     value: { copiedLinks[post.postId] }
                 ) { copyWebLink(post, origin: origin) }
+                .faunaPossible(copyAnswer)
 
                 // Gated rows only: an ungated post has no paywalled body to
                 // hand out, so the affordance would mint a token for nothing.
@@ -258,17 +251,16 @@ public struct WebSettingsView: View {
                     }
                     .buttonStyle(.borderless)
                     .font(.caption)
-                    .disabled(origin == nil)
                     .accessibilityIdentifier(Ids.webPublishedPostCopyPaywallLinkButton)
                     .automationActivate(
                         Ids.webPublishedPostCopyPaywallLinkButton,
-                        isEnabled: { origin != nil },
                         value: { copiedLinks[post.postId] }
                     ) { Task { await copyPaywallLink(post) } }
                     // The plain link copy and the unpublish beside it stay live
                     // (a resolved URL, and an `OfflineSafe` takedown); only the
                     // token MINT needs the nest.
                     .faunaGate("fauna.web.paywall.mint_token")
+                    .faunaPossible(copyAnswer)
                 }
 
                 // Always live: a takedown needs no serving origin, and it is
@@ -306,6 +298,7 @@ public struct WebSettingsView: View {
     /// and this refuses independently rather than trusting the paint (a dead
     /// link on the clipboard is worse than no copy).
     private func copyWebLink(_ post: FfiPublishedPost, origin: String?) {
+        if webPublish.refuseCopy() { return }
         guard let origin else { return }
         let url = webPostPageUrl(origin: origin, slug: post.slug)
         Pasteboard.copy(url)
@@ -316,6 +309,7 @@ public struct WebSettingsView: View {
     /// re-minting is free, so re-copying always yields a link that works from
     /// now, never a cached one that already expired.
     private func copyPaywallLink(_ post: FfiPublishedPost) async {
+        if webPublish.refuseCopy() { return }
         guard let origin = webPublish.siteLink.origin else { return }
         let minted = await Self.mintPaywallLink(store: webPublish, origin: origin) {
             try await webPublish.mintPaywallLink(slug: post.slug)
@@ -368,17 +362,6 @@ public struct WebSettingsView: View {
             store.landActionFailure(
                 generation: generation, message: L.webPublish.errorUnpublish(message: text))
         }
-    }
-
-    /// The human-readable "your posts have no public address, and here's why"
-    /// line for a `SiteLinkView` with no origin — this section's own wording
-    /// (the feed ⋯-menu names a different, menu-appropriate reason instead,
-    /// since it cannot point at "the toggle above" from a different page).
-    /// Delegates to the shared `fauna_client_web::disabled_reason_text`
-    /// decision (linux/tui's own door) via `webDisabledReasonText` rather than
-    /// re-deriving the key mapping by hand.
-    private static func disabledReasonText(_ reason: SiteLinkDisabledReason?) -> String {
-        renderLocalizedText(webDisabledReasonText(reason: reason))
     }
 }
 

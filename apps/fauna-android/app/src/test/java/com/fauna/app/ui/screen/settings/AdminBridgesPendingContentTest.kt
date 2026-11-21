@@ -3,6 +3,7 @@ package com.fauna.app.ui.screen.settings
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import org.junit.Assert.assertEquals
+import uniffi.fauna_core.Possibility
 import org.junit.Assert.assertNull
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -74,6 +75,9 @@ class AdminBridgesPendingContentTest {
         onApprove: (String, String) -> Unit = { _, _ -> },
         onConfirm: (BridgeConfirm?) -> Unit = {},
         formatTimestamp: (Long) -> String = { ms -> "ts:$ms" },
+        listRead: Possibility = Possibility.Possible,
+        confirmAnswer: Possibility = Possibility.Possible,
+        onRefused: (String) -> Unit = {},
     ) {
         composeTestRule.setContent {
             var armed by remember { mutableStateOf<BridgeConfirm?>(null) }
@@ -92,6 +96,9 @@ class AdminBridgesPendingContentTest {
                     armed = null
                 },
                 formatTimestamp = formatTimestamp,
+                listRead = listRead,
+                confirmAnswer = confirmAnswer,
+                onRefused = onRefused,
             )
         }
     }
@@ -227,5 +234,54 @@ class AdminBridgesPendingContentTest {
         composeTestRule.onNodeWithTag("admin-bridges-approved-rotate-button").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("admin-bridges-rotate-confirm-button").performScrollTo().performClick()
         assertEquals(BridgeConfirm.Rotate(pubkeyHex = "cafe"), rotated)
+    }
+
+
+    // ── Controls wait for their read (admin.md § Errors & edge cases) ──
+
+    private fun str(id: Int) = org.robolectric.RuntimeEnvironment.getApplication().getString(id)
+
+    @Test
+    fun sectionsSayLoadingUntilTheListRead() {
+        render(listRead = ReadGateFakes.stillLoading)
+        composeTestRule.onNodeWithTag("admin-bridges-pending-section")
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+        composeTestRule.onNodeWithTag("admin-bridges-approved-section")
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+        // An unread list is not an empty one.
+        composeTestRule.onNodeWithText(str(com.fauna.app.R.string.admin_bridges_pending_empty)).assertDoesNotExist()
+        composeTestRule.onNodeWithText(str(com.fauna.app.R.string.admin_bridges_pending_approved_empty)).assertDoesNotExist()
+    }
+
+    @Test
+    fun sectionsSayFailedAfterAFailedRead() {
+        render(listRead = ReadGateFakes.loadFailed)
+        composeTestRule.onNodeWithTag("admin-bridges-pending-section")
+            .assertPaintedReason(ReadGateFakes.loadFailedText)
+        composeTestRule.onNodeWithText(str(com.fauna.app.R.string.admin_bridges_pending_empty)).assertDoesNotExist()
+    }
+
+    @Test
+    fun readSectionsPublishNoReasonAndPaintTheEmptyText() {
+        render(listRead = Possibility.Possible)
+        composeTestRule.onNodeWithTag("admin-bridges-pending-section").assertNoPaintedReason()
+        composeTestRule.onNodeWithText(str(com.fauna.app.R.string.admin_bridges_pending_empty)).assertExists()
+        composeTestRule.onNodeWithText(str(com.fauna.app.R.string.admin_bridges_pending_approved_empty)).assertExists()
+    }
+
+    @Test
+    fun openConfirmNotLiveWhileItsActIsInFlight() {
+        var confirmed = false
+        render(
+            pending = listOf(bridge(pubkey = "aa")),
+            confirmAnswer = ReadGateFakes.inFlight,
+            onConfirm = { confirmed = true },
+        )
+        composeTestRule.onNodeWithTag("admin-bridges-pending-reject-button").performClick()
+        composeTestRule.onNodeWithTag("admin-bridges-reject-confirm-button")
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.inFlightText)
+            .performClick()
+        assertEquals(false, confirmed)
     }
 }

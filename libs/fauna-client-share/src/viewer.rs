@@ -166,7 +166,11 @@ pub fn open_share(
         .map_err(|_| ViewerError::Damaged)?;
     let envelope =
         open_envelope(fragment, &reply.key_envelope).map_err(|_| ViewerError::Damaged)?;
-    if envelope.chunk_hashes.len() != manifest.chunk_sizes.len() {
+    // A paged root's own chunk lists are empty (`file-sync.md` § Paged
+    // manifests): its count is the sum its page list names. The viewer reads
+    // no page — the envelope carries every chunk's hash, and the nest serves
+    // each chunk by its file index through its own walk.
+    if envelope.chunk_hashes.len() != manifest.entry_count() {
         return Err(ViewerError::Damaged);
     }
     Ok(OpenedShare {

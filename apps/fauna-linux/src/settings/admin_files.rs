@@ -36,6 +36,7 @@ use super::admin_bool_toggle_page::admin_bool_toggle_page;
 
 admin_bool_toggle_page! {
     page_fn: build_admin_files_page,
+    stack_child: "admin-files",
     machine: WebdavPolicyMachine,
     action: WebdavPolicyAction,
     snapshot: WebdavPolicySnapshot,

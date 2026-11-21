@@ -99,14 +99,19 @@ public enum TestAgentBootstrap {
     /// init-time closure is ever installed: a session patch a driver sent the
     /// moment a relaunch served a state used to land on that unrendered
     /// instance, leaving the rendered app with no client and no `connection`
-    /// key. Inert without `FAUNA_E2E_AGENT_PORT`.
+    /// key. Inert without `FAUNA_E2E_AGENT_PORT`. `rootSurfaceName` is the
+    /// rendered app's reading of its root branch, for the `root_surface`
+    /// journal (`E2eLoudSurfaces.rootSurfaceName`) — built here for the same
+    /// reason.
     @MainActor
     public static func bindInProcessAgent(
         stateProvider: @escaping () -> [String: Any],
-        commandHandler: @escaping ([String: Any]) async -> Void
+        commandHandler: @escaping ([String: Any]) async -> Void,
+        rootSurfaceName: @escaping @MainActor () -> String
     ) {
         guard E2eEnv.agentPort != nil else { return }
         InProcessAutomationServer.shared.configure(stateProvider: stateProvider, commandHandler: commandHandler)
+        E2eLoudSurfaces.rootSurfaceName = rootSurfaceName
     }
 }
 

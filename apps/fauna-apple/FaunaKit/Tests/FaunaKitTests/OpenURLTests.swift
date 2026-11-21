@@ -15,7 +15,16 @@ import Foundation
 //
 // `.serialized`: `logSnapshot()`/`logClear()` read/write the same
 // process-wide ring every other log-emitting test can also touch.
-@Suite("OpenURL e2e-harness suppression", .serialized)
+//
+// `.sharedKeychain`: the case `setenv`s and `unsetenv`s `FAUNA_E2E_BRIDGE`,
+// the very variable the keychain suites set to put `KeychainStore()` in its
+// in-memory mode — and `FaunaE2E.isActive` reads it live. Unlocked, this
+// case's `unsetenv` could land between a keychain case's `setenv` and its
+// `KeychainStore()`, which would then reach the REAL login keychain, where an
+// ad-hoc-signed test binary can meet a keychain-ACL dialog nobody answers: the
+// main actor blocks, and every `@MainActor` test in the run hangs behind it.
+// Every writer of that variable holds the one lock.
+@Suite("OpenURL e2e-harness suppression", .serialized, .sharedKeychain)
 struct OpenURLTests {
     /// `logMessage` is a no-op until the process-global `tracing` subscriber is
     /// installed (normally the app's own launch-time `installLogging` call,

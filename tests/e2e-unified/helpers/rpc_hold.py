@@ -78,7 +78,8 @@ def _post(port: int, path: str) -> dict:
     return json.loads(urllib.request.urlopen(req, context=ctx).read() or b"{}")
 
 
-def arm_rpc_hold(port: int, kind: str, *, pass_first: int = 0) -> None:
+def arm_rpc_hold(port: int, kind: str, *, pass_first: int = 0,
+                 client_deadline: bool = False) -> None:
     """Park every subsequent request of ``kind`` until :func:`release_rpc_hold`.
 
     ``kind`` is the wire kind the nest registers (``fauna.inbox.mode.get``), not
@@ -92,8 +93,23 @@ def arm_rpc_hold(port: int, kind: str, *, pass_first: int = 0) -> None:
     re-arming it before the loop's next request would race. The budget is
     spent at the nest's gate in arrival order (`rpc_hold_test_hook.rs`
     § Passing the first N).
+
+    **The window is unbounded by default.** The nest announces each park to
+    its caller, and the caller's dispatcher stops that call's client deadline
+    on the announce, so the app stays pending for as long as the hold stands —
+    the test's window closes at its own ``release``, never at the client's
+    read timeout (`e2e-latency-independent-assertions.md` § The convention,
+    *The held-read announce*). ``client_deadline=True`` arms the hold with
+    ``announce=0``: the park is not announced and the client's own deadline
+    runs — only for the journey whose SUBJECT is that timeout (a failure
+    message, an ``abandoned`` count, a call the app gives up by itself).
     """
-    query = f"?pass={pass_first}" if pass_first else ""
+    params = []
+    if pass_first:
+        params.append(f"pass={pass_first}")
+    if client_deadline:
+        params.append("announce=0")
+    query = f"?{'&'.join(params)}" if params else ""
     _post(port, f"/api/v1/test/rpc-hold/{kind}{query}")
 
 
@@ -109,14 +125,21 @@ def hold_rpc_until_shutdown(port: int, kind: str) -> None:
     (`transport-connection.md` § Graceful shutdown;
     `rpc_hold_test_hook.rs` § Holding until shutdown). :func:`wait_for_held_rpc`
     is the arrival proof to stop the nest on. Release it in a ``finally``
-    anyway: a test that fails before the stop leaves the kind armed.
+    anyway: a test that fails before the stop leaves the kind armed. The park
+    is announced, as :func:`arm_rpc_hold`'s is by default, so the client's
+    deadline never closes the window before the stop does.
     """
     _post(port, f"/api/v1/test/rpc-hold/{kind}/hold-until-shutdown")
 
 
 def rpc_hold_status(port: int, kind: str) -> dict:
-    """``{"armed", "until_shutdown", "refusing", "dropping", "holding",
-    "passing", "released", "refused", "dropped", "abandoned"}`` for ``kind``.
+    """``{"armed", "until_shutdown", "refusing", "dropping", "announcing",
+    "holding", "passing", "released", "refused", "dropped", "abandoned",
+    "announced"}`` for ``kind``.
+
+    ``announcing`` is whether a park is announced to its caller (``false`` only
+    for a hold armed with ``client_deadline=True``); ``announced`` counts the
+    announces the nest actually queued, cumulative like the counters below.
 
     ``holding`` counts the requests parked *right now* — the arrival observable.
     ``released``, ``refused``, ``dropped`` and ``abandoned`` (parks the app

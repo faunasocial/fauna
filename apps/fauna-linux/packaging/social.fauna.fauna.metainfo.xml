@@ -52,7 +52,10 @@
     <content_attribute id="social-chat">intense</content_attribute>
     <content_attribute id="social-contacts">intense</content_attribute>
   </content_rating>
-  <!-- Nothing has shipped yet: entries are appended at release time (owner:
+  <!-- Shipped releases, newest first, each without notes: `fauna-publish release`
+       appends one entry when a version's Linux files go live (owner:
        docs/goal/architecture/product-version.md § Release-history records). -->
-  <releases/>
+  <releases>
+    <release version="0.1.6" date="2026-11-12"/>
+  </releases>
 </component>

@@ -35,11 +35,20 @@
   } from '#lib/rpc';
   import { toBytes, actorHex, actorIdFromHex } from '#lib/hex';
   import { t } from '#lib/i18n/strings';
+  import { copyAndReport } from '#lib/copy-confirm';
   import {
     mailServingStatusLabel,
-    adminUserRowControls,
+    adminUserRowControlPossibility,
+    type AdminUserRowControl,
     adminUserGuardianLabel,
     adminPickerOption,
+    adminRemoveAdminPossibility,
+    adminPendingApprovePossibility,
+    adminAgeBandPossibility,
+    adminTierPickPossibility,
+    adminUsersPageStepPossibility,
+    adminRegistrationCeilingPossibility,
+    adminAdmitActorPossibility,
     registrationModeOptions,
     ageBandOptions,
     claimedAgeBandOption,
@@ -56,6 +65,7 @@
   } from '#lib/wasm';
   import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import { IDS } from '#lib/generated/uiIds';
+  import { afterGate, askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import { localTimestamp } from '#lib/value-format';
 
   // Consolidated admin-users hub (admin.md § 2) — five sections: Pending
@@ -68,6 +78,8 @@
   const PAGE_SIZE = 50;
 
   let tiers = $state<AdminTier[]>([]);
+  /** The tier read resolved (an unread tier list is not an empty one). */
+  let tiersRead = $state(false);
   let requests = $state<AdminInviteRequest[]>([]);
   let inviteCodes = $state<AdminInviteCode[]>([]);
   let users = $state<AdminUser[]>([]);
@@ -122,6 +134,19 @@
   let newCodeGuardianIdx = $state(0);
   let newCodeAgeBand = $state('');
   let mintedCode = $state('');
+  // What the last confirmed copy of the minted code put on the clipboard —
+  // "Copied!" beside the code and the `data-copied` value (the
+  // `account-actor-id-copy-btn` contract); cleared by a new mint.
+  let mintedCodeCopied = $state<string | null>(null);
+
+  /** `admin-users-invite-code-copy-btn`: a copy that reached the clipboard is
+   *  confirmed; one that failed says `common.copy_failed` on
+   *  `admin-users-action-error` (README § Offer only what is possible, rule 7). */
+  async function copyMintedCode() {
+    const outcome = await copyAndReport(mintedCode);
+    mintedCodeCopied = outcome.copied;
+    if (outcome.failed !== null) actionError = outcome.failed;
+  }
   // Section 5 — users: per-row chosen tier (keyed by actor-id hex).
   let userTier = $state<Record<string, string>>({});
 
@@ -182,10 +207,18 @@
   // The *not set* value — the shared seed for "no claim", never a TS literal.
   let ageBandNotSet = $state('');
 
-  /** The band to send beside `guardianIdx`'s guardian, or `undefined` with no
-   *  guardian (an ordinary admission carries no band). */
+  /** The shared answer for a band select beside `guardianIdx`'s guardian
+   *  (`adminAgeBandPossibility`; admin.md § 2 → *What a row offers*): blocked,
+   *  with its reason, until a guardian is picked. */
+  function ageBandAnswer(guardianIdx: number) {
+    return askPossibility(() => adminAgeBandPossibility(!!guardianActorAt(guardianIdx)));
+  }
+
+  /** The band to send beside `guardianIdx`'s guardian, asking the shared
+   *  answer again: `undefined` with no guardian (an ordinary admission carries
+   *  no band). */
   function ageBandFor(guardianIdx: number, band: string | undefined): string | undefined {
-    return guardianActorAt(guardianIdx) ? band : undefined;
+    return ageBandAnswer(guardianIdx)?.state === 'possible' ? band : undefined;
   }
 
   function secret(): string | null {
@@ -226,10 +259,40 @@
     return tiers[0]?.name ?? 'free';
   }
 
+  /** The admit and invite controls' tier gate (admin.md § 2 → *What a row
+   *  offers*: never offered enabled beside an empty tier select) — the shared
+   *  `adminTierPickPossibility` over the names the selects offer; unreadable
+   *  until the tier read resolves. Painted on the three buttons and asked
+   *  again by each click. */
+  function tierAnswer() {
+    if (!tiersRead) return null;
+    return askPossibility(() => adminTierPickPossibility(tiers.map((tier) => tier.name)));
+  }
+
+  /** The registration save's answer: the ceiling draft's own validity
+   *  (`adminRegistrationCeilingPossibility` — blank or a whole number;
+   *  admin.md § Errors & edge cases). Painted on the save, asked again by it. */
+  const registrationAnswer = $derived(
+    askPossibility(() => adminRegistrationCeilingPossibility(maxFreeUsers)),
+  );
+
+  /** The admit button's answer: the tier gate first, then the account-key
+   *  draft (`adminAdmitActorPossibility` — 64 hex). */
+  const admitAnswer = $derived(
+    afterGate(tierAnswer(), () => adminAdmitActorPossibility(admitActorInput)),
+  );
+
+  /** prev (`forward` false) / next (`forward` true): the shared
+   *  `adminUsersPageStepPossibility` — blocked at a bound, saying so. */
+  function pageStepAnswer(forward: boolean) {
+    return askPossibility(() => adminUsersPageStepPossibility(offset, total, PAGE_SIZE, forward));
+  }
+
   async function refresh() {
     const s = secret();
     if (!s) return;
     tiers = await adminTiersList(s);
+    tiersRead = true;
     requests = await adminInviteRequestsList(s);
     inviteCodes = await adminInviteCodesList(s);
     // Section 2 — seed the registration posture + ceiling from the nest.
@@ -318,18 +381,12 @@
   // ── Section 2 — Registration ─────────────────────────────────────────────
 
   /** The typed ceiling as the wire value: blank ⇒ `undefined`, which *clears* the
-   *  cap (mode + ceiling are one decision, always saved together). */
+   *  cap (mode + ceiling are one decision, always saved together). Read only
+   *  once `registrationAnswer` is possible — the draft is blank or a whole
+   *  number then. */
   function capToSave(): number | undefined {
     const trimmed = maxFreeUsers.trim();
     return trimmed === '' ? undefined : Number(trimmed);
-  }
-
-  /** Blank, or a non-negative integer. Guards the `<input type="text">` (blank has
-   *  to stay expressible, so it cannot be `type="number"`) before `Number()` turns
-   *  junk into `NaN` and BigInt() throws inside the wrapper. */
-  function capIsValid(): boolean {
-    const trimmed = maxFreeUsers.trim();
-    return trimmed === '' || /^\d+$/.test(trimmed);
   }
 
   async function saveRegistration() {
@@ -338,11 +395,12 @@
     // read-only in that case and this handler is unreachable, but never write a
     // guess even if that changes.
     if (!s || registrationMode === null) return;
-    actionError = '';
-    if (!capIsValid()) {
-      actionError = t.admin.users_page.max_free_users_hint;
+    const refusal = formRefusal(registrationAnswer);
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
       return;
     }
+    actionError = '';
     try {
       await adminSetRegistrationMode(s, registrationMode, capToSave());
       // The require-knob rides the same save — a second kind, sent only when
@@ -362,22 +420,24 @@
 
   // ── Section 3 — Admit (direct admission, public-mode.md § Registration &
   //    Identity) ──────────────────────────────────────────────────────────
-  // Client-side 64-hex actor validation (mirrors tui's `admit_mutation` /
-  // linux's click handler): a malformed id is a user error, never
-  // dispatched — the nest would refuse it anyway, and failing local keeps
-  // the message actionable. A blank handle ⇒ `undefined`, the deliberate
+  // The 64-hex account key is the shared draft answer's (`admitAnswer`,
+  // tui's `draft_possibility`): a malformed id paints the button disabled
+  // with its reason and the press refuses with the same reason, never
+  // dispatched. A blank handle ⇒ `undefined`, the deliberate
   // handle-less admission. Success re-render is the Users section's own
   // refetch (shared with tier-change/evict).
   async function admitUser() {
     const s = secret();
     if (!s) return;
-    actionError = '';
-    const raw = admitActorInput.trim();
-    const actor = raw.length === 64 ? actorIdFromHex(raw) : null;
-    if (!actor) {
-      actionError = t.admin.users_page.admit_actor_hint;
+    const refusal = formRefusal(admitAnswer);
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
       return;
     }
+    actionError = '';
+    // The draft answer is possible: the key is 64 hex.
+    const actor = actorIdFromHex(admitActorInput.trim());
+    if (!actor) return;
     const handle = admitHandleInput.trim() || undefined;
     try {
       // A guardian on a handle-less admit is refused by the nest and lands in
@@ -393,6 +453,11 @@
   async function mintCode() {
     const s = secret();
     if (!s) return;
+    const refusal = formRefusal(tierAnswer());
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
+      return;
+    }
     actionError = '';
     try {
       // Empty code ⇒ the nest mints + returns one (admin.md § 3, mint-on-empty).
@@ -440,9 +505,32 @@
     }
   }
 
+  /** A users-row control's paint from its shared answer
+   *  (`AdminUserRowControls::*_possibility`; `admin.md` § Errors & edge cases,
+   *  *Role and state gates answer one `Possibility` too*): absent where the
+   *  row does not offer it. */
+  function rowGate(user: AdminUser, control: AdminUserRowControl) {
+    return formGate(
+      askPossibility(() => adminUserRowControlPossibility(user, viewerActor ?? undefined, control)),
+    );
+  }
+
+  /** The press half: the action asks the same answer again and, refused,
+   *  sends nothing (its reason, if any, on `admin-users-action-error`). */
+  function rowRefusal(user: AdminUser, control: AdminUserRowControl): string | null {
+    return formRefusal(
+      askPossibility(() => adminUserRowControlPossibility(user, viewerActor ?? undefined, control)),
+    );
+  }
+
   async function evict(user: AdminUser) {
     const s = secret();
     if (!s) return;
+    const refusal = rowRefusal(user, 'evict');
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
+      return;
+    }
     actionError = '';
     try {
       // The evict handler *requires* a reason (unlike suspend, which defaults it),
@@ -466,6 +554,11 @@
   async function suspend(user: AdminUser) {
     const s = secret();
     if (!s) return;
+    const refusal = rowRefusal(user, 'suspend');
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
+      return;
+    }
     actionError = '';
     try {
       await adminUsersSuspend(s, toBytes(user.actor_id), '', '');
@@ -478,6 +571,11 @@
   async function cancelEvict(user: AdminUser) {
     const s = secret();
     if (!s) return;
+    const refusal = rowRefusal(user, 'restore');
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
+      return;
+    }
     actionError = '';
     try {
       await adminUsersCancelEviction(s, toBytes(user.actor_id));
@@ -495,6 +593,11 @@
   async function makeAdmin(user: AdminUser) {
     const s = secret();
     if (!s) return;
+    const refusal = rowRefusal(user, 'make_admin');
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
+      return;
+    }
     actionError = '';
     try {
       await adminAdminsAdd(s, toBytes(user.actor_id));
@@ -507,6 +610,12 @@
   async function removeAdmin(user: AdminUser) {
     const s = secret();
     if (!s) return;
+    // Ask the shared answer again (admin.md § 2 → *What a row offers*).
+    const refusal = formRefusal(askPossibility(() => adminRemoveAdminPossibility(user)));
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
+      return;
+    }
     actionError = '';
     try {
       await adminAdminsRemove(s, toBytes(user.actor_id));
@@ -519,9 +628,16 @@
   // Approve / cancel a pending admin action — one click each, no confirm. The
   // nest refuses self-approval and a row no longer pending; the re-read below
   // ends on the live list either way.
-  async function approvePending(id: number) {
+  async function approvePending(action: AdminPendingAction) {
     const s = secret();
     if (!s) return;
+    // Ask the shared answer again: the viewer's own action is not approvable.
+    const refusal = formRefusal(askPossibility(() => approveAnswer(action)));
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
+      return;
+    }
+    const id = action.id;
     actionError = '';
     try {
       await adminPendingActionApprove(s, id);
@@ -529,6 +645,12 @@
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /** `adminPendingApprovePossibility` for the viewing admin: absent on its
+   *  own scheduled action (the nest refuses self-approval). */
+  function approveAnswer(action: AdminPendingAction) {
+    return adminPendingApprovePossibility(action, viewerActor ?? new Uint8Array());
   }
 
   async function cancelPending(id: number) {
@@ -543,7 +665,17 @@
     }
   }
 
+  function openCreateForm() {
+    const refusal = formRefusal(tierAnswer());
+    if (refusal !== null) {
+      if (refusal) actionError = refusal;
+      return;
+    }
+    showCreateForm = true;
+  }
+
   async function nextPage() {
+    if (formRefusal(pageStepAnswer(true)) !== null) return;
     const next = nextPageOffset(offset, total, PAGE_SIZE);
     if (next === undefined) return;
     offset = next;
@@ -551,6 +683,7 @@
   }
 
   async function prevPage() {
+    if (formRefusal(pageStepAnswer(false)) !== null) return;
     const prev = prevPageOffset(offset, PAGE_SIZE);
     if (prev === undefined) return;
     offset = prev;
@@ -615,7 +748,8 @@
               data-testid={IDS.INVITE_REQUEST_ROW_AGE_BAND_SELECT}
               data-index={i}
               aria-label={t.family.age_band.label}
-              disabled={!guardianActorAt(requestGuardianIdx[req.id] ?? 0)}
+              disabled={formGate(ageBandAnswer(requestGuardianIdx[req.id] ?? 0)).disabled}
+              title={formGate(ageBandAnswer(requestGuardianIdx[req.id] ?? 0)).reason}
               bind:value={requestAgeBand[req.id]}
             >
               {#each ageBandOptionsList as opt (opt.value)}
@@ -685,6 +819,8 @@
       <button
         class="btn"
         data-testid={IDS.ADMIN_USERS_REGISTRATION_SAVE_BUTTON}
+        disabled={formGate(registrationAnswer).disabled}
+        title={formGate(registrationAnswer).reason}
         onclick={saveRegistration}>{t.admin.users_page.registration_save}</button>
     {/if}
   </section>
@@ -728,22 +864,31 @@
     <select
       data-testid={IDS.ADMIN_USERS_ADMIT_AGE_BAND_SELECT}
       aria-label={t.family.age_band.label}
-      disabled={!guardianActorAt(admitGuardianIdx)}
+      disabled={formGate(ageBandAnswer(admitGuardianIdx)).disabled}
+      title={formGate(ageBandAnswer(admitGuardianIdx)).reason}
       bind:value={admitAgeBand}
     >
       {#each ageBandOptionsList as opt (opt.value)}
         <option value={opt.value}>{resolveLocalizedNested(opt.label)}</option>
       {/each}
     </select>
-    <button class="btn" data-testid={IDS.ADMIN_USERS_ADMIT_BUTTON} onclick={admitUser}
-      >{t.admin.users_page.admit_button}</button>
+    <button
+      class="btn"
+      data-testid={IDS.ADMIN_USERS_ADMIT_BUTTON}
+      disabled={formGate(admitAnswer).disabled}
+      title={formGate(admitAnswer).reason}
+      onclick={admitUser}>{t.admin.users_page.admit_button}</button>
   </section>
 
   <!-- Section 4 — Invite -->
   <section data-testid={IDS.ADMIN_USERS_INVITE_SECTION} class="section">
     <h2>{t.admin.users_page.section_invite}</h2>
-    <button class="btn" data-testid={IDS.CREATE_INVITE_CODE_BTN} onclick={() => (showCreateForm = true)}
-      >{t.admin.settings_page.create_code}</button>
+    <button
+      class="btn"
+      data-testid={IDS.CREATE_INVITE_CODE_BTN}
+      disabled={formGate(tierAnswer()).disabled}
+      title={formGate(tierAnswer()).reason}
+      onclick={openCreateForm}>{t.admin.settings_page.create_code}</button>
 
     {#if showCreateForm}
       <div class="create-form" data-testid={IDS.ADMIN_SETTINGS_INVITE_CREATE_FORM}>
@@ -780,14 +925,20 @@
         <select
           data-testid={IDS.ADMIN_USERS_INVITE_AGE_BAND_SELECT}
           aria-label={t.family.age_band.label}
-          disabled={!guardianActorAt(newCodeGuardianIdx)}
+          disabled={formGate(ageBandAnswer(newCodeGuardianIdx)).disabled}
+          title={formGate(ageBandAnswer(newCodeGuardianIdx)).reason}
           bind:value={newCodeAgeBand}
         >
           {#each ageBandOptionsList as opt (opt.value)}
             <option value={opt.value}>{resolveLocalizedNested(opt.label)}</option>
           {/each}
         </select>
-        <button class="btn" data-testid={IDS.CREATE_INVITE_CONFIRM_BTN} onclick={mintCode}>{t.common.confirm}</button>
+        <button
+          class="btn"
+          data-testid={IDS.CREATE_INVITE_CONFIRM_BTN}
+          disabled={formGate(tierAnswer()).disabled}
+          title={formGate(tierAnswer()).reason}
+          onclick={mintCode}>{t.common.confirm}</button>
         <button
           class="btn"
           data-testid={IDS.ADMIN_SETTINGS_INVITE_CANCEL_BUTTON}
@@ -798,8 +949,12 @@
     {#if mintedCode}
       <p class="minted">
         {t.admin.users_page.code_minted}
-        <button class="btn" data-testid={IDS.ADMIN_USERS_INVITE_CODE_COPY_BTN} onclick={() => navigator.clipboard?.writeText(mintedCode)}
-          ><code>{mintedCode}</code> {t.common.copy}</button>
+        <button
+          class="btn"
+          data-testid={IDS.ADMIN_USERS_INVITE_CODE_COPY_BTN}
+          data-copied={mintedCodeCopied === mintedCode ? mintedCode : undefined}
+          onclick={copyMintedCode}
+          ><code>{mintedCode}</code> {mintedCodeCopied === mintedCode ? t.common.copied : t.common.copy}</button>
       </p>
     {/if}
 
@@ -837,7 +992,12 @@
     {:else}
       <ul class="list">
         {#each users as user, i (actorHex(user.actor_id))}
-          {@const controls = adminUserRowControls(user, viewerActor)}
+          {@const evictGate = rowGate(user, 'evict')}
+          {@const suspendGate = rowGate(user, 'suspend')}
+          {@const restoreGate = rowGate(user, 'restore')}
+          {@const makeAdminGate = rowGate(user, 'make_admin')}
+          {@const takeOverGate = rowGate(user, 'take_over')}
+          {@const removeAdminGate = formGate(askPossibility(() => adminRemoveAdminPossibility(user)))}
           {@const guardian = adminUserGuardianLabel(user)}
           {@const armed = takeOverArmed === actorHex(user.actor_id)}
           <li class="row" data-testid={IDS.USER_ROW} data-index={i}>
@@ -870,39 +1030,51 @@
                  exists to prevent: it made Suspend-from-`warning` unreachable. One click
                  acts immediately (no confirm), since both cut-off paths are reversible by
                  the restore control beside them. -->
-            {#if controls.evict}
+            {#if evictGate.shown}
               <button
                 class="btn danger"
                 data-testid={IDS.ADMIN_USERS_EVICT_BUTTON}
                 data-index={i}
+                disabled={evictGate.disabled}
+                title={evictGate.reason}
                 onclick={() => evict(user)}>{t.admin.users_page.evict}</button>
             {/if}
-            {#if controls.suspend}
+            {#if suspendGate.shown}
               <button
                 class="btn danger"
                 data-testid={IDS.ADMIN_USERS_SUSPEND_BUTTON}
                 data-index={i}
+                disabled={suspendGate.disabled}
+                title={suspendGate.reason}
                 onclick={() => suspend(user)}>{t.admin.users_page.suspend}</button>
             {/if}
-            {#if controls.restore}
+            {#if restoreGate.shown}
               <button
                 class="btn"
                 data-testid={IDS.ADMIN_USERS_CANCEL_EVICTION_BUTTON}
                 data-index={i}
+                disabled={restoreGate.disabled}
+                title={restoreGate.reason}
                 onclick={() => cancelEvict(user)}>{t.admin.users_page.cancel_eviction}</button>
             {/if}
-            {#if controls.make_admin}
+            {#if makeAdminGate.shown}
               <button
                 class="btn"
                 data-testid={IDS.ADMIN_USERS_MAKE_ADMIN_BUTTON}
                 data-index={i}
+                disabled={makeAdminGate.disabled}
+                title={makeAdminGate.reason}
                 onclick={() => makeAdmin(user)}>{t.admin.users_page.make_admin}</button>
             {/if}
-            {#if controls.remove_admin}
+            {#if removeAdminGate.shown}
+              <!-- Painted from the shared answer (admin.md § 2 → *What a row
+                   offers*): blocked, with its reason, on the last superadmin. -->
               <button
                 class="btn danger"
                 data-testid={IDS.ADMIN_USERS_REMOVE_ADMIN_BUTTON}
                 data-index={i}
+                disabled={removeAdminGate.disabled}
+                title={removeAdminGate.reason}
                 onclick={() => removeAdmin(user)}>{t.admin.users_page.remove_admin}</button>
             {/if}
             <!-- The admin take-over of a supervised account (family-safety.md § App
@@ -913,12 +1085,16 @@
               <div class="take-over">
                 <span class="muted" data-testid={IDS.ADMIN_USERS_SUPERVISED_BY} data-index={i}
                   >{t.admin.users_page.supervised_by({ guardian })}</span>
-                {#if controls.take_over && !armed}
+                {#if takeOverGate.shown && !armed}
                   <button
                     class="btn"
                     data-testid={IDS.ADMIN_USERS_TAKE_OVER_BUTTON}
                     data-index={i}
-                    onclick={() => (takeOverArmed = actorHex(user.actor_id))}
+                    disabled={takeOverGate.disabled}
+                    title={takeOverGate.reason}
+                    onclick={() => {
+                      if (rowRefusal(user, 'take_over') === null) takeOverArmed = actorHex(user.actor_id);
+                    }}
                     >{t.admin.users_page.take_over}</button>
                 {/if}
                 {#if armed}
@@ -945,22 +1121,23 @@
       </ul>
     {/if}
 
-    <!-- Pagination (admin.md § Users — limit/offset on users.list). Reflect the
-         bound on the buttons themselves (convention 11: an actuation route must
-         not drive a control the UI has disabled) — the click handlers already
-         guard via the same prevPageOffset/nextPageOffset, so this is visual
-         feedback only, matching linux's set_sensitive(offset > 0)-style guard. -->
+    <!-- Pagination (admin.md § Users — limit/offset on users.list). Each
+         button is painted from the shared `adminUsersPageStepPossibility`
+         (blocked at a bound, the reason on its title) and the click asks it
+         again before stepping. -->
     <div class="pagination" data-testid={IDS.ADMIN_USERS_PAGINATION}>
       <button
         class="btn"
         data-testid={IDS.ADMIN_USERS_PREV_PAGE}
-        disabled={prevPageOffset(offset, PAGE_SIZE) === undefined}
+        disabled={formGate(pageStepAnswer(false)).disabled}
+        title={formGate(pageStepAnswer(false)).reason}
         onclick={prevPage}>{t.admin.users_page.prev_page}</button>
       <span class="muted small">{currentPage(offset, PAGE_SIZE)} / {totalPages(total, PAGE_SIZE)}</span>
       <button
         class="btn"
         data-testid={IDS.ADMIN_USERS_NEXT_PAGE}
-        disabled={nextPageOffset(offset, total, PAGE_SIZE) === undefined}
+        disabled={formGate(pageStepAnswer(true)).disabled}
+        title={formGate(pageStepAnswer(true)).reason}
         onclick={nextPage}>{t.admin.users_page.next_page}</button>
     </div>
   </section>
@@ -975,6 +1152,7 @@
         : t.admin.users_page.pending_count({ count: String(pendingActions.length) })}
     </h2>
     {#each pendingActions as action (action.id)}
+      {@const approveGate = formGate(askPossibility(() => approveAnswer(action)))}
       <div data-testid={IDS.ADMIN_PENDING_ACTION_ITEM} class="pending-action-item">
         <span data-testid={IDS.ADMIN_PENDING_ACTION_DESCRIPTION}>
           {describePendingAction(action.action_type, action.target)}
@@ -991,10 +1169,14 @@
             needed: String(action.requires_quorum),
           })}
         </span>
-        <button
-          class="btn small"
-          data-testid={IDS.ADMIN_PENDING_ACTION_APPROVE_BUTTON}
-          onclick={() => approvePending(action.id)}>{t.admin.users_page.pending_approve}</button>
+        {#if approveGate.shown}
+          <button
+            class="btn small"
+            data-testid={IDS.ADMIN_PENDING_ACTION_APPROVE_BUTTON}
+            disabled={approveGate.disabled}
+            title={approveGate.reason}
+            onclick={() => approvePending(action)}>{t.admin.users_page.pending_approve}</button>
+        {/if}
         <button
           class="btn danger small"
           data-testid={IDS.ADMIN_PENDING_ACTION_CANCEL_BUTTON}

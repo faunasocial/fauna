@@ -82,6 +82,16 @@ pub trait BlobPushSink: MaybeSendSync {
     async fn put_chunk(&self, store_key: &ContentHash, body: &[u8]) -> Result<()>;
     /// `POST /manifests` — the canonical-encoded [`fauna_core::chunk::ChunkManifest`].
     async fn put_manifest(&self, manifest_bytes: &[u8]) -> Result<()>;
+    /// `POST /manifest-pages` — one page of a paged root, sent after the
+    /// chunks it names and before its root (`file-sync.md` § Paged manifests →
+    /// *Transport and order*). A nest that predates paging has no such door,
+    /// so the push fails there before the root is sent — the file never
+    /// lands as a root whose pages a garbage collector cannot see. A sink
+    /// that carries no pages refuses honestly.
+    async fn put_manifest_page(&self, page_bytes: &[u8]) -> Result<()> {
+        let _ = page_bytes;
+        anyhow::bail!("this byte plane carries no manifest pages")
+    }
 }
 
 /// What one [`push_sealed`] moved.
@@ -93,13 +103,13 @@ pub struct PushedBlob {
     pub chunks_deduped: usize,
 }
 
-/// Bytes first: dedup-check, upload what is missing, then the manifest — the
-/// one push every leg that lands custody on a nest shares (this leg, the
-/// re-seed's and the nest-held pull-back).
+/// Bytes first: dedup-check, upload what is missing, then a paged root's
+/// pages, then the manifest — the one push every leg that lands custody on a
+/// nest from a whole [`SealedBlob`] shares (this leg and the re-seed's).
 ///
-/// The manifest lands **after** its chunks so the target never holds a
-/// manifest naming bytes it does not have — the same rule the custodian
-/// store's own `put` follows locally.
+/// The manifest lands **after** its chunks and pages so the target never
+/// holds a manifest naming bytes it does not have — the same rule the
+/// custodian store's own `put` follows locally.
 pub async fn push_sealed<P: BlobPushSink + ?Sized>(
     sink: &P,
     sealed: &SealedBlob,
@@ -121,6 +131,15 @@ pub async fn push_sealed<P: BlobPushSink + ?Sized>(
             .await
             .with_context(|| format!("uploading chunk {}", hex::encode(key.digest())))?;
         pushed.chunks_uploaded += 1;
+    }
+    // A paged root's pages after the chunks they name and before the root —
+    // the target admits a root only once every page it names is at rest, and
+    // a target without the page door refuses here, before any root lands
+    // (`file-sync.md` § Paged manifests → *Transport and order*).
+    for (index, (_, page)) in sealed.pages.iter().enumerate() {
+        sink.put_manifest_page(page)
+            .await
+            .with_context(|| format!("uploading manifest page {index}"))?;
     }
     sink.put_manifest(&sealed.manifest_bytes)
         .await

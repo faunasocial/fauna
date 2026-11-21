@@ -1216,6 +1216,7 @@ impl KindRegistry {
             bc::KIND_RECEIPT,
             bc::KIND_ROOMS_LIST,
             bc::KIND_ROOMS_OPEN,
+            bc::KIND_ADDRESS_ADMIT,
             bc::KIND_INBOX_FETCH,
             // The removes are naturally idempotent: a tombstoned row counts
             // nothing a second time.

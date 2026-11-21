@@ -72,6 +72,10 @@ public struct AdminDnsView: View {
                     }
                 }
 
+                // Waits for both reads, needs a domain, and its "on" needs every
+                // active domain covered by a held credential.
+                FaunaPossibilityReason(vm.manageAllAnswer(managed: !vm.allManaged))
+
                 addDomainSection
 
                 if let error = vm.errorMessage {
@@ -119,15 +123,19 @@ public struct AdminDnsView: View {
             Text(L.admin.dns.manageAll)
         }
         .toggleStyle(.switch)
-        .disabled(vm.isBusy || vm.activeDomainNames.isEmpty)
+        .disabled(vm.isBusy)
         .accessibilityIdentifier(Ids.adminDnsManageAllToggle)
         .automationActivate(
             Ids.adminDnsManageAllToggle,
-            isEnabled: { !vm.isBusy && !vm.activeDomainNames.isEmpty },
+            isEnabled: { !vm.isBusy },
             value: { vm.allManaged ? "on" : "off" }
         ) {
             Task { await vm.setAllManaged(!vm.allManaged) }
         }
+        // The shared answer for the flip this switch would make
+        // (`dns-management.md` § Errors & edge cases), outside `automation*` so
+        // the registry reads the same enabled-ness (`Possibility.swift`).
+        .faunaPossible(vm.manageAllAnswer(managed: !vm.allManaged))
     }
 
     @ViewBuilder
@@ -155,11 +163,11 @@ public struct AdminDnsView: View {
                 }
                 HStack {
                     Button(L.admin.dns.addDomainSubmit) { submitAddDomain() }
-                        .disabled(vm.isBusy || addDomainText.trimmed.isEmpty)
+                        .disabled(vm.isBusy)
                         .accessibilityIdentifier(Ids.adminDnsAddDomainSubmitButton)
                         .automationActivate(
                             Ids.adminDnsAddDomainSubmitButton,
-                            isEnabled: { !vm.isBusy && !addDomainText.trimmed.isEmpty }
+                            isEnabled: { !vm.isBusy }
                         ) { submitAddDomain() }
                         // The nest-side domain plane: adding a local domain is a
                         // nest write. (Revealing the form and typing into it are
@@ -169,6 +177,9 @@ public struct AdminDnsView: View {
                         // the credential/managed/auto-renew/delegation controls on
                         // this page therefore carry NO gate on purpose.
                         .faunaGate("fauna.bridges.add_local_domain")
+                        // The shared draft answer: the domains read resolved, a
+                        // well-formed name, not already active.
+                        .faunaPossible(vm.addDomainAnswer(draft: addDomainText))
                     Button(L.common.cancel) {
                         showAddDomain = false
                         addDomainText = ""
@@ -179,6 +190,7 @@ public struct AdminDnsView: View {
                         addDomainText = ""
                     }
                 }
+                FaunaPossibilityReason(vm.addDomainAnswer(draft: addDomainText))
             }
         } else {
             Button(L.admin.dns.addDomain) { showAddDomain = true }
@@ -187,12 +199,12 @@ public struct AdminDnsView: View {
         }
     }
 
+    /// The VM refuses with the draft's reason first; the form closes, dropping
+    /// what was typed, only once the nest added the domain.
     private func submitAddDomain() {
-        let d = addDomainText.trimmed
-        guard !d.isEmpty else { return }
+        let draft = addDomainText
         Task {
-            await vm.addDomain(d)
-            if vm.errorMessage == nil {
+            if await vm.addDomain(draft) {
                 addDomainText = ""
                 showAddDomain = false
             }
@@ -274,7 +286,12 @@ public struct AdminDnsView: View {
     @ViewBuilder
     private var domainList: some View {
         let names = vm.activeDomainNames
-        if names.isEmpty {
+        if names.isEmpty && vm.resolvedLocal == nil {
+            // Loading is not empty (`dns-management.md` § Errors & edge cases).
+            Text(L.common.loading)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else if names.isEmpty {
             Text(L.admin.dns.empty)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -301,7 +318,8 @@ public struct AdminDnsView: View {
         let dd = vm.dnsDomain(name)
         let isPrimary = ld?.isPrimary ?? dd?.isPrimary ?? false
         return VStack(alignment: .leading, spacing: 10) {
-            domainHeader(name: name, isPrimary: isPrimary, hasLocal: ld != nil, hasDns: dd != nil)
+            domainHeader(name: name, isPrimary: isPrimary, hasDns: dd != nil)
+            domainRowReasons(name: name, isPrimary: isPrimary, hasDns: dd != nil)
             if vm.isManagedOrDelegated(name) {
                 autoRenewToggle(name: name, current: dd?.autoRenew ?? true)
             }
@@ -327,7 +345,20 @@ public struct AdminDnsView: View {
         .automationValue(Ids.adminDnsDomain, text: { name })
     }
 
-    private func domainHeader(name: String, isPrimary: Bool, hasLocal: Bool, hasDns: Bool) -> some View {
+    /// The visible reasons of the header's disabled controls — each renders
+    /// nothing unless its answer is blocked. Opting in to managed mode needs a
+    /// covering credential; the add-credential button stays offered as the step
+    /// that unblocks it.
+    @ViewBuilder
+    private func domainRowReasons(name: String, isPrimary: Bool, hasDns: Bool) -> some View {
+        if hasDns {
+            FaunaPossibilityReason(vm.setModeAnswer(domain: name, managed: !vm.isManaged(name)))
+        }
+        FaunaPossibilityReason(vm.removeAnswer(domain: name))
+        FaunaPossibilityReason(isPrimary ? vm.renameAnswer : vm.promoteAnswer)
+    }
+
+    private func domainHeader(name: String, isPrimary: Bool, hasDns: Bool) -> some View {
         HStack(alignment: .firstTextBaseline) {
             automationText(Ids.adminDnsDomainName, name)
                 .font(.headline)
@@ -358,34 +389,40 @@ public struct AdminDnsView: View {
                 ) {
                     Task { await vm.setMode(domain: name, managed: !vm.isManaged(name)) }
                 }
+                // For the flip this control would make: opting out always may,
+                // opting in needs a held credential covering the domain.
+                .faunaPossible(vm.setModeAnswer(domain: name, managed: !vm.isManaged(name)))
             }
-            // Present on every active row; disabled on the primary (cannot be removed).
-            // Arms the shared confirm (synchronous, no nest); the removal itself
-            // is the modal's confirm button.
+            // Present on every active row; disabled on the primary with the
+            // shared answer's reason (it is renamed away, never removed). Arms
+            // the shared confirm (synchronous, no nest); the removal itself is
+            // the modal's confirm button.
             Button(L.admin.dns.remove, role: .destructive) {
                 vm.armRemoveDomain(name)
             }
             .controlSize(.small)
-            .disabled(vm.isBusy || isPrimary || !hasLocal)
+            .disabled(vm.isBusy)
             .accessibilityIdentifier(Ids.adminDnsDomainRemoveButton)
             .automationActivate(
                 Ids.adminDnsDomainRemoveButton,
-                isEnabled: { !vm.isBusy && !isPrimary && hasLocal }
+                isEnabled: { !vm.isBusy }
             ) {
                 vm.armRemoveDomain(name)
             }
             .faunaGate("fauna.bridges.remove_local_domain")
+            .faunaPossible(vm.removeAnswer(domain: name))
             renamePromoteAffordance(name: name, isPrimary: isPrimary)
         }
     }
 
     /// Primary-domain rename affordances (`mail-primary-domain-rename.md`
-    /// § UX surface). On the **primary** row: "Rename primary" (disabled until
-    /// a non-primary domain exists — the two-step rule — or while a rename is
-    /// already in flight) + the in-flight state text. On a **non-primary** row:
-    /// "Promote to primary" (hidden while a rename is running). Structural
-    /// if/else — each branch is a genuine mount/unmount as `isPrimary`/
-    /// `vm.activeRename` flip (`apple-e2e-automation.md`'s documented-safe
+    /// § UX surface). On the **primary** row: "Rename primary" (disabled with
+    /// the shared answer's reason while a rename is in flight or until a
+    /// non-primary domain exists — the two-step rule) + the in-flight state
+    /// text. On a **non-primary** row: "Promote to primary" (disabled with its
+    /// reason while a rename is running — `dns-management.md` § Errors & edge
+    /// cases). Structural if/else — each branch is a genuine mount/unmount as
+    /// `isPrimary`/`vm.activeRename` flip (`apple-e2e-automation.md`'s documented-safe
     /// "conditionally-hidden element must be ABSENT" pattern) — NOT a captured
     /// struct snapshot, so this never hits the stale-closure class of bug
     /// found in `task-delegation-kind-runner` (every dynamic read
@@ -395,12 +432,13 @@ public struct AdminDnsView: View {
         if isPrimary {
             Button(L.admin.dns.rename.button) { openRenameSheet(target: "") }
                 .controlSize(.small)
-                .disabled(vm.isBusy || !vm.renameAvailable || vm.activeRename != nil)
+                .disabled(vm.isBusy)
                 .accessibilityIdentifier(Ids.adminDnsDomainRenameButton)
                 .automationActivate(
                     Ids.adminDnsDomainRenameButton,
-                    isEnabled: { !vm.isBusy && vm.renameAvailable && vm.activeRename == nil }
+                    isEnabled: { !vm.isBusy }
                 ) { openRenameSheet(target: "") }
+                .faunaPossible(vm.renameAnswer)
             if vm.activeRename != nil {
                 automationText(
                     Ids.adminDnsDomainRenameState,
@@ -409,7 +447,7 @@ public struct AdminDnsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
-        } else if vm.activeRename == nil {
+        } else {
             Button(L.admin.dns.rename.promote) { openRenameSheet(target: name) }
                 .controlSize(.small)
                 .disabled(vm.isBusy)
@@ -417,6 +455,7 @@ public struct AdminDnsView: View {
                 .automationActivate(Ids.adminDnsDomainPromoteButton, isEnabled: { !vm.isBusy }) {
                     openRenameSheet(target: name)
                 }
+                .faunaPossible(vm.promoteAnswer)
         }
     }
 
@@ -671,11 +710,11 @@ public struct AdminDnsView: View {
                 Task { await vm.issueCert(domain: name, managedOrDelegated: vm.isManagedOrDelegated(name)) }
             }
             .controlSize(.small)
-            .disabled(vm.isBusy || pending != nil)
+            .disabled(vm.isBusy)
             .accessibilityIdentifier(Ids.adminDnsCertIssueButton)
             .automationActivate(
                 Ids.adminDnsCertIssueButton,
-                isEnabled: { !vm.isBusy && vm.pendingCert(name) == nil }
+                isEnabled: { !vm.isBusy }
             ) {
                 Task { await vm.issueCert(domain: name, managedOrDelegated: vm.isManagedOrDelegated(name)) }
             }
@@ -689,6 +728,10 @@ public struct AdminDnsView: View {
             // by the shared table, never by a class test written here).
             .faunaGate(vm.isManagedOrDelegated(name)
                        ? "fauna.tls.publish_cert" : "fauna.account.state.put")
+            // The page's own answer: not while this domain's manual order waits
+            // to be finished or cancelled (`cert_issue_possibility`).
+            .faunaPossible(vm.certIssueAnswer(domain: name))
+            FaunaPossibilityReason(vm.certIssueAnswer(domain: name))
 
             if let pending {
                 Text(L.admin.dns.cert.pasteInstructions).font(.caption).foregroundStyle(.secondary)
@@ -780,13 +823,15 @@ public struct AdminDnsView: View {
         } else {
             Button(L.admin.dns.cert.delegate) { beginDelegate(name) }
             .controlSize(.small)
-            .disabled(vm.isBusy || vm.credZones.isEmpty)
-            .help(vm.credZones.isEmpty ? L.admin.dns.cert.delegateNoZones : "")
+            .disabled(vm.isBusy)
             .accessibilityIdentifier(Ids.adminDnsCertDelegateButton)
             .automationActivate(
                 Ids.adminDnsCertDelegateButton,
-                isEnabled: { !vm.isBusy && !vm.credZones.isEmpty }
+                isEnabled: { !vm.isBusy && vm.delegatePossibility.isPossible }
             ) { beginDelegate(name) }
+            // Blocked until a held credential covers a zone; the reason names
+            // the unblocking step (add a DNS-provider credential).
+            .faunaPossible(vm.delegatePossibility)
         }
     }
 
@@ -794,6 +839,7 @@ public struct AdminDnsView: View {
     /// zone-picker to the first held-credential zone. Shared by the reveal Button
     /// and its `.automationActivate` so the two never diverge.
     private func beginDelegate(_ name: String) {
+        if vm.refused(vm.delegatePossibility) { return }
         delegateZone = vm.credZones.first ?? ""
         delegatingDomain = name
     }
@@ -849,7 +895,7 @@ public struct AdminDnsView: View {
     private var renameBannerActions: some View {
         if let rename = vm.activeRename {
             HStack(spacing: 8) {
-                if rename.canComplete || rename.canForceComplete {
+                Group {
                     if confirmingComplete {
                         if rename.canForceComplete {
                             Text(L.admin.dns.rename.completeForceWarning)
@@ -868,7 +914,8 @@ public struct AdminDnsView: View {
                             }
                     }
                 }
-                if rename.canExtend {
+                .faunaPossible(vm.renamePossibility(.complete))
+                Group {
                     TextField("", text: $extendDays)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 50)
@@ -878,8 +925,14 @@ public struct AdminDnsView: View {
                         .accessibilityIdentifier(Ids.adminDnsRenameExtendButton)
                         .automationActivate(Ids.adminDnsRenameExtendButton) { extendRename() }
                         .faunaGate("fauna.bridges.extend_primary_domain_rename_grace")
+                        // Held to the nest's day range (blank or 1–30) by the
+                        // shared answer; an invalid draft is refused, never
+                        // replaced by the default.
+                        .faunaPossible(localDomainExtendDraftPossibility(days: extendDays))
+                    FaunaPossibilityReason(localDomainExtendDraftPossibility(days: extendDays))
                 }
-                if rename.canAbort {
+                .faunaPossible(vm.renamePossibility(.extend))
+                Group {
                     if confirmingAbort {
                         if !rename.isPreFlip {
                             Text(L.admin.dns.rename.abortPostflipWarning)
@@ -898,6 +951,7 @@ public struct AdminDnsView: View {
                             }
                     }
                 }
+                .faunaPossible(vm.renamePossibility(.abort))
             }
             .controlSize(.small)
             .disabled(vm.isBusy)
@@ -922,19 +976,23 @@ public struct AdminDnsView: View {
                     .automationField(Ids.adminDnsRenameGraceDaysInput, text: $renameGraceDays)
                 HStack {
                     Button(L.admin.dns.rename.submit) { submitRename() }
-                        .disabled(vm.isBusy || renameTarget.isEmpty)
+                        .disabled(vm.isBusy)
                         .accessibilityIdentifier(Ids.adminDnsRenameSubmitButton)
                         .automationActivate(
                             Ids.adminDnsRenameSubmitButton,
-                            isEnabled: { !vm.isBusy && !renameTarget.isEmpty }
+                            isEnabled: { !vm.isBusy }
                         ) { submitRename() }
                         // Opening this wizard and picking a target are local; only
                         // the submit starts the nest-side rename.
                         .faunaGate("fauna.bridges.start_primary_domain_rename")
+                        // The sheet's shared draft answer: no rename in flight,
+                        // an active non-primary target, a grace blank or 1–30.
+                        .faunaPossible(vm.renameDraftAnswer(target: renameTarget, graceDays: renameGraceDays))
                     Button(L.admin.dns.rename.cancel) { cancelRenameSheet() }
                         .accessibilityIdentifier(Ids.adminDnsRenameCancelButton)
                         .automationActivate(Ids.adminDnsRenameCancelButton) { cancelRenameSheet() }
                 }
+                FaunaPossibilityReason(vm.renameDraftAnswer(target: renameTarget, graceDays: renameGraceDays))
             }
             .padding(12)
             .background(Color.secondary.opacity(0.06))
@@ -968,6 +1026,7 @@ public struct AdminDnsView: View {
     /// `admin/dns/+page.svelte`). An empty `target` (opened from the primary
     /// row's "Rename primary") defaults to the first active non-primary domain.
     private func openRenameSheet(target: String) {
+        guard !vm.refused(target.isEmpty ? vm.renameAnswer : vm.promoteAnswer) else { return }
         renameTarget = target.isEmpty
             ? (vm.activeDomainNames.first { !(vm.localDomain($0)?.isPrimary ?? false) } ?? "")
             : target
@@ -979,11 +1038,19 @@ public struct AdminDnsView: View {
         renameTarget = ""
         renameGraceDays = ""
     }
+    /// Refuses with the sheet's draft answer first; the sheet closes only once
+    /// the nest started the rename, and a refusal keeps the pick and the grace.
     private func submitRename() {
-        guard !renameTarget.isEmpty, let domainId = vm.localDomain(renameTarget)?.domainId else { return }
-        let days = Int64(renameGraceDays.trimmed)
-        renameSheetOpen = false
-        Task { await vm.startPrimaryRename(newPrimaryDomainId: domainId, graceDays: days) }
+        guard !vm.refused(vm.renameDraftAnswer(target: renameTarget, graceDays: renameGraceDays)),
+              let domainId = vm.localDomain(renameTarget)?.domainId else { return }
+        // Blank → the nest's default window; anything else passed the answer
+        // above, so it is never silently replaced by a default.
+        let days = localDomainRenameDays(draft: renameGraceDays)
+        Task {
+            if await vm.startPrimaryRename(newPrimaryDomainId: domainId, graceDays: days) {
+                cancelRenameSheet()
+            }
+        }
     }
     private func completeRename() {
         guard let rename = vm.activeRename else { return }
@@ -992,9 +1059,15 @@ public struct AdminDnsView: View {
         Task { await vm.completePrimaryRename(renameId: rename.renameId, force: force) }
     }
     private func extendRename() {
-        guard let rename = vm.activeRename, let days = Int64(extendDays.trimmed), days >= 1 else { return }
+        guard let rename = vm.activeRename,
+              !vm.refused(localDomainExtendDraftPossibility(days: extendDays)) else { return }
+        // Blank → the default extension (tui's `DEFAULT_RENAME_EXTEND_DAYS`).
+        let days = localDomainRenameDays(draft: extendDays) ?? Self.defaultRenameExtendDays
         Task { await vm.extendPrimaryRenameGrace(renameId: rename.renameId, additionalDays: days) }
     }
+    /// How many days the extend button adds when its input is blank — the
+    /// nest's own default window (tui's `DEFAULT_RENAME_EXTEND_DAYS`).
+    private static let defaultRenameExtendDays: Int64 = 7
     private func abortRename() {
         guard let rename = vm.activeRename else { return }
         confirmingAbort = false
@@ -1145,7 +1218,7 @@ public struct AdminDnsView: View {
     private var addCredentialForm: some View {
         if showAddCredential {
             VStack(alignment: .leading, spacing: 8) {
-                ProviderRow(
+                ProviderButtonRow(
                     providers: Self.dnsProviders,
                     selectedId: selectedProvider,
                     kind: "admin-dns-add-credential",
@@ -1160,18 +1233,20 @@ public struct AdminDnsView: View {
                 }
                 HStack {
                     Button(L.admin.dns.addCredentialSubmit) { submitAddCredential() }
-                        .disabled(vm.isBusy || !canSubmitCredential)
+                        .disabled(vm.isBusy)
                         .accessibilityIdentifier(Ids.adminDnsAddCredentialSubmitButton)
                         .automationActivate(
                             Ids.adminDnsAddCredentialSubmitButton,
-                            isEnabled: { !vm.isBusy && canSubmitCredential }
+                            isEnabled: { !vm.isBusy }
                         ) { submitAddCredential() }
+                        .faunaPossible(credentialDraftAnswer)
                     Button(L.common.cancel) { resetAddCredential() }
                         .accessibilityIdentifier(Ids.adminDnsAddCredentialCancelButton)
                         .automationActivate(Ids.adminDnsAddCredentialCancelButton) {
                             resetAddCredential()
                         }
                 }
+                FaunaPossibilityReason(credentialDraftAnswer)
             }
         } else {
             Button(L.admin.dns.addCredential) { showAddCredential = true }
@@ -1209,21 +1284,30 @@ public struct AdminDnsView: View {
         Binding(get: { credValues[id] ?? "" }, set: { credValues[id] = $0 })
     }
 
-    private var canSubmitCredential: Bool {
-        guard let provider = Self.dnsProviders.first(where: { $0.id == selectedProvider }) else { return false }
-        let required = provider.fields.filter { $0.kinds.contains(.dns) && $0.required }
-        return required.allSatisfy { !(credValues[$0.id] ?? "").trimmed.isEmpty }
+    /// The shared draft answer: a provider picked and every one of its DNS
+    /// fields typed (`credential_draft_possibility`).
+    private var credentialDraftAnswer: Possibility {
+        let provider = Self.dnsProviders.first(where: { $0.id == selectedProvider })
+        let values = (provider?.fields ?? [])
+            .filter { $0.kinds.contains(.dns) }
+            .map { credValues[$0.id] ?? "" }
+        return dnsCredentialDraftPossibility(providerPicked: provider != nil, values: values)
     }
 
+    /// Refuses with the draft's reason first. The write-only form, and the
+    /// secrets typed into it, stay until the provider verified the credential
+    /// and it is sealed; a rejection leaves it open to correct.
     private func submitAddCredential() {
-        guard let provider = Self.dnsProviders.first(where: { $0.id == selectedProvider }) else { return }
+        guard !vm.refused(credentialDraftAnswer),
+              let provider = Self.dnsProviders.first(where: { $0.id == selectedProvider }) else { return }
         let fields = provider.fields
             .filter { $0.kinds.contains(.dns) }
             .map { DnsCredentialField(id: $0.id, value: credValues[$0.id] ?? "") }
         let label = L.lookup(provider.displayNameKey)
         Task {
-            await vm.putCredentials(providerId: provider.id, fields: fields, label: label)
-            if vm.errorMessage == nil { resetAddCredential() }
+            if await vm.putCredentials(providerId: provider.id, fields: fields, label: label) {
+                resetAddCredential()
+            }
         }
     }
 

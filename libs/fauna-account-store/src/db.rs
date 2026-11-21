@@ -193,6 +193,18 @@ const CREATE_TABLES_SQL: &str = "
         -- When the candidate-free `conflicts.resolve` for `nest_id` landed;
         -- NULL on a cured (`resolved_at`) row with a `nest_id` = still owed.
         nest_resolved_at INTEGER,
+        -- The two columns below serve a `too_large_for_nest` row only
+        -- (`conflicts.md` § Refused uploads reach the review list): the
+        -- refused file's size and mtime (epoch secs) when it was refused, so
+        -- an unchanged file is refused again from its metadata alone, never
+        -- re-read and re-cut on every pass while the nest stays as it is.
+        refused_size  INTEGER,
+        refused_mtime INTEGER,
+        -- The seq of the newest change from another device that the refused
+        -- file kept from applying (`conflicts.md` § Refused uploads reach the
+        -- review list, *Lifecycle*): the set's head for the path, owed to this
+        -- device once the refused file is gone. NULL = nothing owed.
+        owed_head_seq INTEGER,
         -- The six columns below serve a group set's retained loser only
         -- (`p2p-shared-set-build.md` § Build design — the group set,
         -- decision 9): the row its nest would hold, kept by the loser's
@@ -1065,6 +1077,18 @@ pub struct SyncDb {
 /// § Skipped catch-up changes reach the review list).
 pub const CATCHUP_FAILED: &str = "catchup_failed";
 
+/// The conflict kind of a local file this device could not upload because the
+/// nest cannot store it (`file-sync.md` § Paged manifests → *Compatibility*) —
+/// recorded once per path, reported candidate-free like [`CATCHUP_FAILED`], and
+/// cleared when the file uploads, is deleted, or a later change to its path
+/// applies (`conflicts.md` § Refused uploads reach the review list).
+pub const TOO_LARGE_FOR_NEST: &str = "too_large_for_nest";
+
+/// The kinds this device files about itself and re-sends until the nest
+/// acknowledges them ([`CATCHUP_FAILED`], [`TOO_LARGE_FOR_NEST`]), as an SQL
+/// `IN (…)` list — compile-time literals, never input.
+const DEVICE_REPORTED_KINDS_SQL: &str = "('catchup_failed', 'too_large_for_nest')";
+
 /// The conflict kinds whose unresolved local row means "the next change on this
 /// path is the propagated winner the user chose" — the only kinds the
 /// verbatim-winner apply keys on, and only on a row carrying a `nest_id` (its
@@ -1127,10 +1151,14 @@ impl RetainedLoser {
     }
 }
 
-/// One local [`CATCHUP_FAILED`] row, as the report and cure paths need it.
+/// One local device-reported row — a [`CATCHUP_FAILED`] skip or a
+/// [`TOO_LARGE_FOR_NEST`] refusal — as the report and cure paths need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedChange {
     pub id: i64,
+    /// The row's kind: [`CATCHUP_FAILED`] or [`TOO_LARGE_FOR_NEST`] — the
+    /// conflict type its report carries.
+    pub kind: String,
     /// The plaintext relative path, or — [`Self::path_is_hash`] — the change
     /// row's own wire `path_hash` string.
     pub path: String,
@@ -2785,12 +2813,135 @@ impl SyncDb {
             .context("record skipped change")?;
         Ok(Some(SkippedChange {
             id: self.conn.last_insert_rowid(),
+            kind: CATCHUP_FAILED.to_string(),
             path: path.to_string(),
             path_is_hash,
             path_sealed: path_sealed.map(<[u8]>::to_vec),
             details: details.map(str::to_string),
             nest_id: None,
         }))
+    }
+
+    /// Record a local file refused because the nest cannot store it
+    /// ([`TOO_LARGE_FOR_NEST`]), **once per path**: returns `None` when an
+    /// unresolved refusal is already on record for `path` — whose fingerprint
+    /// is then refreshed to `size`/`mtime` — else the new row with its id.
+    pub fn record_upload_refusal(
+        &self,
+        path: &str,
+        details: &str,
+        size: i64,
+        mtime: i64,
+    ) -> Result<Option<SkippedChange>> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE sync_conflicts SET refused_size = ?3, refused_mtime = ?4
+                 WHERE path = ?1 AND conflict_type = ?2 AND resolved_at IS NULL",
+                params![path, TOO_LARGE_FOR_NEST, size, mtime],
+            )
+            .context("refresh upload refusal on record")?;
+        if updated > 0 {
+            return Ok(None);
+        }
+        self.conn
+            .execute(
+                "INSERT INTO sync_conflicts
+                     (path, conflict_type, details, created_at, refused_size, refused_mtime)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    path,
+                    TOO_LARGE_FOR_NEST,
+                    details,
+                    now_epoch_secs(),
+                    size,
+                    mtime
+                ],
+            )
+            .context("record upload refusal")?;
+        Ok(Some(SkippedChange {
+            id: self.conn.last_insert_rowid(),
+            kind: TOO_LARGE_FOR_NEST.to_string(),
+            path: path.to_string(),
+            path_is_hash: false,
+            path_sealed: None,
+            details: Some(details.to_string()),
+            nest_id: None,
+        }))
+    }
+
+    /// The size and mtime the unresolved [`TOO_LARGE_FOR_NEST`] refusal of
+    /// `path` was recorded at, if one is on record.
+    pub fn upload_refusal_fingerprint(&self, path: &str) -> Result<Option<(i64, i64)>> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT refused_size, refused_mtime FROM sync_conflicts
+                 WHERE path = ?1 AND conflict_type = ?2 AND resolved_at IS NULL
+                   AND refused_size IS NOT NULL AND refused_mtime IS NOT NULL
+                 ORDER BY id LIMIT 1",
+                params![path, TOO_LARGE_FOR_NEST],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .context("query upload refusal fingerprint")
+    }
+
+    /// Note that the change at `seq` from another device did not apply over
+    /// the refused file at `path`, so the set's head for `path` is owed to
+    /// this device once that file is gone. Keeps the newest seq; a path with
+    /// no unresolved refusal on record notes nothing.
+    pub fn note_refusal_owed_head(&self, path: &str, seq: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE sync_conflicts
+                 SET owed_head_seq = MAX(COALESCE(owed_head_seq, 0), ?3)
+                 WHERE path = ?1 AND conflict_type = ?2 AND resolved_at IS NULL",
+                params![path, TOO_LARGE_FOR_NEST, seq],
+            )
+            .context("note the head a refusal kept from applying")?;
+        Ok(())
+    }
+
+    /// The newest seq [`Self::note_refusal_owed_head`] noted on the unresolved
+    /// [`TOO_LARGE_FOR_NEST`] refusal of `path`, if any. Read before the cure,
+    /// which resolves the row.
+    pub fn upload_refusal_owed_head(&self, path: &str) -> Result<Option<i64>> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT MAX(owed_head_seq) FROM sync_conflicts
+                 WHERE path = ?1 AND conflict_type = ?2 AND resolved_at IS NULL",
+                params![path, TOO_LARGE_FOR_NEST],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .context("query the head a refusal owes")
+    }
+
+    /// The cure of a refusal: `path` uploaded, was deleted, or a later change
+    /// to it applied, so its unresolved [`TOO_LARGE_FOR_NEST`] row is resolved
+    /// locally. Returns the cured rows; those carrying a `nest_id` owe the nest
+    /// a candidate-free resolve.
+    pub fn cure_upload_refusals_for_path(&self, path: &str) -> Result<Vec<SkippedChange>> {
+        let cured = self.query_skips(
+            "SELECT id, conflict_type, path, path_is_hash, path_sealed, details, nest_id
+             FROM sync_conflicts
+             WHERE conflict_type = ?1 AND resolved_at IS NULL AND path = ?2
+             ORDER BY id",
+            params![TOO_LARGE_FOR_NEST, path],
+        )?;
+        let now = now_epoch_secs();
+        for row in &cured {
+            self.conn
+                .execute(
+                    "UPDATE sync_conflicts SET resolved_at = ?1 WHERE id = ?2",
+                    params![now, row.id],
+                )
+                .context("cure upload refusal row")?;
+        }
+        Ok(cured)
     }
 
     /// Record a group set's resolved concurrent edit, kept by the loser's
@@ -2952,16 +3103,21 @@ impl SyncDb {
         Ok(())
     }
 
-    /// Unresolved skip rows whose report has not landed yet (no `nest_id`) and
-    /// that can be filed at all — a seal-less `path_is_hash` row has neither a
-    /// plaintext path nor a seal to report, and stays local.
+    /// Unresolved device-reported rows (skips and refused uploads) whose report
+    /// has not landed yet (no `nest_id`) and that can be filed at all — a
+    /// seal-less `path_is_hash` row has neither a plaintext path nor a seal to
+    /// report, and stays local.
     pub fn list_unreported_catchup_failures(&self) -> Result<Vec<SkippedChange>> {
         self.query_skips(
-            "SELECT id, path, path_is_hash, path_sealed, details, nest_id FROM sync_conflicts
-             WHERE conflict_type = ?1 AND resolved_at IS NULL AND nest_id IS NULL
-               AND (path_is_hash = 0 OR path_sealed IS NOT NULL)
-             ORDER BY id",
-            params![CATCHUP_FAILED],
+            &format!(
+                "SELECT id, conflict_type, path, path_is_hash, path_sealed, details, nest_id
+                 FROM sync_conflicts
+                 WHERE conflict_type IN {DEVICE_REPORTED_KINDS_SQL}
+                   AND resolved_at IS NULL AND nest_id IS NULL
+                   AND (path_is_hash = 0 OR path_sealed IS NOT NULL)
+                 ORDER BY id"
+            ),
+            [],
         )
     }
 
@@ -2975,7 +3131,8 @@ impl SyncDb {
         path_hash_hex: &str,
     ) -> Result<Vec<SkippedChange>> {
         let cured = self.query_skips(
-            "SELECT id, path, path_is_hash, path_sealed, details, nest_id FROM sync_conflicts
+            "SELECT id, conflict_type, path, path_is_hash, path_sealed, details, nest_id
+             FROM sync_conflicts
              WHERE conflict_type = ?1 AND resolved_at IS NULL
                AND ((path_is_hash = 0 AND path = ?2) OR (path_is_hash = 1 AND path = ?3))
              ORDER BY id",
@@ -3012,15 +3169,20 @@ impl SyncDb {
             .context("read unresolved skip paths")
     }
 
-    /// Cured skip rows whose nest row is still open: the candidate-free
-    /// `conflicts.resolve` for their `nest_id` has not landed yet.
+    /// Cured device-reported rows (skips and refused uploads) whose nest row is
+    /// still open: the candidate-free `conflicts.resolve` for their `nest_id`
+    /// has not landed yet.
     pub fn list_catchup_failures_owing_nest_resolve(&self) -> Result<Vec<SkippedChange>> {
         self.query_skips(
-            "SELECT id, path, path_is_hash, path_sealed, details, nest_id FROM sync_conflicts
-             WHERE conflict_type = ?1 AND resolved_at IS NOT NULL
-               AND nest_id IS NOT NULL AND nest_resolved_at IS NULL
-             ORDER BY id",
-            params![CATCHUP_FAILED],
+            &format!(
+                "SELECT id, conflict_type, path, path_is_hash, path_sealed, details, nest_id
+                 FROM sync_conflicts
+                 WHERE conflict_type IN {DEVICE_REPORTED_KINDS_SQL}
+                   AND resolved_at IS NOT NULL
+                   AND nest_id IS NOT NULL AND nest_resolved_at IS NULL
+                 ORDER BY id"
+            ),
+            [],
         )
     }
 
@@ -3040,11 +3202,12 @@ impl SyncDb {
         let rows = stmt.query_map(params, |row| {
             Ok(SkippedChange {
                 id: row.get(0)?,
-                path: row.get(1)?,
-                path_is_hash: row.get(2)?,
-                path_sealed: row.get(3)?,
-                details: row.get(4)?,
-                nest_id: row.get(5)?,
+                kind: row.get(1)?,
+                path: row.get(2)?,
+                path_is_hash: row.get(3)?,
+                path_sealed: row.get(4)?,
+                details: row.get(5)?,
+                nest_id: row.get(6)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -3326,6 +3489,21 @@ impl SyncDb {
     /// row itself refused the build (decision 2″ (3)).
     pub fn clear_binding_record(&self) -> Result<()> {
         self.meta_del("binding_record")
+    }
+
+    /// The replicated File Provider's change-feed state — the last few trees
+    /// the feed reported, by generation, serialized by
+    /// `fauna_sync_engine::provider_face` (`on-demand-files-apple.md` § Apple
+    /// File Provider binding, *the change feed*). Derived and recreatable: a
+    /// lost row costs one full re-report, never data. `None` = none rests.
+    pub fn provider_change_feed(&self) -> Result<Option<String>> {
+        self.meta_get("provider_change_feed")
+    }
+
+    /// Replace the change-feed state (the write half of
+    /// [`Self::provider_change_feed`]).
+    pub fn set_provider_change_feed(&self, state: &str) -> Result<()> {
+        self.meta_put("provider_change_feed", state)
     }
 
     /// The website-serving shape this device last CONVERGED this folder's

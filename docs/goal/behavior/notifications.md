@@ -499,6 +499,7 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
   `error-message` (snapshot variants arrive with the typed-enum evolution).
 - A dismiss of a security notice inside its window answers
   `fauna.notifications.retained` — § Retention, the security-notice window.
+- **The page-wide actions wait on the first read (ruled 2026-11-16; [`../ui/README.md`](../ui/README.md) § Offer only what is possible, rules 2, 5 and 6; built on tui, linux, android, web, macos and ios).** *Mark all read* (`notification-mark-read`) answers `fauna_client_notifications::mark_all_read_possibility` and *Clear all* (`notification-clear`) `clear_all_possibility`, both over the page's list-read state: before the first read has answered both are blocked with `common.still_loading` (after a failed first read, `common.load_failed`); once read, *Clear all* is blocked with `notifications.nothing_to_clear` while the page holds no row. Once read, *Mark all read* is blocked with `notifications.nothing_unread` while the app's unread count (the app-global count the badge renders, never a count of the page's rows) is zero — blocked with a reason, never absent, because a notification arriving makes it possible (ruled 2026-11-19, rule 2). Each action asks its answer again and refuses with its reason. A failure after a resolved read keeps the shown rows actionable.
 
 ## Architectural rules
 

@@ -68,13 +68,37 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     let submit_btn =
         Button::with_label(crate::i18n::strings::onboarding::claim_code::SUBMIT_BUTTON);
     submit_btn.add_css_class("suggested-action");
-    submit_btn.set_sensitive(false); // gated on input non-empty + snapshot.submit_enabled
     set_test_id(&submit_btn, ids::CLAIM_CODE_SUBMIT_BUTTON);
+    // Painted from the machine's answer (`ui/README.md` § Offer only what is
+    // possible, rule 4's form case): a code typed and no claim on its way.
+    crate::possible::paint(
+        &submit_btn,
+        None,
+        m.claim_code_submit_possibility(String::new()),
+    );
+    {
+        let m = m.clone();
+        let submit_btn = submit_btn.clone();
+        code_input.connect_changed(move |e| {
+            crate::possible::paint(
+                &submit_btn,
+                None,
+                m.claim_code_submit_possibility(e.text().to_string()),
+            );
+        });
+    }
     {
         let m = m.clone();
         let code_input = code_input.clone();
         submit_btn.connect_clicked(move |_| {
             let code = code_input.text().to_string();
+            // The press asks the answer it was painted from again (rule 6);
+            // a blocked draft's line goes on `error-message`.
+            let answer = m.claim_code_submit_possibility(code.clone());
+            if let Some(reason) = crate::possible::reason_text(&answer) {
+                m.set_error_message(reason);
+                return;
+            }
             let m_async = m.clone();
             // A 2xx lands the machine on `Done` (LoggedIn, admin): the
             // observer tick routes the outcome (`mod.rs::handle_change`). For
@@ -134,12 +158,6 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     root.append(&btn_row);
 
     // -- Refresh closure --
-    // Per `docs/goal/behavior/onboarding.md` §3a, `submit_enabled` is the canonical
-    // gate (encodes both "machine is not inflight" and "input is non-empty"
-    // — the input-changed handler below pushes keystrokes through the
-    // machine via `set_claim_code_input` / equivalent). We trust the
-    // snapshot here directly, matching the cross-app contract that the
-    // Python e2e fixtures rely on.
     let refresh: Rc<dyn Fn()> = Rc::new({
         let m = m.clone();
         let submit_btn = submit_btn.clone();
@@ -164,8 +182,12 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
             // target-doc rule: don't recompute message text on the client).
             status_label.set_text(&snap.message.resolve(crate::i18n::strings::lookup));
 
-            // Submit button: snapshot is the source of truth.
-            submit_btn.set_sensitive(snap.submit_enabled);
+            // Submit button: the machine's answer over the code as typed.
+            crate::possible::paint(
+                &submit_btn,
+                None,
+                m.claim_code_submit_possibility(code_input.text().to_string()),
+            );
 
             // Error banner.
             let msg = m.error_message().filter(|msg| !msg.is_empty());

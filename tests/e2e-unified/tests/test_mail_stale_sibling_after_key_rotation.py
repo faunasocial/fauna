@@ -24,9 +24,10 @@ a generation its custody has never held makes it walk the fleet scope
   re-seals (the snapshot row changes) → IMAPS AUTH with the surviving
   credential succeeds.
 
-**The walk lands wherever the engine role is.** The bounce reconnects B's
-sync agent too, and the agent — the engine role's preferred holder — usually
-takes the role back from B's app as it does. B's app is then a non-holder,
+**The walk lands wherever the engine role is.** B's sync agent — the engine
+role's preferred holder — takes the role from B's app when its presence poll
+sees it, before the bounce or as the bounce reconnects it. B's app is then a
+non-holder,
 and its awaited walk reaches the holder (``docs/goal/architecture/account-runtime.md``
 § Multi-instance concurrency → *A non-holder's awaited fleet walk reaches the
 holder*): the agent walks on its behalf over ``WalkFleetNow`` and B's app reads
@@ -42,7 +43,13 @@ no unprompted walk of B's — a nudge's, a pass's — lands after its launch
 listing; only the refresh's own awaited ``walk_fleet`` does. B's agent is
 held too: the e2e spawner starts it as a direct child of B's tui process
 (never through ``systemctl --user``), so it inherits the hold variable — and
-its ``WalkFleetNow`` walk is the awaited leg the hold spares. On a tree without
+its ``WalkFleetNow`` walk is the awaited leg the hold spares. The hold keys on
+the store's listed fact as well as the process's own, so the agent's first
+pass on taking the role — its process's first listing, which can land in the
+middle of A's rotation — walks nothing either; keyed on the process alone, that
+pass walked B forward over whatever of the rotation the nest held by then, and
+B's reconnect refresh returned without walking or a visible re-seal. On a tree
+without
 rule (4) B re-seals under the pre-rotation key and AUTH fails, every run. The
 tier_1 witnesses are ``libs/fauna-client-mail-settings/tests/rotation_resume.rs``'s
 three stale-sibling cases.

@@ -6,7 +6,11 @@ import androidx.lifecycle.viewModelScope
 import com.fauna.app.R
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.feed.FeedManagerHost
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.answerRefusal
 import com.fauna.app.ui.util.resolveLocalized
+import com.fauna.ffi.clearEngagementPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
@@ -19,6 +23,10 @@ import com.fauna.ffi.FfiPublishModelException
 import com.fauna.ffi.FfiPublishNgram
 import com.fauna.ffi.FfiTrainedTopicRow
 import com.fauna.ffi.FfiTrainedTopicsException
+import uniffi.fauna_core.Possibility
+import com.fauna.ffi.trainedFactorNamePossibility
+import com.fauna.ffi.trainedFactorPublishOpenPossibility
+import com.fauna.ffi.trainedFactorPublishSubmitPossibility
 import com.fauna.ffi.ngramDirectionLabel
 import com.fauna.ffi.ngramDocCountLabel
 import com.fauna.app.ui.util.firstListingRefusal
@@ -131,6 +139,22 @@ class TrainedTopicsVM @Inject constructor(
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    private val _clearAnswer = MutableStateFlow(clearAnswerNow())
+
+    /** `personalization-clear-engagement-data-button`'s answer — the shared
+     *  `fauna_client_personalization::engagement::clear_engagement_possibility`
+     *  over whether the live feed manager is up (`engagement-cues.md`
+     *  § Layer B). The button is painted from it and [clearEngagementData]
+     *  asks it again. */
+    val clearAnswer: StateFlow<Possibility> = _clearAnswer.asStateFlow()
+
+    private fun clearAnswerNow(): Possibility =
+        clearEngagementPossibility(feedManagerHost.manager() != null)
+
+    private fun repaintClear() {
+        _clearAnswer.value = clearAnswerNow()
+    }
+
     /** `Some(factor id)` while [topicName] is retargeted at a rename. */
     private var renamingId: ByteArray? = null
     private val _isRenaming = MutableStateFlow(false)
@@ -158,6 +182,7 @@ class TrainedTopicsVM @Inject constructor(
      *  second RPC for the per-factor counts, not a single NestClient RPC
      *  (transport.md § Request lifecycle step 3's note). */
     fun load() {
+        repaintClear()
         viewModelScope.launch {
             var refusal: String? = null
             repeat(HYDRATE_ATTEMPTS) {
@@ -189,16 +214,38 @@ class TrainedTopicsVM @Inject constructor(
         _topicName.value = name
     }
 
+    // The trained-topic forms' answers (`docs/goal/ui/settings.md` § Errors &
+    // edge cases, *Personal form submits paint from their draft*): the shared
+    // `fauna_client_personalization::drafts`, which the content paints from and
+    // each press below asks again, refusing with the same reason.
+
+    /** Whether the live feed manager — whose loaded window is the publish
+     *  corpus — is up. */
+    fun managerReady(): Boolean = feedManagerHost.manager() != null
+
+    /** The create / save-name button's answer. */
+    fun nameAnswer(): Possibility =
+        askForm { trainedFactorNamePossibility(_topicName.value, _busy.value) }
+
+    /** A row's Publish… answer: absent with no addressable model, blocked
+     *  while the feed manager is not up, so no sheet opens onto nothing. */
+    fun publishOpenAnswer(row: FfiTrainedTopicRow): Possibility =
+        askForm { trainedFactorPublishOpenPossibility(row.factorKey != null, managerReady(), _busy.value) }
+
+    /** The open sheet's Publish answer (a public name within the bound, a
+     *  kept item, no publish in flight); `Absent` with no sheet open. */
+    fun publishSubmitAnswer(): Possibility {
+        val state = _publish.value ?: return Possibility.Absent
+        return askForm { trainedFactorPublishSubmitPossibility(state.name, state.hasIncluded, state.busy) }
+    }
+
     /** Commit the name-input: a rename when a row retargeted it, else a create. */
     fun submitTopic() {
-        val name = _topicName.value.trim()
-        if (_busy.value) return
-        if (name.isEmpty()) {
-            // Refused here, before the round trip, with the shared sentence —
-            // never a silent no-op (linux `submit`, tui).
-            _errorMessage.value = appContext.getString(R.string.personalization_trained_factor_blank_name)
+        formRefusal(appContext, nameAnswer())?.let { refusal ->
+            refusal.reason?.let { _errorMessage.value = it }
             return
         }
+        val name = _topicName.value.trim()
         val id = renamingId
         _busy.value = true
         viewModelScope.launch {
@@ -273,14 +320,21 @@ class TrainedTopicsVM @Inject constructor(
      * always controls their data; every new data shape is revocable from the
      * client). It is the sibling of [toggleEngagement] — that one stops future
      * learning, this one erases what was already captured.
+     *
+     * Asks [clearAnswer]'s predicate again first: with no live feed manager
+     * the press refuses with the answer's reason on `error-message` and sends
+     * nothing (`docs/goal/ui/README.md` § Offer only what is possible, rule 6).
      */
     fun clearEngagementData() {
+        val manager = feedManagerHost.manager()
+        val answer = clearEngagementPossibility(manager != null)
+        _clearAnswer.value = answer
+        val refusal = answerRefusal(appContext, answer)
+        if (refusal != null || manager == null) {
+            refusal?.reason?.let { _errorMessage.value = it }
+            return
+        }
         viewModelScope.launch {
-            val manager = feedManagerHost.manager()
-            if (manager == null) {
-                _errorMessage.value = appContext.getString(R.string.common_not_connected)
-                return@launch
-            }
             try {
                 manager.deleteCueRollup()
                 _errorMessage.value = null
@@ -294,6 +348,10 @@ class TrainedTopicsVM @Inject constructor(
      *  score its corpus — the loaded feed window, deliberately not a paging
      *  crawl (§ Publishing's accepted limitation). */
     fun openPublishSheet(row: FfiTrainedTopicRow) {
+        formRefusal(appContext, publishOpenAnswer(row))?.let { refusal ->
+            refusal.reason?.let { _errorMessage.value = it }
+            return
+        }
         publishTargetId = row.id
         publishTargetFactorKey = row.factorKey
         _publish.value = PublishSheetUiState(exemplars = emptyList(), name = "", busy = false)
@@ -409,10 +467,13 @@ class TrainedTopicsVM @Inject constructor(
     fun submitPublish() {
         val state = _publish.value ?: return
         val targetId = publishTargetId ?: return
-        // A blank name is refused here rather than at the wire — the same
-        // guard the create/rename flow uses.
+        // The painted answer, asked again: refused with its reason on
+        // `error-message` rather than at the wire.
+        formRefusal(appContext, publishSubmitAnswer())?.let { refusal ->
+            refusal.reason?.let { _errorMessage.value = it }
+            return
+        }
         val name = state.name.trim()
-        if (name.isEmpty() || state.busy) return
         if (state.isModelKind) {
             val ngrams = state.ngrams.filter { it.included }
                 .map { FfiPublishNgram(ngram = it.ngram, more = it.more, less = it.less) }

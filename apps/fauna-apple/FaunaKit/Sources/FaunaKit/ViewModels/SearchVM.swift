@@ -34,9 +34,6 @@ public final class SearchVM {
     /// `snapshot().query` is the LAST FIRED query, which `search(loadMore:)`
     /// re-issues on "load more" rather than whatever is now in this buffer.
     public var query = ""
-    /// `search-toggle-button` — pure view affordance, no search semantics
-    /// (`search.md` § User actions).
-    public var isSearchVisible = false
 
     /// The `APIClient` this VM is scoped to — the identity key. A fresh login
     /// mints a new `APIClient` (`FaunaClient.api` is a `let`), so a different
@@ -79,6 +76,7 @@ public final class SearchVM {
         api = nil
         indexAttached = false
         query = ""
+        refusal = nil
     }
 
     /// Build (or reuse) the manager for `api`. Idempotent for the *same*
@@ -148,15 +146,35 @@ public final class SearchVM {
     public var typeFilter: String { snapshot?.typeFilter ?? Self.typeFilterAll }
     public var isSearching: Bool { snapshot?.inFlight ?? false }
     public var hasSearched: Bool { !(snapshot?.query.isEmpty ?? true) }
+    /// Whether the Search page (results, `error-message`) is on screen: a
+    /// fired query, or a refused submit whose reason must be read.
+    public var showsResults: Bool { hasSearched || refusal != nil }
     public var noResults: Bool { snapshot?.noResults ?? false }
     public var hasMore: Bool { snapshot?.hasMore ?? false }
-    public var errorMessage: String? { snapshot?.error.map(renderLocalizedText) }
+    /// `error-message`: a refused submit's reason while it stands, else the
+    /// manager's own error.
+    public var errorMessage: String? { refusal ?? snapshot?.error.map(renderLocalizedText) }
+
+    /// A person's submit of a query the shared predicate blocks, refused with
+    /// its reason (`search.md` § Errors & edge cases). Cleared by the next
+    /// accepted submit, `clear()` and `cancel()`.
+    public private(set) var refusal: String?
+
+    /// `search-submit-button`'s shared draft-validity answer
+    /// (`fauna_client_search::query_possibility`): a blank query is not
+    /// offered. The button paints from it; ``search(newTypeFilter:)`` asks it
+    /// again on a person's submit.
+    public var queryPossibility: Possibility { searchQueryPossibility(query: query) }
 
     // ── User actions (`search.md` § User actions) ───────────────────────────
     /// `search-submit-button`, and `search-type-filter` when the filter
     /// changes (`newTypeFilter` keeps the live buffer, re-firing under the new
-    /// token — mirrors tui/linux/web's "SetTypeFilter" semantics). A blank
-    /// query is a no-op every app's search bar shares.
+    /// token — mirrors tui/linux/web's "SetTypeFilter" semantics). A person's
+    /// submit (`newTypeFilter == nil`) asks ``queryPossibility`` first and
+    /// refuses a blank query with its reason on `error-message`; a filter
+    /// change over a blank buffer still reaches the manager, which holds the
+    /// chosen token for the next search (or re-fires the last query) rather
+    /// than dropping it (`search.md` § User actions).
     ///
     /// Retries the local-index attach first (idempotent — `attachLocalIndexIfNeeded`
     /// no-ops once `indexAttached`): `configure`'s own first attempt can race the
@@ -167,8 +185,17 @@ public final class SearchVM {
     /// spirit as `content-index.md`'s "the manager mints on the first query
     /// that finds no arm" for the arm itself.
     public func search(newTypeFilter: String? = nil) async {
+        if newTypeFilter == nil, let refused = queryPossibility.refusal {
+            refusal = refused
+            return
+        }
         let q = query.trimmingCharacters(in: .whitespaces)
+        if q.isEmpty, let token = newTypeFilter {
+            await manager?.runQuery(query: q, typeFilter: token)
+            return
+        }
         guard !q.isEmpty else { return }
+        refusal = nil
         await attachLocalIndexIfNeeded()
         await manager?.runQuery(query: q, typeFilter: newTypeFilter ?? typeFilter)
     }
@@ -182,12 +209,14 @@ public final class SearchVM {
     /// `clear_btn`).
     public func clear() {
         query = ""
+        refusal = nil
     }
     /// `search-cancel-button` — resets the page to pre-search. Synchronous:
     /// the manager bumps its query generation so a reply still in flight lands
     /// on the cancelled page and is dropped.
     public func cancel() {
         query = ""
+        refusal = nil
         manager?.cancel()
     }
 }

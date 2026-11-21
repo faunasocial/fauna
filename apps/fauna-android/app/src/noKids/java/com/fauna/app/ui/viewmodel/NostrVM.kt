@@ -3,13 +3,15 @@ package com.fauna.app.ui.viewmodel
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.fauna.app.R
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ShellLog
 import com.fauna.app.payments.ZapSignerItem
 import com.fauna.app.payments.nostrZapSignersAdd
 import com.fauna.app.payments.nostrZapSignersList
 import com.fauna.app.payments.nostrZapSignersRemove
+import com.fauna.app.ui.util.and
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.app.ui.util.askForm
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.FfiBridgeFollow
 import com.fauna.ffi.FfiBridgeSetting
@@ -18,9 +20,16 @@ import com.fauna.ffi.FfiCborEntry
 import com.fauna.ffi.FfiCborValue
 import com.fauna.ffi.FfiCreateBunkerInviteReply
 import com.fauna.ffi.FfiFeatureRow
+import com.fauna.ffi.nostrAddFollowPossibility
+import com.fauna.ffi.nostrAddRelayPossibility
+import com.fauna.ffi.nostrLinkPossibility
+import com.fauna.ffi.featuresGatePossibility
+import com.fauna.ffi.nostrZapSignerAddPossibility
+import com.fauna.ffi.readPossibility
 import com.fauna.ffi.relayListAppending
-import com.fauna.ffi.relayUrlError
 import com.fauna.ffi.trimmedRelayInput
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,15 +37,25 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import org.json.JSONArray
+import com.fauna.app.ui.controls.Button
 
 private const val NOSTR_BRIDGE_ID = "nostr"
 
-/** Signing modes the nest custodies a key for — the only modes a NIP-46
- * bunker connection can sign under (nostr.md § The nest as the user's
- * NIP-46 signer; mirrors web's `showConnectedApps` gate). Internal (not
- * private) so [com.fauna.app.ui.screen.nostr.NostrContent] shares the same
- * gate when deciding whether to render the Connected apps section. */
-internal val CUSTODIAL_MODES = setOf("generated", "imported")
+/** The `zaps` plane's answer over the features read ([rows] `null` = not
+ *  answered yet) — the shared gate, never a Kotlin re-derivation. */
+internal fun zapsGateOver(rows: List<FfiFeatureRow>?): Possibility =
+    featuresGatePossibility(rows, "zaps")
+
+/**
+ * The submit's second half for this page's forms (`docs/goal/ui/nostr.md`
+ * § Errors & edge cases; README § Offer only what is possible, rule 4): ask
+ * the shared predicate the button was painted from, and refuse with its reason
+ * on `error-message` (`null` = the draft may go). Failing open like the paint.
+ */
+private fun refusalOf(context: Context, predicate: () -> Possibility): String? {
+    val form = askForm(predicate)
+    return if (form is Possibility.Blocked) resolveLocalized(context, form.reason) else null
+}
 
 // ── Nostr bridge-setting helpers (FFI-free — shared with NostrScreen's
 // stateless Content composable for rendering). `relay_list` is a JSON array of
@@ -105,15 +124,17 @@ class NostrVM @Inject constructor(
     // Zap signers (the NIP-57 trust root, monetization.md § Zap receipts —
     // the trust model). Unlike the bunker invite, gated on LINKED alone — NOT
     // custodial: designating who may speak for your money is orthogonal to
-    // where your key lives. [zapSignerGateRow] is the `zaps` gated-feature
-    // row (Dim-3 courtesy read for the add button, `zaps.signer.designate`);
-    // `null` while available OR un-hydrated — an un-hydrated read must leave
-    // the button LIVE, since the nest, not the app, is the enforcement floor.
+    // where your key lives. [zapSignerGate] is the `zaps` plane's answer
+    // over the Dim-3 courtesy read (`featuresGatePossibility`, the shared
+    // `fauna_client_features::gate_possibility`): blocked still loading until
+    // the read answers, blocked load-failed when it threw, absent when the
+    // nest has no `zaps` row or hides it (`docs/goal/ui/README.md` § Offer
+    // only what is possible, rules 2 and 5).
     private val _zapSigners = MutableStateFlow<List<ZapSignerItem>>(emptyList())
     val zapSigners: StateFlow<List<ZapSignerItem>> = _zapSigners
 
-    private val _zapSignerGateRow = MutableStateFlow<FfiFeatureRow?>(null)
-    val zapSignerGateRow: StateFlow<FfiFeatureRow?> = _zapSignerGateRow
+    private val _zapSignerGate = MutableStateFlow(zapsGateOver(null))
+    val zapSignerGate: StateFlow<Possibility> = _zapSignerGate
 
     /** Succession-aftermath npub confirm banner (nostr.md § Key succession
      *  and rotation, leg 3) — checked once per [refresh] (the page's
@@ -158,19 +179,16 @@ class NostrVM @Inject constructor(
                 } else {
                     emptyList()
                 }
-                // The Dim-3 courtesy read for the add button. `null` on ANY
-                // failure to hydrate (missing row, or the fetch itself
-                // throwing) — never disable eagerly, which is what leaves an
-                // un-hydrated read live (mirrors linux's
-                // `zap_signer_add_gate_reason` / web's `fetchZapSignerGate`).
-                _zapSignerGateRow.value = if (nostr?.linked == true) {
-                    try {
-                        api.fetchFeatures().find { it.feature == "zaps" }
+                // The Dim-3 courtesy read for the add button, answered by the
+                // shared gate (tui's `designate_gate`): unknown is not
+                // possible, so a fetch that threw blocks with load-failed.
+                if (nostr?.linked == true) {
+                    _zapSignerGate.value = try {
+                        zapsGateOver(api.fetchFeatures())
                     } catch (e: Exception) {
-                        null
+                        ShellLog.w("NostrVM", "features read failed: ${e.message}")
+                        readPossibility(ReadState.FAILED)
                     }
-                } else {
-                    null
                 }
                 // Succession-aftermath npub confirm (leg 3), checked once on
                 // this nav-enter read — the same "extra leg" tui's
@@ -228,11 +246,13 @@ class NostrVM @Inject constructor(
      *  round trip. Idempotent — a re-add REFRESHES the label, so re-entering
      *  a designated key is the only rename path there is. */
     fun addZapSigner(pubkey: String, label: String) {
-        val trimmed = pubkey.trim()
-        if (trimmed.length != 64 || !trimmed.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }) {
-            _error.value = appContext.getString(R.string.nostr_zap_signers_invalid_pubkey)
+        // Rule 6: the answer the button was painted from, asked again — the
+        // plane's gate first, then the draft.
+        answerRefusal(appContext, zapSignerAddAnswer(pubkey))?.let {
+            _error.value = it.reason
             return
         }
+        val trimmed = pubkey.trim()
         viewModelScope.launch {
             _error.value = null
             try {
@@ -243,6 +263,11 @@ class NostrVM @Inject constructor(
             }
         }
     }
+
+    /** `nostr-zap-signer-add-btn`'s whole answer (tui's `zap_signer_add_answer`):
+     *  the `zaps` plane's gate ANDed with the shared draft predicate. */
+    fun zapSignerAddAnswer(pubkey: String): Possibility =
+        _zapSignerGate.value and askForm { nostrZapSignerAddPossibility(pubkey) }
 
     /** `fauna.nostr.zap_signers.remove` — stop trusting a signer, keyed by
      *  the row's own STORED pubkey. */
@@ -259,6 +284,12 @@ class NostrVM @Inject constructor(
     }
 
     fun link(mode: String, fields: Map<String, String>) {
+        refusalOf(appContext) {
+            nostrLinkPossibility(mode, fields["nsec"].orEmpty(), fields["bunker_url"].orEmpty())
+        }?.let {
+            _error.value = it
+            return
+        }
         viewModelScope.launch {
             _error.value = null
             try {
@@ -313,13 +344,14 @@ class NostrVM @Inject constructor(
      * actions) — the nest republishes NIP-65 on change; the relay clients
      * themselves are shared Rust. */
     fun addRelay(url: String) {
-        val trimmed = trimmedRelayInput(url) ?: return
-        val refusal = relayUrlError(trimmed)
-        if (refusal != null) {
-            _error.value = resolveLocalized(appContext, refusal)
+        val current = parseRelayList(_bridge.value?.settings.orEmpty())
+        // Blank, malformed, private-network and duplicate drafts are each
+        // refused with their reason — a duplicate no longer drops silently.
+        refusalOf(appContext) { nostrAddRelayPossibility(current, url) }?.let {
+            _error.value = it
             return
         }
-        val current = parseRelayList(_bridge.value?.settings.orEmpty())
+        val trimmed = trimmedRelayInput(url) ?: return
         val next = relayListAppending(current, trimmed) ?: return
         updateSetting("relay_list", FfiCborValue.Text(encodeRelayList(next)))
     }
@@ -330,8 +362,11 @@ class NostrVM @Inject constructor(
     }
 
     fun addFollow(pubkey: String, petname: String?) {
+        refusalOf(appContext) { nostrAddFollowPossibility(pubkey) }?.let {
+            _error.value = it
+            return
+        }
         val trimmed = pubkey.trim()
-        if (trimmed.isEmpty()) return
         viewModelScope.launch {
             _error.value = null
             try {

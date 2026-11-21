@@ -494,6 +494,189 @@ def ghost_shell_sync_roots_under(base) -> list[str]:
     ]
 
 
+def shell_sync_root_listed(sync_root_id: str) -> bool:
+    """Whether ``sync_root_id`` is in the `SyncRootManager` registry — the OS's
+    own record of a shell registration, folder or not. Read-only."""
+    return any(i == sync_root_id for i, _ in list_shell_sync_roots())
+
+
+def shell_sync_root_value(sync_root_id: str, name: str) -> str | None:
+    """The string value ``name`` of ``sync_root_id``'s `SyncRootManager` key, or
+    ``None`` when the key or the value is missing — the values
+    `fauna_cfapi::list_shell_sync_roots` reads (`AUMID`, `NamespaceCLSID`, …).
+    Read-only."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, rf"{_SYNC_ROOT_MANAGER_KEY}\{sync_root_id}"
+        ) as key:
+            value, _kind = winreg.QueryValueEx(key, name)
+    except OSError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def shell_sync_root_aumid(sync_root_id: str) -> str | None:
+    """The `AUMID` the OS recorded for ``sync_root_id`` — ``<family>!<app id>`` for
+    a root registered from inside a package, ``None`` for an unpackaged one
+    (`fauna_cfapi::ShellSyncRoot::aumid`; the startup janitor reads it to find a
+    removed package's roots). Read-only."""
+    return shell_sync_root_value(sync_root_id, "AUMID")
+
+
+#: The parents, under HKCU, of the keys the OS writes for a root's Explorer namespace
+#: node, each named by the entry's `NamespaceCLSID` (`fauna_cfapi::NAMESPACE_PARENTS`;
+#: measured 2026-11-17: all three on a registration, the WOW6432Node class alone on a
+#: refused one, and `Unregister` of a packaged root keeps the WOW6432Node class).
+NAMESPACE_PARENTS = (
+    r"Software\Classes\CLSID",
+    r"Software\Classes\WOW6432Node\CLSID",
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace",
+)
+
+
+def namespace_clsid(sync_root_id: str) -> str | None:
+    """The `NamespaceCLSID` ``sync_root_id``'s `SyncRootManager` key names, or
+    ``None`` (no key, no value, or not a braced GUID). Read-only."""
+    import re
+
+    value = shell_sync_root_value(sync_root_id, "NamespaceCLSID")
+    return value if re.fullmatch(r"\{[0-9A-Fa-f-]{36}\}", value or "") else None
+
+
+def namespace_keys_left(clsid: str | None) -> list[str]:
+    """The namespace keys of ``clsid`` that stand under HKCU, of the three
+    :data:`NAMESPACE_PARENTS`; none for no ``clsid``. Read-only."""
+    import winreg
+
+    left = []
+    for parent in NAMESPACE_PARENTS if clsid else ():
+        try:
+            winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{parent}\{clsid}"))
+            left.append(rf"{parent}\{clsid}")
+        except OSError:
+            pass
+    return left
+
+
+def namespace_keys_targeting(base: Path) -> list[str]:
+    """Every namespace key under HKCU, of the three :data:`NAMESPACE_PARENTS`, whose
+    class names a folder at or under ``base`` (its `Instance\\InitPropertyBag` value
+    `TargetFolderPath`), with no `SyncRootManager` key needed to find it. A refused
+    `Register` leaves such a class with no key pointing at it, and so does a teardown
+    that removed the key but not the classes, so this is how a run finds what it left
+    under its own folder. Read-only."""
+    import winreg
+
+    prefix = _norm(base)
+    found = []
+    for parent in NAMESPACE_PARENTS:
+        try:
+            parent_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, parent)
+        except OSError:
+            continue
+        with parent_key:
+            names = []
+            while True:
+                try:
+                    names.append(winreg.EnumKey(parent_key, len(names)))
+                except OSError:
+                    break
+        for name in names:
+            # The class carries the target; a Desktop\NameSpace entry is the bare
+            # CLSID, whose class lives under Software\Classes\CLSID.
+            for holder in (rf"{parent}\{name}", rf"{NAMESPACE_PARENTS[0]}\{name}",
+                           rf"{NAMESPACE_PARENTS[1]}\{name}"):
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                        rf"{holder}\Instance\InitPropertyBag") as bag:
+                        target, _ = winreg.QueryValueEx(bag, "TargetFolderPath")
+                except OSError:
+                    continue
+                norm = _norm(target)
+                if norm == prefix or norm.startswith(prefix + "\\"):
+                    found.append(rf"{parent}\{name}")
+                break
+    return found
+
+
+def give_back_namespace_keys_under(base: Path) -> list[str]:
+    """Delete, from outside any package, every namespace key
+    :func:`namespace_keys_targeting` finds for ``base``; returns what it deleted.
+    Prints a key it could not delete and never raises, so a give-back goes on."""
+    import winreg
+
+    dropped = []
+    for key in namespace_keys_targeting(base):
+        try:
+            _drop_key(winreg.HKEY_CURRENT_USER, key)
+            dropped.append(key)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"GIVE-BACK: the namespace key {key} stays: {exc}")
+    return dropped
+
+
+def _drop_key(hive, path: str) -> None:
+    """Delete the key ``path`` of ``hive`` and every subkey under it."""
+    import winreg
+
+    with winreg.OpenKey(hive, path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+        while True:
+            try:
+                child = winreg.EnumKey(key, 0)
+            except OSError:
+                break
+            _drop_key(hive, rf"{path}\{child}")
+    winreg.DeleteKey(hive, path)
+
+
+def delete_shell_entry(sync_root_id: str, clsid: str | None) -> None:
+    """Delete ``sync_root_id``'s `SyncRootManager` key and its subkeys, then the
+    namespace keys ``clsid`` names (read off the key before it goes). The key is
+    this user's (its creator owns it); this is the give-back for an entry
+    `StorageProviderSyncRootManager.Unregister` keeps, which it does for every root
+    registered from inside a package (measured 2026-11-16 and 2026-11-17)."""
+    import winreg
+
+    try:
+        _drop_key(winreg.HKEY_LOCAL_MACHINE, rf"{_SYNC_ROOT_MANAGER_KEY}\{sync_root_id}")
+    except FileNotFoundError:
+        pass
+    for key in namespace_keys_left(clsid):
+        _drop_key(winreg.HKEY_CURRENT_USER, key)
+
+
+def give_back_root(sync_root_id: str, folder: Path, clsid: str | None) -> None:
+    """Give back a root a test left, from outside any package: the agent's own
+    teardown order (filter, then shell), the shell half by deleting the key once
+    `Unregister` has kept it — which it does for a root registered from inside a
+    package, before and after the package's removal — and then the namespace keys
+    ``clsid`` names, which a kept or deleted key leaves (measured 2026-11-16 and
+    2026-11-17). Every failure is printed, never raised: a give-back goes on."""
+    try:
+        if is_sync_root(folder):
+            unregister_sync_root(folder)
+    except OSError as exc:
+        print(f"GIVE-BACK of the filter root {folder}: {exc}")
+    if shell_sync_root_listed(sync_root_id):
+        try:
+            unregister_shell_sync_root(sync_root_id)
+        except OSError as exc:
+            print(f"GIVE-BACK of {sync_root_id} through Unregister: {exc}")
+    try:
+        delete_shell_entry(sync_root_id, clsid)
+    except OSError as exc:
+        print(f"GIVE-BACK of {sync_root_id} by its keys: {exc}")
+    if shell_sync_root_listed(sync_root_id) or namespace_keys_left(clsid):
+        print(
+            f"GIVE-BACK FAILED: {sync_root_id} is still registered or its namespace "
+            f"keys {namespace_keys_left(clsid)} stand"
+        )
+
+
 def release_sync_roots(base: Path, *, wait_s: float = 0.0) -> Released:
     """Release every Fauna sync root at or under ``base`` whose provider is gone,
     in the product's full-teardown order: the provider disconnected, then the

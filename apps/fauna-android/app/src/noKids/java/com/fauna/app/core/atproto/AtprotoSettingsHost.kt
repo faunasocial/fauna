@@ -51,28 +51,46 @@ class AtprotoSettingsHost @Inject constructor(
      *  (refresh, and every gesture's own internal refresh) republishes it. */
     val snapshot: StateFlow<AtprotoSettingsSnapshot> = _snapshot.asStateFlow()
 
+    private val _possibilities = MutableStateFlow(AtprotoPossibilities.PENDING)
+
+    /** What the page may offer now — the machine's own `Possibility` answers
+     *  (`ui/README.md` § Offer only what is possible, rule 6), republished
+     *  beside [snapshot] on every notification so the two never disagree. */
+    val possibilities: StateFlow<AtprotoPossibilities> = _possibilities.asStateFlow()
+
     /** The machine whose `snapshot()` [observer] republishes — held so the
      *  arbitrary-Rust-thread `onChanged` callback reads the *current* machine
      *  even across a sign-out→sign-in rebuild. */
     private var seen: AtprotoSettingsMachine? = null
 
     private val observer = object : AtprotoSettingsObserver {
-        override fun onChanged() {
-            _snapshot.value = seen?.snapshot() ?: EMPTY_SNAPSHOT
-        }
+        override fun onChanged() = republish()
+    }
+
+    /** Re-pull the snapshot AND the answers from the current machine. */
+    private fun republish() {
+        val m = seen
+        _snapshot.value = m?.snapshot() ?: EMPTY_SNAPSHOT
+        if (m != null) _possibilities.value = AtprotoPossibilities.of(m)
     }
 
     /**
-     * The shared machine, or null until the nest is connected / no secret yet
-     * (the caller renders the empty-snapshot page and retries on the next
-     * gesture). Reseeds [snapshot] when [ApiClient] hands back a freshly-built
-     * machine (the sign-out→sign-in case).
+     * The shared machine, or null until the nest is connected / no secret yet.
+     * A null publishes [AtprotoPossibilities.UNAVAILABLE] so the page paints
+     * its one reason line instead of controls that would drop every gesture
+     * (rule 7; tui's `unavailable: machine.is_none()`). Reseeds [snapshot]
+     * when [ApiClient] hands back a freshly-built machine (the
+     * sign-out→sign-in case).
      */
     fun machine(): AtprotoSettingsMachine? {
-        val m = api.buildAtprotoSettingsMachine(observer) ?: return null
+        val m = api.buildAtprotoSettingsMachine(observer)
+        if (m == null) {
+            _possibilities.value = AtprotoPossibilities.UNAVAILABLE
+            return null
+        }
         if (m !== seen) {
             seen = m
-            _snapshot.value = m.snapshot()
+            republish()
         }
         return m
     }
@@ -80,7 +98,7 @@ class AtprotoSettingsHost @Inject constructor(
     /** Force a re-pull of the current machine's snapshot (after a gesture the
      *  observer may not have fired for yet, or to seed the page on mount). */
     fun refreshSnapshot() {
-        seen?.let { _snapshot.value = it.snapshot() }
+        if (seen != null) republish()
     }
 
     companion object {

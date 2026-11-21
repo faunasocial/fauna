@@ -41,6 +41,19 @@ import org.mockito.Mockito.`when` as whenever
 @ExperimentalCoroutinesApi
 class ContactsVMKnockAcceptTest {
 
+    private object WardAsksTestPolicies {
+        fun approvalOn() = com.fauna.ffi.FfiReachPolicy(
+            contactApproval = true,
+            unknownSenderMail = "allow",
+            federationContact = true,
+            feedSources = "allow",
+            contentPolicy = null,
+            screenTime = null,
+            contentNotify = null,
+            unknownPeerDm = null,
+        )
+    }
+
     @Before
     fun installMainDispatcher() = Dispatchers.setMain(UnconfinedTestDispatcher())
 
@@ -51,17 +64,22 @@ class ContactsVMKnockAcceptTest {
 
     private class Harness(val vm: ContactsVM, val api: ApiClient, val knockDao: KnockDao)
 
-    private fun harness(queued: Boolean): Harness {
+    private fun harness(queued: Boolean, wardAsks: WardAsks? = null): Harness {
         val api = mock(ApiClient::class.java)
         val storage = mock(SecureStorage::class.java)
         val contactDao = mock(ContactDao::class.java)
         val knockDao = mock(KnockDao::class.java)
         val aftermath = mock(SuccessionAftermathHost::class.java)
         whenever(storage.secretHex).thenReturn("11".repeat(32))
-        whenever(api.wardAsks).thenReturn(WardAsks())
+        // An unsupervised account's resolved status read: the entry gate
+        // (contacts.md § Errors & edge cases) lets the knock and accept through.
+        whenever(api.wardAsks).thenReturn(
+            wardAsks ?: WardAsks().apply { setFromStatus(false, null, emptyList(), emptyList()) },
+        )
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         whenever(api.knockTick).thenReturn(MutableSharedFlow())
         whenever(api.addressBookChangedTick).thenReturn(MutableSharedFlow())
+        whenever(api.storeChangedTick).thenReturn(MutableSharedFlow())
         whenever(aftermath.configStageSettled).thenReturn(MutableSharedFlow())
         whenever(contactDao.getAll()).thenReturn(emptyFlow())
         whenever(knockDao.getAll()).thenReturn(emptyFlow())
@@ -78,7 +96,7 @@ class ContactsVMKnockAcceptTest {
             knockDao,
             mock(ResolveService::class.java),
             aftermath,
-            mock(Context::class.java),
+            mock(Context::class.java, org.mockito.Mockito.RETURNS_DEEP_STUBS),
         )
         return Harness(vm, api, knockDao)
     }
@@ -96,6 +114,20 @@ class ContactsVMKnockAcceptTest {
             .map { it.arguments[0] }
         assertEquals(listOf<Any?>(peer), dropped)
         assertEquals("queued: never re-read", reads, calls(h.api, "fetchKnocks"))
+    }
+
+    /** The ward's entry gate (contacts.md § Errors & edge cases): while the
+     *  guardian decides knocks the accept asks the shared `accept_possibility`
+     *  first, sends nothing and says why on `error-message`. */
+    @Test
+    fun aWardsAcceptIsRefusedWithItsReasonWhileTheGuardianDecides() {
+        val ward = WardAsks().apply {
+            setFromStatus(true, WardAsksTestPolicies.approvalOn(), emptyList(), emptyList())
+        }
+        val h = harness(queued = false, wardAsks = ward)
+        h.vm.acceptKnock(peer)
+        assertEquals("nothing is sent", 0, calls(h.api, "acceptKnockOrQueue"))
+        assertEquals("contacts.knock_guardian_pending", h.vm.errorMessage.value)
     }
 
     @Test

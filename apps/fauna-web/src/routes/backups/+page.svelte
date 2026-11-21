@@ -31,7 +31,7 @@
     everyDestinationIsAClientDevice,
     hexShort,
     immediateDeleteAckText,
-    offlineAffordance,
+    offlinePossibility,
     backupSelfAuditIsAlerting,
     backupSelfReportedAlertReason,
     snapshotRestoreOptionLabel,
@@ -40,11 +40,33 @@
   } from '#lib/wasm';
   import { makeOfflineGate } from '#lib/offline-gate';
   import {
+    backupsFaces,
     createBackupsMachine,
+    ensureBackupsWasm,
     busyText as sharedBusyText,
     snapshotStateText,
     snapshotIntegrityText,
   } from '#lib/wasm-backups';
+  import {
+    carveOutAnswer,
+    carveOutPaint,
+    deleteAnswer,
+    deletePaint,
+    destinationForm,
+    destinationFormAnswer,
+    destinationFormPaint,
+    immediateDeleteAnswer,
+    immediateDeletePaint,
+    refuse,
+    restoreAnswer,
+    restoreInputsPaint,
+    restorePaint,
+    setActionAnswer,
+    setActionPaint,
+    type BackupsFaces,
+    type DestinationFormTag,
+  } from '#lib/backups-possibility';
+  import type { LocalizedText } from '#lib/i18n/localized';
   import {
     snapshotLifecycle,
     type BackupFolderRow,
@@ -72,11 +94,12 @@
   } from '#lib/value-format';
   import { auditAlertBanners } from '#lib/backup-audit-alerts';
   import { IDS } from '#lib/generated/uiIds';
+  import { endsTextSelection } from '#lib/selection-click';
 
   // W4 (account-data-plane.md § Workstreams) phase 4's UI desensitizing (`account-data-plane.md` § The
   // offline-mutation contract). The verdict is the shared rule's, never a class
   // test written here; `#lib/offline-gate` owns how a reactive tree obeys it.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   let error = $state('');
   let ready = $state(false);
@@ -120,10 +143,31 @@
     errorFromMachine = false;
   }
 
+  /** A gated gesture's refusal reason, on `error-message` — never a silent
+   *  no-op (`ui/README.md` § Offer only what is possible, rule 7). */
+  function showRefusal(reason: LocalizedText): void {
+    showPageError(resolveLocalized(reason));
+  }
+
+  // --- What the page offers (`docs/goal/ui/backups.md` § Errors & edge cases →
+  // *What the page offers*). Every gated control paints from the shared
+  // backups answer (`#lib/backups-possibility` over the backups wasm chunk) and
+  // its gesture asks the same answer again; the page derives none of them. ---
+  //
+  // The chunk's free faces, once it is loaded (`ready` flips after
+  // `ensureBackupsWasm()`); `null` paints shown-but-dead.
+  let faces = $derived<BackupsFaces | null>(ready ? backupsFaces() : null);
+
   /** Single-flight (§ *Create* ruling): while an op is in flight EVERY mutating
-   *  control is disabled. One predicate so no control can drift off it. */
+   *  control is disabled. The machine's answers fold it in for the controls
+   *  they cover; the rest (the selector, recover, the modal's cancel) read it. */
   let busy = $derived(snap?.in_progress_op != null);
-  let armed = $derived(!busy && (snap?.selected_folder ?? null) !== null);
+  // `snapshot-create-button` / `-prune-button` / `-check-button`: one answer,
+  // re-read on every machine tick (`snap`).
+  let setAction = $derived.by(() => {
+    void snap;
+    return setActionPaint(machine);
+  });
 
   // --- Restore surfaces (docs/goal/ui/backups.md §§ Restore history /
   // Restore divergence / Restore from backup destination). Mirror of the
@@ -218,13 +262,16 @@
     | { kind: 'done'; text: string };
   let reseedView: ReseedView = $state({ kind: 'closed' });
 
-  // The restore button arms only when the typed id exactly matches the
-  // selected snapshot's id (same friction bar as the immediate-delete modal).
-  let restoreButtonEnabled = $derived(
-    !restoring &&
-      restoreConfirm !== '' &&
-      restoreConfirm === selectedRestoreId &&
-      selectedKindTicked(),
+  // The picked local snapshot's id, `null` while there is none to restore.
+  let restoreSelectionId = $derived(selectedRestoreId === '' ? null : selectedRestoreId);
+  // `restore-kind-checkbox` + `restore-confirm-input`: nothing to choose or
+  // re-type until a snapshot exists (`restore_inputs_possibility`).
+  let restoreInputs = $derived(restoreInputsPaint(faces, restoreSelectionId));
+  // `restore-confirm-button`: a snapshot, its kind ticked, its id re-typed
+  // exactly, no restore running (`restore_possibility` — the same friction bar
+  // as the immediate-delete modal).
+  let restoreConfirmPaint = $derived(
+    restorePaint(faces, restoring, restoreSelectionId, selectedKindTicked(), restoreConfirm),
   );
 
   // --- Immediate-delete modal (docs/goal/ui/backups.md § Element IDs + the
@@ -295,6 +342,9 @@
   // The path currently downloading — one at a time, so the row's button can
   // disable itself without a per-row flag.
   let downloadingPath = $state('');
+  // `snapshot-file-download-button`: a carve-out fetch, which needs a live nest
+  // — the shared `carve_out_affordance` over web's connection word.
+  let downloadPaint = $derived(carveOutPaint(faces, $connectionStatus));
 
   /**
    * Download one snapshot file's bytes and save them.
@@ -313,6 +363,8 @@
     const id = $identity;
     const detail = snap?.detail;
     if (!id || !detail) return;
+    // A carve-out fetch: it needs a live nest (`carve_out_affordance`).
+    if (refuse(carveOutAnswer(faces, $connectionStatus), showRefusal)) return;
     // The machine hands `manifest_hash` across the boundary as hex (the same
     // reason `SnapshotRow.device_id` is hex); the download walk wants bytes.
     const manifestHash = bytesFromHex(file.manifest_hash);
@@ -355,6 +407,7 @@
   }
 
   async function triggerSnapshot() {
+    if (refuse(setActionAnswer(machine), showRefusal)) return;
     await machine?.createSnapshot();
     await rereadRestoreSnapshots();
   }
@@ -445,7 +498,14 @@
 
   async function triggerRestore() {
     const id = $identity;
-    if (!id || !restoreButtonEnabled) return;
+    if (!id) return;
+    if (
+      refuse(
+        restoreAnswer(faces, restoring, restoreSelectionId, selectedKindTicked(), restoreConfirm),
+        showRefusal,
+      )
+    )
+      return;
     const snapshotId = Number(selectedRestoreId);
     restoring = true;
     restoreProgress = t.backups.restore_progress_running;
@@ -500,6 +560,9 @@
     const id = $identity;
     if (id) {
       try {
+        // The backups chunk carries the page's possibility faces as well as the
+        // machine; `ready` below is what makes `faces` read them.
+        await ensureBackupsWasm();
         machine = await createBackupsMachine(
           { onChanged: () => applySnapshot() },
           // The SPA singleton's socket, lent to the backups chunk — one
@@ -540,7 +603,10 @@
     }
   });
 
-  async function handleDeleteSnapshot(snapId: number) {
+  async function handleDeleteSnapshot(index: number, snapId: number) {
+    // Only an active row enters the soft delete (`delete_possibility`): a
+    // pending or soft-deleted one refuses with its reason, before the confirm.
+    if (refuse(deleteAnswer(machine, index), showRefusal)) return;
     // The confirm is client glue (the four apps that ship one keep theirs); the
     // machine queues the 48 h pending action and the row returns as
     // `DeletionPending`.
@@ -559,7 +625,8 @@
 
   // --- Immediate-delete handlers (backups.md § User actions) ---
 
-  function openImmediateDelete(row: SnapshotRow) {
+  function openImmediateDelete(index: number, row: SnapshotRow) {
+    if (refuse(immediateDeleteAnswer(machine, index), showRefusal)) return;
     immediateDeleteTargetId = row.id;
     immediateDeleteConfirmId = '';
     immediateDeleteAcknowledge = '';
@@ -589,6 +656,7 @@
    *  `keep_last: 3` policy it confirmed — this page never supplies a policy
    *  (Architectural rule 5). */
   async function handlePrune() {
+    if (refuse(setActionAnswer(machine), showRefusal)) return;
     await machine?.prunePreview();
   }
 
@@ -606,6 +674,7 @@
    *  (§ *Check* ruling). The verdict renders on its own surface, never in
    *  `error-message` (Architectural rule 6). */
   async function handleCheck() {
+    if (refuse(setActionAnswer(machine), showRefusal)) return;
     await machine?.check();
   }
 
@@ -1095,9 +1164,25 @@
    * same). i18n stays in the view. */
   const EDIT_DIFFERENT_NEST_ERR = 'backup-destination-edit-different-nest';
 
+  /** The ceremony the destination dialog is running: an add (web enrolls only
+   *  nests — it is never a custodian), or an edit of a nest row or of a
+   *  client-device row, the latter a rename with no URL. */
+  let destForm = $derived.by((): DestinationFormTag => {
+    const editing = editingDestId
+      ? destinations.find((d) => d.destination_id === editingDestId)
+      : undefined;
+    return destinationForm(editing && ready ? { isClientDevice: isClientDevice(editing) } : null);
+  });
+  // `backup-destination-add-confirm-button` (`destination_form_possibility`).
+  // Web has no capacity field (it never enrolls this device), so capacity is ''.
+  let destConfirm = $derived(destinationFormPaint(faces, destForm, destUrl, ''));
+
   async function submitDest() {
     const id = $identity;
-    if (!id || destUrl.trim() === '') return;
+    if (!id) return;
+    // A nest form needs its URL; a this-device edit is a rename and saves with
+    // a blank one (the shared edit re-resolves only a URL that changed).
+    if (refuse(destinationFormAnswer(faces, destForm, destUrl, ''), showRefusal)) return;
     destBusy = true;
     error = '';
     try {
@@ -1198,27 +1283,30 @@
 
 <h1 data-testid={IDS.PAGE_HEADING}>{t.backups.title}</h1>
 
-<!-- The three set-scoped actions. All three bind the SAME `armed` predicate —
-     single-flight (§ *Create* ruling): while any op is in flight every mutating
-     control is disabled, and with no set selected there is nothing to act on. -->
+<!-- The three set-scoped actions. All three paint from the SAME machine answer
+     (`set_action_possibility`): a selected set, and no op in flight (the
+     single-flight § *Create* ruling) — disabled with its reason as the title. -->
 <div class="page-actions">
   <button
     data-testid={IDS.SNAPSHOT_CREATE_BUTTON}
     class="btn"
     onclick={triggerSnapshot}
-    disabled={!armed}
+    disabled={setAction.disabled}
+    title={setAction.reason ? resolveLocalized(setAction.reason) : undefined}
   >{t.backups.create_snapshot}</button>
   <button
     data-testid={IDS.SNAPSHOT_PRUNE_BUTTON}
     class="btn"
     onclick={handlePrune}
-    disabled={!armed}
+    disabled={setAction.disabled}
+    title={setAction.reason ? resolveLocalized(setAction.reason) : undefined}
   >{t.backups.prune_snapshots}</button>
   <button
     data-testid={IDS.SNAPSHOT_CHECK_BUTTON}
     class="btn"
     onclick={handleCheck}
-    disabled={!armed}
+    disabled={setAction.disabled}
+    title={setAction.reason ? resolveLocalized(setAction.reason) : undefined}
   >{t.backups.check_integrity}</button>
 </div>
 
@@ -1384,11 +1472,14 @@
               <!-- The download affordance is a REGULAR-FILE gesture: a directory
                    row gets no dead button (tui's ruling, inherited). -->
               {#if file.file_type === 'regular'}
+                <!-- A carve-out fetch: blocked while there is no live nest
+                     (`carve_out_affordance`), its reason as the title. -->
                 <button
                   class="btn"
                   data-testid={IDS.SNAPSHOT_FILE_DOWNLOAD_BUTTON}
                   onclick={() => downloadSnapshotFile(file)}
-                  disabled={downloadingPath === file.path}
+                  disabled={downloadingPath === file.path || downloadPaint.disabled}
+                  title={downloadPaint.reason ? resolveLocalized(downloadPaint.reason) : undefined}
                 >{t.backups.download}</button>
               {/if}
             </td>
@@ -1406,8 +1497,14 @@
         </thead>
         <tbody>
           <!-- Wire order (newest-first) — the page does not re-sort. -->
-          {#each snap.snapshots as row}
-            <tr data-testid={IDS.SNAPSHOT_ITEM} class="clickable" onclick={() => machine?.openSnapshot(row.id)}>
+          {#each snap.snapshots as row, i}
+            <!-- Each row's two deletes paint from the machine's answers for
+                 THIS row: the soft delete only on an active row
+                 (`delete_possibility`), the hard delete in every state but
+                 while an op runs (`immediate_delete_possibility`). -->
+            {@const softDelete = deletePaint(machine, i)}
+            {@const hardDelete = immediateDeletePaint(machine, i)}
+            <tr data-testid={IDS.SNAPSHOT_ITEM} class="clickable" onclick={(e) => { if (!endsTextSelection(e.currentTarget)) machine?.openSnapshot(row.id); }}>
               <!-- ONE cell: the row's whole visible contract (formatted time,
                    file count, formatted size) plus its lifecycle state and, once
                    a check has run, its integrity verdict — never a raw dump. -->
@@ -1426,24 +1523,30 @@
                     onclick={(e) => { e.stopPropagation(); handleUndeleteSnapshot(row.id); }}
                   >{t.backups.snapshot_undelete_button}</button>
                 {/if}
-                <button
-                  data-testid={IDS.SNAPSHOT_DELETE_BUTTON}
-                  class="btn danger"
-                  disabled={busy}
-                  onclick={(e) => { e.stopPropagation(); handleDeleteSnapshot(row.id); }}
-                >{t.common.delete}</button>
+                {#if softDelete.shown}
+                  <button
+                    data-testid={IDS.SNAPSHOT_DELETE_BUTTON}
+                    class="btn danger"
+                    disabled={softDelete.disabled}
+                    title={softDelete.reason ? resolveLocalized(softDelete.reason) : undefined}
+                    onclick={(e) => { e.stopPropagation(); handleDeleteSnapshot(i, row.id); }}
+                  >{t.common.delete}</button>
+                {/if}
                 <!-- Immediate-delete: NEVER one-click — opens the friction-bar
                      modal (backups.md rule 4). data-snapshot-id lets the e2e read
                      the row's id (get_attr, scoped to the row) to drive the
                      re-type confirm; the visible text is the date/size, not the
                      raw id. A cross-app contract, not a test nicety. -->
-                <button
-                  data-testid={IDS.SNAPSHOT_IMMEDIATE_DELETE_BUTTON}
-                  data-snapshot-id={row.id}
-                  class="btn danger"
-                  disabled={busy}
-                  onclick={(e) => { e.stopPropagation(); openImmediateDelete(row); }}
-                >{t.backups.immediate_delete_button}</button>
+                {#if hardDelete.shown}
+                  <button
+                    data-testid={IDS.SNAPSHOT_IMMEDIATE_DELETE_BUTTON}
+                    data-snapshot-id={row.id}
+                    class="btn danger"
+                    disabled={hardDelete.disabled}
+                    title={hardDelete.reason ? resolveLocalized(hardDelete.reason) : undefined}
+                    onclick={(e) => { e.stopPropagation(); openImmediateDelete(i, row); }}
+                  >{t.backups.immediate_delete_button}</button>
+                {/if}
               </td>
             </tr>
           {/each}
@@ -1479,6 +1582,8 @@
             type="checkbox"
             data-testid={IDS.RESTORE_KIND_CHECKBOX}
             bind:checked={restoreKindTicked[i]}
+            disabled={restoreInputs.disabled}
+            title={restoreInputs.reason ? resolveLocalized(restoreInputs.reason) : undefined}
           />
           {kind.label}
         </label>
@@ -1490,13 +1595,16 @@
       data-testid={IDS.RESTORE_CONFIRM_INPUT}
       placeholder={t.backups.restore_confirm_placeholder}
       bind:value={restoreConfirm}
+      disabled={restoreInputs.disabled}
+      title={restoreInputs.reason ? resolveLocalized(restoreInputs.reason) : undefined}
     />
 
     <button
       data-testid={IDS.RESTORE_CONFIRM_BUTTON}
       class="btn"
       onclick={triggerRestore}
-      disabled={!restoreButtonEnabled}
+      disabled={restoreConfirmPaint.disabled}
+      title={restoreConfirmPaint.reason ? resolveLocalized(restoreConfirmPaint.reason) : undefined}
     >{t.backups.restore_confirm_button}</button>
 
     <p class="muted" data-testid={IDS.RESTORE_PROGRESS}>{restoreProgress}</p>
@@ -1588,7 +1696,8 @@
             data-testid={IDS.BACKUP_DESTINATION_ADD_CONFIRM_BUTTON}
             class="btn primary"
             onclick={submitDest}
-            disabled={destBusy || destUrl.trim() === ''}
+            disabled={destBusy || destConfirm.disabled}
+            title={destConfirm.reason ? resolveLocalized(destConfirm.reason) : undefined}
           >{t.backups.backup_destination_add_confirm}</button>
         </div>
       </div>

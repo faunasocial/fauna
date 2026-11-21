@@ -206,13 +206,11 @@ impl PolicyEditor {
     /// its own reason on `error-message`, with no round trip, instead of a
     /// generic transport failure.
     fn to_policy(&self) -> Result<ReachPolicy, &'static str> {
-        use fauna_core::screen_time::{parse_daily_minutes, parse_time_of_day};
-        let screen_time = fauna_core::screen_time::ScreenTimePolicy {
-            window_start: parse_time_of_day(&self.screen_window_start)?,
-            window_end: parse_time_of_day(&self.screen_window_end)?,
-            daily_minutes: parse_daily_minutes(&self.screen_daily_minutes)?,
-        };
-        screen_time.validate()?;
+        let screen_time = fauna_client_family::forms::screen_time_policy(
+            &self.screen_window_start,
+            &self.screen_window_end,
+            &self.screen_daily_minutes,
+        )?;
         Ok(ReachPolicy {
             contact_approval: self.contact_approval,
             unknown_sender_mail: self.unknown_sender.as_str().to_string(),
@@ -229,6 +227,17 @@ impl PolicyEditor {
             ..Default::default()
         })
     }
+}
+
+/// `family-policy-save-button`'s answer — the shared screen-time predicate over
+/// the editor's cells (`fauna_client_family::forms`), what the button paints
+/// from and what [`Action::SavePolicy`] refuses by.
+fn policy_save_answer(editor: &PolicyEditor) -> fauna_core::possibility::Possibility {
+    fauna_client_family::forms::policy_save_possibility(
+        &editor.screen_window_start,
+        &editor.screen_window_end,
+        &editor.screen_daily_minutes,
+    )
 }
 
 /// The Family page's state, hung off [`App`]. Mirrors the one
@@ -314,6 +323,13 @@ pub struct FamilyState {
     /// is awaited, so both landing orders are reachable. The
     /// `NotificationsState::read_gen` shape.
     pub read_gen: std::cell::Cell<u64>,
+    /// Whether a `fauna.family.status` read of this run has succeeded — what
+    /// separates "no policy: unsupervised" from "nothing known yet" for the
+    /// predicates that gate on [`Self::own_policy`] ([`Self::own_supervision`];
+    /// `ui/README.md` § Offer only what is possible, rule 5). Never restored
+    /// from the supervision snapshot, which carries no reach knobs, and reset
+    /// with the whole state on an account switch.
+    pub status_read: bool,
 }
 
 /// The two live states a ward's feed-source ask can be in — the shared
@@ -331,6 +347,17 @@ impl FamilyState {
     /// Case-insensitive, because the caller's id is whatever the Find User form
     /// resolved and the wire's is canonical lowercase hex — the same compare
     /// `fauna_core::format::contact_row_blocks_actor` makes for the same reason.
+    /// The caller's own supervision as the Contacts page's knock and accept
+    /// predicates take it (`fauna_client_family::OwnSupervision`): unread
+    /// until this run's first successful status read, then that read's policy.
+    pub fn own_supervision(&self) -> fauna_client_family::OwnSupervision<'_> {
+        if self.status_read {
+            fauna_client_family::OwnSupervision::Read(self.own_policy.as_ref())
+        } else {
+            fauna_client_family::OwnSupervision::Unread
+        }
+    }
+
     pub fn contact_ask_pending(&self, peer_actor_id_hex: &str) -> bool {
         // The id compare (decoded, so case-insensitive; a non-hex id matches
         // nothing) is the shared rule every app renders from.
@@ -803,9 +830,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::SaveFeatureLimit | Action::RemoveFeatureLimit => {
             let remove = matches!(action, Action::RemoveFeatureLimit);
             let editor = app.family.feature_editor.clone()?;
-            if !remove && let Err(reason) = editor.draft() {
-                app.errors
-                    .insert(Page::Family, reason.resolve(fauna_i18n::strings::lookup));
+            if !remove
+                && app.errors.refuse(
+                    Page::Family,
+                    &fauna_core::possibility::Possibility::from_blocked_reason(
+                        editor.draft().err(),
+                    ),
+                )
+            {
                 return None;
             }
             app.errors.remove(&Page::Family);
@@ -824,13 +856,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // `error-message` with no round trip — so the guardian reads the
             // reason instead of a generic RPC failure, and the rest of the
             // editor is left untouched (linux's `submit_policy`, lifted).
-            let policy = match app.family.editor.to_policy() {
-                Ok(policy) => policy,
-                Err(reason) => {
-                    app.errors.insert(Page::Family, reason.to_string());
-                    return None;
-                }
-            };
+            if app
+                .errors
+                .refuse(Page::Family, &policy_save_answer(&app.family.editor))
+            {
+                return None;
+            }
+            let policy = app.family.editor.to_policy().ok()?;
             app.errors.remove(&Page::Family);
             Some(Op::PolicyUpdate {
                 nest,
@@ -843,18 +875,19 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let nest = app.family.nest.clone()?;
             let ward = app.family.selected()?.actor_id.to_vec();
             let input = app.family.contact_input.trim().to_string();
-            if input.is_empty() {
+            // v1 takes a hex actor id, no handle resolution: the shared
+            // predicate the button is painted from refuses a blank or
+            // malformed box on the page error, never silently.
+            if app.errors.refuse(
+                Page::Family,
+                &fauna_client_family::forms::contact_add_possibility(&input),
+            ) {
                 return None;
             }
-            // v1 takes a hex actor id, no handle resolution (the windows seam's
-            // rule, lifted): a parse failure is a client-side refusal, surfaced
-            // on the page error rather than sent to the nest.
-            let Ok(peer) = fauna_core::identity::ActorId::from_hex(&input).map(|a| a.0.to_vec())
-            else {
-                app.errors
-                    .insert(Page::Family, t::CONTACT_ADD_INVALID_ACTOR_ID.to_string());
-                return None;
-            };
+            let peer = fauna_core::identity::ActorId::from_hex(&input)
+                .ok()?
+                .0
+                .to_vec();
             app.errors.remove(&Page::Family);
             app.family.contact_input.clear();
             Some(Op::ContactAdd {
@@ -869,15 +902,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let nest = app.family.nest.clone()?;
             let ward = app.family.selected()?.actor_id.to_vec();
             let input = app.family.transfer_input.trim().to_string();
-            if input.is_empty() {
+            if app.errors.refuse(
+                Page::Family,
+                &fauna_client_family::forms::transfer_possibility(&input),
+            ) {
                 return None;
             }
-            let Ok(target) = fauna_core::identity::ActorId::from_hex(&input).map(|a| a.0.to_vec())
-            else {
-                app.errors
-                    .insert(Page::Family, t::CONTACT_ADD_INVALID_ACTOR_ID.to_string());
-                return None;
-            };
+            let target = fauna_core::identity::ActorId::from_hex(&input)
+                .ok()?
+                .0
+                .to_vec();
             app.errors.remove(&Page::Family);
             Some(Op::Transfer {
                 nest,
@@ -1654,10 +1688,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // named on an incoming proposal (`family-safety.md` § Graduation &
             // transfer → Visibility: a proposed guardian with no other family
             // relationship must still reach the prompt).
-            app.has_family = supervised_by.is_some() || !wards.is_empty() || !incoming.is_empty();
+            app.has_family = fauna_client_family::forms::has_family_surface(
+                supervised_by.is_some(),
+                wards.len(),
+                incoming.len(),
+            );
             app.family.supervised_by = supervised_by;
             app.family.own_age_band = age_band;
             app.family.own_policy = policy;
+            app.family.status_read = true;
             app.family.own_usage_today_minutes = usage_today_minutes;
             app.family.wards = wards;
             app.family.approvals = approvals;
@@ -2185,12 +2224,15 @@ fn policy_editor_elements(st: &FamilyState, ward: &FamilyWardInfo, out: &mut Vec
         t::POLICY_SCREEN_CAVEAT,
     ));
 
-    out.push(Element::gesture_button(
-        ids::FAMILY_POLICY_SAVE_BUTTON,
-        t::POLICY_SAVE_BUTTON,
-        true,
-        Gesture::Family(Action::SavePolicy),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::FAMILY_POLICY_SAVE_BUTTON,
+            t::POLICY_SAVE_BUTTON,
+            true,
+            Gesture::Family(Action::SavePolicy),
+        )
+        .possible(policy_save_answer(&st.editor)),
+    );
 
     feature_limits_elements(st, ward, out);
     device_mark_elements(ward, out);
@@ -2205,12 +2247,17 @@ fn policy_editor_elements(st: &FamilyState, ward: &FamilyWardInfo, out: &mut Vec
         )
         .labelled(t::CONTACT_ADD_PLACEHOLDER),
     );
-    out.push(Element::gesture_button(
-        ids::FAMILY_CONTACT_ADD_BUTTON,
-        t::CONTACT_ADD_BUTTON,
-        true,
-        Gesture::Family(Action::AddContact),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::FAMILY_CONTACT_ADD_BUTTON,
+            t::CONTACT_ADD_BUTTON,
+            true,
+            Gesture::Family(Action::AddContact),
+        )
+        .possible(fauna_client_family::forms::contact_add_possibility(
+            &st.contact_input,
+        )),
+    );
 
     // The transfer handshake: a pending proposal swaps the initiate row for the
     // pending marker + cancel, so `family-transfer-pending` is present exactly
@@ -2237,12 +2284,17 @@ fn policy_editor_elements(st: &FamilyState, ward: &FamilyWardInfo, out: &mut Vec
                 )
                 .labelled(t::TRANSFER_PLACEHOLDER),
             );
-            out.push(Element::gesture_button(
-                ids::FAMILY_TRANSFER_BUTTON,
-                t::TRANSFER_BUTTON,
-                true,
-                Gesture::Family(Action::Transfer),
-            ));
+            out.push(
+                Element::gesture_button(
+                    ids::FAMILY_TRANSFER_BUTTON,
+                    t::TRANSFER_BUTTON,
+                    true,
+                    Gesture::Family(Action::Transfer),
+                )
+                .possible(fauna_client_family::forms::transfer_possibility(
+                    &st.transfer_input,
+                )),
+            );
         }
     }
 
@@ -4227,8 +4279,65 @@ mod tests {
         assert!(apply_local(&mut app, Action::Transfer).is_none());
         assert_eq!(
             app.errors.get(&Page::Family).map(String::as_str),
-            Some(t::CONTACT_ADD_INVALID_ACTOR_ID)
+            Some(t::TRANSFER_INVALID_ACTOR_ID),
+            "the transfer refusal has its own words, not the contact-add string"
         );
+    }
+
+    /// The form case of `ui/README.md` § Offer only what is possible: a blank
+    /// or malformed box paints its submit blocked with the shared reason, and
+    /// the press refuses with the same reason on `error-message` instead of
+    /// returning silently (apps 6040).
+    #[test]
+    fn family_forms_paint_their_submit_from_the_shared_predicate_and_never_refuse_silently() {
+        let mut app = guardian_app(vec![ward(2, "kid", ReachPolicy::default())]);
+        let blocked = |app: &App, id: &str| -> Option<String> {
+            app.page_elements()
+                .into_iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.possibility)
+                .and_then(|p| p.reason().map(|r| r.key.clone()))
+        };
+
+        assert_eq!(
+            blocked(&app, ids::FAMILY_CONTACT_ADD_BUTTON).as_deref(),
+            Some("family.contact_add_required")
+        );
+        assert!(apply_local(&mut app, Action::AddContact).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Family).map(String::as_str),
+            Some(t::CONTACT_ADD_REQUIRED),
+            "an empty box is refused with a reason, not silently"
+        );
+
+        app.errors.remove(&Page::Family);
+        assert_eq!(
+            blocked(&app, ids::FAMILY_TRANSFER_BUTTON).as_deref(),
+            Some("family.transfer_required")
+        );
+        assert!(apply_local(&mut app, Action::Transfer).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Family).map(String::as_str),
+            Some(t::TRANSFER_REQUIRED)
+        );
+
+        set_field(&mut app.family, FamilyField::ContactAdd, "07".repeat(32));
+        assert_eq!(blocked(&app, ids::FAMILY_CONTACT_ADD_BUTTON), None);
+
+        // A half-set screen-time window blocks the policy save with the shared
+        // reason, painted and refused alike.
+        set_field(
+            &mut app.family,
+            FamilyField::ScreenWindowStart,
+            "22:00".into(),
+        );
+        assert_eq!(
+            blocked(&app, ids::FAMILY_POLICY_SAVE_BUTTON).as_deref(),
+            Some("family.policy_screen_time_invalid")
+        );
+        app.errors.remove(&Page::Family);
+        assert!(apply_local(&mut app, Action::SavePolicy).is_none());
+        assert!(app.errors.contains_key(&Page::Family));
     }
 
     /// A pending proposal swaps the initiate row for the pending marker + cancel

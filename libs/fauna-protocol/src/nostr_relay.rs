@@ -114,9 +114,61 @@ pub fn relay_list_appending(existing: &[String], url: &str) -> Option<Vec<String
     Some(next)
 }
 
+/// `nostr-add-relay`'s answer from the typed draft (`docs/goal/ui/README.md`
+/// § Offer only what is possible, rule 4's form case): blank →
+/// `nostr.relays.url_required`; a URL [`relay_url_error`] refuses → its
+/// reason; one already on `existing` → `nostr.relays.already_added`; else
+/// possible. Every app paints the Add button from it and the add asks it
+/// first, so a blank, invalid or duplicate entry is never dropped silently.
+pub fn add_relay_possibility(
+    existing: &[String],
+    input: &str,
+) -> fauna_core::possibility::Possibility {
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::Possibility;
+    let Some(url) = trimmed_relay_input(input) else {
+        return Possibility::blocked(LocalizedText::key("nostr.relays.url_required"));
+    };
+    if let Some(reason) = relay_url_error(&url) {
+        return Possibility::blocked(reason);
+    }
+    if relay_list_appending(existing, &url).is_none() {
+        return Possibility::blocked(LocalizedText::key("nostr.relays.already_added"));
+    }
+    Possibility::Possible
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
+
+    #[test]
+    fn add_relay_possibility_names_each_reason() {
+        use super::add_relay_possibility;
+        use fauna_core::possibility::Possibility;
+        let existing = vec!["wss://relay.damus.io".to_string()];
+        let key = |p: Possibility| p.reason().map(|r| r.key.clone());
+        assert_eq!(
+            key(add_relay_possibility(&existing, "  ")).as_deref(),
+            Some("nostr.relays.url_required")
+        );
+        assert_eq!(
+            key(add_relay_possibility(&existing, "https://x.example")).as_deref(),
+            Some("nostr.relays.invalid_url")
+        );
+        assert_eq!(
+            key(add_relay_possibility(&existing, "wss://127.0.0.1")).as_deref(),
+            Some("nostr.relays.private_address")
+        );
+        assert_eq!(
+            key(add_relay_possibility(&existing, " wss://relay.damus.io ")).as_deref(),
+            Some("nostr.relays.already_added")
+        );
+        assert_eq!(
+            add_relay_possibility(&existing, "wss://nos.lol"),
+            Possibility::Possible
+        );
+    }
 
     use fauna_core::resolve::is_global_ip;
 

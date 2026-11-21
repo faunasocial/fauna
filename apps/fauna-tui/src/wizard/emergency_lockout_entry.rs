@@ -17,7 +17,6 @@
 //! the same text the signed-in Sessions page paints — one copy of the REQUIRED
 //! warning (`devices.md` § The two panic buttons).
 
-use fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD;
 use fauna_i18n::strings::common;
 use fauna_i18n::strings::onboarding::emergency_lockout as t;
 use fauna_i18n::strings::sessions as s;
@@ -35,9 +34,15 @@ pub fn description() -> Vec<String> {
 
 pub fn elements(w: &Wizard) -> Vec<Element> {
     let confirm = w.field(WizardField::LockoutConfirm);
-    // The word gates the button here AND in the machine — a wrong word is
-    // refused identically on all seven apps (`submit_emergency_lockout`).
-    let armed = confirm == LOCKOUT_CONFIRM_WORD;
+    // The secret, the account and the word gate the button through the shared
+    // draft predicate, and the machine's lock asks the same checks — so a
+    // wrong word or a blank secret is refused identically on all seven apps
+    // (`fauna_onboarding_machine::drafts`).
+    let answer = fauna_onboarding_machine::emergency_lockout_possibility(
+        w.field(WizardField::LockoutSecret),
+        w.field(WizardField::LockoutAccount),
+        confirm.clone(),
+    );
     vec![
         Element::input(
             ids::PASTE_SECRET_FIELD,
@@ -61,11 +66,12 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         Element::button(
             ids::SESSIONS_LOCKOUT_BUTTON,
             s::LOCKOUT_BUTTON,
-            armed,
+            true,
             Action::SubmitEmergencyLockout {
                 confirm_word: confirm,
             },
-        ),
+        )
+        .possible(answer),
         Element::button(
             ids::EMERGENCY_LOCKOUT_BACK_BUTTON,
             common::BACK,

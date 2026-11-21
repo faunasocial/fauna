@@ -21,6 +21,54 @@ def test_navigate_to_search(logged_in_app):
     )
 
 
+#: The search bar's row that `search-toggle-button` collapses and reveals
+#: (ui.yaml `search-bar`). The clear button is left out: it is also gated on a
+#: non-empty query, so its presence says nothing about the toggle.
+_SEARCH_BAR_ROW = ("search-query-field", "search-submit-button", "search-type-filter")
+
+
+@pytest.mark.macos
+def test_search_toggle_collapses_and_reveals_the_search_bar(logged_in_app):
+    """A press of `search-toggle-button` removes the search bar's row and the
+    next press brings it back, and the toggle's own `state` attribute follows
+    (ui.yaml `search-bar`). macOS publishes the `state` read; the row's
+    presence is the observable on every app.
+
+    Starts from the revealed bar (`navigate` reveals it), so the assertions do
+    not depend on the app's initial visibility."""
+    app = logged_in_app
+    driver = app.driver
+    app.search.navigate()
+
+    def row_visible() -> dict[str, bool]:
+        return {eid: driver.is_visible(eid) for eid in _SEARCH_BAR_ROW}
+
+    assert all(row_visible().values()), (
+        f"the revealed search bar should paint its whole row: {row_visible()}"
+    )
+    assert driver.get_attr("search-toggle-button", "state") == "on", (
+        f"toggle state with the bar shown: {driver.diagnose('search-toggle-button')}"
+    )
+
+    app.search.toggle()
+    wait_until(
+        lambda: not any(row_visible().values()), 10,
+        diagnose=lambda: f"one toggle press should collapse the search bar's row: {row_visible()}",
+    )
+    assert driver.get_attr("search-toggle-button", "state") == "off", (
+        f"toggle state with the bar collapsed: {driver.diagnose('search-toggle-button')}"
+    )
+
+    app.search.toggle()
+    wait_until(
+        lambda: all(row_visible().values()), 10,
+        diagnose=lambda: f"a second toggle press should reveal the search bar's row again: {row_visible()}",
+    )
+    assert driver.get_attr("search-toggle-button", "state") == "on", (
+        f"toggle state with the bar revealed again: {driver.diagnose('search-toggle-button')}"
+    )
+
+
 @pytest.mark.feature("search")
 def test_search_and_clear(logged_in_app):
     """Execute a search query and clear it."""

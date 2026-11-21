@@ -54,7 +54,7 @@ Stamped 2026-10-01 at dfa27a899f.
 |---|---|---|
 | web | — absent | |
 | linux | ✅ full | 0.1.5-dev+aaa3f320 standalone |
-| windows | ✅ full | 0.1.6-dev+3986249b standalone |
+| windows | ✅ full | 0.1.7-dev+e8d95526 standalone |
 | macos | ✅ full | 0.1.5-dev+6017a6f7 standalone |
 | ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
@@ -77,7 +77,7 @@ Stamped 2026-10-01 at dfa27a899f.
 | 3 | app | `tests/e2e-unified/tests/test_home_screen_widget_taskbar_badge.py::test_taskbar_badge_shows_the_unread_count_and_moves_while_hidden` | windows (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_home_screen_widget_launcher_badge.py::test_a_conversation_read_on_another_device_stops_counting_on_the_badge` | linux (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_home_screen_widget.py::test_a_conversation_read_on_another_device_stops_counting_on_the_widget` | macos (macos): passed, ios (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_home_screen_widget_taskbar_badge.py::test_a_conversation_read_on_another_device_stops_counting_on_the_taskbar_badge` | windows (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_home_screen_widget_taskbar_badge.py::test_a_conversation_read_on_another_device_stops_counting_on_the_taskbar_badge` | windows (windows): passed, tui (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_home_screen_widget_launcher_badge.py::test_signing_out_never_leaves_the_previous_accounts_count` | linux (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_home_screen_widget.py::test_signing_out_never_leaves_the_previous_accounts_count_on_the_widget` | macos (macos): passed, ios (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_home_screen_widget_taskbar_badge.py::test_signing_out_never_leaves_the_previous_accounts_count_on_the_taskbar_badge` | windows (windows): passed |

@@ -417,7 +417,14 @@ def test_a_namesake_made_before_the_accept_does_not_hide_the_shared_set(
     "folder_share_owner_app,folder_share_recipient_app",
     # tui leads (outcome 26 of `docs/features/share-a-folder.md`); the other
     # apps add their pair as they are witnessed.
-    [("tui", "tui")],
+    [
+        ("tui", "tui"),
+        # android is the MEMBER (a tui owner granting to the phone): its Media
+        # versions and delete pass the item's row (`filterValue`) and its
+        # restore stamps the version's own row (`FileVersionInfo::folder_id`),
+        # so none resolves by name. First run owed on the host emulator.
+        pytest.param("tui", "android", marks=pytest.mark.android),
+    ],
     indirect=True,
 )
 @pytest.mark.real_conversations

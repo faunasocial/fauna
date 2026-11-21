@@ -145,11 +145,11 @@ class NavRouteResolverTest {
     }
 
     @Test
-    fun `mail-list-members is refused because the patch carries no list`() {
-        // Its route is parameterised; a nav with no list has nothing to open,
-        // and the refusal says how to reach it instead.
-        val why = refusal("settings", "mail-list-members")
-        assertTrue(why, why.contains("settings/mail-lists"))
+    fun `mail-list-members with no list opens the bare members route`() {
+        // The Settings landing's Mail list members row and a nav patch carry no
+        // list: both open the bare route, the members page on the placeholder
+        // list behind the mail-usable gate (mail-settings.md, the gate).
+        assertEquals("settings/mail-list-members", route("settings", "mail-list-members"))
     }
 
     @Test
@@ -168,7 +168,6 @@ class NavRouteResolverTest {
             "settings" to "p2p",
             "settings" to "tui-settings",
             "admin" to "admin-services",
-            "settings" to "mail-list-members",
         ).forEach { (view, id) ->
             val why = refusal(view, id)
             assertTrue("refusal for $view/$id is too short to diagnose: $why", why.length > 40)

@@ -285,9 +285,21 @@ def ceremony_seats(nest_instance, offline_share_app, request):
 
     seats = []
     try:
-        initiator, initiator_actor = _seat(
-            nest_instance, initiator_path, initiator_app, "initiator", request
-        )
+        # A phone's sharer is named LITERALLY: conftest's cross-app hoist
+        # (`_CROSS_APP_FIXTURE_APPS["ceremony_seats"]`) prebuilds that desktop
+        # app for a phone run, and its pin reads the literal here.
+        if offline_share_app == "ios":
+            initiator, initiator_actor = _seat(
+                nest_instance, initiator_path, "macos", "initiator", request
+            )
+        elif offline_share_app == "android":
+            initiator, initiator_actor = _seat(
+                nest_instance, initiator_path, "tui", "initiator", request
+            )
+        else:
+            initiator, initiator_actor = _seat(
+                nest_instance, initiator_path, initiator_app, "initiator", request
+            )
         seats.append(initiator)
         recipient, recipient_actor = _seat(
             nest_instance, recipient_path, offline_share_app, "recipient", request
@@ -417,7 +429,10 @@ def _seat_state(label, app):
     )
 
 
-_CEREMONY_KEYS = ("offline-share", "ceremony", "dial", "peer", "group")
+# `[fp]` is the phone seat's File Provider reconcile: whether it ran, was
+# skipped or added the group set's domain is the first question a phone's
+# missing domain asks, and its INFO lines carry none of the other keys.
+_CEREMONY_KEYS = ("offline-share", "ceremony", "dial", "peer", "group", "[fp]")
 
 
 def _is_ceremony_evidence(line):
@@ -977,6 +992,43 @@ def _phone_tree_listing(udid: str) -> str:
     return "\n".join(lines) or "<no files under FileProvider/roots or sync>"
 
 
+def _utc_now() -> str:
+    """The harness's instant in the tracing lines' zone and shape."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+#: The extension engine's lines that date a save's ingest and its lift: the
+#: group engine's seal (`created_at` of the pending row is minted there), the
+#: lift, and the fold's landing.
+_PHONE_INGEST_MARKERS = (
+    "sealed for the group plane",
+    "group lift",
+    "reconciliation complete",
+    "ingest",
+    "retained",
+    "converged",
+)
+
+
+def _phone_ingest_lines(udid: str) -> str:
+    """The extension's tracing lines that date the phone's save as its engine
+    took it in — the instant the plane ranks it by."""
+    from tests.platform.ios.test_file_provider_eviction import _extension_tracing
+
+    try:
+        text = _extension_tracing(udid)
+    except Exception as exc:  # a diagnosis never raises over the real failure
+        return f"<the extension's tracing is unreadable: {exc}>"
+    lines = [
+        strip_ansi(line)
+        for line in text.splitlines()
+        if any(m in line for m in _PHONE_INGEST_MARKERS)
+    ]
+    return "\n".join(lines[-40:]) or "<no ingest line in the extension's tracing>"
+
+
 def _phone_seat_on_the_group_row(phone, row, actor, tmp_path):
     """The phone's seat in a set shared in person: the group-scope row's
     `folder-on-demand-toggle`, ON by default, and the File Provider domain
@@ -1236,11 +1288,23 @@ def test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restor
         )
     require_surface(initiator.driver, "group-set-feed")
     receiver_read = _arrival_reader(recipient, receiver_folder)
+    # When each save was made, by the harness's clock (UTC, the tracing
+    # lines' own zone): the plane ranks the two rows by the instant each
+    # seat's engine took its save in, so a red reads them side by side.
+    save_times: dict[str, str] = {}
 
     def diagnose():
         return (
             f"sharer={_read_or_none(sharer_folder / name)!r} "
             f"receiver={receiver_read(name)!r}\n"
+            + (f"[saves] {save_times}\n" if save_times else "")
+            + (
+                "[receiver] the extension's ingest lines:\n"
+                + _phone_ingest_lines(recipient.driver._launch_config["udid"])
+                + "\n"
+                if phone
+                else ""
+            )
             + agent_diagnosis(initiator, "sharer")
             + "\n"
             + agent_diagnosis(recipient, "receiver")
@@ -1274,7 +1338,9 @@ def test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restor
         _phone_saves_through_its_domain(
             recipient, receiver_folder, recipient_row, name, receiver_edit
         )
+        save_times["phone write returned"] = _utc_now()
         atomic_write(sharer_folder / name, sharer_edit)
+        save_times["sharer saved"] = _utc_now()
         # The seat comes back: its share plane lifts the phone's save and
         # folds the sharer's.
         recipient.driver.hard_reload()

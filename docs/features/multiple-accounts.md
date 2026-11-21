@@ -5,7 +5,8 @@ section: your data and devices
 goal: docs/goal/architecture/long-term-store.md § Multi-account evolution (target state)
 guide: docs/guides/identity-and-devices.md § Several identities on one device
 absences:
-  android (outcome 14): "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
+  android (outcomes 12, 14): "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
+  android-kids (outcome 12): "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
   ios (outcomes 12, 14): "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
 ---
 
@@ -147,8 +148,8 @@ Stamped 2026-11-07 at b844c771f6.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+646e0070 standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | 0.1.2-dev+a3582c8b.dirty standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| windows | ⚠ partial | 0.1.7-dev+35d33bf9 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+859d84e8 standalone |
@@ -237,7 +238,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_apple_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | macos (macos): passed, ios (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_remove_account_refused_other_tab_web.py::test_web_remove_account_refuses_an_account_another_tab_serves` | web (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_remove_account_refuses_while_another_instance_serves_it` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 12 | app | absent by design on ios, ios-kids | — |
+| 12 | app | absent by design on ios, android, android-kids, ios-kids | — |
 | 13 | app | `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_provisioning_run_holds_custody_without_hijacking_the_live_session` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 13 | app | `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_deferred_dns_exit_switches_to_the_appended_identity_and_survives_a_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 14 | app | `tests/e2e-unified/tests/test_account_registry_mutation_lock_web.py::test_a_registry_write_queues_behind_a_sibling_tabs_mutation_lock` | web (linux): passed |
@@ -258,6 +259,6 @@ Stamped 2026-11-07 at b844c771f6.
 | 16 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_add_account_appends_second_identity_to_registry` | macos (macos): passed, ios (macos): passed |
 | 16 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_add_account_appends_second_identity_to_registry` | windows (windows): passed |
 | 16 | app | `tests/e2e-unified/tests/test_account_switcher_android.py::test_android_add_account_appends_second_identity_to_registry` | — |
-| 17 | app | `tests/e2e-unified/tests/test_launch_superseded_verdict.py::test_a_superseded_launch_verdict_never_tears_down_the_newer_session` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_launch_superseded_verdict.py::test_a_superseded_launch_verdict_never_tears_down_the_newer_session` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_launch_superseded_verdict.py::test_a_superseded_launch_verdict_never_tears_down_the_newer_session_web` | web (linux): passed |
 <!-- features-render:end -->

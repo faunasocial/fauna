@@ -15,11 +15,19 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.SessionsUiState
 import com.fauna.app.ui.viewmodel.SessionsVM
 import com.fauna.ffi.FfiSessionRow
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * Settings → **Sessions** (`docs/goal/ui/sessions.md`; ui.yaml page `sessions`;
@@ -97,7 +105,7 @@ fun SessionsContent(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            localized(state.snapshot?.error)?.let {
+            (localized(state.refusal) ?: localized(state.snapshot?.error))?.let {
                 Text(
                     it,
                     color = MaterialTheme.colorScheme.error,
@@ -123,12 +131,16 @@ fun SessionsContent(
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
 
             // 2. Sign out everywhere else — the two-press inline confirm, with the
-            // required note on what revoking can and cannot do beside it.
+            // required note on what revoking can and cannot do beside it. Both
+            // presses are painted from the shared answer: not live before the
+            // first read folds, with no other sign-in to end, or in flight —
+            // the reason beside the button (`ui/sessions.md` § Errors & edge cases).
+            val revokeOthers = state.revokeOthersAnswer
             if (state.revokeOthersArmed) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = onConfirmRevokeOthers,
-                        enabled = !state.busy,
+                        enabled = revokeOthers.isPossible,
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.testTag(Ids.SESSIONS_REVOKE_OTHERS_CONFIRM_BUTTON),
                     ) { Text(stringResource(R.string.sessions_revoke_others_confirm)) }
@@ -137,13 +149,14 @@ fun SessionsContent(
                         modifier = Modifier.testTag(Ids.SESSIONS_REVOKE_OTHERS_CANCEL_BUTTON),
                     ) { Text(stringResource(R.string.sessions_revoke_others_cancel)) }
                 }
-            } else {
+            } else if (revokeOthers.isShown) {
                 OutlinedButton(
                     onClick = onArmRevokeOthers,
-                    enabled = !state.busy,
+                    enabled = revokeOthers.isPossible,
                     modifier = Modifier.testTag(Ids.SESSIONS_REVOKE_OTHERS_BUTTON),
                 ) { Text(stringResource(R.string.sessions_revoke_others)) }
             }
+            DisabledControlReasonText(localized(revokeOthers.blockedReason))
             Text(
                 stringResource(R.string.sessions_revoke_note),
                 style = MaterialTheme.typography.bodySmall,

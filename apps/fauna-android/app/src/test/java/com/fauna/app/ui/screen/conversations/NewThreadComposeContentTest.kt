@@ -14,7 +14,9 @@ import uniffi.fauna_conversations.RecipientPickerState
 import uniffi.fauna_conversations.ResolveState
 import uniffi.fauna_conversations.SendState
 import uniffi.fauna_conversations.TypedAddress
+import uniffi.fauna_conversations.NewThreadControl
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [NewThreadComposeContent] (the
@@ -88,6 +90,8 @@ class NewThreadComposeContentTest {
         onAttach: () -> Unit = {},
         onReplyCancel: () -> Unit = {},
         onHomeNestToggle: (Boolean) -> Unit = {},
+        newThreadAnswer: (NewThreadControl) -> Possibility = { Possibility.Possible },
+        pageError: String? = null,
     ) {
         composeTestRule.setContent {
             NewThreadComposeContent(
@@ -105,9 +109,13 @@ class NewThreadComposeContentTest {
                 onAttach = onAttach,
                 onReplyCancel = onReplyCancel,
                 onHomeNestToggle = onHomeNestToggle,
+                newThreadAnswer = newThreadAnswer,
+                pageError = pageError,
             )
         }
     }
+
+    private fun blocked(key: String) = Possibility.Blocked(LocalizedText(key = key, args = emptyMap()))
 
     @Test
     fun homeNestTogglePaintsBeforeAnyChipAndReportsTheValueAsked() {
@@ -247,6 +255,64 @@ class NewThreadComposeContentTest {
         render(compose(), onSend = { sent = true })
         composeTestRule.onNodeWithTag("dm-send-button").performClick()
         assertTrue(sent)
+    }
+
+    // The new-thread composer offers only what it can send
+    // (`ui/conversations.md` § Errors & edge cases): the shared
+    // `new_thread_control_possibility` answer — stood in for here, the .so does
+    // not load under Robolectric — paints Send, attach and topic. With no
+    // recipient Send is blocked with its reason while attach and topic take the
+    // unaddressed draft.
+    @Test
+    fun sendWaitsForARecipientWithTheReasonWhileAttachAndTopicStayLive() {
+        var sent = false
+        render(
+            compose(),
+            onSend = { sent = true },
+            newThreadAnswer = {
+                if (it == NewThreadControl.SEND) blocked("conversations.compose.needs_recipient") else Possibility.Possible
+            },
+        )
+        composeTestRule.onNodeWithTag("dm-send-button").assertIsNotEnabled().performClick()
+        assertTrue("a blocked Send never acts", !sent)
+        composeTestRule.onNodeWithText("Add who it goes to first.").assertExists()
+        composeTestRule.onNodeWithTag("attachment-button").assertIsEnabled()
+        composeTestRule.onNodeWithTag("topic-toggle-button").assertIsEnabled()
+    }
+
+    // After a `Bridged` recipient decides the rail, attach and topic are
+    // disabled with their reasons and a press does nothing.
+    @Test
+    fun aBridgedRecipientBlocksAttachAndTopicWithTheirReasons() {
+        var attached = false
+        var toggled = false
+        render(
+            compose(recipientPicker = picker(chips = listOf(TypedAddress.Bridged("bridge", "far")))),
+            onAttach = { attached = true },
+            onTopicToggle = { toggled = true },
+            newThreadAnswer = {
+                when (it) {
+                    NewThreadControl.SEND -> Possibility.Possible
+                    NewThreadControl.ATTACH -> blocked("conversations.compose.no_attachments_here")
+                    NewThreadControl.TOPIC -> blocked("conversations.compose.no_topic_here")
+                }
+            },
+        )
+        composeTestRule.onNodeWithTag("dm-send-button").assertIsEnabled()
+        composeTestRule.onNodeWithTag("attachment-button").assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithTag("topic-toggle-button").assertIsNotEnabled().performClick()
+        assertTrue("blocked controls never act", !attached && !toggled)
+        composeTestRule.onNodeWithText("Files cannot be sent to this recipient.").assertExists()
+        composeTestRule.onNodeWithText("A topic cannot be set for this recipient.").assertExists()
+    }
+
+    // A refusal or failure no draft carries (a press the handler refused, an
+    // unstamped send error) reaches `error-message`, never only the log.
+    @Test
+    fun aPageErrorNoDraftCarriesShowsOnErrorMessage() {
+        render(compose(), pageError = "Could not send this message: nest unreachable")
+        composeTestRule.onNodeWithTag("error-message")
+            .assertTextContains("nest unreachable", substring = true)
     }
 
     @Test

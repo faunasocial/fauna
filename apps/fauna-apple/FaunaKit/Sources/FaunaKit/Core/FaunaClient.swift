@@ -51,9 +51,16 @@ public class FaunaClient {
     /// roster rather than blanking live marks (a page repaint must not
     /// un-flag a real review — same best-effort contract as `publishSubscriberEncapsKey`).
     public func reloadMemberReviewRoster() async {
-        if let fresh = try? await api.memberReviewList(), fresh != memberReviewRoster {
-            memberReviewRoster = fresh
-        }
+        try? await refreshMemberReviewRoster()
+    }
+
+    /// Re-read the roster, saying a failed read: the PREVIOUS roster stays
+    /// (a mark still genuinely open is never blanked) and the error goes to a
+    /// caller that owes the person a sentence — a *Keep* whose re-read fails
+    /// says so (`conversations.md` § Errors & edge cases).
+    public func refreshMemberReviewRoster() async throws {
+        let fresh = try await api.memberReviewList()
+        if fresh != memberReviewRoster { memberReviewRoster = fresh }
     }
 
     /// The store-change notice's re-read of the app-wide store-backed render
@@ -167,6 +174,12 @@ public class FaunaClient {
     #if !FAUNA_KIDS
     /// The shared mail refresh is spawned once per client.
     private var mailEpochRefreshStarted = false
+
+    /// The session's mail-usable answer, painted on the six mail sub-pages and
+    /// their Settings rail rows on both apple apps (`mail-settings.md`
+    /// § Errors & edge cases, the mail-usable gate). One per client, so a new
+    /// session starts unread.
+    public let mailUsable = MailUsableGate()
     #endif
 
     /// Long-lived loop that dispatches every inbound push (`fauna.notification`,

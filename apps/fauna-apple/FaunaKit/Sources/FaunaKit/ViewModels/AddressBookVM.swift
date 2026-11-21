@@ -8,7 +8,7 @@ import Foundation
 /// carddav_backend}.rs` and windows' `AddressBookModels.cs` +
 /// `ContactsPage.LoadAddressbooksAsync`/`LoadCardsAsync`.
 ///
-/// Reads ride `FfiCarddavClient.{listAddressbooks,queryCards}` (the Layer-2 FFI
+/// Reads ride `FfiCarddavClient.{readAddressbooks,queryCards}` (the Layer-2 FFI
 /// seam over `fauna_client_carddav::CardDavClient`); there is no write path in
 /// slice 4b. Auto-selects the first address book on load (windows/linux parity)
 /// so the card list isn't empty on first entry.
@@ -17,6 +17,12 @@ public final class AddressBookVM {
     /// The actor's address books, in `list_addressbooks` order. Empty ⇒ the
     /// `no_addressbooks` empty state, not an error.
     public private(set) var addressbooks: [FfiAddressbookRow] = []
+    /// The book read has not answered `.loaded` yet: not finished, or the
+    /// account's custody holds no key yet — the first-connect mint in flight
+    /// (`ui/contacts.md` § Errors & edge cases; `mail-credentials.md` ruling 7).
+    /// The segment paints loading then, never the empty address book, and a
+    /// store change re-runs the read (``resyncIfUnresolved()``).
+    public private(set) var addressbooksUnresolved = true
     /// The selected book's decoded vCards. Empty ⇒ the `no_cards` empty state.
     public private(set) var cards: [FfiCardRow] = []
     /// The currently-open book (`addressbook-item` selection) — `nil` before the
@@ -80,6 +86,7 @@ public final class AddressBookVM {
         carddav = nil
         api = nil
         addressbooks = []
+        addressbooksUnresolved = true
         cards = []
         selectedAddressbookId = nil
         selectedCard = nil
@@ -92,6 +99,7 @@ public final class AddressBookVM {
     /// offline (it dials the nest). Never called by production.
     func seedForTest(addressbooks: [FfiAddressbookRow], cards: [FfiCardRow]) {
         self.addressbooks = addressbooks
+        self.addressbooksUnresolved = false
         self.cards = cards
         self.selectedAddressbookId = addressbooks.first?.id
     }
@@ -124,6 +132,7 @@ public final class AddressBookVM {
                 // a `configure` for another api may have run meanwhile, and a failure
                 // for the outgoing account must not paint on that account's successor.
                 guard self.api === api else { return }
+                self.addressbooksUnresolved = false
                 self.errorMessage = DisplayError.message(error)
                 return
             }
@@ -149,16 +158,17 @@ public final class AddressBookVM {
         // Only the run that still owns the page clears the spinner — a superseded
         // run's `defer` would otherwise switch off the NEXT account's.
         defer { if self.carddav === carddav { isLoading = false } }
-        let books: [FfiAddressbookRow]
+        let read: FfiAddressbooksRead
         do {
-            books = try await carddav.listAddressbooks()
+            read = try await carddav.readAddressbooks()
         } catch {
             guard self.carddav === carddav else { return }
+            addressbooksUnresolved = false
             errorMessage = DisplayError.message(error)
             return
         }
         guard self.carddav === carddav else { return }
-        addressbooks = books
+        guard let books = land(read) else { return }
         if let first = books.first {
             await selectAddressbook(first.id)
         } else {
@@ -260,16 +270,18 @@ public final class AddressBookVM {
     /// after the query lands and drops a reply for a book the user has since left.
     public func refreshFromPush() async {
         guard let carddav else { return }
-        let books: [FfiAddressbookRow]
+        let read: FfiAddressbooksRead
         do {
-            books = try await carddav.listAddressbooks()
+            read = try await carddav.readAddressbooks()
         } catch {
             guard self.carddav === carddav else { return }
             errorMessage = DisplayError.message(error)
             return
         }
         guard self.carddav === carddav else { return }
-        addressbooks = books
+        // A push during the mint is still the wait: the loading line stays,
+        // never the empty address book.
+        guard let books = land(read) else { return }
         guard let openId = selectedAddressbookId, books.contains(where: { $0.id == openId }) else {
             // Nothing was open, or the open book itself vanished — fall back to
             // the ordinary auto-select-first behavior.
@@ -292,6 +304,43 @@ public final class AddressBookVM {
             guard self.carddav === carddav, selectedAddressbookId == openId else { return }
             errorMessage = DisplayError.message(error)
         }
+    }
+
+    /// Land the book read's answer: `.unresolved` keeps (or puts back) the
+    /// loading state with no books and returns `nil`; `.loaded` stores the
+    /// books and returns them.
+    @discardableResult
+    func land(_ read: FfiAddressbooksRead) -> [FfiAddressbookRow]? {
+        switch read {
+        case .unresolved:
+            addressbooksUnresolved = true
+            addressbooks = []
+            cards = []
+            selectedAddressbookId = nil
+            return nil
+        case .loaded(let books):
+            addressbooksUnresolved = false
+            addressbooks = books
+            return books
+        }
+    }
+
+    /// The store-change notice's resync (tui's `contacts::store_resync_op`):
+    /// re-run the book read only while it is still unresolved — the mint
+    /// landing the key is a store change. A resolved page is left alone; its
+    /// own `fauna.addressbook.changed` push re-pulls it.
+    public func resyncIfUnresolved() async {
+        guard addressbooksUnresolved, carddav != nil, !isLoading else { return }
+        await loadAddressbooks()
+    }
+
+    /// The book picker's placeholder line when no book is listed: loading
+    /// while the read is unresolved, the empty state once it answered with
+    /// none (and no load is running), `nil` when the books are listed.
+    public var bookPickerPlaceholder: String? {
+        guard addressbooks.isEmpty else { return nil }
+        if addressbooksUnresolved { return L.contacts.addressBook.loading }
+        return isLoading ? nil : L.contacts.addressBook.noAddressbooks
     }
 
     /// `ORG` components joined with " · " (empty components dropped) — byte-

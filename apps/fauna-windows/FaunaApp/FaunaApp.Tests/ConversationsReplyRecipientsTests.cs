@@ -151,4 +151,31 @@ public class ConversationsReplyRecipientsTests
         Assert.Equal("@dave:example.org", FaunaConversationsMethods.TypedAddressDisplay(
             new TypedAddress.Bridged(@bridgeId: "matrix", @address: "@dave:example.org")));
     }
+
+    /// <summary>The reply bar (<c>dm-text-field</c> / <c>dm-send-button</c>) paints from the
+    /// shared <c>thread_send_possibility</c> answer, never the <c>canSend</c> bool: a
+    /// writable thread is possible; one no bridge serves is blocked by the sentence the
+    /// room notice states (<c>docs/goal/ui/README.md</c> § Offer only what is possible).</summary>
+    [Fact]
+    public void ReplyBar_PaintsFromTheSharedSendAnswer()
+    {
+        var (m, tid, _) = MailThread();
+        var vm = new ConversationsViewModel(m, new SyncObserver());
+        vm.OpenThread(tid);
+        var caps = vm.SelectedDetail!.capabilities;
+
+        var open = FaunaApp.Core.Helpers.PossibilityPaint.Of(
+            FaunaConversationsMethods.ThreadSendPossibility(caps with { canSend = true }));
+        Assert.True(open.IsPossible);
+
+        var withheld = FaunaApp.Core.Helpers.PossibilityPaint.Of(
+            FaunaConversationsMethods.ThreadSendPossibility(caps with { canSend = false }));
+        Assert.True(withheld.Shown);
+        Assert.False(withheld.Enabled);
+        Assert.Equal(
+            FaunaApp.Core.Services.Strings.Resolve(new uniffi.fauna_core.LocalizedText(
+                "conversations.unified.room_notice_bridge_disconnected",
+                new System.Collections.Generic.Dictionary<string, string>())),
+            withheld.Reason);
+    }
 }

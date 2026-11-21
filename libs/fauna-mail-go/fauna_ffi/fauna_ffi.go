@@ -614,6 +614,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_calendar_pan_possibility()
+		})
+		if checksum != 61894 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_calendar_pan_possibility: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_calendar_pan_step()
 		})
 		if checksum != 13560 {
@@ -715,7 +724,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_deserialize_manifest()
 		})
-		if checksum != 54733 {
+		if checksum != 58202 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_deserialize_manifest: UniFFI API checksum mismatch")
 		}
@@ -1001,6 +1010,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_kids_app_eligibility()
+		})
+		if checksum != 35316 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_kids_app_eligibility: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_kids_app_eligible()
 		})
 		if checksum != 29003 {
@@ -1042,6 +1060,15 @@ func uniffiCheckChecksums() {
 		if checksum != 26950 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_ward_feed_request_state: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_ward_guardian_decides_contact()
+		})
+		if checksum != 25294 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_ward_guardian_decides_contact: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1550,9 +1577,27 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_webdav_manifest_page_hashes()
+		})
+		if checksum != 60456 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_webdav_manifest_page_hashes: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_webdav_manifest_store_keys()
+		})
+		if checksum != 49048 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_webdav_manifest_store_keys: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_webdav_open_file()
 		})
-		if checksum != 17926 {
+		if checksum != 10102 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_webdav_open_file: UniFFI API checksum mismatch")
 		}
@@ -1570,7 +1615,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_webdav_seal_file()
 		})
-		if checksum != 43312 {
+		if checksum != 15974 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_webdav_seal_file: UniFFI API checksum mismatch")
 		}
@@ -1714,7 +1759,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_notification_text_for()
 		})
-		if checksum != 24625 {
+		if checksum != 58029 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_notification_text_for: UniFFI API checksum mismatch")
 		}
@@ -2770,6 +2815,15 @@ func uniffiCheckChecksums() {
 		if checksum != 52339 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_fficarddavclient_query_cards: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_fficarddavclient_read_addressbooks()
+		})
+		if checksum != 12783 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_fficarddavclient_read_addressbooks: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -8067,6 +8121,13 @@ type FfiCarddavClientInterface interface {
 	// when mail/CardDAV is off, or when the book has no row yet
 	// (`AddressbookNotFound` → empty, mirroring caldav's `CalendarNotFound`).
 	QueryCards(addressbookIdHex string) ([]FfiCardRow, error)
+	// The Address Book segment's book load in its answers
+	// ([`fauna_client_carddav::CardDavClient::read_addressbooks`]): unlike
+	// [`Self::list_addressbooks`], a wait (custody not readable yet, or no key
+	// minted yet) is kept apart instead of reading as an empty list, so the
+	// segment paints loading, never an empty address book. A list error is
+	// the call's error.
+	ReadAddressbooks() (FfiAddressbooksRead, error)
 }
 
 // UniFFI handle for the encrypted-CardDAV Address Book surface. Construct via
@@ -8184,6 +8245,47 @@ func (_self *FfiCarddavClient) QueryCards(addressbookIdHex string) ([]FfiCardRow
 		},
 		C.uniffi_fauna_ffi_fn_method_fficarddavclient_query_cards(
 			_pointer, FfiConverterStringINSTANCE.Lower(addressbookIdHex)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// The Address Book segment's book load in its answers
+// ([`fauna_client_carddav::CardDavClient::read_addressbooks`]): unlike
+// [`Self::list_addressbooks`], a wait (custody not readable yet, or no key
+// minted yet) is kept apart instead of reading as an empty list, so the
+// segment paints loading, never an empty address book. A list error is
+// the call's error.
+func (_self *FfiCarddavClient) ReadAddressbooks() (FfiAddressbooksRead, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiCarddavClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) FfiAddressbooksRead {
+			return FfiConverterFfiAddressbooksReadINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_fficarddavclient_read_addressbooks(
+			_pointer),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
@@ -19368,6 +19470,11 @@ type FfiAdminUser struct {
 	// (`family-safety.md` § App surface → *Admin take-over*). Additive
 	// 2026-11-14.
 	Guardian *FfiAdminUserGuardian
+	// Whether removing this row's admin role would leave the nest with no
+	// superadmin — the floor the nest refuses (`admin.md` § 2 → *What a row
+	// offers*); read by [`admin_remove_admin_possibility`]. Additive
+	// 2026-11-17; `false` from an older nest.
+	LastSuperadmin bool
 }
 
 func (r *FfiAdminUser) Destroy() {
@@ -19383,6 +19490,7 @@ func (r *FfiAdminUser) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.MailServingEnabled)
 	FfiDestroyerBool{}.Destroy(r.IsAdmin)
 	FfiDestroyerOptionalFfiAdminUserGuardian{}.Destroy(r.Guardian)
+	FfiDestroyerBool{}.Destroy(r.LastSuperadmin)
 }
 
 type FfiConverterFfiAdminUser struct{}
@@ -19407,6 +19515,7 @@ func (c FfiConverterFfiAdminUser) Read(reader io.Reader) FfiAdminUser {
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalFfiAdminUserGuardianINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
 
@@ -19431,6 +19540,7 @@ func (c FfiConverterFfiAdminUser) Write(writer io.Writer, value FfiAdminUser) {
 	FfiConverterBoolINSTANCE.Write(writer, value.MailServingEnabled)
 	FfiConverterBoolINSTANCE.Write(writer, value.IsAdmin)
 	FfiConverterOptionalFfiAdminUserGuardianINSTANCE.Write(writer, value.Guardian)
+	FfiConverterBoolINSTANCE.Write(writer, value.LastSuperadmin)
 }
 
 type FfiDestroyerFfiAdminUser struct{}
@@ -23836,10 +23946,10 @@ type FfiManifest struct {
 	// For a **content-key-sealed** (M2) folder: BLAKE3 digest of each
 	// *ciphertext* chunk — the content-addressed blob-store key the byte
 	// routes use (`manifest.store_keys()`), parallel to `chunk_hashes`. `None`
-	// for the plaintext-chunking path (owner-only / no content key). The Go
-	// WebDAV MDA receives it populated from `webdav_seal_file` on PUT and
-	// reads it on GET to fetch each ciphertext chunk by store key before
-	// handing the bodies to `webdav_open_file`.
+	// for the plaintext-chunking path (owner-only / no content key). No
+	// reader takes a file's store keys from here: the Go WebDAV MDA lists
+	// them through the one manifest walk (`webdav_manifest_store_keys`),
+	// which also reads a paged root's pages.
 	StoredHashes *[][]byte
 }
 
@@ -26474,12 +26584,19 @@ func (_ FfiDestroyerFfiSealedChunk) Destroy(value FfiSealedChunk) {
 
 // A whole file sealed for the byte plane by [`webdav_seal_file`].
 type FfiSealedFile struct {
-	// Canonical dag-cbor `ChunkManifest` with `stored_hashes` populated —
-	// byte-identical to what the sync engine uploads for the same bytes.
+	// The manifest the change record names, byte-identical to what the sync
+	// engine uploads for the same bytes: the single canonical `ChunkManifest`
+	// (store keys populated, plaintext hashes sealed) for a file at or under
+	// the inline bound, else the paged **root** (`file-sync.md` § Paged
+	// manifests).
 	ManifestBytes []byte
 	// `blake3(manifest_bytes)` (32 bytes) — the change record's manifest hash
-	// and the DAV ETag.
+	// and the DAV ETag; a paged file's root hash.
 	ManifestHash []byte
+	// A paged file's encoded pages, in file order — each POSTed to the page
+	// door (`/api/v1/manifest-pages`) after the chunks and before the root.
+	// Empty for a file at or under the inline bound.
+	ManifestPages [][]byte
 	// The content-key generation the chunks were sealed under
 	// (`keys.current.version`) — stamp exactly this into the change record.
 	ContentKeyVersion uint64
@@ -26490,6 +26607,7 @@ type FfiSealedFile struct {
 func (r *FfiSealedFile) Destroy() {
 	FfiDestroyerBytes{}.Destroy(r.ManifestBytes)
 	FfiDestroyerBytes{}.Destroy(r.ManifestHash)
+	FfiDestroyerSequenceBytes{}.Destroy(r.ManifestPages)
 	FfiDestroyerUint64{}.Destroy(r.ContentKeyVersion)
 	FfiDestroyerSequenceFfiSealedChunk{}.Destroy(r.Chunks)
 }
@@ -26506,6 +26624,7 @@ func (c FfiConverterFfiSealedFile) Read(reader io.Reader) FfiSealedFile {
 	return FfiSealedFile{
 		FfiConverterBytesINSTANCE.Read(reader),
 		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterSequenceBytesINSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterSequenceFfiSealedChunkINSTANCE.Read(reader),
 	}
@@ -26522,6 +26641,7 @@ func (c FfiConverterFfiSealedFile) LowerExternal(value FfiSealedFile) ExternalCR
 func (c FfiConverterFfiSealedFile) Write(writer io.Writer, value FfiSealedFile) {
 	FfiConverterBytesINSTANCE.Write(writer, value.ManifestBytes)
 	FfiConverterBytesINSTANCE.Write(writer, value.ManifestHash)
+	FfiConverterSequenceBytesINSTANCE.Write(writer, value.ManifestPages)
 	FfiConverterUint64INSTANCE.Write(writer, value.ContentKeyVersion)
 	FfiConverterSequenceFfiSealedChunkINSTANCE.Write(writer, value.Chunks)
 }
@@ -29381,6 +29501,82 @@ func (_ FfiDestroyerX25519Keypair) Destroy(value X25519Keypair) {
 	value.Destroy()
 }
 
+// The address-book read's two answers, as they cross UniFFI
+// ([`fauna_client_carddav::AddressbooksRead`]; `ui/contacts.md` § Errors &
+// edge cases — the segment never waits on a credential), the books as the
+// page's decrypted rows.
+type FfiAddressbooksRead interface {
+	Destroy()
+}
+
+// Not finished, the custody read failed (the account store is not up
+// yet), or custody holds no key yet (the first-connect mint is in
+// flight): a wait the segment paints as loading — never an empty address
+// book — re-read when the store changes.
+type FfiAddressbooksReadUnresolved struct {
+}
+
+func (e FfiAddressbooksReadUnresolved) Destroy() {
+}
+
+// The key is there and the listing came back, possibly with no books
+// (the address book has no lazy provisioning).
+type FfiAddressbooksReadLoaded struct {
+	Addressbooks []FfiAddressbookRow
+}
+
+func (e FfiAddressbooksReadLoaded) Destroy() {
+	FfiDestroyerSequenceFfiAddressbookRow{}.Destroy(e.Addressbooks)
+}
+
+type FfiConverterFfiAddressbooksRead struct{}
+
+var FfiConverterFfiAddressbooksReadINSTANCE = FfiConverterFfiAddressbooksRead{}
+
+func (c FfiConverterFfiAddressbooksRead) Lift(rb RustBufferI) FfiAddressbooksRead {
+	return LiftFromRustBuffer[FfiAddressbooksRead](c, rb)
+}
+
+func (c FfiConverterFfiAddressbooksRead) Lower(value FfiAddressbooksRead) C.RustBuffer {
+	return LowerIntoRustBuffer[FfiAddressbooksRead](c, value)
+}
+
+func (c FfiConverterFfiAddressbooksRead) LowerExternal(value FfiAddressbooksRead) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FfiAddressbooksRead](c, value))
+}
+func (FfiConverterFfiAddressbooksRead) Read(reader io.Reader) FfiAddressbooksRead {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return FfiAddressbooksReadUnresolved{}
+	case 2:
+		return FfiAddressbooksReadLoaded{
+			FfiConverterSequenceFfiAddressbookRowINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterFfiAddressbooksRead.Read()", id))
+	}
+}
+
+func (FfiConverterFfiAddressbooksRead) Write(writer io.Writer, value FfiAddressbooksRead) {
+	switch variant_value := value.(type) {
+	case FfiAddressbooksReadUnresolved:
+		writeInt32(writer, 1)
+	case FfiAddressbooksReadLoaded:
+		writeInt32(writer, 2)
+		FfiConverterSequenceFfiAddressbookRowINSTANCE.Write(writer, variant_value.Addressbooks)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterFfiAddressbooksRead.Write", value))
+	}
+}
+
+type FfiDestroyerFfiAddressbooksRead struct{}
+
+func (_ FfiDestroyerFfiAddressbooksRead) Destroy(value FfiAddressbooksRead) {
+	value.Destroy()
+}
+
 // The asking-price field's text as the sell composer and the *Change
 // price…* dialog both read it — the shared
 // [`fauna_client_subscriptions::parse_asking_price_sats`].
@@ -30742,6 +30938,48 @@ func (FfiConverterFfiFeedSourceOperation) Write(writer io.Writer, value FfiFeedS
 type FfiDestroyerFfiFeedSourceOperation struct{}
 
 func (_ FfiDestroyerFfiFeedSourceOperation) Destroy(value FfiFeedSourceOperation) {
+}
+
+// The three-way kids-app answer — the native face of
+// `fauna_client_family::KidsAppEligibility` (`account-age-band.md` § The
+// account age band → *Kids-app eligibility while it is unknown*).
+// `Eligible` mounts the kids shell, `Ineligible` the not-supervised surface
+// with its message, `Unknown` that surface's frame without the message.
+type FfiKidsAppEligibility uint
+
+const (
+	FfiKidsAppEligibilityEligible   FfiKidsAppEligibility = 1
+	FfiKidsAppEligibilityIneligible FfiKidsAppEligibility = 2
+	FfiKidsAppEligibilityUnknown    FfiKidsAppEligibility = 3
+)
+
+type FfiConverterFfiKidsAppEligibility struct{}
+
+var FfiConverterFfiKidsAppEligibilityINSTANCE = FfiConverterFfiKidsAppEligibility{}
+
+func (c FfiConverterFfiKidsAppEligibility) Lift(rb RustBufferI) FfiKidsAppEligibility {
+	return LiftFromRustBuffer[FfiKidsAppEligibility](c, rb)
+}
+
+func (c FfiConverterFfiKidsAppEligibility) Lower(value FfiKidsAppEligibility) C.RustBuffer {
+	return LowerIntoRustBuffer[FfiKidsAppEligibility](c, value)
+}
+
+func (c FfiConverterFfiKidsAppEligibility) LowerExternal(value FfiKidsAppEligibility) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FfiKidsAppEligibility](c, value))
+}
+func (FfiConverterFfiKidsAppEligibility) Read(reader io.Reader) FfiKidsAppEligibility {
+	id := readInt32(reader)
+	return FfiKidsAppEligibility(id)
+}
+
+func (FfiConverterFfiKidsAppEligibility) Write(writer io.Writer, value FfiKidsAppEligibility) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerFfiKidsAppEligibility struct{}
+
+func (_ FfiDestroyerFfiKidsAppEligibility) Destroy(value FfiKidsAppEligibility) {
 }
 
 // UniFFI face of [`fauna_client_bridges::LinkBlock`] — why a bridge's Link
@@ -33055,6 +33293,47 @@ type FfiDestroyerOptionalFfiFamilyPendingTransfer struct{}
 func (_ FfiDestroyerOptionalFfiFamilyPendingTransfer) Destroy(value *FfiFamilyPendingTransfer) {
 	if value != nil {
 		FfiDestroyerFfiFamilyPendingTransfer{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalFfiFamilyStatus struct{}
+
+var FfiConverterOptionalFfiFamilyStatusINSTANCE = FfiConverterOptionalFfiFamilyStatus{}
+
+func (c FfiConverterOptionalFfiFamilyStatus) Lift(rb RustBufferI) *FfiFamilyStatus {
+	return LiftFromRustBuffer[*FfiFamilyStatus](c, rb)
+}
+
+func (_ FfiConverterOptionalFfiFamilyStatus) Read(reader io.Reader) *FfiFamilyStatus {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterFfiFamilyStatusINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalFfiFamilyStatus) Lower(value *FfiFamilyStatus) C.RustBuffer {
+	return LowerIntoRustBuffer[*FfiFamilyStatus](c, value)
+}
+
+func (c FfiConverterOptionalFfiFamilyStatus) LowerExternal(value *FfiFamilyStatus) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*FfiFamilyStatus](c, value))
+}
+
+func (_ FfiConverterOptionalFfiFamilyStatus) Write(writer io.Writer, value *FfiFamilyStatus) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterFfiFamilyStatusINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalFfiFamilyStatus struct{}
+
+func (_ FfiDestroyerOptionalFfiFamilyStatus) Destroy(value *FfiFamilyStatus) {
+	if value != nil {
+		FfiDestroyerFfiFamilyStatus{}.Destroy(*value)
 	}
 }
 
@@ -39631,6 +39910,21 @@ func SettingControl(settingType string) FfiSettingControl {
 	}))
 }
 
+// Whether the pan pair (`events-prev-month` / `events-next-month`) can do
+// anything in `mode` — `fauna_core::caltime::pan_possibility`, the pair's one
+// predicate (`ui/README.md` § Offer only what is possible, rules 2 and 6):
+// blocked with `events.pan_none_in_agenda` in agenda, possible otherwise. A
+// native paints both buttons from it (disabled, the reason within eyeshot)
+// and its pan handler asks it again and refuses with the same reason before
+// reading [`calendar_pan_step`].
+func CalendarPanPossibility(mode FfiCalendarViewMode) fauna_core.Possibility {
+	return fauna_core.FfiConverterPossibilityINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_calendar_pan_possibility(FfiConverterFfiCalendarViewModeINSTANCE.Lower(mode), _uniffiStatus),
+		}
+	}))
+}
+
 // The shared pan policy: how far one click moves in `mode`
 // (`fauna_core::caltime::pan_step`) — one visible range per click.
 //
@@ -39775,6 +40069,13 @@ func ContentHashAtPath(path string) ([]byte, error) {
 }
 
 // Deserialize canonical dag-cbor manifest bytes to typed manifest.
+//
+// A paged **root** (`file-sync.md` § Paged manifests) decodes with empty
+// chunk lists — its entries ride in pages this record does not carry — so
+// no reader learns a file's chunks from this: the WebDAV MDA walks a
+// manifest of either shape through `webdav_manifest_page_hashes` /
+// `webdav_manifest_store_keys` / `webdav_open_file`, and the apps through
+// the shared download walk.
 func DeserializeManifest(data []byte) (FfiManifest, error) {
 	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
@@ -40245,6 +40546,20 @@ func IosAgeAttestationAppId() *string {
 	}))
 }
 
+// Decide the kids-app answer from the run's latest **successful**
+// `familyStatus` read (`None` until one has succeeded — never a failed one)
+// and the account's persisted snapshot
+// ([`crate::FfiAccountRegistry::supervision_snapshot`], `None` when absent or
+// guardian-less). The rule itself lives in
+// `fauna_client_family::kids_app_eligibility`.
+func KidsAppEligibility(latestRead *FfiFamilyStatus, snapshot *FfiSupervisionSnapshot) FfiKidsAppEligibility {
+	return FfiConverterFfiKidsAppEligibilityINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_kids_app_eligibility(FfiConverterOptionalFfiFamilyStatusINSTANCE.Lower(latestRead), FfiConverterOptionalFfiSupervisionSnapshotINSTANCE.Lower(snapshot), _uniffiStatus),
+		}
+	}))
+}
+
 // May this account use the kids app? The native face of the shared
 // `fauna_client_family::kids_app_eligible` verdict (`family-safety.md` § The
 // account age band → the kids-app bullet, item (3)): `true` exactly when the
@@ -40306,6 +40621,16 @@ func WardFeedRequestState(asks []FfiFamilyFeedRequest, bridgeId string, operatio
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_ffi_fn_func_ward_feed_request_state(FfiConverterSequenceFfiFamilyFeedRequestINSTANCE.Lower(asks), FfiConverterStringINSTANCE.Lower(bridgeId), FfiConverterStringINSTANCE.Lower(operation), FfiConverterStringINSTANCE.Lower(target), _uniffiStatus),
 		}
+	}))
+}
+
+// Whether the guardian decides contact with this peer — when
+// `contact-request-guardian-button` is the Find User result's one step,
+// offered before anything is refused. Over the shared
+// [`fauna_client_family::guardian_decides_contact`].
+func WardGuardianDecidesContact(statusRead bool, ownPolicy *FfiReachPolicy, peerStatus *string) bool {
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_ffi_fn_func_ward_guardian_decides_contact(FfiConverterBoolINSTANCE.Lower(statusRead), FfiConverterOptionalFfiReachPolicyINSTANCE.Lower(ownPolicy), FfiConverterOptionalStringINSTANCE.Lower(peerStatus), _uniffiStatus)
 	}))
 }
 
@@ -41695,6 +42020,46 @@ func WebdavDecodeFolderKeysHeader(value string) (FfiFolderContentKeys, error) {
 	}
 }
 
+// The one manifest walk without a key (`file-sync.md` § Paged manifests →
+// *One walk, used by every reader*), split for a caller that does its own
+// fetching: the page addresses a manifest names, in file order, for the MDA
+// to fetch from `GET /api/v1/manifests/{hash}` — empty for a single
+// manifest, whose chunk list is inline. The bytes are decoded and held to
+// their shape's reader-version, shape and size checks; nothing is opened.
+func WebdavManifestPageHashes(manifestBytes []byte) ([][]byte, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_webdav_manifest_page_hashes(FfiConverterBytesINSTANCE.Lower(manifestBytes), _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue [][]byte
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterSequenceBytesINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// The file's store keys (32-byte ciphertext hashes for a sealed file), in
+// file order across every page — what the MDA fetches from
+// `GET /api/v1/chunks/{key}` before [`webdav_open_file`]. `page_bodies` are
+// the pages [`webdav_manifest_page_hashes`] named, in that order (empty for a
+// single manifest); each is verified by the walk against the address, entry
+// count and byte length its root names before a key in it is used.
+func WebdavManifestStoreKeys(manifestBytes []byte, pageBodies [][]byte) ([][]byte, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_webdav_manifest_store_keys(FfiConverterBytesINSTANCE.Lower(manifestBytes), FfiConverterSequenceBytesINSTANCE.Lower(pageBodies), _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue [][]byte
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterSequenceBytesINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
 // Open a DAV GET's file — the apps' shared walk
 // (`fauna_core::file_download::download_file_bytes_by_manifest`) over the
 // manifest and ciphertext chunk bodies the MDA fetched by store key, under
@@ -41705,13 +42070,15 @@ func WebdavDecodeFolderKeysHeader(value string) (FfiFolderContentKeys, error) {
 // files sealed unframed), and the whole-file
 // content-address verify. Returns the plaintext.
 //
-// `chunk_bodies` are in manifest order — one per `stored_hashes[i]`, exactly
-// as `deserialize_manifest` lists them; a count mismatch is an error before
-// any crypto runs.
-func WebdavOpenFile(keys FfiFolderContentKeys, contentKeyVersion uint64, relativePath string, manifestBytes []byte, chunkBodies [][]byte) ([]byte, error) {
+// `page_bodies` are a paged root's pages in root order — as
+// [`webdav_manifest_page_hashes`] names them; empty for a single manifest —
+// and `chunk_bodies` the file's chunks in file order, one per store key
+// exactly as [`webdav_manifest_store_keys`] lists them; a count mismatch is
+// an error before any crypto runs.
+func WebdavOpenFile(keys FfiFolderContentKeys, contentKeyVersion uint64, relativePath string, manifestBytes []byte, pageBodies [][]byte, chunkBodies [][]byte) ([]byte, error) {
 	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
-			inner: C.uniffi_fauna_ffi_fn_func_webdav_open_file(FfiConverterFfiFolderContentKeysINSTANCE.Lower(keys), FfiConverterUint64INSTANCE.Lower(contentKeyVersion), FfiConverterStringINSTANCE.Lower(relativePath), FfiConverterBytesINSTANCE.Lower(manifestBytes), FfiConverterSequenceBytesINSTANCE.Lower(chunkBodies), _uniffiStatus),
+			inner: C.uniffi_fauna_ffi_fn_func_webdav_open_file(FfiConverterFfiFolderContentKeysINSTANCE.Lower(keys), FfiConverterUint64INSTANCE.Lower(contentKeyVersion), FfiConverterStringINSTANCE.Lower(relativePath), FfiConverterBytesINSTANCE.Lower(manifestBytes), FfiConverterSequenceBytesINSTANCE.Lower(pageBodies), FfiConverterSequenceBytesINSTANCE.Lower(chunkBodies), _uniffiStatus),
 		}
 	})
 	if _uniffiErr != nil {
@@ -41769,6 +42136,12 @@ func WebdavRenderPaths(keys FfiFolderContentKeys, rows []FfiWebdavPathRow) ([]*s
 // Seals under `current` and returns that generation together, so the record
 // stamps the generation the bytes were actually sealed under by construction
 // (the same invariant [`webdav_seal_path`] states for the label).
+//
+// A file of more chunks than the inline bound comes back paged — the root in
+// `manifest_bytes`, its pages in `manifest_pages` — cut by the engine's own
+// writer (`ChunkManifest::into_wire_parts`), so the same content gives the
+// same root hash whichever of the two wrote it (`file-sync.md` § Paged
+// manifests).
 func WebdavSealFile(keys FfiFolderContentKeys, data []byte) (FfiSealedFile, error) {
 	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
@@ -42015,18 +42388,6 @@ func NotificationRetainedFor(item FfiNotifItem, nowMicros int64) bool {
 	}))
 }
 
-// What this row says — the localized body, the English `summary`, or the
-// default — decided once in shared Rust.
-//
-// A **pure** function over one row, the twin of
-// [`notification_destination_for`]: an app calls it while painting the list,
-// exactly as the Rust-native apps call
-// `fauna_client_notifications::notification_text`.
-//
-// ⚠ An app must not paint `body` or `summary` on its own judgement. A body
-// whose key this build's catalog lacks (a newer nest's) must lose to
-// `summary` — resolving it would paint `notifications.some_future_key` at the
-// user — and "is the key known" is exactly the part an app cannot see.
 func NotificationTextFor(item FfiNotifItem) FfiNotificationText {
 	return FfiConverterFfiNotificationTextINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{

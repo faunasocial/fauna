@@ -105,20 +105,15 @@ public struct MailListsView: View {
                 beginAdd()
             }
             .accessibilityIdentifier(Ids.mailListsAddButton)
-            .automationActivate(
-                Ids.mailListsAddButton,
-                isEnabled: { !vm.localDomains.isEmpty }
-            ) { beginAdd() }
-            .disabled(vm.localDomains.isEmpty)
-            if vm.localDomains.isEmpty {
-                Text(L.mailLists.noDomain)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            .automationActivate(Ids.mailListsAddButton) { beginAdd() }
+            .faunaPossible(vm.createAnswer)
+            FaunaPossibilityReason(vm.createAnswer)
         }
     }
 
     private func beginAdd() {
+        // The press asks what the paint asked (rule 7).
+        if refusePress(vm.createAnswer, errorMessage: &vm.errorMessage) { return }
         sheetMode = .add
     }
 
@@ -267,6 +262,20 @@ struct MailListAddSheet: View {
 
     private var submitArmed: Bool { armedArchiveUrl != nil && armedArchiveUrl == trimmedArchiveUrl }
 
+    private var selectedDomain: String {
+        vm.localDomains.indices.contains(domainIndex) ? vm.localDomains[domainIndex] : ""
+    }
+
+    /// The submit's draft validity — the shared `list_submit_possibility`
+    /// tui asks (`mail-settings.md` § Errors & edge cases, *The in-page
+    /// predicates*): creating needs a local part and a domain, and a typed
+    /// recipients-per-send cap must be a whole number. Painted on the submit
+    /// and asked again by ``submit()``, which refuses with the reason.
+    private var submitAnswer: Possibility {
+        listSubmitPossibility(
+            editing: isEditing, localPart: localPart, domain: selectedDomain, perSendCap: perSend)
+    }
+
     private var submitLabel: String {
         if submitting { return "…" }
         if submitArmed { return L.mailLists.archiveOffServerConfirm }
@@ -322,20 +331,21 @@ struct MailListAddSheet: View {
                 Button(submitLabel) {
                     Task { await submit() }
                 }
-                .disabled(submitting || name.trimmingCharacters(in: .whitespaces).isEmpty)
                 .accessibilityIdentifier(Ids.mailListsAddSheetSubmitButton)
                 .automationActivate(
                     Ids.mailListsAddSheetSubmitButton,
-                    isEnabled: { !submitting && !name.trimmingCharacters(in: .whitespaces).isEmpty },
                     // The armed/unarmed label is what the journey reads.
                     text: { submitLabel }
                 ) { Task { await submit() } }
+                .faunaPossible(submitAnswer)
+                .disabled(submitting)
                 // `submit()` branches on this same `editing != nil` — the
                 // aliases-submit case one level over (tui's `MailListsSubmit` is
                 // `None` for the same missing-mode reason).
                 .faunaGate(isEditing
                            ? "fauna.bridges.update_account_list"
                            : "fauna.bridges.create_account_list")
+                FaunaPossibilityReason(submitAnswer)
                 Button(L.mailLists.cancel, role: .cancel) { dismiss() }
                     .accessibilityIdentifier(Ids.mailListsAddSheetCancelButton)
                     .automationActivate(Ids.mailListsAddSheetCancelButton) { dismiss() }
@@ -356,6 +366,8 @@ struct MailListAddSheet: View {
     }
 
     private func submit() async {
+        // The press asks what the paint asked (rule 7): never a silent return.
+        if refusePress(submitAnswer, errorMessage: &error) { return }
         if archiveNeedsConfirm && !submitArmed {
             // The first press only asks: nothing is saved.
             armedArchiveUrl = trimmedArchiveUrl
@@ -363,15 +375,14 @@ struct MailListAddSheet: View {
         }
         submitting = true
         defer { submitting = false }
-        let domain = vm.localDomains.indices.contains(domainIndex) ? vm.localDomains[domainIndex] : ""
         let draft = ListDraft(
             friendlyName: name.trimmingCharacters(in: .whitespaces),
             localPart: localPart.trimmingCharacters(in: .whitespaces),
-            localDomain: domain,
+            localDomain: selectedDomain,
             description: description.trimmingCharacters(in: .whitespaces),
             listHelpUrl: listHelpUrl.trimmingCharacters(in: .whitespaces),
             listArchiveUrl: listArchiveUrl.trimmingCharacters(in: .whitespaces),
-            recipientsPerSend: UInt32(perSend)
+            recipientsPerSend: parseCount(input: perSend)
         )
         let action: MailListsAction
         if let editing {

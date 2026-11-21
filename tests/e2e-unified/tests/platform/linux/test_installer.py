@@ -619,18 +619,28 @@ class TestSnap:
 class TestFlatpak:
     """Install/uninstall flatpak (desktop only, no sync)."""
 
-    def test_install_and_uninstall(self, repo_root):
-        flatpak_dir = os.path.join(repo_root, "apps", "fauna-linux", "packaging", "flatpak")
-        manifest = os.path.join(flatpak_dir, "social.fauna.fauna.yml")
-        build_dir = os.path.join(repo_root, "build", "linux-installer", "flatpak-build")
-        repo_dir = os.path.join(repo_root, "build", "linux-installer", "flatpak-repo")
+    def test_install_and_uninstall(self, desktop_binary, agent_binary, repo_root):
         app_id = "social.fauna.fauna"
+        manifest = os.path.join(
+            repo_root, "apps", "fauna-linux", "packaging", "flatpak", "social.fauna.fauna.yml",
+        )
+        build_dir = os.path.join(repo_root, "build", "linux-installer", "flatpak-build")
+        state_dir = os.path.join(repo_root, "build", "linux-installer", "flatpak-builder-state")
 
+        # The Flatpak build packages, it never compiles (linux-desktop.md § 3):
+        # stage the prebuilt binaries with the rest of the payload through the
+        # one staging script, then package them.
+        assert os.path.dirname(desktop_binary) == os.path.dirname(agent_binary)
+        subprocess.run(
+            [sys.executable, os.path.join(repo_root, "scripts", "linux-flatpak-stage.py"),
+             "--bin-dir", os.path.dirname(desktop_binary)],
+            check=True, capture_output=True, text=True, timeout=120, cwd=repo_root,
+        )
         result = subprocess.run(
             [
-                "flatpak-builder", "--force-clean",
+                "flatpak-builder", "--force-clean", "--disable-rofiles-fuse",
+                "--default-branch=stable", f"--state-dir={state_dir}",
                 "--user", "--install",
-                "--repo", repo_dir,
                 build_dir, manifest,
             ],
             capture_output=True, text=True, timeout=1200,
@@ -658,85 +668,81 @@ class TestFlatpak:
         assert app_id not in result.stdout, f"{app_id} still installed"
 
 
-@pytest.mark.skip(reason="AppImage not production-ready — no bundled libraries")
+def _stage_appdir(repo_root, bin_dir, notices):
+    """Stage an AppDir with the recipe's own script, `installer/stage-appdir.sh`
+    (the layout's one definition — `just linux-appimage` runs it too, so the
+    recipe and this test cannot disagree; installers/linux-desktop.md § 5
+    AppImage). Returns the AppDir's path, in a fresh temporary directory."""
+    parent = tempfile.mkdtemp(prefix="fauna-e2e-appimage-")
+    appdir = os.path.join(parent, "fauna-desktop.AppDir")
+    result = subprocess.run(
+        ["bash", os.path.join(repo_root, "installer", "stage-appdir.sh"),
+         "--bin-dir", bin_dir, "--out", appdir, "--notices", notices],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, f"stage-appdir.sh failed: {result.stderr}"
+    return appdir
+
+
+def _real_bin_dir(desktop_binary, agent_binary):
+    """The two built binaries side by side, as the staging script reads them."""
+    bin_dir = tempfile.mkdtemp(prefix="fauna-e2e-appimage-bin-")
+    os.symlink(desktop_binary, os.path.join(bin_dir, "fauna-desktop"))
+    os.symlink(agent_binary, os.path.join(bin_dir, "fauna-sync-agent"))
+    return bin_dir
+
+
 class TestAppImage:
-    """Verify AppImage directory structure and binary launches."""
+    """Verify the AppDir the recipe stages and that its binary launches."""
 
     def test_appdir_structure(self, desktop_binary, agent_binary, repo_root):
-        appdir = tempfile.mkdtemp(prefix="fauna-e2e-appimage-")
-        appimage_src = os.path.join(
-            repo_root, "apps", "fauna-linux", "packaging", "appimage",
+        bin_dir = _real_bin_dir(desktop_binary, agent_binary)
+        notices = os.path.join(
+            repo_root, "build", "shipped-notices", "linux-desktop", "THIRD-PARTY-NOTICES",
         )
-
+        appdir = _stage_appdir(repo_root, bin_dir, notices)
         try:
-            usr_bin = os.path.join(appdir, "usr", "bin")
-            os.makedirs(usr_bin, exist_ok=True)
-            shutil.copy2(desktop_binary, os.path.join(usr_bin, "fauna-desktop"))
-            os.chmod(os.path.join(usr_bin, "fauna-desktop"), 0o755)
-            shutil.copy2(agent_binary, os.path.join(usr_bin, "fauna-sync-agent"))
-            os.chmod(os.path.join(usr_bin, "fauna-sync-agent"), 0o755)
-
-            apprun_src = os.path.join(appimage_src, "AppRun")
             apprun = os.path.join(appdir, "AppRun")
-            shutil.copy2(apprun_src, apprun)
-            os.chmod(apprun, 0o755)
-
-            # The AppDir stages the ONE shared desktop entry under the app-id
-            # basename — the AppDir used to carry a byte-identical copy of its
-            # own, which is exactly the drift the 2026-08-22 convergence removed
-            # (installers/linux-desktop.md § Desktop entry).
-            desktop_src = os.path.join(
-                repo_root, "apps", "fauna-linux", "packaging",
-                "social.fauna.fauna.desktop",
-            )
-            shutil.copy2(
-                desktop_src, os.path.join(appdir, "social.fauna.fauna.desktop")
-            )
-
-            # The licence texts and the notices file, in the AppDir's
-            # documentation directory (shipped-notices.md § Per channel). This
-            # fixture IS the AppDir's staging — the channel has no recipe
-            # (installers/linux-desktop.md § AppImage).
-            doc_dir = os.path.join(appdir, "usr", "share", "doc", "fauna-desktop")
-            os.makedirs(doc_dir, exist_ok=True)
-            shutil.copy2(os.path.join(repo_root, "LICENSE-MIT"), doc_dir)
-            shutil.copy2(os.path.join(repo_root, "LICENSE-APACHE"), doc_dir)
-            shutil.copy2(
-                os.path.join(repo_root, "build", "shipped-notices", "linux-desktop", "THIRD-PARTY-NOTICES"),
-                doc_dir,
-            )
-
+            usr_bin = os.path.join(appdir, "usr", "bin")
             assert os.path.isfile(apprun), "AppRun missing"
             assert os.access(apprun, os.X_OK), "AppRun not executable"
-            assert os.path.isfile(os.path.join(usr_bin, "fauna-desktop")), \
-                "Binary missing from AppDir"
-            assert os.path.isfile(os.path.join(usr_bin, "fauna-sync-agent")), \
-                "Sync agent missing from AppDir"
-            _assert_doc_files(doc_dir, repo_root)
+            with open(apprun) as f:
+                assert "usr/lib" not in f.read(), \
+                    "AppRun points at a usr/lib the AppDir does not stage"
+            for name in ("fauna-desktop", "fauna-sync-agent"):
+                path = os.path.join(usr_bin, name)
+                assert os.path.isfile(path) and os.access(path, os.X_OK), \
+                    f"{name} missing from AppDir"
+            # The ONE shared desktop entry under the app-id basename, and the
+            # icon its Icon=fauna names at the AppDir root
+            # (installers/linux-desktop.md § Desktop entry, § 5 AppImage).
+            assert os.path.isfile(os.path.join(appdir, "social.fauna.fauna.desktop")), \
+                "desktop entry missing from AppDir"
+            assert os.path.isfile(os.path.join(appdir, "fauna.svg")), "icon missing from AppDir"
+            assert os.path.islink(os.path.join(appdir, ".DirIcon")), ".DirIcon missing"
+            assert not os.path.exists(os.path.join(appdir, "usr", "lib")), \
+                "the AppDir bundles no library"
+            # The licence texts and the notices file (shipped-notices.md § Per channel).
+            _assert_doc_files(
+                os.path.join(appdir, "usr", "share", "doc", "fauna-desktop"), repo_root,
+            )
         finally:
-            shutil.rmtree(appdir, ignore_errors=True)
+            shutil.rmtree(os.path.dirname(appdir), ignore_errors=True)
+            shutil.rmtree(bin_dir, ignore_errors=True)
 
     @needs_display
-    def test_apprun_launches(self, desktop_binary, repo_root):
-        appdir = tempfile.mkdtemp(prefix="fauna-e2e-appimage-run-")
-        appimage_src = os.path.join(
-            repo_root, "apps", "fauna-linux", "packaging", "appimage",
+    def test_apprun_launches(self, desktop_binary, agent_binary, repo_root):
+        bin_dir = _real_bin_dir(desktop_binary, agent_binary)
+        notices = os.path.join(
+            repo_root, "build", "shipped-notices", "linux-desktop", "THIRD-PARTY-NOTICES",
         )
-
+        appdir = _stage_appdir(repo_root, bin_dir, notices)
         try:
-            usr_bin = os.path.join(appdir, "usr", "bin")
-            os.makedirs(usr_bin, exist_ok=True)
-            shutil.copy2(desktop_binary, os.path.join(usr_bin, "fauna-desktop"))
-            os.chmod(os.path.join(usr_bin, "fauna-desktop"), 0o755)
-
-            apprun = os.path.join(appdir, "AppRun")
-            shutil.copy2(os.path.join(appimage_src, "AppRun"), apprun)
-            os.chmod(apprun, 0o755)
-
-            assert launch_and_check(apprun, timeout=2), \
+            assert launch_and_check(os.path.join(appdir, "AppRun"), timeout=2), \
                 "AppImage binary crashed on launch"
         finally:
-            shutil.rmtree(appdir, ignore_errors=True)
+            shutil.rmtree(os.path.dirname(appdir), ignore_errors=True)
+            shutil.rmtree(bin_dir, ignore_errors=True)
 
 
 class TestAppRunDispatch:
@@ -745,25 +751,25 @@ class TestAppRunDispatch:
     The systemd user unit written by the app under an AppImage install execs
     the stable `.AppImage` file itself with `--sync-agent` (the per-run FUSE
     mount path is throwaway), and AppRun dispatches to the bundled agent.
-    Headless mechanism test with a stub agent — no display, no real binaries.
+    Headless mechanism test with stub binaries staged by the recipe's own
+    script — no display, no real binaries.
     """
 
     def _stage(self, repo_root):
-        appdir = tempfile.mkdtemp(prefix="fauna-e2e-apprun-")
-        appimage_src = os.path.join(
-            repo_root, "apps", "fauna-linux", "packaging", "appimage",
-        )
-        usr_bin = os.path.join(appdir, "usr", "bin")
-        os.makedirs(usr_bin, exist_ok=True)
+        work = tempfile.mkdtemp(prefix="fauna-e2e-apprun-")
+        bin_dir = os.path.join(work, "bin")
+        os.makedirs(bin_dir)
         for name in ("fauna-desktop", "fauna-sync-agent"):
-            stub = os.path.join(usr_bin, name)
+            stub = os.path.join(bin_dir, name)
             with open(stub, "w") as f:
                 f.write(f'#!/bin/sh\necho "STUB {name} $@"\n')
             os.chmod(stub, 0o755)
-        apprun = os.path.join(appdir, "AppRun")
-        shutil.copy2(os.path.join(appimage_src, "AppRun"), apprun)
-        os.chmod(apprun, 0o755)
-        return appdir, apprun
+        notices = os.path.join(work, "THIRD-PARTY-NOTICES")
+        with open(notices, "w") as f:
+            f.write("stub notices\n")
+        appdir = _stage_appdir(repo_root, bin_dir, notices)
+        shutil.rmtree(work, ignore_errors=True)
+        return os.path.dirname(appdir), os.path.join(appdir, "AppRun")
 
     def test_sync_agent_arg_dispatches_to_the_bundled_agent(self, repo_root):
         appdir, apprun = self._stage(repo_root)

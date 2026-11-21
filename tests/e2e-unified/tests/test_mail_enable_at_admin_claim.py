@@ -124,6 +124,7 @@ from conftest import MAIL_PRIMARY_DOMAIN, get_available_apps  # noqa: E402
 from helpers.app_surface import require_surface  # noqa: E402
 from helpers.authenticated_shell import SHELL_MARKERS  # noqa: E402
 from helpers.waiting import wait_until  # noqa: E402
+from helpers.use_case_walk import assert_use_case_walked
 
 _avail_clients = get_available_apps()
 if not any(
@@ -162,7 +163,8 @@ _LOGGED_IN_MARKERS = SHELL_MARKERS
 # included) anchors on `SERVING_ENABLEMENT_KEY`, never on a settle window:
 # `helpers.waiting.await_serving_enablement_for` returns once the run for the
 # identity this test onboarded is `completed`, i.e. every step the glue planned
-# has answered (the decide-nothing run included). From then on the deployment
+# succeeded or was refused for good — a passing failure is retried, never
+# counted (the decide-nothing run included). From then on the deployment
 # toggles are final for this onboarding, so ONE read of them is a sound verdict
 # in both directions: a slow enable cannot miss it and a late wrong enable
 # cannot slip past it. `_CONTROL_ENABLE_WAIT_S` only bounds the claim leg's
@@ -212,10 +214,17 @@ def unclaimed_mail_nest(request, nest_mode, tmp_path_factory):
 
 
 def _drive_admin_claim_to_logged_in(
-    app, nest, secret_hex: str, typed_handle: str, *, nat_mode: str | None = None
-) -> None:
+    app, nest, secret_hex: str | None, typed_handle: str, *, nat_mode: str | None = None
+) -> str:
     """Drive the believable wizard (linux or macOS in-process) for a fresh admin
-    claiming an unclaimed nest, from identity import to the logged-in feed.
+    claiming an unclaimed nest, from a new identity to the logged-in feed, and
+    return that identity's secret (hex).
+
+    `secret_hex=None` is the path a person claiming a fresh nest takes, and the
+    catalogue's `claim-a-nest` steps: Create, Continue, keep the recovery kit
+    (`OnboardingActions.create_identity_to_handle_entry`), the secret read off
+    `secret-key-display` for the test's later admin calls. A given secret is
+    imported instead, for a caller that must claim as a known key.
 
     `nat_mode` selects a radio on `nat_mode_choice` before confirming
     (`"public"` / `"private"`); the default confirms the pre-selected seed,
@@ -241,7 +250,10 @@ def _drive_admin_claim_to_logged_in(
     _relaunch_trusting_nest(app.driver, nest)
     ob = app.onboarding
     ob.navigate_to_status()
-    ob.import_key(secret_hex)  # fresh identity → handle_entry
+    if secret_hex is None:
+        secret_hex = ob.create_identity_to_handle_entry()  # Create → kit → handle_entry
+    else:
+        ob.import_key(secret_hex)  # a known identity → handle_entry
     ob.fill_handle(typed_handle)
     # Pillar C (uniform https): the loopback `…@127.0.0.1:{port}` handle resolves to
     # `https://127.0.0.1:{port}` and the nest serves real self-signed HTTPS there
@@ -263,7 +275,7 @@ def _drive_admin_claim_to_logged_in(
     deadline = time.monotonic() + 120.0
     while time.monotonic() < deadline:
         if any(app.driver.is_visible(m) for m in _LOGGED_IN_MARKERS):
-            return
+            return secret_hex
         try:
             app.onboarding.finish_nat_mode(mode=nat_mode)
         except Exception:
@@ -636,18 +648,17 @@ def _reinstall_nest_override(app, nest) -> None:
 
 
 def _claim_fresh_admin(app, nest) -> str:
-    """Import a fresh identity and claim `nest` through the wizard with a
+    """Create a fresh identity and claim `nest` through the wizard with a
     LOOPBACK handle (needed for local-nest discovery with no real DNS) — the
     address type the handle-locality derived default treats as non-real, so
     mail/CalDAV/CardDAV/WebDAV all derive OFF at claim (see module
     docstring). Returns the admin's secret (hex)."""
     localpart = "admin" + secrets.token_hex(3)
-    secret_hex = secrets.token_hex(32)
     typed_handle = f"{localpart}@127.0.0.1:{nest['port']}"
-    _drive_admin_claim_to_logged_in(app, nest, secret_hex, typed_handle)
-    return secret_hex
+    return _drive_admin_claim_to_logged_in(app, nest, None, typed_handle)
 
 
+@pytest.mark.use_case("claim-a-nest")
 @pytest.mark.feature("claim-a-fresh-nest")
 def test_admin_claim_with_loopback_handle_derives_mail_disabled(app, unclaimed_mail_nest):
     """Claiming with a loopback handle must NOT auto-enable deployment mail —
@@ -664,6 +675,7 @@ def test_admin_claim_with_loopback_handle_derives_mail_disabled(app, unclaimed_m
         "real-domain target), but the glue decided "
         f"{decided!r} and the nest reads {enables}"
     )
+    assert_use_case_walked(app.driver, "claim-a-nest")
 
 
 @pytest.mark.web
@@ -693,8 +705,7 @@ def test_admin_claim_with_real_domain_handle_auto_enables_mail(app, unclaimed_re
     nest = unclaimed_real_domain_nest
 
     localpart = "admin" + secrets.token_hex(3)
-    secret_hex = secrets.token_hex(32)
-    _drive_admin_claim_to_logged_in(app, nest, secret_hex, f"{localpart}@{MAIL_PRIMARY_DOMAIN}")
+    secret_hex = _drive_admin_claim_to_logged_in(app, nest, None, f"{localpart}@{MAIL_PRIMARY_DOMAIN}")
 
     # No UI action between the claim and these assertions: the launch glue's
     # `provision_mail_at_first_setup` is the only thing that can flip either.
@@ -759,9 +770,8 @@ def test_marking_the_box_private_at_claim_leaves_all_four_serving_off(
     nest = unclaimed_real_domain_nest
 
     localpart = "admin" + secrets.token_hex(3)
-    secret_hex = secrets.token_hex(32)
-    _drive_admin_claim_to_logged_in(
-        app, nest, secret_hex, f"{localpart}@{MAIL_PRIMARY_DOMAIN}", nat_mode="private"
+    secret_hex = _drive_admin_claim_to_logged_in(
+        app, nest, None, f"{localpart}@{MAIL_PRIMARY_DOMAIN}", nat_mode="private"
     )
 
     # No UI action between the claim and this read: whatever the launch glue
@@ -809,8 +819,7 @@ def test_claiming_a_social_only_box_leaves_mail_off_and_serves_the_rest(
     nest = unclaimed_social_only_real_domain_nest
 
     localpart = "admin" + secrets.token_hex(3)
-    secret_hex = secrets.token_hex(32)
-    _drive_admin_claim_to_logged_in(app, nest, secret_hex, f"{localpart}@{MAIL_PRIMARY_DOMAIN}")
+    secret_hex = _drive_admin_claim_to_logged_in(app, nest, None, f"{localpart}@{MAIL_PRIMARY_DOMAIN}")
 
     # Convention 14: the run's completion is the anchor — the glue published
     # `SERVING_ENABLEMENT_KEY` for this admin and every planned step answered.
@@ -891,9 +900,8 @@ def test_a_new_user_on_a_social_only_box_gets_the_calendar_credential_at_first_s
     nest = unclaimed_social_only_real_domain_nest
 
     # ── the admin claims the box (the sibling test's journey, unasserted) ──────
-    admin_secret_hex = secrets.token_hex(32)
-    _drive_admin_claim_to_logged_in(
-        app, nest, admin_secret_hex, f"admin{secrets.token_hex(3)}@{MAIL_PRIMARY_DOMAIN}"
+    admin_secret_hex = _drive_admin_claim_to_logged_in(
+        app, nest, None, f"admin{secrets.token_hex(3)}@{MAIL_PRIMARY_DOMAIN}"
     )
     _glue_verdict(app, admin_secret_hex, nest["url"])
     enables = _read_deployment_enables(admin_secret_hex, nest["url"])

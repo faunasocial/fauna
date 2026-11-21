@@ -46,7 +46,8 @@ import { quotedPostBlock, resolvingLinkPreviewUrls } from './document';
 import { contentRender, guardianReasonOf, setSpamMarked, showAgain, showAgainFor, spamMarkedIds } from './contentPolicy.svelte';
 import type { ShowAgain } from './wasm';
 import { markSpam, nostrAdvertisePost, nostrAdvertiseSupported, nostrClearAdvertisement, trainedTopicsList, unmarkSpam, webPaywallMintToken, webPublishSet, webPublishUnset, type TrainedTopicRow } from './rpc';
-import { postIsSoldPost, postNostrAdvertiseVerb } from './wasm';
+import { postIsSoldPost, postNostrAdvertiseVerb, feedReplySubmitPossibility } from './wasm';
+import { askPossibility, formRefusal } from './form-gate';
 import { bestEffortCopyToClipboard, siteLink } from './web-publish';
 import { hexToBytes } from './hex';
 import { toArrayBufferView } from './bytes';
@@ -563,9 +564,16 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
   // ── Reply compose dialog (feed.md § Implementation status today: reply is
   //    COMPOSED via FeedManager::reply, never interact — its native arm
   //    discards body). `FeedReplyDialog` paints it over this host. ──
-  const reply = $state<{ targetId: string | null; text: string; publicConfirm: boolean }>({
+  const reply = $state<{ targetId: string | null; text: string; publicConfirm: boolean; sending: boolean; error: string }>({
     targetId: null,
     text: '',
+    /** The dialog's own `error-message` (`ui/README.md` § Offer only what is
+     *  possible, rule 7: the form's while it is open): a refused or failed
+     *  send is painted inside the modal, never on the page behind it. */
+    error: '',
+    /** A send is in flight — the dialog stays open (and its submit disabled)
+     *  until the save answers; it closes only on success. */
+    sending: false,
     /** The dialog's explicit-public answer (`feed-reply-public-confirm`) —
      *  unchecked at every open, never remembered (restricted-posts.md
      *  § Encryption at rest → *Ruling 5's build — the shape*, (e)). */
@@ -593,6 +601,8 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
     reply.targetId = null;
     reply.text = '';
     reply.publicConfirm = false;
+    reply.sending = false;
+    reply.error = '';
   }
 
   async function submitReply(): Promise<void> {
@@ -601,14 +611,23 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
     // and a bare return would discard the typed reply with no feedback at all
     // (web.md § Async manager readiness).
     const manager = deps.manager();
-    if (!manager) { deps.setError(t.common.still_loading); return; }
-    if (!reply.targetId) return;
+    if (!manager) { reply.error = t.common.still_loading; return; }
+    if (!reply.targetId || reply.sending) return;
+    // Ask the painted predicate again first (`feed.md` § Errors & edge cases):
+    // a blocked draft refuses with its reason on the dialog's `error-message`.
+    const refusal = formRefusal(askPossibility(() => feedReplySubmitPossibility(reply.text)));
+    if (refusal !== null) { reply.error = refusal; return; }
+    reply.error = '';
     const text = reply.text.trim();
-    if (!text) return;
     const postId = reply.targetId;
     const publicConfirmed =
       reply.publicConfirm && replyTarget()?.reply_audience === 'PublicByConfirmation';
-    closeReplyDialog();
+    // The dialog stays open while the save runs and closes only when it
+    // succeeds; a failure keeps it open with the reply typed, the error on
+    // the dialog's own `error-message` (`ui/README.md` § Offer only what is
+    // possible, rule 7).
+    reply.sending = true;
+    let saved = false;
     try {
       if (publicConfirmed) {
         // The one door that composes words public under a restricted target.
@@ -634,11 +653,16 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
           await manager.reply(postId, text);
         }
       }
-      deps.setError('');
+      saved = true;
     } catch (e) {
       logMessage('warn', LOG, `reply error: ${e}`);
-      deps.setError(verbErrorCopy(e));
+      // Only onto the dialog this send came from — it may have been dismissed.
+      if (reply.targetId === postId) reply.error = verbErrorCopy(e);
     } finally {
+      reply.sending = false;
+      // Close only the dialog this send came from — the person may have
+      // dismissed it and opened another reply meanwhile.
+      if (saved && reply.targetId === postId) closeReplyDialog();
       refreshFeed();
     }
   }

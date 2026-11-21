@@ -787,6 +787,14 @@ pub struct FedInboxDeliverRequest {
     /// the HTTP twin received as its request body; a CBOR byte string.
     #[serde(with = "serde_bytes")]
     pub payload_bytes: Vec<u8>,
+    /// The delivering nest's self-declared base URL, as the Welcome and
+    /// room-invite relays declare theirs; `None` from a nest with no claimed
+    /// domain. The receiver records it only as an UNPROVEN sighting of the
+    /// channel's verified origin ([`resolve_origin_home_url`]), so a knock's
+    /// pending edge resolves to a home even when this nest never dialed the
+    /// knocker's (`docs/goal/ui/contacts.md` § State & data shape).
+    #[serde(default)]
+    pub origin_nest_url: Option<String>,
 }
 
 /// `fauna.federation.inbox.deliver` reply — the created inbox row id when
@@ -2341,6 +2349,18 @@ fn inbox_deliver_handler() -> RpcHandler {
         Box::pin(async move {
             let req: FedInboxDeliverRequest = decode(&payload)?;
             let recipient = parse_actor(&req.recipient_actor_id)?;
+            // Record the delivering nest's declared home as an unproven
+            // sighting bound to the VERIFIED origin, before the delivery, so the
+            // knock's pending edge (`peer_nest_id`) resolves through
+            // `nest_addresses` even when this nest has never dialed the
+            // knocker's: an inbound channel proves no address of its own.
+            // Best-effort — a bookkeeping failure never fails a good delivery.
+            if let Err(e) =
+                resolve_origin_home_url(&state, &origin_nest_id, req.origin_nest_url.as_deref())
+                    .await
+            {
+                tracing::warn!("record inbox origin sighting: {}", e.code);
+            }
             let body = Bytes::from(req.payload_bytes);
             // The channel's authenticated peer — what a knock's pending edge
             // records as the peer's home nest (`store_knock`).
@@ -4212,6 +4232,13 @@ pub struct FedFolderChangesRecordRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FedFolderChangesRecordReply {
     pub seq: i64,
+    /// The newest row of the same set below `seq` — relayed into the writer's
+    /// `SyncChangeRecordReply::prev_set_seq` by its own nest (`conflicts.md`
+    /// § the causal watermark, *An edit stamp reaches across the writer's own
+    /// acknowledged run*). Wire-additive: an older home nest omits it and the
+    /// writer's run simply does not advance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_set_seq: Option<i64>,
 }
 
 /// `fauna.federation.folder.write_token.mint` request — a foreign writer asks
@@ -4254,7 +4281,7 @@ fn folder_changes_record_handler() -> RpcHandler {
             let fs =
                 require_foreign_writer(&state, &channel_id, &requester, &origin_nest_id).await?;
 
-            let seq = crate::sync_handlers::record_change_core(
+            let recorded = crate::sync_handlers::record_change_core(
                 &state,
                 &requester,
                 &fs,
@@ -4281,7 +4308,10 @@ fn folder_changes_record_handler() -> RpcHandler {
                 crate::change_signature::CertCarriage::Inline(req.signer_cert.as_ref()),
             )
             .await?;
-            encode_reply(&FedFolderChangesRecordReply { seq })
+            encode_reply(&FedFolderChangesRecordReply {
+                seq: recorded.seq,
+                prev_set_seq: recorded.prev_set_seq,
+            })
         })
     })
 }
@@ -4985,7 +5015,8 @@ fn backup_changes_record_handler() -> RpcHandler {
                 crate::change_signature::CarriedSignature::default(),
                 crate::change_signature::CertCarriage::ByReference,
             )
-            .await?;
+            .await?
+            .seq;
             encode_reply(&FedBackupChangesRecordReply { seq })
         })
     })

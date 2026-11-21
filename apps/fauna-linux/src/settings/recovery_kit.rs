@@ -54,7 +54,7 @@ use std::sync::Mutex;
 use crate::i18n::strings::common;
 use crate::i18n::strings::settings::recovery_kit as rk;
 use fauna_client_recovery::RecoveryKitStatus;
-use fauna_client_recovery::ceremony::{STOLEN_CONFIRM_WORD, SweepStatus};
+use fauna_client_recovery::ceremony::SweepStatus;
 use fauna_client_recovery::owed_nests::{OwedNestKey, OwedNestsView, dismiss_failed_copy};
 use fauna_core::qr_matrix::QrMatrix;
 use fauna_sync_engine::generation_let_go::{
@@ -1109,6 +1109,12 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
         let widgets = widgets.clone();
         move |_| repaint(&state.borrow(), &widgets)
     });
+    // The kit is the stolen draft's first field, so it re-arms it too.
+    phrase_row.connect_changed({
+        let state = state.clone();
+        let widgets = widgets.clone();
+        move |_| repaint(&state.borrow(), &widgets)
+    });
 
     stolen_btn.connect_clicked({
         let state = state.clone();
@@ -1120,21 +1126,15 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
             // gesture, but a test agent driving the id reaches this handler, and
             // an irreversible ceremony must refuse out loud rather than run —
             // or, worse, drop the command silently (convention 11).
-            if widgets.stolen_confirm_row.text() != STOLEN_CONFIRM_WORD {
-                super::render_account_error_label(
-                    &widgets.error_label,
-                    Some(rk::STOLEN_CONFIRM_PLACEHOLDER),
-                );
-                return;
-            }
-            // The kit is the whole authorization, so the phrase is the second
-            // refusal — and both are checked before anything is torn down.
+            // The shared draft answer the button is painted from (kit first,
+            // then the word), asked again before anything is torn down.
             let phrase = widgets.phrase_row.text().to_string();
-            if phrase.trim().is_empty() {
-                super::render_account_error_label(
-                    &widgets.error_label,
-                    Some(rk::KIT_PHRASE_REQUIRED),
-                );
+            let draft = fauna_client_recovery::ceremony::stolen_entry_possibility(
+                &phrase,
+                &widgets.stolen_confirm_row.text(),
+            );
+            if let Some(reason) = crate::possible::reason_text(&draft) {
+                super::render_account_error_label(&widgets.error_label, Some(&reason));
                 return;
             }
             super::render_account_error_label(&widgets.error_label, None);
@@ -1577,11 +1577,22 @@ fn repaint(state: &RecoveryState, widgets: &Widgets) {
     // the KIT, never the status: `succeed_with_held_kit` does no status re-read
     // of its own, because a chain read there is a round trip a locked-out owner
     // can fail. The confirm word is the only real gate.
-    widgets.stolen_btn.set_sensitive(
-        !state.busy
-            && status.is_none_or(RecoveryKitStatus::allows_stolen)
-            && widgets.stolen_confirm_row.text() == STOLEN_CONFIRM_WORD,
-    );
+    // Painted from the shared draft answer (`ui/README.md` § Offer only what
+    // is possible, rule 4's form case): the kit pasted, then the confirm word,
+    // and no ceremony already on its way.
+    let stolen_answer = if status.is_none_or(RecoveryKitStatus::allows_stolen) {
+        fauna_client_recovery::ceremony::stolen_entry_possibility(
+            &widgets.phrase_row.text(),
+            &widgets.stolen_confirm_row.text(),
+        )
+        .and(fauna_core::possibility::Possibility::for_write(
+            fauna_core::possibility::ReadState::Resolved,
+            !state.busy,
+        ))
+    } else {
+        fauna_core::possibility::Possibility::Absent
+    };
+    crate::possible::paint(&widgets.stolen_btn, None, stolen_answer);
 
     // The kit-in-hand entry serves every ceremony that takes a kit the user
     // holds (`settings.md` § Recovery kit → *Kit-in-hand entry*) — replace,
@@ -1895,6 +1906,12 @@ mod tests {
             widgets
                 .stolen_confirm_row
                 .set_text(fauna_client_recovery::ceremony::STOLEN_CONFIRM_WORD);
+            repaint(&never_created, &widgets);
+            assert!(
+                !widgets.stolen_btn.is_sensitive(),
+                "the shared draft asks for the kit first: no phrase, no ceremony"
+            );
+            widgets.phrase_row.set_text("any kit text");
             repaint(&never_created, &widgets);
             assert!(
                 widgets.stolen_btn.is_sensitive(),

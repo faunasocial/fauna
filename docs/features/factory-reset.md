@@ -58,7 +58,6 @@ Stamped 2026-11-12 at 16271854163a.
     - `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_each_account_keeps_its_own_pending_reset`
 13. [app] After a reset and a fresh claim, the calendar works in the app again: an event can be made and is shown — `docs/goal/architecture/nest/common.md` § Factory reset
     - `tests/e2e-unified/tests/test_factory_reset_calendar_reclaim.py::test_calendar_works_after_factory_reset_reclaim`
-    - `tests/e2e-unified/tests/platform/docker/test_factory_reset_calendar_reclaim_docker.py::test_calendar_works_after_factory_reset_reclaim_docker`
 14. [nest] After a reset and a fresh claim with mail switched on, the nest accepts and delivers mail again — `docs/goal/architecture/nest/common.md` § Factory reset
     - `tests/e2e-unified/tests/test_factory_reset_mail.py::test_mail_is_accepted_and_delivered_again_after_a_reset_and_reclaim`
 15. [app] Once a reset has wiped the app's own sign-in, the next launch starts from the beginning — choose or create an identity — and never tries to sign the old identity back in — `docs/goal/behavior/onboarding.md` § App-launch routing
@@ -68,19 +67,21 @@ Stamped 2026-11-12 at 16271854163a.
     - `tests/e2e-unified/tests/api/test_factory_reset_wipe.py::test_nothing_is_served_after_a_reset_until_mail_is_switched_on`
 17. [app] After a reset, claiming the nest again as the same identity with email chosen brings back the mailbox the account already had, with the mail app passwords it had: the Mail page reads on and lists them, and nothing asks the admin to enable or resume mail first — `docs/goal/behavior/mail-credentials.md` § A nest that lost the mailbox (factory reset, rebuilt box)
     - `tests/e2e-unified/tests/test_factory_reset_mail_reclaim.py::test_a_reclaim_after_a_reset_brings_back_the_mailbox_and_its_app_passwords`
+18. [nest] After a reset and a fresh claim, a nest running the released image serves the calendar again — `docs/goal/architecture/nest/common.md` § Factory reset
+    - `tests/e2e-unified/tests/platform/docker/test_factory_reset_calendar_reclaim_app_less_docker.py::test_a_reset_and_reclaimed_image_serves_the_calendar_again`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
-| linux | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
-| windows | 🚧 unbuilt | 0.1.5-dev+c9e7fe5d standalone |
-| macos | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
-| ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
+| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| linux | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| windows | 🚧 unbuilt | 0.1.5-dev+acde58f9 standalone |
+| macos | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| ios | ✅ full | 0.1.5-dev+acde58f9 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| tui | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -110,11 +111,11 @@ Stamped 2026-11-12 at 16271854163a.
 | 10 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_within_grace_failed_reset_honors_fresh_slot_with_visible_exit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_reopening_while_the_reset_nest_is_down_keeps_the_reclaim` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_each_account_keeps_its_own_pending_reset` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 13 | app | `tests/e2e-unified/tests/test_factory_reset_calendar_reclaim.py::test_calendar_works_after_factory_reset_reclaim` — requires `calendar-after-reclaim` (not built: windows, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/platform/docker/test_factory_reset_calendar_reclaim_docker.py::test_calendar_works_after_factory_reset_reclaim_docker` — requires `calendar-after-reclaim-docker-drive` (test harness) (not built: windows, macos, ios, android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_factory_reset_calendar_reclaim.py::test_calendar_works_after_factory_reset_reclaim` — requires `calendar-after-reclaim` (not built: windows, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): failed |
 | 14 | nest | `tests/e2e-unified/tests/test_factory_reset_mail.py::test_mail_is_accepted_and_delivered_again_after_a_reset_and_reclaim` | nest (linux): passed, nest (macos): passed |
 | 15 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_g_factory_reset_leaves_no_identity_for_the_next_launch` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 15 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_next_load_after_the_sign_in_is_wiped_starts_from_identity_choice` | web (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_factory_reset_wipe.py::test_nothing_is_served_after_a_reset_until_mail_is_switched_on` | nest (linux): passed, nest (macos): passed |
 | 17 | app | `tests/e2e-unified/tests/test_factory_reset_mail_reclaim.py::test_a_reclaim_after_a_reset_brings_back_the_mailbox_and_its_app_passwords` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/platform/docker/test_factory_reset_calendar_reclaim_app_less_docker.py::test_a_reset_and_reclaimed_image_serves_the_calendar_again` | nest (linux): passed |
 <!-- features-render:end -->

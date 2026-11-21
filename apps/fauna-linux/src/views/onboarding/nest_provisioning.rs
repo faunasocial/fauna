@@ -25,6 +25,8 @@
 //! `provisioning-substep`, `provisioning-step-error`.
 //!
 //! Entry: the wizard transitions to `OnboardingStep::NestProvisioning`
+//! from the choose-providers page's Continue (`onboarding-provisioning.md`
+//! § 3d — the choices region and the price confirm then show here) or
 //! after `continue_from_vps()` succeeds. The user lands with `overall ==
 //! Idle` and reviews the price summary at the top, then clicks the
 //! `provisioning-start-button` ("Buy and set up") to actually kick the
@@ -36,12 +38,63 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
-use gtk::{Box, Button, Label, Orientation};
+use fauna_core::possibility::Possibility;
+use gtk::{Box, Button, CheckButton, Label, Orientation};
 
 use crate::i18n::resolve_key as resolve;
 use crate::testid::set_test_id;
 use fauna_onboarding_machine::OnboardingMachine;
 use fauna_provisioning::progress::{OverallStatus, ProvisioningSnapshot, StepStatus};
+
+/// The `provisioning-step-checkbox` slot of one step row — shared by this
+/// page and the nest-retire page's step rows. A `Running` step paints a
+/// spinning `gtk::Spinner` (`onboarding-provisioning.md` § 6, *A running step
+/// shows activity, never an attempt count*); every other status paints the
+/// shared `status_glyph`. The test id sits on the slot, and the slot declares
+/// the glyph as its automation text and its accessible label in every state,
+/// so drivers read the same value whichever child is on screen.
+pub(crate) struct StepCheckbox {
+    slot: gtk::Stack,
+    glyph: Label,
+    spinner: gtk::Spinner,
+}
+
+impl StepCheckbox {
+    pub(crate) fn new() -> Self {
+        let slot = gtk::Stack::new();
+        slot.set_hhomogeneous(false);
+        slot.set_vhomogeneous(false);
+        let glyph = Label::new(None);
+        let spinner = gtk::Spinner::new();
+        slot.add_child(&glyph);
+        slot.add_child(&spinner);
+        set_test_id(&slot, ids::PROVISIONING_STEP_CHECKBOX);
+        Self {
+            slot,
+            glyph,
+            spinner,
+        }
+    }
+
+    pub(crate) fn widget(&self) -> &gtk::Stack {
+        &self.slot
+    }
+
+    pub(crate) fn paint(&self, status: StepStatus) {
+        let text = fauna_provisioning::progress::status_glyph(status);
+        self.glyph.set_text(&text);
+        crate::testid::set_test_text(&self.slot, &text);
+        self.slot
+            .update_property(&[gtk::accessible::Property::Label(&text)]);
+        let running = matches!(status, StepStatus::Running);
+        self.spinner.set_spinning(running);
+        if running {
+            self.slot.set_visible_child(&self.spinner);
+        } else {
+            self.slot.set_visible_child(&self.glyph);
+        }
+    }
+}
 
 /// A step row's per-tick refresh closure, driven from its `StepSnapshot`.
 type StepRefresher = Rc<dyn Fn(&fauna_provisioning::progress::StepSnapshot)>;
@@ -60,9 +113,8 @@ fn build_step_row(_idx: usize) -> (Box, StepRefresher) {
         .build();
     set_test_id(&row, ids::PROVISIONING_STEP_ROW);
 
-    let checkbox = Label::new(None);
-    set_test_id(&checkbox, ids::PROVISIONING_STEP_CHECKBOX);
-    row.append(&checkbox);
+    let checkbox = StepCheckbox::new();
+    row.append(checkbox.widget());
 
     let label = Label::new(None);
     label.set_halign(gtk::Align::Start);
@@ -88,16 +140,16 @@ fn build_step_row(_idx: usize) -> (Box, StepRefresher) {
         // Glyph + step name are single-sourced in shared Rust
         // (`fauna_provisioning::progress`); the glyph is locale-invariant (use
         // the `String` directly), the step name resolves through linux's i18n.
-        checkbox.set_text(&fauna_provisioning::progress::status_glyph(snap.status));
+        checkbox.paint(snap.status);
         label.set_text(&crate::i18n::provisioning_step_label(snap.kind));
 
         // Sub-step text. Visibility is the shared `shows_substep` predicate
         // (`StepSnapshot::recompute_display` — shown on Skipped and on
-        // Running/Failed when a substep label or attempt suffix exists); we only
+        // Running/Failed when a substep label exists); we only
         // resolve the text it gates. The predicate encodes "the resolved text is
         // non-empty", so the row is shown verbatim when it fires.
         if snap.shows_substep {
-            let mut text = if matches!(snap.status, StepStatus::Skipped) {
+            let text = if matches!(snap.status, StepStatus::Skipped) {
                 resolve("onboarding.provision.substep.status_skipped")
             } else {
                 // Pass `last_error` as the `{cause}` arg so a `status_retrying`
@@ -107,12 +159,6 @@ fn build_step_row(_idx: usize) -> (Box, StepRefresher) {
                     .map(|k| crate::i18n::provisioning_substep_label(k, snap.last_error.clone()))
                     .unwrap_or_default()
             };
-            if snap.shows_attempt_suffix {
-                let suffix = resolve("onboarding.provision.step_attempt_template")
-                    .replace("{attempt}", &snap.attempt.to_string())
-                    .replace("{max_attempts}", &snap.max_attempts.to_string());
-                text.push_str(&suffix);
-            }
             substep.set_text(&text);
             substep.set_visible(true);
         } else {
@@ -154,7 +200,8 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
     // Pre-commit recap of up to two priced line items from
     // `bill_of_materials()`: the domain's one-time registration price
     // (only when buying a new domain) and the selected VPS's monthly
-    // price (always present once vps_config's Continue has been taken).
+    // price (once a server type is chosen — on vps_config, or as the default
+    // the choose-providers page's Continue writes).
     // Pure computation over already-in-state DNS/VPS data — no IO, so the
     // refresh closure below just re-derives it every tick like everything
     // else on this page (onboarding.md §6).
@@ -171,6 +218,27 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
     bom_domain_line.set_visible(false);
     price_bom.append(&bom_domain_line);
 
+    // On a run entered from the choose-providers page the price is agreed
+    // here, at the purchase: the confirm sits directly under the domain line
+    // and gates *Buy and set up* (`onboarding-provisioning.md` § 3d *The
+    // choices on the setting-things-up page*). Its label is § 4's, unchanged.
+    // A repaint's `set_active` must not read as the person agreeing, so the
+    // handler stands down while the refresh syncs it.
+    let price_confirm = CheckButton::with_label(&resolve("registrar.price_confirm"));
+    set_test_id(&price_confirm, ids::DNS_PRICE_CONFIRM_CHECKBOX);
+    price_confirm.set_visible(false);
+    let price_syncing = Rc::new(Cell::new(false));
+    {
+        let m = m.clone();
+        let price_syncing = price_syncing.clone();
+        price_confirm.connect_toggled(move |b| {
+            if !price_syncing.get() && b.is_active() {
+                m.confirm_price();
+            }
+        });
+    }
+    price_bom.append(&price_confirm);
+
     let bom_vps_line = Label::new(None);
     bom_vps_line.set_halign(gtk::Align::Start);
     set_test_id(&bom_vps_line, ids::PROVISIONING_BOM_VPS_LINE);
@@ -178,6 +246,44 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
     price_bom.append(&bom_vps_line);
 
     root.append(&price_bom);
+
+    // -- The DNS plan (onboarding-provisioning.md § 6 *The DNS plan*): every
+    // record the run will keep, add, change or remove, read from the zone by
+    // the shared machine as it entered this page. Rows and their sentences
+    // come from `dns_plan()`; nothing here decides an action. The text is
+    // selectable so a record can be copied out.
+    let dns_plan_box = Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(2)
+        .accessible_role(gtk::AccessibleRole::Group)
+        .build();
+    set_test_id(&dns_plan_box, ids::PROVISIONING_DNS_PLAN);
+    let dns_plan_heading = Label::new(None);
+    dns_plan_heading.set_halign(gtk::Align::Start);
+    dns_plan_heading.set_wrap(true);
+    dns_plan_heading.set_selectable(true);
+    dns_plan_box.append(&dns_plan_heading);
+    let dns_plan_rows = Box::new(Orientation::Vertical, 2);
+    dns_plan_box.append(&dns_plan_rows);
+    dns_plan_box.set_visible(false);
+    root.append(&dns_plan_box);
+    let dns_plan_last: Rc<std::cell::RefCell<Option<fauna_onboarding_machine::DnsPlanSnapshot>>> =
+        Rc::new(std::cell::RefCell::new(None));
+
+    // -- The choices region: location, server type, mail mode, update channel,
+    // SSH door — between the price summary and the start button, every one
+    // with a default, only on a run entered from the choose-providers page
+    // that has not started (`provisioning_choices_visible()`). The same
+    // widgets `vps_config` shows (§ 5's rules apply wherever they are shown).
+    let choices = super::vps_config::build_choices(m.clone());
+    let choices_region = Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(8)
+        .build();
+    choices_region.append(&choices.provider_part);
+    choices_region.append(&choices.channel_box);
+    choices_region.set_visible(false);
+    root.append(&choices_region);
 
     // -- By-continuing terms notice: below the price recap, before the charge
     // (Buy and set up is the acceptance gesture; onboarding-provisioning.md §6) --
@@ -204,6 +310,17 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
         });
     }
     root.append(&start_btn);
+
+    // Un-id'd chrome beneath the start button, rule 5: why *Buy and set up* is
+    // dead on a run entered from the choose-providers page (the price not
+    // agreed, no server type) — the machine's reason, painted by the seam.
+    let start_reason = Label::builder()
+        .visible(false)
+        .wrap(true)
+        .halign(gtk::Align::Start)
+        .css_classes(["dim-label"])
+        .build();
+    root.append(&start_reason);
 
     // -- Progress region: four step rows --
     let progress = Box::builder()
@@ -333,9 +450,30 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
         let last_overall = last_overall.clone();
         let bom_domain_line = bom_domain_line.clone();
         let bom_vps_line = bom_vps_line.clone();
+        let dns_plan_box = dns_plan_box.clone();
+        let dns_plan_heading = dns_plan_heading.clone();
+        let dns_plan_rows = dns_plan_rows.clone();
+        let dns_plan_last = dns_plan_last.clone();
         let ssh_door_command = ssh_door_command.clone();
+        let price_confirm = price_confirm.clone();
+        let start_reason = start_reason.clone();
         move || {
             let snap = m.provisioning_snapshot();
+
+            // The choices region and the price confirm (§ 3d): shown only on a
+            // run entered from the choose-providers page that has not started.
+            let choices_shown = m.provisioning_choices_visible();
+            choices_region.set_visible(choices_shown);
+            if choices_shown {
+                (choices.refresh)();
+            }
+            let cfg = m.dns_config();
+            price_confirm.set_visible(m.provisioning_price_confirm_visible());
+            price_syncing.set(true);
+            if price_confirm.is_active() != cfg.price_agreed {
+                price_confirm.set_active(cfg.price_agreed);
+            }
+            price_syncing.set(false);
 
             // Bill-of-materials recap — pre-derived by the shared machine
             // (`resolve_nested`, not `resolve`: `{label}` carries the step's
@@ -355,6 +493,29 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
                 None => bom_vps_line.set_visible(false),
             }
 
+            // The DNS plan — rebuilt only when the shared snapshot changed, so
+            // a selection the person is making survives the other ticks.
+            let plan = m.dns_plan();
+            if dns_plan_last.borrow().as_ref() != Some(&plan) {
+                dns_plan_box.set_visible(plan.visible);
+                dns_plan_heading.set_text(&plan.heading.resolve(crate::i18n::strings::lookup));
+                while let Some(child) = dns_plan_rows.first_child() {
+                    dns_plan_rows.remove(&child);
+                }
+                for row in &plan.rows {
+                    let label = Label::new(Some(&row.text.resolve(crate::i18n::strings::lookup)));
+                    label.set_halign(gtk::Align::Start);
+                    label.set_wrap(true);
+                    label.set_selectable(true);
+                    set_test_id(
+                        &label,
+                        &format!("{}[{}]", ids::PROVISIONING_DNS_PLAN_ROW, row.key),
+                    );
+                    dns_plan_rows.append(&label);
+                }
+                *dns_plan_last.borrow_mut() = Some(plan);
+            }
+
             // Per-row updates — the snapshot always carries 4 entries.
             for (i, refresher) in step_refreshers.iter().enumerate() {
                 if let Some(step) = snap.steps.get(i) {
@@ -368,17 +529,23 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
             // both Failed and soft-Cancelled (cancelled runs keep their
             // resources, retry resumes via idempotency).
             let overall = snap.overall;
-            start_btn.set_visible(overall.is_idle());
+            // *Buy and set up*: shown while idle, dead while the machine names
+            // a reason (on a run entered from the choose-providers page: the
+            // price not agreed, no server type). The routing guard is the
+            // machine's, folded into its answer.
+            let start_answer = if overall.is_idle() {
+                m.provisioning_start_possibility()
+            } else {
+                Possibility::Absent
+            };
+            crate::possible::paint(&start_btn, Some(&start_reason), start_answer);
             cancel_btn.set_visible(overall.is_running());
             retry_btn.set_visible(overall.can_retry());
-            continue_btn.set_sensitive(overall.can_continue());
-            match overall.continue_blocked_reason() {
-                Some(text) => {
-                    continue_reason.set_text(&text.resolve(crate::i18n::strings::lookup));
-                    continue_reason.set_visible(true);
-                }
-                None => continue_reason.set_visible(false),
-            }
+            crate::possible::paint(
+                &continue_btn,
+                Some(&continue_reason),
+                m.provisioning_continue_possibility(),
+            );
 
             // Elapsed: once started, show "Ns elapsed". When finished,
             // freeze on the finish time. The compute + i18n glue is

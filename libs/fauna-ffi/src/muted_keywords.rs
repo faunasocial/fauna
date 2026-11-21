@@ -139,6 +139,18 @@ pub async fn set_muted_word_level(
     .map_err(general_err)
 }
 
+/// `muted-word-add-button` and the input's Enter:
+/// [`fauna_client_config::muted_word_add_possibility`] — a term to mute and no
+/// change still on its way (`docs/goal/ui/settings.md` § Errors & edge cases,
+/// *Personal form submits paint from their draft*).
+#[uniffi::export]
+pub fn muted_word_add_possibility(
+    term: String,
+    busy: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_config::muted_word_add_possibility(&term, busy)
+}
+
 /// The level the muted-words page's level picker shows for a row's stored
 /// `weight` — `fauna_core::scoring::MutedKeywordLevel::of`: `Hide` iff the
 /// weight collapses (the full penalty), else `ShowLess`. The one shared

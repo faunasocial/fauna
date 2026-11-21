@@ -237,10 +237,78 @@ pub fn build_privacy_page(
     save_spam_btn.add_css_class("suggested-action");
     crate::testid::set_test_id(&save_spam_btn, ids::SAVE_SPAM_PREFS);
     crate::offline_gate::declare_wire_kind(&save_spam_btn, "fauna.spam.set_preferences");
+
+    // What the nest last confirmed and where the read stands: `save-spam-prefs`
+    // is offered only while a threshold differs from it, answered by the shared
+    // `save_preferences_possibility` (`settings.md`, the spam-moderation row;
+    // `ui/README.md` § Offer only what is possible).
+    let saved = std::rc::Rc::new(std::cell::RefCell::new(
+        crate::settings::get_spam_preferences(),
+    ));
+    let read = std::rc::Rc::new(std::cell::Cell::new(if saved.borrow().is_some() {
+        fauna_core::possibility::ReadState::Resolved
+    } else {
+        fauna_core::possibility::ReadState::Pending
+    }));
+    // Set while a nest-confirmed value is painted onto the scales, so showing
+    // it does not fire the immediate-apply write back.
+    let applying_remote = std::rc::Rc::new(std::cell::Cell::new(false));
+    let repaint_save: std::rc::Rc<dyn Fn()> = {
+        let (btn, saved, read) = (save_spam_btn.clone(), saved.clone(), read.clone());
+        let (spam_scale, phishing_scale) = (spam_scale.clone(), phishing_scale.clone());
+        std::rc::Rc::new(move || {
+            crate::possible::paint(
+                &btn,
+                None,
+                save_possibility(
+                    read.get(),
+                    saved.borrow().as_ref(),
+                    spam_scale.value(),
+                    phishing_scale.value(),
+                ),
+            );
+        })
+    };
+    repaint_save();
+    {
+        let (spam_scale, phishing_scale) = (spam_scale.clone(), phishing_scale.clone());
+        let (saved, read, applying_remote, repaint_save, band_label) = (
+            saved.clone(),
+            read.clone(),
+            applying_remote.clone(),
+            repaint_save.clone(),
+            band_label.clone(),
+        );
+        let paint_loaded = move |prefs: Option<&fauna_client_spam::spam::SpamPreferences>| {
+            read.set(read.get().after(prefs.is_some()));
+            if let Some(prefs) = prefs {
+                use fauna_client_spam::spam::per_mille_to_probability;
+                *saved.borrow_mut() = Some(prefs.clone());
+                applying_remote.set(true);
+                spam_scale.set_value(per_mille_to_probability(prefs.spam_threshold));
+                phishing_scale.set_value(per_mille_to_probability(prefs.phishing_threshold));
+                applying_remote.set(false);
+                band_label.set_text(spam_band_label(spam_scale.value()));
+            }
+            repaint_save();
+        };
+        if let Some(prefs) = crate::settings::get_spam_preferences() {
+            paint_loaded(Some(&prefs));
+        }
+        crate::settings::set_spam_prefs_loaded_handler(std::rc::Rc::new(paint_loaded));
+    }
     {
         let spam_scale_ref = spam_scale.clone();
         let phishing_scale_ref = phishing_scale.clone();
+        let error_label = error_label.clone();
+        let btn = save_spam_btn.clone();
         save_spam_btn.connect_clicked(move |_| {
+            // The press asks the answer it was painted from again.
+            let answer = crate::possible::painted_answer(&btn)
+                .unwrap_or(fauna_core::possibility::Possibility::Possible);
+            if crate::possible::refused_at_press(&answer, &error_label) {
+                return;
+            }
             send_spam_prefs(&spam_scale_ref, &phishing_scale_ref);
         });
     }
@@ -252,10 +320,16 @@ pub fn build_privacy_page(
     spam_group.add(&save_row);
 
     // Also wire scale changes → server update for immediate feedback.
-    {
+    for scale in [&spam_scale, &phishing_scale] {
         let spam_scale_ref = spam_scale.clone();
         let phishing_scale_ref = phishing_scale.clone();
-        spam_scale.connect_value_changed(move |_| {
+        let applying_remote = applying_remote.clone();
+        let repaint_save = repaint_save.clone();
+        scale.connect_value_changed(move |_| {
+            if applying_remote.get() {
+                return;
+            }
+            repaint_save();
             send_spam_prefs(&spam_scale_ref, &phishing_scale_ref);
         });
     }
@@ -309,6 +383,22 @@ fn spam_band_label(value: f64) -> &'static str {
     fauna_client_spam::spam::spam_band_label(value)
 }
 
+/// The shared answer for `save-spam-prefs` from the two scale values: the
+/// scales' probabilities are the drafts, compared on the wire's per-mille.
+fn save_possibility(
+    read: fauna_core::possibility::ReadState,
+    saved: Option<&fauna_client_spam::spam::SpamPreferences>,
+    spam: f64,
+    phishing: f64,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_spam::possibility::save_preferences_possibility(
+        read,
+        saved,
+        &spam.to_string(),
+        &phishing.to_string(),
+    )
+}
+
 /// Collect all spam preference values and send them to the server.
 fn send_spam_prefs(spam_scale: &gtk::Scale, phishing_scale: &gtk::Scale) {
     use fauna_client_spam::spam::probability_to_per_mille;
@@ -330,3 +420,35 @@ fn send_spam_prefs(spam_scale: &gtk::Scale, phishing_scale: &gtk::Scale) {
 // load/save_bayes_model_to_disk, apply_read_result) removed — zero production callers, superseded by the real on-device
 // "Fauna-app" scoring position, `libs/fauna-client-mail-settings::inbox_scorer`,
 // which scores against the shared `fauna_mail::spam::SpamModel`.
+
+#[cfg(test)]
+mod tests {
+    use super::save_possibility;
+    use fauna_client_spam::spam::SpamPreferences;
+    use fauna_core::possibility::{Possibility, ReadState};
+
+    fn saved(spam: u16, phishing: u16) -> SpamPreferences {
+        SpamPreferences {
+            spam_threshold: spam,
+            phishing_threshold: phishing,
+            extra: Default::default(),
+        }
+    }
+
+    /// `save-spam-prefs` is blocked "nothing to save" while both scales hold
+    /// what the nest confirmed, live once one moves, and blocked on the read
+    /// before it resolves.
+    #[test]
+    fn save_spam_prefs_is_offered_only_while_a_threshold_changed() {
+        let nest = saved(700, 400);
+        let unchanged = save_possibility(ReadState::Resolved, Some(&nest), 0.7, 0.4);
+        assert_eq!(
+            crate::possible::reason_text(&unchanged).as_deref(),
+            Some(crate::i18n::strings::common::NOTHING_TO_SAVE)
+        );
+        let edited = save_possibility(ReadState::Resolved, Some(&nest), 0.8, 0.4);
+        assert_eq!(edited, Possibility::Possible);
+        let loading = save_possibility(ReadState::Pending, None, 0.5, 0.3);
+        assert!(!loading.is_possible());
+    }
+}

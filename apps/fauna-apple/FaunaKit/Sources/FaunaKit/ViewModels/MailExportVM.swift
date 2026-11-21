@@ -38,7 +38,7 @@ import SwiftUI
 /// at the gesture (`setActorHandle` before Start / Resume / Download), never
 /// only at construction.
 @MainActor @Observable
-public final class MailExportVM: MachineBackedVM {
+public final class MailExportVM: MachineBackedVM, MailUnbuiltRefusing {
     /// Same cadence as the import twin (linux's `PROGRESS_TICK_MS`).
     static let progressTickMs: UInt64 = MailImportVM.progressTickMs
 
@@ -65,6 +65,40 @@ public final class MailExportVM: MachineBackedVM {
     @ObservationIgnored let loops = DriveLoops<Loop>()
 
     public init() {}
+
+    /// `wizard-next-button`'s shared answer (`mail-export.md` § Wizard steps,
+    /// *Next and Start offer only an export that can start*): on Scope it is
+    /// blocked, with its reason, while no mailbox is selected or a date is
+    /// malformed or inverted. The Scope fields dispatch each keystroke, so the
+    /// snapshot's dates ARE the typed drafts; they are folded in through the
+    /// shared face all the same, so the answer is the one tui asks. Before the
+    /// first snapshot it is not known yet (rule 5).
+    public var nextAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return mailExportNextPossibility(
+            snapshot: snapshot, dateFrom: snapshot.dateFrom, dateTo: snapshot.dateTo)
+    }
+
+    /// `mail-export-start-button`'s shared answer: the scope's answer again, so
+    /// a scope changed after Next is refused before a session key is minted.
+    public var startAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return mailExportStartPossibility(snapshot: snapshot)
+    }
+
+    /// The Next press: asks what the paint asked, and a refusal lands on
+    /// `error-message` with the same reason (`ui/README.md` § Offer only what
+    /// is possible, rule 7) — nothing reaches the machine.
+    public func pressNext() async {
+        if refusePress(nextAnswer, errorMessage: &errorMessage) { return }
+        await dispatch(.next)
+    }
+
+    /// The Start press, refused with ``startAnswer``'s reason the same way.
+    public func pressStart() async {
+        if refusePress(startAnswer, errorMessage: &errorMessage) { return }
+        await dispatch(.start)
+    }
 
     /// A failed export is a record on Progress: no Pause / Resume / Cancel, one
     /// Dismiss (mail-export.md § A failed export is a record the wizard shows
@@ -119,7 +153,10 @@ public final class MailExportVM: MachineBackedVM {
     /// error on the snapshot), then we re-read — and a `Start`/`Resume` that
     /// really landed a running session spawns the drive loop.
     public func dispatch(_ action: MailExportAction) async {
-        guard let machine else { return }
+        guard let machine else {
+            errorMessage = missingMachineRefusal
+            return
+        }
         var wantsRun = false
         var needsHandle = false
         switch action {

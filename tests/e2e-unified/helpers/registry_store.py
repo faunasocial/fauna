@@ -14,7 +14,10 @@ across a relaunch by ``preserve_state_across_relaunch()``; windows:
 ``_cred_dir`` + ``_keyring_app``), so that is the one thing resolved here — and
 web, whose store is the SPA origin's ``localStorage``: its
 ``LocalStorageSecretStore`` keys every logical key verbatim, so the page's whole
-``localStorage`` is the same flat map (``common.cred_store.WebCredStore.read_map``).
+``localStorage`` is the same flat map (``common.cred_store.WebCredStore.read_map``)
+— and android, whose file lives in the app's own filesDir where no host path
+reaches: the bridge's ``GET /credentials`` (``AndroidBridgeDriver.credential_map``)
+returns the same flat map.
 A linux launch in real-keyring mode resolves no credential dir and has no store
 at rest here (its slots are Secret Service items); a test that reads slots
 launches file-backed (``make_launch_harness(..., file_backed=True)``).
@@ -48,6 +51,11 @@ def _is_web(driver) -> bool:
     return bool(callable(probe) and probe())
 
 
+def _is_android(driver) -> bool:
+    probe = getattr(driver, "is_android", None)
+    return bool(callable(probe) and probe())
+
+
 def read_store_map(driver) -> dict:
     """The whole flat store (every logical key, verbatim), or ``{}`` when it is
     absent or unreadable."""
@@ -55,6 +63,10 @@ def read_store_map(driver) -> dict:
         from common.cred_store import WebCredStore
 
         return WebCredStore(driver).read_map()
+    if _is_android(driver):
+        # The on-device credential file: no host path reaches the app's
+        # filesDir, so the bridge's `GET /credentials` is the one read.
+        return driver.credential_map()
     path = credential_store_path(driver)
     if path is None:
         return {}

@@ -232,6 +232,12 @@ pub fn capabilities_for(payments: bool, relay: bool, p2p_share: bool, zaps: bool
         // call failed" and skip cleanly rather than rotate into unreadability
         // (see the token's doc-comment).
         fauna_protocol::discovery::capability::SUBSCRIPTION_PERIOD_ROTATE.to_string(),
+        // Always-on: every nest reader of a manifest's chunk list walks a
+        // paged root's pages (`crate::manifest_walk`) — garbage collection
+        // first, so a root never reads as chunkless and deletes a file — and
+        // the page door is built. Engines write paged manifests only to a nest
+        // advertising this (see the token's doc-comment).
+        fauna_protocol::discovery::capability::PAGED_MANIFESTS.to_string(),
     ];
     // RELAY (P2P relay path): advertised iff the relay backend can actually serve.
     // Since the WireGuard stack's deletion (2026-08-23) that means iroh alone:
@@ -1221,6 +1227,7 @@ mod tests {
                 capability::FILE_SYNC,
                 capability::SPAM_MODEL_SEALED_AT_REST,
                 capability::PEER_SYNC,
+                capability::PAGED_MANIFESTS,
             ] {
                 assert!(
                     capability::supports(&caps, always),

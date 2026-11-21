@@ -4,9 +4,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -15,8 +13,12 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.fauna.app.R
+import com.fauna.app.ui.util.faunaFormGate
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogEntry
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * One `labeler-catalog-item` row (`tests/e2e-unified/ui.yaml` shared component,
@@ -35,10 +37,10 @@ import social.fauna.generated.Ids
  * `BackupDestinationsSection.destinationLabel` shape); the default paints the
  * discriminator unchanged.
  *
- * [subscribeEnabled] is the shared gate's answer for this row
- * (`LabelerCatalogMachine::subscribe_enabled` — false while the open inspect
- * view is this labeler and failed verification), read by the screen; the row
- * never re-derives it from `verified`.
+ * [subscribeAnswer] is the shared gate's answer for this row
+ * (`LabelerCatalogMachine::subscribe_possibility` — blocked with the refusal's
+ * reason while the open inspect view is this labeler and failed verification),
+ * read by the screen; the row never re-derives it from `verified`.
  */
 @Composable
 fun LabelerCatalogItemRow(
@@ -50,7 +52,7 @@ fun LabelerCatalogItemRow(
     onUnsubscribe: (Int) -> Unit,
     modifier: Modifier = Modifier,
     kindBadge: (LabelerCatalogEntry) -> String = { it.artifactKind },
-    subscribeEnabled: Boolean = true,
+    subscribeAnswer: Possibility = Possibility.Possible,
 ) {
     Row(
         modifier = modifier
@@ -87,12 +89,16 @@ fun LabelerCatalogItemRow(
                 Text(stringResource(R.string.labeler_catalog_inspect))
             }
             if (!entry.subscribed) {
-                Button(
-                    onClick = { onSubscribe(index) },
-                    enabled = subscribeEnabled,
-                    modifier = Modifier.testTag(Ids.LABELER_CATALOG_ITEM_SUBSCRIBE_BUTTON),
-                ) {
-                    Text(stringResource(R.string.labeler_catalog_subscribe))
+                val subscribeGate = faunaFormGate(subscribeAnswer)
+                Column {
+                    Button(
+                        onClick = { onSubscribe(index) },
+                        enabled = subscribeGate.enabled,
+                        modifier = Modifier.testTag(Ids.LABELER_CATALOG_ITEM_SUBSCRIBE_BUTTON),
+                    ) {
+                        Text(stringResource(R.string.labeler_catalog_subscribe))
+                    }
+                    DisabledControlReasonText(subscribeGate.reason)
                 }
             }
         }

@@ -7,22 +7,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -36,13 +34,22 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.LabelerCatalogItemRow
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
+import uniffi.fauna_core.Possibility
 import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.FaunaFormVerdict
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.LabelerCatalogVM
@@ -52,9 +59,16 @@ import com.fauna.app.ui.viewmodel.TrainedTopicsVM
 import com.fauna.ffi.FfiReportShareEntry
 import com.fauna.ffi.FfiTrainedTopicRow
 import com.fauna.ffi.publishKindOptions
+import com.fauna.ffi.trainedFactorNamePossibility
+import com.fauna.ffi.trainedFactorPublishOpenPossibility
+import com.fauna.ffi.trainedFactorPublishSubmitPossibility
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogEntry
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogSnapshot
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The **Personalization** home (`ui.yaml` page `personalization`;
@@ -87,6 +101,8 @@ fun PersonalizationScreen(
     val shareSignals by signalShareVm.share.collectAsState()
     val signalPublished by signalShareVm.published.collectAsState()
     val signalShareError by signalShareVm.errorMessage.collectAsState()
+    val shareAnswer by signalShareVm.shareAnswer.collectAsState()
+    val clearAnswer by topicsVm.clearAnswer.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
     // The kind picker's options — the shared `fauna_core::format::publish_kind_options`
@@ -125,6 +141,7 @@ fun PersonalizationScreen(
         isRenaming = isRenaming,
         topicsBusy = topicsBusy,
         publishState = publishState,
+        publishManagerReady = topicsVm.managerReady(),
         shareSignals = shareSignals,
         signalPublished = signalPublished,
         onBack = { navController.popBackStack() },
@@ -145,8 +162,12 @@ fun PersonalizationScreen(
         onTogglePublishNgramInclude = topicsVm::togglePublishNgramIncluded,
         onSubmitPublish = topicsVm::submitPublish,
         onCancelPublish = topicsVm::cancelPublish,
-        onToggleShareSignals = signalShareVm::setShare,
+        // The VM writes the flip of the nest-confirmed value, never the
+        // switch's painted one (engagement-cues.md § Layer B).
+        onToggleShareSignals = { signalShareVm.toggleShare() },
         onClearEngagementData = topicsVm::clearEngagementData,
+        shareSignalsAnswer = shareAnswer,
+        clearEngagementAnswer = clearAnswer,
         kindBadge = { entry -> kindBadgeText(context, entry) },
     )
 }
@@ -160,6 +181,9 @@ fun PersonalizationContent(
     isRenaming: Boolean = false,
     topicsBusy: Boolean = false,
     publishState: PublishSheetUiState? = null,
+    /** Whether the live feed manager is up — a row's Publish… answer's input
+     *  (the press asks again in the VM). */
+    publishManagerReady: Boolean = true,
     shareSignals: Boolean = false,
     signalPublished: List<FfiReportShareEntry> = emptyList(),
     onBack: () -> Unit,
@@ -184,6 +208,11 @@ fun PersonalizationContent(
     onCancelPublish: () -> Unit = {},
     onToggleShareSignals: (Boolean) -> Unit = {},
     onClearEngagementData: () -> Unit = {},
+    // The two engagement-cue controls' answers (`SignalShareVM.shareAnswer`,
+    // `TrainedTopicsVM.clearAnswer`); the defaults are for the stateless
+    // harness only.
+    shareSignalsAnswer: Possibility = Possibility.Possible,
+    clearEngagementAnswer: Possibility = Possibility.Possible,
     kindBadge: (LabelerCatalogEntry) -> String = { it.artifactKind },
 ) {
     val subscribed = snapshot?.entries?.withIndex()?.filter { it.value.subscribed } ?: emptyList()
@@ -244,6 +273,10 @@ fun PersonalizationContent(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 20.dp, bottom = 8.dp),
             )
+            // The create / save-name answer — the shared
+            // `drafts::factor_name_possibility` (`docs/goal/ui/settings.md`
+            // § Errors & edge cases); the VM's commit asks it again.
+            val nameGate = faunaFormGate(askForm { trainedFactorNamePossibility(topicName, topicsBusy) })
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
@@ -259,7 +292,7 @@ fun PersonalizationContent(
                 )
                 Button(
                     onClick = onSubmitTopic,
-                    enabled = !topicsBusy,
+                    enabled = nameGate.enabled,
                     modifier = Modifier
                         .padding(start = 8.dp)
                         .testTag(Ids.PERSONALIZATION_TRAINED_FACTOR_CREATE_BUTTON),
@@ -272,6 +305,7 @@ fun PersonalizationContent(
                     )
                 }
             }
+            DisabledControlReasonText(nameGate.reason)
             if (topics.isEmpty()) {
                 Text(
                     stringResource(R.string.personalization_trained_topics_empty),
@@ -283,6 +317,15 @@ fun PersonalizationContent(
                 topics.forEach { topic ->
                     TrainedTopicRowItem(
                         topic = topic,
+                        publishGate = faunaFormGate(
+                            askForm {
+                                trainedFactorPublishOpenPossibility(
+                                    topic.factorKey != null,
+                                    publishManagerReady,
+                                    topicsBusy,
+                                )
+                            },
+                        ),
                         onStartRename = onStartRename,
                         onDelete = onDeleteTopic,
                         onToggleEngagement = onToggleEngagement,
@@ -360,13 +403,19 @@ fun PersonalizationContent(
             // be able to erase them from their own client. Sibling of the
             // per-row "Learn from my activity" toggle (that stops future
             // learning; this erases what was captured).
-            TextButton(
-                onClick = onClearEngagementData,
-                modifier = Modifier
-                    .padding(top = 8.dp)
-                    .testTag(Ids.PERSONALIZATION_CLEAR_ENGAGEMENT_DATA_BUTTON),
-            ) {
-                Text(stringResource(R.string.personalization_clear_engagement_data))
+            // Painted from its shared answer: not live while the feed manager
+            // is down, with why beside it (engagement-cues.md § Layer B).
+            if (clearEngagementAnswer.isShown) {
+                TextButton(
+                    onClick = onClearEngagementData,
+                    enabled = clearEngagementAnswer.isPossible,
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .testTag(Ids.PERSONALIZATION_CLEAR_ENGAGEMENT_DATA_BUTTON),
+                ) {
+                    Text(stringResource(R.string.personalization_clear_engagement_data))
+                }
+                DisabledControlReasonText(localized(clearEngagementAnswer.blockedReason))
             }
 
             // ── Layer-B signal-sharing pane (engagement-cues.md § Layer B):
@@ -402,12 +451,19 @@ fun PersonalizationContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Switch(
-                    checked = shareSignals,
-                    onCheckedChange = onToggleShareSignals,
-                    modifier = Modifier.testTag(Ids.PERSONALIZATION_SHARE_SIGNALS_TOGGLE),
-                )
+                // Not live before the status read resolves, nor while the
+                // feed manager is down — an unread `false` is never flipped
+                // into a guessed `true` (engagement-cues.md § Layer B).
+                if (shareSignalsAnswer.isShown) {
+                    Switch(
+                        checked = shareSignals,
+                        onCheckedChange = onToggleShareSignals,
+                        enabled = shareSignalsAnswer.isPossible,
+                        modifier = Modifier.testTag(Ids.PERSONALIZATION_SHARE_SIGNALS_TOGGLE),
+                    )
+                }
             }
+            DisabledControlReasonText(localized(shareSignalsAnswer.blockedReason))
 
             Text(
                 stringResource(R.string.personalization_signal_published_title),
@@ -493,6 +549,9 @@ private fun SignalSharePublishedRow(entry: FfiReportShareEntry) {
 @Composable
 private fun TrainedTopicRowItem(
     topic: FfiTrainedTopicRow,
+    /** The row's Publish… answer: absent with no addressable model, blocked
+     *  while the feed manager is not up (`drafts::publish_open_possibility`). */
+    publishGate: FaunaFormVerdict,
     onStartRename: (FfiTrainedTopicRow) -> Unit,
     onDelete: (FfiTrainedTopicRow) -> Unit,
     onToggleEngagement: (FfiTrainedTopicRow) -> Unit,
@@ -536,15 +595,22 @@ private fun TrainedTopicRowItem(
             Text(stringResource(R.string.personalization_trained_factor_rename))
         }
         // A corrupt (non-16-byte) id has no addressable model — nothing to
-        // score, nothing to publish — so the row simply offers no publish.
-        OutlinedButton(
-            onClick = { onOpenPublish(topic) },
-            enabled = topic.factorKey != null,
-            modifier = Modifier
-                .padding(start = 4.dp)
-                .testTag(Ids.PERSONALIZATION_TRAINED_FACTOR_PUBLISH_BUTTON),
-        ) {
-            Text(stringResource(R.string.personalization_trained_factor_publish))
+        // score, nothing to publish — so the row offers no publish (absent);
+        // without the live feed manager it is disabled with its reason, so no
+        // sheet opens onto nothing.
+        if (publishGate.shown) {
+            Column {
+                OutlinedButton(
+                    onClick = { onOpenPublish(topic) },
+                    enabled = publishGate.enabled,
+                    modifier = Modifier
+                        .padding(start = 4.dp)
+                        .testTag(Ids.PERSONALIZATION_TRAINED_FACTOR_PUBLISH_BUTTON),
+                ) {
+                    Text(stringResource(R.string.personalization_trained_factor_publish))
+                }
+                DisabledControlReasonText(publishGate.reason)
+            }
         }
         OutlinedButton(
             onClick = { onDelete(topic) },
@@ -630,12 +696,17 @@ private fun PublishSheetContent(
             )
             // Starts blank on every open: the sealed registry name is PRIVATE
             // (§ Publishing), so prefilling it would leak the user's own label
-            // into a public artifact by default.
+            // into a public artifact by default. The keyboard's Done is the
+            // sheet's submit: the same press as Publish, which the VM refuses
+            // with its reason while the draft cannot succeed
+            // (ui/settings.md § Errors & edge cases).
             OutlinedTextField(
                 value = state.name,
                 onValueChange = onNameChange,
                 placeholder = { Text(stringResource(R.string.personalization_publish_name_placeholder)) },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onSubmit() }),
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag(Ids.PERSONALIZATION_TRAINED_FACTOR_PUBLISH_NAME_INPUT),
@@ -645,15 +716,18 @@ private fun PublishSheetContent(
             } else {
                 PublishExemplarReview(state = state, onToggleInclude = onToggleInclude)
             }
+            // The shared `drafts::publish_submit_possibility`: a public name
+            // within the bound, at least one kept row of the active kind ("the
+            // corpus scored nothing" and "the user unchecked everything" alike)
+            // and no publish in flight — disabled with its reason, never a
+            // click that does nothing; the VM's submit asks it again.
+            val submitGate = faunaFormGate(
+                askForm { trainedFactorPublishSubmitPossibility(state.name, state.hasIncluded, state.busy) },
+            )
             Row(modifier = Modifier.padding(top = 8.dp)) {
-                // Publishing nothing is not a thing the artifact means, so the
-                // button goes insensitive rather than no-op'ing a click (the
-                // restore-confirm-button precedent). Covers both "the corpus
-                // scored nothing" and "the user unchecked everything", for
-                // whichever kind is active.
                 Button(
                     onClick = onSubmit,
-                    enabled = state.hasIncluded && !state.busy,
+                    enabled = submitGate.enabled,
                     modifier = Modifier.testTag(Ids.PERSONALIZATION_TRAINED_FACTOR_PUBLISH_SUBMIT_BUTTON),
                 ) {
                     Text(stringResource(R.string.personalization_publish_submit))
@@ -667,6 +741,7 @@ private fun PublishSheetContent(
                     Text(stringResource(R.string.common_cancel))
                 }
             }
+            DisabledControlReasonText(submitGate.reason)
         }
     }
 }

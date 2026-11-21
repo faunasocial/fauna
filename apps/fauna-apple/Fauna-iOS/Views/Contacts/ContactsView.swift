@@ -132,7 +132,11 @@ struct ContactsView: View {
                             .accessibilityIdentifier(Ids.contactsAddButton)
                             // Same add the Button runs (mirrors macOS). Env-gated no-op.
                             .automationActivate(Ids.contactsAddButton) { Task { await vm.addContact(actorId: result.actorId) } }
+                            // The ward's entry gate, from the one shared answer the
+                            // knock asks again before it sends (mirrors macOS).
+                            .faunaPossible(vm.knockPossibility(peerId: result.actorId))
                         }
+                        FaunaPossibilityReason(vm.knockPossibility(peerId: result.actorId))
                         // The ward's in-app ask (`family-safety.md` § Child-initiated
                         // contact requests): the button only after the nest's TYPED
                         // guardian refusal, the pending label once one is outstanding.
@@ -190,6 +194,7 @@ struct ContactsView: View {
                                     .automationActivate(Ids.contactsAcceptButton) {
                                         Task { await vm.acceptKnock(peerId: knock.sender) }
                                     }
+                                    .faunaPossible(vm.acceptPossibility())
 
                                     Button(L.common.dismiss) {
                                         Task { await vm.dismissKnock(peerId: knock.sender) }
@@ -321,6 +326,7 @@ struct ContactsView: View {
                                     }
                                 }
                                 .contentShape(Rectangle())
+                                .faunaActsOnClick()
                                 .onTapGesture {
                                     if opensProfile(status: contact.status) {
                                         openProfile(contact.peerId, home: contact.homeNestUrl)

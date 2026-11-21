@@ -25,12 +25,22 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.FaunaGateVerdict
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.pressAsked
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.and
+import com.fauna.app.ui.util.faunaReadGate
+import com.fauna.app.ui.util.paintedReason
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.AdminMailVM
+import com.fauna.app.ui.viewmodel.AdminEntryRereadEffect
 import uniffi.fauna_client_mail_settings.AliasPolicyView
 import uniffi.fauna_client_mail_settings.AuthPolicyView
 import uniffi.fauna_client_mail_settings.BaselinePublishView
@@ -52,7 +62,13 @@ import uniffi.fauna_client_mail_settings.imapDeleteNonemptyOptions
 import uniffi.fauna_client_mail_settings.secretRotationText
 import uniffi.fauna_client_mail_settings.senderDashboardLinks
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The flat admin `admin-mail` policy page (`admin.md` § 6 Mail;
@@ -77,15 +93,17 @@ fun AdminMailScreen(
     navController: NavController,
     vm: AdminMailVM = hiltViewModel(),
 ) {
+    AdminEntryRereadEffect(vm.entryReread)
     val snapshot by vm.snapshot.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val writeAnswer by vm.writeAnswer.collectAsState()
     val appMessages = LocalAppMessages.current
 
     LaunchedEffect(errorMessage) { errorMessage?.let { appMessages.showError(it) } }
 
     AdminMailContent(
         mailEnabled = snapshot.mailEnabled,
-        mailUnavailableHere = snapshot.mailUnavailableHere,
+        enableToggle = com.fauna.ffi.mailEnableTogglePossibility(snapshot),
         spam = snapshot.spam,
         auth = snapshot.auth,
         submission = snapshot.submission,
@@ -113,6 +131,8 @@ fun AdminMailScreen(
         onSaveDmarc = vm::saveDmarc,
         onSaveMicrosoft = vm::saveMicrosoftRegistration,
         onSetBaselineStanding = vm::setBaselineStandingPublish,
+        onRefused = appMessages::showError,
+        writeAnswer = writeAnswer,
     )
 }
 
@@ -120,10 +140,13 @@ fun AdminMailScreen(
 @Composable
 fun AdminMailContent(
     mailEnabled: Boolean,
-    // `MailPolicySnapshot.mailUnavailableHere` — read, never re-derived: while mail
-    // is off the master toggle is disabled with state `unavailable`, the notice
-    // beneath it (admin.md § 6 Mail).
-    mailUnavailableHere: Boolean = false,
+    // The master toggle's shared answer, `MailPolicySnapshot::enable_toggle_possibility`
+    // (admin.md § Errors & edge cases, *Role and state gates answer one
+    // `Possibility` too*): turning mail on is blocked by the
+    // `admin-mail-unavailable-notice` sentence on a box that cannot enable it,
+    // painted as state `unavailable` with that notice beneath; mail already on
+    // stays possible so it can be turned off. Read, never re-derived.
+    enableToggle: Possibility = Possibility.Possible,
     spam: SpamPolicyView,
     auth: AuthPolicyView,
     submission: SubmissionPolicyView,
@@ -166,18 +189,41 @@ fun AdminMailContent(
     armed: MailPolicyConfirm? = null,
     secretRotation: SecretRotationView? = null,
     onPress: (MailPolicyConfirm) -> Unit = {},
-    // Mail-knob validation via the shared `fauna_core::format::parse_count`
-    // (`u32`) and `parse_count_u64` (`u64`, the IMAP storage ceiling): trim +
-    // parse; a `null` return ⇒ keep the persisted value (a full-PUT save never
-    // silently zeroes a knob). Injected as FFI-free lambdas so the Compose test
-    // stays off the native path (mirrors the `parsePort` admin-port leg).
-    // value-formatting.md § Mail-knob validation.
+    // Mail-knob parsing via the shared `fauna_core::format::parse_count`
+    // (`u32`) and `parse_count_u64` (`u64`, the IMAP storage ceiling) — the
+    // same parsers `admin_policy::parse_knob*` run, so once a group's draft
+    // answer below is possible every draft parses. No fallback to the stored
+    // value: a malformed draft is refused, never sent with the old number
+    // (admin.md § Errors & edge cases, the form bullet). Injected as FFI-free
+    // lambdas so the Compose test stays off the native path.
     parseCount: (String) -> UInt? = { com.fauna.ffi.parseCount(it) },
     parseCountU64: (String) -> ULong? = { com.fauna.ffi.parseCountU64(it) },
+    // A group's draft-validity answer — the shared
+    // `admin_policy::knobs_draft_possibility` over its `u32` drafts, its `u64`
+    // drafts and its one-number-per-line lists; the Microsoft save's is the
+    // shared `microsoft_draft_possibility`. Each save is painted from it and
+    // asks it again at the press. Fails open off the native path ([askForm]).
+    knobsDraft: (counts: List<String>, countsU64: List<String>, lists: List<String>) -> Possibility = { c, u, l ->
+        askForm { com.fauna.ffi.mailKnobsDraftPossibility(c, u, l) }
+    },
+    microsoftDraft: (clientId: String, tenant: String) -> Possibility = { id, tenant ->
+        askForm { com.fauna.ffi.mailMicrosoftDraftPossibility(id, tenant) }
+    },
+    // A refused save's reason, for the page's `error-message` banner.
+    onRefused: (String) -> Unit = {},
     // Whether a forensic-report retention earns the page's PII warning — the
     // shared `dmarc_forensic_retention_warns`, injected FFI-free like the parse
     // lambdas so the Compose test stays off the native path.
     dmarcRetentionWarns: (UInt) -> Boolean = { dmarcForensicRetentionWarns(it) },
+    // The answer every control that writes what the policy read decides is
+    // painted from — the mail-enable toggle, every group's save, the
+    // standing-publish toggle, the Microsoft save and the warm-up reset, rotate
+    // and publish confirms: the shared `MailPolicyMachine::write_possibility`
+    // (admin.md § Errors & edge cases, *Controls wait for their read*). The
+    // page's FIRST answer: folded before every draft answer, so a page still
+    // loading says so first, and a group's save never sends defaults over a
+    // policy the page has not shown. Asked again at every press.
+    writeAnswer: Possibility = Possibility.Possible,
 ) {
     Scaffold(
         topBar = {
@@ -222,42 +268,52 @@ fun AdminMailContent(
             // gate inside it would grey sixteen drafts the admin must still be
             // able to edit with no nest. Same one-composable-two-roles split the
             // admin-users `TierDropdown` records.
-            val mailEnabledGate = faunaGate("fauna.bridges.set_mail_enabled", enabled = !working)
-            // A mailbox already on keeps its live toggle so it can still be turned off.
-            val mailUnavailable = !mailEnabled && mailUnavailableHere
+            val toggleAnswer = writeAnswer and enableToggle
+            val mailEnabledGate = faunaReadGate(
+                writeAnswer,
+                faunaGate("fauna.bridges.set_mail_enabled", enabled = !working && toggleAnswer.isPossible),
+                enableToggle,
+            )
+            val mailUnavailable = enableToggle.blockedReason
+            val context = LocalContext.current
             ToggleRow(
                 label = stringResource(R.string.admin_mail_page_enabled_label),
-                subtitle = if (mailUnavailable) null else stringResource(R.string.admin_mail_page_enabled_subtitle),
+                subtitle = if (mailUnavailable != null) null else stringResource(R.string.admin_mail_page_enabled_subtitle),
                 checked = mailEnabled,
-                enabled = mailEnabledGate.enabled && !mailUnavailable,
-                onChange = onSetMailEnabled,
+                enabled = mailEnabledGate.enabled,
+                // The flip asks the answer the toggle was painted from again.
+                onChange = { on -> pressAsked(context, toggleAnswer, onRefused) { onSetMailEnabled(on) } },
                 testTag = Ids.ADMIN_MAIL_ENABLED_TOGGLE,
-                state = if (mailEnabled) "on" else if (mailUnavailable) "unavailable" else "off",
+                state = if (mailEnabled) "on" else if (mailUnavailable != null) "unavailable" else "off",
+                reason = mailEnabledGate.reason,
             )
-            if (mailUnavailable) {
+            if (mailUnavailable != null) {
                 Text(
-                    stringResource(R.string.mail_settings_unavailable_notice),
+                    localized(mailUnavailable).orEmpty(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.testTag(Ids.ADMIN_MAIL_UNAVAILABLE_NOTICE),
                 )
             }
-            DisabledControlReasonText(mailEnabledGate.reason)
+            // The unavailable notice above already paints the enable answer's
+            // own sentence; this line paints the read's (or the offline gate's).
+            DisabledControlReasonText(if (mailUnavailable != null && writeAnswer.isPossible) null else mailEnabledGate.reason)
 
-            health?.let { HealthGroup(it, working, armed, onRecheckHealth, onPress) }
+            health?.let { HealthGroup(it, working, armed, onRecheckHealth, onPress, writeAnswer, onRefused) }
 
+            val drafts = MailDrafts(parseCount, parseCountU64, knobsDraft, onRefused, writeAnswer)
             SpamGroup(
-                spam, working, onSaveSpam, parseCount, baselinePublishResult, armed, onPress,
+                spam, working, onSaveSpam, drafts, baselinePublishResult, armed, onPress,
                 baselineState, onSetBaselineStanding, formatDate,
             )
-            AuthGroup(auth, working, onSaveAuth, parseCount)
-            SubmissionGroup(submission, working, onSaveSubmission, parseCount)
-            ImapGroup(imap, working, onSaveImap, parseCount, parseCountU64)
-            OutboundGroup(outbound, working, onSaveOutbound, parseCount)
-            AliasGroup(alias, working, onSaveAlias, parseCount)
-            DmarcGroup(dmarc, working, onSaveDmarc, parseCount, dmarcRetentionWarns)
-            MicrosoftGroup(microsoft, working, onSaveMicrosoft)
-            SecretsGroup(working, armed, secretRotation, onPress)
+            AuthGroup(auth, working, onSaveAuth, drafts)
+            SubmissionGroup(submission, working, onSaveSubmission, drafts)
+            ImapGroup(imap, working, onSaveImap, drafts)
+            OutboundGroup(outbound, working, onSaveOutbound, drafts)
+            AliasGroup(alias, working, onSaveAlias, drafts)
+            DmarcGroup(dmarc, working, onSaveDmarc, drafts, dmarcRetentionWarns)
+            MicrosoftGroup(microsoft, working, onSaveMicrosoft, { id, t -> writeAnswer and microsoftDraft(id, t) }, onRefused)
+            SecretsGroup(working, armed, secretRotation, onPress, writeAnswer, onRefused)
         }
     }
 }
@@ -281,6 +337,8 @@ private fun HealthGroup(
     armed: MailPolicyConfirm?,
     onRecheck: () -> Unit,
     onPress: (MailPolicyConfirm) -> Unit,
+    writeAnswer: Possibility,
+    onRefused: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
@@ -346,11 +404,14 @@ private fun HealthGroup(
             modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_RECHECK_BUTTON),
         ) { Text(stringResource(R.string.admin_mail_page_health_recheck)) }
         DisabledControlReasonText(recheckGate.reason)
-        val resetGate = faunaGate("fauna.bridges.outbound_warmup_reset", enabled = !working)
+        val resetGate = faunaReadGate(
+            writeAnswer,
+            faunaGate("fauna.bridges.outbound_warmup_reset", enabled = !working && writeAnswer.isPossible),
+        )
         OutlinedButton(
-            onClick = { onPress(MailPolicyConfirm.RESET_WARMUP) },
+            onClick = { pressAsked(context, writeAnswer, onRefused) { onPress(MailPolicyConfirm.RESET_WARMUP) } },
             enabled = resetGate.enabled,
-            modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_WARMUP_RESET_BUTTON),
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_WARMUP_RESET_BUTTON).paintedReason(resetGate.reason),
         ) {
             Text(
                 stringResource(
@@ -398,7 +459,10 @@ private fun SecretsGroup(
     armed: MailPolicyConfirm?,
     secretRotation: SecretRotationView?,
     onPress: (MailPolicyConfirm) -> Unit,
+    writeAnswer: Possibility,
+    onRefused: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             stringResource(R.string.admin_mail_page_secrets_group_title),
@@ -409,12 +473,17 @@ private fun SecretsGroup(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        val unsubscribeGate =
-            faunaGate("fauna.bridges.rotate_list_unsubscribe_secret", enabled = !working)
+        val unsubscribeGate = faunaReadGate(
+            writeAnswer,
+            faunaGate("fauna.bridges.rotate_list_unsubscribe_secret", enabled = !working && writeAnswer.isPossible),
+        )
         OutlinedButton(
-            onClick = { onPress(MailPolicyConfirm.ROTATE_LIST_UNSUBSCRIBE_SECRET) },
+            onClick = {
+                pressAsked(context, writeAnswer, onRefused) { onPress(MailPolicyConfirm.ROTATE_LIST_UNSUBSCRIBE_SECRET) }
+            },
             enabled = unsubscribeGate.enabled,
-            modifier = Modifier.testTag(Ids.ADMIN_MAIL_LIST_UNSUBSCRIBE_SECRET_ROTATE_BUTTON),
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_LIST_UNSUBSCRIBE_SECRET_ROTATE_BUTTON)
+                .paintedReason(unsubscribeGate.reason),
         ) {
             Text(
                 stringResource(
@@ -427,11 +496,14 @@ private fun SecretsGroup(
             )
         }
         DisabledControlReasonText(unsubscribeGate.reason)
-        val srsGate = faunaGate("fauna.bridges.rotate_srs_secret", enabled = !working)
+        val srsGate = faunaReadGate(
+            writeAnswer,
+            faunaGate("fauna.bridges.rotate_srs_secret", enabled = !working && writeAnswer.isPossible),
+        )
         OutlinedButton(
-            onClick = { onPress(MailPolicyConfirm.ROTATE_SRS_SECRET) },
+            onClick = { pressAsked(context, writeAnswer, onRefused) { onPress(MailPolicyConfirm.ROTATE_SRS_SECRET) } },
             enabled = srsGate.enabled,
-            modifier = Modifier.testTag(Ids.ADMIN_MAIL_FORWARD_SRS_SECRET_ROTATE_BUTTON),
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_FORWARD_SRS_SECRET_ROTATE_BUTTON).paintedReason(srsGate.reason),
         ) {
             Text(
                 stringResource(
@@ -459,7 +531,7 @@ private fun SpamGroup(
     initial: SpamPolicyView,
     working: Boolean,
     onSave: (SpamPolicyView) -> Unit,
-    parseCount: (String) -> UInt?,
+    drafts: MailDrafts,
     baselineResult: BaselinePublishView?,
     armed: MailPolicyConfirm?,
     onPress: (MailPolicyConfirm) -> Unit,
@@ -509,55 +581,56 @@ private fun SpamGroup(
         NumField(stringResource(R.string.admin_mail_page_bayesian_full_confidence_samples_label), stringResource(R.string.admin_mail_page_bayesian_full_confidence_samples_subtitle), bayesianFullConfidence, { bayesianFullConfidence = it }, "admin-mail-spam-bayesian-full-confidence-samples")
         NumField(stringResource(R.string.admin_mail_page_training_history_retention_label), stringResource(R.string.admin_mail_page_training_history_retention_subtitle), trainingRetention, { trainingRetention = it }, "admin-mail-spam-training-history-retention")
         NumField(stringResource(R.string.admin_mail_page_unlisted_recipient_penalty_label), stringResource(R.string.admin_mail_page_unlisted_recipient_penalty_subtitle), unlistedRecipientPenalty, { unlistedRecipientPenalty = it }, "admin-mail-unlisted-recipient-penalty")
+        val spamCounts = {
+            listOf(
+                junk, reject, greylistDelay, maxConn, maxBytes, bayesianWeight, bayesianMinSamples,
+                bayesianFullConfidence, trainingRetention, unlistedRecipientPenalty,
+            )
+        }
         SaveButton(
             "admin-mail-spam-save-button",
             stringResource(R.string.admin_mail_page_spam_save),
             faunaGate("fauna.bridges.put_spam_policy", enabled = !working),
+            draft = { drafts.answer(spamCounts()) },
+            onRefused = drafts.onRefused,
         ) {
+            val n = drafts.count
             onSave(
                 SpamPolicyView(
-                    maxScoreBeforeSpamFolder = parseCount(junk) ?: initial.maxScoreBeforeSpamFolder,
-                    maxScoreBeforeReject = parseCount(reject) ?: initial.maxScoreBeforeReject,
+                    maxScoreBeforeSpamFolder = n(junk),
+                    maxScoreBeforeReject = n(reject),
                     dnsblServers = splitLines(dnsbl),
                     rejectNoRdns = rejectNoRdns,
                     greylistEnabled = greylistEnabled,
-                    greylistDelaySecs = parseCount(greylistDelay) ?: initial.greylistDelaySecs,
-                    maxConnPerMin = parseCount(maxConn) ?: initial.maxConnPerMin,
+                    greylistDelaySecs = n(greylistDelay),
+                    maxConnPerMin = n(maxConn),
                     fcrdnsMode = fcrdns,
                     heloIdentityRequired = heloRequired,
                     rejectFcrdnsFail = rejectFcrdnsFail,
-                    maxMessageBytes = parseCount(maxBytes) ?: initial.maxMessageBytes,
-                    bayesianWeightMilli = parseCount(bayesianWeight) ?: initial.bayesianWeightMilli,
-                    bayesianMinSamples = parseCount(bayesianMinSamples) ?: initial.bayesianMinSamples,
-                    bayesianFullConfidenceSamples = parseCount(bayesianFullConfidence) ?: initial.bayesianFullConfidenceSamples,
-                    trainingHistoryRetentionDays = parseCount(trainingRetention) ?: initial.trainingHistoryRetentionDays,
-                    unlistedRecipientPenalty = parseCount(unlistedRecipientPenalty) ?: initial.unlistedRecipientPenalty,
+                    maxMessageBytes = n(maxBytes),
+                    bayesianWeightMilli = n(bayesianWeight),
+                    bayesianMinSamples = n(bayesianMinSamples),
+                    bayesianFullConfidenceSamples = n(bayesianFullConfidence),
+                    trainingHistoryRetentionDays = n(trainingRetention),
+                    unlistedRecipientPenalty = n(unlistedRecipientPenalty),
                     // Carried through so a save never turns the standing baseline
                     // publish off (which withdraws the baseline); the toggle below is
                     // its own gesture.
                     baselineStandingPublish = initial.baselineStandingPublish,
                 ),
             )
-            // A non-number saved as the previous value (`parse_count(..).unwrap_or(prev)`):
-            // show what was kept, since `remember(initial)` does not reset when the saved
-            // config is unchanged.
-            junk = (parseCount(junk) ?: initial.maxScoreBeforeSpamFolder).toString()
-            reject = (parseCount(reject) ?: initial.maxScoreBeforeReject).toString()
-            greylistDelay = (parseCount(greylistDelay) ?: initial.greylistDelaySecs).toString()
-            maxConn = (parseCount(maxConn) ?: initial.maxConnPerMin).toString()
-            maxBytes = (parseCount(maxBytes) ?: initial.maxMessageBytes).toString()
-            bayesianWeight = (parseCount(bayesianWeight) ?: initial.bayesianWeightMilli).toString()
-            bayesianMinSamples = (parseCount(bayesianMinSamples) ?: initial.bayesianMinSamples).toString()
-            bayesianFullConfidence = (parseCount(bayesianFullConfidence) ?: initial.bayesianFullConfidenceSamples).toString()
-            trainingRetention = (parseCount(trainingRetention) ?: initial.trainingHistoryRetentionDays).toString()
-            unlistedRecipientPenalty = (parseCount(unlistedRecipientPenalty) ?: initial.unlistedRecipientPenalty).toString()
         }
         // ── Deployment baseline (admin opt-in aggregate; publish_spam_baseline) ──
-        val baselineGate = faunaGate("fauna.bridges.publish_spam_baseline", enabled = !working)
+        val context = LocalContext.current
+        val baselineGate = faunaReadGate(
+            drafts.write,
+            faunaGate("fauna.bridges.publish_spam_baseline", enabled = !working && drafts.write.isPossible),
+        )
         Button(
-            onClick = { onPress(MailPolicyConfirm.PUBLISH_SPAM_BASELINE) },
+            onClick = { pressAsked(context, drafts.write, drafts.onRefused) { onPress(MailPolicyConfirm.PUBLISH_SPAM_BASELINE) } },
             enabled = baselineGate.enabled,
-            modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_MAIL_PUBLISH_SPAM_BASELINE_BUTTON),
+            modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_MAIL_PUBLISH_SPAM_BASELINE_BUTTON)
+                .paintedReason(baselineGate.reason),
         ) {
             Text(
                 stringResource(
@@ -606,14 +679,18 @@ private fun SpamGroup(
         // Standing publish — dispatches immediately off the PERSISTED group (the
         // shared machine flips the one field and re-reads), so a gate on its wire
         // kind, never a draft buffer like the toggles above.
-        val standingGate = faunaGate("fauna.bridges.put_spam_policy", enabled = !working)
+        val standingGate = faunaReadGate(
+            drafts.write,
+            faunaGate("fauna.bridges.put_spam_policy", enabled = !working && drafts.write.isPossible),
+        )
         ToggleRow(
             label = stringResource(R.string.admin_mail_page_spam_baseline_standing_label),
             subtitle = stringResource(R.string.admin_mail_page_spam_baseline_standing_subtitle),
             checked = initial.baselineStandingPublish,
             enabled = standingGate.enabled,
-            onChange = onSetBaselineStanding,
+            onChange = { on -> pressAsked(context, drafts.write, drafts.onRefused) { onSetBaselineStanding(on) } },
             testTag = Ids.ADMIN_MAIL_SPAM_BASELINE_STANDING_TOGGLE,
+            reason = standingGate.reason,
         )
         DisabledControlReasonText(standingGate.reason)
         // The served baseline's state: published / none, then the waiting note
@@ -639,7 +716,7 @@ private fun SpamGroup(
 }
 
 @Composable
-private fun AuthGroup(initial: AuthPolicyView, working: Boolean, onSave: (AuthPolicyView) -> Unit, parseCount: (String) -> UInt?) {
+private fun AuthGroup(initial: AuthPolicyView, working: Boolean, onSave: (AuthPolicyView) -> Unit, drafts: MailDrafts) {
     var enforceDmarc by remember(initial) { mutableStateOf(initial.enforceDmarc) }
     var enforceDmarcQuarantine by remember(initial) { mutableStateOf(initial.enforceDmarcQuarantine) }
     var enforceSpfHardfail by remember(initial) { mutableStateOf(initial.enforceSpfHardfail) }
@@ -663,6 +740,8 @@ private fun AuthGroup(initial: AuthPolicyView, working: Boolean, onSave: (AuthPo
             "admin-mail-auth-save-button",
             stringResource(R.string.admin_mail_page_auth_save),
             faunaGate("fauna.bridges.put_auth_policy", enabled = !working),
+            draft = { drafts.answer(listOf(maxFailures, maxConnPerIp)) },
+            onRefused = drafts.onRefused,
         ) {
             onSave(
                 AuthPolicyView(
@@ -671,8 +750,8 @@ private fun AuthGroup(initial: AuthPolicyView, working: Boolean, onSave: (AuthPo
                     enforceSpfHardfail = enforceSpfHardfail,
                     enforceDkim = enforceDkim,
                     logOnly = logOnly,
-                    maxAuthFailuresPerMinute = parseCount(maxFailures) ?: initial.maxAuthFailuresPerMinute,
-                    maxConnPerIp = parseCount(maxConnPerIp) ?: initial.maxConnPerIp,
+                    maxAuthFailuresPerMinute = drafts.count(maxFailures),
+                    maxConnPerIp = drafts.count(maxConnPerIp),
                 ),
             )
         }
@@ -680,7 +759,7 @@ private fun AuthGroup(initial: AuthPolicyView, working: Boolean, onSave: (AuthPo
 }
 
 @Composable
-private fun SubmissionGroup(initial: SubmissionPolicyView, working: Boolean, onSave: (SubmissionPolicyView) -> Unit, parseCount: (String) -> UInt?) {
+private fun SubmissionGroup(initial: SubmissionPolicyView, working: Boolean, onSave: (SubmissionPolicyView) -> Unit, drafts: MailDrafts) {
     var maxPerDay by remember(initial) { mutableStateOf(initial.maxPerDay.toString()) }
     var maxRecipients by remember(initial) { mutableStateOf(initial.maxRecipientsPerMessage.toString()) }
 
@@ -694,11 +773,13 @@ private fun SubmissionGroup(initial: SubmissionPolicyView, working: Boolean, onS
             "admin-mail-submission-save-button",
             stringResource(R.string.admin_mail_page_submission_save),
             faunaGate("fauna.bridges.put_submission_policy", enabled = !working),
+            draft = { drafts.answer(listOf(maxPerDay, maxRecipients)) },
+            onRefused = drafts.onRefused,
         ) {
             onSave(
                 SubmissionPolicyView(
-                    maxPerDay = parseCount(maxPerDay) ?: initial.maxPerDay,
-                    maxRecipientsPerMessage = parseCount(maxRecipients) ?: initial.maxRecipientsPerMessage,
+                    maxPerDay = drafts.count(maxPerDay),
+                    maxRecipientsPerMessage = drafts.count(maxRecipients),
                 ),
             )
         }
@@ -706,7 +787,7 @@ private fun SubmissionGroup(initial: SubmissionPolicyView, working: Boolean, onS
 }
 
 @Composable
-private fun ImapGroup(initial: ImapPolicyView, working: Boolean, onSave: (ImapPolicyView) -> Unit, parseCount: (String) -> UInt?, parseCountU64: (String) -> ULong?) {
+private fun ImapGroup(initial: ImapPolicyView, working: Boolean, onSave: (ImapPolicyView) -> Unit, drafts: MailDrafts) {
     var idleTimeout by remember(initial) { mutableStateOf(initial.idleTimeoutSecs.toString()) }
     var tombstone by remember(initial) { mutableStateOf(initial.tombstoneRetentionDays.toString()) }
     var deleteNonempty by remember(initial) { mutableStateOf(initial.deleteNonempty) }
@@ -732,15 +813,19 @@ private fun ImapGroup(initial: ImapPolicyView, working: Boolean, onSave: (ImapPo
             "admin-mail-imap-save-button",
             stringResource(R.string.admin_mail_page_imap_save),
             faunaGate("fauna.bridges.put_imap_policy", enabled = !working),
+            draft = {
+                drafts.answer(listOf(idleTimeout, tombstone, cacheMax, messageCount), countsU64 = listOf(storageBytes))
+            },
+            onRefused = drafts.onRefused,
         ) {
             onSave(
                 ImapPolicyView(
-                    idleTimeoutSecs = parseCount(idleTimeout) ?: initial.idleTimeoutSecs,
-                    tombstoneRetentionDays = parseCount(tombstone) ?: initial.tombstoneRetentionDays,
+                    idleTimeoutSecs = drafts.count(idleTimeout),
+                    tombstoneRetentionDays = drafts.count(tombstone),
                     deleteNonempty = deleteNonempty,
-                    bodystructureCacheMax = parseCount(cacheMax) ?: initial.bodystructureCacheMax,
-                    storageBytesDefault = parseCountU64(storageBytes) ?: initial.storageBytesDefault,
-                    messageCountDefault = parseCount(messageCount) ?: initial.messageCountDefault,
+                    bodystructureCacheMax = drafts.count(cacheMax),
+                    storageBytesDefault = drafts.countU64(storageBytes),
+                    messageCountDefault = drafts.count(messageCount),
                 ),
             )
         }
@@ -748,7 +833,7 @@ private fun ImapGroup(initial: ImapPolicyView, working: Boolean, onSave: (ImapPo
 }
 
 @Composable
-private fun OutboundGroup(initial: OutboundPolicyView, working: Boolean, onSave: (OutboundPolicyView) -> Unit, parseCount: (String) -> UInt?) {
+private fun OutboundGroup(initial: OutboundPolicyView, working: Boolean, onSave: (OutboundPolicyView) -> Unit, drafts: MailDrafts) {
     var retrySchedule by remember(initial) { mutableStateOf(initial.retryScheduleSeconds.joinToString("\n")) }
     var permfail by remember(initial) { mutableStateOf(initial.permanentFailureTimeoutHours.toString()) }
     var delayWarning by remember(initial) { mutableStateOf(initial.delayWarningAtHours.toString()) }
@@ -778,13 +863,15 @@ private fun OutboundGroup(initial: OutboundPolicyView, working: Boolean, onSave:
             "admin-mail-outbound-save-button",
             stringResource(R.string.admin_mail_page_outbound_save),
             faunaGate("fauna.bridges.put_outbound_policy", enabled = !working),
+            draft = { drafts.answer(listOf(permfail, delayWarning, ndrRateLimit), lists = listOf(retrySchedule)) },
+            onRefused = drafts.onRefused,
         ) {
             onSave(
                 OutboundPolicyView(
-                    retryScheduleSeconds = splitLines(retrySchedule).mapNotNull { it.toULongOrNull() },
-                    permanentFailureTimeoutHours = parseCount(permfail) ?: initial.permanentFailureTimeoutHours,
-                    delayWarningAtHours = parseCount(delayWarning) ?: initial.delayWarningAtHours,
-                    ndrRateLimitDays = parseCount(ndrRateLimit) ?: initial.ndrRateLimitDays,
+                    retryScheduleSeconds = splitLines(retrySchedule).map(drafts.countU64),
+                    permanentFailureTimeoutHours = drafts.count(permfail),
+                    delayWarningAtHours = drafts.count(delayWarning),
+                    ndrRateLimitDays = drafts.count(ndrRateLimit),
                     suppressNdrSpfHardfail = suppressSpf,
                     suppressNdrDmarcReject = suppressDmarc,
                     // Read-only; resubmit the persisted value unchanged.
@@ -799,7 +886,7 @@ private fun OutboundGroup(initial: OutboundPolicyView, working: Boolean, onSave:
 }
 
 @Composable
-private fun AliasGroup(initial: AliasPolicyView, working: Boolean, onSave: (AliasPolicyView) -> Unit, parseCount: (String) -> UInt?) {
+private fun AliasGroup(initial: AliasPolicyView, working: Boolean, onSave: (AliasPolicyView) -> Unit, drafts: MailDrafts) {
     var exactMax by remember(initial) { mutableStateOf(initial.exactAliasesMax.toString()) }
     var reserved by remember(initial) { mutableStateOf(initial.reservedLocalParts.joinToString("\n")) }
     var subaddressing by remember(initial) { mutableStateOf(initial.subaddressingEnabled) }
@@ -817,10 +904,12 @@ private fun AliasGroup(initial: AliasPolicyView, working: Boolean, onSave: (Alia
             "admin-mail-alias-save-button",
             stringResource(R.string.admin_mail_page_alias_save),
             faunaGate("fauna.bridges.put_alias_policy", enabled = !working),
+            draft = { drafts.answer(listOf(exactMax)) },
+            onRefused = drafts.onRefused,
         ) {
             onSave(
                 AliasPolicyView(
-                    exactAliasesMax = parseCount(exactMax) ?: initial.exactAliasesMax,
+                    exactAliasesMax = drafts.count(exactMax),
                     reservedLocalParts = splitLines(reserved),
                     subaddressingEnabled = subaddressing,
                     wildcardPrefixEnabled = wildcard,
@@ -842,7 +931,7 @@ private fun DmarcGroup(
     initial: DmarcPolicyView,
     working: Boolean,
     onSave: (DmarcPolicyView) -> Unit,
-    parseCount: (String) -> UInt?,
+    drafts: MailDrafts,
     retentionWarns: (UInt) -> Boolean,
 ) {
     var rufPublish by remember(initial) { mutableStateOf(initial.rufPublish) }
@@ -869,7 +958,7 @@ private fun DmarcGroup(
         )
         NumField(stringResource(R.string.admin_mail_page_dmarc_aggregate_retention_label), null, aggregateRetention, { aggregateRetention = it }, Ids.ADMIN_MAIL_DMARC_AGGREGATE_RETENTION_INPUT)
         NumField(stringResource(R.string.admin_mail_page_dmarc_forensic_retention_label), null, forensicRetention, { forensicRetention = it }, Ids.ADMIN_MAIL_DMARC_FORENSIC_RETENTION_INPUT)
-        if (parseCount(forensicRetention)?.let(retentionWarns) == true) {
+        if (drafts.parseCount(forensicRetention)?.let(retentionWarns) == true) {
             Text(
                 stringResource(R.string.admin_mail_page_dmarc_forensic_retention_warning),
                 style = MaterialTheme.typography.bodySmall,
@@ -881,13 +970,15 @@ private fun DmarcGroup(
             Ids.ADMIN_MAIL_DMARC_SAVE_BUTTON,
             stringResource(R.string.admin_mail_page_dmarc_save),
             faunaGate("fauna.bridges.put_dmarc_policy", enabled = !working),
+            draft = { drafts.answer(listOf(aggregateRetention, forensicRetention)) },
+            onRefused = drafts.onRefused,
         ) {
             onSave(
                 initial.copy(
                     rufPublish = rufPublish,
                     foMode = foMode,
-                    aggregateRetentionDays = parseCount(aggregateRetention) ?: initial.aggregateRetentionDays,
-                    forensicRetentionDays = parseCount(forensicRetention) ?: initial.forensicRetentionDays,
+                    aggregateRetentionDays = drafts.count(aggregateRetention),
+                    forensicRetentionDays = drafts.count(forensicRetention),
                     outboundAggregateEnabled = outboundAggregate,
                 ),
             )
@@ -898,15 +989,18 @@ private fun DmarcGroup(
 /**
  * The deployment's own Microsoft app registration for the Outlook import
  * (`mailbox-migration.md` § Microsoft sign-in, *An admin-supplied
- * registration*). The two drafts go out as typed; the shared machine checks
- * them (both blank clears) and refuses a bad pair onto the error banner before
- * any round trip.
+ * registration*). The save is painted from the shared pair check
+ * (`microsoft_draft_possibility`; both blank clears) and asks it again at the
+ * press, refusing a bad pair onto the error banner before any round trip; a
+ * good pair goes out as typed.
  */
 @Composable
 private fun MicrosoftGroup(
     initial: MicrosoftRegistrationView,
     working: Boolean,
     onSave: (clientId: String, tenant: String) -> Unit,
+    microsoftDraft: (clientId: String, tenant: String) -> Possibility,
+    onRefused: (String) -> Unit,
 ) {
     var clientId by remember(initial) { mutableStateOf(initial.clientId) }
     var tenant by remember(initial) { mutableStateOf(initial.tenant) }
@@ -934,6 +1028,8 @@ private fun MicrosoftGroup(
             Ids.ADMIN_MAIL_MICROSOFT_SAVE_BUTTON,
             stringResource(R.string.admin_mail_page_microsoft_save),
             faunaGate("fauna.bridges.set_microsoft_registration", enabled = !working),
+            draft = { microsoftDraft(clientId, tenant) },
+            onRefused = onRefused,
         ) {
             onSave(clientId, tenant)
         }
@@ -1000,7 +1096,18 @@ private fun MultilineField(label: String, subtitle: String?, value: String, onCh
 }
 
 @Composable
-private fun ToggleRow(label: String, subtitle: String?, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit, testTag: String, state: String? = null) {
+private fun ToggleRow(
+    label: String,
+    subtitle: String?,
+    checked: Boolean,
+    enabled: Boolean,
+    onChange: (Boolean) -> Unit,
+    testTag: String,
+    state: String? = null,
+    // The reason a blocked commit toggle paints, published as its automation
+    // `reason` beside its `state` ([paintedReason]).
+    reason: String? = null,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -1016,9 +1123,7 @@ private fun ToggleRow(label: String, subtitle: String?, checked: Boolean, enable
             checked = checked,
             onCheckedChange = onChange,
             enabled = enabled,
-            modifier = Modifier.testTag(testTag).let { m ->
-                if (state != null) m.semantics { stateDescription = state } else m
-            },
+            modifier = Modifier.testTag(testTag).paintedReason(reason, state),
         )
     }
 }
@@ -1046,11 +1151,41 @@ internal fun SelectField(label: String, options: List<Pair<String, String>>, sel
 }
 
 /**
- * The six policy groups' shared commit button.
+ * The policy groups' draft plumbing: the shared parsers, the shared
+ * `knobs_draft_possibility` and the page's refusal line, handed to every group
+ * as one value. [count]/[countU64] parse a draft the group's [answer] has
+ * already admitted — the same `parse_count` family the answer runs — so they
+ * never fall back to a stored value.
+ */
+private class MailDrafts(
+    val parseCount: (String) -> UInt?,
+    val parseCountU64: (String) -> ULong?,
+    private val knobsDraft: (List<String>, List<String>, List<String>) -> Possibility,
+    val onRefused: (String) -> Unit,
+    // The policy read's write answer (`MailPolicyMachine::write_possibility`),
+    // folded FIRST into every group's [answer]: a page still loading says so
+    // before any draft complaint.
+    val write: Possibility,
+) {
+    fun answer(
+        counts: List<String>,
+        countsU64: List<String> = emptyList(),
+        lists: List<String> = emptyList(),
+    ): Possibility = write and knobsDraft(counts, countsU64, lists)
+
+    val count: (String) -> UInt = { checkNotNull(parseCount(it)) { "a draft the save admitted must parse" } }
+    val countU64: (String) -> ULong = { checkNotNull(parseCountU64(it)) { "a draft the save admitted must parse" } }
+}
+
+/**
+ * The policy groups' shared commit button, painted from the group's draft
+ * answer folded with its offline gate, and asking the same answer again at the
+ * press: a blocked draft is refused with its reason on the page's
+ * `error-message` (via [onRefused]) and nothing is saved.
  *
  * ⚠ It takes a [FaunaGateVerdict] rather than calling [faunaGate] itself, and
  * that is the point: each group full-PUTs a DIFFERENT policy sub-struct, so the
- * six call sites issue six different wire kinds. A `faunaGate(kind)` in here
+ * call sites issue different wire kinds. A `faunaGate(kind)` in here
  * would be handed a variable, which `check-offline-gate-kinds.py` cannot
  * distinguish from the computed kind it must refuse — so the kind literal stays
  * at the call site where the reader (and the checker) can see which gesture it
@@ -1058,11 +1193,27 @@ internal fun SelectField(label: String, options: List<Pair<String, String>>, sel
  * stops a call site rendering the button and forgetting its reason.
  */
 @Composable
-private fun SaveButton(testTag: String, label: String, gate: FaunaGateVerdict, onClick: () -> Unit) {
+private fun SaveButton(
+    testTag: String,
+    label: String,
+    gate: FaunaGateVerdict,
+    draft: () -> Possibility,
+    onRefused: (String) -> Unit,
+    onClick: () -> Unit,
+) {
+    val context = LocalContext.current
+    val verdict = faunaFormGate(draft(), gate)
     Button(
-        onClick = onClick,
-        enabled = gate.enabled,
-        modifier = Modifier.fillMaxWidth().testTag(testTag),
+        onClick = {
+            val refusal = formRefusal(context, draft())
+            if (refusal != null) {
+                refusal.reason?.let(onRefused)
+            } else {
+                onClick()
+            }
+        },
+        enabled = verdict.enabled,
+        modifier = Modifier.fillMaxWidth().testTag(testTag).paintedReason(verdict.reason),
     ) { Text(label) }
-    DisabledControlReasonText(gate.reason)
+    DisabledControlReasonText(verdict.reason)
 }

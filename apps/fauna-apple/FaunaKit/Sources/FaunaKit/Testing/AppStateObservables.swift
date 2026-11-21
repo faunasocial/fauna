@@ -379,6 +379,11 @@ public enum AppStateObservables {
                 "peer_id": c.peerId,
                 "status": c.status,
                 "handle": NSNull(),
+                // The row's carried home (`ContactItem.home_nest_url`; null =
+                // this nest), so a profile opened from the row with the wrong
+                // home is told apart from a roster that never had one (e2e
+                // convention 6).
+                "home_nest_url": c.homeNestUrl as Any? ?? NSNull(),
             ] as [String: Any]
         }
 

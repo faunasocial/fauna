@@ -17,9 +17,11 @@ import com.fauna.app.core.foldContactAskFailed
 import com.fauna.app.core.foldContactAsked
 import com.fauna.app.core.foldKnockReply
 import com.fauna.app.ui.navigation.decodeProfileHome
+import com.fauna.app.ui.util.answerRefusal
 import com.fauna.ffi.accountDisplayHandle
 import com.fauna.ffi.actorHome
 import com.fauna.ffi.actorIdFromSecret
+import com.fauna.ffi.readPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,6 +29,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 
 /**
  * The Profile shell's identity, for **either** the viewer's own profile (SELF,
@@ -143,10 +147,31 @@ class ProfileVM @Inject constructor(
     private val _unfollowArmed = MutableStateFlow(false)
     val unfollowArmed: StateFlow<Boolean> = _unfollowArmed.asStateFlow()
 
+    /** Where the open-time `status.get` read stands (tui's `follow_read`) —
+     *  `FAILED` when it threw, which [followStatus] alone cannot tell from
+     *  "not answered yet". */
+    private var followRead = ReadState.PENDING
+
+    private val _followAnswer = MutableStateFlow(readPossibility(ReadState.PENDING))
+
+    /**
+     * Whether `profile-follow-button` can be pressed now (`profile.md`
+     * § Errors & edge cases, *Unread state is not possible*; tui's
+     * `follow_answer`): only once the page knows which way the press goes —
+     * the viewer's own press this open, or a status read that answered.
+     * Before it blocked still loading, after a failed read blocked
+     * load-failed, so a press never subscribes again to an author the viewer
+     * already follows. [follow] asks it again.
+     */
+    val followAnswer: StateFlow<Possibility> = _followAnswer.asStateFlow()
+
     private fun repaintFollowing() {
         _following.value = followFlip
             ?: followStatus?.let { com.fauna.ffi.isFollowing(it.tier, it.followPending) }
             ?: false
+        _followAnswer.value = readPossibility(
+            if (followFlip != null || followStatus != null) ReadState.RESOLVED else followRead,
+        )
     }
 
     /** True while a [follow] round-trip is in flight (disables the follow button). */
@@ -164,6 +189,13 @@ class ProfileVM @Inject constructor(
      *  already blocks (mirrors tui's `is_blocked: Option<bool>`). */
     private val _blockKnown = MutableStateFlow(false)
     val blockKnown: StateFlow<Boolean> = _blockKnown.asStateFlow()
+
+    private val _blockAnswer = MutableStateFlow(readPossibility(ReadState.PENDING))
+
+    /** Whether `profile-block-button` can be pressed now (tui's `block_answer`,
+     *  `Possibility::once_read`): blocked still loading until [blockKnown] —
+     *  a dead toggle that says why. [toggleBlock] asks it again. */
+    val blockAnswer: StateFlow<Possibility> = _blockAnswer.asStateFlow()
 
     /** The viewer's own press has decided [blocked] for this open: a late
      *  open-time read must not rewind it. */
@@ -333,8 +365,13 @@ class ProfileVM @Inject constructor(
     fun refreshFollowStatus() {
         val hex = targetActorId ?: return
         viewModelScope.launch {
-            val status = runCatching { api.subscriptionStatus(hex) }.getOrNull() ?: return@launch
-            followStatus = status
+            val status = runCatching { api.subscriptionStatus(hex) }.getOrNull()
+            if (status == null) {
+                followRead = ReadState.FAILED
+            } else {
+                followRead = ReadState.RESOLVED
+                followStatus = status
+            }
             repaintFollowing()
         }
     }
@@ -354,6 +391,10 @@ class ProfileVM @Inject constructor(
      */
     fun follow() {
         val hex = targetActorId ?: return
+        answerRefusal(context, _followAnswer.value)?.let {
+            errorMessage.value = it.reason
+            return
+        }
         val home = _actorHomeSlot.value
         val leaving = _following.value
         if (leaving && com.fauna.ffi.unfollowEndsPaidTier(followStatus?.tier) && !_unfollowArmed.value) {
@@ -398,19 +439,31 @@ class ProfileVM @Inject constructor(
                 // peer-id matches this actor (case-insensitive hex). Single-sourced so
                 // the toggle state can't drift per-app. contacts.md § Where logic lives.
                 api.fetchContacts(hex).any { com.fauna.ffi.contactRowBlocksActor(it.peerId, it.status, hex) }
-            }.getOrDefault(false))
+            }.getOrNull())
         }
     }
 
     /**
-     * Fold the open-time edge read in: it enables the toggle (a failed read lands as
-     * not-blocked, so the toggle never stays stuck off) and sets [blocked] — unless
-     * the viewer's own press already authored the edge, which a read issued before
-     * it must not rewind. Mirrors linux `apply_block_read`.
+     * Fold the open-time edge read in: it enables the toggle and sets [blocked] —
+     * unless the viewer's own press already authored the edge, which a read issued
+     * before it must not rewind. `null` is a failed read: the toggle stays blocked
+     * with `common.load_failed`, never a guessed not-blocked edge (`profile.md`
+     * § Errors & edge cases, *Unread state is not possible*). Mirrors linux
+     * `apply_block_read`.
      */
-    internal fun applyBlockRead(isBlocked: Boolean) {
-        if (!blockUserAuthored) _blocked.value = isBlocked
+    internal fun applyBlockRead(isBlocked: Boolean?) {
+        if (blockUserAuthored) {
+            _blockKnown.value = true
+            _blockAnswer.value = readPossibility(ReadState.RESOLVED)
+            return
+        }
+        if (isBlocked == null) {
+            _blockAnswer.value = readPossibility(ReadState.FAILED)
+            return
+        }
+        _blocked.value = isBlocked
         _blockKnown.value = true
+        _blockAnswer.value = readPossibility(ReadState.RESOLVED)
     }
 
     /**
@@ -423,7 +476,10 @@ class ProfileVM @Inject constructor(
      */
     fun toggleBlock() {
         val hex = targetActorId ?: return
-        if (!_blockKnown.value) return
+        answerRefusal(context, _blockAnswer.value)?.let {
+            errorMessage.value = it.reason
+            return
+        }
         val wasBlocked = _blocked.value
         viewModelScope.launch {
             errorMessage.value = null

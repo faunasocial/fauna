@@ -527,9 +527,10 @@ public sealed partial class MediaPage : Page
         VersionsBorder.Visibility = followed ? Visibility.Collapsed : Visibility.Visible;
         DeleteBtn.Visibility = followed ? Visibility.Collapsed : Visibility.Visible;
         DownloadBtn.Visibility = followed ? Visibility.Visible : Visibility.Collapsed;
-        // share-link-button: absent (Collapsed), never inert, on an ineligible file —
-        // the shared verdict, already false in a followed scope.
-        ShareLinkBtn.Visibility = item.ShareLinkEligible ? Visibility.Visible : Visibility.Collapsed;
+        // share-link-button: painted from the shared share_link_possibility answer —
+        // absent (Collapsed), never inert, on an ineligible file (the verdict is
+        // already false in a followed scope).
+        ShareLinkBtn.ApplyPossibility(item.ShareLinkAnswer);
         if (followed) return;
 
         await LoadVersions(item);
@@ -954,6 +955,7 @@ public sealed partial class MediaPage : Page
         // The machine refuses an ineligible or unknown file (a no-op), so no
         // surface follows for one.
         if (_machine is null || _detailItem is not { } item) return;
+        if (!item.ShareLinkAnswer.IsPossible) return;
         _machine.OpenShareCreate(item.Folder, item.Path);
         RenderPage();
     }

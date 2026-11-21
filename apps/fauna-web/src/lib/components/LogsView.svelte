@@ -21,18 +21,36 @@
   // what `tracing` captured; call sites are forbidden from logging message
   // plaintext or secrets. This layer enforces nothing.
   import { t } from '#lib/i18n/strings';
-  import { logFilterEntries, logRenderedText, logRows, type LogEntry } from '#lib/wasm';
+  import {
+    logFilterEntries,
+    logRenderedText,
+    logRingActionPossibility,
+    logRows,
+    type LogEntry,
+  } from '#lib/wasm';
   import { IDS } from '#lib/generated/uiIds';
   import { utcOffsetSeconds } from '#lib/utcOffset';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { askPossibility, formGate } from '#lib/form-gate';
+  import { DEVICE_LOGS_EMPTY_KEY, clearRing, copyRing } from '#lib/ring-actions';
+  import { copyAndReport } from '#lib/copy-confirm';
 
   let {
     entries = [],
     showClear = false,
     onClear,
+    emptyKey = DEVICE_LOGS_EMPTY_KEY,
+    error = $bindable(''),
   }: {
     entries: LogEntry[];
     showClear?: boolean;
     onClear?: () => void;
+    /** The page's own empty line — also the reason copy/clear are blocked on
+     *  an empty ring (`logs.empty` / `admin.logs_page.empty`). */
+    emptyKey?: string;
+    /** The host page's `error-message` text: a refused action or a failed
+     *  clipboard write is said there. */
+    error?: string;
   } = $props();
 
   // Filter options: `value` is the stable English token the e2e `select` passes
@@ -69,14 +87,47 @@
   // Rendered `log-entry` rows, **newest-first** (the shared `rows`).
   let rows = $derived(filtered.length === 0 ? [] : logRows(filtered, tzOffsetSecs));
 
-  async function copy() {
-    const text = filtered.length === 0 ? '' : logRenderedText(filtered, tzOffsetSecs);
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // Clipboard is unavailable in a headless browser; the affordance is still
-      // present + actuable (the e2e asserts the button, not the OS buffer).
+  // `log-copy-button` / `log-clear-button` paint from the shared
+  // `ring_action_possibility` over the entries the filter shows: blocked by the
+  // page's own empty line on an empty ring (that line is already on screen
+  // below, so the reason rides only the buttons' `title`, web's
+  // disabled-with-a-reason idiom); unreadable before wasm → disabled. Both
+  // handlers ask the same answer and refuse on `error-message`.
+  const ringAnswer = () => logRingActionPossibility(filtered.length, emptyKey);
+  let ringGate = $derived.by(() => {
+    void filtered;
+    return formGate(askPossibility(ringAnswer));
+  });
+
+  // What the last confirmed copy put on the clipboard — "Copied!" and the
+  // `data-copied` value (the `account-actor-id-copy-btn` contract). The error
+  // this view last said, so a later success clears only its own line.
+  let copied = $state<string | null>(null);
+  let ownError = '';
+
+  function say(text: string) {
+    if (text) {
+      error = text;
+    } else if (ownError && error === ownError) {
+      error = '';
     }
+    ownError = text;
+  }
+
+  async function copy() {
+    const result = await copyRing(
+      ringAnswer,
+      () => logRenderedText(filtered, tzOffsetSecs),
+      copyAndReport,
+    );
+    copied = result.copied;
+    say(result.error);
+  }
+
+  function clear() {
+    const refusal = clearRing(ringAnswer, () => onClear?.());
+    if (refusal === null) copied = null;
+    say(refusal ?? '');
   }
 </script>
 
@@ -89,16 +140,29 @@
       {/each}
     </select>
   </label>
-  <button class="btn" data-testid={IDS.LOG_COPY_BUTTON} onclick={copy}>{t.logs.copy_button}</button>
+  <button
+    class="btn"
+    data-testid={IDS.LOG_COPY_BUTTON}
+    data-copied={copied ?? undefined}
+    disabled={ringGate.disabled}
+    title={ringGate.reason || undefined}
+    onclick={copy}>{copied !== null ? t.common.copied : t.logs.copy_button}</button
+  >
   {#if showClear}
-    <button class="btn danger" data-testid={IDS.LOG_CLEAR_BUTTON} onclick={() => onClear?.()}>
+    <button
+      class="btn danger"
+      data-testid={IDS.LOG_CLEAR_BUTTON}
+      disabled={ringGate.disabled}
+      title={ringGate.reason || undefined}
+      onclick={clear}
+    >
       {t.logs.clear_button}
     </button>
   {/if}
 </div>
 
 {#if rows.length === 0}
-  <p class="muted empty">{t.logs.empty}</p>
+  <p class="muted empty">{resolveLocalized({ key: emptyKey })}</p>
 {:else}
   <ul class="log-list">
     {#each rows as row, i (i + '-' + row.line)}

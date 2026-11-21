@@ -3,13 +3,11 @@ package com.fauna.app.ui.screen
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -17,8 +15,17 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.fauna.app.R
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
+import com.fauna.ffi.recoveryStolenEntryPossibility
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The locked launch surface, ui.yaml page `launch_account_locked`
@@ -75,15 +82,17 @@ fun LaunchAccountLockedScreen(
  * the kit, the type-to-confirm `SUCCEED`, the irreversible press — composed of
  * existing elements only (`recovery-entry-phrase-field`,
  * `identity-stolen-confirm-field`, `identity-stolen-button`,
- * `recovery-entry-back-button`, `error-message`). The gate starts unarmed and
- * is re-checked in the action arm ([com.fauna.app.ui.viewmodel.AppLaunchVM.succeedStolenLocked]);
- * nothing typed here is persisted.
+ * `recovery-entry-back-button`, `error-message`). The press is painted from
+ * the shared draft answer (`recovery_stolen_entry_possibility`: the kit, then
+ * the word — `ui/README.md` § Offer only what is possible, rule 4's form case)
+ * and re-asks it in the action arm
+ * ([com.fauna.app.ui.viewmodel.AppLaunchVM.succeedStolenLocked]); nothing
+ * typed here is persisted.
  */
 @Composable
 fun IdentityStolenEntryScreen(
     phrase: String,
     confirm: String,
-    confirmWord: String,
     busy: Boolean,
     error: String?,
     onPhraseChange: (String) -> Unit,
@@ -91,6 +100,9 @@ fun IdentityStolenEntryScreen(
     onSucceed: () -> Unit,
     onBack: () -> Unit,
 ) {
+    val stolenAnswer = remember(phrase, confirm) {
+        askForm { recoveryStolenEntryPossibility(phrase, confirm) }
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -129,10 +141,11 @@ fun IdentityStolenEntryScreen(
         }
         Button(
             onClick = onSucceed,
-            enabled = !busy && confirm == confirmWord,
+            enabled = !busy && stolenAnswer.isPossible,
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
             modifier = Modifier.fillMaxWidth().testTag(Ids.IDENTITY_STOLEN_BUTTON),
         ) { Text(stringResource(R.string.settings_recovery_kit_stolen)) }
+        DisabledControlReasonText(localized(stolenAnswer.blockedReason))
         OutlinedButton(
             onClick = onBack,
             enabled = !busy,

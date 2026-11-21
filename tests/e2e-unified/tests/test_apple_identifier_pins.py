@@ -1167,6 +1167,62 @@ def test_the_photo_library_purpose_string_names_the_nest():
     assert "nest" in text and "node" not in text, text
 
 
+#: The property list `bins/fauna-sync-agent/build.rs` embeds in the macOS agent.
+SYNC_AGENT_INFO_PLIST = "bins/fauna-sync-agent/macos/Info.plist"
+
+
+def test_the_embedded_agent_plist_names_the_agent_by_its_launch_agent_label():
+    """The embedded `CFBundleIdentifier` becomes the agent binary's default
+    code-signing identifier, so its designated requirement names it: it is the
+    LaunchAgent label on purpose, one identifier for the job and the code. The
+    name is the binary's own, the one macOS showed before the plist existed."""
+    plist = _read_plist(SYNC_AGENT_INFO_PLIST)
+    assert plist["CFBundleIdentifier"] == SYNC_AGENT_LABEL
+    assert plist["CFBundleName"] == "fauna-sync-agent"
+    build = _read("bins/fauna-sync-agent/build.rs")
+    assert '"macos"' in build and "__TEXT,__info_plist" in build
+    assert 'join("macos")' in build and 'join("Info.plist")' in build
+
+
+#: Every Apple plist whose app binds the same-account peer leg, which dials
+#: private-range addresses and so meets the Local Network prompt (iOS 14+,
+#: macOS 15+): account-sync-plane.md § Implementation status today.
+LOCAL_NETWORK_PLISTS = (
+    IOS_INFO_PLIST,
+    KIDS_INFO_PLIST,
+    "apps/fauna-apple/Fauna-macOS/Resources/Info.plist",
+    # The agent's own plist, linked into its __TEXT,__info_plist section by its
+    # build script: the agent binds the leg while it hosts the store, and macOS
+    # attributes a launchd agent's prompt to the agent binary.
+    SYNC_AGENT_INFO_PLIST,
+)
+
+
+def _inventory_local_network_string() -> str:
+    """The approved wording, read from the public-texts inventory entry's claim."""
+    import tomllib
+
+    with open(os.path.join(REPO, "docs/public-texts/inventory.toml"), "rb") as f:
+        inventory = tomllib.load(f)
+    (entry,) = [t for t in inventory["text"] if t["id"] == "apple-permission-strings"]
+    for claim in entry["claims"]:
+        if "NSLocalNetworkUsageDescription" in claim:
+            found = re.search(r"— '(.+?)' —", claim)
+            assert found, f"the inventory claim no longer quotes the string: {claim}"
+            return found.group(1)
+    raise AssertionError("apple-permission-strings names no NSLocalNetworkUsageDescription")
+
+
+@pytest.mark.parametrize("rel", LOCAL_NETWORK_PLISTS)
+def test_every_peer_leg_app_explains_the_local_network_prompt(rel):
+    """Without the key the prompt shows no reason, and App Review may reject the build."""
+    text = _read_plist(rel).get("NSLocalNetworkUsageDescription")
+    assert text == _inventory_local_network_string(), (
+        f"{rel} NSLocalNetworkUsageDescription is {text!r}, not the inventory's "
+        f"approved wording (docs/public-texts/inventory.toml, apple-permission-strings)"
+    )
+
+
 def test_the_ios_app_icon_is_one_opaque_1024_image():
     import json
 

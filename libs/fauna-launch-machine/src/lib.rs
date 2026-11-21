@@ -33,7 +33,7 @@ pub mod render_text;
 pub mod snapshots;
 pub(crate) mod state;
 
-pub use machine::LaunchMachine;
+pub use machine::{LAUNCH_ATTEMPT_BOUND, LaunchMachine};
 
 pub use dial::resolved_dial_url;
 #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
@@ -58,7 +58,7 @@ pub use snapshots::*;
 pub use observer::NullObserver;
 
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-pub use connector::MockAuthConnector;
+pub use connector::{MockAuthConnector, MockReplyDelay};
 #[cfg(any(test, debug_assertions, feature = "test-observer"))]
 pub use observer::CountingObserver;
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]

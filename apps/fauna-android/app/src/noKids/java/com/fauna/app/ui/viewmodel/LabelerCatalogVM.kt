@@ -10,6 +10,7 @@ import kotlinx.coroutines.launch
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogMachine
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogObserver
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogSnapshot
+import uniffi.fauna_core.Possibility
 import javax.inject.Inject
 
 /**
@@ -67,12 +68,14 @@ class LabelerCatalogVM @Inject constructor(
     }
 
     /**
-     * Whether the catalog row at [index] paints its subscribe button enabled —
-     * the shared gate (`LabelerCatalogMachine::subscribe_enabled`), read fresh
-     * on each recomposition the [snapshot] drives. No machine yet → false.
+     * The catalog row at [index]'s subscribe answer, with its reason — the
+     * shared `LabelerCatalogMachine::subscribe_possibility` (blocked with the
+     * refusal's reason once this row's inspect failed), read fresh on each
+     * recomposition the [snapshot] drives and asked again by the press. No
+     * machine yet → no rows (`Absent`).
      */
-    fun subscribeEnabled(index: Int): Boolean =
-        machine?.subscribeEnabled(index.toUInt()) ?: false
+    fun subscribePossibility(index: Int): Possibility =
+        machine?.subscribePossibility(index.toUInt()) ?: Possibility.Absent
 
     /** Subscribe to the catalog row at [index], then refresh. */
     fun subscribe(index: Int) {

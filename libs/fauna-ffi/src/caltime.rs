@@ -206,6 +206,18 @@ pub fn calendar_pan_step(mode: FfiCalendarViewMode) -> FfiPanStep {
     }
 }
 
+/// Whether the pan pair (`events-prev-month` / `events-next-month`) can do
+/// anything in `mode` — `fauna_core::caltime::pan_possibility`, the pair's one
+/// predicate (`ui/README.md` § Offer only what is possible, rules 2 and 6):
+/// blocked with `events.pan_none_in_agenda` in agenda, possible otherwise. A
+/// native paints both buttons from it (disabled, the reason within eyeshot)
+/// and its pan handler asks it again and refuses with the same reason before
+/// reading [`calendar_pan_step`].
+#[uniffi::export]
+pub fn calendar_pan_possibility(mode: FfiCalendarViewMode) -> fauna_core::possibility::Possibility {
+    fauna_core::caltime::pan_possibility(mode.into())
+}
+
 /// The mode's cross-app wire spelling — the string the automation surface
 /// reports and view state persists (`calendar-view-{wire}` element ids are
 /// built from it).
@@ -338,6 +350,24 @@ mod tests {
             calendar_pan_step(FfiCalendarViewMode::Agenda),
             FfiPanStep::None
         );
+    }
+
+    /// The pair's predicate crosses the boundary: blocked with its reason in
+    /// agenda — where the step is `None` — and possible everywhere else.
+    #[test]
+    fn the_pan_possibility_blocks_agenda_with_its_reason() {
+        use fauna_core::possibility::Possibility;
+        assert!(matches!(
+            calendar_pan_possibility(FfiCalendarViewMode::Agenda),
+            Possibility::Blocked { .. }
+        ));
+        for mode in [
+            FfiCalendarViewMode::Month,
+            FfiCalendarViewMode::Week,
+            FfiCalendarViewMode::Day,
+        ] {
+            assert_eq!(calendar_pan_possibility(mode), Possibility::Possible);
+        }
     }
 
     /// The boundary reports the shared wire word — `agenda`, never the `list`

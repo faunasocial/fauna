@@ -215,8 +215,6 @@ fn machine_signed_in_as_returning_admin(handle: &str) -> Arc<OnboardingMachine> 
             args: Default::default(),
         },
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         ..Default::default()
     });
     m

@@ -257,9 +257,21 @@ def _variant_build_is_fresh(built: Path, stamp: Path, newest_source_mtime) -> bo
     mtime churn (every rebase). `built` is an existence check; `newest_source_mtime`
     is a callable so the libs/ scan is skipped when the files alone already decide.
     """
-    if not built.exists() or not stamp.exists():
-        return False
-    return newest_source_mtime() <= stamp.stat().st_mtime
+    reason = _variant_stale_reason(built, stamp, newest_source_mtime)
+    if reason is not None:
+        _load_build_if_stale().note_rebuild(stamp.name, reason)
+    return reason is None
+
+
+def _variant_stale_reason(built: Path, stamp: Path, newest_source_mtime) -> str | None:
+    """Why `_variant_build_is_fresh` would build — `None` when it would not —
+    in the words of build-if-stale's own gate (`note_rebuild`)."""
+    for path in (built, stamp):
+        if not path.exists():
+            return f"missing {path}"
+    if newest_source_mtime() > stamp.stat().st_mtime:
+        return "stale (a source newer than the stamp)"
+    return None
 
 
 def build_node(release: bool = False, features: str = "test-hooks,nostr") -> str:

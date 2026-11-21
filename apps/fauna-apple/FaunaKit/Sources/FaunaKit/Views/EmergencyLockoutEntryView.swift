@@ -21,8 +21,6 @@ public struct EmergencyLockoutEntryView: View {
     @State private var account = ""
     @State private var confirm = ""
     @State private var submitting = false
-    /// The shared word: gates the button here AND in the machine.
-    private let confirmWord = sessionsLockoutConfirmWord()
 
     public init(vm: OnboardingVM) {
         self.vm = vm
@@ -91,16 +89,23 @@ public struct EmergencyLockoutEntryView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.red)
                         .controlSize(.large)
-                        .disabled(!enabled)
                         .accessibilityIdentifier(Ids.sessionsLockoutButton)
-                        .automationActivate(Ids.sessionsLockoutButton, isEnabled: { enabled }) { submit() }
+                        .automationActivate(Ids.sessionsLockoutButton) { submit() }
+                        .faunaPossible(answer)
                 }
+                FaunaPossibilityReason(answer)
             }
             .padding()
         }
     }
 
-    private var enabled: Bool { !submitting && confirm == confirmWord }
+    /// `sessions-lockout-button`'s one answer — secret, account, then the
+    /// confirm word
+    /// (``OnboardingVM/emergencyLockoutAnswer(secret:account:confirm:submitting:)``);
+    /// the machine's `submit_emergency_lockout` runs the same checks.
+    private var answer: Possibility {
+        vm.emergencyLockoutAnswer(secret: secret, account: account, confirm: confirm, submitting: submitting)
+    }
 
     /// Referenced by both the `Button` and its `automationActivate` so the two
     /// never diverge (apple-e2e-automation.md § Resolved design point).

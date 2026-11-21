@@ -46,6 +46,7 @@
 //! (`super::devices::wire_mls_query`) — un-wired, `DevicesMachine` drops every
 //! member row and nothing painted here can appear.
 
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_devices_machine::{ConflictSummary, FolderSummary};
 use fauna_folders_machine::{
     FolderWizardSnapshot, FolderWizardStep, SubmitPhase, conflict_badge_label,
@@ -205,8 +206,8 @@ pub struct FoldersUiState {
     ///
     /// ⚠ Read **per page-visit off the key-bearing config**, never carried on the
     /// `DevicesMachine` snapshot, which is keyless and cannot answer it
-    /// (`ui/folders.md:59`). `false` gates `folder-webdav-toggle` DISABLED with
-    /// a "set up mail first" hint: serving seals the `WebdavKeysBlob` under the
+    /// (`ui/folders.md:59`). `false` gates `folder-webdav-toggle` DISABLED
+    /// "still loading" — the connect-time mail-key mint in flight: serving seals the `WebdavKeysBlob` under the
     /// MSEK, and `serve_set` commits the nest flag *before* it re-provisions, so
     /// an MSEK-less click would leave the set served-but-blobless. Disabling makes
     /// that state unreachable rather than merely reported.
@@ -218,6 +219,18 @@ pub struct FoldersUiState {
     /// tier first" hint, since there is nothing to paywall to
     /// (`ui/folders.md:60`).
     pub own_tiers: Vec<String>,
+    /// Where the custody read behind [`Self::can_serve_webdav`] stands — the
+    /// toggle's answer is `webdav_serve_possibility(webdav_read, can_serve_webdav)`.
+    pub webdav_read: ReadState,
+    /// A folders hydrate committed the rows and the custody read is owed: the
+    /// read runs as its own op after the rows are painted
+    /// ([`crate::settings::take_folders_custody_op`]), so the toggle shows
+    /// "still loading" while it is out (`folders.md` § Errors & edge cases,
+    /// *Own-tier and mail gates*) rather than the page waiting on it.
+    pub custody_read_owed: bool,
+    /// Where the tier read behind [`Self::own_tiers`] stands — the paywall
+    /// select's answer is `own_tiers_possibility(own_tiers_read, …)`.
+    pub own_tiers_read: ReadState,
     /// The owner-side "Shared with" roster for the ONE expanded row —
     /// `fauna.folders.members.list_actors` as returned, **unfiltered**. The
     /// `role == "member"` filter is applied at render through the single shared
@@ -416,31 +429,143 @@ fn channel_id_of(mls_group_id: Option<String>) -> Result<Option<[u8; 32]>, Strin
 
 /// Whether this actor may serve a set over WebDAV — the shared
 /// `owner_can_serve_webdav` ("the account's mail custody holds an MSEK"), read
-/// through the session's account-store handle. No handle yet, or a failed
-/// read, answers `false`, the fail-safe direction: withholding the control is
-/// recoverable, offering one whose flip commits a nest flag and then fails is
-/// not (the page re-reads on its next hydrate).
+/// through the session's account-store handle, with where that read stands:
+/// no handle yet is `Pending` (nothing has been read), a failed read `Failed`
+/// — and an answered read with no MSEK is the connect-time mint in flight,
+/// the same wait (`fauna_client_folders::webdav_provision::webdav_serve_possibility`). The
+/// bool is `false` whenever the read did not answer, so nothing reads it as a
+/// yes; the toggle is painted from the possibility, never the bool alone.
 pub(super) async fn load_can_serve_webdav(
     store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
-) -> bool {
+) -> (ReadState, bool) {
     let Some(handle) = store else {
-        return false;
+        return (ReadState::Pending, false);
     };
-    fauna_client_folders::webdav_provision::owner_can_serve_webdav(&handle)
-        .await
-        .unwrap_or(false)
+    match fauna_client_folders::webdav_provision::owner_can_serve_webdav(&handle).await {
+        Ok(holds) => (ReadState::Resolved, holds),
+        Err(e) => {
+            tracing::warn!(target: "fauna_tui", "folders: mail custody read failed: {e}");
+            (ReadState::Failed, false)
+        }
+    }
 }
 
 /// The creator's own subscription tier names, ascending by rank — the
-/// `folder-paywall-tier-select` option set. Fail-safe empty (a failed read
-/// renders the select disabled with the "create a tier first" hint rather than
-/// offering tiers that may not exist).
-pub(super) async fn load_own_tiers(nest: std::sync::Arc<fauna_client::NestClient>) -> Vec<String> {
-    fauna_client_subscriptions::SubscriptionsClient::new(nest)
+/// `folder-paywall-tier-select` option set — with where the read stands. A
+/// failed read is `Failed` with no names: the select is painted from
+/// `fauna_client_subscriptions::own_tiers::own_tiers_possibility`, which says
+/// the read failed rather than "create a tier first".
+pub(super) async fn load_own_tiers(
+    nest: std::sync::Arc<fauna_client::NestClient>,
+) -> (ReadState, Vec<String>) {
+    match fauna_client_subscriptions::SubscriptionsClient::new(nest)
         .tiers_list()
         .await
-        .map(|tiers| tiers.into_iter().map(|t| t.name).collect())
-        .unwrap_or_default()
+    {
+        Ok(tiers) => (
+            ReadState::Resolved,
+            tiers.into_iter().map(|t| t.name).collect(),
+        ),
+        Err(e) => {
+            tracing::warn!(target: "fauna_tui", "folders: own tiers read failed: {e}");
+            (ReadState::Failed, Vec::new())
+        }
+    }
+}
+
+/// `folder-webdav-toggle`'s answer — the shared
+/// `webdav_serve_possibility` over the page's custody read.
+pub(crate) fn webdav_possibility(ui: &FoldersUiState) -> Possibility {
+    fauna_client_folders::webdav_provision::webdav_serve_possibility(
+        ui.webdav_read,
+        ui.can_serve_webdav,
+    )
+}
+
+/// `folder-add-button`'s answer (`docs/goal/ui/README.md` § Offer only what is
+/// possible): the wizard opens through the devices machine, so until that
+/// machine exists the control reads "still loading". tui builds the machine
+/// synchronously in `DevicesState::new`, so it records no failed build and
+/// none is claimed here; the paint and the press both ask this one answer.
+pub(crate) fn folder_add_possibility(devices: &super::devices::DevicesState) -> Possibility {
+    if devices.machine.is_some() {
+        Possibility::Possible
+    } else {
+        Possibility::from_read(ReadState::Pending)
+    }
+}
+
+/// `folder-paywall-tier-select`'s answer — the shared own-tier answer over
+/// the page's tier read.
+pub(crate) fn paywall_possibility(ui: &FoldersUiState) -> Possibility {
+    fauna_client_subscriptions::own_tiers::own_tiers_possibility(
+        ui.own_tiers_read,
+        ui.own_tiers.len(),
+        fauna_client_subscriptions::own_tiers::OwnTierUse::Paywall,
+    )
+}
+
+/// The unblocking step a folder row's gate names — the step functions the
+/// shared crates answer beside each gate's possibility
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rule 3; the ruling
+/// is `docs/goal/ui/folders.md` § Errors & edge cases, *Own-tier and mail
+/// gates*). Carried by [`crate::element::Gesture::FoldersStep`], which crosses
+/// pages like `Gesture::OpenSearchResult`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderStep {
+    /// `folder-paywall-step` → the own profile's Tiers tab.
+    Paywall(fauna_client_subscriptions::own_tiers::OwnTierStep),
+    /// `folder-destination-step` → the Backups page.
+    Destination(fauna_client_config::FolderDestinationStep),
+}
+
+/// `folder-paywall-tier-select`'s step, from the same read as
+/// [`paywall_possibility`].
+pub(crate) fn paywall_step(ui: &FoldersUiState) -> Option<FolderStep> {
+    fauna_client_subscriptions::own_tiers::own_tiers_step(ui.own_tiers_read, ui.own_tiers.len())
+        .map(FolderStep::Paywall)
+}
+
+/// The expanded row `name`'s destination read: answered exactly when the
+/// fresh guard names this row (a failed or not-yet-run read leaves it unset,
+/// so it never reads as "no destination").
+fn destination_read(ui: &FoldersUiState, name: &str) -> ReadState {
+    if ui.destination_places_for.as_deref() == Some(name) {
+        ReadState::Resolved
+    } else {
+        ReadState::Pending
+    }
+}
+
+/// The attach pair's answer for row `name` — the shared
+/// `folder_destination_attach_possibility` over the row's destination read.
+pub(crate) fn destination_attach_possibility(ui: &FoldersUiState, name: &str) -> Possibility {
+    fauna_client_config::folder_destination_attach_possibility(
+        destination_read(ui, name),
+        &ui.destination_places,
+    )
+}
+
+/// The attach pair's step for row `name`, from the same inputs.
+pub(crate) fn destination_step(ui: &FoldersUiState, name: &str) -> Option<FolderStep> {
+    fauna_client_config::folder_destination_step(destination_read(ui, name), &ui.destination_places)
+        .map(FolderStep::Destination)
+}
+
+/// Press a folder row's step button: go to the place the reason's step is
+/// taken — the own profile on its Tiers tab, or the Backups page (whose nav
+/// edge re-reads its destination list).
+pub fn go_to_step(app: &mut crate::app::App, step: FolderStep) -> Option<crate::app::PageOp> {
+    use crate::{app::PageOp, pages::Page};
+    match step {
+        FolderStep::Paywall(fauna_client_subscriptions::own_tiers::OwnTierStep::CreateTier) => {
+            let _ = app.apply(Page::Profile);
+            crate::profile::apply_local(app, crate::profile::Action::ShowTiers).map(PageOp::Profile)
+        }
+        FolderStep::Destination(fauna_client_config::FolderDestinationStep::EnrolDestination) => {
+            app.apply(Page::Backups)
+        }
+    }
 }
 
 /// Set a folder's audience — the phase-4 keyless `folders.update` setter.
@@ -1139,12 +1264,15 @@ pub(super) fn folders_elements(
         .labelled(t::DEFAULT_CONFLICT_POLICY),
     );
 
-    els.push(Element::gesture_button(
-        ids::FOLDER_ADD_BUTTON,
-        t::ADD_FOLDER,
-        true,
-        Gesture::Settings(Action::OpenFolderWizard),
-    ));
+    els.push(
+        Element::gesture_button(
+            ids::FOLDER_ADD_BUTTON,
+            t::ADD_FOLDER,
+            true,
+            Gesture::Settings(Action::OpenFolderWizard),
+        )
+        .possible(folder_add_possibility(&state.devices)),
+    );
 
     // The recipient-side "Shared with you" knock list — a page-level section
     // above the set list, not a per-row surface (`ui/folders.md:168`). Only a
@@ -1634,9 +1762,25 @@ fn folder_row_elements(
             // only — coverage is owner-plane state, and the resolver behind
             // the load already refuses a member row. The reserved rails never
             // appear here: the folder list itself excludes `__` sets. The
-            // fresh guard mirrors `device_places_for`, and the section is
-            // absent entirely while the owner has no enrolled destination —
-            // an affordance that cannot work must not paint.
+            // fresh guard mirrors `device_places_for`. While the read has
+            // answered with no enrolled destination the attach pair is absent
+            // and the shared answer's reason paints in its place, beside rule
+            // 3's one-press jump to Backups (`ui/folders.md` § Errors & edge
+            // cases, *Own-tier and mail gates*); an unanswered read paints
+            // nothing here (its failure is the row read's own error).
+            if let Some(step) = destination_step(ui, &fs.name) {
+                let reason = destination_attach_possibility(ui, &fs.name)
+                    .reason()
+                    .map(crate::wizard::localized)
+                    .unwrap_or_default();
+                body.push(Element::label(ids::FOLDER_DESTINATION_HINT, reason));
+                body.push(Element::gesture_button(
+                    ids::FOLDER_DESTINATION_STEP,
+                    t::FOLDER_STEP_OPEN_BACKUPS,
+                    true,
+                    Gesture::FoldersStep(step),
+                ));
+            }
             if ui.destination_places_for.as_deref() == Some(fs.name.as_str())
                 && !ui.destination_places.is_empty()
             {
@@ -1821,16 +1965,21 @@ fn folder_row_elements(
             // rail is never listed here, and the nest refuses serving one —
             // `webdav-server.md` § What the namespace is), in the expanded
             // body (linux's `BuildWebdavToggleRow` placement; the shared e2e
-            // helper reads it on the expanded row). DISABLED, with a "set up
-            // mail first" hint in place of the usual one, while the actor holds
-            // no MSEK — see `FoldersUiState::can_serve_webdav` for why that is
-            // a gate and not a message. `ui/folders.md:59`.
+            // helper reads it on the expanded row). DISABLED, with the
+            // reason in place of the usual hint, while the actor holds no MSEK
+            // — see `FoldersUiState::can_serve_webdav` for why that is a gate
+            // and not a message. `ui/folders.md:59`.
             if !is_member {
-                let hint = if ui.can_serve_webdav {
-                    t::SERVE_WEBDAV_HINT
-                } else {
-                    t::SERVE_WEBDAV_NEEDS_MAIL
-                };
+                // Painted from the shared answer: a custody read that has not
+                // answered — or answered no MSEK, the connect-time mint in
+                // flight — says still loading, a failed one says so
+                // (`ui/folders.md` § Errors & edge cases, *Own-tier and mail
+                // gates*).
+                let answer = webdav_possibility(ui);
+                let hint = answer
+                    .reason()
+                    .map(crate::wizard::localized)
+                    .unwrap_or_else(|| t::SERVE_WEBDAV_HINT.to_string());
                 body.push(
                     Element::checkbox_gesture(
                         ids::FOLDER_WEBDAV_TOGGLE,
@@ -1838,8 +1987,8 @@ fn folder_row_elements(
                         fs.webdav_enabled,
                         Gesture::Settings(Action::ToggleFolderWebdav(i)),
                     )
-                    .enabled(ui.can_serve_webdav)
-                    .labelled(hint)
+                    .possible(answer)
+                    .labelled(hint.clone())
                     .attr("state", if fs.webdav_enabled { "on" } else { "off" }),
                 );
                 // A checkbox's `label` is driver-visible only (the paint is
@@ -1864,6 +2013,11 @@ fn folder_row_elements(
                     options.push(String::new());
                 }
                 options.extend(ui.own_tiers.iter().cloned());
+                // The shared own-tier answer: loading and a failed read are
+                // told apart from "no tier" (`ui/folders.md` § Errors & edge
+                // cases, *Own-tier and mail gates*).
+                let answer = paywall_possibility(ui);
+                let reason = answer.reason().map(crate::wizard::localized);
                 body.push(
                     Element::select(
                         ids::FOLDER_PAYWALL_TIER_SELECT,
@@ -1871,21 +2025,27 @@ fn folder_row_elements(
                         SelectTarget::FolderPaywallTier { row: i },
                         options,
                     )
-                    .enabled(!ui.own_tiers.is_empty())
-                    .labelled(if ui.own_tiers.is_empty() {
-                        t::PAYWALL_TIER_NEEDS_TIER
-                    } else {
-                        t::PAYWALL_TIER
-                    }),
+                    .possible(answer)
+                    .labelled(
+                        reason
+                            .clone()
+                            .unwrap_or_else(|| t::PAYWALL_TIER.to_string()),
+                    ),
                 );
                 // As the website hint above: a select's `label` is
-                // driver-visible only, so the create-a-tier-first hint ALSO
-                // paints as the adjacent line `folder-paywall-hint` names —
-                // present exactly while the select is disabled for want of a tier.
-                if ui.own_tiers.is_empty() {
-                    body.push(Element::label(
-                        ids::FOLDER_PAYWALL_HINT,
-                        t::PAYWALL_TIER_NEEDS_TIER,
+                // driver-visible only, so the blocked reason ALSO paints as
+                // the adjacent line `folder-paywall-hint` names — present
+                // exactly while the select is blocked.
+                if let Some(reason) = reason {
+                    body.push(Element::label(ids::FOLDER_PAYWALL_HINT, reason));
+                }
+                // Rule 3's jump to where a tier is created.
+                if let Some(step) = paywall_step(ui) {
+                    body.push(Element::gesture_button(
+                        ids::FOLDER_PAYWALL_STEP,
+                        t::FOLDER_STEP_OPEN_TIERS,
+                        true,
+                        Gesture::FoldersStep(step),
                     ));
                 }
             }
@@ -2014,18 +2174,24 @@ fn offline_share_elements(state: &crate::offline_share::OfflineShareState) -> Ve
     }
 
     match view.panel {
-        OfflineSharePanel::Initiate => els.push(Element::gesture_button(
-            ids::OFFLINE_SHARE_BEGIN_BUTTON,
-            fs_strings::OFFLINE_SHARE_BEGIN,
-            view.can_begin(),
-            Gesture::Settings(Action::BeginOfflineShare),
-        )),
-        OfflineSharePanel::Receive => els.push(Element::gesture_button(
-            ids::OFFLINE_RECEIVE_EXPECT_BUTTON,
-            fs_strings::OFFLINE_SHARE_EXPECT,
-            view.can_expect(),
-            Gesture::Settings(Action::ExpectOfflineShare),
-        )),
+        OfflineSharePanel::Initiate => els.push(
+            Element::gesture_button(
+                ids::OFFLINE_SHARE_BEGIN_BUTTON,
+                fs_strings::OFFLINE_SHARE_BEGIN,
+                view.begin_possibility().is_possible(),
+                Gesture::Settings(Action::BeginOfflineShare),
+            )
+            .possible(view.begin_possibility()),
+        ),
+        OfflineSharePanel::Receive => els.push(
+            Element::gesture_button(
+                ids::OFFLINE_RECEIVE_EXPECT_BUTTON,
+                fs_strings::OFFLINE_SHARE_EXPECT,
+                view.expect_possibility().is_possible(),
+                Gesture::Settings(Action::ExpectOfflineShare),
+            )
+            .possible(view.expect_possibility()),
+        ),
         // `shows_entry_buttons()` already returned for the closed panel.
         OfflineSharePanel::Closed => {}
     }
@@ -2964,26 +3130,41 @@ fn wizard_elements(wizard: &FolderWizardSnapshot) -> Vec<Element> {
                 Action::WizardConfirmPublic,
             )));
         }
-        els.push(Element::gesture_button(
-            ids::WIZARD_CREATE_BUTTON,
-            t::wizard::CREATE,
-            wizard.review.create_enabled && !armed,
-            Gesture::Settings(Action::WizardCreate),
-        ));
+        // Painted from the machine's answer, reason and all (`ui/folders.md`
+        // § Errors & edge cases, *Own-tier and mail gates*); the armed confirm
+        // is one of its reasons, so the page keeps no flag of its own.
+        els.push(
+            Element::gesture_button(
+                ids::WIZARD_CREATE_BUTTON,
+                t::wizard::CREATE,
+                true,
+                Gesture::Settings(Action::WizardCreate),
+            )
+            .possible(wizard_create_possibility(wizard)),
+        );
     } else {
-        let continue_enabled = match wizard.step {
-            FolderWizardStep::Name => wizard.name.continue_enabled,
-            FolderWizardStep::Devices => wizard.device_places.continue_enabled,
-            FolderWizardStep::Review | FolderWizardStep::Done => false,
-        };
-        els.push(Element::gesture_button(
-            ids::WIZARD_NEXT_BUTTON,
-            t::wizard::NEXT,
-            continue_enabled,
-            Gesture::Settings(Action::WizardNext),
-        ));
+        els.push(
+            Element::gesture_button(
+                ids::WIZARD_NEXT_BUTTON,
+                t::wizard::NEXT,
+                true,
+                Gesture::Settings(Action::WizardNext),
+            )
+            .possible(wizard_next_possibility(wizard)),
+        );
     }
     els
+}
+
+/// `wizard-next-button`'s answer on the current step — the folders machine's
+/// shared step dispatch (absent past the last step that has one).
+pub(crate) fn wizard_next_possibility(wizard: &FolderWizardSnapshot) -> Possibility {
+    fauna_folders_machine::possibility::wizard_next_possibility(wizard)
+}
+
+/// `wizard-create-button`'s answer — the folders machine's shared predicate.
+pub(crate) fn wizard_create_possibility(wizard: &FolderWizardSnapshot) -> Possibility {
+    fauna_folders_machine::possibility::wizard_create_possibility(wizard)
 }
 
 /// Step 1 — the folder's name, and nothing else. The mode radios
@@ -3004,8 +3185,9 @@ fn name_elements(wizard: &FolderWizardSnapshot) -> Vec<Element> {
     // name (folders.md § Create wizard step 1), and a greyed-out Next with
     // zero on-screen signal why was a live-user "unknowable" report. One
     // line, only while the gate is actually closed.
-    if !nm.continue_enabled {
-        els.push(Element::chrome(t::wizard::NAME_REQUIRED));
+    if let Some(reason) = fauna_folders_machine::possibility::name_continue_possibility(nm).reason()
+    {
+        els.push(Element::chrome(crate::wizard::localized(reason)));
     }
     // Who can see the new folder — a field of this step, never a step of its
     // own (`ui/folders.md` § Audience and website serving → *Born public*,
@@ -3282,6 +3464,13 @@ mod tests {
 
     fn el<'a>(els: &'a [Element], id: &str) -> Option<&'a Element> {
         els.iter().find(|e| e.id == id)
+    }
+
+    /// Whether the page offers `e` enabled once the possibility seam has
+    /// applied its declared answer (`App::apply_possibility_seam`): the page's
+    /// own `enabled` and its `Element::possible` answer both.
+    fn live(e: &Element) -> bool {
+        e.enabled && e.possibility.as_ref().is_none_or(|p| p.is_possible())
     }
 
     /// A `Role::Select`'s offered option values (there is no accessor — every
@@ -3931,6 +4120,7 @@ mod tests {
     #[test]
     fn webdav_toggle_paints_on_every_expanded_owner_row() {
         let mut state = empty_state();
+        state.folders.webdav_read = ReadState::Resolved;
         state.folders.can_serve_webdav = true;
         state.devices.snapshot = Some(snapshot_with_folders(vec![
             folder("photos"),
@@ -3942,7 +4132,7 @@ mod tests {
         state.folders.expanded = Some(0);
         let els = folders_elements(&state, &[]);
         let toggle = el(&els, "folder-webdav-toggle").expect("an owner row paints the toggle");
-        assert!(toggle.enabled, "an MSEK-holding actor may flip it");
+        assert!(live(toggle), "an MSEK-holding actor may flip it");
         assert_eq!(
             toggle.path,
             vec![("folder-row".to_string(), 0)],
@@ -3957,20 +4147,50 @@ mod tests {
     /// ⚠ The capability gate, not a hint: an actor with no MSEK still SEES the
     /// toggle but cannot fire it. `serve_set` commits the nest's `webdav_enabled`
     /// flag before it provisions the keys blob, so an enabled-but-doomed toggle
-    /// would leave the set served-but-blobless (`ui/folders.md:59`).
+    /// would leave the set served-but-blobless (`ui/folders.md:59`). Every
+    /// account mints its key at first connect, so an answered read with no key
+    /// is that mint in flight — the toggle says still loading, the same as an
+    /// unanswered read, a failed read says so, and no step is named
+    /// (`ui/folders.md` § Errors & edge cases, *Own-tier and mail gates*).
     #[test]
-    fn webdav_toggle_is_disabled_with_a_mail_hint_without_an_msek() {
+    fn webdav_toggle_without_a_key_waits_and_names_no_step() {
+        for (read, want) in [
+            (ReadState::Resolved, common::STILL_LOADING),
+            (ReadState::Pending, common::STILL_LOADING),
+            (ReadState::Failed, common::LOAD_FAILED),
+        ] {
+            let mut state = empty_state();
+            state.folders.webdav_read = read;
+            state.folders.can_serve_webdav = false;
+            state.folders.expanded = Some(0);
+            state.devices.snapshot = Some(snapshot_with_folders(vec![folder("photos")]));
+            let els = folders_elements(&state, &[]);
+            let toggle = el(&els, "folder-webdav-toggle").expect("still painted");
+            assert!(!live(toggle), "{read:?}: no MSEK ⇒ not actionable");
+            assert_eq!(toggle.label.as_deref(), Some(want), "{read:?}");
+            assert!(
+                els.iter()
+                    .all(|e| !matches!(e.gesture(), Some(Gesture::FoldersStep(_)))),
+                "{read:?}: the WebDAV toggle names no step"
+            );
+        }
+    }
+
+    /// The press asks the toggle's own answer (rule 6): a blocked toggle is
+    /// refused with its reason and sends nothing.
+    #[test]
+    fn a_blocked_webdav_press_is_refused_with_its_reason() {
         let mut state = empty_state();
-        state.folders.can_serve_webdav = false;
-        state.folders.expanded = Some(0);
-        state.devices.snapshot = Some(snapshot_with_folders(vec![folder("photos")]));
-        let els = folders_elements(&state, &[]);
-        let toggle = el(&els, "folder-webdav-toggle").expect("still painted");
-        assert!(
-            !toggle.enabled,
-            "no MSEK ⇒ the toggle must not be actionable"
+        state.folders.webdav_read = ReadState::Pending;
+        assert_eq!(
+            webdav_possibility(&state.folders)
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("common.still_loading")
         );
-        assert_eq!(toggle.label.as_deref(), Some(t::SERVE_WEBDAV_NEEDS_MAIL));
+        state.folders.webdav_read = ReadState::Resolved;
+        state.folders.can_serve_webdav = true;
+        assert!(webdav_possibility(&state.folders).is_possible());
     }
 
     /// `folder-paywall-tier-select` is website-enabled-only — the structural sibling of
@@ -3978,16 +4198,21 @@ mod tests {
     #[test]
     fn paywall_select_paints_only_on_an_expanded_website_row_with_the_owners_tiers() {
         let mut state = empty_state();
+        state.folders.own_tiers_read = ReadState::Resolved;
         state.folders.own_tiers = vec!["gold".into(), "silver".into()];
         state.folders.expanded = Some(0);
         state.devices.snapshot = Some(snapshot_with_folders(vec![website_folder("site")]));
         let els = folders_elements(&state, &[]);
         let sel = el(&els, "folder-paywall-tier-select").expect("website row paints the select");
-        assert!(sel.enabled);
+        assert!(live(sel));
         assert_eq!(sel.path, vec![("folder-row".to_string(), 0)]);
         assert!(
             el(&els, "folder-paywall-hint").is_none(),
             "the create-a-tier-first line is present only while the select is disabled"
+        );
+        assert!(
+            el(&els, "folder-paywall-step").is_none(),
+            "no step when possible"
         );
         // Still public ⇒ the "Not paywalled" placeholder is offered first.
         assert_eq!(
@@ -4006,17 +4231,53 @@ mod tests {
     fn paywall_select_is_disabled_without_any_own_tier() {
         let mut state = empty_state();
         assert!(state.folders.own_tiers.is_empty());
+        state.folders.own_tiers_read = ReadState::Resolved;
         state.folders.expanded = Some(0);
         state.devices.snapshot = Some(snapshot_with_folders(vec![website_folder("site")]));
         let els = folders_elements(&state, &[]);
         let sel = el(&els, "folder-paywall-tier-select").expect("still painted");
-        assert!(!sel.enabled);
+        assert!(!live(sel));
         assert_eq!(sel.label.as_deref(), Some(t::PAYWALL_TIER_NEEDS_TIER));
         // A select's `label` is driver-visible only, so the hint ALSO paints as
         // the adjacent line `folder-paywall-hint` names.
         let hint = el(&els, "folder-paywall-hint").expect("the hint paints by id");
         assert_eq!(hint.text, t::PAYWALL_TIER_NEEDS_TIER);
         assert_eq!(hint.path, vec![("folder-row".to_string(), 0)]);
+        // Rule 3: the tier is created one press away.
+        let step = el(&els, "folder-paywall-step").expect("the tiers jump paints");
+        assert!(step.enabled);
+        assert_eq!(step.text, t::FOLDER_STEP_OPEN_TIERS);
+        assert_eq!(step.path, vec![("folder-row".to_string(), 0)]);
+        assert!(matches!(
+            step.gesture(),
+            Some(Gesture::FoldersStep(FolderStep::Paywall(_)))
+        ));
+    }
+
+    /// A tier read that has not answered, or failed, is not "no tier": the
+    /// select and its hint line say what is true (`ui/folders.md` § Errors &
+    /// edge cases, *Own-tier and mail gates*).
+    #[test]
+    fn an_unanswered_or_failed_tier_read_never_says_create_a_tier() {
+        for (read, want) in [
+            (ReadState::Pending, common::STILL_LOADING),
+            (ReadState::Failed, common::LOAD_FAILED),
+        ] {
+            let mut state = empty_state();
+            state.folders.own_tiers_read = read;
+            state.folders.expanded = Some(0);
+            state.devices.snapshot = Some(snapshot_with_folders(vec![website_folder("site")]));
+            let els = folders_elements(&state, &[]);
+            let sel = el(&els, "folder-paywall-tier-select").expect("still painted");
+            assert!(!live(sel), "{read:?}");
+            assert_eq!(sel.label.as_deref(), Some(want), "{read:?}");
+            assert_eq!(
+                el(&els, "folder-paywall-hint").unwrap().text,
+                want,
+                "{read:?}"
+            );
+            assert!(el(&els, "folder-paywall-step").is_none(), "{read:?}");
+        }
     }
 
     /// v1 is SET-ONLY: once paywalled, the "Not paywalled" placeholder is gone, so
@@ -4025,6 +4286,7 @@ mod tests {
     #[test]
     fn an_already_paywalled_set_offers_no_public_placeholder() {
         let mut state = empty_state();
+        state.folders.own_tiers_read = ReadState::Resolved;
         state.folders.own_tiers = vec!["gold".into()];
         state.folders.expanded = Some(0);
         let mut fs = website_folder("site");
@@ -5010,7 +5272,15 @@ mod tests {
         // Back is hidden on the first step; Next is present, disabled (empty name).
         assert!(el(&els, "wizard-back-button").is_none());
         let next = el(&els, "wizard-next-button").unwrap();
-        assert!(!next.enabled);
+        assert!(!live(next));
+        // …with its reason, the machine's shared answer (rule 6).
+        assert_eq!(
+            next.possibility
+                .as_ref()
+                .and_then(|p| p.reason())
+                .map(|r| r.key.as_str()),
+            Some(fauna_folders_machine::possibility::NAME_REQUIRED)
+        );
     }
 
     /// Born public, ruling 1: the Name step carries who can see the folder —
@@ -5103,7 +5373,16 @@ mod tests {
             confirm.gesture(),
             Some(Gesture::Settings(Action::WizardConfirmPublic))
         ));
-        assert!(!el(&els, "wizard-create-button").unwrap().enabled);
+        let create = el(&els, "wizard-create-button").unwrap();
+        assert!(!live(create));
+        assert_eq!(
+            create
+                .possibility
+                .as_ref()
+                .and_then(|p| p.reason())
+                .map(|r| r.key.as_str()),
+            Some(fauna_folders_machine::possibility::CONFIRM_PUBLIC_PENDING)
+        );
         // Back is the inline dialog's dismissal (the machine's `back()`).
         assert!(el(&els, "wizard-back-button").unwrap().enabled);
     }
@@ -6521,11 +6800,12 @@ mod tests {
         assert!(el(&els, "folder-destination-row").is_none());
     }
 
-    /// An owner with NO enrolled destination sees no section at all — an
-    /// affordance that cannot work must not paint (there is nothing to attach
-    /// to; enrolling happens on the Backups page).
+    /// An owner with NO enrolled destination sees no attach pair — an
+    /// affordance that cannot work must not paint — but the reason and rule
+    /// 3's one-press jump to Backups, where one is enrolled (`ui/folders.md`
+    /// § Errors & edge cases, *Own-tier and mail gates*).
     #[test]
-    fn no_enrolled_destination_paints_no_section() {
+    fn no_enrolled_destination_paints_the_reason_and_the_backups_step() {
         let mut state = empty_state();
         state.folders.expanded = Some(0);
         state.devices.snapshot = Some(snapshot_with_folders(vec![folder("docs")]));
@@ -6536,5 +6816,149 @@ mod tests {
         assert!(el(&els, "folder-destination-row").is_none());
         assert!(el(&els, "folder-destination-attach-select").is_none());
         assert!(el(&els, "folder-destination-attach-button").is_none());
+        let hint = el(&els, "folder-destination-hint").expect("the reason paints by id");
+        assert_eq!(hint.text, t::FOLDER_DESTINATION_NEEDS_DESTINATION);
+        assert_eq!(hint.path, vec![("folder-row".to_string(), 0)]);
+        let step = el(&els, "folder-destination-step").expect("the jump paints beside it");
+        assert!(step.enabled);
+        assert_eq!(step.text, t::FOLDER_STEP_OPEN_BACKUPS);
+        assert_eq!(step.path, vec![("folder-row".to_string(), 0)]);
+    }
+
+    /// The destination step is named only by an ANSWERED read: unanswered
+    /// (no read for this row yet, or a failed one — the fresh guard unset or
+    /// naming another row) paints neither the reason nor the jump, and a row
+    /// with a destination left to attach paints the pair, not the step.
+    #[test]
+    fn the_destination_step_waits_for_an_answer_and_leaves_with_a_destination() {
+        let mut state = empty_state();
+        state.folders.expanded = Some(0);
+        state.devices.snapshot = Some(snapshot_with_folders(vec![folder("docs")]));
+        for guard in [None, Some("other".to_string())] {
+            state.folders.destination_places_for = guard.clone();
+            let els = folders_elements(&state, &[]);
+            assert!(el(&els, "folder-destination-hint").is_none(), "{guard:?}");
+            assert!(el(&els, "folder-destination-step").is_none(), "{guard:?}");
+        }
+        state.folders.destination_places_for = Some("docs".to_string());
+        state.folders.destination_places = vec![destination_place("dest-1", "Offsite", false)];
+        let els = folders_elements(&state, &[]);
+        assert!(el(&els, "folder-destination-step").is_none());
+        assert!(el(&els, "folder-destination-hint").is_none());
+        assert!(el(&els, "folder-destination-attach-select").is_some());
+    }
+
+    /// A failed coverage re-read after an attach/detach folds as UNANSWERED,
+    /// never as an empty list — so it can never paint "add a destination
+    /// first" over destinations the owner has.
+    #[test]
+    fn a_failed_destination_re_read_is_unanswered_not_empty() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.folders.destination_places = vec![destination_place("d", "D", true)];
+        app.settings.folders.destination_places_for = Some("docs".to_string());
+        crate::settings::apply_outcome(
+            &mut app,
+            crate::settings::Outcome::FolderDestinationsLoaded {
+                name: "docs".to_string(),
+                places: None,
+            },
+        );
+        assert_eq!(app.settings.folders.destination_places_for, None);
+        assert_eq!(
+            destination_step(&app.settings.folders, "docs"),
+            None,
+            "an unanswered read names no step"
+        );
+    }
+
+    /// Each blocked gate's jump lands on the page its reason names (rule 3):
+    /// the paywall's on the own profile's Tiers tab, the destination pair's on
+    /// Backups.
+    #[test]
+    fn each_folder_step_lands_on_the_page_its_reason_names() {
+        use crate::pages::Page;
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        crate::app::gesture_work(
+            &mut app,
+            Gesture::FoldersStep(FolderStep::Paywall(
+                fauna_client_subscriptions::own_tiers::OwnTierStep::CreateTier,
+            )),
+        );
+        assert_eq!(app.page, Page::Profile);
+        assert!(app.profile.viewing.is_none(), "the person's OWN profile");
+        assert!(matches!(app.profile.tab, crate::profile::Tab::Tiers));
+
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        crate::app::gesture_work(
+            &mut app,
+            Gesture::FoldersStep(FolderStep::Destination(
+                fauna_client_config::FolderDestinationStep::EnrolDestination,
+            )),
+        );
+        assert_eq!(app.page, Page::Backups);
+    }
+    /// The follow and share forms' submits answer the shared form predicate
+    /// (`fauna_client_folders::forms`): blocked with a reason while a box is
+    /// empty or the app cannot run the op, never a silent return, and the
+    /// share form stays open with what was typed when it cannot run (apps 6040).
+    #[test]
+    fn follow_and_share_forms_refuse_with_a_reason_and_keep_their_input() {
+        use crate::settings::{Action as SettingsAction, apply_local};
+        let text = |key: &str| fauna_i18n::strings::lookup(key).unwrap().to_string();
+
+        let mut app = crate::app::tests::authed_app();
+        app.settings.folders.follow_open = true;
+        assert!(apply_local(&mut app, SettingsAction::ConfirmFolderFollow).is_none());
+        assert_eq!(
+            app.errors.get(&crate::pages::Page::Settings),
+            Some(&text("folders.follow_handle_required")),
+            "an empty handle box is refused with its reason"
+        );
+
+        app.errors.remove(&crate::pages::Page::Settings);
+        app.settings.folders.follow_handle_input = "alice".into();
+        app.settings.folders.follow_name_input = "Pictures".into();
+        assert!(apply_local(&mut app, SettingsAction::ConfirmFolderFollow).is_none());
+        assert_eq!(
+            app.errors.get(&crate::pages::Page::Settings),
+            Some(&text("folders.follow_not_ready")),
+            "boxes filled but no signed-in machine: blocked, not silent"
+        );
+
+        // Share: a folder is expanded and its form open, a recipient is typed,
+        // but there is no live session.
+        app.errors.remove(&crate::pages::Page::Settings);
+        app.settings.devices.snapshot = Some(snapshot_with_folders(vec![folder("docs")]));
+        app.settings.folders.expanded = Some(0);
+        app.settings.folders.share_open = true;
+        app.settings.folders.share_recipient_input = "bob".into();
+        assert!(apply_local(&mut app, SettingsAction::ConfirmFolderShare).is_none());
+        assert_eq!(
+            app.errors.get(&crate::pages::Page::Settings),
+            Some(&text("folders.share_not_ready"))
+        );
+        assert!(app.settings.folders.share_open, "the form stays open");
+        assert_eq!(
+            app.settings.folders.share_recipient_input, "bob",
+            "what was typed is kept"
+        );
+
+        // The answers the buttons are painted from say the same.
+        assert_eq!(
+            app.settings
+                .folder_share_answer(false)
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("folders.share_not_ready")
+        );
+        assert_eq!(
+            app.settings
+                .folder_follow_answer()
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("folders.follow_not_ready")
+        );
     }
 }

@@ -56,6 +56,7 @@ pytestmark = [
 STATE_LABELS = {
     "off": "Mail: off",
     "bridge_down": "Mail: mail service not connected",
+    "outbound_blocked": "Mail: outgoing mail cannot leave this server",
     "blocklisted": "Mail: server address is blocklisted",
     "queue_stalled": "Mail: outgoing mail is delayed",
     "records_failing": "Mail: DNS records need attention",
@@ -557,6 +558,70 @@ def test_a_healthy_server_past_its_ramp_reads_delivering(admin_app, nest_instanc
             )
     finally:
         _nest(nest_instance, "fauna.bridges.outbound_warmup_reset")
+
+
+#: The outgoing-queue row's detail while outbound port 25 is unreachable
+#: (`fauna_mail::health::OUTBOUND_BLOCKED_DETAIL`'s opening).
+OUTBOUND_BLOCKED_OPENING = "outbound port 25 is unreachable"
+
+
+def _script_starttls_probe(nest, outcome, reason=None) -> None:
+    """Script the diagnostics' outbound probe to a receiver's port 25 (the
+    `test-hooks` seam `POST /api/v1/test/mail/starttls-probe`); `None` puts the
+    build's own unscripted answer back."""
+    post(nest, "/api/v1/test/mail/starttls-probe", {"outcome": outcome, "reason": reason})
+
+
+@pytest.mark.feature("admin-mail-health")
+def test_a_blocked_outbound_port_reads_outgoing_mail_cannot_leave_naming_why(
+    admin_app, nest_instance, outbound
+):
+    """A fresh cloud box whose provider blocks outbound port 25: the probe's
+    connection never opens. Check again runs the diagnostics, and the line says
+    outgoing mail cannot leave this server, while the outgoing-queue row says
+    why and what to do — even with every record published and nothing queued
+    yet (`mail-deliverability.md` § Symptom diagnostics). Once the block is
+    lifted, Check again clears it."""
+    nest = outbound
+    _script_starttls_probe(
+        nest, "unreachable",
+        "timed out after 12s connecting to gmail-smtp-in.l.google.com:25",
+    )
+    try:
+        with passing_records(nest):
+            _open_readout(admin_app)
+            _press_check_again(admin_app, nest)
+            expected = STATE_LABELS["outbound_blocked"]
+            assert _wait(lambda: admin_app.admin.mail_health_status().startswith(expected)), (
+                f"status line {admin_app.admin.mail_health_status()!r} does not say "
+                f"{expected!r}; the nest says "
+                f"{_nest(nest_instance, 'fauna.bridges.mail_health')!r}"
+            )
+            row = admin_app.admin.mail_health_check(2)
+            nest_row = _nest(nest_instance, "fauna.bridges.mail_health")["checks"][2]
+            assert row["state"] == "Problem" and row["detail"].startswith(
+                OUTBOUND_BLOCKED_OPENING
+            ), (row, nest_row)
+            assert row["detail"] == nest_row["detail"], (row, nest_row)
+            assert "ask yours to lift the block" in row["detail"], row
+
+            # The provider lifts the block: the next check clears it.
+            _script_starttls_probe(nest, "ok")
+            _press_check_again(admin_app, nest)
+            assert _wait(
+                lambda: not admin_app.admin.mail_health_status().startswith(expected)
+            ), (
+                f"the block was lifted and checked again, but the line still says "
+                f"{admin_app.admin.mail_health_status()!r}"
+            )
+            assert admin_app.admin.mail_health_check(2)["state"] == "OK", (
+                admin_app.admin.mail_health_check(2)
+            )
+    finally:
+        # The session nest is shared: put the probe back and leave a latest
+        # diagnostics run without the block, so no later test reads it.
+        _script_starttls_probe(nest, None)
+        _nest(nest_instance, "fauna.bridges.run_deliverability_diagnostics")
 
 
 @pytest.mark.feature("admin-mail-health")

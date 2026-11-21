@@ -104,22 +104,34 @@ pub async fn load_selfhosted_command(
 }
 
 /// Spawn **the custody leg** over `nest` with the account-store handle
-/// (`fauna_client_account_runtime::deployment_seeds::run_custody_leg`), and
-/// bridge the warning it answers — custody unconfirmed for an admin — onto
-/// `warning-message` ([`DataMessage::RecoveryCustodyWarning`] →
-/// `app.injected_warning`). The steady state (the fold already holds this box)
-/// makes no round trip. A dropped `tx` (UI gone) is ignored.
+/// (`fauna_client_account_runtime::deployment_seeds::run_custody_leg_signalled`),
+/// and bridge every run's signal onto `warning-message`: a warning — custody
+/// unconfirmed for an admin — as [`DataMessage::RecoveryCustodyWarning`] →
+/// `app.injected_warning`, and a later run that confirms it (a reconnect's
+/// retry) as [`DataMessage::RecoveryCustodyCleared`], which takes that
+/// warning down. The steady state (the fold already holds this box) makes no
+/// round trip. A dropped `tx` (UI gone) is ignored.
 pub fn spawn_custody_leg(
     nest: Arc<NestClient>,
     store: AccountStoreHandle,
     tx: UnboundedSender<UiMessage>,
 ) {
     tokio::spawn(async move {
-        if let Some(warning) =
-            fauna_client_account_runtime::deployment_seeds::run_custody_leg(&nest, &store).await
-        {
-            let msg = crate::wizard::localized(&warning);
-            let _ = tx.send(UiMessage::Data(DataMessage::RecoveryCustodyWarning(msg)));
-        }
+        fauna_client_account_runtime::deployment_seeds::run_custody_leg_signalled(
+            &nest,
+            store,
+            move |signal| {
+                let msg = match signal {
+                    fauna_client_config::CustodyLegSignal::Warning(warning) => {
+                        DataMessage::RecoveryCustodyWarning(crate::wizard::localized(&warning))
+                    }
+                    fauna_client_config::CustodyLegSignal::Cleared => {
+                        DataMessage::RecoveryCustodyCleared
+                    }
+                };
+                let _ = tx.send(UiMessage::Data(msg));
+            },
+        )
+        .await;
     });
 }

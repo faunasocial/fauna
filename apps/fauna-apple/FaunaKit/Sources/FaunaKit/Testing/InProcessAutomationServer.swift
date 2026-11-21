@@ -58,7 +58,7 @@ public final class InProcessAutomationServer: @unchecked Sendable {
 
     /// How long to let SwiftUI flush the re-render a state command triggers
     /// before signalling readiness. A state injection that *reveals* a control
-    /// (e.g. `handle-control-checkbox`) only registers that control on its
+    /// (e.g. `dns-buy-domain-checkbox`) only registers that control on its
     /// `.onAppear`, which runs on a later main-runloop pass than the state
     /// mutation; sleeping the main actor here yields that pass. Without it the
     /// ack races the render (the known-limitation-(d) staleness across the
@@ -411,6 +411,7 @@ public final class InProcessAutomationServer: @unchecked Sendable {
                             "\(Int(f.minX)),\(Int(f.minY)),\(Int(f.width)),\(Int(f.height))"
                     }
                     if let t = row.text { out["text"] = t }
+                    if !row.attrs.isEmpty { out["attrs"] = row.attrs }
                     return out
                 }
             }])
@@ -505,6 +506,13 @@ public final class InProcessAutomationServer: @unchecked Sendable {
                         default: v = nil
                         }
                     }
+                case "reason":
+                    // The reason an enclosing `.faunaPossible` painted beside the
+                    // control (`""` while possible), read by the driver's
+                    // `blocked_reason`; null under no painter — never the
+                    // `default` arm's text read, which would hand back a label
+                    // as a reason.
+                    v = e.attributes?()["reason"]
                 case "oracle_ops":
                     // Present exactly on a roster row the oracle served; null on
                     // any other — never the `default` arm's text read, which would
@@ -710,6 +718,68 @@ public final class InProcessAutomationServer: @unchecked Sendable {
                     return (200, ["error": "sentinel not realized (detached or no sentinel)"])
                 }
             }
+
+        // --- text selection (web's routes, names and reply shapes) ---
+        // Select the element's text the way a person does — on macos a click on
+        // the text, then Edit ▸ Select All; on ios a long-press on its first
+        // word — and answer what the selection holds (`""` when the element
+        // shows no selectable text; a gesture that could not be made is a 500
+        // naming why, never `""`). `TextSelectionRead` carries why a pointer
+        // drag is not used on macos. The selection is left standing
+        // for `/page/selection`. An element whose `selectable` attribute is false
+        // answers `""` without a gesture, as one with no selectable text view does
+        // on macos. On ios the reply also carries `copy_offered` — whether the
+        // press raised the platform's Copy action (inside the app's layout: the
+        // edit menu, not an in-place selection — `TextSelectionRead`'s ios
+        // header) — and the route takes that menu down before it answers.
+        case ("POST", "/element/select-text"):
+            #if os(macOS)
+            return onMainActor {
+                let registry = AutomationRegistry.shared
+                guard let entry = registry.resolvedEntry(id, scope: scopeSteps, leafIndex: leafIndex)
+                else { return self.notFound(id, leafIndex) }
+                let (selected, why) = TextSelectionRead.explainedSelectText(
+                    selectableAttribute: entry.attributes?()["selectable"],
+                    sentinel: registry.resolvedSentinelView(
+                        id, scope: scopeSteps, leafIndex: leafIndex))
+                var reply: [String: Any] = ["selected": selected]
+                if let why { reply["why"] = why }
+                return (200, reply)
+            }
+            #else
+            // ios: a long-press synthesised in-process on the element's text
+            // view (no Select All exists there). The gesture's waits run on
+            // this server thread, so the route is not one main-actor block.
+            let found: Bool = onMainActor {
+                AutomationRegistry.shared.resolvedEntry(id, scope: scopeSteps, leafIndex: leafIndex) != nil
+            }
+            guard found else { return notFound(id, leafIndex) }
+            let result = TextSelectionRead.selectText {
+                let registry = AutomationRegistry.shared
+                return (
+                    registry.resolvedEntry(id, scope: scopeSteps, leafIndex: leafIndex)?
+                        .attributes?()["selectable"],
+                    registry.resolvedSentinelView(id, scope: scopeSteps, leafIndex: leafIndex))
+            }
+            switch result {
+            case .success(let answer):
+                var reply: [String: Any] = [
+                    "selected": answer.selected, "copy_offered": answer.copyOffered,
+                ]
+                if let why = answer.why { reply["why"] = why }
+                if !answer.copyLabel.isEmpty {
+                    // Which label was counted, and whether UIKit's table gave it.
+                    reply["copy_label"] = answer.copyLabel
+                    reply["copy_label_from"] = answer.labelFromTable ? "uikit" : "english-fallback"
+                }
+                if let by = answer.dismissedBy { reply["dismissed_by"] = by }
+                return (200, reply)
+            case .failure(let failure):
+                return (500, ["error": "select-text: \(failure.description)"])
+            }
+            #endif
+        case ("POST", "/page/selection"):
+            return onMainActor { (200, ["selected": TextSelectionRead.currentSelection()]) }
 
         // --- window ops (macOS only — desktop-residency.md's "real close door";
         // the windows/linux drivers' own `/window/close` twin, AppKit's shape) ---

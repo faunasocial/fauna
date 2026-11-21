@@ -67,6 +67,8 @@ Stamped 2026-11-07 at ac836c937b.
    - `tests/e2e-unified/tests/api/test_bridge_enroll_loopback_only.py::test_a_process_on_the_nests_own_machine_can_ask_to_enroll_as_a_bridge`
    - `tests/e2e-unified/tests/platform/docker/test_preauth_rejects.py::test_a_stranger_crossing_the_sni_router_cannot_ask_to_enroll_as_a_bridge`
    - `tests/e2e-unified/tests/platform/docker/test_preauth_rejects.py::test_a_forged_proxy_header_through_the_sni_router_cannot_pass_for_loopback`
+20. [app] The pending and approved lists say they are loading, or failed to load, rather than showing as empty before they were read; and while a reject or a key rotation is on its way its confirm is disabled, a second press saying it is still saving — `docs/goal/behavior/admin.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_bridge_lists_say_they_are_loading_rather_than_empty`
 
 ## Status
 
@@ -75,11 +77,11 @@ Stamped 2026-11-07 at ac836c937b.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+110d1248 standalone |
 | linux | ✅ full | 0.1.5-dev+37e2409c standalone |
-| windows | ✅ full | 0.1.5-dev+de363e06.dirty standalone |
+| windows | ⚠ partial | 0.1.5-dev+de363e06.dirty standalone |
 | macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
 | ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6-dev+8f244c6f standalone |
+| tui | ✅ full | 0.1.7-dev+500226d2 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -113,4 +115,5 @@ Stamped 2026-11-07 at ac836c937b.
 | 19 | nest | `tests/e2e-unified/tests/api/test_bridge_enroll_loopback_only.py::test_a_process_on_the_nests_own_machine_can_ask_to_enroll_as_a_bridge` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/platform/docker/test_preauth_rejects.py::test_a_stranger_crossing_the_sni_router_cannot_ask_to_enroll_as_a_bridge` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/platform/docker/test_preauth_rejects.py::test_a_forged_proxy_header_through_the_sni_router_cannot_pass_for_loopback` | nest (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_bridge_lists_say_they_are_loading_rather_than_empty` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

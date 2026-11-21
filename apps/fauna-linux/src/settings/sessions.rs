@@ -59,6 +59,9 @@ struct Widgets {
     list_box: gtk::Box,
     empty_label: gtk::Label,
     revoke_others_btn: gtk::Button,
+    /// `sessions-revoke-others-button`'s reason line, painted by the
+    /// possibility seam while the button's answer is blocked.
+    revoke_others_reason: gtk::Label,
     revoke_others_confirm_btn: gtk::Button,
     revoke_others_cancel_btn: gtk::Button,
     lockout_entry: adw::EntryRow,
@@ -143,6 +146,20 @@ pub fn build_sessions_page(devices: Arc<DevicesMachine>) -> (adw::PreferencesPag
     others_row.append(&revoke_others_confirm_btn);
     others_row.append(&revoke_others_cancel_btn);
     others_group.add(&others_row);
+    // Not live before the roster folds, after a failed first read, with no
+    // other sign-in to end, nor while an act is in flight
+    // (`sessions_view::revoke_others_possibility`; `ui/sessions.md` § Errors &
+    // edge cases). The reason sits right under the button.
+    let revoke_others_reason = text_label("");
+    revoke_others_reason.set_visible(false);
+    revoke_others_reason.add_css_class("dim-label");
+    revoke_others_reason.add_css_class("caption");
+    crate::possible::paint(
+        &revoke_others_btn,
+        Some(&revoke_others_reason),
+        sessions_view::revoke_others_possibility(None, false),
+    );
+    others_group.add(&revoke_others_reason);
     let note = text_label(t::REVOKE_NOTE);
     note.add_css_class("caption");
     set_test_id(&note, ids::SESSIONS_REVOKE_NOTE);
@@ -174,6 +191,7 @@ pub fn build_sessions_page(devices: Arc<DevicesMachine>) -> (adw::PreferencesPag
         list_box,
         empty_label,
         revoke_others_btn,
+        revoke_others_reason,
         revoke_others_confirm_btn,
         revoke_others_cancel_btn,
         lockout_entry,
@@ -213,6 +231,11 @@ fn wire(widgets: Widgets, devices: Arc<DevicesMachine>) -> Option<impl Fn()> {
     {
         let ctx_ = Rc::clone(&ctx);
         ctx.w.revoke_others_btn.connect_clicked(move |_| {
+            // Arming asks the answer the button painted from: before the
+            // roster, or with nothing to end, there is nothing to confirm.
+            if refuse_revoke_others(&ctx_) {
+                return;
+            }
             *ctx_.revoke_others_armed.borrow_mut() = true;
             paint_controls(&ctx_);
         });
@@ -228,6 +251,11 @@ fn wire(widgets: Widgets, devices: Arc<DevicesMachine>) -> Option<impl Fn()> {
         let ctx_ = Rc::clone(&ctx);
         ctx.w.revoke_others_confirm_btn.connect_clicked(move |_| {
             *ctx_.revoke_others_armed.borrow_mut() = false;
+            // The confirm asks the same answer again (the roster may have
+            // changed, or an act gone out, since the arm).
+            if refuse_revoke_others(&ctx_) {
+                return;
+            }
             run(&ctx_, Some(SessionsAct::RevokeOthers));
         });
     }
@@ -401,11 +429,50 @@ fn paint_error(ctx: &Rc<Ctx>) {
     super::render_error_label(&ctx.w.error_label, text.as_deref());
 }
 
+/// `sessions-revoke-others-button`'s answer over this page's fold and its
+/// in-flight act (a landed lock counts as one: nothing is left to end).
+fn revoke_others_answer(ctx: &Ctx) -> fauna_core::possibility::Possibility {
+    let busy = *ctx.busy.borrow() || *ctx.locked.borrow();
+    sessions_view::revoke_others_possibility(ctx.snapshot.borrow().as_ref(), busy)
+}
+
+/// The refusal a revoke-others press (the arm or the confirm) meets, if any:
+/// the blocked answer's reason, `None` while the press may go ahead.
+fn revoke_others_refusal(snapshot: Option<&SessionsSnapshot>, busy: bool) -> Option<LocalizedText> {
+    sessions_view::revoke_others_possibility(snapshot, busy)
+        .reason()
+        .cloned()
+}
+
+/// Ask the answer at a press: refused → the reason on `error-message`, the
+/// arm dropped, and `true`.
+fn refuse_revoke_others(ctx: &Rc<Ctx>) -> bool {
+    let busy = *ctx.busy.borrow() || *ctx.locked.borrow();
+    let refusal = revoke_others_refusal(ctx.snapshot.borrow().as_ref(), busy);
+    let Some(reason) = refusal else {
+        return false;
+    };
+    *ctx.revoke_others_armed.borrow_mut() = false;
+    *ctx.local_error.borrow_mut() = Some(reason);
+    paint_error(ctx);
+    paint_controls(ctx);
+    true
+}
+
 /// The two confirm states and the busy/locked gate.
 fn paint_controls(ctx: &Rc<Ctx>) {
     let idle = !*ctx.busy.borrow() && !*ctx.locked.borrow();
     let armed = *ctx.revoke_others_armed.borrow();
-    ctx.w.revoke_others_btn.set_sensitive(idle && !armed);
+    // Painted from its answer; armed, the confirm pair takes over, so the
+    // button is narrowed further (narrowing never contradicts the answer).
+    crate::possible::paint(
+        &ctx.w.revoke_others_btn,
+        Some(&ctx.w.revoke_others_reason),
+        revoke_others_answer(ctx),
+    );
+    if armed {
+        ctx.w.revoke_others_btn.set_sensitive(false);
+    }
     ctx.w.revoke_others_confirm_btn.set_visible(armed);
     ctx.w.revoke_others_confirm_btn.set_sensitive(idle);
     ctx.w.revoke_others_cancel_btn.set_visible(armed);
@@ -439,4 +506,38 @@ fn resolve(text: &LocalizedText) -> String {
 
 fn format_time(secs: u64) -> String {
     fauna_core::format::format_unix_local(i64::try_from(secs).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rules 2, 5 and 7 on sign out everywhere else (`ui/sessions.md`
+    /// § Errors & edge cases): built before the roster folds it is disabled
+    /// with its reason beside it, and both presses (the arm and the confirm)
+    /// meet a refusal until there is another sign-in to end.
+    #[test]
+    fn revoke_others_waits_for_the_roster() {
+        assert!(revoke_others_refusal(None, false).is_some());
+        let only_mine = SessionsSnapshot::default();
+        assert!(revoke_others_refusal(Some(&only_mine), false).is_some());
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let devices = DevicesMachine::new(
+                Arc::new(fauna_devices_machine::observer::NullObserver)
+                    as Arc<dyn fauna_devices_machine::DevicesObserver>,
+                Arc::new(fauna_devices_machine::FakeDevicesNestApi::new()),
+                Arc::new(fauna_devices_machine::FakeWizardFactory::new()),
+            );
+            let (page, _refresh) = build_sessions_page(devices);
+            let button = crate::testid::find_by_test_id(&page, ids::SESSIONS_REVOKE_OTHERS_BUTTON)
+                .expect("the button is built");
+            assert!(button.is_visible() && !button.is_sensitive());
+            let answer = crate::possible::painted_answer(&button).expect("painted");
+            assert_eq!(
+                answer.reason().map(|r| r.key.as_str()),
+                Some("common.still_loading")
+            );
+        });
+    }
 }

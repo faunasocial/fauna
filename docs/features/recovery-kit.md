@@ -65,7 +65,7 @@ Stamped 2026-11-07 at ac836c937b.
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+413aa33d standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | 0.1.6 docker |
+| windows | ⚠ partial | 0.1.6-dev+89d36747 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |
@@ -78,8 +78,8 @@ Stamped 2026-11-07 at ac836c937b.
 | 1 | app | `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_creating_a_recovery_kit_flips_the_status_and_shows_the_secret_once` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_replacing_the_kit_with_the_one_you_hold_mints_a_different_secret` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_the_phrase_alone_restores_the_account_after_losing_every_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_phrase_that_names_no_account_asks_for_one_instead_of_failing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_an_identity_secret_is_never_taken_for_a_recovery_phrase` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_phrase_that_names_no_account_asks_for_one_instead_of_failing` — requires `blocked-reason-read` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_an_identity_secret_is_never_taken_for_a_recovery_phrase` — requires `blocked-reason-read` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_succession_fixture.py::test_the_fixture_registers_a_kit_the_nest_serves_back` | nest (linux): passed, nest (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_succession_fixture.py::test_a_kit_from_the_wrong_identity_is_refused` | nest (linux): passed, nest (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_recovery_kit_ceremonies.py::test_the_status_names_each_of_the_four_states_including_a_kit_made_elsewhere` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |

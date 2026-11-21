@@ -15,10 +15,11 @@
 use fauna_protocol::ByteBuf;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::bridged_conversations::{
-    BridgedMessageInfo, BridgedRoomInfo, InboxFetchReply, InboxFetchRequest, KIND_INBOX_FETCH,
-    KIND_MESSAGES_REMOVE, KIND_ROOMS_LIST, KIND_ROOMS_OPEN, KIND_ROOMS_REMOVE, KIND_SEND,
-    MessagesRemoveRequest, PUSH_CONVERSATION_CHANGED, RemoveReply, RoomsListReply,
-    RoomsListRequest, RoomsOpenReply, RoomsOpenRequest, RoomsRemoveRequest, SendReply, SendRequest,
+    AddressAdmitReply, AddressAdmitRequest, BridgedMessageInfo, BridgedRoomInfo, InboxFetchReply,
+    InboxFetchRequest, KIND_ADDRESS_ADMIT, KIND_INBOX_FETCH, KIND_MESSAGES_REMOVE, KIND_ROOMS_LIST,
+    KIND_ROOMS_OPEN, KIND_ROOMS_REMOVE, KIND_SEND, MessagesRemoveRequest,
+    PUSH_CONVERSATION_CHANGED, RemoveReply, RoomsListReply, RoomsListRequest, RoomsOpenReply,
+    RoomsOpenRequest, RoomsRemoveRequest, SendReply, SendRequest,
 };
 
 /// The push wire kind the bridged poll subscribes to — a room changed.
@@ -54,10 +55,31 @@ impl<R: RpcRequester> BridgedConversationClient<R> {
         Ok(reply.rooms)
     }
 
-    /// `conversation.rooms.open` — find or mint the 1:1 room for `address`.
-    /// `bridge_id: None` asks the nest which one consented bridge's grammar
-    /// admits the address (the backend's `resolve_address`); the refusal
-    /// `fauna.bridges.address_refused` means none, or more than one, does.
+    /// `conversation.address.admit` — the one bridge serving the account whose
+    /// declared grammar admits `address`, or `None` when none or more than one
+    /// does. Effect-free: what the recipient picker asks on each keystroke
+    /// (the backend's `resolve_address`).
+    pub async fn address_admit(&self, address: String) -> Result<Option<String>, R::Error> {
+        let reply: AddressAdmitReply = self
+            .nest
+            .request(
+                KIND_ADDRESS_ADMIT,
+                AddressAdmitRequest {
+                    address,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(reply.bridge_id)
+    }
+
+    /// `conversation.rooms.open` — find or mint the 1:1 room for `address`,
+    /// resolving it on the far network. Called only when a message is sent
+    /// (a new thread's recipient, the backend's `open_recipient`, or a send
+    /// into a room not yet opened) — never on a keystroke. `bridge_id: None`
+    /// asks the nest which one consented bridge's grammar admits the address;
+    /// the refusal `fauna.bridges.address_refused` means none, or more than
+    /// one, does, or the far network does not know the address.
     pub async fn rooms_open(
         &self,
         bridge_id: Option<String>,
@@ -172,6 +194,10 @@ mod tests {
         match kind {
             KIND_ROOMS_LIST => fauna_protocol::encode_canonical(&RoomsListReply::default()),
             KIND_ROOMS_OPEN => fauna_protocol::encode_canonical(&RoomsOpenReply::default()),
+            KIND_ADDRESS_ADMIT => fauna_protocol::encode_canonical(&AddressAdmitReply {
+                bridge_id: Some("matrix".into()),
+                ..Default::default()
+            }),
             KIND_INBOX_FETCH => fauna_protocol::encode_canonical(&InboxFetchReply {
                 guardian_state: Some("held".into()),
                 ..Default::default()
@@ -206,6 +232,13 @@ mod tests {
             (req.bridge_id, req.address.as_str()),
             (None, "@bob:example.org")
         );
+
+        let admitted = block_on(client.address_admit("@bob:exam".into())).expect("mock");
+        assert_eq!(admitted.as_deref(), Some("matrix"));
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, KIND_ADDRESS_ADMIT);
+        let req: AddressAdmitRequest = fauna_protocol::decode_strict(&payload).unwrap();
+        assert_eq!(req.address, "@bob:exam");
 
         let page = block_on(client.inbox_fetch(Some(vec![1; 32]), 41, 0)).expect("mock");
         assert_eq!(page.guardian_state.as_deref(), Some("held"));

@@ -141,6 +141,46 @@ pub fn fallthrough_enabled(state: &AwaitingDnsState) -> bool {
     )
 }
 
+impl AwaitingManualDnsSnapshot {
+    /// `awaiting-dns-recheck-button`'s answer (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 6): blocked while a probe or a
+    /// claim is already on its way — the probe is single-shot, so a second
+    /// press would only stack another — with the status line the page paints
+    /// for that state as the reason. Possible otherwise, a terminal `Error`
+    /// included: checking again is how the user retries.
+    pub fn recheck_possibility(&self) -> fauna_core::possibility::Possibility {
+        match self.state {
+            AwaitingDnsState::Checking | AwaitingDnsState::Claiming => {
+                fauna_core::possibility::Possibility::blocked(self.message.clone())
+            }
+            _ => fauna_core::possibility::Possibility::Possible,
+        }
+    }
+
+    /// `awaiting-dns-copy-button`'s answer: [`copy_all_enabled`] with the
+    /// records-less mode's own status line as the reason — the server is
+    /// starting and there is nothing to add by hand.
+    pub fn copy_possibility(&self) -> fauna_core::possibility::Possibility {
+        if copy_all_enabled(&self.dns_records) {
+            fauna_core::possibility::Possibility::Possible
+        } else {
+            fauna_core::possibility::Possibility::blocked(LocalizedText::key(resting_message_key(
+                &self.dns_records,
+            )))
+        }
+    }
+
+    /// `awaiting-dns-fallthrough-button`'s answer: [`fallthrough_enabled`],
+    /// blocked under a claim with the claim's status line as the reason.
+    pub fn fallthrough_possibility(&self) -> fauna_core::possibility::Possibility {
+        if fallthrough_enabled(&self.state) {
+            fauna_core::possibility::Possibility::Possible
+        } else {
+            fauna_core::possibility::Possibility::blocked(self.message.clone())
+        }
+    }
+}
+
 /// The records the user must add at their registrar, one per line, in the shape
 /// they would retype into a registrar panel.
 ///
@@ -326,5 +366,90 @@ mod tests {
         let raw = serde_json::to_string(&s).unwrap();
         let s2: AwaitingManualDnsSnapshot = serde_json::from_str(&raw).unwrap();
         assert_eq!(s, s2);
+    }
+
+    fn in_state(state: AwaitingDnsState, key: &str, records: bool) -> AwaitingManualDnsSnapshot {
+        AwaitingManualDnsSnapshot {
+            state,
+            dns_records: if records {
+                vec![DnsRecordPlain {
+                    record_type: "A".into(),
+                    name: "@".into(),
+                    value: "1.2.3.4".into(),
+                    ttl: 300,
+                    priority: None,
+                }]
+            } else {
+                Vec::new()
+            },
+            message: LocalizedText::key(key),
+        }
+    }
+
+    /// Each button's answer names the line the page paints for the state
+    /// that blocks it, and is possible otherwise.
+    #[test]
+    fn the_three_buttons_answer_with_the_pages_own_status_line() {
+        use fauna_core::possibility::Possibility;
+        let blocked = |k: &str| Possibility::blocked(LocalizedText::key(k));
+
+        let checking = in_state(
+            AwaitingDnsState::Checking,
+            "onboarding.awaiting_dns.checking",
+            true,
+        );
+        assert_eq!(
+            checking.recheck_possibility(),
+            blocked("onboarding.awaiting_dns.checking"),
+            "a probe in flight is not stacked"
+        );
+        assert_eq!(
+            checking.fallthrough_possibility(),
+            Possibility::Possible,
+            "the exit stays live under a bare probe"
+        );
+        assert_eq!(checking.copy_possibility(), Possibility::Possible);
+
+        let claiming = in_state(
+            AwaitingDnsState::Claiming,
+            "onboarding.awaiting_dns.claiming",
+            true,
+        );
+        assert_eq!(
+            claiming.recheck_possibility(),
+            blocked("onboarding.awaiting_dns.claiming")
+        );
+        assert_eq!(
+            claiming.fallthrough_possibility(),
+            blocked("onboarding.awaiting_dns.claiming"),
+            "leaving under a claim would race its nest binding"
+        );
+
+        let error = in_state(
+            AwaitingDnsState::Error { cause: "x".into() },
+            "onboarding.awaiting_dns.error",
+            true,
+        );
+        assert_eq!(
+            error.recheck_possibility(),
+            Possibility::Possible,
+            "checking again is the retry"
+        );
+
+        let records_less = in_state(
+            AwaitingDnsState::Pending,
+            "onboarding.awaiting_dns.server_starting",
+            false,
+        );
+        assert_eq!(
+            records_less.copy_possibility(),
+            blocked("onboarding.awaiting_dns.server_starting"),
+            "nothing to copy: the reason is the mode's own line"
+        );
+        assert_eq!(records_less.recheck_possibility(), Possibility::Possible);
+        assert_eq!(
+            records_less.fallthrough_possibility(),
+            Possibility::Possible
+        );
     }
 }

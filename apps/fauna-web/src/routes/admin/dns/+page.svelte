@@ -46,7 +46,21 @@
     adminPickerOption,
     type RoleAddressOption,
     type DmarcPolicyOption,
+    dnsSetModePossibility,
+    dnsManageAllPossibility,
+    dnsCredentialDraftPossibility,
+    dnsCertIssuePossibility,
+    dnsDelegatePossibility,
+    primaryDomainRenamePossibility,
+    localDomainAddPossibility,
+    localDomainRemovePossibility,
+    localDomainRenamePossibility,
+    localDomainPromotePossibility,
+    localDomainRenameDraftPossibility,
+    localDomainExtendDraftPossibility,
+    localDomainRenameDays,
   } from '#lib/wasm';
+  import { paintPossibility, type Possibility } from '#lib/possibility';
   import { graceCountdown } from '#lib/value-format';
   import { onMount } from 'svelte';
   import { certAutoRenewPasses } from '#lib/cert-auto-renew';
@@ -166,6 +180,10 @@
   // (libs/fauna-client-mail-settings/src/local_domains.rs). The MTA-STS policy
   // mode is not sent: the nest sets and advances it.
   const DEFAULT_CERT_MODE = 'expand_primary';
+  // How many days `admin-dns-rename-extend-button` extends the grace window by
+  // when its input is blank — the nest's own default window (tui's
+  // `DEFAULT_RENAME_EXTEND_DAYS`), so the common case needs no typing.
+  const DEFAULT_RENAME_EXTEND_DAYS = 7;
 
   // DNS-capable providers for the add-credential picker (same source the
   // onboarding DNS step uses; linux filters `PROVIDERS` by `Capability::Dns`).
@@ -207,15 +225,30 @@
   let delegateOpen = $state<Record<string, boolean>>({});
   let delegateZone = $state<Record<string, string>>({});
   let error = $state('');
+  // A failed every-account read: the pickers stay empty AND the page says so
+  // on `error-message` — never a picker silently offering only "None"
+  // (admin.md § 2 → *Which accounts a picker offers*).
+  let actorsError = $state('');
   let loading = $state(true);
+  // The two machines' snapshots as the shared answers read them
+  // (`docs/goal/ui/README.md` § Offer only what is possible, rule 5): each is
+  // handed over only once its read has resolved (`ldRead` / `dnsRead`), `null`
+  // before — so a control is never offered on an empty pre-hydrate snapshot.
+  // `wasmReady` guards the answers themselves: they are wasm calls.
+  // `$state.raw`: the answers hand these to wasm, which reads plain objects
+  // (never a deep `$state` proxy); each is replaced whole on every apply.
+  let ldSnap = $state.raw<LocalDomainsSnapshot | null>(null);
+  let dnsSnap = $state.raw<DnsSnapshot | null>(null);
+  let ldRead = $state(false);
+  let dnsRead = $state(false);
+  let wasmReady = $state(false);
   let addFormOpen = $state(false);
   let addInput = $state('');
   // Primary-domain rename (mail-primary-domain-rename.md § UX surface). The state
   // rides the LocalDomainMachine snapshot: `renameActive` is the in-flight rename
-  // (drives the banner + per-row state), `renameAvailable` gates the "Rename
-  // primary" button (two-step rule). The sheet + reveal-confirm flags are local UI.
+  // (drives the banner + per-row state); the "Rename primary" button paints from
+  // the shared `renameAnswer` below. The sheet + reveal-confirm flags are local UI.
   let renameActive = $state<PrimaryDomainRenameView | null>(null);
-  let renameAvailable = $state(false);
   // The add-domain form's irreversibility warning (deployment-home-with-public-
   // relay.md § MUA reach) — true only while a domainless nest's next add would
   // become the primary.
@@ -258,6 +291,106 @@
   // options (a manual domain's `_acme-challenge` renewals re-home into one of these).
   const credZones = $derived(Array.from(new Set(credentials.flatMap((c) => c.zones))));
 
+  // ── The page's answers (`docs/goal/ui/README.md` § Offer only what is
+  // possible; the ruling is `dns-management.md` § Errors & edge cases) ──────
+  // Every gated control is painted from one of these and its action asks the
+  // same one first (`refuse`), so what is offered and what is accepted agree.
+  // The decisions are the shared crates' (`fauna_client_dns::affordances`,
+  // `fauna_client_mail_settings::domain_forms`, over wasm); only folding this
+  // page's held state into their inputs is here — the twin of tui's
+  // `admin/dns.rs` answers.
+  const ldForAnswers = $derived(ldRead ? ldSnap : null);
+  const dnsForAnswers = $derived(dnsRead ? dnsSnap : null);
+  // Before the wasm module has loaded no answer can be asked; the page has
+  // read nothing yet either, which is the shared "still loading" reason.
+  const NOT_YET: Possibility = { state: 'blocked', reason: { key: 'common.still_loading' } };
+  function ask(answer: () => Possibility): Possibility {
+    return wasmReady ? answer() : NOT_YET;
+  }
+
+  /** `admin-dns-domain-mode` on `domain`, switching to `managed`. */
+  function modeAnswer(domain: string, managed: boolean): Possibility {
+    return ask(() => dnsSetModePossibility(dnsForAnswers, domain, managed));
+  }
+  /** `admin-dns-manage-all-toggle`, switching to the opposite of its state. */
+  const manageAllAnswer = $derived(
+    ask(() =>
+      dnsManageAllPossibility(
+        dnsForAnswers,
+        ldForAnswers ? ldForAnswers.active.map((d) => d.domain) : null,
+        !allManaged,
+      ),
+    ),
+  );
+  /** `admin-dns-add-credential-submit-button`, over the picked provider's DNS
+   *  fields and what has been typed into each. */
+  const credAnswer = $derived(
+    ask(() =>
+      dnsCredentialDraftPossibility(
+        selectedCredProvider !== null,
+        credFields.map((f) => credValues[f.id] ?? ''),
+      ),
+    ),
+  );
+  /** `admin-dns-cert-issue-button` on `domain`. */
+  function certIssueAnswer(domain: string): Possibility {
+    return ask(() => dnsCertIssuePossibility(dnsForAnswers?.pending_cert ?? null, domain));
+  }
+  /** `admin-dns-add-domain-submit-button`. */
+  const addAnswer = $derived(ask(() => localDomainAddPossibility(ldForAnswers, addInput)));
+  /** `admin-dns-domain-remove-button` on one active row — the raw snapshot's
+   *  own row for that domain (not the page's proxied `active` copy). */
+  function removeAnswer(d: LocalDomainView): Possibility {
+    const row = ldForAnswers?.active.find((r) => r.domain === d.domain);
+    return row ? ask(() => localDomainRemovePossibility(row)) : NOT_YET;
+  }
+  /** `admin-dns-domain-rename-button` (the primary row). */
+  const renameAnswer = $derived(
+    ldForAnswers ? ask(() => localDomainRenamePossibility(ldForAnswers)) : NOT_YET,
+  );
+  /** `admin-dns-domain-promote-button` (a non-primary row). */
+  const promoteAnswer = $derived(
+    ldForAnswers ? ask(() => localDomainPromotePossibility(ldForAnswers)) : NOT_YET,
+  );
+  // `bind:value` on a `type="number"` input yields a number (or null when
+  // blank), not the string the state is initialised with — the drafts below
+  // hand the shared predicates the text.
+  const renameGraceDraft = $derived(String(renameGraceDays ?? '').trim());
+  const extendDraft = $derived(String(extendDays ?? '').trim());
+  /** `admin-dns-rename-submit-button`. */
+  const renameDraftAnswer = $derived(
+    ask(() => localDomainRenameDraftPossibility(ldForAnswers, renameTarget, renameGraceDraft)),
+  );
+  /** `admin-dns-rename-extend-button`. */
+  const extendAnswer = $derived(ask(() => localDomainExtendDraftPossibility(extendDraft)));
+  /** `admin-dns-cert-delegate-button`: blocked until a held credential covers
+   *  a zone (`dns-management.md` § Errors & edge cases). */
+  const delegateAnswer = $derived(ask(() => dnsDelegatePossibility(credZones)));
+  /** The rename banner's controls — the shared rename view's answers, absent
+   *  outside the states that take them (`dns-management.md` § Errors & edge
+   *  cases). */
+  function renameControlAnswer(control: 'complete' | 'extend' | 'abort'): Possibility {
+    const view = ldForAnswers?.active_rename;
+    return view ? ask(() => primaryDomainRenamePossibility(view, control)) : NOT_YET;
+  }
+  const renameCompleteAnswer = $derived(renameControlAnswer('complete'));
+  const renameExtendAnswer = $derived(renameControlAnswer('extend'));
+  const renameAbortAnswer = $derived(renameControlAnswer('abort'));
+
+  /** Refuse an action whose answer is not possible: its reason goes on the
+   *  page's `error-message`, never a silent return. `true` when refused (tui's
+   *  `refuse_dns`). */
+  function refuse(answer: Possibility): boolean {
+    if (answer.state === 'possible') return false;
+    error = answer.state === 'blocked' ? resolveLocalized(answer.reason) : '';
+    return true;
+  }
+  /** The `title` a painted control carries: its blocked reason, resolved. */
+  function reasonTitle(answer: Possibility): string | undefined {
+    const reason = paintPossibility(answer).reason;
+    return reason ? resolveLocalized(reason) : undefined;
+  }
+
   // Resolve a dot-notation i18n key (provider display names + field labels) —
   // the shared `#lib/i18n/localized` resolver (was duplicated per-page).
   const L = resolveKey;
@@ -284,10 +417,11 @@
   function applySnapshots(): void {
     const dns = (dnsMachine?.snapshot() ?? null) as DnsSnapshot | null;
     const ld = (ldMachine?.snapshot() ?? null) as LocalDomainsSnapshot | null;
+    ldSnap = ld;
+    dnsSnap = dns;
     active = ld?.active ?? [];
     removed = ld?.soft_deleted ?? [];
     renameActive = ld?.active_rename ?? null;
-    renameAvailable = ld?.rename_available ?? false;
     addingFirstDomain = ld?.adding_first_domain ?? false;
     removeConfirmDomain = ld?.remove_confirm_domain ?? null;
     dnsByName = Object.fromEntries((dns?.domains ?? []).map((d) => [d.domain, d]));
@@ -296,7 +430,7 @@
     certIssuanceErrors = dns?.cert_issuance_errors ?? [];
     delegByName = Object.fromEntries((dns?.delegations ?? []).map((g) => [g.domain, g]));
     pendingCert = dns?.pending_cert ?? null;
-    error = ld?.error ?? dns?.error ?? '';
+    error = ld?.error ?? dns?.error ?? (actorsError || '');
   }
 
   // Re-fetch the DNS record matrix + held credentials + overlay live verdicts
@@ -310,6 +444,9 @@
     await ldMachine?.dispatch('Refresh');
     applySnapshots();
     await dnsMachine.dispatch('Refresh');
+    // A refresh that answered is the DNS read resolved, even when the mount's
+    // own hydrate had failed (the refresh button is how the admin retries).
+    dnsRead = true;
     applySnapshots();
     await dnsMachine.dispatch({ VerifyRecords: { domain: null } });
     applySnapshots();
@@ -324,6 +461,7 @@
     if (!id?.secretHex) { loading = false; return; }
     try {
       await ensureWasm();
+      wasmReady = true;
       ROLE_ADDRESS_ROLES = roleAddressOptions();
       DMARC_POLICIES = dmarcPolicyOptions();
       dnsMachine = await dnsManagementMachineWithCredentials(id.secretHex);
@@ -333,7 +471,8 @@
       // (admin.md § 2 → *Which accounts a picker offers*). Fetched beside the
       // domain list, so a row never paints a picker missing its members. A
       // failure here must not break the rest of the page — the picker degrades
-      // to "None" + any current designation kept visible.
+      // to "None" + any current designation kept visible — but it is never
+      // silent: it reaches `error-message`.
       const actorsReady = adminUsersListAll(id.secretHex).then(
         (users) => {
           // Option text is `adminPickerOption` (the two-halves rule's display
@@ -346,8 +485,8 @@
             hex: actorHex(u.actor_id),
           }));
         },
-        () => {
-          // Non-fatal: the catch-all picker just can't offer new actors yet.
+        (e) => {
+          actorsError = `load accounts: ${e instanceof Error ? e.message : String(e)}`;
         },
       );
       // The fetches fire together and each renders as it lands: the domain list
@@ -357,10 +496,16 @@
       const dns = dnsMachine;
       await Promise.all([
         Promise.all([ld.hydrate(), actorsReady]).then(() => {
+          ldRead = true;
           applySnapshots();
           loading = false;
         }),
-        dns.hydrate().finally(applySnapshots),
+        dns
+          .hydrate()
+          .then(() => {
+            dnsRead = true;
+          })
+          .finally(applySnapshots),
       ]);
       // Overlay live public-DNS verdicts onto the rendered matrix.
       await dnsMachine.dispatch({ VerifyRecords: { domain: null } });
@@ -435,19 +580,23 @@
   // an added domain appears with its records and their status
   // (mail-multidomain.md § Wizard steps, step 8). A thrown dispatch skips the
   // re-check; the machine records the error on its snapshot, which wins.
+  // Resolves `true` only when the action itself succeeded — a form closes on
+  // that and nothing else (tui's `DnsForm` fold).
   async function dispatchLd(
     action: Parameters<NonNullable<typeof ldMachine>['dispatch']>[0],
-  ): Promise<void> {
-    if (!ldMachine) return;
+  ): Promise<boolean> {
+    if (!ldMachine) return false;
     try {
       await ldMachine.dispatch(action);
       if (dnsMachine && localDomainActionMovesRecordMatrix(action)) {
         await dnsMachine.recheckMatrix();
       }
       applySnapshots();
+      return true;
     } catch (e) {
       applySnapshots();
       if (!error) error = e instanceof Error ? e.message : String(e);
+      return false;
     }
   }
 
@@ -459,22 +608,28 @@
     addFormOpen = false;
     addInput = '';
   }
+  // The same answer the submit is painted from; a refusal is said on
+  // `error-message` and the form stays open with what was typed. It closes,
+  // dropping the draft, only once the nest has added the domain.
   async function submitAdd(): Promise<void> {
+    if (refuse(addAnswer) || !ldMachine) return;
     const domain = addInput.trim().toLowerCase();
-    if (!domain || !ldMachine) return;
-    addFormOpen = false;
-    addInput = '';
-    await dispatchLd({
+    const saved = await dispatchLd({
       AddDomain: {
         domain,
         mta_sts_cert_mode: DEFAULT_CERT_MODE,
       },
     });
+    if (saved) {
+      addFormOpen = false;
+      addInput = '';
+    }
   }
   // The row's Remove only opens the shared confirm (synchronous, no nest); the
   // dialog's confirm removes the armed domain, its cancel closes it.
-  function armRemoveDomain(domain: string): void {
-    ldMachine?.armRemoveDomain(domain);
+  function armRemoveDomain(d: LocalDomainView): void {
+    if (refuse(removeAnswer(d))) return;
+    ldMachine?.armRemoveDomain(d.domain);
     applySnapshots();
   }
   function cancelRemoveDomain(): void {
@@ -496,6 +651,9 @@
   // surfaces a refusal via the machine's snapshot error. The client only picks the
   // target + the grace override and reads back the projected state.
   function openRenameSheet(target: string): void {
+    // The primary row's rename and a non-primary row's promote each ask their
+    // own answer — the one the button is painted from.
+    if (refuse(target ? promoteAnswer : renameAnswer)) return;
     // `target` is '' when opened from the primary row's "Rename primary" (the
     // admin picks in the select); a domain name when opened via a row's "Promote".
     renameTarget = target || (active.find((d) => !d.is_primary)?.domain ?? '');
@@ -508,23 +666,26 @@
     renameGraceDays = '';
   }
   async function submitRename(): Promise<void> {
-    if (!ldMachine) return;
+    // The sheet's answer covers the pick (an active non-primary domain) and the
+    // grace draft (blank = the nest's default, else 1–30 — never silently
+    // replaced by a default); a refusal keeps the sheet open as typed.
+    if (refuse(renameDraftAnswer) || !ldMachine) return;
     const target = active.find((d) => d.domain === renameTarget && !d.is_primary);
     if (!target) return;
-    // `bind:value` on a `type="number"` input yields a number (or null when
-    // blank), not the string the state is initialised with — normalise first.
-    const rawDays = String(renameGraceDays ?? '').trim();
-    const days = rawDays === '' ? null : Number(rawDays);
-    renameSheetOpen = false;
-    await dispatchLd({
+    const saved = await dispatchLd({
       StartPrimaryRename: {
         new_primary_domain_id: Array.from(toBytes(target.domain_id)),
-        grace_days: days,
+        grace_days: localDomainRenameDays(renameGraceDraft),
       },
     });
+    if (saved) {
+      renameSheetOpen = false;
+      renameTarget = '';
+      renameGraceDays = '';
+    }
   }
   async function completeRename(): Promise<void> {
-    if (!ldMachine || !renameActive) return;
+    if (refuse(renameCompleteAnswer) || !ldMachine || !renameActive) return;
     // `force` iff the grace window has NOT yet elapsed (can_force_complete);
     // otherwise it's a plain complete (can_complete).
     const force = renameActive.can_force_complete;
@@ -533,14 +694,15 @@
     await dispatchLd({ CompletePrimaryRename: { rename_id, force } });
   }
   async function extendRename(): Promise<void> {
-    if (!ldMachine || !renameActive) return;
-    const n = Number(extendDays);
-    if (!Number.isFinite(n) || n < 1) return;
+    if (refuse(renameExtendAnswer) || refuse(extendAnswer) || !ldMachine || !renameActive) return;
+    // Blank extends by the nest's own default window (tui's
+    // `DEFAULT_RENAME_EXTEND_DAYS`); anything else was checked by the answer.
+    const n = localDomainRenameDays(extendDraft) ?? DEFAULT_RENAME_EXTEND_DAYS;
     const rename_id = Array.from(toBytes(renameActive.rename_id));
     await dispatchLd({ ExtendPrimaryRenameGrace: { rename_id, additional_days: n } });
   }
   async function abortRename(): Promise<void> {
-    if (!ldMachine || !renameActive) return;
+    if (refuse(renameAbortAnswer) || !ldMachine || !renameActive) return;
     const rename_id = Array.from(toBytes(renameActive.rename_id));
     confirmingAbort = false;
     await dispatchLd({ AbortPrimaryRename: { rename_id, reason: null } });
@@ -726,8 +888,10 @@
   // → the machine verifies against the provider API (via the CORS proxy on web)
   // and, on success, seals it into DnsConfig. A verify failure surfaces in
   // error-message and stores nothing (dns-management.md § The two modes).
+  // The form, and the secrets typed into it, stay until the provider has
+  // verified the credential and it is sealed; a failure leaves it open.
   async function submitAddCred(): Promise<void> {
-    if (!dnsMachine || !selectedCredProvider) return;
+    if (refuse(credAnswer) || !dnsMachine || !selectedCredProvider) return;
     const provider_id = selectedCredProvider.id;
     const fields = credFields.map((f) => ({ id: f.id, value: credValues[f.id] ?? '' }));
     const label = L(selectedCredProvider.displayNameKey);
@@ -760,7 +924,7 @@
   // (InvalidState → error-message) and the next render snaps the mode back. A
   // successful opt-in publishes the records inside the same SetMode.
   async function setMode(domain: string, managed: boolean): Promise<void> {
-    if (!dnsMachine) return;
+    if (refuse(modeAnswer(domain, managed)) || !dnsMachine) return;
     try {
       await dnsMachine.dispatch({ SetMode: { domain, managed } });
       await refreshDnsMatrix();
@@ -773,7 +937,7 @@
   // without covering credentials rejects per-domain (surfaced via error-message);
   // we stop on the first error so the admin sees why.
   async function toggleManageAll(): Promise<void> {
-    if (!dnsMachine) return;
+    if (refuse(manageAllAnswer) || !dnsMachine) return;
     const target = !allManaged;
     try {
       for (const d of active) {
@@ -860,7 +1024,7 @@
   // issued cert is sealed to the nest over `fauna.tls.publish_cert`; RefreshCertStatus
   // re-reads the served-cert badge afterwards.
   async function issueCert(domain: string, single: boolean): Promise<void> {
-    if (!dnsMachine || !targetNestId) return;
+    if (refuse(certIssueAnswer(domain)) || !dnsMachine || !targetNestId) return;
     try {
       await dnsMachine.dispatch(
         single
@@ -915,6 +1079,7 @@
     }
   }
   function openDelegateForm(domain: string): void {
+    if (refuse(delegateAnswer)) return;
     delegateOpen = { ...delegateOpen, [domain]: true };
     // Default the target zone to the first held-credential zone (the e2e submits
     // without picking one — DelegateRenewal needs a held credential covering it).
@@ -973,7 +1138,7 @@
       {/if}
     </div>
     <div class="rename-banner-actions">
-      {#if renameActive.can_complete || renameActive.can_force_complete}
+      {#if paintPossibility(renameCompleteAnswer).shown}
         {#if confirmingComplete}
           {#if renameActive.can_force_complete}
             <span class="warn">{t.admin.dns.rename.complete_force_warning}</span>
@@ -991,7 +1156,7 @@
           >{t.admin.dns.rename.complete}</button>
         {/if}
       {/if}
-      {#if renameActive.can_extend}
+      {#if paintPossibility(renameExtendAnswer).shown}
         <input
           class="add-input narrow"
           type="number"
@@ -1003,10 +1168,12 @@
         <button
           class="btn"
           data-testid={IDS.ADMIN_DNS_RENAME_EXTEND_BUTTON}
+          disabled={paintPossibility(extendAnswer).disabled}
+          title={reasonTitle(extendAnswer)}
           onclick={extendRename}
         >{t.admin.dns.rename.extend}</button>
       {/if}
-      {#if renameActive.can_abort}
+      {#if paintPossibility(renameAbortAnswer).shown}
         {#if confirmingAbort}
           {#if !renameActive.is_pre_flip}
             <span class="warn">{t.admin.dns.rename.abort_postflip_warning}</span>
@@ -1060,7 +1227,8 @@
       <button
         class="btn primary"
         data-testid={IDS.ADMIN_DNS_RENAME_SUBMIT_BUTTON}
-        disabled={!renameTarget}
+        disabled={paintPossibility(renameDraftAnswer).disabled}
+        title={reasonTitle(renameDraftAnswer)}
         onclick={submitRename}
       >{t.admin.dns.rename.submit}</button>
       <button
@@ -1129,6 +1297,8 @@
     class:active={allManaged}
     data-testid={IDS.ADMIN_DNS_MANAGE_ALL_TOGGLE}
     data-state={allManaged ? 'on' : 'off'}
+    disabled={paintPossibility(manageAllAnswer).disabled}
+    title={reasonTitle(manageAllAnswer)}
     onclick={toggleManageAll}
   >{t.admin.dns.manage_all}</button>
 
@@ -1191,7 +1361,13 @@
       {/if}
 
       <div class="form-actions">
-        <button class="btn primary" data-testid={IDS.ADMIN_DNS_ADD_CREDENTIAL_SUBMIT_BUTTON} onclick={submitAddCred}>
+        <button
+          class="btn primary"
+          data-testid={IDS.ADMIN_DNS_ADD_CREDENTIAL_SUBMIT_BUTTON}
+          disabled={paintPossibility(credAnswer).disabled}
+          title={reasonTitle(credAnswer)}
+          onclick={submitAddCred}
+        >
           {t.admin.dns.add_credential_submit}
         </button>
         <button class="btn" data-testid={IDS.ADMIN_DNS_ADD_CREDENTIAL_CANCEL_BUTTON} onclick={cancelAddCred}>
@@ -1243,7 +1419,13 @@
         bind:value={addInput}
         onkeydown={(e) => { if (e.key === 'Enter') submitAdd(); }}
       />
-      <button class="btn primary" data-testid={IDS.ADMIN_DNS_ADD_DOMAIN_SUBMIT_BUTTON} onclick={submitAdd}>
+      <button
+        class="btn primary"
+        data-testid={IDS.ADMIN_DNS_ADD_DOMAIN_SUBMIT_BUTTON}
+        disabled={paintPossibility(addAnswer).disabled}
+        title={reasonTitle(addAnswer)}
+        onclick={submitAdd}
+      >
         {t.admin.dns.add_domain_submit}
       </button>
       <button class="btn" data-testid={IDS.ADMIN_DNS_ADD_DOMAIN_CANCEL_BUTTON} onclick={cancelAdd}>
@@ -1260,7 +1442,9 @@
 {/each}
 
 {#if loading}
-  <p class="muted">{t.admin.dns.empty}</p>
+  <!-- Loading is not empty (dns-management.md § Errors & edge cases): until the
+       domains read resolves the page says it is loading, never "No domains". -->
+  <p class="muted">{t.common.loading}</p>
 {:else if active.length === 0 && removed.length === 0}
   <p class="muted" data-testid={IDS.ADMIN_DNS_EMPTY}>{t.admin.dns.empty_desc}</p>
 {:else}
@@ -1280,6 +1464,11 @@
       <!-- Per-domain catch-all picker model (options + parallel actor-id map +
            current selection); dispatched by `selectedIndex` like linux. -->
       {@const ca = buildCatchAll(d)}
+      <!-- The row's answers (the shared predicates over wasm): the mode control
+           is painted for the switch it would make. -->
+      {@const modeTo = modeAnswer(d.domain, !isManaged)}
+      {@const removeTo = removeAnswer(d)}
+      {@const certTo = certIssueAnswer(d.domain)}
       <div class="domain-card" data-testid={IDS.ADMIN_DNS_DOMAIN}>
         <div class="domain-header">
           <span class="domain-name" data-testid={IDS.ADMIN_DNS_DOMAIN_NAME}>{d.domain}</span>
@@ -1289,6 +1478,8 @@
             class="btn mode"
             class:active={isManaged}
             data-testid={IDS.ADMIN_DNS_DOMAIN_MODE}
+            disabled={paintPossibility(modeTo).disabled}
+            title={reasonTitle(modeTo)}
             onclick={() => setMode(d.domain, !isManaged)}
           >{isManaged ? t.admin.dns.mode_managed : t.admin.dns.mode_manual}</button>
           <!-- Default-on auto-renew toggle (managed/delegated rows only). The
@@ -1307,33 +1498,38 @@
             <span class="badge" data-testid={IDS.ADMIN_DNS_DOMAIN_PRIMARY_BADGE}>{t.admin.dns.primary_badge}</span>
           {/if}
           <!-- Present on every active row (index aligns with admin-dns-domain-name
-               for scoped e2e clicks); disabled on the primary, which cannot be
-               removed (the nest refuses with cannot_remove_primary_domain). -->
+               for scoped e2e clicks); disabled with its reason on the primary,
+               which is renamed away, never removed (the shared answer). -->
           <button
             class="btn danger"
             data-testid={IDS.ADMIN_DNS_DOMAIN_REMOVE_BUTTON}
-            disabled={d.is_primary}
-            onclick={() => armRemoveDomain(d.domain)}
+            disabled={paintPossibility(removeTo).disabled}
+            title={reasonTitle(removeTo)}
+            onclick={() => armRemoveDomain(d)}
           >{t.admin.dns.remove}</button>
           <!-- Primary-domain rename affordances (mail-primary-domain-rename.md
-               § UX surface). On the primary row: "Rename primary" (disabled until a
-               non-primary exists — the two-step rule) + the in-flight state. On a
-               non-primary row: "Promote to primary" (hidden while a rename runs). -->
+               § UX surface). On the primary row: "Rename primary" (disabled with its
+               reason until a non-primary exists — the two-step rule — or while a
+               rename runs) + the in-flight state. On a non-primary row: "Promote to
+               primary" (disabled with its reason while a rename runs). -->
           {#if d.is_primary}
             <button
               class="btn"
               data-testid={IDS.ADMIN_DNS_DOMAIN_RENAME_BUTTON}
-              disabled={!renameAvailable || !!renameActive}
+              disabled={paintPossibility(renameAnswer).disabled}
+              title={reasonTitle(renameAnswer)}
               onclick={() => openRenameSheet('')}
             >{t.admin.dns.rename.button}</button>
             {#if renameActive}
               <span class="badge" data-testid={IDS.ADMIN_DNS_DOMAIN_RENAME_STATE}
                 >{t.admin.dns.rename.renaming_to} {renameActive.new_primary_domain} ({renameActive.state})</span>
             {/if}
-          {:else if !renameActive}
+          {:else}
             <button
               class="btn"
               data-testid={IDS.ADMIN_DNS_DOMAIN_PROMOTE_BUTTON}
+              disabled={paintPossibility(promoteAnswer).disabled}
+              title={reasonTitle(promoteAnswer)}
               onclick={() => openRenameSheet(d.domain)}
             >{t.admin.dns.rename.promote}</button>
           {/if}
@@ -1428,7 +1624,8 @@
           <button
             class="btn"
             data-testid={IDS.ADMIN_DNS_CERT_ISSUE_BUTTON}
-            disabled={pendingHere || !targetNestId}
+            disabled={paintPossibility(certTo).disabled || !targetNestId}
+            title={reasonTitle(certTo)}
             onclick={() => issueCert(d.domain, isManaged || !!deleg)}
           >{t.admin.dns.cert.issue}</button>
         </div>
@@ -1462,8 +1659,8 @@
             <button
               class="btn"
               data-testid={IDS.ADMIN_DNS_CERT_DELEGATE_BUTTON}
-              disabled={credZones.length === 0}
-              title={credZones.length === 0 ? t.admin.dns.cert.delegate_no_zones : undefined}
+              disabled={paintPossibility(delegateAnswer).disabled}
+              title={reasonTitle(delegateAnswer)}
               onclick={() => openDelegateForm(d.domain)}
             >{t.admin.dns.cert.delegate}</button>
           </div>

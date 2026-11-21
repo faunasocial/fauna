@@ -33,6 +33,13 @@ import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.EventsVM
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The VM-bound `event_detail` sub-page the NavHost mounts. Stateless

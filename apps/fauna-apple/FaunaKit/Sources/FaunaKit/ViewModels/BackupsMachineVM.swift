@@ -85,6 +85,7 @@ public final class BackupsMachineVM {
     public func reset() {
         machine = nil
         connectError = nil
+        pressRefusal = nil
         sharingError = nil
         devices = []
         selectedDeviceId = nil
@@ -210,10 +211,67 @@ public final class BackupsMachineVM {
     /// partial busy flags).
     public var busy: Bool { snapshot?.inProgressOp != nil }
 
-    /// Single-flight (§ Snapshot-list shape, *Create* ruling): while the machine
-    /// reports an op in flight every mutating control is disabled. A `Refresh` is
-    /// included — it is the re-read every mutation ends with.
-    public var mutationsDisabled: Bool { selectedFolder == nil || busy }
+
+    // ── What the page offers (shared answers) ────────────────────────────────
+    //
+    // `ui/backups.md` § Errors & edge cases → *What the page offers*; every
+    // gated snapshot control paints from one answer of
+    // `fauna_backups_machine::possibility` and its gesture asks the same answer
+    // first, refusing on `error-message` with the same reason. Before the
+    // machine exists nothing has been read (`common.still_loading`).
+
+    private func answer(_ ask: (BackupsSnapshot) -> Possibility) -> Possibility {
+        if let snapshot { return ask(snapshot) }
+        return readPossibility(read: .pending)
+    }
+
+    /// The machine's index of the row `id` — the shared answers index the
+    /// machine's own list, never the macOS device filter's `rows`.
+    private func machineIndex(of id: Int64) -> UInt32? {
+        snapshot?.snapshots.firstIndex(where: { $0.id == id }).map { UInt32($0) }
+    }
+
+    /// `snapshot-create-button`, `snapshot-prune-button`,
+    /// `snapshot-check-button`: a selected folder (the reason names where one
+    /// is made when there are none) and an idle machine.
+    public var setActionPossibility: Possibility {
+        answer { backupsSetActionPossibility(snapshot: $0) }
+    }
+
+    /// The single-flight gate alone — `snapshot-undelete-button` and the
+    /// prune preview's execute, which wait only on the machine being idle.
+    public var idlePossibility: Possibility {
+        answer { backupsIdlePossibility(snapshot: $0) }
+    }
+
+    /// `snapshot-delete-button` on the row `id`: only an active row, and an
+    /// idle machine; a row the machine no longer lists is absent.
+    public func deletePossibility(id: Int64) -> Possibility {
+        answer { snapshot in
+            guard let index = machineIndex(of: id) else { return .absent }
+            return backupsDeletePossibility(snapshot: snapshot, index: index)
+        }
+    }
+
+    /// `snapshot-immediate-delete-button` on the row `id`: live in every row
+    /// state, held only by the single-flight gate.
+    public func immediateDeletePossibility(id: Int64) -> Possibility {
+        answer { snapshot in
+            guard let index = machineIndex(of: id) else { return .absent }
+            return backupsImmediateDeletePossibility(snapshot: snapshot, index: index)
+        }
+    }
+
+    /// The reason the last refused press gave, on the page's `error-message`
+    /// (rule 7: a refusal is never silent). Cleared by the next press.
+    public private(set) var pressRefusal: String?
+
+    /// Ask `answer` for a press: `true` (and the reason on `error-message`)
+    /// when refused.
+    private func refused(_ answer: Possibility) -> Bool {
+        pressRefusal = nil
+        return refusePress(answer, errorMessage: &pressRefusal)
+    }
 
     /// The `in_progress_op` line, off the shared `fauna_backups_machine::busy_text`
     /// (`docs/goal/ui/backups.md` § Where logic lives):
@@ -286,7 +344,7 @@ public final class BackupsMachineVM {
     /// NOT routed here — it is a result (§ Architectural rules, rule 6).
     public var errorMessage: String? {
         _ = _observerTick
-        return firstNonNil(connectError, sharingError, snapshot?.error.map(renderLocalizedText))
+        return firstNonNil(connectError, pressRefusal, sharingError, snapshot?.error.map(renderLocalizedText))
     }
 
     /// Transient failure from one of the four non-machine reads above.
@@ -325,11 +383,13 @@ public final class BackupsMachineVM {
     }
 
     public func createSnapshot() async {
+        if refused(setActionPossibility) { return }
         await machine?.createSnapshot()
         snapshotsChanged &+= 1
     }
 
     public func deleteSnapshot(id: Int64) async {
+        if refused(deletePossibility(id: id)) { return }
         await machine?.deleteSnapshot(snapshotId: id)
         snapshotsChanged &+= 1
     }
@@ -339,6 +399,7 @@ public final class BackupsMachineVM {
     /// on the machine's own `in_progress_op`, same as every other mutating
     /// gesture here.
     public func undeleteSnapshot(id: Int64) async {
+        if refused(idlePossibility) { return }
         await machine?.undeleteSnapshot(snapshotId: id)
         snapshotsChanged &+= 1
     }
@@ -347,8 +408,12 @@ public final class BackupsMachineVM {
     /// resting retention policy and never carries a client-chosen one
     /// (§ Architectural rules, rule 5), which is what retired the page's
     /// hand-encoded `keep_*` writer along with `RetentionEditorSheet`.
-    public func prunePreview() async { await machine?.prunePreview() }
+    public func prunePreview() async {
+        if refused(setActionPossibility) { return }
+        await machine?.prunePreview()
+    }
     public func pruneExecute() async {
+        if refused(setActionPossibility) { return }
         await machine?.pruneExecute()
         snapshotsChanged &+= 1
     }
@@ -357,7 +422,10 @@ public final class BackupsMachineVM {
     /// `snapshot-check-button` — the tagged button fires the check DIRECTLY
     /// (§ Snapshot-list shape, *Check* ruling; the sheet that required a second,
     /// untagged "Start check" click violated the actuation contract).
-    public func check() async { await machine?.check() }
+    public func check() async {
+        if refused(setActionPossibility) { return }
+        await machine?.check()
+    }
 
     public func openSnapshot(id: Int64) async {
         await machine?.openSnapshot(snapshotId: id)
@@ -395,6 +463,7 @@ public final class BackupsMachineVM {
     /// Open the modal for `snapshotId` — the per-row button OPENS it, never a
     /// one-click delete (backups.md § Architectural rules, rule 4).
     public func openImmediateDelete(snapshotId: Int64) {
+        if refused(immediateDeletePossibility(id: snapshotId)) { return }
         immediateDeleteSnapshotId = snapshotId
         immediateDeleteConfirmId = ""
         immediateDeleteAcknowledge = ""
@@ -489,7 +558,12 @@ public final class BackupsMachineVM {
     /// loudly, onto `error-message` — rather than in each view: e2e convention 11
     /// (an automation command is honoured or it fails visibly, never a bare
     /// `return`) plus priority #2, one refusal in shared FaunaKit for both targets.
-    public func downloadSnapshotFile(snapshotId: Int64, path: String) async -> Data? {
+    ///
+    /// `carveOut` is the offline answer the button painted from
+    /// (`carveOutAnswer(client)`): the press asks it again and refuses on
+    /// `error-message` with its reason before anything else.
+    public func downloadSnapshotFile(snapshotId: Int64, path: String, carveOut: Possibility) async -> Data? {
+        if refused(carveOut) { return nil }
         // Input check BEFORE the `api` guard: the device id is wrong
         // independently of whether a nest is connected, and checking it first
         // leaves both refusals assertable without a live API.

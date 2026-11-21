@@ -77,6 +77,14 @@ class WebBridgeDriver(HttpBridgeDriver):
     # web's leaf is the browser language's region subtag.
     REGION_SOURCE_KEY = "source_browser_locale"
 
+    #: No scroll-and-retry on a 404: the DOM holds every element whether or not
+    #: it is scrolled into view (Playwright scrolls a target itself), and the
+    #: bridge answers an actuation's 404 only after Playwright's whole wait has
+    #: given up — three more retries would each wait it again. Before the
+    #: bridge answered a never-attached element 404 (it was a bare 500) web
+    #: never took the retry, so this keeps its behaviour exactly.
+    _MAX_SCROLL_RETRIES = 0
+
     #: The escrow-trust seed's name — the native environment variable, and on
     #: web the `localStorage` key (`fauna_client_core::nest_trust::
     #: E2E_TRUST_NEST_IDENTITY`).
@@ -101,6 +109,15 @@ class WebBridgeDriver(HttpBridgeDriver):
     #: written on web: the context trusts pebble, and the nest reads the name
     #: server from its own environment.
     _ACME_DIRECTORY_KEY = "FAUNA_E2E_ACME_DIRECTORY_URL"
+
+    def blocked_reason(
+        self, element_id: str, index: int = 0, *, scope: str | None = None
+    ) -> str | None:
+        """web paints a blocked control's reason as its ``title`` — the
+        tooltip ``formGate`` fills (``apps/fauna-web/src/lib/form-gate.ts``);
+        see :meth:`PlatformDriver.blocked_reason`."""
+        value = self.get_attr(element_id, "title", index, scope=scope)
+        return value or None
 
     def declare_region_for_relaunch(self, region: str, registry_hex: str) -> bool:
         """Web's twin of the native environment seam: a page reads no
@@ -564,6 +581,11 @@ class WebBridgeDriver(HttpBridgeDriver):
         nothing has been copied — the windows driver's contract."""
         return self._get("/clipboard/text").get("text")
 
+    # The bridge's ``/element/select-text`` makes a real mouse drag across the
+    # element, so a ``user-select: none`` rule reads False; ``/page/selection``
+    # answers ``window.getSelection().toString()`` (`HttpBridgeDriver`).
+    _serves_select_text = True
+
     def set_input_files(self, element_id: str, files: str | list[str]) -> None:
         """Set file(s) on an input[type=file] element."""
         if isinstance(files, str):
@@ -1025,13 +1047,26 @@ class WebBridgeDriver(HttpBridgeDriver):
         # Double-encode: inner dumps → JSON blob the page JSON.parses; outer
         # dumps → a JS string literal we can splice into the snippet safely.
         blob_literal = json_mod.dumps(json_mod.dumps(urls))
-        self._execute_js(
+        # While a finished wizard's launch is held (`launch_progress` /
+        # `launch_retry` after `LoggedIn`), install in place, as the native
+        # agents always do: a reload there is a cold signed-in reload, which
+        # ends the held launch and the deferred work it carries
+        # (onboarding.md § Wizard exit handling → *The finished wizard holds
+        # until the session is signed in*). The launch re-reads the override
+        # at every Retry (`libs/fauna-wasm-launch`), and the param still goes
+        # on the URL so a later reload keeps it.
+        held = self._execute_js(
             "(() => {"
+            "  const held = window.__fauna_launchHeld?.() === true;"
             "  const u = new URL(location.href);"
             f"  u.searchParams.set('fauna_e2e_provider_base_urls', {blob_literal});"
             "  history.replaceState(null, '', u.toString());"
+            f"  if (held) window.__fauna_setProviderBaseUrls(JSON.parse({blob_literal}));"
+            "  return held;"
             "})()"
         )
+        if held is True:
+            return
         # Re-mount so onMount's first initOnboardingMachine() picks up the
         # override (hard_reload re-injects the agent + waits for rehydrate).
         self.hard_reload()
@@ -1204,8 +1239,10 @@ class WebBridgeDriver(HttpBridgeDriver):
         """Convention 14's causal anchor on web.
 
         `call_command` above awaits the handler's promise, and `#lib/barrier-e2e`
-        makes that promise resolve only after two macrotask turns — awaiting a
-        promise alone would order this against microtasks only. The state sync
+        makes that promise resolve only once no SvelteKit navigation and no
+        counted WS-RPC call is in flight, turn by turn (its header, *The two
+        completion observables*, owns the bounds) — awaiting a promise alone
+        would order this against microtasks only. The state sync
         `call_command` already does then republishes the post-barrier snapshot,
         so a following `get_state()` reads what the barrier waited for.
         """

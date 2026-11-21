@@ -27,7 +27,12 @@ from helpers import budgets
 from helpers.app_surface import require_surface
 from helpers.waiting import wait_until
 
-pytestmark = pytest.mark.tier_2
+# The old set-up path (dns_config -> vps_config) exists only on an app whose
+# `provider-choice` surface is unbuilt - windows today (surfaces.toml); the
+# choose-providers page replaced both pages elsewhere (onboarding-provisioning.md
+# § 3d). Successors: test_provider_choice*.py and
+# test_provider_dialog_registry_parity.py. Keep this mark equal to that set.
+pytestmark = [pytest.mark.tier_2, pytest.mark.windows]
 
 
 def test_dns_config_renders_provider_row(app):

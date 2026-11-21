@@ -451,6 +451,28 @@ pub fn offline_share_gates(view: OfflineShareView) -> OfflineShareGates {
     }
 }
 
+/// Whether `offline-share-begin-button` can start the ceremony now
+/// ([`OfflineShareView::begin_possibility`]; `docs/goal/ui/README.md` § Offer
+/// only what is possible, rule 6): possible, blocked by the reason the person
+/// can act on (a ceremony in flight, an empty or refused code), or absent off
+/// the initiator panel. [`OfflineShareGates::can_begin`] stays for its callers.
+#[uniffi::export]
+pub fn offline_share_begin_possibility(
+    view: OfflineShareView,
+) -> fauna_core::possibility::Possibility {
+    view.begin_possibility()
+}
+
+/// `offline-receive-expect-button`'s answer
+/// ([`OfflineShareView::expect_possibility`]) — the recipient's mirror of
+/// [`offline_share_begin_possibility`].
+#[uniffi::export]
+pub fn offline_share_expect_possibility(
+    view: OfflineShareView,
+) -> fauna_core::possibility::Possibility {
+    view.expect_possibility()
+}
+
 /// Parse the typed counterpart code against this seat's own identity —
 /// `offline-share-peer-code-input`'s validity gate.
 #[uniffi::export]

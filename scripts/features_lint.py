@@ -26,7 +26,12 @@ The rules, in the doc's own numbering:
    key it declares; no surface is declared unbuilt on an app whose ledger holds a
    passing record of a test that requires it, nor — keyed by a ui.yaml id — on an app
    whose `ui-actual-<app>.yaml` records that id; and no `product` entry lists all
-   seven apps (finished: the entry and its gates are deleted together).
+   seven apps (finished: the entry and its gates are deleted together);
+8. the release table records no promotion ahead of the dev line: a row with `promoted`
+   set has a `verified` row at its commit, or one recorded after it — Stable never
+   recorded ahead of `:dev` (`docs/goal/architecture/image-pipeline.md` § Image tags &
+   channels → *What moves `:dev` without a session's initiative*, part (4), ruled
+   2026-11-15; the rule is that section's, listed here because this lint runs it).
 
 Rules 2 and 3 are the two directions of the same promise, which is why they are
 separate rules rather than one: a contract line naming a test that does not carry the
@@ -59,12 +64,26 @@ _CITATION_RE = re.compile(r"^(?P<doc>[\w./-]+\.md)\s+§\s+(?P<section>.+?)\s*$")
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.*?)\s*$")
 
 
+#: `(path, mtime_ns, size)` → its headings, for the process. Rule 1 resolves
+#: ~3,000 citations against a few dozen goal docs, and read and split each doc
+#: once per citation: ~1 s of the lint on macOS (2026-11-16; merge-gates.md
+#: § The 10-second budget, rule 7). Keyed on the stat so a fixture world that
+#: rewrites one path between two lints reads its new headings.
+_HEADINGS: dict = {}
+
+
 def _headings(path: Path) -> list:
+    st = path.stat()
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    cached = _HEADINGS.get(key)
+    if cached is not None:
+        return cached
     out = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         match = _HEADING_RE.match(line)
         if match:
             out.append(match.group(1).strip())
+    _HEADINGS[key] = out
     return out
 
 
@@ -424,6 +443,35 @@ def lint(features: Path = fc.FEATURES, e2e: Path = fs.E2E, repo: Path = REPO, *,
     problems += _rule_7(tests, e2e / "surfaces.toml")
     if registry is not None:
         problems += _rule_7_declarations(pages, ledger, tests, registry, e2e)
+    try:
+        problems += _rule_8(fc.load_releases(features))
+    except fc.CatalogError as exc:
+        problems.append(str(exc))
+    return problems
+
+
+def _rule_8(releases: list) -> list:
+    """A promoted row has a `verified` row at its commit or recorded after it.
+
+    "After" is the table's own order — rows are appended as they are recorded and
+    upserted in place, never re-sorted (`release_artifacts.dumps`) — so the rule reads
+    nothing but the file and stays on the 10-second merge path. It reds at the merge
+    that records a promotion while the dev line's newest verified build is older; the
+    `image-dev` step of the release attempt (release-attempt.md § The release attempt)
+    records the merged candidate's verified build before any promote can."""
+    problems = []
+    for i, row in enumerate(releases):
+        if not row.get("promoted"):
+            continue
+        commit = row.get("commit")
+        if any(other.get("verified") and (other.get("commit") == commit or j > i)
+               for j, other in enumerate(releases)):
+            continue
+        problems.append(
+            f"rule 8: release table: {row.get('version')} @ {str(commit)[:12]} is recorded "
+            "promoted with no verified row at its commit or after it — restage the candidate "
+            "on :dev first (`fauna-publish attempt image-dev <version>`, image-pipeline.md "
+            "§ Image tags & channels)")
     return problems
 
 
@@ -576,7 +624,16 @@ def _publish_ships(repo: Path):
     transform = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(transform)
     rules = transform.parse_allowlist(allowlist)
-    return lambda rel: transform.ships_source_path(rel, *rules)
+    # Per path, for the process: rule 2 asks once per contract-mapped test, about
+    # 3,900 asks over ~1,600 files, and each ask walks every drop-path glob at
+    # every depth of the path (~0.5 s on macOS, 2026-11-16).
+    answers: dict = {}
+
+    def ships(rel: str) -> bool:
+        if rel not in answers:
+            answers[rel] = transform.ships_source_path(rel, *rules)
+        return answers[rel]
+    return ships
 
 
 def main(argv=None) -> int:

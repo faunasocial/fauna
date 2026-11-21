@@ -45,9 +45,16 @@ public final class PluginAdminVM {
         }
     }
 
+    /// `bridge-plugin-install-submit`'s draft answer — the shared
+    /// `plugin_install_possibility` (`bridges.md` § Errors & edge cases):
+    /// blocked on a blank URL.
+    public var installAnswer: Possibility { bridgePluginInstallPossibility(documentUrl: installUrl) }
+
     public func install() async {
+        // The press asks what the paint asked, refusing out loud (rule 7).
+        if refusePress(installAnswer, errorMessage: &errorMessage) { return }
         let url = installUrl.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let api, !url.isEmpty else { return }
+        guard let api else { return }
         do {
             try await api.installPlugin(documentUrl: url)
             installUrl = ""
@@ -81,13 +88,14 @@ public final class PluginAdminVM {
 }
 
 /// The admin's installed-plugins list with its install entry — one FaunaKit
-/// view both Apple Bridges pages embed, painted only while the caller is an
-/// admin (the host passes `isAdmin`). Reference painter: tui
+/// view both Apple Bridges pages embed, painted from the shared admin-entry
+/// answer the host passes (`admin_entry_possibility`: absent for a non-admin). Reference painter: tui
 /// `apps/fauna-tui/src/bridges.rs::plugin_elements`.
 public struct PluginAdminSection: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = PluginAdminVM()
-    private let isAdmin: Bool
+    private let entry: Possibility
+    private var isAdmin: Bool { entry.isShown }
     /// The host page's `appState.navGeneration`: a navigate to the already-open
     /// Bridges page re-reads the list, as every other settings and admin page
     /// re-fetches on its `reloadToken` (the e2e poll-by-re-navigate pattern) —
@@ -97,16 +105,14 @@ public struct PluginAdminSection: View {
     /// count_and_last_fault`, macos and ios).
     private let reloadToken: Int
 
-    public init(isAdmin: Bool, reloadToken: Int = 0) {
-        self.isAdmin = isAdmin
+    public init(entry: Possibility, reloadToken: Int = 0) {
+        self.entry = entry
         self.reloadToken = reloadToken
     }
 
     public var body: some View {
         Group {
-            if isAdmin {
-                content
-            }
+            content.faunaPossible(entry)
         }
         // Non-admin reads 0; an admin's key moves with every re-navigate.
         .task(id: SessionKey(client, reloadToken: isAdmin ? reloadToken + 1 : 0)) {
@@ -138,15 +144,15 @@ public struct PluginAdminSection: View {
                     text: $vm.installUrl,
                     commit: { Task { await vm.install() } }
                 )
-            let canInstall = !vm.installUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             Button(L.bridges.pluginInstallSubmit) {
                 Task { await vm.install() }
             }
-            .disabled(!canInstall)
             .accessibilityIdentifier(Ids.bridgePluginInstallSubmit)
-            .automationActivate(Ids.bridgePluginInstallSubmit, isEnabled: { canInstall }) {
+            .automationActivate(Ids.bridgePluginInstallSubmit) {
                 Task { await vm.install() }
             }
+            .faunaPossible(vm.installAnswer)
+            FaunaPossibilityReason(vm.installAnswer)
             if vm.installOpened {
                 Text(L.bridges.pluginInstallOpened)
                     .font(.caption)

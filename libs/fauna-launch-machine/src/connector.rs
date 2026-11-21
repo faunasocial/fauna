@@ -141,6 +141,24 @@ pub struct MockAuthConnector {
     /// *order* — that the domain is dialled first and the hint only after — which
     /// is the whole safety property of a possibly-stale hint.
     silent_challenge_hints: std::sync::Mutex<Vec<Option<String>>>,
+    /// How long each `silent_challenge` call takes to answer — `None` at once
+    /// (the default), else [`MockReplyDelay`]. Settable after construction
+    /// (`&self`) so a test can script a fast first launch and a hanging Retry
+    /// on one shared connector.
+    reply_delay: std::sync::Mutex<Option<MockReplyDelay>>,
+}
+
+/// How a [`MockAuthConnector`]'s `silent_challenge` delays its scripted reply —
+/// the seam the launch attempt bound (`crate::machine::LAUNCH_ATTEMPT_BOUND`)
+/// is witnessed through. Waits on the shared cross-target sleep, so a test on a
+/// paused tokio clock spends no real time.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Clone, Copy, Debug)]
+pub enum MockReplyDelay {
+    /// The reply arrives after this long.
+    After(std::time::Duration),
+    /// The reply never arrives — a host that drops every packet.
+    Never,
 }
 
 // `new()` owns the defaults (notably the `Claimed` probe fallback), so `Default`
@@ -163,7 +181,13 @@ impl MockAuthConnector {
             claim_probe_calls: std::sync::Mutex::new(0),
             forgotten_pins: std::sync::Mutex::new(Vec::new()),
             silent_challenge_hints: std::sync::Mutex::new(Vec::new()),
+            reply_delay: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Delay every later `silent_challenge` reply (`None`: answer at once).
+    pub fn set_reply_delay(&self, delay: Option<MockReplyDelay>) {
+        *self.reply_delay.lock().unwrap() = delay;
     }
 
     /// The reach hint each `silent_challenge` call carried, in order — `None`
@@ -225,6 +249,12 @@ impl AuthConnector for MockAuthConnector {
             .lock()
             .unwrap()
             .push(reach_ipv4.map(str::to_string));
+        let delay = *self.reply_delay.lock().unwrap();
+        match delay {
+            None => {}
+            Some(MockReplyDelay::After(d)) => fauna_sleep::sleep(d).await,
+            Some(MockReplyDelay::Never) => std::future::pending::<()>().await,
+        }
         pop_or_clone(&self.silent_challenge).unwrap_or(SilentChallengeOutcome::Transient {
             error: "mock: no scripted silent_challenge outcome".into(),
         })

@@ -985,6 +985,22 @@ pub const KIND_MAIL_IMPORT_SOURCE: &str = "fauna.state.mail-import-source";
 /// The one logical key a [`KIND_MAIL_IMPORT_SOURCE`] row lives at.
 pub use fauna_core::mail_import_source::MAIL_IMPORT_SOURCE_ROW_KEY;
 
+/// Class-2 kind: the **pairing mark** — one row per nest, a payload-free
+/// notice that the account's pairings at that nest changed
+/// (`account-runtime.md` § Multi-instance concurrency → *A nest-side change a
+/// store-backed page shows leaves a mark in the store: the pairing mark*
+/// owns the concept). Key: the lowercase hex64 of the nest's proven 32-byte
+/// id; value: the 32-byte digest of the pairing listing that nest answered
+/// (`fauna_client_core::linked_nests::pairing_mark_digest` owns the digest).
+/// It carries no pairing, authorizes nothing and is never read for what a
+/// page lists — a Nests page lists from the nest. Latest-wins per nest, by
+/// the entry's `LwwStamp`: the value is a function of the nest's answer, so
+/// a stale write is corrected by the next run of the pump's secondary leg,
+/// and losing a row loses nothing. Fleet-only (the [`POLICIES`] rung
+/// default: no grantee is argued for) and tip-sealed like every
+/// product-level fleet kind. **Frozen** (see the module header).
+pub const KIND_PAIRING_MARK: &str = "fauna.state.pairing-mark";
+
 /// The registered class-2 kinds: **three frozen columns** per kind — how it
 /// merges, who can open it (R13, charter § The audience ladder), and which key
 /// material seals it (R14, charter § The generation machinery). Audience and
@@ -1460,6 +1476,15 @@ const POLICIES: &[(&str, MergePolicy, AudienceRung, SealingEpoch)] = &[
         AudienceRung::FleetOnly,
         SealingEpoch::GenerationTip,
     ),
+    (
+        KIND_PAIRING_MARK,
+        // Whole-record per nest: the latest listing's digest. Recreatable —
+        // the next secondary-leg run writes it again from the nest.
+        MergePolicy::LatestWins,
+        // Fleet-only + tip-sealed (the kind const's doc).
+        AudienceRung::FleetOnly,
+        SealingEpoch::GenerationTip,
+    ),
 ];
 
 /// The policy for `kind`, or `None` when this build does not know the kind.
@@ -1605,13 +1630,15 @@ pub enum TipSealedKind {
     KindManifest,
     /// [`KIND_MAIL_IMPORT_SOURCE`].
     MailImportSource,
+    /// [`KIND_PAIRING_MARK`].
+    PairingMark,
 }
 
 impl TipSealedKind {
     /// Every registered `GenerationTip` kind, in registry order —
     /// `the_tip_sealed_kinds_are_exactly_the_registry_set` holds the list to
     /// the registry, so a consumer that walks it meets every tip-sealed kind.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::DeviceEndpoints,
         Self::CustodiesHeld,
         Self::CustodianEndpoints,
@@ -1637,6 +1664,7 @@ impl TipSealedKind {
         Self::RefusedSchedulingChanges,
         Self::KindManifest,
         Self::MailImportSource,
+        Self::PairingMark,
     ];
 
     /// The variant for a kind string, or `None` for any kind that is not a
@@ -1670,6 +1698,7 @@ impl TipSealedKind {
             KIND_NOSTR_CONFIRMATION => Self::NostrConfirmation,
             KIND_KIND_MANIFEST => Self::KindManifest,
             KIND_MAIL_IMPORT_SOURCE => Self::MailImportSource,
+            KIND_PAIRING_MARK => Self::PairingMark,
             _ => return None,
         })
     }
@@ -1703,6 +1732,7 @@ impl TipSealedKind {
             Self::NostrConfirmation => KIND_NOSTR_CONFIRMATION,
             Self::KindManifest => KIND_KIND_MANIFEST,
             Self::MailImportSource => KIND_MAIL_IMPORT_SOURCE,
+            Self::PairingMark => KIND_PAIRING_MARK,
         }
     }
 
@@ -1787,6 +1817,9 @@ impl TipSealedKind {
             // The remembered import source: connected on any device, it
             // prefills the wizard and seeds a resume on every device.
             Self::MailImportSource => TipRowScope::Account,
+            // The account's pairings at a nest: written by whichever device
+            // listed them, read as a notice by every device.
+            Self::PairingMark => TipRowScope::Account,
         }
     }
 }
@@ -3929,7 +3962,8 @@ mod tests {
                 KIND_NOSTR_CONFIRMATION,
                 KIND_REFUSED_SCHEDULING_CHANGES,
                 KIND_KIND_MANIFEST,
-                KIND_MAIL_IMPORT_SOURCE
+                KIND_MAIL_IMPORT_SOURCE,
+                KIND_PAIRING_MARK
             ]
         );
     }
@@ -6352,6 +6386,34 @@ mod tests {
         assert_eq!(TipSealedKind::Follows.scope(), TipRowScope::Account);
         assert!(!retired_with_its_writer(KIND_FOLLOWS));
         assert!(!delegable_kinds().any(|k| k == KIND_FOLLOWS));
+    }
+
+    /// The pairing mark's registration, held whole: the frozen string,
+    /// latest-wins per nest, fleet-only, tip-sealed, an ACCOUNT row on
+    /// departure (`account-runtime.md` § Multi-instance concurrency → *the
+    /// pairing mark*, part 1).
+    #[test]
+    fn the_pairing_mark_registers_as_a_fleet_only_tip_sealed_latest_wins() {
+        assert_eq!(KIND_PAIRING_MARK, "fauna.state.pairing-mark");
+        assert_eq!(
+            merge_policy(KIND_PAIRING_MARK),
+            Some(MergePolicy::LatestWins)
+        );
+        assert_eq!(
+            audience_rung(KIND_PAIRING_MARK),
+            Some(AudienceRung::FleetOnly)
+        );
+        assert_eq!(
+            sealing_epoch(KIND_PAIRING_MARK),
+            Some(SealingEpoch::GenerationTip)
+        );
+        assert_eq!(
+            TipSealedKind::of(KIND_PAIRING_MARK),
+            Some(TipSealedKind::PairingMark)
+        );
+        assert_eq!(TipSealedKind::PairingMark.scope(), TipRowScope::Account);
+        assert!(!retired_with_its_writer(KIND_PAIRING_MARK));
+        assert!(!delegable_kinds().any(|k| k == KIND_PAIRING_MARK));
     }
 
     fn a_followed_folder(home: &str, name: &str) -> fauna_core::data::FollowedFolder {

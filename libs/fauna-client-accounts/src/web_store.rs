@@ -181,6 +181,22 @@ pub fn identity_store_create(passphrase: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// `unlock-submit-button`'s answer over what is typed — the passphrase and, in
+/// create mode, its confirmation (`undefined` in unlock mode) —
+/// [`crate::passphrase_possibility`] (`docs/goal/ui/README.md` § Offer only
+/// what is possible, rule 4's form case), as `Possibility`'s serde JSON for
+/// `#lib/possibility`'s `paintPossibility`. Beside the create and unlock doors
+/// so every chunk that opens the store carries the answer its form paints from;
+/// the unlock gate keeps no emptiness or mismatch check of its own.
+#[wasm_bindgen(js_name = passphrasePossibilityJson)]
+pub fn passphrase_possibility_json(passphrase: &str, confirm: Option<String>) -> String {
+    serde_json::to_string(&crate::passphrase_possibility(
+        passphrase,
+        confirm.as_deref(),
+    ))
+    .unwrap_or_default()
+}
+
 /// Open the header under `passphrase` and resume any interrupted sealing.
 #[wasm_bindgen(js_name = identityStoreUnlock)]
 pub fn identity_store_unlock(passphrase: &str) -> Result<(), JsValue> {

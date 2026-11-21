@@ -64,6 +64,7 @@ async fn serve(mut server: fauna_client::testing::ServerSide, captured: Captured
                 true,
                 value_of(&SyncChangeRecordReply {
                     seq: 1,
+                    prev_set_seq: None,
                     extra: Default::default(),
                 }),
             ),

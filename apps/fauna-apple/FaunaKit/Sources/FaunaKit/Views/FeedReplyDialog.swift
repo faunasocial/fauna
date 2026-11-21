@@ -25,15 +25,29 @@ public struct FeedReplyDialog: View {
         self.vm = vm
     }
 
-    private var canSubmit: Bool { !replyText.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// The submit's shared draft-validity answer (`fauna_feed::forms::
+    /// reply_submit_possibility`, `feed.md` § Errors & edge cases): disabled
+    /// with its reason on blank text; `FeedVM.replyToPost` asks it again.
+    private var submitPossibility: Possibility { vm.replySubmitPossibility(replyText) }
+
+    /// A send is in flight — the submit stays disabled until the save answers.
+    @State private var sending = false
 
     private func submit() {
+        guard !sending else { return }
+        sending = true
         Task {
             // The box exists (hence can be ticked) only under *public by
             // confirmation*; the send path lives in `FeedVM.replyToPost`.
-            await vm.replyToPost(postId: post.postId, body: replyText,
-                                 publicConfirmed: needsPublicConfirm && publicConfirmed)
-            dismiss()
+            let saved = await vm.replyToPost(postId: post.postId, body: replyText,
+                                             publicConfirmed: needsPublicConfirm && publicConfirmed)
+            sending = false
+            // Closes only on a saved reply: a refusal or a failed save keeps
+            // the dialog open with the reply typed and the reason on its own
+            // `error-message`, the page's standing down (`ui/README.md`
+            // § Offer only what is possible, rule 7; `feed.md` § Errors &
+            // edge cases).
+            if saved { dismiss() }
         }
     }
 
@@ -89,13 +103,23 @@ public struct FeedReplyDialog: View {
                     ) { publicConfirmed.toggle() }
             }
 
+            FaunaPossibilityReason(submitPossibility)
+
+            // The sheet's own `error-message` — the refusal or failed save while
+            // it is open; the page's behind it stands down (`FeedVM.errorMessage`).
+            if let formError = vm.modalFormError(.reply) {
+                ErrorBanner(message: formError)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             HStack {
                 Button(L.common.cancel) { dismiss() }
                 Button(L.common.reply) { submit() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!canSubmit)
+                    .disabled(sending)
                     .accessibilityIdentifier(Ids.feedReplySubmitButton)
-                    .automationActivate(Ids.feedReplySubmitButton, isEnabled: { canSubmit }, perform: submit)
+                    .automationActivate(Ids.feedReplySubmitButton, isEnabled: { !sending }, perform: submit)
+                    .faunaPossible(submitPossibility)
             }
         }
         .padding(24)
@@ -104,6 +128,8 @@ public struct FeedReplyDialog: View {
         #endif
         .accessibilityIdentifier(Ids.feedReplyDialog)
         .automationValue(Ids.feedReplyDialog, text: { "" })
+        .onAppear { vm.modalFormOpened(.reply) }
+        .onDisappear { vm.modalFormClosed(.reply) }
     }
 }
 #endif // !FAUNA_KIDS

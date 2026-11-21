@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.events
 
+import androidx.compose.foundation.text.selection.DisableSelection
 import com.fauna.ffi.FfiCalendarViewMode
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -96,7 +97,11 @@ fun MonthGridContent(
                             } else null)
                         .padding(2.dp),
                         contentAlignment = Alignment.TopCenter) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        // A day cell is a control (tap drills in, double tap starts an
+                        // event): its text stays out of the page selection, or a double
+                        // tap would select a word instead (ui/README.md § Text the person
+                        // reads can be copied, rule 3).
+                        DisableSelection { Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Box(modifier = if (isToday) Modifier.size(28.dp).clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.primary) else Modifier.size(28.dp),
                                 contentAlignment = Alignment.Center) {
@@ -121,7 +126,7 @@ fun MonthGridContent(
                                         color = MaterialTheme.colorScheme.primary)
                                 }
                             }
-                        }
+                        } }
                     }
                 }
             }

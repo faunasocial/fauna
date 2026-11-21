@@ -12,24 +12,16 @@ web APP UI path: flipping a row's toggle serves and unserves the set.
 The MUTATION is UI-driven (the toggle
 click); VERIFICATION reads the nest ground truth via `fauna.folders.list`
 (external, mirroring test_admin_files' get_mail_config read). serve_set's blob
-re-provision seals under the actor's MSEK, so mail is enabled first (precondition).
+re-provision seals under the actor's MSEK, which every account holds from its
+first connect.
 
-The 6b-2(c) disable-with-hint test below (the only one needing a mail-*less* actor)
-runs against `dedicated_no_mail_app`/`dedicated_no_mail_nest` — a freshly-registered
-actor on its own nest, never touched by the shared session's `test_user`. It used
-to ride the shared `nest_instance`/`test_user` and rely on running before any
-other test in this *module* ever called `ensure_mail_enabled()` on that actor (an
-MSEK, once minted, cannot be un-minted) — but `nest_instance`/`test_user` are
-SESSION-scoped, so at least 5 other files sorting alphabetically before this one
-(`test_admin_serving_indicator.py`, `test_apple_track_a_diag.py`,
-`test_automation_registry_lifecycle.py`, `test_events.py`,
-`test_factory_reset_calendar_reclaim.py`) already mint that MSEK long before this
-module's tests run in a full-suite collection, regardless of in-module ordering.
-The dedicated actor makes the precondition true by construction; it still asserts
-rather than assumes it, so a genuine future regression fails loudly instead of
-quietly proving nothing. The other two tests below still use the shared
-`logged_in_app`/`nest_instance`/`test_user` — they call `ensure_mail_enabled()`
-themselves regardless of prior state, so they never depended on ordering.
+The no-mail test below (the only one needing a mail-*less* actor) runs against
+`dedicated_no_mail_app`/`dedicated_no_mail_nest` — a freshly-registered actor on
+its own nest, never touched by the shared session's `test_user`, whose
+SESSION-scoped actor other files give a mail credential long before this module
+runs. It asserts the precondition rather than assuming it. The other two tests
+use the shared `logged_in_app`/`nest_instance`/`test_user` and call
+`ensure_mail_enabled()` themselves, so they never depended on ordering.
 """
 
 import secrets
@@ -97,89 +89,68 @@ def _wait(pred, timeout: float = 20.0, interval: float = 0.3) -> bool:
 
 
 @pytest.mark.feature("share-a-folder")
-def test_folder_webdav_toggle_is_disabled_until_mail_is_set_up(
+def test_folder_webdav_toggle_serves_on_an_account_with_no_mail(
     dedicated_no_mail_app, dedicated_no_mail_nest
 ):
-    """Slice 6b-2(c): the toggle is DISABLED with a "set up mail first" hint while
-    the actor holds no MSEK, and becomes live once mail is enabled.
+    """An account that never set up mail can serve a folder: the switch waits on
+    the account's mail key alone, and every account holds that key from its
+    first connect (`folders.md` § Errors & edge cases, *Own-tier and mail
+    gates*, ruled 2026-11-19; `mail-credentials.md` § Every account holds the
+    key). No mailbox and no credential is asked for — the credential an outside
+    file app signs in with comes after the flip, from the mail page section the
+    served folder opens.
 
-    Serving seals the `WebdavKeysBlob` under the actor's MSEK, minted when mail is
-    first enabled — so without mail the serve *cannot* succeed. Worse, it cannot
-    fail cleanly either: `FoldersAuthor::serve_set` flips the nest
-    `folders.webdav_enabled` flag BEFORE it re-provisions the blob, so a click by
-    an MSEK-less actor would commit the flag and only then raise `NoMsek`, leaving
-    the set served-but-blobless until a later reconcile heals it. The capability
-    (`folders_can_serve_webdav` / `foldersCanServeWebdav` → the shared
-    `owner_can_serve_webdav`) makes that state unreachable instead of merely
-    reported.
+    Until 2026-11-19 this slot held the opposite journey ("disabled until mail
+    is set up"): the key was then minted by the first mail enable, so a no-mail
+    account could not serve. The connect-time mint made that state unreachable.
 
     Runs against `dedicated_no_mail_app` (its own nest + a freshly-registered
-    actor, see module docstring) rather than the shared session actor, so "this
-    actor has no MSEK" is true by construction instead of by collection order.
-
-    It then enables mail and re-checks, so a capability wired to a constant `false`
-    fails this test rather than passing it.
+    actor, see module docstring), so "this account has no mail" is true by
+    construction; the precondition is still asserted, and asserted again after
+    the flip — serving must not mint a credential on the way.
     """
     app = dedicated_no_mail_app
     b = app.backups
     gt = _user_client(dedicated_no_mail_nest, dedicated_no_mail_nest["user"])
 
-    # Precondition, asserted not assumed: this actor must not have mail yet, or
-    # "the toggle is disabled" proves nothing.
     app.mail_settings.navigate()
     assert app.mail_settings.credential_count() == 0, (
-        "dedicated_no_mail_app's freshly-registered actor already has mail "
-        "enabled — the dedicated-nest fixture itself must be leaking a credential"
+        "dedicated_no_mail_app's freshly-registered actor already holds a mail "
+        "credential — the journey would prove nothing about a no-mail account"
     )
 
-    # NO mail-enable here — this actor holds no MSEK.
     name = f"webdav-nomail-{secrets.token_hex(4)}"
     b.navigate_folders()
     b.create_folder_via_wizard(name)
     b.find_and_expand_folder(name)
 
-    # The row renders the toggle (it is a folder) but it is not interactive.
-    assert b.webdav_toggle_visible(), (
-        f"a row must render folder-webdav-toggle; error={app.error_text()!r}"
-    )
-    assert not b.webdav_toggle_enabled(), (
-        "folder-webdav-toggle must be DISABLED for an actor with no MSEK (mail not "
-        "set up) — otherwise a click commits the nest flag and then fails NoMsek"
-    )
-
-    with gt:
-        assert not _served(gt, name), "an unserveable set must not be served"
-
-    # Now mint the MSEK the capability keys on, and the same toggle goes live.
-    app.mail_settings.navigate()
-    app.mail_settings.ensure_mail_enabled()
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
-        "mail must enable to mint the MSEK; "
-        f"error={app.mail_settings.page_error_text(timeout=2.0)!r}"
-    )
-
-    # Back to Folders: the page re-reads the capability on nav (it is not a
-    # DevicesMachine snapshot field — the machine is keyless), so the toggle is now
-    # interactive without a client restart.
-    b.navigate_folders()
-    b.find_and_expand_folder(name)
-
     def _toggle_enabled_reexpanding() -> bool:
-        # linux fully rebuilds the folder list on every DevicesMachine observer
-        # tick, collapsing the expander closed independent of the mail-enable
-        # change this poll is waiting on (webdav_toggle_visible's own
-        # docstring) — a poll that only ever reads the row expanded ONCE can
-        # sit on a collapsed (so permanently not-enabled-reading) row for its
-        # whole budget even after the real capability has flipped. Re-expand
-        # on every check, same convention webdav_toggle_visible's docstring
-        # already prescribes for a second action on the same row.
+        # linux rebuilds the folder list on every DevicesMachine observer tick,
+        # collapsing the expander (webdav_toggle_visible's docstring) — re-expand
+        # on every check. The switch may read "still loading" first: the custody
+        # read, or the connect-time mint, can still be on its way.
         if not b.webdav_toggle_visible():
             b.find_and_expand_folder(name)
         return b.webdav_toggle_enabled()
 
-    assert _wait(_toggle_enabled_reexpanding, timeout=15.0), (
-        "folder-webdav-toggle must become ENABLED once mail is set up (the MSEK "
-        f"exists); error={app.error_text()!r}"
+    assert _wait(_toggle_enabled_reexpanding, timeout=30.0), (
+        "folder-webdav-toggle must be ENABLED on an account with no mail once "
+        "its mail key is read (minted at first connect); "
+        f"error={app.error_text()!r}"
+    )
+
+    with gt:
+        assert not _served(gt, name), "a freshly-created set is not served over WebDAV"
+        b.toggle_webdav()
+        assert _wait(lambda: _served(gt, name)), (
+            f"toggling folder-webdav-toggle ON must serve {name!r} on an account "
+            f"with no mail; error={app.error_text()!r}"
+        )
+    assert not app.has_error(), f"serve-on raised an error: {app.error_text()!r}"
+
+    app.mail_settings.navigate()
+    assert app.mail_settings.credential_count() == 0, (
+        "serving a folder must not mint a mail credential"
     )
 
 

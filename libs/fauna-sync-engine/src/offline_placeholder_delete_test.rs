@@ -1,7 +1,9 @@
 //! An offline placeholder delete propagates — the engine's half of the ruling
 //! (`docs/goal/behavior/delete-propagation.md` § *The floor on an on-demand
 //! root* → **An offline placeholder delete propagates — the sweep sees what the
-//! watcher would have seen**, decisions (a), (b), (d) and (f)).
+//! watcher would have seen**, decisions (a), (b), (d) and (f), and (c)'s engine
+//! half: the boot pass runs its delete detection even while it is held for the
+//! folder row).
 //!
 //! The delete universe is the rows with evidence: `Synced` ∪ **seen**
 //! `Placeholder` (∪ `LocallyDeleted`, a seen placeholder whose delete is still
@@ -266,15 +268,7 @@ async fn a_locally_deleted_placeholder_observed_again_is_restored() {
 
 #[cfg(windows)]
 fn set_offline(path: &std::path::Path) {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn SetFileAttributesW(path: *const u16, attrs: u32) -> i32;
-    }
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: `wide` is a NUL-terminated UTF-16 path living until after the call.
-    let rc = unsafe { SetFileAttributesW(wide.as_ptr(), 0x0000_1000) };
-    assert_ne!(rc, 0, "SetFileAttributesW(OFFLINE) failed");
+    crate::placeholder::set_offline_for_test(path, true);
 }
 
 /// A dehydrate frees a hydrated file's bytes IN PLACE — the placeholder is on the
@@ -405,7 +399,7 @@ async fn the_fold_settles_or_resurrects_an_owed_delete() {
 
 /// A mocked socket that answers `fauna.sync.changes.record` with a genuine reply
 /// while `up`, with an error while down, and every other kind with an error.
-async fn serve_records(
+pub(crate) async fn serve_records(
     mut server: fauna_client::testing::ServerSide,
     up: Arc<AtomicBool>,
     records: Arc<AtomicI64>,
@@ -419,6 +413,7 @@ async fn serve_records(
             let seq = records.fetch_add(1, Ordering::SeqCst) + 1;
             let bytes = fauna_core::encoding::canonical_encode(&SyncChangeRecordReply {
                 seq,
+                prev_set_seq: None,
                 extra: Default::default(),
             })
             .unwrap();
@@ -517,4 +512,56 @@ async fn a_delete_owed_while_the_nest_is_down_lands_on_the_next_pass() {
 
     supervisor.abort();
     server_task.abort();
+}
+
+/// **The boot sweep runs on a pass held for the folder row** — decision (c)
+/// through the boot sweep's real entry, `LocalWriteHost::converge`, which
+/// [`a_delete_owed_while_the_nest_is_down_lands_on_the_next_pass`] bypasses by
+/// calling `reconcile` itself.
+///
+/// An engine's first local pass waits for its folder row (`file-sync.md`
+/// § Status: a matcher that has not read the row's exclusions excludes
+/// nothing). With the nest down at boot — the commonest restart — that read
+/// cannot land, and on an on-demand root the root connects right after this
+/// pass: a seen placeholder the downtime deleted that the pass did not find
+/// would be listed straight back by the re-armed population, the silent revert
+/// decision (c) exists to close. So the held pass still runs the delete
+/// detection, and takes nothing up — a file written while the agent was down
+/// waits for the read like any other take-up.
+#[tokio::test]
+async fn a_pass_held_for_the_folder_row_still_finds_a_seen_placeholder_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    // A folder over an unreachable nest: the row read fails, so does every record.
+    let engine = test_engine(dir.path().to_path_buf());
+    seed_tracked_file(&engine, dir.path(), "kept.txt", b"still here");
+    seed_seen_placeholder(&engine, "gone.txt");
+    std::fs::write(dir.path().join("written-while-down.txt"), b"not yet").unwrap();
+
+    let recorded = tokio::time::timeout(
+        Duration::from_secs(30),
+        crate::always_resident::LocalWriteHost::converge(&engine, "__test"),
+    )
+    .await
+    .expect("a held pass must not hang on the dead nest");
+
+    assert!(
+        !engine.row_read_for_first_pass().await,
+        "precondition: the row is unreadable, so this pass was the held one"
+    );
+    assert_eq!(
+        state(&engine, "gone.txt"),
+        Some(SyncState::LocallyDeleted),
+        "decision (c): the boot sweep must find the delete before the root connects, \
+         row read or not"
+    );
+    assert!(recorded.is_empty(), "nothing was uploaded");
+    assert!(
+        engine
+            .db()
+            .get_entry("written-while-down.txt")
+            .unwrap()
+            .is_none(),
+        "the held pass takes nothing up — an unread exclusion list is not an empty one"
+    );
+    assert_eq!(state(&engine, "kept.txt"), Some(SyncState::Synced));
 }

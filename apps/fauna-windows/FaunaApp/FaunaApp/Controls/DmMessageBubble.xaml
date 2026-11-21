@@ -485,6 +485,37 @@
             HorizontalAlignment="Left"
             Margin="0,2,0,0"
             Visibility="Collapsed" />
+        <!-- The queued own copy (devices.md § Offline compose → What "resurfaced as
+             drafts" means; account-offline-mutation.md § The unsent-changes surface,
+             point 2): an MLS send the device holds for a nest it could not reach keeps
+             its body in view, with ONE of these indexed lines under it — the
+             dm-message-undelivered shape. Waiting to send while it is in the outbox;
+             Not sent — <reason> once the drain parked it, whose ⋯ menu then offers
+             retry and discard (BuildActionsFlyout). Painted by RenderQueuedSend from
+             DmMessageView.QueuedLine / UnsentLine; Collapsed otherwise so the e2e
+             counts 0. Name set per bind beside the id. -->
+        <TextBlock
+            x:Name="QueuedText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageQueued}"
+            FontSize="11"
+            FontStyle="Italic"
+            Opacity="0.75"
+            TextWrapping="Wrap"
+            IsTextSelectionEnabled="True"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Visibility="Collapsed" />
+        <TextBlock
+            x:Name="UnsentText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageUnsent}"
+            FontSize="11"
+            FontStyle="Italic"
+            Opacity="0.75"
+            TextWrapping="Wrap"
+            IsTextSelectionEnabled="True"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Visibility="Collapsed" />
         <!-- Reaction pills (conversations.md § Reactions & message delete) — one
              dm-reaction-pill per ReactionGroup the manager folded onto the snapshot
              (emoji + count, own/reactedByMe highlighted), tap-to-toggle. Built

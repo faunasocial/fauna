@@ -64,3 +64,33 @@ def test_mail_settings_reached_by_rail_click(admin_main_app):
     assert admin_main_app.driver.is_visible("mail-settings-enabled-toggle"), (
         admin_main_app.driver.diagnose("mail-settings-enabled-toggle")
     )
+
+
+def test_backups_row_reached_by_settings_click(logged_in_app):
+    """On mobile, Settings carries a ``settings-nav-row[backups]`` row into the
+    Backups page — not a Settings sub-page (settings.md's rail has no Backups
+    entry) but the More hub's / drawer's own ``backups`` view, the page
+    ``{"view":"backups"}`` lands on. Pressing it opens that page: its
+    unconditionally painted ``last-backed-up`` line shows.
+
+    Pins the press from a clean Settings frame, which once changed nothing on
+    ios (the systematic walk's actuation sweep, convention 17)."""
+    from helpers.app_surface import declared_absence
+    from helpers.settings_tab_click import click_settings_tab
+
+    if not logged_in_app.driver.is_mobile():
+        declared_absence(
+            logged_in_app.driver,
+            capability="a Settings row into Backups (Backups is a primary-nav "
+                       "peer on desktop and tui)",
+            doc="ui/settings.md § Navigation model (the rail list has no Backups)",
+        )
+    row = "settings-nav-row[backups]"
+    click_settings_tab(logged_in_app.driver, timeout=60.0)
+    logged_in_app.driver.wait_for(row, timeout=60.0)
+    logged_in_app.driver.click(row)
+    logged_in_app.driver.wait_for("last-backed-up", timeout=30.0)
+    assert logged_in_app.driver.is_visible("last-backed-up"), (
+        f"clicking {row} did not open the Backups page: "
+        f"{logged_in_app.driver.diagnose('last-backed-up')}"
+    )

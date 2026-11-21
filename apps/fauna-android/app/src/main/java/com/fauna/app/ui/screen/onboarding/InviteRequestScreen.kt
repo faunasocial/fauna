@@ -18,17 +18,27 @@ import androidx.compose.ui.platform.LocalContext
 import com.fauna.app.age.findActivity
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.RegionPlaneHost
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.ffi.onboarding.InviteRequestState
 import com.fauna.ffi.onboarding.OnboardingStep
 import com.fauna.ffi.onboarding.OobCodeState
 import com.fauna.ffi.onboarding.WizardOutcome
+import com.fauna.ffi.onboarding.inviteCodeDraftPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * How often this page re-polls while it shows `PendingReview`.
@@ -109,11 +119,20 @@ fun InviteRequestScreen(
     val tick by vm.host.tick.collectAsState()
     val snap = remember(tick) { vm.host.machine.inviteRequestSnapshot() }
     val isLoading = remember(tick) { vm.host.machine.isLoading() }
+    // Submit and Continue answer from the machine (`ui/README.md` § Offer only what is possible, rule 6):
+    // Submit is blocked while a wizard call is on its way (its reason beneath
+    // it); Continue's reason is the code status line the page already shows.
+    val submitAnswer = remember(tick) { vm.host.machine.inviteSubmitPossibility() }
+    val continueAnswer = remember(tick) { vm.host.machine.inviteContinuePossibility() }
     val coroutineScope = rememberCoroutineScope()
     // For the store-age round's Play consent prompt (OnboardingHost.attachStoreAgeClaim).
-    val activity = LocalContext.current.findActivity()
+    val context = LocalContext.current
+    val activity = context.findActivity()
 
     var codeInput by remember { mutableStateOf("") }
+    // `invite-code-check-button`'s answer (`ui/README.md` § Offer only what is
+    // possible, rule 4's form case): the shared draft predicate over the code.
+    val codeAnswer = remember(codeInput) { askForm { inviteCodeDraftPossibility(codeInput) } }
 
     // The pending-invite poll. Approval reaches an *unregistered* actor through
     // no push channel — every notification plane is keyed on a bearer-proven
@@ -176,7 +195,7 @@ fun InviteRequestScreen(
         ) {
             Button(
                 onClick = { vm.submit(activity) },
-                enabled = !isLoading && snap.state !is InviteRequestState.Submitting,
+                enabled = submitAnswer.isPossible,
                 modifier = Modifier.testTag(Ids.INVITE_REQUEST_SUBMIT_BUTTON),
             ) {
                 Text(stringResource(R.string.onboarding_invite_request_submit))
@@ -191,6 +210,7 @@ fun InviteRequestScreen(
                 }
             }
         }
+        DisabledControlReasonText(localized(submitAnswer.blockedReason))
 
         Spacer(Modifier.height(8.dp))
         // invite-request-status: localized message text from snapshot.message,
@@ -231,10 +251,31 @@ fun InviteRequestScreen(
                 },
             )
             Button(
-                onClick = { vm.verifyCode(codeInput) },
-                enabled = codeInput.isNotBlank() && !isLoading,
+                onClick = {
+                    // The press asks the answer it was painted from again
+                    // (rule 6); a blocked draft's line goes on `error-message`.
+                    val refusal = formRefusal(context, codeAnswer)
+                    if (refusal != null) {
+                        refusal.reason?.let(vm.host.machine::setErrorMessage)
+                    } else {
+                        vm.verifyCode(codeInput)
+                    }
+                },
+                enabled = codeAnswer.isPossible && !isLoading,
                 modifier = Modifier.testTag(Ids.INVITE_CODE_CHECK_BUTTON),
             ) { Text(stringResource(R.string.common_check)) }
+        }
+        DisabledControlReasonText(
+            localized(codeAnswer.blockedReason),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        remember(tick) { vm.host.machine.errorMessage() }?.ifEmpty { null }?.let {
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.fillMaxWidth().testTag(Ids.ERROR_MESSAGE),
+            )
         }
         Spacer(Modifier.height(8.dp))
         val oobStatusText = localizedOnboardingText(snap.oobMessage)
@@ -295,7 +336,7 @@ fun InviteRequestScreen(
                         }
                     }
                 },
-                enabled = snap.continueEnabled && !isLoading,
+                enabled = continueAnswer.isPossible && !isLoading,
                 modifier = Modifier.testTag(Ids.INVITE_REQUEST_CONTINUE_BUTTON),
             ) { Text(stringResource(R.string.common_continue)) }
         }

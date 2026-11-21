@@ -1260,6 +1260,95 @@ async fn apply_refresh_fold_keeps_a_delivered_unrecorded_edit_and_reports_the_co
     );
 }
 
+/// The on-demand fold's declined delete never opens a cloud-only file
+/// (`on-demand-files.md` § On-Demand Files, *Nothing the serve loop waits on holds
+/// up the root*). A row in flight (`LocallyModified`) whose file the platform has
+/// freed is still kept by the verdict — its state says this device holds an edit
+/// the nest lacks — and the declined delete's report used to READ the survivor to
+/// upload it: on a cfapi root the provider's own read of its own placeholder is
+/// answered by nobody and holds the fold, on the thread that serves the root, for
+/// cfapi's 60 s timeout (`crate::placeholder`). A freed file holds no bytes to
+/// upload, so the conflict is recorded on this device alone.
+///
+/// The file keeps readable bytes behind `FILE_ATTRIBUTE_OFFLINE` (the half of the
+/// cloud-only attributes an ordinary process may set), so an open would SUCCEED
+/// here and the survivor's upload would ask the mock nest which chunks it lacks:
+/// any request reaching the nest is the open's witness. Holding the file with no
+/// sharing instead would make the open fail into the same local record and hide
+/// it.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_declined_delete_over_a_cloud_only_file_never_opens_it() {
+    use crate::pull_remote_changes_test::record_own_write;
+
+    let server = wiremock::MockServer::start().await;
+    let watch = tempfile::tempdir().unwrap();
+    let engine = crate::backfill_thumbnail_test::test_engine(
+        &server.uri(),
+        watch.path().to_path_buf(),
+        Some(fauna_core::crypto::BackupKey::from_bytes([0x11; 32])),
+    );
+    let rel = "notes.txt";
+    let edit = b"an edit this device observed, its bytes since freed";
+    record_own_write(&engine, watch.path(), rel, b"the recorded version");
+    std::fs::write(watch.path().join(rel), edit).unwrap();
+    engine
+        .db()
+        .update_state(rel, SyncState::LocallyModified)
+        .unwrap();
+    let abs = watch.path().join(rel);
+    crate::placeholder::set_offline_for_test(&abs, true);
+    assert!(
+        crate::placeholder::path_is_cloud_placeholder(&abs),
+        "precondition: the file reads as cloud-only"
+    );
+
+    let outcome = engine
+        .apply_folded_delete(
+            &crate::engine::FoldedDelete {
+                relative_path: rel.to_string(),
+                deleting_device: Some("device".to_string()),
+                seq: Some(2),
+            },
+            |p| panic!("a kept file is never removed, yet the binding was asked: {p:?}"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        crate::engine::FoldedDeleteOutcome::KeptConflict,
+        "the in-flight row's delete is declined"
+    );
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock records requests");
+    assert!(
+        requests.is_empty(),
+        "nothing went to the nest: the cloud-only survivor was never opened; got {:?}",
+        requests
+            .iter()
+            .map(|r| r.url.path().to_string())
+            .collect::<Vec<_>>()
+    );
+    let conflicts = engine.db().list_unresolved_conflicts().unwrap();
+    assert!(
+        conflicts
+            .iter()
+            .any(|(_, path, kind, _, _)| path == rel && kind == "delete_declined"),
+        "the declined delete is recorded on this device; got {conflicts:?}"
+    );
+    assert!(
+        engine.db().get_entry(rel).unwrap().is_some(),
+        "the row stays"
+    );
+    assert!(
+        crate::placeholder::path_is_cloud_placeholder(&abs),
+        "the platform's file stands"
+    );
+}
+
 /// An edit the OS held and had NOT delivered when the remote delete arrived: the
 /// row was settled, so the delete applies and the row goes; the OS then fails to
 /// remove its edited copy and re-creates the item through `createItem` with the

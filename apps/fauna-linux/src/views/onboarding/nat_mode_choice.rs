@@ -194,7 +194,9 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
             }
             updating.set(false);
 
-            confirm_btn.set_sensitive(snap.submit_enabled);
+            // Confirm, from the machine's answer (`ui/README.md` § Offer only
+            // what is possible, rule 6).
+            crate::possible::paint(&confirm_btn, None, m.nat_mode_submit_possibility());
 
             // Radios disabled while a submit is in flight.
             let inflight = snap.state == NatModeState::Submitting;

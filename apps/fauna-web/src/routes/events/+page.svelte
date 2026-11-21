@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { identity, reconnectTick } from '#lib/store';
-  import { ensureWasm, attendeeDisplay, rsvpStatusLabel, reminderLabel, reminderPresets, resolveCalendarSelection, calendarIsDisplayed, workingDayStart, normalizeEventDatetimeInput, type ReminderPresetOption } from '#lib/wasm';
+  import { ensureWasm, eventCreatePossibility, eventCreateTarget, calendarWritePossibility, attendeeDisplay, rsvpStatusLabel, reminderLabel, reminderPresets, resolveCalendarSelection, calendarIsDisplayed, workingDayStart, normalizeEventDatetimeInput, type ReminderPresetOption } from '#lib/wasm';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { refusedChanges, dismissRefusedChange, type RefusedChange } from '#lib/conversations';
   import { onStoreChange } from '#lib/store-change';
   import {
-    listCalendars,
+    readCalendars,
     createCalendar,
     queryEvents,
     createEvent,
@@ -34,10 +34,15 @@
     visibleDays,
     type CalendarViewMode,
     type PanDirection,
+    panPossibility,
   } from '#lib/caltime';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
+  import { paintPossibility, type Possibility } from '#lib/possibility';
+  import { refusalOf, calendarWriteFailure, unreadableNotice } from '#lib/events-gate';
+  import type { CalendarsRead } from '#lib/rpc';
+  import { endsTextSelection } from '#lib/selection-click';
 
   // The Events page reads/writes the encrypted `bridge_caldav_*` store via the
   // `caldav*` wasm seam (events.md Decision B):
@@ -88,7 +93,18 @@
   // the date-unfiltered agenda). Wired unconditionally in every view mode:
   // the agenda arm is inert because `pan` returns the anchor unchanged, not
   // because the page branches on the mode — same as linux's `step_forward`.
+  //
+  // The pair is painted from the shared `caltime::pan_possibility` (disabled
+  // with its reason in agenda, never withdrawn) and the click asks the same
+  // answer again, refusing with the same reason on `error-message`.
+  let panPaint = $derived(paintPossibility(ready ? panPossibility(viewMode) : { state: 'absent' }));
+  let panReason = $derived(panPaint.reason ? resolveLocalized(panPaint.reason) : undefined);
   function panBy(direction: PanDirection) {
+    const answer = panPossibility(viewMode);
+    if (answer.state === 'blocked') {
+      error = resolveLocalized(answer.reason);
+      return;
+    }
     selectedDate = pan(viewMode, selectedDate, direction);
   }
 
@@ -184,11 +200,56 @@
     return id?.handle && id?.domain ? `${id.handle}@${id.domain}` : '';
   }
 
-  /** Mail/CalDAV is off when `cfg.mail.msek` is None — the encrypted store then
-   *  returns an empty calendar list (the lazy Personal provision needs the msek).
-   *  With mail on, at least Personal is always present, so an empty list after a
-   *  successful load is exactly the mail-off state (events.md § Persistence). */
-  let mailDisabled = $derived(ready && !!$identity && calendars.length === 0);
+  // The calendar read and the one create predicate over it (events.md
+  // § Errors & edge cases → *No calendar to hold an event*, rulings 2, 3 and
+  // 5): while unresolved (a missing key included — the mint is in flight) the
+  // list paints loading, never the empty state; on *provision failed* the
+  // empty state paints the predicate's reason; every door asks the predicate again at the press,
+  // the submit asks `eventCreateTarget`. Nothing here re-derives the rule.
+  let calendarsRead = $state<CalendarsRead>({ state: 'unresolved' });
+  let createAnswer = $derived<Possibility>(
+    ready ? eventCreatePossibility(calendarsRead) : { state: 'absent' },
+  );
+  let createPaint = $derived(paintPossibility(createAnswer));
+  // The other calendar-write doors — `new-calendar-btn`, `create-calendar`,
+  // `calendar-import-button` — over the same read (events.md § Errors & edge
+  // cases → *The other calendar writes*): painted from the shared
+  // `calendar_write_possibility`, and each action asks it again at the press.
+  let writeAnswer = $derived<Possibility>(
+    ready ? calendarWritePossibility(calendarsRead) : { state: 'absent' },
+  );
+  let writePaint = $derived(paintPossibility(writeAnswer));
+  // A newer load supersedes an older one still in flight (a re-run must not put
+  // an older roster back over a landed mutation — tui's load generation).
+  let loadGeneration = 0;
+  // The compose's own `error-message` (ruling 4): a refused or failed create
+  // says so here and the form stays open with what was typed.
+  let formError = $state('');
+
+  /** Ask the predicate at a door: `true` = open the compose; otherwise its
+   *  reason goes on the page's `error-message` and nothing opens. */
+  function composeAllowed(): boolean {
+    const refusal = refusalOf(eventCreatePossibility(calendarsRead));
+    if (refusal) error = resolveLocalized(refusal);
+    return refusal === null;
+  }
+
+  /** Ask the calendar-write predicate at a press (rule 1 of *The other
+   *  calendar writes*): `true` = go on; otherwise its reason goes on the page's
+   *  `error-message` and nothing is sent. */
+  function writeAllowed(): boolean {
+    const refusal = refusalOf(calendarWritePossibility(calendarsRead));
+    if (refusal) error = resolveLocalized(refusal);
+    return refusal === null;
+  }
+
+  /** A calendar write's failure on `error-message`: the key lost between the
+   *  paint and the act says the predicate's "loading", never "calendar
+   *  requires mail". */
+  function sayWriteFailure(e: unknown, fallback: string) {
+    const failure = calendarWriteFailure(e, fallback);
+    error = typeof failure === 'string' ? failure : resolveLocalized(failure);
+  }
 
   onMount(async () => {
     await ensureWasm();
@@ -215,6 +276,23 @@
       // No identity yet / transport down: composing still works, unpersisted.
       // `loadEventDrafts` already logs the interesting half (a failed restore);
       // this arm only swallows the no-identity rejection.
+    });
+    // Joined BEFORE the first load, never after it: the key mint at the first
+    // connect fires its notice while that load is awaited, and a listener
+    // joined later would miss it and leave an unresolved read unresolved.
+    // The store-change notice (`#lib/store-change`): the refused-change list
+    // is this page's one store-backed render source, and a refusal is the
+    // runtime's own background write to the store — a source of the notice
+    // like a pump run (`account-runtime.md` § Multi-instance concurrency →
+    // *A runtime's own pump is a source of the notice too*, part 2). Re-read
+    // the list only — the calendars and events beside it are the nest's, so
+    // the notice says nothing about them. A level: an unchanged read paints
+    // the same rows; the page's own dismiss repaints from its own answer.
+    unsubStore = onStoreChange(() => {
+      void loadRefusedChanges(); // manager-gate-ok: store-change subscription, not a user action
+      // An unresolved calendar read waits on custody (the account store not up
+      // yet): re-run the whole load when the store moves, until it answers.
+      if (calendarsRead.state === 'unresolved') void loadCalendars().then(refreshEvents);
     });
     await loadCalendars();
     // Render the initial no-selection union (every owned calendar's events) so
@@ -256,18 +334,6 @@
     unsubReconnect = reconnectTick.subscribe(() => {
       if (firstTick) { firstTick = false; return; }
       void loadCalendars().then(refreshEvents);
-    });
-
-    // The store-change notice (`#lib/store-change`): the refused-change list
-    // is this page's one store-backed render source, and a refusal is the
-    // runtime's own background write to the store — a source of the notice
-    // like a pump run (`account-runtime.md` § Multi-instance concurrency →
-    // *A runtime's own pump is a source of the notice too*, part 2). Re-read
-    // the list only — the calendars and events beside it are the nest's, so
-    // the notice says nothing about them. A level: an unchanged read paints
-    // the same rows; the page's own dismiss repaints from its own answer.
-    unsubStore = onStoreChange(() => {
-      void loadRefusedChanges(); // manager-gate-ok: store-change subscription, not a user action
     });
   });
 
@@ -312,11 +378,19 @@
     const id = $identity;
     if (!id) return;
     error = '';
+    const generation = ++loadGeneration;
     try {
+      const read = await readCalendars(id.secretHex);
+      if (generation !== loadGeneration) return;
       const previous = calendars;
-      calendars = await listCalendars(id.secretHex);
+      calendars = read.state === 'loaded' ? (read.calendars as Calendar[]) : [];
+      calendarsRead = read;
       seedVisibleCalendars(previous, calendars);
+      // A calendar that would not unseal is left out and said (rule 3).
+      const notice = unreadableNotice(read);
+      if (notice) error = resolveLocalized(notice);
     } catch (e: any) {
+      if (generation !== loadGeneration) return;
       error = e.message || t.events.error.load_calendars;
     }
   }
@@ -437,6 +511,7 @@
   async function handleCreateCalendar() {
     const id = $identity;
     if (!id || !newCalendarName.trim()) return;
+    if (!writeAllowed()) return;
     creatingCalendar = true;
     error = '';
     try {
@@ -444,6 +519,13 @@
       newCalendarName = '';
       showNewCalendar = false;
       await loadCalendars();
+      // A re-listing with no calendar after the create is the read's
+      // *provision failed* answer: say its sentence (rule 3).
+      const relisted = refusalOf(calendarWritePossibility(calendarsRead));
+      if (relisted) {
+        error = resolveLocalized(relisted);
+        return;
+      }
       // TARGET the just-created calendar for the next authoring action (so an
       // event can be added immediately with no extra "pick a calendar" step),
       // but do NOT narrow the view to it — the no-selection union stays visible,
@@ -454,8 +536,8 @@
       // lift removed that gate, so the forced selection is no longer needed.)
       lastCreatedCalendarId = newCalendarId;
       await refreshEvents();
-    } catch (e: any) {
-      error = e.message || t.events.error.create_calendar;
+    } catch (e: unknown) {
+      sayWriteFailure(e, t.events.error.create_calendar);
     } finally {
       creatingCalendar = false;
     }
@@ -575,6 +657,7 @@
   // start — `caltime::WORKING_DAY_START`); the user sets the end. Single-click
   // still drills into Day view (the grids' onSelectDate).
   function openNewEventOnDay(d: Date) {
+    if (!composeAllowed()) return;
     selectedDate = d;
     // This gesture means *start a new event here* (events.md § Layout & flow's
     // `create_event` bullet), so unlike the New Event opener it clears rather
@@ -591,16 +674,22 @@
 
   async function handleCreateEvent() {
     const id = $identity;
-    const cal = activeCalendar;
-    if (!id || !cal || !newEventSummary.trim() || !newEventDtstart || !newEventDtend) return;
+    if (!id || !newEventSummary.trim() || !newEventDtstart || !newEventDtend) return;
+    // The submit asks the same predicate as the doors (ruling 3): the calendar
+    // the create goes to, or the reason it is refused — never an empty id.
+    const target = eventCreateTarget(calendarsRead, activeCalendar?.id ?? null);
+    if ('reason' in target) {
+      formError = resolveLocalized(target.reason);
+      return;
+    }
     creatingEvent = true;
-    error = '';
+    formError = '';
     try {
       const uid = crypto.randomUUID();
       await createEvent(
         id.secretHex,
         {
-          calendar_id: cal.id,
+          calendar_id: target.id,
           uid,
           summary: newEventSummary.trim(),
           // The shared A2 input rule, as on every app: wall-clock, seconds-padded.
@@ -622,7 +711,14 @@
       showNewEvent = false;
       await refreshEvents();
     } catch (e: any) {
-      error = e.message || t.events.error.create_event;
+      // Ruling 4: a whole sentence on the form's own `error-message`, the form
+      // left open with what was typed.
+      console.warn('[events] create failed:', e);
+      const failure = calendarWriteFailure(e, String(e));
+      formError =
+        typeof failure === 'string'
+          ? t.events.save_failed({ error: failure })
+          : resolveLocalized(failure);
     } finally {
       creatingEvent = false;
     }
@@ -730,6 +826,9 @@
     const id = $identity;
     const cal = activeCalendar;
     if (!id || !cal) return;
+    // The predicate first (it gates on the read only), then the no-file
+    // refusal, which stays at the press (rule 2).
+    if (!writeAllowed()) return;
     const file = importFileInput?.files?.[0];
     // No file chosen is said, never a silent no-op (events.md § Import / Export).
     if (!file) {
@@ -744,8 +843,8 @@
       const text = await file.text();
       importResult = await importCalendar(id.secretHex, cal.id, text, selfEmail());
       await refreshEvents();
-    } catch (e: any) {
-      error = e.message || t.events.error.import;
+    } catch (e: unknown) {
+      sayWriteFailure(e, t.events.error.import);
     } finally {
       importing = false;
     }
@@ -857,6 +956,7 @@
   // to that date + time (the Outlook drill-in, mirroring the month grid's
   // empty-cell double-click). One-hour default duration.
   function openNewEventAt(d: Date, hour: number, minute: number) {
+    if (!composeAllowed()) return;
     selectedDate = d;
     // Same fresh-start gesture as the month grid's day cell, one view over.
     clearCompose();
@@ -889,18 +989,19 @@
 {/if}
 
 <div class="view-toggle" data-testid={IDS.EVENTS_VIEW_TOGGLE}>
-  <button class="view-btn" data-testid={IDS.CALENDAR_VIEW_AGENDA} class:active={viewMode === 'agenda'} onclick={() => { viewMode = 'agenda'; }}>{t.events.view_agenda}</button>
-  <button class="view-btn" data-testid={IDS.CALENDAR_VIEW_MONTH} class:active={viewMode === 'month'} onclick={() => { viewMode = 'month'; }}>{t.events.view_month}</button>
-  <button class="view-btn" data-testid={IDS.CALENDAR_VIEW_WEEK} class:active={viewMode === 'week'} onclick={() => { viewMode = 'week'; }}>{t.events.view_week}</button>
-  <button class="view-btn" data-testid={IDS.CALENDAR_VIEW_DAY} class:active={viewMode === 'day'} onclick={() => { viewMode = 'day'; }}>{t.events.view_day}</button>
+  <button class="view-btn" data-testid={IDS.CALENDAR_VIEW_AGENDA} class:active={viewMode === 'agenda'} data-state={viewMode === 'agenda' ? 'on' : 'off'} onclick={() => { viewMode = 'agenda'; }}>{t.events.view_agenda}</button>
+  <button class="view-btn" data-testid={IDS.CALENDAR_VIEW_MONTH} class:active={viewMode === 'month'} data-state={viewMode === 'month' ? 'on' : 'off'} onclick={() => { viewMode = 'month'; }}>{t.events.view_month}</button>
+  <button class="view-btn" data-testid={IDS.CALENDAR_VIEW_WEEK} class:active={viewMode === 'week'} data-state={viewMode === 'week' ? 'on' : 'off'} onclick={() => { viewMode = 'week'; }}>{t.events.view_week}</button>
+  <button class="view-btn" data-testid={IDS.CALENDAR_VIEW_DAY} class:active={viewMode === 'day'} data-state={viewMode === 'day' ? 'on' : 'off'} onclick={() => { viewMode = 'day'; }}>{t.events.view_day}</button>
   <!-- The pan control is page-level and present in EVERY view mode: it moves the
        page's one anchor by one visible range. It used to live inside the month
        grid, so it existed in the DOM only in month view — which is why panning
        "did nothing" in week and day. Agenda's inertness comes from the shared
-       `caltime::pan` policy, not from hiding or disabling the buttons. -->
+       `caltime::pan` policy; in agenda the pair is shown DISABLED with its
+       reason (shared `caltime::pan_possibility`), never withdrawn. -->
   <span class="pan-nav">
-    <button class="view-btn pan-btn" data-testid={IDS.EVENTS_PREV_MONTH} onclick={() => panBy('backward')} aria-label={t.common.previous}>&lsaquo;</button>
-    <button class="view-btn pan-btn" data-testid={IDS.EVENTS_NEXT_MONTH} onclick={() => panBy('forward')} aria-label={t.common.next}>&rsaquo;</button>
+    <button class="view-btn pan-btn" data-testid={IDS.EVENTS_PREV_MONTH} disabled={panPaint.disabled} data-reason={panReason} title={panReason} onclick={() => panBy('backward')} aria-label={t.common.previous}>&lsaquo;</button>
+    <button class="view-btn pan-btn" data-testid={IDS.EVENTS_NEXT_MONTH} disabled={panPaint.disabled} data-reason={panReason} title={panReason} onclick={() => panBy('forward')} aria-label={t.common.next}>&rsaquo;</button>
   </span>
   <span data-testid={IDS.CALENDAR_DATE_LABEL} class="calendar-date-label">{dateLabel}</span>
 </div>
@@ -921,7 +1022,9 @@
           <button
             data-testid={IDS.NEW_CALENDAR_BTN}
             class="btn"
-            onclick={() => { showNewCalendar = !showNewCalendar; }}
+            onclick={() => { if (showNewCalendar || writeAllowed()) showNewCalendar = !showNewCalendar; }}
+            disabled={writePaint.disabled && !showNewCalendar}
+            title={writePaint.reason ? resolveLocalized(writePaint.reason) : undefined}
           >
             {showNewCalendar ? t.common.cancel : t.events.new_calendar}
           </button>
@@ -940,20 +1043,20 @@
               data-testid={IDS.CREATE_CALENDAR}
               class="btn primary"
               onclick={handleCreateCalendar}
-              disabled={creatingCalendar || !newCalendarName.trim()}
+              disabled={creatingCalendar || !newCalendarName.trim() || writePaint.disabled}
             >
               {creatingCalendar ? t.common.creating : t.common.create}
             </button>
           </div>
         {/if}
 
-        {#if calendars.length === 0}
-          {#if mailDisabled}
-            <p class="muted enable-mail-state">
-              {t.events.mail_required}
+        {#if calendarsRead.state === 'unresolved'}
+          <p class="muted">{t.common.loading}</p>
+        {:else if calendars.length === 0}
+          {#if createPaint.reason}
+            <p class="muted" data-testid={IDS.CALENDAR_LIST_EMPTY_STATE}>
+              {resolveLocalized(createPaint.reason)}
             </p>
-          {:else}
-            <p class="muted">{t.events.no_calendars}</p>
           {/if}
         {:else}
           {#each calendars as cal}
@@ -962,6 +1065,7 @@
                 data-testid={IDS.CALENDAR_ITEM}
                 class="calendar-item"
                 class:active={selectedCalendar?.id === cal.id}
+                data-state={selectedCalendar?.id === cal.id ? 'on' : 'off'}
                 onclick={() => selectCalendar(cal)}
               >
                 <span class="calendar-color" style="background: {cal.color || 'var(--accent)'}"></span>
@@ -979,7 +1083,7 @@
         {/if}
       </section>
 
-      {#if calendars.length > 0}
+      {#if createPaint.shown}
         <section class="mini-cal-section">
           <MiniCalendar
             {selectedDate}
@@ -989,7 +1093,7 @@
         </section>
       {/if}
 
-      {#if calendars.length > 0}
+      {#if createPaint.shown}
         <section class="events-list-section">
           <div class="section-header">
             <h2>{t.events.title}</h2>
@@ -997,13 +1101,16 @@
               <button
                 data-testid={IDS.NEW_EVENT_BTN}
                 class="btn"
-                onclick={toggleNewEvent}
+                onclick={() => { if (showNewEvent || composeAllowed()) toggleNewEvent(); }}
+                disabled={createPaint.disabled && !showNewEvent}
+                title={createPaint.reason ? resolveLocalized(createPaint.reason) : undefined}
               >
                 {showNewEvent ? t.common.cancel : t.events.new_event}
               </button>
             </div>
           </div>
 
+          {#if calendars.length > 0}
           <div class="ics-controls">
             <input
               type="file"
@@ -1015,7 +1122,8 @@
               data-testid={IDS.CALENDAR_IMPORT_BUTTON}
               class="btn"
               onclick={handleImport}
-              disabled={importing}
+              disabled={importing || writePaint.disabled}
+              title={writePaint.reason ? resolveLocalized(writePaint.reason) : undefined}
             >
               {importing ? t.events.importing : t.events.import_ics}
             </button>
@@ -1028,6 +1136,7 @@
               {exporting ? t.events.exporting : t.events.export_ics}
             </button>
           </div>
+          {/if}
 
           {#if exportedName}
             <div class="import-result">
@@ -1044,7 +1153,10 @@
           {/if}
 
           {#if showNewEvent}
-            <div class="inline-form">
+            <div class="inline-form" data-testid={IDS.EVENT_FORM}>
+              {#if formError}
+                <p class="error" data-testid={IDS.ERROR_MESSAGE}>{formError}</p>
+              {/if}
               <label class="form-label">
                 <input
                   data-testid={IDS.EVENT_SUMMARY}
@@ -1163,7 +1275,7 @@
                 style="border-left: 3px solid {calendarColorForEvent(ev) || 'var(--accent)'}"
                 role="button"
                 tabindex="0"
-                onclick={(e) => { if (!(e.target as HTMLElement).closest('.rsvp-inline')) selectEvent(ev); }}
+                onclick={(e) => { if (!endsTextSelection(e.currentTarget) && !(e.target as HTMLElement).closest('.rsvp-inline')) selectEvent(ev); }}
                 onkeydown={(e) => { if (e.key === 'Enter' && !(e.target as HTMLElement).closest('.rsvp-inline')) selectEvent(ev); }}
               >
                 <div data-testid={IDS.EVENT_CARD_SUMMARY} class="event-card-summary">{ev.summary}</div>
@@ -1458,7 +1570,6 @@
   }
   .calendar-name { font-weight: 600; flex: 1; }
   .calendar-visibility-toggle { flex-shrink: 0; cursor: pointer; }
-  .enable-mail-state { line-height: 1.4; }
 
   /* Event cards */
   .event-card {

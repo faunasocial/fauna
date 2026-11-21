@@ -16,9 +16,10 @@ pass is still running, and both passes export, strip and ingest the same asset (
 The obvious fix is `guard !isBackingUp else { return 0 }`, and it is worse: the
 running pass has already taken its `PHAsset.fetchAssets` snapshot, so the mid-pass
 photo is not in it, and refusing the second call means **nothing** picks that photo
-up until the next OS slice — or never, if the app closes first. android ships
-exactly that guard today (`PhotoBackupEngine.kt`'s `if (_isSyncing.value) return 0`,
-and its set is not even atomic with its test). So the engine coalesces instead:
+up until the next OS slice — or never, if the app closes first. android shipped
+exactly that guard once (`PhotoBackupEngine.kt`'s bare `if (_isSyncing.value) return 0`,
+not even atomic with its test), until `PhotoBackupPassGate` replaced it. So each
+engine coalesces instead:
 single-flight, plus one trailing re-run that picks up whatever the snapshot missed.
 
 **Both failure modes are asserted, because a test for one passes in the other's
@@ -39,13 +40,29 @@ which is what makes "while a pass is running" a state this test stands in rather
 than an interval it hopes to hit. `wait_for_held_rpc` proves the app really issued
 the request before the second photo is added.
 
-**What is deliberately NOT asserted.** The tempting mid-pass read — "`holding` is
-still 1, so no second pass parked" — is a race, not a check: the observer fires
-asynchronously, so a green result may only mean it had not fired yet. The two
-assertions above are both *positive* and settle after the release, so neither can
-pass by arriving early.
+**The second request is witnessed, not assumed.** The tempting mid-pass read —
+"`holding` is still 1, so no second pass parked" — is a race, not a check: the
+observer fires asynchronously, so a green result may only mean it had not fired
+yet. Instead both platforms wait for the funnel's `requests_coalesced` to rise
+above a baseline read before the second photo was added — the positive statement
+"the gate refused the second request mid-pass" — and only then release the parked
+pass. The two assertions above settle after the release, so neither can pass by
+arriving early.
 
-**Why this module is iOS-only** — macOS runs the same engine against the
+**Android drives both triggers by hand, because it has no observer.** android's
+only automatic trigger is the `PhotoBackupWorker` schedule (`folders.md` § Photo
+backup → *What drives the ingress*; no `ContentObserver`), so adding a photo starts
+nothing there. The android leg therefore starts the parked pass with
+`photo-backup-sync-now-button` (the app is quiet, so the button is enabled) and
+makes the mid-pass second request with `photo_backup_scheduled_pass_now`, which
+enqueues the real `PhotoBackupWorker` — the very concurrency `PhotoBackupPassGate`
+exists for (Sync-now vs the scheduled worker), and the only second trigger a user's
+phone could raise mid-pass, since Sync-now is disabled while a pass runs. Every
+assertion is the same, save the closing funnel-consistency read: android's funnel
+has no `assets_seen` / `already_synced` legs (convention 11: absent, never zero), so
+that read is skipped by their presence.
+
+**Why macOS is not marked here** — macOS runs the same engine against the
 machine-global host Photos library, out of reach of an ordinary launch under
 convention 10; the macOS column runs this very function from
 `tests/real_session/test_photo_backup_macos.py` (convention 12's macOS arm).
@@ -75,6 +92,7 @@ from helpers.waiting import describe_photo_backup_funnel, wait_until
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 #: The kind the sealed per-file ingest drives once per file — `host.ingestFile` →
@@ -123,10 +141,18 @@ def test_a_photo_arriving_mid_pass_is_backed_up_once_by_one_trailing_pass(
     # ⚠ ARM BEFORE THE FIRST PHOTO. Adding it wakes the app's ingress at once, so
     # arming afterwards races that pass and loses whenever it wins (the same
     # "arm before the boundary" rule `helpers/rpc_hold` states for a cold start).
+    # android has no library observer (the module docstring), so its passes are
+    # started explicitly; on iOS adding a photo is itself the trigger.
+    android = driver.is_android()
+    if android:
+        app.backups.navigate_folders()
+        await_quiet(driver)
     arm_rpc_hold(port, INGEST_KIND)
     try:
         first, second = a_tag(), a_tag()
         driver.add_photo_to_library(str(a_real_png(tmp_path, tag=first)))
+        if android:
+            driver.click("photo-backup-sync-now-button")
 
         # The pass is now provably parked inside the first photo's ingest — not
         # "probably running by now".
@@ -144,7 +170,34 @@ def test_a_photo_arriving_mid_pass_is_backed_up_once_by_one_trailing_pass(
 
         # THE SECOND PHOTO, while the first pass is held open. Its own pass cannot
         # run — that is the point — so the engine must remember the request.
+        # The baseline is read BEFORE the photo is added: on iOS the library
+        # observer fires from the add itself, so a later read could already
+        # include the refusal this barrier waits for.
+        coalesced_before = funnel(driver)["requests_coalesced"]
         driver.add_photo_to_library(str(a_real_png(tmp_path, tag=second)))
+        if android:
+            # The second request, mid-pass: the real scheduled worker, the one
+            # trigger that can arrive while Sync-now is disabled by the held pass.
+            # (iOS needs no poke: the PhotoKit observer is the second request.)
+            driver.call_command("photo_backup_scheduled_pass_now")
+        # Released only once the gate has provably REFUSED the request (folded it
+        # into a trailing pass): `requests_coalesced` rising is that positive
+        # statement, so the release cannot outrun the trigger and let it start
+        # an independent pass that would pass this test under the lossy guard.
+        assert wait_until(
+            lambda: funnel(driver)["requests_coalesced"] > coalesced_before,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: (
+                "the second request never reached the single-flight gate "
+                "while the first pass was parked (requests_coalesced stayed "
+                f"{coalesced_before}): {describe_photo_backup_funnel(driver)}"
+            ),
+        )
+        assert passes(driver)[0] == started_mid_pass, (
+            "a second pass STARTED while the first was parked inside its "
+            "ingest — the single-flight gate let two passes run at once. "
+            f"{describe_photo_backup_funnel(driver)}"
+        )
     finally:
         # ALWAYS release: an armed kind parks every later request of that kind,
         # including the ones the tests after this one issue.
@@ -197,6 +250,10 @@ def test_a_photo_arriving_mid_pass_is_backed_up_once_by_one_trailing_pass(
     # And the funnel describes ONE pass, not a blend of two: the trailing pass saw
     # both photos and had exactly the second one left to upload.
     last = funnel(driver)
+    if "assets_seen" not in last:
+        # android's funnel has no `assets_seen` / `already_synced` legs (absent,
+        # never zero — convention 11), so there is no blend to detect.
+        return
     assert last["uploaded"] + last["already_synced"] <= last["assets_seen"], (
         "the per-pass funnel is internally inconsistent "
         f"({last['uploaded']} uploaded + {last['already_synced']} already-synced > "

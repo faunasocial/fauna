@@ -9,7 +9,9 @@
 //! **actually holds**: the server-measured stored sizes (`blob_metadata`,
 //! written load-bearingly by the chunk/manifest POST routes — a failed
 //! metadata write fails the upload, so an ACKed blob is always metered) of the
-//! named manifest plus every chunk its `store_keys()` reference, deduped.
+//! named manifest plus, through the one manifest walk
+//! (`crate::manifest_walk`), every page a paged root names and every chunk
+//! store key, deduped.
 //!
 //! A record naming bytes this nest does not hold is **refused**, typed and
 //! retryable — never charged as zero or as declared (fail closed). An honest
@@ -97,9 +99,29 @@ pub(crate) async fn derive_held_custody_charge(
         return Ok(Err(CustodyChargeRefusal::ManifestNotHeld));
     };
 
+    // Through the one walk (`file-sync.md` § Paged manifests): a paged root's
+    // page blobs are held bytes this row pins too, and its chunks are named
+    // by those pages. A page not held is bytes not uploaded yet; a page that
+    // does not hold what its root names makes the root not a manifest.
+    let src = crate::manifest_walk::StorePages { store, at_rest_key };
+    let walked = match crate::manifest_walk::store_keys(&manifest, &src).await {
+        Ok(walked) => walked,
+        Err(crate::manifest_walk::WalkError::MissingPage(_)) => {
+            return Ok(Err(CustodyChargeRefusal::ChunksNotHeld { missing: 1 }));
+        }
+        Err(crate::manifest_walk::WalkError::Source(e)) => return Err(e),
+        Err(crate::manifest_walk::WalkError::Invalid(_)) => {
+            return Ok(Err(CustodyChargeRefusal::ManifestNotAManifest));
+        }
+    };
     // Dedup: a manifest may reference the same chunk under several indices,
     // but the content-addressed store holds — and this row pins — it once.
-    let mut keys: Vec<[u8; 32]> = manifest.store_keys().iter().map(|h| h.digest()).collect();
+    let mut keys: Vec<[u8; 32]> = walked
+        .page_hashes
+        .iter()
+        .chain(&walked.store_keys)
+        .map(|h| h.digest())
+        .collect();
     keys.sort_unstable();
     keys.dedup();
 
@@ -163,6 +185,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         fauna_core::encoding::canonical_encode(&m).unwrap()
     }
@@ -217,6 +240,54 @@ mod tests {
         let mh = seed_blob(&db, &store, &body, "manifest").await;
 
         let refusal = derive_held_custody_charge(&db, &store, None, &mh)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            refusal,
+            CustodyChargeRefusal::ChunksNotHeld { missing: 1 }
+        ));
+    }
+
+    /// A paged root is charged through the one walk: the root, every page it
+    /// names, and every distinct chunk those pages name — never as a
+    /// chunkless file. A page not held is bytes not uploaded yet.
+    #[tokio::test]
+    async fn a_paged_root_is_charged_with_its_pages_and_their_chunks() {
+        let (db, store, _dir) = fixture().await;
+        let content: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
+        let file = crate::manifest_walk::tests::seed_paged_file(
+            &store,
+            Some(&db),
+            None,
+            &content,
+            16,
+            None,
+        )
+        .await;
+        let mut expected: i64 = 0;
+        let mut seen = std::collections::HashSet::new();
+        for h in std::iter::once(&file.root)
+            .chain(&file.pages)
+            .chain(&file.chunks)
+        {
+            if seen.insert(h.digest()) {
+                expected += db
+                    .get_blob_metadata(&h.digest())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .size_bytes;
+            }
+        }
+        let charge = derive_held_custody_charge(&db, &store, None, &file.root.digest())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(charge, expected);
+
+        store.delete(&file.pages[0]).await.unwrap();
+        let refusal = derive_held_custody_charge(&db, &store, None, &file.root.digest())
             .await
             .unwrap()
             .unwrap_err();

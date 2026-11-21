@@ -905,6 +905,28 @@ fn verify_waits_for_inputs_the_app_announced() {
     assert!(m.can_verify());
 }
 
+/// Retire's verify answers with the reason that revives it (`ui/README.md`
+/// § Offer only what is possible, rules 2 and 6).
+#[test]
+fn verify_possibility_names_what_revives_the_button() {
+    let key = |m: &NestRetireMachine| m.verify_possibility().reason().map(|r| r.key.clone());
+    let m = NestRetireMachine::new_with_inputs(RetireInputs::default());
+    assert_eq!(
+        key(&m).as_deref(),
+        Some("onboarding.vps_config.status_pick_provider")
+    );
+    m.select_provider("hetzner".into());
+    assert_eq!(
+        key(&m).as_deref(),
+        Some("provisioning.fill_required_fields")
+    );
+    m.set_credential_field("api-token".into(), "tok".into());
+    m.expect_app_inputs();
+    assert_eq!(key(&m).as_deref(), Some("common.still_loading"));
+    m.app_inputs_landed();
+    assert!(m.verify_possibility().is_possible());
+}
+
 #[test]
 fn the_binding_faces_pair_held_credentials_by_index() {
     let held = held_dns_from_json(
@@ -1810,12 +1832,15 @@ async fn cancel_drops_the_token_and_everything_fetched_with_it() {
     assert!(snap.servers.is_empty(), "the fetched code went with it");
     assert!(snap.selected.is_none());
 
-    // The token is gone: a verify without re-entering it cannot build a
-    // dispatcher, so it fails back to the credential form.
+    // The token is gone: the verify button asks for the field again, and a
+    // press anyway starts nothing — the form stays on screen.
     m.select_provider("bundled".into());
+    assert_eq!(
+        m.verify_possibility().reason().map(|r| r.key.as_str()),
+        Some("provisioning.fill_required_fields")
+    );
     m.verify().await;
     assert_eq!(m.snapshot().phase, RetirePhase::Credentials);
-    assert!(m.snapshot().error.is_some());
 }
 
 #[tokio::test]
@@ -2311,4 +2336,63 @@ async fn resolve_current_host_badges_the_row_the_nest_host_points_at() {
         !m.resolve_current_host("gone.example.test").await,
         "unresolvable"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The delete and confirm buttons' answers (`ui/README.md` § Offer only what
+// is possible, rule 6)
+// ---------------------------------------------------------------------------
+
+/// Delete is absent off the list, blocked until a server is chosen; confirm is
+/// absent off the confirm state, blocked until the typed name matches. Each
+/// action asks its own answer: a refused press changes nothing.
+#[tokio::test]
+async fn delete_and_confirm_answer_with_their_reasons() {
+    use fauna_core::possibility::Possibility;
+    let blocked = |k: &str| Possibility::blocked(LocalizedText::key(k));
+    let mock = MockServer::start().await;
+    mount_account(&mock, one_zone(), "example-test").await;
+    mount_ptr(&mock, None).await;
+    mount_apex_a(&mock, "198.51.100.99").await;
+    mount_empty_records(&mock).await;
+
+    let m = machine(&mock, RetireInputs::default());
+    assert_eq!(m.delete_possibility(), Possibility::Absent, "no list yet");
+    assert_eq!(m.confirm_possibility(), Possibility::Absent);
+    m.verify().await;
+    assert_eq!(m.snapshot().phase, RetirePhase::List);
+    assert_eq!(
+        m.delete_possibility(),
+        blocked("onboarding.retire.delete_blocked_pick_server")
+    );
+    m.begin_confirm();
+    assert_eq!(
+        m.snapshot().phase,
+        RetirePhase::List,
+        "a refused delete stays on the list"
+    );
+
+    m.select("s-1".into());
+    assert_eq!(m.delete_possibility(), Possibility::Possible);
+    m.begin_confirm();
+    assert_eq!(m.snapshot().phase, RetirePhase::Confirm);
+    assert_eq!(m.delete_possibility(), Possibility::Absent);
+    assert_eq!(
+        m.confirm_possibility(),
+        blocked("onboarding.retire.confirm_blocked_name")
+    );
+    m.set_confirm_name("example-tes".into());
+    assert_eq!(
+        m.confirm_possibility(),
+        blocked("onboarding.retire.confirm_blocked_name"),
+        "a near miss is not the name"
+    );
+    m.confirm().await;
+    assert_eq!(
+        m.snapshot().phase,
+        RetirePhase::Confirm,
+        "a refused confirm deletes nothing"
+    );
+    m.set_confirm_name("example-test".into());
+    assert_eq!(m.confirm_possibility(), Possibility::Possible);
 }

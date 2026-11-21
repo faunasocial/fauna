@@ -1,0 +1,62 @@
+{
+  "comment": "The second brake's allowlist on the Windows dev machine, deployed by the owner as C:\\Program Files\\FaunaFleet\\allow.json (docs/goal/architecture/tool-installs.md, the bullet The second brake). Per winget id: the architecture, installer type and scope the install takes, the prefix the manifest's installer URL must carry, the exact Authenticode subjects its installer may be signed by (a subject that names a person -- Git for Windows' maintainer signs it with a personal certificate -- as sha256:<hex> of the subject's UTF-8 text, so no name sits in a file), and godev for the one package go.dev's own MSI may supply. Read on that machine 2026-11-20 from the installers of the installed versions. LLVM.LLVM is absent: its arm64 installer carries no signature. The owner alone widens it.",
+  "packages": {
+    "Git.Git": {
+      "arch": "arm64",
+      "type": "inno",
+      "scope": "machine",
+      "url": "https://github.com/git-for-windows/git/releases/download/",
+      "signers": ["sha256:10e938b5614f61e7dcd624a687c1d9d612e159793c0282a1ccb09318152cd857"]
+    },
+    "GitHub.cli": {
+      "arch": "arm64",
+      "type": "wix",
+      "scope": "machine",
+      "url": "https://github.com/cli/cli/releases/download/",
+      "signers": ["CN=\"GitHub, Inc.\", O=\"GitHub, Inc.\", L=San Francisco, S=California, C=US"]
+    },
+    "GoLang.Go": {
+      "arch": "arm64",
+      "type": "wix",
+      "scope": "machine",
+      "url": "https://go.dev/dl/",
+      "signers": ["CN=Google LLC, O=Google LLC, L=Mountain View, S=California, C=US, SERIALNUMBER=3582691, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Delaware, OID.1.3.6.1.4.1.311.60.2.1.3=US"],
+      "godev": true
+    },
+    "Microsoft.DotNet.SDK.10": {
+      "arch": "arm64",
+      "type": "burn",
+      "scope": "machine",
+      "url": "https://download.microsoft.com/download/",
+      "signers": ["CN=.NET, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"]
+    },
+    "Microsoft.PowerShell": {
+      "arch": "arm64",
+      "type": "wix",
+      "scope": "machine",
+      "url": "https://github.com/PowerShell/PowerShell/releases/download/",
+      "signers": ["CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"]
+    },
+    "Microsoft.VCRedist.2015+.arm64": {
+      "arch": "arm64",
+      "type": "burn",
+      "scope": "machine",
+      "url": "https://download.visualstudio.microsoft.com/download/pr/",
+      "signers": ["CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"]
+    },
+    "Microsoft.WindowsAppRuntime.1.7": {
+      "arch": "arm64",
+      "type": "exe",
+      "scope": "",
+      "url": "https://aka.ms/windowsappsdk/1.7/",
+      "signers": ["CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"]
+    },
+    "Microsoft.WindowsAppRuntime.1.8": {
+      "arch": "arm64",
+      "type": "exe",
+      "scope": "",
+      "url": "https://aka.ms/windowsappsdk/1.8/",
+      "signers": ["CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"]
+    }
+  }
+}

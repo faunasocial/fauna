@@ -10,16 +10,16 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import android.content.Context
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -27,6 +27,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import com.fauna.app.R
+import com.fauna.app.ui.util.getStringFmt
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * Shared copy-to-clipboard primitives — the Android twin of iOS
@@ -39,8 +42,9 @@ import com.fauna.app.R
  *
  * The single clipboard write lives in [rememberCopyToClipboard]; the visible
  * affordances delegate to it, so the bug-prone part exists exactly once. Like the
- * iOS prior art these just copy — no ephemeral "Copied!" feedback; sites that
- * surface a banner pass an [onCopied] callback.
+ * iOS prior art these just copy by default; sites that surface a banner pass an
+ * [onCopied] callback, and a [CopyButton] with `confirm` confirms ("Copied!") or
+ * reports the failure itself.
  */
 
 /**
@@ -60,6 +64,16 @@ fun rememberCopyToClipboard(): (String) -> Unit {
  * mirroring iOS's `doc.on.doc`); with a [label] it renders a text button —
  * [outlined] picks `OutlinedButton` (default) vs `TextButton`. [onCopied] fires
  * after the write for sites that surface a "copied" banner.
+ *
+ * With [confirm] the button reports the write's outcome itself, the
+ * `account-actor-id-copy-btn` contract (`docs/goal/ui/README.md` § Offer only
+ * what is possible, rule 7): a write that reached the clipboard relabels a
+ * labelled button `common.copied` ("Copied!") and paints the copied text as the
+ * node's `copied` attribute (its `stateDescription`, as [CopyableRow] does); a
+ * write that threw hands `common.copy_failed` (its `{error}` filled) to
+ * [onCopyFailed], for the page's error line. [mayCopy] is the press asking the
+ * control's answer again (rule 6) — `false` writes nothing; the caller painted
+ * the refusal.
  */
 @Composable
 fun CopyButton(
@@ -70,24 +84,55 @@ fun CopyButton(
     outlined: Boolean = true,
     enabled: Boolean = true,
     onCopied: () -> Unit = {},
+    confirm: Boolean = false,
+    onCopyFailed: (String) -> Unit = {},
+    mayCopy: () -> Boolean = { true },
 ) {
+    val context = LocalContext.current
     val copy = rememberCopyToClipboard()
-    val onClick = {
-        copy(text)
-        onCopied()
+    // The text the last confirmed write put on the clipboard; keyed on the
+    // text, so a new payload starts unconfirmed.
+    var copied by remember(text) { mutableStateOf("") }
+    val onClick: () -> Unit = onClick@{
+        if (!mayCopy()) return@onClick
+        if (!confirm) {
+            copy(text)
+            onCopied()
+            return@onClick
+        }
+        val failure = runCatching { copy(text) }.exceptionOrNull()
+        if (failure == null) {
+            copied = text
+            onCopied()
+        } else {
+            copied = ""
+            onCopyFailed(copyFailedText(context, failure))
+        }
     }
+    val shownLabel = if (confirm && label != null && copied.isNotEmpty()) {
+        stringResource(R.string.common_copied)
+    } else {
+        label
+    }
+    val tagged = modifier.testTag(testTag).then(
+        if (confirm) Modifier.semantics { stateDescription = copied } else Modifier
+    )
     when {
-        label == null -> IconButton(onClick = onClick, enabled = enabled, modifier = modifier.testTag(testTag)) {
+        shownLabel == null -> IconButton(onClick = onClick, enabled = enabled, modifier = tagged) {
             Icon(Icons.Default.ContentCopy, contentDescription = stringResource(R.string.common_copy))
         }
-        outlined -> OutlinedButton(onClick = onClick, enabled = enabled, modifier = modifier.testTag(testTag)) {
-            Text(label)
+        outlined -> OutlinedButton(onClick = onClick, enabled = enabled, modifier = tagged) {
+            Text(shownLabel)
         }
-        else -> TextButton(onClick = onClick, enabled = enabled, modifier = modifier.testTag(testTag)) {
-            Text(label)
+        else -> TextButton(onClick = onClick, enabled = enabled, modifier = tagged) {
+            Text(shownLabel)
         }
     }
 }
+
+/** `common.copy_failed` with its `{error}` filled from [failure] — tui's `copy_failed_text`. */
+fun copyFailedText(context: Context, failure: Throwable): String =
+    context.getStringFmt(R.string.common_copy_failed, failure.message ?: failure.toString())
 
 /**
  * A full-width, tappable label/value row that copies [fullValue] (showing the

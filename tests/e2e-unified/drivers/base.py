@@ -2,6 +2,8 @@ import json
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from . import gesture_record
+
 
 def detached_agent_log_text(agent_data_dir: str | None) -> str:
     """The real `fauna-sync-agent`'s OWN daily-rolling log under
@@ -114,7 +116,18 @@ class PlatformDriver(ABC):
 
     Each method operates on logical element IDs from ui.yaml.
     Drivers translate these to native selectors.
+
+    Every gesture method a subclass defines is wrapped so the driver records
+    the element id it acted on (`drivers/gesture_record.py`; a journey test
+    compares that record with its use case's steps).
     """
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        for name in gesture_record.GESTURE_METHODS:
+            fn = cls.__dict__.get(name)
+            if callable(fn) and not getattr(fn, "__gesture_recorded__", False):
+                setattr(cls, name, gesture_record.recorded(name, fn))
 
     def is_mobile(self) -> bool:
         """True for Android and iOS. Use this instead of checking driver type."""
@@ -744,6 +757,37 @@ class PlatformDriver(ABC):
             for i in range(self.count(element_id, scope=scope))
         ]
 
+    def painted_reason(
+        self, element_id: str, index: int = 0, *, scope: str | None = None
+    ) -> str | None:
+        """The reason painted beside a blocked element, in the words the person
+        reads — or ``None`` when the element is live or paints none.
+
+        For a disabled control it is the *why* within eyeshot that
+        `docs/goal/ui/README.md` § Offer only what is possible, rule 2, owes;
+        for a list section's heading it is the line saying the list is still
+        loading or failed to load. A possibility journey asserts the reason's
+        words (the ``S.`` string) through this read, never the frame
+        (`feature-catalog.md` § The coverage contract, the possibility-outcome
+        bullet).
+
+        Served as the element's ``reason`` attribute. Built on tui (the
+        possibility seam, `App::apply_possibility`, publishes the reason it
+        paints) and on macos and ios (FaunaKit's registry publishes the reason
+        `.faunaPossible` paints, and a list heading its own read's reason),
+        and on linux, web and android (each app's possibility painter, and the
+        Bridges headings their list read's reason), and on windows for every
+        control its one painter ``ApplyPossibility`` paints (the control's UIA
+        FullDescription, which the flaui-bridge answers as ``reason``); a
+        journey gates on the ``painted-reason`` surface (``surfaces.toml``)
+        first.
+
+        An empty attribute is no reason: linux's painter publishes ``''`` on a
+        live control or a read list heading where web and tui leave the
+        attribute absent, and both read ``None`` here.
+        """
+        return self.get_attr(element_id, "reason", index, scope=scope) or None
+
     def get_attrs(
         self, element_id: str, attribute: str, *, scope: str | None = None
     ) -> list[str | None]:
@@ -760,6 +804,46 @@ class PlatformDriver(ABC):
             self.get_attr(element_id, attribute, index=i, scope=scope)
             for i in range(self.count(element_id, scope=scope))
         ]
+
+    def blocked_reason(
+        self, element_id: str, index: int = 0, *, scope: str | None = None
+    ) -> str | None:
+        """The reason painted for a blocked control — the words the person reads
+        beside it — or ``None`` when the app paints none
+        (``docs/goal/ui/README.md`` § Offer only what is possible, rule 2: a
+        control the person can unblock is disabled *with its reason within
+        eyeshot*).
+
+        A journey reads it to witness that reason, never a literal: it compares
+        the answer with the ``S.`` string of the predicate's reason key.
+
+        Per-platform mapping — each app publishes what it actually PAINTS, so a
+        reason the app computed but never showed answers ``None``:
+          * tui: the ``reason`` element attr the possibility seam publishes once
+            the reason is painted (the element's own label, or a line of the
+            page — ``App::apply_possibility_seam``).
+          * linux: the ``reason`` test attr ``possible::paint`` sets beside the
+            tooltip or the page's reason line it writes.
+          * web: the control's ``title`` — ``formGate``'s reason, painted as the
+            control's tooltip (``lib/form-gate.ts``).
+          * macos, ios: the ``reason`` attr FaunaKit's registry publishes for
+            every control under ``.faunaPossible`` — the reason that modifier
+            paints as the control's ``.help``/``.accessibilityHint`` and its
+            sibling caption (``FaunaKit/Core/Possibility.swift``).
+          * android: the ``reason`` attr ``Modifier.paintedReason`` publishes on
+            the gated control's ``stateDescription`` (packed beside a ``state``
+            of its own through ``AutomationAttributePack``), read back by the
+            bridge's ``GET /element/attr`` — compile- and unit-verified only
+            (``AutomationSemanticsTest``); no android e2e run exists yet.
+          * windows: the control's UIA FullDescription, which the app's one
+            painter ``ApplyPossibility`` writes beside the tooltip and reason
+            line it paints, answered as ``reason`` by the flaui-bridge — but the
+            admin pages' gates and most form gates are not painted through it
+            yet, so a journey gates on the ``blocked-reason-read`` surface
+            (``surfaces.toml``) first.
+        """
+        value = self.get_attr(element_id, "reason", index, scope=scope)
+        return value or None
 
     @abstractmethod
     def set_input_files(self, element_id: str, files: str | list[str]) -> None:
@@ -781,6 +865,11 @@ class PlatformDriver(ABC):
         verbatim), ``enabled``, ``declares_enabled`` (an ``enabled`` that was
         *declared* versus one that merely *defaulted*), ``actuable`` (the driver
         can click it), ``editable`` (the driver can type into it) and ``scope``.
+        A record MAY also carry ``attrs`` — the element's automation attributes
+        (``state``, ``checked``, …) as a string-to-string map, what
+        :meth:`get_attr` reads one key of — so a whole-frame comparison sees a
+        state change that leaves the text alone (a toggle flipped, a choice
+        made current). An app that omits it is read as publishing none.
 
         ⚠ ``None`` and ``[]`` are OPPOSITE answers and callers must not collapse
         them: ``None`` is "this app publishes no such surface" — an ``n/a``, and
@@ -790,6 +879,19 @@ class PlatformDriver(ABC):
         never read (the failure mode `frame_invariants._ABSENT` exists for).
         """
         return None
+
+    def registry_frame(self) -> tuple[list[dict] | None, int]:
+        """:meth:`registry_snapshot` plus the reads the app still owes the frame.
+
+        The second value is the app's count of one-shot reads in flight when the
+        frame was read (``reads_owed`` on ``GET /registry``) — a page whose first
+        paint is still on its way (a calendar list, a quota, a feed's first
+        page) reads above zero, and a zero says the frame holds every read that
+        had finished. An app that publishes no count answers 0: its frame is
+        read as loaded, exactly as before the count existed. Read in ONE request
+        with the frame, so the two can never describe different moments.
+        """
+        return self.registry_snapshot(), 0
 
     def diagnose(self, element_id: str, *, attrs: tuple[str, ...] = (),
                  scope: str | None = None) -> str:
@@ -977,6 +1079,63 @@ class PlatformDriver(ABC):
         ``if (n := driver.live_app_instance_count()) is not None: assert n == 1``
         and the assertion strengthens for free as other drivers implement it.
         """
+        return None
+
+    def is_text_selectable(
+        self, element_id: str, index: int = 0, *, scope: str | None = None
+    ) -> bool | None:
+        """Whether the element's text can be selected with the platform's own
+        gesture (`docs/goal/ui/README.md` § Text the person reads can be copied).
+
+        One read on every app, answered by each app's own selection mechanism —
+        never by a flag the app sets for the test:
+          * web makes the selection a person makes, a real mouse drag across the
+            element, and answers whether the page's selection then holds some
+            of the element's text (`WebBridgeDriver` override). The selection is
+            LEFT standing, so `selected_text` reads it afterwards.
+          * linux selects with the gtk label's own Select All (its context
+            menu's ``selection.select-all``, after the focus a click gives) on
+            the element's label, or the first label under it carrying text, and
+            answers whether that selection holds the element's text
+            (`HttpBridgeDriver` with ``_serves_select_text``; a drag cannot be
+            made in-process). A label `read_text.rs` left unselectable selects
+            nothing. The selection is left standing, as web's is.
+          * macos selects with Select All on the element's own SwiftUI text
+            view and answers whether that selection holds the element's text
+            (`MacosInProcessDriver` override; a pointer drag selects nothing
+            while the app is not the active app). The selection is left
+            standing, as web's is.
+          * ios makes the person's gesture: a long-press synthesised in the
+            app's own process, answering True when it selected part of the
+            element's text in place or raised the platform's Copy action (the
+            edit menu, recognised by UIKit's own Copy label; the bridge takes
+            the menu down before replying) (`HttpBridgeDriver` with
+            ``_serves_select_text``). An in-place selection is left standing.
+          * android makes the person's gesture: its bridge long-presses the
+            element (`ElementOps.selectText`) and answers whether the selection
+            it made holds the element's text, read with the selection's own
+            Ctrl+C copy — or True with a ``why`` when the text-selection
+            toolbar came up with its Copy action but the copy wrote nothing
+            (`HttpBridgeDriver` with ``_serves_select_text``). The selection is
+            left standing, as web's is.
+          * an app whose agent does not answer the ``selectable`` attr returns
+            ``None``: no reading here yet, which a test reads as unbuilt
+            (convention 7), never as False.
+        """
+        value = self.get_attr(element_id, "selectable", index, scope=scope)
+        if value is None:
+            return None
+        return str(value).strip().lower() == "true"
+
+    def selected_text(self) -> str | None:
+        """The text the page's current selection holds (``""`` when nothing is
+        selected); ``None`` where this driver cannot read a selection. Web reads
+        ``window.getSelection()``, macos the first responder's own Services
+        write, linux the selection the showing gtk label holds, ios the
+        first-responder text input's selection (``""`` where the platform gave
+        the whole-text edit menu), android the standing selection's own Ctrl+C
+        copy; the other native apps answer ``None`` until
+        their agents serve one."""
         return None
 
     def get_clipboard_text(self) -> str | None:

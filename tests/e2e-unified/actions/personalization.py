@@ -40,11 +40,42 @@ class PersonalizationActions:
         runtime's own role, the state the seam waits on — the barrier
         ``atproto_hosted_logged_in_app`` takes for the same reason. An app that
         publishes no role key offers no such barrier (convention 11)."""
+        self.type_topic_name(name)
+        if name.strip():
+            # Create paints from the shared name answer, which also holds it
+            # while the previous create is in flight (`busy`): wait for the
+            # armed button rather than click one still painted disabled (an
+            # agent refuses that click — apple's strict actuation answers 409).
+            wait_until(
+                self.create_enabled,
+                budgets.UI_SETTLE_S,
+                diagnose=lambda: (
+                    f"Create never armed for {name!r}; "
+                    f"its painted reason={self.create_blocked_reason()!r}"
+                ),
+            )
+        self.driver.click("personalization-trained-factor-create-button")
+
+    def type_topic_name(self, name: str) -> None:
+        """Type ``name`` into the inline add row's name input, once the
+        account runtime the create rests on has assembled (``create_topic``)."""
         if account_pump_role(self.driver) is not None:
             await_account_runtime_assembled(self.driver)
         self.driver.wait_for("personalization-trained-factor-name-input")
         self.driver.clear_and_type("personalization-trained-factor-name-input", name)
-        self.driver.click("personalization-trained-factor-create-button")
+
+    def create_enabled(self) -> bool:
+        """Whether the inline add row's Create is armed."""
+        return self.driver.is_enabled("personalization-trained-factor-create-button")
+
+    def create_blocked_reason(self) -> str | None:
+        """The reason painted beside a disabled Create — the shared
+        ``trained_factor_name_possibility``'s words. Callers gate the read on
+        the ``blocked-reason-read`` surface."""
+        try:
+            return self.driver.blocked_reason("personalization-trained-factor-create-button")
+        except Exception as e:  # noqa: BLE001 — diagnostic only
+            return f"<{type(e).__name__}: {e}>"
 
     def topic_count(self) -> int:
         return self.driver.count("personalization-trained-factor-item")
@@ -432,6 +463,25 @@ class PersonalizationActions:
 
     def submit_publish(self) -> None:
         self.driver.click("personalization-trained-factor-publish-submit-button")
+
+    def publish_submit_blocked_reason(self) -> str | None:
+        """The reason painted beside a disabled Publish — the shared
+        ``drafts::publish_submit_possibility``'s words (``ui/settings.md``
+        § Errors & edge cases). Callers gate the read on the
+        ``blocked-reason-read`` surface."""
+        return self.driver.blocked_reason(
+            "personalization-trained-factor-publish-submit-button"
+        )
+
+    def submit_publish_via_enter(self) -> None:
+        """Press Enter in the public-name input — the sheet's submit by the
+        keyboard. Unlike a click it is legal while Publish is disabled: the
+        press asks the draft's answer again and refuses with its reason on
+        ``error-message`` (``ui/settings.md`` § Errors & edge cases, *Personal
+        form submits paint from their draft*)."""
+        self.driver.press_key(
+            "personalization-trained-factor-publish-name-input", "Enter"
+        )
 
     def cancel_publish(self) -> None:
         self.driver.click("personalization-trained-factor-publish-cancel-button")

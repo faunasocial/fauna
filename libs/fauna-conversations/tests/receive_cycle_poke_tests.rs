@@ -742,3 +742,147 @@ async fn retiring_a_swapped_in_manager_hands_nothing_over_only_the_outgoing_one_
     // Held across the whole assertion, as the shell's stale field is.
     drop(session);
 }
+
+/// **The rooms-loaded pin.** The manager's room list counts as loaded only
+/// once a full sweep over every rail has returned
+/// (`ConversationsManager::rooms_loaded`): before it, an empty thread list is
+/// "not read yet", which the conversations oracle's door refuses to answer as
+/// an empty list (`apps/cli.md` § A tool that cannot run, rule 4). A wipe
+/// starts it over, and the next full sweep loads it again.
+///
+/// Reds under: marking loaded when the sweep begins rather than when it
+/// returns (the held first sweep reads loaded); never marking it (the launch
+/// cycle completes and it stays false); a wipe that leaves the outgoing
+/// identity's bit standing.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_room_list_is_loaded_only_once_a_full_sweep_returns() {
+    let inbox = WatchingMailbox::new();
+    inbox.hold.store(1, Ordering::SeqCst);
+    let session = session(Arc::clone(&inbox));
+    let manager = session.manager();
+    assert!(!manager.rooms_loaded(), "a fresh manager has read nothing");
+
+    let loop_session = Arc::clone(&session);
+    tokio::spawn(async move { loop_session.start_receive_loop().await });
+    let deadline = tokio::time::Instant::now() + CYCLE_BUDGET;
+    while inbox.fetches() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the launch sweep never reached the mail rail"
+        );
+        // sleep-ok: the poll interval of a deadline wait, not the assertion.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !manager.rooms_loaded(),
+        "a sweep still inside a rail has not read every rail yet"
+    );
+
+    inbox.release.notify_one();
+    await_cycles(&session, |_, completed| completed >= 1, "the launch cycle").await;
+    assert!(manager.rooms_loaded(), "the launch sweep returned");
+
+    manager.clear_for_test();
+    assert!(!manager.rooms_loaded(), "a wipe starts the room list over");
+    let before = session.receive_cycles().completed();
+    session.poke_receive_cycle();
+    await_cycles(
+        &session,
+        |_, completed| completed > before,
+        "a cycle after the wipe",
+    )
+    .await;
+    assert!(
+        manager.rooms_loaded(),
+        "the first full sweep after the wipe loads it again"
+    );
+}
+
+/// An INBOX whose first `failures` fetches answer an error, then empty pages.
+struct FailingMailbox {
+    failures: AtomicUsize,
+}
+
+#[async_trait]
+impl InboundMailSource for FailingMailbox {
+    async fn fetch(&self, _after_uid: u32, _limit: u32) -> Result<InboundMailPage, String> {
+        if self
+            .failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err("nest unreachable".into());
+        }
+        Ok(InboundMailPage {
+            skipped: Vec::new(),
+            highest_modseq: 0,
+            records: vec![],
+            more: false,
+        })
+    }
+}
+
+/// **A failed first read keeps the page unloaded** (`ui/README.md` § List
+/// pages: loading is not empty, rule 2): a full sweep whose mail read answered
+/// an error has returned, but has not READ that rail, so the room list stays
+/// "not read yet" — `error-message` does the talking rather than a false "no
+/// conversations" beside it. The next sweep whose reads all come back loads it,
+/// and the page's snapshot carries the same bit as `loaded`.
+///
+/// Reds under: marking loaded whenever the sweep returns (the failed launch
+/// cycle reads loaded); a snapshot whose `loaded` does not follow
+/// `rooms_loaded()`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sweep_whose_read_failed_leaves_the_room_list_unloaded() {
+    let session = session_over(Arc::new(FailingMailbox {
+        failures: AtomicUsize::new(1),
+    }));
+    let manager = session.manager();
+    assert!(!manager.snapshot().loaded, "a fresh page has read nothing");
+
+    let loop_session = Arc::clone(&session);
+    tokio::spawn(async move { loop_session.start_receive_loop().await });
+    await_cycles(&session, |_, completed| completed >= 1, "the launch cycle").await;
+    assert!(
+        !manager.rooms_loaded(),
+        "the launch sweep's mail read failed: the rail was not read"
+    );
+    assert!(
+        !manager.snapshot().loaded,
+        "the snapshot paints the same unloaded page"
+    );
+    assert!(
+        manager.snapshot().threads.is_empty(),
+        "the case the bit exists for: no rows, and not yet empty"
+    );
+
+    let before = session.receive_cycles().completed();
+    session.poke_receive_cycle();
+    await_cycles(
+        &session,
+        |_, completed| completed > before,
+        "a cycle whose reads come back",
+    )
+    .await;
+    assert!(
+        manager.rooms_loaded(),
+        "every rail read: the list has loaded"
+    );
+    assert!(
+        manager.snapshot().loaded,
+        "the snapshot's `loaded` follows `rooms_loaded()`"
+    );
+}
+
+/// A sweep that began under the outgoing identity marks nothing loaded for the
+/// incoming one, however late it returns.
+#[test]
+fn a_sweep_begun_before_an_identity_change_marks_nothing_loaded_after_it() {
+    let manager = ConversationsManager::new();
+    let outgoing = manager.identity_epoch();
+    manager.clear_for_identity_change();
+    manager.mark_rooms_loaded(outgoing);
+    assert!(!manager.rooms_loaded());
+    manager.mark_rooms_loaded(manager.identity_epoch());
+    assert!(manager.rooms_loaded());
+}

@@ -203,6 +203,16 @@ fn provider_status_not_ready_before_verify() {
     m.select_dns_provider("gandi".into());
     assert_eq!(m.provider_status(), ProviderStatus::NotReady);
     assert!(!m.can_continue_dns(), "NotReady must block continue");
+    // Rule 6: the button's one answer is blocked by the status line the
+    // page paints — here, verify the credentials.
+    assert_eq!(
+        m.dns_continue_possibility().reason(),
+        Some(&m.dns_status_text_key())
+    );
+    assert_eq!(
+        m.dns_status_text_key().key,
+        "onboarding.dns_config.status_verify_credentials"
+    );
 }
 
 /// Test 2: zones contain the handle's domain → ProviderHasDomain.
@@ -216,10 +226,12 @@ fn provider_status_provider_has_domain() {
         d.current_zones = vec![DnsZone {
             id: "zone-1".into(),
             name: "example.com".into(),
+            nameservers: Vec::new(),
         }];
     });
     assert_eq!(m.provider_status(), ProviderStatus::ProviderHasDomain);
     assert!(m.can_continue_dns());
+    assert!(m.dns_continue_possibility().is_possible());
 }
 
 /// Test 3: probe says registered, zone not present → RegisteredElsewhere.
@@ -233,6 +245,7 @@ fn provider_status_registered_elsewhere() {
         d.current_zones = vec![DnsZone {
             id: "zone-other".into(),
             name: "other.com".into(),
+            nameservers: Vec::new(),
         }];
     });
     m.set_handle_check_outcome_for_test(HandleCheckOutcome::RegisteredNoNest);
@@ -418,6 +431,7 @@ fn select_dns_provider_clears_caches() {
         d.current_zones = vec![DnsZone {
             id: "z".into(),
             name: "example.com".into(),
+            nameservers: Vec::new(),
         }];
         d.current_availability = Some(RegistrarAvailability::Unavailable);
         d.contact = Some(ContactInfo::default());
@@ -779,6 +793,7 @@ fn captured_dns_credential_some_when_verified() {
         d.current_zones = vec![DnsZone {
             id: "z1".into(),
             name: "example.com".into(),
+            nameservers: Vec::new(),
         }];
     });
 
@@ -817,6 +832,7 @@ fn captured_dns_credential_secret_serializes_transparently() {
         d.current_zones = vec![DnsZone {
             id: "z1".into(),
             name: "example.com".into(),
+            nameservers: Vec::new(),
         }];
     });
 

@@ -12,7 +12,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -36,11 +35,18 @@ import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.LogEntryList
 import com.fauna.app.ui.components.LogLevelFilter
 import com.fauna.app.ui.components.renderLogs
+import com.fauna.app.ui.util.answerRefusal
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
+import uniffi.fauna_core.Possibility
 import com.fauna.app.ui.viewmodel.AdminLogsVM
 import uniffi.fauna_log.LogRow
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
 
 /**
  * The admin Logs page (`admin-logs`, observability.md § Surfaces) — the nest's
@@ -93,8 +99,10 @@ fun AdminLogsScreen(
         onBack = { navController.exitAdminToPrimary() },
         auditRows = auditRows,
         auditStatus = auditStatus,
-        auditMoreEnabled = auditView?.moreBeforeId != null,
+        // Read off `auditView` so a new page repaints it.
+        auditMorePossibility = auditView?.let { vm.auditMorePossibility() },
         onAuditMore = { vm.auditMore() },
+        onError = { appMessages.showError(it) },
     )
 }
 
@@ -108,9 +116,17 @@ fun AdminLogsContent(
     onBack: () -> Unit,
     auditRows: List<String> = emptyList(),
     auditStatus: String = "",
-    auditMoreEnabled: Boolean = false,
+    // `admin-audit-more-button`'s shared answer (`audit_more_possibility`);
+    // `null` before the first page — disabled, nothing to say yet.
+    auditMorePossibility: Possibility? = null,
     onAuditMore: () -> Unit = {},
+    onError: (String) -> Unit = {},
 ) {
+    val context = LocalContext.current
+    // The copy offers only what it can do: blocked by the page's own empty
+    // line (`admin.logs_page.empty`) while nothing is shown — already painted
+    // below then, so no second copy of the reason (tui `admin/logs.rs`).
+    val ringAnswer = logRingAnswer(rows.size, "admin.logs_page.empty")
     Scaffold(
         topBar = {
             TopAppBar(
@@ -155,6 +171,14 @@ fun AdminLogsContent(
                 testTag = Ids.LOG_COPY_BUTTON,
                 text = copyText,
                 label = stringResource(R.string.logs_copy_button),
+                enabled = ringAnswer.isPossible,
+                confirm = true,
+                onCopyFailed = onError,
+                mayCopy = {
+                    val refusal = answerRefusal(context, logRingAnswer(rows.size, "admin.logs_page.empty"))
+                    refusal?.reason?.let(onError)
+                    refusal == null
+                },
             )
 
             LogEntryList(rows, emptyText = stringResource(R.string.admin_logs_page_empty))
@@ -184,9 +208,10 @@ fun AdminLogsContent(
                 )
                 Button(
                     onClick = onAuditMore,
-                    enabled = auditMoreEnabled,
+                    enabled = auditMorePossibility?.isPossible == true,
                     modifier = Modifier.testTag(Ids.ADMIN_AUDIT_MORE_BUTTON),
                 ) { Text(stringResource(R.string.admin_logs_page_audit_more)) }
+                DisabledControlReasonText(localized(auditMorePossibility?.blockedReason))
             }
         }
     }

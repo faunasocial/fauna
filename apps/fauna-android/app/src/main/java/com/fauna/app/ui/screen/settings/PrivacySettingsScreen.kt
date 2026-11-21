@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -22,7 +23,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
+import uniffi.fauna_core.Possibility
 import com.fauna.app.ui.viewmodel.FilterForm
 import com.fauna.app.ui.viewmodel.PrivacySettingsVM
 import com.fauna.ffi.FfiEmailFilter
@@ -30,6 +36,11 @@ import com.fauna.ffi.FfiFilterActionInputs
 import com.fauna.ffi.FfiFilterRuleInputs
 import com.fauna.ffi.inboxModeOptions
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The `privacy` settings page (`settings.md`): inbox mode, email filters, and the
@@ -65,6 +76,7 @@ fun PrivacySettingsScreen(
     val spamPrefsLoading by vm.spamPrefsLoading.collectAsState()
     val spamPrefsSaved by vm.spamPrefsSaved.collectAsState()
     val spamPrefsError by vm.spamPrefsError.collectAsState()
+    val saveSpamAnswer by vm.saveSpamAnswer.collectAsState()
 
     LaunchedEffect(Unit) { vm.loadAll() }
 
@@ -83,6 +95,7 @@ fun PrivacySettingsScreen(
         spamPrefsLoading = spamPrefsLoading,
         spamPrefsSaved = spamPrefsSaved,
         spamPrefsError = spamPrefsError,
+        saveSpamAnswer = saveSpamAnswer,
         bandKeyFor = vm::spamBandKey,
         onBack = { navController.popBackStack() },
         onInboxModeChange = vm::updateInboxMode,
@@ -93,8 +106,8 @@ fun PrivacySettingsScreen(
         onEditFilter = vm::beginEditFilter,
         onSaveFilter = vm::saveFilter,
         onCancelEditFilter = vm::cancelEditFilter,
-        onSpamThresholdChange = { vm.spamThreshold.value = it },
-        onPhishingThresholdChange = { vm.phishingThreshold.value = it },
+        onSpamThresholdChange = vm::setSpamThreshold,
+        onPhishingThresholdChange = vm::setPhishingThreshold,
         onSaveSpamPrefs = vm::saveSpamPreferences,
     )
 }
@@ -116,6 +129,7 @@ fun PrivacySettingsContent(
     spamPrefsLoading: Boolean,
     spamPrefsSaved: Boolean,
     spamPrefsError: String?,
+    saveSpamAnswer: Possibility,
     bandKeyFor: (Float) -> String,
     onBack: () -> Unit,
     onInboxModeChange: (String) -> Unit,
@@ -391,12 +405,15 @@ fun PrivacySettingsContent(
 
                         Spacer(Modifier.height(16.dp))
 
-                        Button(
-                            onClick = onSaveSpamPrefs,
-                            enabled = !spamPrefsLoading,
-                            modifier = Modifier.testTag(Ids.SAVE_SPAM_PREFS)
-                        ) {
-                            Text(stringResource(R.string.common_save_preferences))
+                        if (saveSpamAnswer.isShown) {
+                            Button(
+                                onClick = onSaveSpamPrefs,
+                                enabled = !spamPrefsLoading && saveSpamAnswer.isPossible,
+                                modifier = Modifier.testTag(Ids.SAVE_SPAM_PREFS)
+                            ) {
+                                Text(stringResource(R.string.common_save_preferences))
+                            }
+                            DisabledControlReasonText(localized(saveSpamAnswer.blockedReason))
                         }
 
                         if (spamPrefsSaved) {
@@ -531,7 +548,7 @@ private fun FilterFormSheet(
         wasCreating = creatingFilter
     }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ModalBottomSheet(onDismissRequest = onDismiss) { SelectionContainer {
         Column(
             modifier = Modifier
                 .padding(horizontal = 24.dp, vertical = 16.dp)
@@ -647,5 +664,5 @@ private fun FilterFormSheet(
             }
             Spacer(Modifier.height(24.dp))
         }
-    }
+    }}
 }

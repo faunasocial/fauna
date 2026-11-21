@@ -24,6 +24,7 @@
   import { resolveLocalized } from '#lib/i18n/localized';
   import { relativeTime } from '#lib/value-format';
   import { IDS } from '#lib/generated/uiIds';
+  import { endsTextSelection } from '#lib/selection-click';
 
   /** A snapshot `fauna_feed::PostSummary` — the shared post-list row
    *  (`feed.md` § State & data shape). `body` is the nest's preview; `tags` /
@@ -432,9 +433,11 @@
 
   // Clicking the card opens the post detail — except when the click lands on an
   // interactive child (the InteractionBar buttons, a link, a media element), which
-  // handles its own gesture.
+  // handles its own gesture, or ends a drag that selected the card's text
+  // (selecting is not acting — `#lib/selection-click`).
   function handleCardActivate(e: Event): void {
     if (!onselect) return;
+    if (e.type === 'click' && endsTextSelection(e.currentTarget)) return;
     if ((e.target as HTMLElement).closest('button, a, input, textarea, img')) return;
     onselect();
   }

@@ -11,6 +11,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [PrivacySettingsContent] spam-preferences
@@ -34,6 +35,7 @@ class PrivacySettingsContentTest {
     private fun render(
         inboxMode: String? = null,
         spamThreshold: Float = 0.5f,
+        saveSpamAnswer: Possibility = Possibility.Possible,
         bandKeyFor: (Float) -> String = { "moderate" },
         emailFilters: List<FfiEmailFilter> = emptyList(),
         editingFilterId: Long? = null,
@@ -58,6 +60,7 @@ class PrivacySettingsContentTest {
                 phishingThreshold = 0.5f,
                 spamPrefsLoading = false,
                 spamPrefsSaved = false,
+                saveSpamAnswer = saveSpamAnswer,
                 spamPrefsError = null,
                 bandKeyFor = bandKeyFor,
                 onBack = {},

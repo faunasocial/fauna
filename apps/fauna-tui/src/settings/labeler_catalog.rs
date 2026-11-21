@@ -140,13 +140,15 @@ impl LabelerCatalogState {
         self.snapshot.as_ref().is_some_and(|s| s.loaded)
     }
 
-    /// Whether the catalog row at `index` paints subscribe enabled — the
-    /// shared `LabelerCatalogSnapshot::subscribe_enabled`, every app's one
-    /// read of the inspect gate. No snapshot yet → no rows to paint.
-    fn subscribe_enabled(&self, index: u32) -> bool {
+    /// The catalog row at `index`'s subscribe answer — the shared
+    /// `LabelerCatalogSnapshot::subscribe_possibility`, every app's one read
+    /// of the inspect gate, with its reason. No snapshot yet → no rows.
+    pub(super) fn subscribe_answer(&self, index: u32) -> fauna_core::possibility::Possibility {
         self.snapshot
             .as_ref()
-            .is_some_and(|s| s.subscribe_enabled(index))
+            .map_or(fauna_core::possibility::Possibility::Absent, |s| {
+                s.subscribe_possibility(index)
+            })
     }
 
     /// The open inspect view, if the panel is showing.
@@ -264,7 +266,14 @@ pub(super) fn personalization_elements(state: &SettingsState) -> Vec<Element> {
     for (row, (index, entry)) in subscribed.iter().enumerate() {
         // `show_inspect_subscribe: false` — the home is the "what I already
         // granted" facet; browsing and granting happen on the catalog page.
-        push_labeler_row(&mut els, entry, *index, row, false, false);
+        push_labeler_row(
+            &mut els,
+            entry,
+            *index,
+            row,
+            false,
+            fauna_core::possibility::Possibility::Possible,
+        );
     }
     els.push(Element::gesture_button(
         ids::PERSONALIZATION_BROWSE_CATALOG_BUTTON,
@@ -329,7 +338,7 @@ pub(super) fn labeler_catalog_elements(state: &SettingsState) -> Vec<Element> {
             row as u32,
             row,
             true,
-            lc.subscribe_enabled(row as u32),
+            lc.subscribe_answer(row as u32),
         );
     }
     if let Some(view) = lc.inspecting() {
@@ -363,9 +372,9 @@ pub(super) fn labeler_catalog_elements(state: &SettingsState) -> Vec<Element> {
 /// subscribed, and exactly one of subscribe/unsubscribe ever paints per row — the
 /// gating the shared action's `wait_for_subscribed_state` polls on.
 ///
-/// `subscribe_enabled` is the shared `LabelerCatalogSnapshot::subscribe_enabled`
-/// for this row: false when the open inspect view is THIS row's labeler and
-/// fails [`LabelerInspectView::subscribable`] (`content-moderation-and-ranking.md`
+/// `subscribe` is the shared `LabelerCatalogSnapshot::subscribe_possibility`
+/// for this row: blocked, with the refusal's reason, when the open inspect
+/// view is THIS row's labeler and fails [`LabelerInspectView::subscribable`] (`content-moderation-and-ranking.md`
 /// § Tier-3: "`verified` reads false and subscribe stays disabled"). The shared
 /// machine refuses the gesture regardless — this is the visible half of the
 /// same predicate. Unread where `show_inspect_subscribe` is false.
@@ -375,7 +384,7 @@ fn push_labeler_row(
     index: u32,
     row: usize,
     show_inspect_subscribe: bool,
-    subscribe_enabled: bool,
+    subscribe: fauna_core::possibility::Possibility,
 ) {
     els.push(Element::label(ids::LABELER_CATALOG_ITEM, String::new()));
     // The kind badge is the ONE field that is not a verbatim passthrough, and
@@ -429,10 +438,12 @@ fn push_labeler_row(
                 Element::gesture_button(
                     ids::LABELER_CATALOG_ITEM_SUBSCRIBE_BUTTON,
                     t::SUBSCRIBE,
-                    subscribe_enabled,
+                    true,
                     Gesture::Settings(Action::LabelerSubscribe(index)),
                 )
-                .within(ids::LABELER_CATALOG_ITEM, row),
+                .within(ids::LABELER_CATALOG_ITEM, row)
+                // The seam disables it with the refusal's reason (rule 2).
+                .possible(subscribe),
             );
         }
     }
@@ -744,7 +755,7 @@ mod tests {
                             && e.path == vec![("labeler-catalog-item".to_string(), row)]
                     })
                     .expect("an unsubscribed row paints subscribe")
-                    .enabled
+                    .offered()
             };
             (at(0), at(1))
         };
@@ -772,7 +783,7 @@ mod tests {
                         && e.path == vec![("labeler-catalog-item".to_string(), row)]
                 })
                 .expect("an unsubscribed row paints subscribe")
-                .enabled
+                .offered()
         };
         assert_eq!(
             (subscribe(0), subscribe(1)),

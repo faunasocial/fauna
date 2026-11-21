@@ -15,13 +15,20 @@ use gtk::prelude::*;
 
 use fauna_conversations::{
     ConversationsManager, RoomInvitationSnapshot,
-    snapshot::{GuardianState, ThreadSummary, next_sort_order},
+    snapshot::{GuardianState, SortOrder, ThreadSummary, next_sort_order},
 };
 
 pub struct ConversationList {
     pub root: gtk::Box,
     list_box: gtk::ListBox,
+    /// The "no conversations" line, installed on `list_box` only while
+    /// `ConversationsSnapshot.loaded` is true.
+    empty_placeholder: adw::StatusPage,
+    /// Whether the placeholder is currently installed (GTK has no getter).
+    empty_line_shown: std::cell::Cell<bool>,
     invitations_box: gtk::Box,
+    /// `conversation-sort`: repainted from every snapshot by [`Self::render_sort`].
+    sort_btn: gtk::Button,
     /// Runs the accept/decline round trips (`room.accept_invite`, `inbox.ack`).
     rt: tokio::runtime::Handle,
     /// Held so `render` can wire each row's clickable card to
@@ -32,6 +39,16 @@ pub struct ConversationList {
     /// `active_actor_id_hex()` read, which can name a different account on a
     /// bound (secondary) launch (`account-scoping.md:818-837`).
     actor_id_hex: String,
+}
+
+/// `conversation-sort` names the order in force — its tooltip the shared
+/// [`SortOrder::label`], its `value` attr [`SortOrder::name`] — so each press
+/// of the three-way cycle changes the frame even over an empty list. A cycle,
+/// never a choice: no `state` attr (`e2e-systematic-ui-walks.md` § The
+/// possibility invariants, layer (c)), as tui's and apple's.
+fn paint_sort(btn: &gtk::Button, order: SortOrder) {
+    btn.set_tooltip_text(Some(&order.label().resolve(crate::i18n::strings::lookup)));
+    crate::testid::set_test_attr(btn, "value", order.name());
 }
 
 impl ConversationList {
@@ -64,8 +81,8 @@ impl ConversationList {
 
         let sort_btn = gtk::Button::from_icon_name("view-sort-descending-symbolic");
         sort_btn.add_css_class("flat");
-        sort_btn.set_tooltip_text(Some(crate::i18n::strings::common::SORT));
         crate::testid::set_test_id(&sort_btn, ids::CONVERSATION_SORT);
+        paint_sort(&sort_btn, manager.snapshot().sort);
         // Wire the button to the shared cycle: `next_sort_order` owns the
         // arity (latest → oldest → unread → back), the manager reorders and
         // notifies, so the observer re-renders the sorted list. Reading the
@@ -128,8 +145,9 @@ impl ConversationList {
             .title(crate::i18n::strings::conversations::list::NO_CONVERSATIONS)
             .icon_name("mail-unread-symbolic")
             .build();
-        list_box.set_placeholder(Some(&placeholder));
-
+        // Set only by `render` once the shared `loaded` bit is true: GTK paints
+        // the placeholder whenever the list has no rows, so it cannot take a
+        // second condition (`ui/conversations.md` § Loading is not empty).
         let scrolled = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
@@ -142,11 +160,20 @@ impl ConversationList {
         Self {
             root,
             list_box,
+            empty_placeholder: placeholder,
+            empty_line_shown: std::cell::Cell::new(false),
             invitations_box,
+            sort_btn,
             manager,
             rt,
             actor_id_hex,
         }
+    }
+
+    /// Name the sort order in force on `conversation-sort` ([`paint_sort`]);
+    /// called from every snapshot, not only on press.
+    pub fn render_sort(&self, order: SortOrder) {
+        paint_sort(&self.sort_btn, order);
     }
 
     /// Paint `room-invitation[i]` with its accept/decline pair. The rows are
@@ -211,7 +238,12 @@ impl ConversationList {
         }
     }
 
-    pub fn render(&self, threads: &[ThreadSummary], selected: Option<&str>) {
+    pub fn render(&self, threads: &[ThreadSummary], loaded: bool, selected: Option<&str>) {
+        // The empty line paints only once the shared `loaded` bit is true.
+        self.list_box
+            .set_placeholder(loaded.then_some(&self.empty_placeholder));
+        self.empty_line_shown.set(loaded);
+
         // Feed the backup audit loop's freshness comparison: the newest activity
         // this client has actually *displayed* is its own, source-untrusted
         // evidence that data this recent exists, and the audit compares that
@@ -417,7 +449,7 @@ mod tests {
                 .build()
                 .expect("rt");
             let list = ConversationList::new(manager, actor.clone(), rt.handle().clone());
-            list.render(&[thread(1_700_000_000_000)], None);
+            list.render(&[thread(1_700_000_000_000)], true, None);
 
             let snapshot = crate::backup_audit::store(&actor)
                 .load()
@@ -428,6 +460,80 @@ mod tests {
                 "the observation must land in the pane's OWN actor's store"
             );
 
+            let _ = std::fs::remove_dir_all(crate::sync::backup_state_dir(&actor));
+        });
+    }
+
+    /// The "no conversations" line paints only once the shared `loaded` bit is
+    /// true (`ui/conversations.md` § Loading is not empty): unloaded with zero
+    /// threads installs no placeholder; loaded with zero threads installs it.
+    /// `conversation-sort` names the order in force — tooltip and `value`
+    /// attr — and a press changes both, over an EMPTY list too; a cycle, so
+    /// no `state` attr (`e2e-systematic-ui-walks.md` layer (c); tui's
+    /// `sort_button_names_the_order_in_force`).
+    #[test]
+    fn the_sort_button_names_the_order_in_force() {
+        crate::testid::run_on_gtk_thread(|| {
+            let actor = "ff77ff77ff77ff77ff77ff77ff77ff77".to_string();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("rt");
+            let manager = ConversationsManager::new();
+            let list = ConversationList::new(manager.clone(), actor.clone(), rt.handle().clone());
+            let attr = |prefix: &str| {
+                list.sort_btn
+                    .css_classes()
+                    .iter()
+                    .find_map(|c| c.strip_prefix(prefix).map(str::to_owned))
+            };
+            for (want_tip, want_value) in [
+                (
+                    crate::i18n::strings::conversations::list::SORT_LATEST_ACTIVITY,
+                    "LatestActivity",
+                ),
+                (
+                    crate::i18n::strings::conversations::list::SORT_OLDEST_FIRST,
+                    "OldestFirst",
+                ),
+                (
+                    crate::i18n::strings::conversations::list::SORT_UNREAD,
+                    "Unread",
+                ),
+            ] {
+                list.render_sort(manager.snapshot().sort);
+                assert_eq!(list.sort_btn.tooltip_text().as_deref(), Some(want_tip));
+                assert_eq!(attr("test-attr-value-").as_deref(), Some(want_value));
+                assert_eq!(attr("test-attr-state-"), None, "a cycle, not a choice");
+                list.sort_btn.emit_clicked();
+            }
+            list.render_sort(manager.snapshot().sort);
+            assert_eq!(attr("test-attr-value-").as_deref(), Some("LatestActivity"));
+            let _ = std::fs::remove_dir_all(crate::sync::backup_state_dir(&actor));
+        });
+    }
+
+    #[test]
+    fn the_empty_line_paints_only_once_the_list_has_loaded() {
+        crate::testid::run_on_gtk_thread(|| {
+            let actor = "ee66ee66ee66ee66ee66ee66ee66ee66".to_string();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("rt");
+            let list = ConversationList::new(
+                ConversationsManager::new(),
+                actor.clone(),
+                rt.handle().clone(),
+            );
+            list.render(&[], false, None);
+            assert!(
+                !list.empty_line_shown.get(),
+                "no empty line while the list has not loaded"
+            );
+            list.render(&[], true, None);
+            assert!(
+                list.empty_line_shown.get(),
+                "the empty line paints once loaded and empty"
+            );
             let _ = std::fs::remove_dir_all(crate::sync::backup_state_dir(&actor));
         });
     }

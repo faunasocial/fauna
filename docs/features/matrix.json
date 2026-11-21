@@ -89,6 +89,25 @@
       "promoted": true,
       "public_commit": "9a01dbc0273f42b387f670902c8307f14ae4bff2",
       "version": "0.1.6"
+    },
+    {
+      "commit": "15aa0a1f46a9a991efedbd1c0d25182371df0de6",
+      "date": "2026-11-15",
+      "image": "ghcr.io/faunasocial/nest:sha-15aa0a1f46a9a991efedbd1c0d25182371df0de6",
+      "image_digest": "sha256:fe86d2485827a06f9848340ab53daf678e296136f10af0833b1245eb81324f35",
+      "promoted": false,
+      "verified": "2026-11-15",
+      "version": "0.1.7"
+    },
+    {
+      "candidate_run": "2026-11-16",
+      "commit": "72b3e3f9b7a4aa062640ccc684bbe85fc16f2e23",
+      "date": "2026-11-16",
+      "image": "ghcr.io/faunasocial/nest:sha-8f6c0a5abbc682a520d9050bf976d3066ce4b75d",
+      "image_digest": "sha256:cbc067baaf3e9d89d8ce011d48d0a05c0119c3c0c5772509b91128ac5b213cbd",
+      "promoted": false,
+      "public_commit": "8f6c0a5abbc682a520d9050bf976d3066ce4b75d",
+      "version": "0.1.7"
     }
   ],
   "schema": 1,
@@ -138,9 +157,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-10-30",
+              "date": "2026-11-01",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.5-dev+99dc4c58 standalone",
               "state": "full"
             },
             "web": {
@@ -176,10 +195,10 @@
               "state": "none"
             },
             "android-kids": {
-              "date": "",
+              "date": "2026-11-10",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.6-dev+e46418b8 standalone",
+              "state": "unbuilt"
             },
             "ios": {
               "date": "2026-11-10",
@@ -188,14 +207,14 @@
               "state": "partial"
             },
             "ios-kids": {
-              "date": "",
+              "date": "2026-11-10",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.6-dev+e46418b8 standalone",
+              "state": "unbuilt"
             },
             "linux": {
               "date": "2026-11-09",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.6-dev+3aeb19b0 standalone",
               "state": "full"
             },
@@ -207,9 +226,9 @@
             },
             "tui": {
               "date": "2026-11-07",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.6-dev+59444f07 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
               "date": "2026-11-10",
@@ -221,7 +240,7 @@
               "date": "2026-11-10",
               "dirty": false,
               "stamp": "0.1.6-dev+e46418b8 standalone",
-              "state": "partial"
+              "state": "unbuilt"
             }
           },
           "full": true,
@@ -279,7 +298,7 @@
             },
             "tui": {
               "date": "2026-11-05",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.6-dev+8438e5ce standalone",
               "state": "partial"
             },
@@ -372,7 +391,7 @@
           "page": "docs/features/get-the-app.md",
           "slug": "get-the-app",
           "title": "Get the app",
-          "what": "Every nest serves the web app itself by default, so on any device with a browser\nyou open your nest's address and you are in — nothing to install. Released versions, the first of them 0.1.6, are published on the project's releases page, with downloads of the macOS, Windows, Linux and terminal apps; the Android app is in Google Play's invitation-only testing, and the iOS app is built from source. A version's public release arrives once it passes acceptance, and the nest and every app's release channel that exists ship together at one version. The Windows installer can also set up your nest on the computer it installs on — its \"Nest Service\" choice, off by default — as a service that starts with the computer, runs with nobody signed in, and that your other devices reach over the network; the macOS package, once published, does the same."
+          "what": "A nest run from Fauna's container image serves the web app itself, so on any device with a browser\nyou open your nest's address and you are in — nothing to install. Released versions, the first of them 0.1.6, are published on the project's releases page, with downloads of the macOS, Windows, Linux and terminal apps; the Android app is in Google Play's invitation-only testing, and the iOS app is built from source. A version's public release arrives once it passes acceptance, and the nest and every app's release channel that exists ship together at one version. The Windows installer can also set up your nest on the computer it installs on — its \"Nest Service\" choice, off by default — as a service that starts with the computer, runs with nobody signed in, and that your other devices reach over the network."
         },
         {
           "absences": {},
@@ -495,9 +514,9 @@
               "state": "partial"
             },
             "macos": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "tui": {
@@ -513,9 +532,9 @@
               "state": "full"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             }
           },
@@ -569,9 +588,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-05",
+              "date": "2026-11-19",
               "dirty": false,
-              "stamp": "0.1.6-dev+2f2257c1 standalone",
+              "stamp": "0.1.7-dev+38e9e922 standalone",
               "state": "full"
             },
             "web": {
@@ -990,7 +1009,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+1e755069 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -1002,13 +1021,13 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+1e755069 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-31",
@@ -1020,7 +1039,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+1e755069 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-31",
@@ -1074,9 +1093,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "ios-kids": {
@@ -1098,9 +1117,9 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -1110,10 +1129,10 @@
               "state": "partial"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "full"
+              "stamp": "0.1.7 docker",
+              "state": "partial"
             }
           },
           "full": true,
@@ -1145,7 +1164,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+17b5832c standalone",
-              "state": "full"
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -1154,28 +1173,28 @@
               "state": "none"
             },
             "linux": {
-              "date": "2026-10-31",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+cbd813be standalone",
-              "state": "full"
+              "stamp": "0.1.7-dev+00c1f744 standalone",
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-24",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "full"
+              "stamp": "0.1.7-dev+00c1f744 standalone",
+              "state": "partial"
             },
             "web": {
               "date": "2026-11-05",
               "dirty": false,
               "stamp": "0.1.5-dev+1c9a6a26 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-11-02",
@@ -1210,10 +1229,10 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-13",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "full"
+              "stamp": "0.1.7-dev+d36d802e standalone",
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -1246,9 +1265,9 @@
               "state": "partial"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             }
           },
@@ -1261,6 +1280,89 @@
           "slug": "contacts",
           "title": "Contacts",
           "what": "Your contacts page lists the people you have connected with and the knocks\nwaiting for you. Look someone up by their handle, send a knock, and see one arrive\nwhile you watch. Blocking someone is a toggle on their profile."
+        },
+        {
+          "absences": {},
+          "cells": {
+            "android": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "none"
+            },
+            "android-kids": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "none"
+            },
+            "ios": {
+              "date": "2026-11-19",
+              "dirty": false,
+              "stamp": "0.1.7-dev+9743183c standalone",
+              "state": "full"
+            },
+            "ios-kids": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "none"
+            },
+            "linux": {
+              "date": "2026-11-19",
+              "dirty": false,
+              "stamp": "0.1.7-dev+98ac59f7 standalone",
+              "state": "full"
+            },
+            "macos": {
+              "date": "2026-11-19",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e42f7d34 standalone",
+              "state": "full"
+            },
+            "tui": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "none"
+            },
+            "web": {
+              "date": "2026-11-19",
+              "dirty": false,
+              "stamp": "0.1.7-dev+bf45494c standalone",
+              "state": "full"
+            },
+            "windows": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "none"
+            }
+          },
+          "full": true,
+          "goal": "docs/goal/ui/README.md § Text the person reads can be copied",
+          "guide": "docs/guides/app-tour.md § One app, three shapes",
+          "nest_only": false,
+          "outcome_absences": {
+            "ios": {
+              "3": "docs/goal/ui/README.md § Text the person reads can be copied",
+              "4": "docs/goal/ui/README.md § Text the person reads can be copied"
+            },
+            "ios-kids": {
+              "3": "docs/goal/ui/README.md § Text the person reads can be copied",
+              "4": "docs/goal/ui/README.md § Text the person reads can be copied"
+            },
+            "linux": {
+              "3": "docs/goal/ui/README.md § Text the person reads can be copied"
+            },
+            "macos": {
+              "3": "docs/goal/ui/README.md § Text the person reads can be copied"
+            }
+          },
+          "page": "docs/features/copy-what-you-read.md",
+          "slug": "copy-what-you-read",
+          "title": "Copy the text the app shows you",
+          "what": "Text the app shows you, rather than a button you press, can be selected and\ncopied the way your device always does it: an error you want to search for or\npass on, an address, a fingerprint, a message or a post. Selecting text never\npresses anything, so selecting words inside a row does not open it, and a\nselection you are making stays put while the page refreshes around it."
         },
         {
           "absences": {
@@ -1352,9 +1454,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -1364,34 +1466,34 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "tui": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "web": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-11-07",
-              "dirty": true,
-              "stamp": "0.1.6-dev+73cd2201.dirty standalone",
-              "state": "partial"
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
+              "state": "unbuilt"
             }
           },
           "full": true,
@@ -1423,7 +1525,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+79c80402 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -1433,7 +1535,7 @@
             },
             "linux": {
               "date": "2026-11-11",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.6-dev+5c83561c standalone",
               "state": "full"
             },
@@ -1569,7 +1671,7 @@
             },
             "linux": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+cbd813be standalone",
               "state": "full"
             },
@@ -1580,9 +1682,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -1651,7 +1753,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+390d61b5 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
               "date": "2026-10-30",
@@ -1698,7 +1800,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+79c80402 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -1708,7 +1810,7 @@
             },
             "linux": {
               "date": "2026-11-13",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.7-dev+c0e2aa0e standalone",
               "state": "full"
             },
@@ -1728,7 +1830,7 @@
               "date": "2026-10-22",
               "dirty": true,
               "stamp": "0.1.5-dev+646e0070 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
               "date": "",
@@ -1745,7 +1847,7 @@
           "page": "docs/features/feed-images-and-video.md",
           "slug": "feed-images-and-video",
           "title": "Images and video in posts",
-          "what": "Attach a picture or a video and it shows in the post: pictures inline with a\ntap-to-enlarge view, videos as a thumbnail that plays in place when you tap it\n(never on its own). Pictures carry their provenance badge when the file has one.\nThe hidden tags a camera writes into a photo — where it was taken, when, on what\n— are removed on your own device, before the picture is ever sent. A picture\nlinked from somewhere else on the internet stays blocked until you choose to\nload it, so the site hosting it does not learn you read the post."
+          "what": "Attach a picture or a video and it shows in the post: pictures inline with a\ntap-to-enlarge view, videos as a thumbnail that plays when you tap it, never on\nits own — right there in the post, or, in the terminal app, in your system's own\nplayer. Pictures carry their provenance badge when the file has one.\nThe hidden tags a camera writes into a photo — where it was taken, when, on what\n— are removed on your own device, before the picture is ever sent. A picture\nlinked from somewhere else on the internet stays blocked until you choose to\nload it, so the site hosting it does not learn you read the post."
         },
         {
           "absences": {
@@ -1766,9 +1868,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "ios-kids": {
@@ -1790,9 +1892,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -2000,12 +2102,12 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
-              "date": "2026-10-22",
-              "dirty": true,
-              "stamp": "0.1.5-dev+646e0070 standalone",
+              "date": "2026-11-14",
+              "dirty": false,
+              "stamp": "0.1.7-dev+ef6a45c3 standalone",
               "state": "full"
             },
             "web": {
@@ -2047,10 +2149,10 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-30",
+              "date": "2026-11-02",
               "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -2059,16 +2161,16 @@
               "state": "none"
             },
             "linux": {
-              "date": "2026-10-31",
+              "date": "2026-11-02",
               "dirty": false,
-              "stamp": "0.1.5-dev+5a9a5fa8 standalone",
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "partial"
             },
             "macos": {
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-11-02",
@@ -2077,16 +2179,16 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-31",
+              "date": "2026-11-02",
               "dirty": false,
-              "stamp": "0.1.5-dev+88622a93 standalone",
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "partial"
             },
             "windows": {
               "date": "2026-11-02",
               "dirty": false,
               "stamp": "0.1.5-dev+acde58f9 standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -2187,8 +2289,8 @@
             },
             "ios": {
               "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "dirty": true,
+              "stamp": "0.1.5-dev+c9e7fe5d standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -2198,9 +2300,9 @@
               "state": "none"
             },
             "linux": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "date": "2026-10-31",
+              "dirty": true,
+              "stamp": "0.1.5-dev+cbd813be standalone",
               "state": "partial"
             },
             "macos": {
@@ -2210,21 +2312,21 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-30",
+              "date": "2026-11-07",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.6-dev+c788c80c standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-10-30",
+              "date": "2026-11-15",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-30",
+              "date": "2026-11-15",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "partial"
             }
           },
@@ -2548,7 +2650,7 @@
             },
             "macos": {
               "date": "2026-10-24",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
               "state": "partial"
             },
@@ -2887,7 +2989,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -2911,13 +3013,13 @@
               "date": "2026-11-09",
               "dirty": false,
               "stamp": "0.1.6-dev+4c3abb30 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-10-31",
               "dirty": true,
               "stamp": "0.1.5-dev+d6b5dbea.dirty standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
               "date": "2026-10-16",
@@ -2952,15 +3054,15 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "ios-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "linux": {
@@ -2988,9 +3090,9 @@
               "state": "full"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             }
           },
@@ -3059,9 +3161,9 @@
               "state": "absent"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-17",
               "dirty": false,
-              "stamp": "0.1.6-dev+3986249b standalone",
+              "stamp": "0.1.7-dev+e8d95526 standalone",
               "state": "full"
             }
           },
@@ -3094,10 +3196,10 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "full"
+              "stamp": "0.1.7 docker",
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -3109,7 +3211,7 @@
               "date": "2026-10-31",
               "dirty": true,
               "stamp": "0.1.5-dev+cbd813be standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-24",
@@ -3118,22 +3220,22 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-10-30",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
               "date": "2026-10-22",
               "dirty": false,
               "stamp": "0.1.5-dev+646e0070 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-09",
               "dirty": false,
               "stamp": "0.1.3-dev+a6f1524b standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -3175,7 +3277,7 @@
             },
             "linux": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+74897c5d standalone",
               "state": "full"
             },
@@ -3201,7 +3303,7 @@
               "date": "2026-09-14",
               "dirty": true,
               "stamp": "0.1.2-dev+068e152c.dirty standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -3299,7 +3401,7 @@
           "page": "docs/features/identity-in-your-cloud-keychain.md",
           "slug": "identity-in-your-cloud-keychain",
           "title": "A copy of your identity in your cloud keychain",
-          "what": "On iPhone you can choose to keep a copy of your identity in your iCloud Keychain\nas well as on the device. It is off until you turn it on, so by default your\nidentity stays out of iCloud. With it on, a new iPhone restored from your Apple\naccount, with iCloud Keychain on, finds your identity when the app first starts\nthere. The Mac app shows the same switch but cannot make the copy yet: turning\nit on leaves it off and says so. Once it can, your Mac and your iPhone on one\nApple account will share the one copy. Turning it off removes the copy from iCloud Keychain and\nnothing more: every device that already has your identity keeps it. Adding a\ndevice and your recovery kit remain the main ways to have your identity in more\nthan one place; the cloud copy is an extra you can opt into."
+          "what": "On iPhone and iPad you can choose to keep a copy of your identity in your iCloud\nKeychain as well as on the device. It is off until you turn it on, so by default\nyour identity stays out of iCloud. With it on, a new iPhone or iPad restored from\nyour Apple account, with iCloud Keychain on, finds your identity when the app\nfirst starts\nthere. The Mac app shows the same switch but cannot make the copy: turning it on leaves it off and says so. Turning it off removes the copy from iCloud Keychain and\nnothing more: every device that already has your identity keeps it. Adding a\ndevice and your recovery kit remain the main ways to have your identity in more\nthan one place; the cloud copy is an extra you can opt into."
         },
         {
           "absences": {
@@ -3418,7 +3520,7 @@
               "date": "2026-11-05",
               "dirty": false,
               "stamp": "0.1.6-dev+8438e5ce standalone",
-              "state": "failing"
+              "state": "partial"
             },
             "tui": {
               "date": "",
@@ -3468,9 +3570,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-10-30",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+500226d2 standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -3480,9 +3582,9 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-10-30",
+              "date": "2026-10-31",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.5-dev+cbd813be standalone",
               "state": "partial"
             },
             "macos": {
@@ -3492,21 +3594,21 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
-              "state": "full"
+              "date": "2026-11-01",
+              "dirty": true,
+              "stamp": "0.1.5-dev+7674275f.dirty standalone",
+              "state": "partial"
             },
             "web": {
-              "date": "2026-10-30",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+500226d2 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-30",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.7-dev+500226d2 standalone",
               "state": "partial"
             }
           },
@@ -3546,7 +3648,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "full"
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -3558,13 +3660,13 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-30",
@@ -3576,13 +3678,13 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -3702,7 +3804,7 @@
             },
             "ios": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "partial"
             },
@@ -3714,31 +3816,31 @@
             },
             "linux": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "partial"
             },
             "macos": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "full"
             },
             "web": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+1e755069 standalone",
               "state": "unbuilt"
             }
@@ -3967,9 +4069,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-08",
-              "dirty": true,
-              "stamp": "0.1.6-dev+54cdf1b6.dirty standalone",
+              "date": "2026-11-14",
+              "dirty": false,
+              "stamp": "0.1.7-dev+4df11101 standalone",
               "state": "full"
             },
             "web": {
@@ -4062,7 +4164,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "partial"
+              "state": "full"
             }
           },
           "full": true,
@@ -4108,7 +4210,6 @@
               "11": "docs/goal/behavior/p2p.md § Implementation status today",
               "16": "docs/goal/behavior/p2p.md § Implementation status today",
               "17": "docs/goal/behavior/p2p.md § Implementation status today",
-              "18": "docs/goal/behavior/p2p.md § Implementation status today",
               "19": "docs/goal/behavior/p2p.md § Implementation status today",
               "2": "docs/goal/behavior/p2p.md § Implementation status today",
               "3": "docs/goal/behavior/p2p.md § Implementation status today",
@@ -4124,7 +4225,6 @@
               "11": "docs/goal/behavior/p2p.md § Implementation status today",
               "16": "docs/goal/behavior/p2p.md § Implementation status today",
               "17": "docs/goal/behavior/p2p.md § Implementation status today",
-              "18": "docs/goal/behavior/p2p.md § Implementation status today",
               "19": "docs/goal/behavior/p2p.md § Implementation status today",
               "2": "docs/goal/behavior/p2p.md § Implementation status today",
               "3": "docs/goal/behavior/p2p.md § Implementation status today",
@@ -4194,9 +4294,9 @@
               "state": "absent"
             },
             "windows": {
-              "date": "2026-11-14",
+              "date": "2026-11-17",
               "dirty": false,
-              "stamp": "0.1.7-dev+49e2a8cc standalone",
+              "stamp": "0.1.7-dev+e8d95526 standalone",
               "state": "partial"
             }
           },
@@ -4214,27 +4314,27 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "unbuilt"
             },
             "android-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "unbuilt"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "ios-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "unbuilt"
             },
             "linux": {
@@ -4250,10 +4350,10 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "full"
+              "stamp": "0.1.7 docker",
+              "state": "partial"
             },
             "web": {
               "date": "2026-10-31",
@@ -4262,9 +4362,9 @@
               "state": "partial"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             }
           },
@@ -4462,9 +4562,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-12",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.6-dev+ef3fcb6a standalone",
               "state": "full"
             },
             "ios-kids": {
@@ -4476,7 +4576,7 @@
             "linux": {
               "date": "2026-11-11",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.6-dev+5c83561c standalone",
               "state": "full"
             },
             "macos": {
@@ -4488,7 +4588,7 @@
             "tui": {
               "date": "2026-11-11",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.6-dev+89d36747 standalone",
               "state": "full"
             },
             "web": {
@@ -4498,10 +4598,10 @@
               "state": "full"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-12",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "unbuilt"
+              "stamp": "0.1.6-dev+ef3fcb6a standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -4580,7 +4680,7 @@
           "page": "docs/features/privacy-settings.md",
           "slug": "privacy-settings",
           "title": "Privacy: who can reach you, and your spam threshold",
-          "what": "Choose who may start a conversation with you: anyone, contacts only, or nobody.\nContacts only isn't applied yet to someone on another nest who starts a\nconversation with you, unless they do it by inviting you to a room. Set how\naggressive your spam filter is and whether your training helps others. Both\npersist across relaunch and show the real value, never a default — and while\nyour nest is still being asked, the page says so rather than marking a guess."
+          "what": "Choose who may start a conversation with you: anyone, people who first send you a contact request you accept, contacts only, or nobody. The contact-request and contacts-only choices aren't applied to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room. Set how\naggressive your spam filter is and whether your training helps others. Both\npersist across relaunch and show the real value, never a default — and while\nyour nest is still being asked, the page says so rather than marking a guess."
         },
         {
           "absences": {
@@ -4604,7 +4704,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+ede1a6ab standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -4616,31 +4716,31 @@
               "date": "2026-10-31",
               "dirty": true,
               "stamp": "0.1.5-dev+db30f58d.dirty standalone",
-              "state": "partial"
+              "state": "full"
             },
             "macos": {
               "date": "2026-10-24",
               "dirty": true,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-11-01",
               "dirty": false,
               "stamp": "0.1.5-dev+99dc4c58 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-11-01",
               "dirty": false,
               "stamp": "0.1.5-dev+99dc4c58 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
               "date": "2026-11-01",
               "dirty": false,
               "stamp": "0.1.5-dev+99dc4c58 standalone",
-              "state": "partial"
+              "state": "full"
             }
           },
           "full": true,
@@ -4756,15 +4856,15 @@
             },
             "linux": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+cbd813be standalone",
               "state": "full"
             },
             "macos": {
               "date": "2026-10-24",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-11-01",
@@ -4779,9 +4879,9 @@
               "state": "full"
             },
             "windows": {
-              "date": "2026-09-25",
-              "dirty": true,
-              "stamp": "0.1.2-dev+a3582c8b.dirty standalone",
+              "date": "2026-11-15",
+              "dirty": false,
+              "stamp": "0.1.7-dev+35d33bf9 standalone",
               "state": "partial"
             }
           },
@@ -4791,9 +4891,11 @@
           "nest_only": false,
           "outcome_absences": {
             "android": {
+              "12": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances",
               "14": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
             },
             "android-kids": {
+              "12": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances",
               "14": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
             },
             "ios": {
@@ -4828,10 +4930,10 @@
               "state": "unbuilt"
             },
             "ios": {
-              "date": "2026-10-31",
+              "date": "2026-11-18",
               "dirty": false,
-              "stamp": "0.1.5-dev+2e009c0f standalone",
-              "state": "unbuilt"
+              "stamp": "0.1.7-dev+07ddec56 standalone",
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -4852,9 +4954,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
@@ -4977,9 +5079,9 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "partial"
             },
             "android-kids": {
@@ -4989,10 +5091,10 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
-              "state": "partial"
+              "stamp": "0.1.7 docker",
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -5010,7 +5112,7 @@
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-31",
@@ -5121,9 +5223,9 @@
               "state": "absent"
             },
             "windows": {
-              "date": "2026-11-02",
-              "dirty": true,
-              "stamp": "0.1.5-dev+a73ed62e.dirty standalone",
+              "date": "2026-11-17",
+              "dirty": false,
+              "stamp": "0.1.7-dev+e8d95526 standalone",
               "state": "full"
             }
           },
@@ -5235,7 +5337,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "unbuilt"
+              "state": "partial"
             },
             "android-kids": {
               "date": "",
@@ -5265,7 +5367,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-30",
@@ -5283,7 +5385,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "unbuilt"
+              "state": "partial"
             }
           },
           "full": true,
@@ -5291,6 +5393,10 @@
           "guide": "docs/guides/identity-and-devices.md § If a device is lost or stolen",
           "nest_only": false,
           "outcome_absences": {
+            "android": {
+              "10": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances",
+              "9": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
+            },
             "ios": {
               "10": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances",
               "9": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
@@ -5393,7 +5499,7 @@
               "date": "2026-10-23",
               "dirty": false,
               "stamp": "0.1.5-dev+fa996fbb standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -5411,7 +5517,7 @@
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-11-05",
@@ -5452,21 +5558,21 @@
               "state": "none"
             },
             "android-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "unbuilt"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "ios-kids": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "unbuilt"
             },
             "linux": {
@@ -5491,12 +5597,12 @@
               "date": "2026-11-10",
               "dirty": false,
               "stamp": "0.1.6-dev+7df68063 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "partial"
             }
           },
@@ -5505,6 +5611,12 @@
           "guide": "docs/guides/app-tour.md § Settings",
           "nest_only": false,
           "outcome_absences": {
+            "android": {
+              "13": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
+            },
+            "android-kids": {
+              "13": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
+            },
             "ios": {
               "13": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances",
               "18": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
@@ -5820,7 +5932,7 @@
           "page": "docs/features/identity-protected-on-this-device.md",
           "slug": "identity-protected-on-this-device",
           "title": "Your identity is kept safe on this device",
-          "what": "Your identity is a secret key, and each device you use keeps its own copy where that device protects secrets — the keychain on iPhone and Mac, the equivalent stores on Windows, Linux and Android. Where there is no such store — in the web app, and in the terminal app on a server or over SSH, or on a computer whose system keyring is locked or not set up — the app asks you to choose a passphrase the first time it opens and keeps the key encrypted with it, asking for the passphrase again at each launch (in a browser, once per session, as long as one Fauna tab stays open). Either way, reopening the app finds your identity where you left it: nothing to set up twice. Where the key is encrypted with a passphrase, you can change that passphrase from Settings, and the old one stops opening it.\n\nThe app never sends your key anywhere by itself — not into a backup, not into a sync between your devices. It leaves a device only when you move it yourself: by adding a device, exporting your identity, making a recovery kit, or — on iPhone — turning on the iCloud Keychain backup. What your device's own backup then does with the place the key is kept depends on the device: some keep the key on the device and out of the backup, others carry it still locked under your sign-in password or your passphrase — and a copy of your browser's data carries it encrypted with your passphrase, too."
+          "what": "Your identity is a secret key, and each device you use keeps its own copy where that device protects secrets — the keychain on iPhone, iPad and Mac, the equivalent stores on Windows, Linux and Android. Where there is no such store — in the web app, and in the terminal app on a server or over SSH, or on a computer whose system keyring is locked or not set up — the app asks you to choose a passphrase the first time it opens and keeps the key encrypted with it, asking for the passphrase again at each launch (in a browser, once per session, as long as one Fauna tab stays open). Either way, reopening the app finds your identity where you left it: nothing to set up twice. Where the key is encrypted with a passphrase, you can change that passphrase from Settings, and the old one stops opening it.\n\nThe app never sends your key anywhere by itself — not into a backup, not into a sync between your devices. It leaves a device only when you move it yourself: by adding a device, exporting your identity, making a recovery kit, or — on iPhone or iPad — turning on the iCloud Keychain backup. What your device's own backup then does with the place the key is kept depends on the device: some keep the key on the device and out of the backup, others carry it still locked under your sign-in password or your passphrase — and a copy of your browser's data carries it encrypted with your passphrase, too."
         },
         {
           "absences": {
@@ -5844,7 +5956,7 @@
               "date": "2026-10-30",
               "dirty": true,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "unbuilt"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -5862,7 +5974,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "unbuilt"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-30",
@@ -5947,7 +6059,7 @@
             "windows": {
               "date": "2026-11-11",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.6-dev+89d36747 standalone",
               "state": "partial"
             }
           },
@@ -6006,7 +6118,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-30",
@@ -6272,7 +6384,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+b7384d11 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -6290,7 +6402,7 @@
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-11-11",
@@ -6347,7 +6459,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+fb3b5657 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -6365,7 +6477,7 @@
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-30",
@@ -6383,7 +6495,7 @@
               "date": "2026-09-26",
               "dirty": true,
               "stamp": "0.1.2-dev+15642c38.dirty standalone",
-              "state": "partial"
+              "state": "unbuilt"
             }
           },
           "full": true,
@@ -6415,10 +6527,10 @@
               "state": "absent"
             },
             "ios": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -6427,33 +6539,33 @@
               "state": "absent"
             },
             "linux": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
               "state": "full"
             },
             "macos": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
+              "state": "full"
             },
             "tui": {
               "date": "2026-11-11",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.6-dev+b536197e standalone",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
               "state": "full"
             },
             "windows": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.7-dev+8f6c0a5a docker",
               "state": "partial"
             }
           },
@@ -6881,7 +6993,7 @@
               "date": "2026-10-31",
               "dirty": true,
               "stamp": "0.1.5-dev+cbd813be standalone",
-              "state": "partial"
+              "state": "full"
             },
             "macos": {
               "date": "2026-10-24",
@@ -6899,13 +7011,13 @@
               "date": "2026-11-02",
               "dirty": true,
               "stamp": "0.1.5-dev+acde58f9 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
-              "date": "",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.7-dev+bea44c4b standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -6974,7 +7086,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3b591c2e standalone",
-              "state": "unbuilt"
+              "state": "partial"
             },
             "web": {
               "date": "2026-10-30",
@@ -7021,7 +7133,7 @@
               "date": "2026-10-27",
               "dirty": false,
               "stamp": "0.1.5-dev+5f525618 docker",
-              "state": "full"
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -7033,7 +7145,7 @@
               "date": "2026-10-27",
               "dirty": false,
               "stamp": "0.1.5-dev+5f525618 docker",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-27",
@@ -7051,7 +7163,7 @@
               "date": "2026-10-27",
               "dirty": false,
               "stamp": "0.1.5-dev+5f525618 docker",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-27",
@@ -7104,7 +7216,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+962dc452 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-24",
@@ -7116,13 +7228,13 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+962dc452 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+962dc452 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-14",
@@ -7423,7 +7535,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+1e755069 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-27",
@@ -7492,7 +7604,7 @@
             "tui": {
               "date": "2026-10-30",
               "dirty": false,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.5-dev+8755c14e standalone",
               "state": "full"
             },
             "web": {
@@ -7660,7 +7772,7 @@
           "page": "docs/features/kids-app.md",
           "slug": "kids-app",
           "title": "Fauna Kids",
-          "what": "Fauna Kids is a planned app for a child whose account a guardian supervises; it\nis not yet available anywhere. It is the Fauna app for Android and iOS with the\nopen parts left out of the build itself: no feed, no searching for people you do\nnot know, no bridges to other networks, no publishing to the web, no payments\nand no outside apps. A link in a message opens nothing, pictures from elsewhere\nare never shown, another person's profile opens only once they are a confirmed\ncontact, and the four content categories a guardian can block stay blocked\nwhatever anyone sets. A child joins the family's nest by invite. An account\nnobody supervises is told so and can only sign out."
+          "what": "Fauna Kids is an app for a child whose account a guardian supervises; it is not\navailable anywhere today. It is the Fauna app for Android and iOS with the\nopen parts left out of the build itself: no feed, no searching for people you do\nnot know, no bridges to other networks, no publishing to the web, no payments\nand no outside apps. A link in a message opens nothing, pictures from elsewhere\nare never shown, another person's profile opens only once they are a confirmed\ncontact, and the four content categories a guardian can block stay blocked\nwhatever anyone sets. A child joins the family's nest by invite. An account\nnobody supervises is told so and can only sign out."
         },
         {
           "absences": {
@@ -7766,7 +7878,7 @@
             },
             "linux": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+74897c5d standalone",
               "state": "full"
             },
@@ -7904,13 +8016,13 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+cbd813be standalone",
-              "state": "partial"
+              "state": "full"
             },
             "macos": {
               "date": "2026-10-24",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-11-01",
@@ -7926,7 +8038,7 @@
             },
             "windows": {
               "date": "2026-09-25",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.2-dev+f9031bce standalone",
               "state": "partial"
             }
@@ -7960,9 +8072,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-10-31",
+              "date": "2026-11-05",
               "dirty": false,
-              "stamp": "0.1.5-dev+f83e3033 standalone",
+              "stamp": "0.1.6-dev+2f2257c1 standalone",
               "state": "full"
             },
             "ios-kids": {
@@ -8040,10 +8152,10 @@
               "state": "none"
             },
             "linux": {
-              "date": "",
+              "date": "2026-11-13",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.7-dev+34330ae6 standalone",
+              "state": "full"
             },
             "macos": {
               "date": "",
@@ -8105,9 +8217,9 @@
             },
             "ios": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
-              "state": "full"
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -8117,7 +8229,7 @@
             },
             "linux": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             },
@@ -8129,7 +8241,7 @@
             },
             "tui": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
               "state": "full"
             },
@@ -8141,9 +8253,9 @@
             },
             "windows": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+0daa3736 docker",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -8188,7 +8300,7 @@
             },
             "linux": {
               "date": "2026-11-05",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+37e2409c standalone",
               "state": "full"
             },
@@ -8199,9 +8311,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-08",
+              "date": "2026-11-15",
               "dirty": false,
-              "stamp": "0.1.6-dev+8f244c6f standalone",
+              "stamp": "0.1.7-dev+500226d2 standalone",
               "state": "full"
             },
             "web": {
@@ -8214,7 +8326,7 @@
               "date": "2026-10-27",
               "dirty": true,
               "stamp": "0.1.5-dev+de363e06.dirty standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -8285,7 +8397,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+c9e7fe5d standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -8388,10 +8500,10 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
-              "state": "partial"
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -8400,33 +8512,33 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
-              "state": "partial"
-            },
-            "tui": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "full"
             },
+            "tui": {
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "state": "partial"
+            },
             "web": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "full"
             },
             "windows": {
-              "date": "2026-10-30",
-              "dirty": false,
-              "stamp": "0.1.5-dev+c9e7fe5d standalone",
+              "date": "2026-11-02",
+              "dirty": true,
+              "stamp": "0.1.5-dev+acde58f9 standalone",
               "state": "unbuilt"
             }
           },
@@ -8604,7 +8716,7 @@
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+5beed650 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "ios-kids": {
               "date": "",
@@ -8614,7 +8726,7 @@
             },
             "linux": {
               "date": "2026-10-31",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+d8a27534 standalone",
               "state": "full"
             },
@@ -8622,7 +8734,7 @@
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+a1b3eaab standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-31",
@@ -8634,13 +8746,13 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+d8a27534 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-27",
               "dirty": false,
               "stamp": "0.1.5-dev+e98a39b5 standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -8675,7 +8787,7 @@
               "date": "2026-10-30",
               "dirty": true,
               "stamp": "0.1.5-dev+0daa3736 docker",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -8687,13 +8799,13 @@
               "date": "2026-10-30",
               "dirty": true,
               "stamp": "0.1.5-dev+0daa3736 docker",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-24",
               "dirty": false,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-30",
@@ -8705,13 +8817,13 @@
               "date": "2026-10-30",
               "dirty": true,
               "stamp": "0.1.5-dev+0daa3736 docker",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-30",
               "dirty": true,
               "stamp": "0.1.5-dev+0daa3736 docker",
-              "state": "full"
+              "state": "unbuilt"
             }
           },
           "full": true,
@@ -8743,9 +8855,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-10-28",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+407a19e1 standalone",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -8755,33 +8867,33 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-11-02",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
-              "state": "full"
+              "stamp": "0.1.7-dev+00c1f744 standalone",
+              "state": "partial"
             },
             "macos": {
-              "date": "2026-11-02",
+              "date": "2026-11-10",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
-              "state": "full"
+              "stamp": "0.1.6-dev+e46418b8 standalone",
+              "state": "partial"
             },
             "tui": {
-              "date": "2026-11-02",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-11-02",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
-              "state": "full"
+              "stamp": "0.1.7-dev+00c1f744 standalone",
+              "state": "partial"
             },
             "windows": {
-              "date": "2026-11-02",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.5-dev+acde58f9 standalone",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "partial"
             }
           },
@@ -8814,9 +8926,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-10-28",
-              "dirty": false,
-              "stamp": "0.1.5-dev+407a19e1 standalone",
+              "date": "2026-10-31",
+              "dirty": true,
+              "stamp": "0.1.5-dev+4d41bfdd.dirty standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -8832,9 +8944,9 @@
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-28",
-              "dirty": false,
-              "stamp": "0.1.5-dev+409ac563 standalone",
+              "date": "2026-10-31",
+              "dirty": true,
+              "stamp": "0.1.5-dev+4d41bfdd.dirty standalone",
               "state": "partial"
             },
             "tui": {
@@ -8847,13 +8959,13 @@
               "date": "2026-10-31",
               "dirty": true,
               "stamp": "0.1.5-dev+4d41bfdd.dirty standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-31",
               "dirty": true,
               "stamp": "0.1.5-dev+4d41bfdd.dirty standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -8887,7 +8999,7 @@
             "ios": {
               "date": "2026-10-30",
               "dirty": true,
-              "stamp": "0.1.5-dev+662ece79 standalone",
+              "stamp": "0.1.5-dev+e4b19f90 standalone",
               "state": "partial"
             },
             "ios-kids": {
@@ -8911,7 +9023,7 @@
             "tui": {
               "date": "2026-10-30",
               "dirty": true,
-              "stamp": "0.1.5-dev+390d61b5 standalone",
+              "stamp": "0.1.5-dev+e4b19f90 standalone",
               "state": "partial"
             },
             "web": {
@@ -8959,7 +9071,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -8977,7 +9089,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-30",
@@ -8995,7 +9107,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -9027,9 +9139,9 @@
               "state": "absent"
             },
             "ios": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "ios-kids": {
@@ -9051,9 +9163,9 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-14",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7-dev+00c1f744 standalone",
               "state": "full"
             },
             "web": {
@@ -9064,7 +9176,7 @@
             },
             "windows": {
               "date": "2026-09-11",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.2-dev+c04c2468 standalone",
               "state": "partial"
             }
@@ -9254,9 +9366,9 @@
               "state": "absent"
             },
             "linux": {
-              "date": "2026-10-30",
+              "date": "2026-11-05",
               "dirty": false,
-              "stamp": "0.1.5-dev+b7384d11 standalone",
+              "stamp": "0.1.5-dev+37e2409c standalone",
               "state": "full"
             },
             "macos": {
@@ -9266,15 +9378,15 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-10-19",
+              "date": "2026-11-15",
               "dirty": false,
-              "stamp": "0.1.5-dev+cab1c46a standalone",
+              "stamp": "0.1.7-dev+e08dc6d6 standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-10-30",
+              "date": "2026-11-05",
               "dirty": false,
-              "stamp": "0.1.5-dev+b7384d11 standalone",
+              "stamp": "0.1.5-dev+1c9a6a26 standalone",
               "state": "full"
             },
             "windows": {
@@ -9479,14 +9591,14 @@
               "state": "full"
             },
             "tui": {
-              "date": "2026-11-11",
+              "date": "2026-11-16",
               "dirty": false,
-              "stamp": "0.1.6 docker",
+              "stamp": "0.1.7 docker",
               "state": "full"
             },
             "web": {
               "date": "2026-10-30",
-              "dirty": true,
+              "dirty": false,
               "stamp": "0.1.5-dev+879affa6 standalone",
               "state": "full"
             },
@@ -9597,7 +9709,7 @@
               "date": "2026-11-01",
               "dirty": false,
               "stamp": "0.1.5-dev+ab838565 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "ios-kids": {
               "date": "",
@@ -9877,7 +9989,7 @@
           "page": "docs/features/nest-serves-the-app.md",
           "slug": "nest-serves-the-app",
           "title": "Your nest serves the app",
-          "what": "There is nothing to choose to get this: Fauna's container image for the nest carries the web app and serves it at the nest's own address, on every start, with the security headers a browser expects.\nA nest whose saved settings never recorded where the app is finds it again on the\nnext restart. An admin can instead send visitors to the Fauna project's own address for the app, with the nest already filled in on the sign-in page, by choosing it under **Web app** in the admin area (a nest without a domain yet keeps serving the app itself); that address serves the app's code and holds nothing of yours, and it is not live yet."
+          "what": "There is nothing to choose to get this: Fauna's container image for the nest carries the web app and serves it at the nest's own address, on every start, with the security headers a browser expects.\nA nest whose saved settings never recorded where the app is finds it again on the\nnext restart."
         },
         {
           "absences": {},
@@ -9961,6 +10073,11 @@
       "date": "2026-11-11",
       "promoted": true,
       "version": "0.1.6"
+    },
+    {
+      "date": "2026-11-16",
+      "promoted": false,
+      "version": "0.1.7"
     }
   ]
 }

@@ -23,7 +23,6 @@ import SwiftUI
 /// `admin-nav-back` is provided by the admin shell rail (macOS) / the navigation
 /// stack (iOS), not this page.
 public struct AdminCalendarView: View {
-    @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = AdminCalendarVM()
     /// Edit buffer for the CalDAV-port field — a `String` so it parses on Save with
     /// a u16-range guard (a stray edit never silently writes a bad port). Re-seeded
@@ -58,10 +57,7 @@ public struct AdminCalendarView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task(id: reloadToken) {
-            guard let client else { return }
-            await vm.configure(api: client.api)
-        }
+        .adminReadOnEntryAndReconnect(vm, reloadToken: reloadToken)
         // Re-seed the edit buffer from the hydrated value (initial + after a save's
         // re-read); a live user/driver edit changes the buffer, not the snapshot,
         // so this never clobbers an in-progress edit.
@@ -88,11 +84,17 @@ public struct AdminCalendarView: View {
                         .frame(maxWidth: 160)
                         .accessibilityIdentifier(Ids.adminCalendarCaldavPortInput)
                         .automationField(Ids.adminCalendarCaldavPortInput, text: $caldavPortText)
+                        // The port the field shows is the read's: typing over
+                        // an unread value would save a guess.
+                        .faunaPossible(vm.toggleAnswer)
                 }
+                FaunaPossibilityReason(vm.toggleAnswer)
                 automationText(Ids.adminCalendarCaldavPortHelpText, L.admin.calendarPage.caldavPortDesc)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack {
+                    // The draft's own reason (the read's stands under the field).
+                    FaunaPossibilityReason(caldavPortDraftPossibility(draft: caldavPortText))
                     Spacer()
                     Button(L.admin.calendarPage.caldavPortSave) { saveCaldavPort() }
                         .disabled(vm.isBusy)
@@ -101,6 +103,9 @@ public struct AdminCalendarView: View {
                                             isEnabled: { !vm.isBusy }) {
                             saveCaldavPort()
                         }
+                        // The read gate, then the typed port; `saveCaldavPort`
+                        // asks the same answer.
+                        .faunaPossible(vm.portSaveAnswer(caldavPortText))
                         .faunaGate("fauna.bridges.set_caldav_port")
                 }
             }
@@ -109,18 +114,14 @@ public struct AdminCalendarView: View {
         .disabled(vm.isBusy)
     }
 
-    /// Parse the CalDAV-port edit buffer as a u16 in [1, 65535]; an out-of-range /
-    /// unparseable value surfaces `caldav_port_invalid` on `error-message` and is
-    /// NOT dispatched (mirrors the linux/android reference validation).
+    /// The press asks the answer the Save is painted from: an out-of-range /
+    /// unparseable port is refused on `error-message` with the shared reason and
+    /// NOT dispatched.
     private func saveCaldavPort() {
-        // Shared `fauna_core::format::parse_port` (UniFFI `parsePort`): trims,
-        // parses u16, requires 1..=65535 (rejects 0) — the same validator the
-        // admin serving-port field uses (value-formatting.md § Port validation),
-        // replacing the inline `UInt16(...) + port >= 1` check.
-        guard let port = parsePort(input: caldavPortText) else {
-            vm.errorMessage = L.admin.calendarPage.caldavPortInvalid
-            return
-        }
+        if refusePress(vm.portSaveAnswer(caldavPortText), errorMessage: &vm.errorMessage) { return }
+        // Shared `fauna_core::format::parse_port` (UniFFI `parsePort`) — the
+        // parser the answer above asks, so this never fails once it passed.
+        guard let port = parsePort(input: caldavPortText) else { return }
         Task { await vm.setCaldavPort(port) }
     }
 
@@ -143,6 +144,10 @@ public struct AdminCalendarView: View {
                     let next = !(vm.snapshot?.caldavEnabled ?? false)
                     Task { await vm.setCaldavEnabled(next) }
                 }
+                // Waits for `get_mail_config` (admin.md § Errors & edge cases,
+                // *Controls wait for their read*) — never flipped from the
+                // `false` a machine starts at.
+                .faunaPossible(vm.toggleAnswer)
                 .faunaGate("fauna.bridges.set_caldav_enabled")
                 Text(L.admin.calendarPage.enabledSubtitle)
                     .font(.caption).foregroundStyle(.secondary)

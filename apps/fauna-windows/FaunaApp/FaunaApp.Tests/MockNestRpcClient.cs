@@ -1413,7 +1413,9 @@ internal sealed class MockNestRpcClient : INestRpcClient
         new LocalizedText("admin.nest_page.web_app_origin_status_bundled", new()),
         new LocalizedText("admin.nest_page.web_app_origin_scope", new()),
         true,
-        new LocalizedText("admin.nest_page.web_app_origin_central", new()));
+        new LocalizedText("admin.nest_page.web_app_origin_central", new()),
+        new Possibility.Possible(),
+        new Possibility.Possible());
     /// Every <c>fauna.admin.web_app_origin.set</c> arg, in call order. The set
     /// answers a view selecting that mode (the real reply folds the stored one).
     public List<FfiWebAppOrigin> WebAppOriginSetCalls { get; } = new();
@@ -1538,11 +1540,17 @@ internal sealed class MockNestRpcClient : INestRpcClient
             : CriticalAlertSweepEnds.Task;
     }
 
-    public Task ApplyPostClaimServingEnablementAsync(
+    /// The refusal text the shared serving-enablement step answers (null: every
+    /// planned step done), and whether the call fails before reaching the step.
+    public string? NextServingEnablementRefusal { get; set; }
+    public bool ServingEnablementThrows { get; set; }
+
+    public Task<string?> ApplyPostClaimServingEnablementAsync(
         string nodeUrl, bool email, bool caldav, bool carddav, bool webdav)
     {
         _calls.Add($"ApplyPostClaimServingEnablement({nodeUrl},{email},{caldav},{carddav},{webdav})");
-        return Task.CompletedTask;
+        if (ServingEnablementThrows) throw new InvalidOperationException("no connection");
+        return Task.FromResult(NextServingEnablementRefusal);
     }
 
     public Task RecoveryRegisterDeferredKitAsync(string kitHex)
@@ -3211,6 +3219,15 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextTiers);
     }
 
+    public FfiSalePriceSave NextSalePriceSave { get; set; } = new FfiSalePriceSave.Unchanged();
+
+    public Task<FfiSalePriceSave> SubscriptionSalePriceSaveAsync(FfiTierItem tier, string priceHint, string askingPrice)
+    {
+        _calls.Add($"SubscriptionSalePriceSave:{tier.name}:{priceHint}:{askingPrice}");
+        Throw();
+        return Task.FromResult(NextSalePriceSave);
+    }
+
     public Task<bool> SubscriptionTierCreateAsync(
         string name, uint rank, string? description, string? priceHint, string? paymentUrl, bool autoApprove,
         ulong? askingPriceSats)
@@ -4198,6 +4215,17 @@ internal sealed class MockNestRpcClient : INestRpcClient
         _calls.Add("CarddavListAddressbooks");
         Throw();
         return Task.FromResult(NextAddressbooks);
+    }
+
+    /// The typed <c>read_addressbooks</c> fixture — unresolved by default, the state
+    /// a fresh account's first connect starts in (custody holds no key yet).
+    public FfiAddressbooksRead NextAddressbooksRead { get; set; } = new FfiAddressbooksRead.Unresolved();
+
+    public Task<FfiAddressbooksRead> CarddavReadAddressbooksAsync()
+    {
+        _calls.Add("CarddavReadAddressbooks");
+        Throw();
+        return Task.FromResult(NextAddressbooksRead);
     }
 
     public Task<FfiCardRow[]> CarddavQueryCardsAsync(string addressbookIdHex)

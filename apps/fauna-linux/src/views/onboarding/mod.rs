@@ -18,25 +18,26 @@
 //! Per-stage code never calls `stack.set_visible_child_name` directly — it
 //! only invokes machine mutators and lets the observer tick do the navigation.
 
-mod claim_code;
-mod dns_config;
+pub(crate) mod claim_code;
+pub(crate) mod dns_config;
 mod dns_post_instructions;
-mod emergency_lockout_entry;
+pub(crate) mod emergency_lockout_entry;
 mod generic_provider_form;
-mod handle_entry;
+pub(crate) mod handle_entry;
 mod identity_choice;
 mod identity_created;
-mod identity_import;
-mod invite_request;
+pub(crate) mod identity_import;
+pub(crate) mod invite_request;
 mod machine_glue;
-mod nat_mode_choice;
-mod nest_provisioning;
+pub(crate) mod nat_mode_choice;
+pub(crate) mod nest_provisioning;
 mod nest_recovery;
+pub(crate) mod provider_choice;
 mod recover_selfhosted_instructions;
-mod recovery_entry;
+pub(crate) mod recovery_entry;
 mod recovery_kit;
 mod trust_prompt;
-mod vps_config;
+pub(crate) mod vps_config;
 #[allow(dead_code)]
 pub(crate) mod widgets;
 
@@ -62,6 +63,7 @@ pub const STEP_IDENTITY_CHOICE: &str = "identity_choice";
 pub const STEP_IDENTITY_CREATED: &str = "identity_created";
 pub const STEP_IDENTITY_IMPORT: &str = "identity_import";
 pub const STEP_HANDLE_ENTRY: &str = "handle_entry";
+pub const STEP_PROVIDER_CHOICE: &str = "provider_choice";
 pub const STEP_DNS_CONFIG: &str = "dns_config";
 pub const STEP_VPS_CONFIG: &str = "vps_config";
 pub const STEP_DNS_POST_INSTRUCTIONS: &str = "dns_post_instructions";
@@ -113,6 +115,11 @@ fn step_to_name(step: OnboardingStep) -> Option<&'static str> {
         // 2026-08-14 (tui led it the same day), so `make_machine` declares
         // `set_renders_trust_prompt(true)` and both NAT-step exits route here.
         TrustPrompt => STEP_TRUST_PROMPT,
+        // The choose-providers page (onboarding-provisioning.md § 3d) — built
+        // on linux after tui led: `make_machine` declares
+        // `set_renders_provider_choice(true)`, so the handle check lands here
+        // in place of `dns_config` / `vps_config`.
+        ProviderChoice => STEP_PROVIDER_CHOICE,
         // The orchestrator handles `Done` separately — no stack child to swap to.
         Done => return None,
     })
@@ -122,7 +129,11 @@ fn step_to_name(step: OnboardingStep) -> Option<&'static str> {
 /// so `start_test_agent_if_enabled` (in main.rs) can mirror in-window error
 /// state into its JSON payload.
 pub struct OnboardingResult {
-    pub window: adw::Window,
+    /// An application window, because it is the one the app goes on in: at
+    /// `LoggedIn` its content becomes the launch screen and then the signed-in
+    /// app (`onboarding.md` § Wizard exit handling → *The wizard becomes the app
+    /// in place*).
+    pub window: adw::ApplicationWindow,
     pub error_label: gtk::Label,
     /// Handle to the wizard's state machine — exposed so main.rs's
     /// test-agent reset handler can call `m.reset()` instead of tearing
@@ -196,6 +207,13 @@ fn pages(
             Box::new({
                 let m = m.clone();
                 move || handle_entry::build(m)
+            }),
+        ),
+        (
+            STEP_PROVIDER_CHOICE,
+            Box::new({
+                let m = m.clone();
+                move || provider_choice::build(m)
             }),
         ),
         (
@@ -564,6 +582,7 @@ fn persist_logged_in_terminal(
     registry: &fauna_client_accounts::AccountRegistry,
     secret_hex: Option<&str>,
     nest_url: &str,
+    reach_ipv4: Option<&str>,
     append: bool,
 ) -> Option<String> {
     if append {
@@ -583,11 +602,11 @@ fn persist_logged_in_terminal(
         // and nowhere earlier (ratified 2026-09-21).
         if let Err(e) = fauna_client_accounts::persist_logged_in(
             registry, secret_hex, nest_url, None,
-            // No reach hint on this path yet: linux reads the wizard's
-            // captured address at its own `LoggedIn` terminal only once
-            // its leg lands (`onboarding.md` § Reach hint). `None` is
-            // the honest value and behaves exactly as today.
-            None,
+            // The reach hint (`onboarding-provisioning.md` § Reach hint),
+            // read off the machine by the caller as on every app: the box
+            // this wizard provisioned, at the address its claim used, so
+            // the post-wizard launch reaches it before DNS does.
+            reach_ipv4,
         ) {
             tracing::error!("[onboarding] persisting the logged-in account failed: {e:#}");
             // Only a refusal the user can act on (the account list is full)
@@ -632,6 +651,7 @@ fn handle_wizard_done(m: &Arc<OnboardingMachine>, append: bool) -> Option<Wizard
                 &crate::account_registry(),
                 m.effective_secret().as_deref(),
                 nest_url.as_str(),
+                m.provision_reach_ipv4().as_deref(),
                 append,
             ) {
                 m.set_error_message(line);
@@ -685,6 +705,13 @@ pub fn build_onboarding_window_awaiting_dns(
     build_onboarding_window_inner(app, Some(secret_hex), false, Some(record))
 }
 
+/// The wizard window's widget name. The account-switch teardown keys on it to
+/// keep an append wizard on screen until the switched-to surface is up, and
+/// the e2e window journal (`fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY`) lists it.
+/// At sign-in the same window is renamed `fauna-main-window` when the main UI
+/// becomes its content (`app::build_main_window`).
+pub const WIZARD_WINDOW_NAME: &str = "fauna-onboarding-window";
+
 /// Build the onboarding wizard window.
 pub fn build_onboarding_window(app: &adw::Application) -> OnboardingResult {
     build_onboarding_window_inner(app, None, false, None)
@@ -721,6 +748,37 @@ fn spawn_signed_out_onboarding_reconcile() {
     );
 }
 
+/// An add-account run shows as already connected every provider whose
+/// credential the signed-in account holds in its DNS record
+/// (`onboarding-provisioning.md` § 3d *Held credentials*): the record is read
+/// through the live account runtime and the credentials passed INTO the
+/// machine, which re-runs each provider's checks before it shows the row
+/// connected (a revoked token reads as not connected). Best-effort and off the
+/// GTK thread: a failed read leaves every row unconnected, the state a
+/// first-nest run starts in anyway. The machine notifies on the seed, so the
+/// observer tick repaints the page. Mirrors tui's
+/// `App::seed_held_provider_credentials`.
+fn spawn_seed_held_provider_credentials(m: Arc<OnboardingMachine>) {
+    let Some(store) = crate::account_runtime::handle() else {
+        return;
+    };
+    crate::async_helper::run_on_tokio(
+        async move {
+            match store.dns().await {
+                Ok(dns) => {
+                    let held = fauna_onboarding_machine::HeldDnsCredential::all_from(&dns)
+                        .into_iter()
+                        .map(Into::into)
+                        .collect();
+                    m.seed_held_provider_credentials(held).await;
+                }
+                Err(e) => tracing::info!("provider_choice: DNS record read failed: {e:#}"),
+            }
+        },
+        |()| {},
+    );
+}
+
 fn build_onboarding_window_inner(
     app: &adw::Application,
     seed_secret: Option<&str>,
@@ -748,6 +806,8 @@ fn build_onboarding_window_inner(
     // capability now rather than wait for its own renewal-loop cadence.
     if !append {
         spawn_signed_out_onboarding_reconcile();
+    } else {
+        spawn_seed_held_provider_credentials(m.clone());
     }
 
     // ── Stack + per-page registry ───────────────────────────────────────
@@ -814,7 +874,7 @@ fn build_onboarding_window_inner(
     outer.append(&error_label);
     outer.append(&stack);
 
-    let window = adw::Window::builder()
+    let window = adw::ApplicationWindow::builder()
         .title(crate::i18n::strings::onboarding::identity_choice::TITLE)
         .default_width(600)
         .default_height(550)
@@ -822,6 +882,8 @@ fn build_onboarding_window_inner(
         .content(&outer)
         .build();
     window.set_application(Some(app));
+    window.set_widget_name(WIZARD_WINDOW_NAME);
+    crate::window_host::set_root_surface(&window, fauna_e2e_agent::ROOT_SURFACE_WIZARD);
 
     // The app is permanently held alive by `app.hold()` in main.rs so
     // close-to-tray works on the authenticated main window. That same
@@ -834,7 +896,9 @@ fn build_onboarding_window_inner(
     // must merely dismiss it, never quit the app. Just Proceed (destroy).
     {
         let app_for_quit = app.clone();
-        window.connect_close_request(move |_| {
+        // Through `window_host`, so the launch this window goes on to host
+        // replaces it rather than stacking a second handler.
+        crate::window_host::set_close_handler(&window, move |_| {
             if !append {
                 app_for_quit.quit();
             }
@@ -991,14 +1055,14 @@ fn handle_change(
     recovery_command: &recover_selfhosted_instructions::CommandCell,
     error_label: &gtk::Label,
     app: &adw::Application,
-    window: &adw::Window,
+    window: &adw::ApplicationWindow,
     append: bool,
     handed_off: &Rc<std::cell::Cell<bool>>,
 ) {
     // ── The hand-off latch ──
     // `OnboardingStep::Done` is a TERMINAL route, not a page: it launches the
-    // main app (or switches accounts, or dismisses the wizard) and destroys the
-    // wizard window. But the machine stays `Done` and the observer keeps
+    // main app in the wizard's own window (or switches accounts, or dismisses the
+    // wizard). But the machine stays `Done` and the observer keeps
     // notifying, so without this latch every subsequent tick re-ran the whole
     // terminal route — measured at ~840 ticks/s, each one re-writing the
     // credential trio and then bailing out of `launch_main_app_after_signin` at
@@ -1396,7 +1460,7 @@ fn persist_restored_predecessors(
 
 #[allow(clippy::too_many_arguments)]
 fn launch_main_app_after_signin(
-    onboarding_window: &adw::Window,
+    onboarding_window: &adw::ApplicationWindow,
     nest_url: &str,
     secret_hex: &str,
     captured_dns: Option<fauna_onboarding_machine::CapturedDnsCredential>,
@@ -1407,12 +1471,10 @@ fn launch_main_app_after_signin(
     trust_granted: bool,
     pending_kit: Option<fauna_core::secret::SecretString>,
 ) {
-    // ⚠ The breadcrumbs through this function and `finish_launch_after_signin`
-    // are load-bearing, not debug leftovers. Until 2026-08-17 this entire
-    // wizard→main-app transition emitted **not one** `tracing` event: the prescribed next step was "raise the app's log
-    // level and find the last thing the main thread does", and there was
-    // nothing to raise. A transition that can wedge the GTK main loop must say
-    // where it got to. Keep them, and add one beside any new step.
+    // ⚠ The `[launch]` breadcrumbs through this transition are load-bearing,
+    // not debug leftovers: until 2026-08-17 it emitted not one `tracing` event,
+    // so a wedge in it could not be localised. Keep them, and add one beside
+    // any new step.
     tracing::info!("[launch] post-wizard transition: credentials registered by moment 4");
 
     let app = match onboarding_window
@@ -1423,199 +1485,109 @@ fn launch_main_app_after_signin(
         None => return,
     };
 
-    onboarding_window.destroy();
+    // The step from `LoggedIn` to the app is a launch — the cold launch's
+    // `LaunchMachine::start` and verdict routing — run in this window
+    // (`onboarding.md` § Wizard exit handling → *The wizard becomes the app in
+    // place*, *The finished wizard holds until the session is signed in*): the
+    // window shows `launch_progress`, `launch_retry` with Retry in place while
+    // the connection cannot be made, and becomes the main window only at
+    // `Online`. ⚠ This transition once destroyed the wizard's window, ran the
+    // machine with no window on screen, and built the main window whatever the
+    // machine's verdict — a "Fauna is ready" notification for an unfocused new
+    // window, and a signed-in shell over a DNS failure.
+    //
+    // The first-setup glue rides the launch's `Online` arm, on the
+    // authenticated client and before the window is built — the order it has
+    // always run in — and is dropped if the person walks away to another nest.
+    // `launch_authenticated` is the one funnel every authenticated launch goes
+    // through (client, post-auth hooks, the identity follow that gives the send
+    // rail its `<handle>@<domain>`, window, pump).
+    let first_setup: crate::FirstSetup = Box::new(move |fauna_client| {
+        tracing::info!("[launch] FaunaClient built; authenticate() dispatched");
 
-    // LaunchMachine: construct fresh, then drive `start()` to Online before
-    // FaunaClient consumes it for token refresh. The wizard just authenticated
-    // via OnboardingMachine; the LaunchMachine re-runs silent challenge against
-    // the just-registered credentials — wasteful but correct, and the
-    // post-wizard transition is rare. `handle_wizard_done`'s moment 4
-    // (`persist_logged_in`) registered the identity per-actor and made it
-    // active, so this launch routes on that account.
-    // See docs/goal/architecture/long-term-store.md § Shared seam.
-    //
-    // **`start()` runs OFF the GTK main thread** (`run_on_tokio`), and the rest
-    // of the launch is the continuation. It used to be a `block_on` on a
-    // runtime built and dropped *on the main thread* — a real hazard, since the
-    // e2e agent drains its commands from a `glib::timeout_add_local` tick on
-    // that same thread (`main.rs` `start_test_agent_if_enabled`), and
-    // `Runtime::drop` joins the blocking pool (tokio resolves DNS on
-    // `spawn_blocking(getaddrinfo)`), so the drop half has no bound. This now
-    // matches the cold-launch path in `main.rs`, which has always driven
-    // `LaunchMachine::start` this way. The ordering the old code depended on is
-    // preserved exactly: `store_credentials` still runs first, and the machine
-    // is still Online before `FaunaClient::new` receives it — only the
-    // *waiting* moved.
-    //
-    // ⚠ **This did NOT fix the standing hang** — do not re-derive that guess.
-    // It named this `block_on` as its located hypothesis for the standing
-    // `agent timeout — the UI thread did not reply within 25s` on every
-    // claim→app journey. Measured 2026-08-16: with all three such sites moved
-    // off the main thread, the failing set was byte-for-byte unchanged (3
-    // `test_mail_enable_at_admin_claim` + 2 `test_trust_prompt`), and the
-    // drop-duration detector added to `async_helper` the same day never fired,
-    // so the unbounded-drop half was never happening either. The blocking work
-    // is somewhere else and is still unlocated. Keep this shape — it is correct
-    // and uniform — but look elsewhere for it.
-    //
-    // The app survives the gap with no window: `app.hold()` in `main.rs` holds
-    // the GApplication alive for the process's lifetime.
-    let machine = fauna_launch_machine::LaunchMachine::new(
-        std::sync::Arc::new(fauna_launch_machine::NullObserver),
-        std::sync::Arc::new(crate::account_registry().launch_persistence()),
-    );
-    let machine_for_start = std::sync::Arc::clone(&machine);
-    let nest_url = nest_url.to_string();
-    let secret_hex = secret_hex.to_string();
-    tracing::info!("[launch] driving LaunchMachine::start off the GTK thread");
-    crate::async_helper::run_on_tokio(async move { machine_for_start.start().await }, move |()| {
+        // Slice 4 (onboarding launch glue): seal the onboarding-captured DNS
+        // credential into the admin's DNS record (`fauna.state.dns`) now that we
+        // have an authenticated client — the store waits for the account runtime
+        // this sign-in starts. `dns_put_credentials` re-runs `verify()` to
+        // (re)derive the covered zones — so there is one store, one writer (the
+        // `DnsManagementMachine`), no second config-put path in onboarding (priority
+        // #2). See `docs/goal/behavior/dns-management.md` § Where the credential lives.
+        //
+        // This call site keeps linux's own `dns_put_credentials` rather than the
+        // shared `fauna_client_dns::dispatch_seal_captured_dns_credential` tui uses:
+        // the live `FaunaClient` already holds a built DNS machine, so going through
+        // it reuses that one instead of standing a second up, and it keeps the
+        // trailing `VerifyRecords` refresh the page wants. The rule the two share —
+        // map the captured fields, pass the machine's own label through — is the
+        // shared helper's; `cred.label` is that label, and passing it was the fix:
+        // `dns_put_credentials` used to substitute the bare provider id, so a linux
+        // admin saw "cloudflare" where every other app shows "cloudflare
+        // (example.com)".
+        if let Some(cred) = captured_dns {
+            let fields = cred
+                .fields
+                .into_iter()
+                .map(|(id, value)| fauna_client_dns::DnsCredentialField { id, value })
+                .collect();
+            fauna_client.dns_put_credentials(cred.provider_id, fields, cred.label);
+        }
+
+        // onboarding.md § 3b-ter: the one-tap trust answer latched on the
+        // `trust_prompt` page. The page only asks — minting needs this
+        // authenticated session and the nest's own roster — so the mint runs here.
+        // Best-effort and log-only by design: a failure must not paint an error over a completed
+        // onboarding, and the same trust is grantable any time from Settings →
+        // Nests. WHICH grants is not decided here either: `MintDefaultSet` mints
+        // exactly what the shared catalog derives, so this glue holds no policy
+        // that could drift from the Nests page's own picker (and an empty set on a
+        // box with nothing enrolled yet is an honest no-op, not an error).
+        if trust_granted {
+            fauna_client.mint_default_trust_set();
+        }
+
+        // The kit confirmed on the `recovery_kit` screen, registered now
+        // that this session is authenticated — the same deferral as the
+        // two above, through the shared body tui's handoff calls.
+        if let Some(kit_hex) = pending_kit {
+            fauna_client.register_deferred_recovery_kit(kit_hex);
+        }
+
+        // The post-claim serving enablement — ONE shared step for every
+        // `LoggedIn` route (`onboarding.md` § 3b *Mechanism*). ⚠ "First setup"
+        // is carried by the four `*_enable_requested()` intents, NOT by this
+        // call site: this whole function runs at `WizardOutcome::LoggedIn`,
+        // which a returning admin's plain **sign-in** reaches too (a relaunch
+        // skips the wizard entirely, but a sign-in does not). The machine's
+        // § 3b claim axis is what makes the intents false on that route —
+        // `onboarding.md` § 3b *Gating rule*. The shared step still runs the
+        // first-setup mail provision on every route, which is the new-user
+        // mailbox auto-mint on invite redemption (`mail-credentials.md`
+        // § Auto-enable for new users), and publishes its completion anchor
+        // (`fauna_e2e_agent::SERVING_ENABLEMENT_KEY`) whatever it decided.
         tracing::info!(
-            "[launch] LaunchMachine::start returned; entering finish_launch_after_signin"
-        );
-        finish_launch_after_signin(
-            app,
-            machine,
-            &nest_url,
-            &secret_hex,
-            captured_dns,
             enable_email,
             enable_caldav,
             enable_carddav,
             enable_webdav,
-            trust_granted,
-            pending_kit,
+            "[launch] post-claim serving enablement dispatched; building the main window"
+        );
+        fauna_client.apply_post_claim_serving_enablement(
+            fauna_client_mail_settings::serving_enablement::ServingEnablementIntents {
+                email: enable_email,
+                caldav: enable_caldav,
+                carddav: enable_carddav,
+                webdav: enable_webdav,
+            },
         );
     });
-}
-
-/// The post-`start()` half of [`launch_main_app_after_signin`] — everything that
-/// needs the `LaunchMachine` already Online. Runs on the GTK main thread, as the
-/// continuation of the off-thread silent challenge.
-#[allow(clippy::too_many_arguments)]
-fn finish_launch_after_signin(
-    app: adw::Application,
-    machine: std::sync::Arc<fauna_launch_machine::LaunchMachine>,
-    nest_url: &str,
-    secret_hex: &str,
-    captured_dns: Option<fauna_onboarding_machine::CapturedDnsCredential>,
-    enable_email: bool,
-    enable_caldav: bool,
-    enable_carddav: bool,
-    enable_webdav: bool,
-    trust_granted: bool,
-    pending_kit: Option<fauna_core::secret::SecretString>,
-) {
-    // One funnel for every authenticated launch: `crate::launch_authenticated`
-    // builds the client, runs the post-auth hooks (autostart, `authenticate`, and
-    // the silent sign-in that fills the account cache and so gives the send rail
-    // its `<handle>@<domain>`), builds the window and pumps its messages. The
-    // first-setup glue below rides its `first_setup` hook — on the authenticated
-    // client, before the window is built, the order it has always run in.
-    //
-    // ⚠ This transition used to build its own client, window and pump, and so
-    // skipped the silent sign-in: an account signed in through the wizard (every
-    // UI claim included) refused every send with `no_handle` until the app was
-    // relaunched, and never registered autostart, tracked window focus, or wired
-    // close-to-tray.
-    let result =
-        crate::launch_authenticated(&app, nest_url, secret_hex, machine, move |fauna_client| {
-            tracing::info!("[launch] FaunaClient built; authenticate() dispatched");
-
-            // Slice 4 (onboarding launch glue): seal the onboarding-captured DNS
-            // credential into the admin's DNS record (`fauna.state.dns`) now that we
-            // have an authenticated client — the store waits for the account runtime
-            // this sign-in starts. `dns_put_credentials` re-runs `verify()` to
-            // (re)derive the covered zones — so there is one store, one writer (the
-            // `DnsManagementMachine`), no second config-put path in onboarding (priority
-            // #2). See `docs/goal/behavior/dns-management.md` § Where the credential lives.
-            //
-            // This call site keeps linux's own `dns_put_credentials` rather than the
-            // shared `fauna_client_dns::dispatch_seal_captured_dns_credential` tui uses:
-            // the live `FaunaClient` already holds a built DNS machine, so going through
-            // it reuses that one instead of standing a second up, and it keeps the
-            // trailing `VerifyRecords` refresh the page wants. The rule the two share —
-            // map the captured fields, pass the machine's own label through — is the
-            // shared helper's; `cred.label` is that label, and passing it was the fix:
-            // `dns_put_credentials` used to substitute the bare provider id, so a linux
-            // admin saw "cloudflare" where every other app shows "cloudflare
-            // (example.com)".
-            if let Some(cred) = captured_dns {
-                let fields = cred
-                    .fields
-                    .into_iter()
-                    .map(|(id, value)| fauna_client_dns::DnsCredentialField { id, value })
-                    .collect();
-                fauna_client.dns_put_credentials(cred.provider_id, fields, cred.label);
-            }
-
-            // onboarding.md § 3b-ter: the one-tap trust answer latched on the
-            // `trust_prompt` page. The page only asks — minting needs this
-            // authenticated session and the nest's own roster — so the mint runs here.
-            // Best-effort and log-only by design: a failure must not paint an error over a completed
-            // onboarding, and the same trust is grantable any time from Settings →
-            // Nests. WHICH grants is not decided here either: `MintDefaultSet` mints
-            // exactly what the shared catalog derives, so this glue holds no policy
-            // that could drift from the Nests page's own picker (and an empty set on a
-            // box with nothing enrolled yet is an honest no-op, not an error).
-            if trust_granted {
-                fauna_client.mint_default_trust_set();
-            }
-
-            // The kit confirmed on the `recovery_kit` screen, registered now
-            // that this session is authenticated — the same deferral as the
-            // two above, through the shared body tui's handoff calls.
-            if let Some(kit_hex) = pending_kit {
-                fauna_client.register_deferred_recovery_kit(kit_hex);
-            }
-
-            // The post-claim serving enablement — ONE shared step for every
-            // `LoggedIn` route (`onboarding.md` § 3b *Mechanism*). ⚠ "First setup"
-            // is carried by the four `*_enable_requested()` intents, NOT by this
-            // call site: this whole function runs at `WizardOutcome::LoggedIn`,
-            // which a returning admin's plain **sign-in** reaches too (a relaunch
-            // skips the wizard entirely, but a sign-in does not). The machine's
-            // § 3b claim axis is what makes the intents false on that route —
-            // `onboarding.md` § 3b *Gating rule*. The shared step still runs the
-            // first-setup mail provision on every route, which is the new-user
-            // mailbox auto-mint on invite redemption (`mail-credentials.md`
-            // § Auto-enable for new users), and publishes its completion anchor
-            // (`fauna_e2e_agent::SERVING_ENABLEMENT_KEY`) whatever it decided.
-            tracing::info!(
-                enable_email,
-                enable_caldav,
-                enable_carddav,
-                enable_webdav,
-                "[launch] post-claim serving enablement dispatched; building the main window"
-            );
-            fauna_client.apply_post_claim_serving_enablement(
-                fauna_client_mail_settings::serving_enablement::ServingEnablementIntents {
-                    email: enable_email,
-                    caldav: enable_caldav,
-                    carddav: enable_carddav,
-                    webdav: enable_webdav,
-                },
-            );
-        });
-    tracing::info!("[launch] main window built");
-
-    // E2E: re-point the test-command drain's cells at this post-onboarding
-    // window so state-protocol nav (`navigate_to`) drives this window's stack.
-    // Without it the believable onboarding flow reaches the feed but can't
-    // navigate to mail-settings / conversations. No-op for real users (the
-    // registry is only populated when the e2e agent/bridge is wired).
-    crate::rebind_active_window(
-        result.stack.clone(),
-        result.state.clone(),
-        result.error_label.clone(),
-        result.warning_label.clone(),
-        result.info_label.clone(),
-        std::rc::Rc::clone(&result.client),
-        std::rc::Rc::clone(&result.open_profile),
+    tracing::info!("[launch] running the launch in the wizard's window");
+    crate::launch_after_wizard(
+        &app,
+        nest_url.to_string(),
+        secret_hex.to_string(),
+        onboarding_window.clone(),
+        first_setup,
     );
-    // Shown the way the account-switch launch shows its window: the user is
-    // driving this session, so it is never an autostart-hidden launch.
-    crate::show_window(&result.window);
-    tracing::info!("[launch] post-wizard transition complete — main window presented");
 }
 
 #[cfg(test)]
@@ -1647,7 +1619,7 @@ mod tests {
         let (registry, live) = registry_with_live_account(&tmp);
         registry.set_pending_factory_reset_json(&live, "{}");
 
-        persist_logged_in_terminal(&registry, Some(ADDED_SECRET), NEST, true);
+        persist_logged_in_terminal(&registry, Some(ADDED_SECRET), NEST, None, true);
 
         assert_eq!(registry.active().as_deref(), Some(live.as_str()));
         assert_eq!(registry.list().len(), 1, "nothing registered yet");
@@ -1684,11 +1656,72 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (registry, _live) = registry_with_live_account(&tmp);
 
-        persist_logged_in_terminal(&registry, Some(ADDED_SECRET), NEST, false);
+        persist_logged_in_terminal(&registry, Some(ADDED_SECRET), NEST, None, false);
 
         let added = fauna_core::identity::ActorKeypair::from_secret_hex(ADDED_SECRET)
             .unwrap()
             .actor_id_hex();
         assert_eq!(registry.active().as_deref(), Some(added.as_str()));
+    }
+
+    /// `onboarding-provisioning.md` § Reach hint: the box this
+    /// wizard provisioned is reachable at the address the claim used while its
+    /// domain does not resolve yet, so the `LoggedIn` terminal records that
+    /// address and the post-wizard launch authenticates over it. Seen on a
+    /// manual walk at 0.1.7: the terminal passed no hint, and the launch and
+    /// session failed DNS lookup for fifteen minutes with the main window up.
+    #[tokio::test]
+    async fn the_post_wizard_launch_authenticates_over_the_provisioned_reach_hint() {
+        use fauna_launch_machine::{
+            LaunchMachine, MockAuthConnector, NullObserver, SilentChallengeOutcome,
+        };
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = crate::account_registry_in(tmp.path().join("credentials"));
+
+        persist_logged_in_terminal(
+            &registry,
+            Some(ADDED_SECRET),
+            NEST,
+            Some("203.0.113.9"),
+            false,
+        );
+
+        // The domain does not resolve; the box answers at the hint.
+        let connector = Arc::new(
+            MockAuthConnector::new()
+                .push_silent_challenge(SilentChallengeOutcome::Transient {
+                    error: "failed to lookup address information".into(),
+                })
+                .push_silent_challenge(SilentChallengeOutcome::Success(
+                    fauna_protocol::auth::VerifyReply {
+                        token: "actor.opaque".into(),
+                        token_id: "0".repeat(16),
+                        handle: "owner".into(),
+                        domain: "nest.example".into(),
+                        tier: "free".into(),
+                        expires_at: 1_700_003_600,
+                        expires_in: 3600,
+                        ..Default::default()
+                    },
+                )),
+        );
+        let launch = LaunchMachine::new_with_connector(
+            Arc::new(NullObserver),
+            Arc::new(registry.launch_persistence()),
+            connector.clone(),
+        );
+        launch.start().await;
+
+        assert_eq!(
+            connector.silent_challenge_hints(),
+            vec![None, Some("203.0.113.9".to_string())],
+            "the domain first, then the hint the terminal recorded"
+        );
+        assert!(
+            launch.current_bearer().is_some(),
+            "the post-wizard launch is signed in over the hint"
+        );
     }
 }

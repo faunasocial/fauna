@@ -131,10 +131,10 @@ Stamped 2026-11-07 at ac836c937b.
 | 2 | app | `tests/e2e-unified/tests/live/test_activitypub_federation_live.py::test_activitypub_federation_live_three_party` | linux (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_reply_to_a_fediverse_post_reaches_its_author` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_quote_of_a_fediverse_post_reaches_its_author` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_follow_is_auto_accepted_and_delivered` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_post_is_pushed_to_follower_then_chased_by_delete` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_webfinger_discovery` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_actor_endpoint` | nest (linux): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_follow_is_auto_accepted_and_delivered` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_post_is_pushed_to_follower_then_chased_by_delete` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_webfinger_discovery` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_actor_endpoint` | nest (linux): passed, nest (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/fediverse/test_interop.py::TestFediverseInteropProduce::test_f2_follow_is_auto_accepted` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/fediverse/test_interop.py::TestFediverseInteropProduce::test_f3_post_reaches_follower_timeline` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/fediverse/test_interop.py::TestFediverseInteropProduce::test_f4_delete_removes_status_from_timeline` | nest (linux): passed |
@@ -143,40 +143,40 @@ Stamped 2026-11-07 at ac836c937b.
 | 5 | nest | `tests/e2e-unified/tests/platform/fediverse/test_interop.py::TestFediverseInteropConsume::test_f7_peer_boost_mints_a_synthetic_repost` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/fediverse/test_interop.py::TestFediverseInteropConsume::test_f9_followed_peer_account_posts_are_ingested` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/fediverse/test_authorized_fetch.py::test_follow_is_accepted_under_authorized_fetch` | nest (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_reply_or_quote_of_an_ingested_note_reaches_its_author` | nest (linux): passed |
+| 6 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_reply_or_quote_of_an_ingested_note_reaches_its_author` | nest (linux): passed, nest (macos): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/fediverse/test_interop.py::TestFediverseInteropConsume::test_f10_our_reply_joins_the_peer_status_thread` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/fediverse/test_interop.py::TestFediverseInteropConsume::test_f11_our_quote_arrives_with_its_re_link` | nest (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_enable_derives_username_from_handle` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_a_later_handle_change_leaves_the_fediverse_address_as_it_was` | nest (linux): passed |
-| 9 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_the_actor_carries_the_profiles_name_picture_and_bio` | nest (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_the_follower_collection_is_a_count_never_the_members` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_update_settings` | nest (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_no_push_to_a_follower_that_never_got_accepted` | nest (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_default_visibility_decides_the_addressing` | nest (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_outbox_empty_without_backfill` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_publishing_history_serves_earlier_public_posts` | nest (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_gated_post_is_neither_pushed_nor_listed` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_photos_arrive_as_attachments` | nest (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_liking_or_boosting_a_fediverse_post_reaches_its_author` | nest (linux): passed |
-| 19 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_unfollowing_tells_the_other_server` | nest (linux): passed |
-| 20 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_fediverse_reply_threads_under_your_post` | nest (linux): passed |
+| 7 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_enable_derives_username_from_handle` | nest (linux): passed, nest (macos): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_a_later_handle_change_leaves_the_fediverse_address_as_it_was` | nest (linux): passed, nest (macos): passed |
+| 9 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_the_actor_carries_the_profiles_name_picture_and_bio` | nest (linux): passed, nest (macos): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_the_follower_collection_is_a_count_never_the_members` | nest (linux): passed, nest (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_update_settings` | nest (linux): passed, nest (macos): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_no_push_to_a_follower_that_never_got_accepted` | nest (linux): passed, nest (macos): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_default_visibility_decides_the_addressing` | nest (linux): passed, nest (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_outbox_empty_without_backfill` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_publishing_history_serves_earlier_public_posts` | nest (linux): passed, nest (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_gated_post_is_neither_pushed_nor_listed` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_photos_arrive_as_attachments` | nest (linux): passed, nest (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_liking_or_boosting_a_fediverse_post_reaches_its_author` | nest (linux): passed, nest (macos): passed |
+| 19 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_unfollowing_tells_the_other_server` | nest (linux): passed, nest (macos): passed |
+| 20 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_fediverse_reply_threads_under_your_post` | nest (linux): passed, nest (macos): passed |
 | 21 | nest | `tests/e2e-unified/tests/platform/fediverse/test_interop.py::TestFediverseInteropConsume::test_f8_undo_retracts_both_synthetic_reactions` | nest (linux): passed |
-| 22 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_remote_delete_removes_the_post_from_your_feed` | nest (linux): passed |
-| 23 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_remote_edit_replaces_the_post_in_your_feed` | nest (linux): passed |
-| 24 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_post_that_was_not_public_never_enters_your_feed` | nest (linux): passed |
-| 25 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_only_followed_or_addressed_posts_enter_your_feed` | nest (linux): passed |
-| 26 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_delete_after_federation_is_off_still_reaches_the_followers` | nest (linux): passed |
+| 22 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_remote_delete_removes_the_post_from_your_feed` | nest (linux): passed, nest (macos): passed |
+| 23 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_remote_edit_replaces_the_post_in_your_feed` | nest (linux): passed, nest (macos): passed |
+| 24 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_post_that_was_not_public_never_enters_your_feed` | nest (linux): passed, nest (macos): passed |
+| 25 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_only_followed_or_addressed_posts_enter_your_feed` | nest (linux): passed, nest (macos): passed |
+| 26 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_delete_after_federation_is_off_still_reaches_the_followers` | nest (linux): passed, nest (macos): passed |
 | 27 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_replying_or_quoting_with_federation_off_is_refused_inline` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 28 | app | `tests/e2e-unified/tests/test_bridges_follow_requests.py::test_follow_requests_are_listed_and_approved_or_refused_on_the_card` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_approving_a_request_sends_accept_and_later_posts_reach_it` | nest (linux): passed |
-| 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_refusing_a_request_sends_reject_and_later_posts_do_not_reach_it` | nest (linux): passed |
-| 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_held_back_follow_is_listed_as_a_request` | nest (linux): passed |
-| 30 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_turning_auto_accept_back_on_accepts_the_waiting_requests` | nest (linux): passed |
-| 31 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_actor_document_says_whether_followers_are_approved_by_hand` | nest (linux): passed |
-| 32 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_liking_or_boosting_is_refused_while_federation_is_off` | nest (linux): passed |
+| 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_approving_a_request_sends_accept_and_later_posts_reach_it` | nest (linux): passed, nest (macos): passed |
+| 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_refusing_a_request_sends_reject_and_later_posts_do_not_reach_it` | nest (linux): passed, nest (macos): passed |
+| 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_held_back_follow_is_listed_as_a_request` | nest (linux): passed, nest (macos): passed |
+| 30 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_turning_auto_accept_back_on_accepts_the_waiting_requests` | nest (linux): passed, nest (macos): passed |
+| 31 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_actor_document_says_whether_followers_are_approved_by_hand` | nest (linux): passed, nest (macos): passed |
+| 32 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_liking_or_boosting_is_refused_while_federation_is_off` | nest (linux): passed, nest (macos): passed |
 | 33 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_dm_arrives_as_a_fediverse_room_and_the_reply_reaches_that_peer_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 34 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_room_started_from_the_picker_by_account_reaches_the_resolved_peer_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 35 | nest | `tests/e2e-unified/tests/api/test_fediverse_off_until_enabled.py::test_nothing_federates_until_the_member_turns_it_on` | nest (linux): passed |
-| 36 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_delete_or_update_from_another_server_changes_nothing` | nest (linux): passed |
-| 36 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_delete_or_update_aimed_at_your_own_post_changes_nothing` | nest (linux): passed |
+| 35 | nest | `tests/e2e-unified/tests/api/test_fediverse_off_until_enabled.py::test_nothing_federates_until_the_member_turns_it_on` | nest (linux): passed, nest (macos): passed |
+| 36 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_delete_or_update_from_another_server_changes_nothing` | nest (linux): passed, nest (macos): passed |
+| 36 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_delete_or_update_aimed_at_your_own_post_changes_nothing` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

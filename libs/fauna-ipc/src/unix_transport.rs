@@ -595,4 +595,82 @@ mod tests {
         let _ = shutdown_tx.send(true);
         let _ = server.await;
     }
+
+    /// Sockets the kernel lists as bound to `sock` — the listener plus every
+    /// connection the server accepted and still holds open.
+    #[cfg(target_os = "linux")]
+    fn sockets_on(sock: &Path) -> usize {
+        let path = sock.to_str().unwrap();
+        std::fs::read_to_string("/proc/net/unix")
+            .unwrap()
+            .lines()
+            .filter(|line| line.split_whitespace().nth(7) == Some(path))
+            .count()
+    }
+
+    /// tier_1: N apps each time out on a request whose handler is wedged and
+    /// hang up — the server holds none of their connections afterwards. The
+    /// 2026-11-19 agent on a dev machine held 42,709 such connections, one per 3-second
+    /// status poll of a desktop app, behind one handler stuck on a lock: the
+    /// serve loop awaited the handler and never read the client's EOF.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn connections_whose_client_hung_up_mid_request_are_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sync-agent.sock");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (event_tx, _) = broadcast::channel::<Event>(16);
+        // A handler wedged for good, as on a lock nobody releases.
+        let handler = |_req: Request| std::future::pending::<Response>();
+        let sock_srv = sock.clone();
+        let server = tokio::spawn(async move {
+            serve(&sock_srv, handler, shutdown_rx, event_tx)
+                .await
+                .unwrap();
+        });
+        for _ in 0..200 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(sock.exists(), "server never bound the socket");
+        let baseline = sockets_on(&sock);
+
+        const N: usize = 20;
+        let sock_cli = sock.clone();
+        tokio::task::spawn_blocking(move || {
+            for _ in 0..N {
+                let client = SyncPipeClient::connect_socket(&sock_cli).unwrap();
+                assert!(
+                    client
+                        .request_with_timeout(
+                            RequestMethod::GetSyncStatus,
+                            Duration::from_millis(50)
+                        )
+                        .is_err(),
+                    "the wedged handler never answers"
+                );
+            }
+        })
+        .await
+        .unwrap();
+
+        let mut held = sockets_on(&sock);
+        for _ in 0..200 {
+            if held == baseline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            held = sockets_on(&sock);
+        }
+        assert_eq!(
+            held - baseline,
+            0,
+            "the server still holds connections whose client hung up"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = server.await;
+    }
 }

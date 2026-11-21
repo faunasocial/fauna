@@ -98,6 +98,15 @@ REPO = Path(__file__).resolve().parents[3]
 #: make every second run dirty for a reason that says nothing about what it observed.
 LEDGER_REL = "docs/features/ledger"
 LEDGER = REPO / LEDGER_REL
+#: Every path a run writes as its OWN record, none of which is ever dirt
+#: (`tree_dirt`; feature-ledger.md § The ledger, *Dirty trees*, (c)): the ledger, and
+#: the two publish-gate files a release-candidate run's record adds its SHAs to
+#: (the release gate's allowlist and ratchet exemptions). Without the latter two,
+#: the candidate run's first half dirtied the tree its second half is refused on
+#: (0.1.7). They decide nothing a test observes — the publish gate reads them.
+RUN_RECORD_PATHS = (
+    LEDGER_REL,
+)
 #: The integration branch every landing path rebases onto and fast-forward-pushes
 #: (the merge script). A record's `base` is its commit's merge-base with THIS ref
 #: as the checkout knew it: the newest main commit in the record's own history.
@@ -482,8 +491,9 @@ def main_base(commit: str, repo: Path = REPO) -> str | None:
 
 
 def tree_dirt(repo: Path = REPO) -> list | None:
-    """`git status --porcelain` lines outside `docs/features/ledger/` — `[]` for a
-    clean tree, `None` when git cannot say (no repository, no git).
+    """`git status --porcelain` lines outside the run's own record
+    (`RUN_RECORD_PATHS`) — `[]` for a clean tree, `None` when git cannot say (no
+    repository, no git).
 
     The ONE definition of dirt (§ The ledger, *Dirty trees*): the ordinary run marks
     its records by it and the release-candidate gate refuses by it, so the two can
@@ -497,7 +507,7 @@ def tree_dirt(repo: Path = REPO) -> list | None:
     try:
         status = subprocess.run(
             ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all",
-             "--", ".", f":(exclude){LEDGER_REL}"],
+             "--", ".", *(f":(exclude){rel}" for rel in RUN_RECORD_PATHS)],
             capture_output=True, text=True, timeout=30)
     except Exception:
         return None
@@ -1219,46 +1229,88 @@ def _git_ok(repo: Path, *args: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=60)
 
 
+def carried_refusal(base: str, head: str, path_ok, *, what: str, outside: str,
+                    repo: Path = REPO, main_ref: str = "origin/main",
+                    single_parent: bool = False) -> tuple:
+    """`(refusal, carried)` — why HEAD is NOT `base` plus commits carried back from
+    `main_ref`, each changing only paths `path_ok` accepts.
+
+    The shared walk of the two off-main shapes (the correction tree, `correction_refusal`,
+    and the docs tip, `release_attempt.derive_docs_tip`): `base` is an ancestor of HEAD;
+    every path the diff `base..head` touches passes `path_ok` (`outside` says what that
+    class is, in the refusal); every commit above `base` carries the
+    `(cherry picked from commit <sha>)` trailer of a commit that is an ancestor of
+    `main_ref` — a carried commit lands on main first and is carried back, never written
+    on the side. `single_parent` also refuses a commit above `base` with more than one
+    parent. `what` names the shape's commits in a refusal ("a correction"). `carried`
+    lists the main commits, oldest first, when the tree passes."""
+    if _git_ok(repo, "merge-base", "--is-ancestor", base, head).returncode:
+        return f"the base {base[:12]} is not an ancestor of HEAD {head[:12]}", []
+    changed = _git_ok(repo, "diff", "--name-only", "--no-renames", base, head)
+    if changed.returncode:
+        return f"`git diff` {base[:12]}..HEAD failed", []
+    stray = [p for p in changed.stdout.splitlines() if p and not path_ok(p)]
+    if stray:
+        shown = ", ".join(stray[:6]) + (f", … {len(stray) - 6} more" if len(stray) > 6 else "")
+        return (f"HEAD changes paths outside {outside} beyond the base {base[:12]} ({shown}) — "
+                f"a change there is a new commit, a new image and a new run"), []
+    revs = _git_ok(repo, "rev-list", "--reverse", "--parents", f"{base}..{head}")
+    if revs.returncode:
+        return f"`git rev-list` {base[:12]}..HEAD failed", []
+    carried = []
+    for line in revs.stdout.splitlines():
+        rev, *parents = line.split()
+        if single_parent and len(parents) != 1:
+            return f"commit {rev[:12]} has {len(parents)} parents — {what} has one", []
+        body = _git_ok(repo, "log", "-1", "--format=%B", rev).stdout
+        found = _CHERRY_PICK_RE.findall(body)
+        if not found:
+            return (f"commit {rev[:12]} carries no `(cherry picked from commit <sha>)` "
+                    f"trailer — {what} lands on main first and is carried back "
+                    f"with `git cherry-pick -x`"), []
+        source = found[-1]
+        if _git_ok(repo, "merge-base", "--is-ancestor", source, main_ref).returncode:
+            return (f"commit {rev[:12]} was cherry-picked from {source[:12]}, which is "
+                    f"not on {main_ref} — {what} lands on main first"), []
+        resolved = _git_ok(repo, "rev-parse", f"{source}^{{commit}}").stdout.strip()
+        carried.append(resolved or source)
+    return None, carried
+
+
 def correction_refusal(version_commit: str, head: str, repo: Path = REPO,
                        main_ref: str = "origin/main") -> tuple:
     """`(refusal, carried)` — why HEAD is NOT a correction tree of `version_commit`.
 
     A correction tree is the version's commit plus commits that (i) change only
     `TEST_SIDE_PATHS` and (ii) each carry the `(cherry picked from commit <sha>)`
-    trailer of a commit that is an ancestor of `main_ref`: a correction lands on main
-    first and is carried back, never written on the side. `carried` lists those main
-    commits, oldest first, when the tree passes."""
+    trailer of a commit that is an ancestor of `main_ref` (`carried_refusal`, the walk
+    the docs tip shares). `carried` lists those main commits, oldest first, when the
+    tree passes."""
     if _git_ok(repo, "merge-base", "--is-ancestor", version_commit, head).returncode:
         return (f"the version's commit {version_commit[:12]} is not an ancestor of HEAD "
                 f"{head[:12]}"), []
-    changed = _git_ok(repo, "diff", "--name-only", version_commit, head)
-    if changed.returncode:
-        return f"`git diff` {version_commit[:12]}..HEAD failed", []
-    product = [p for p in changed.stdout.splitlines() if p and not _is_test_side(p)]
-    if product:
-        shown = ", ".join(product[:6]) + (f", … {len(product) - 6} more"
-                                          if len(product) > 6 else "")
-        return (f"HEAD changes paths outside the test side beyond the version's commit "
-                f"{version_commit[:12]} ({shown}) — a change there is a new commit, a "
-                f"new image and a new run"), []
-    revs = _git_ok(repo, "rev-list", "--reverse", f"{version_commit}..{head}")
-    if revs.returncode:
-        return f"`git rev-list` {version_commit[:12]}..HEAD failed", []
-    carried = []
-    for rev in revs.stdout.split():
-        body = _git_ok(repo, "log", "-1", "--format=%B", rev).stdout
-        found = _CHERRY_PICK_RE.findall(body)
-        if not found:
-            return (f"commit {rev[:12]} carries no `(cherry picked from commit <sha>)` "
-                    f"trailer — a correction lands on main first and is carried back "
-                    f"with `git cherry-pick -x`"), []
-        source = found[-1]
-        if _git_ok(repo, "merge-base", "--is-ancestor", source, main_ref).returncode:
-            return (f"commit {rev[:12]} was cherry-picked from {source[:12]}, which is "
-                    f"not on {main_ref} — a correction lands on main first"), []
-        resolved = _git_ok(repo, "rev-parse", f"{source}^{{commit}}").stdout.strip()
-        carried.append(resolved or source)
-    return None, carried
+    return carried_refusal(version_commit, head, _is_test_side, what="a correction",
+                           outside="the test side", repo=repo, main_ref=main_ref)
+
+
+_RELEASE_ATTEMPT = None
+
+
+def _release_attempt():
+    """The release attempt's tool of this tree, loaded once — the home of
+    `main_derived_refusal`, the one reading of "a commit on `main`" for the release
+    source (it imports this module back at call time, never at load)."""
+    global _RELEASE_ATTEMPT
+    if _RELEASE_ATTEMPT is None:
+        import importlib.util
+        path = Path(__file__).resolve().parents[3] / "scripts" / "publish" / "release_attempt.py"
+        if not path.exists():
+            raise FileNotFoundError(path)
+        spec = importlib.util.spec_from_file_location("release_attempt", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _RELEASE_ATTEMPT = mod
+    return _RELEASE_ATTEMPT
 
 
 def release_candidate_check_for_image(image: str, repo: Path = REPO,
@@ -1273,7 +1325,9 @@ def release_candidate_check_for_image(image: str, repo: Path = REPO,
     HEAD is a CORRECTION TREE of the commit either older shape would accept
     (`correction_refusal`). The row is keyed on that private version commit every
     time; the public shape also hands back the public commit to record beside the
-    digest, the correction shape the main commits it carries.
+    digest, the correction shape the main commits it carries. Whatever the shape, the
+    version's commit is main-derived — on `main_ref`, or a docs tip re-deriving from its
+    commits (`release_attempt.main_derived_refusal`) — or the run is refused.
     """
     # The same `tree_dirt` the ordinary run MARKS by — one definition of dirt, two
     # callers, so the gate can never call clean what the mark calls dirty or vice
@@ -1323,6 +1377,19 @@ def release_candidate_check_for_image(image: str, repo: Path = REPO,
                     f"tree: {correction}")
         else:
             public_commit = build_commit
+    # The version's commit is main-derived (release-table.md § Tag gate and release table,
+    # *One shape is main-derived instead*): on `main`, or a docs tip the release tool made
+    # from `main` commits — never another commit off `main` whose public build pairs.
+    try:
+        off_main = _release_attempt().main_derived_refusal(version_commit, repo=repo,
+                                                           main_ref=main_ref)
+    except OSError as exc:  # a tree without the release tool (the public one) cannot tell
+        off_main = f"the release tool that reads it is not in this tree ({exc})"
+    if off_main:
+        return CandidateCheck(
+            f"the version's commit is not main-derived: {off_main} — a candidate run "
+            f"witnesses a commit on `main`, a docs tip of `main` commits, or a correction "
+            f"tree of either")
     if not digests:
         return CandidateCheck(
             f"{image} has no registry digest — a locally built image has none, and "
@@ -1404,7 +1471,13 @@ def sync_point_of(public_commit: str, public_clone: Path | None = None,
     if out.returncode != 0:
         return None, (f"public commit {public_commit[:12]} is not in {clone} "
                       "(fetch the public repository there, or pass --public-clone)")
-    found = _SYNC_POINT_RE.findall(out.stdout)
+    return sync_point_in_message(public_commit, out.stdout)
+
+
+def sync_point_in_message(public_commit: str, message: str) -> tuple:
+    """`(private short sha, reason)` — the last `Sync-Point:` trailer in the
+    commit MESSAGE of `public_commit`, wherever the message was read from."""
+    found = _SYNC_POINT_RE.findall(message or "")
     if not found:
         return None, (f"public commit {public_commit[:12]} carries no Sync-Point "
                       "trailer — `fauna-publish pr` did not make it")

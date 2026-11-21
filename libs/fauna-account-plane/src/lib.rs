@@ -182,6 +182,7 @@ pub mod owed_delivery;
 pub mod p2p_participation;
 /// The page loop every plane walk runs.
 pub mod page_walk;
+pub mod pairing_mark_rows;
 /// The scheduler yield a pass takes per unit of local work.
 pub mod pass_breath;
 pub mod peer_anchor_rows;

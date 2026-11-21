@@ -2,12 +2,13 @@
 choice — ``web-content-hosting.md`` § Same-origin security model → *The
 nest-served `/app/` and the central origin*, on a real ``fauna-nest`` binary.
 
-* The admin kind drives it: ``fauna.admin.web_app_origin.set`` → ``central``
-  flips ``GET /app/`` to a **302** (never 301/308) at the central origin with the
-  same path and query and ``nest=<this nest's handle domain>``; ``bundled`` flips
-  it back. ``fauna.admin.web_app_origin.get`` and the anonymous
-  ``fauna.setup.status`` projection report the mode and the exact target.
-* A domainless box serves bundled whatever the choice, and says so.
+* While the central origin is not live (``fauna_protocol::web_app_origin::
+  CENTRAL_APP_ORIGIN_LIVE`` is ``false`` — § *While the central origin is not
+  live, the choice is not offered*), ``fauna.admin.web_app_origin.set`` →
+  ``central`` is refused with ``fauna.admin.web_app_origin.central_not_live``
+  and writes nothing, ``GET /app/`` stays bundled, and
+  ``fauna.admin.web_app_origin.get`` says ``central_live`` false. ``bundled`` is
+  always accepted. A domainless box refuses the same way.
 * A non-admin cannot set it.
 
 **Where "bundled" is observed.** A tier_3 nest ships no SPA (``node.static_dir``
@@ -32,7 +33,7 @@ from common.auth import no_redirect_opener
 
 pytestmark = pytest.mark.tier_3
 
-CENTRAL = "https://app.fauna.social"
+CENTRAL_NOT_LIVE = "fauna.admin.web_app_origin.central_not_live"
 
 
 # A redirect is the assertion here, so it is handed back rather than
@@ -74,74 +75,56 @@ def _status(nest) -> dict:
 
 
 @pytest.mark.feature("admin-nest", "nest-serves-the-app")
-def test_the_admin_choice_flips_app_to_the_central_origin_and_back(web_hosting_nest):
+def test_central_is_refused_while_the_central_origin_is_not_live(web_hosting_nest):
+    """Rules 2-4 of *While the central origin is not live, the choice is not
+    offered*: the projection says ``central_live`` false, a ``central`` set is
+    refused with the typed error and writes nothing, ``/app/`` stays bundled,
+    and ``bundled`` is always accepted. The flip-to-central journey comes back
+    in the commit that flips ``CENTRAL_APP_ORIGIN_LIVE``; until then the redirect
+    itself is pinned at tier_1 (``bins/fauna-nest/tests/spa_web_app_origin.rs``)."""
     nest = web_hosting_nest
     with _client(nest, nest["admin"]["signing_key"]) as admin:
         before = admin.call("fauna.admin.web_app_origin.get", {})
-    assert before["mode"] == "bundled", f"absent row must read bundled: {before}"
-    assert not before.get("redirect_target")
+        assert before["mode"] == "bundled", f"absent row must read bundled: {before}"
+        assert not before.get("redirect_target")
+        assert before.get("central_live") is False, (
+            f"the nest must say the central origin is not live: {before}"
+        )
+
+        with pytest.raises(RpcCallError) as refused:
+            admin.call("fauna.admin.web_app_origin.set", {"mode": "central"})
+        assert refused.value.code == CENTRAL_NOT_LIVE, refused.value
+
+        after = admin.call("fauna.admin.web_app_origin.get", {})
+        assert after["mode"] == "bundled", f"a refused set must write nothing: {after}"
+
     status, headers = _get(nest["url"], "/app/")
     assert status == _bundled_status(nest) and headers.get("Location") is None, (
-        f"bundled must answer {_bundled_status(nest)} (serves_spa="
-        f"{nest['serves_spa']}), not redirect: {status}"
-    )
-
-    from conftest import WEB_HOSTING_DOMAIN
-
-    domain = WEB_HOSTING_DOMAIN
-    target = f"{CENTRAL}/app/?nest={domain}"
-
-    try:
-        reply = _set(nest, "central")
-        assert reply["mode"] == "central"
-        assert reply["redirect_target"] == target, reply
-        assert not reply.get("domainless")
-
-        status, headers = _get(nest["url"], "/app/")
-        assert status == 302, f"central must be a TEMPORARY redirect: {status}"
-        assert headers["Location"] == target
-        assert headers["Cache-Control"] == "no-store"
-        assert headers["X-Frame-Options"] == "DENY", "invariant-#5 headers ride it"
-
-        status, headers = _get(nest["url"], "/app/feed/x?tab=2")
-        assert status == 302
-        assert headers["Location"] == f"{CENTRAL}/app/feed/x?tab=2&nest={domain}"
-
-        s = _status(nest)
-        assert s["web_app_origin"] == "central"
-        assert s["web_app_origin_target"] == target
-        assert s["web_app_origin_domainless"] is False
-    finally:
-        back = _set(nest, "bundled")
-
-    assert back["mode"] == "bundled" and not back.get("redirect_target")
-    status, headers = _get(nest["url"], "/app/")
-    assert status == _bundled_status(nest) and headers.get("Location") is None, (
-        f"moving back to bundled must stop the redirect at once: {status}"
+        f"/app/ must stay bundled ({_bundled_status(nest)}, serves_spa="
+        f"{nest['serves_spa']}), never redirect: {status}"
     )
     s = _status(nest)
     assert s["web_app_origin"] == "bundled"
     assert not s.get("web_app_origin_target")
 
+    back = _set(nest, "bundled")
+    assert back["mode"] == "bundled" and not back.get("redirect_target")
+    assert back.get("central_live") is False
+
 
 @pytest.mark.feature("admin-nest")
-def test_a_domainless_box_serves_bundled_under_central(domainless_nest):
+def test_a_domainless_box_refuses_central_too(domainless_nest):
+    """The refusal is decided before the domainless arm: a domainless box says
+    "not live", never stores central, and serves bundled."""
     nest = domainless_nest
-    try:
-        reply = _set(nest, "central")
-        assert reply["mode"] == "central"
-        assert reply["domainless"] is True, reply
-        assert not reply.get("redirect_target"), (
-            "a domainless box has nothing to pre-fill — never nest=localhost"
-        )
-        status, headers = _get(nest["url"], "/app/")
-        assert status != 302 and headers.get("Location") is None, status
-        s = _status(nest)
-        assert s["web_app_origin"] == "central"
-        assert s["web_app_origin_domainless"] is True
-        assert not s.get("web_app_origin_target")
-    finally:
-        _set(nest, "bundled")
+    with pytest.raises(RpcCallError) as refused:
+        _set(nest, "central")
+    assert refused.value.code == CENTRAL_NOT_LIVE, refused.value
+    status, headers = _get(nest["url"], "/app/")
+    assert status != 302 and headers.get("Location") is None, status
+    s = _status(nest)
+    assert s["web_app_origin"] == "bundled"
+    assert not s.get("web_app_origin_target")
 
 
 @pytest.mark.feature("admin-nest")

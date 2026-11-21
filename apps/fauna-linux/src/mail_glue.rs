@@ -101,7 +101,14 @@ pub fn build_linked_nests_machine_with_mail_relay_and_trust(
             crate::account_runtime::period_key_store(),
             crate::account_runtime::mail_store(),
         )
-        .with_folder_names(folder_names),
+        .with_folder_names(folder_names)
+        // The pairing-mark door: `fauna.state.pairing-mark` over the same
+        // handle, so a link or an unlink here repaints a sibling's open page.
+        .with_pairing_marks(std::sync::Arc::new(
+            fauna_client_account_runtime::pairing_marks::PlanePairingMarks::new(
+                crate::account_runtime::handle,
+            ),
+        )),
     )
 }
 

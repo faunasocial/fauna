@@ -114,7 +114,7 @@ class TestAgentCalendarImportPickTest {
                     onIcsPicked = { picked = it },
                     onRsvp = { _, _ -> },
                     onCreateCalendar = {},
-                    onCreateEvent = {},
+                    onCreateEvent = { _, _ -> },
                 )
             }
         }

@@ -38,6 +38,12 @@ fauna-core = { path = "../fauna-core", default-features = false }
 # CardDAV PUT uses (mailfauna.EncryptToRecipientHybrid), so MDA-written and
 # client-written card bodies are mutually readable.
 fauna-mls = { path = "../fauna-mls", default-features = false }
+# `dav_custody`'s three answers (`DavCustody`) — the address-book read folds
+# an unreadable custody and a missing key into *unresolved*
+# (`addressbooks_read.rs`; contacts.md § Errors & edge cases). The lean,
+# wasm-clean store-seam crate; it does not depend on this one, so the edge
+# adds no cycle (the same edge `fauna-client-caldav` takes).
+fauna-client-config = { path = "../fauna-client-config" }
 # Derives on the `AddressbookMetadata` cross-language CBOR mirror + the
 # `FaunaCardExt` sidecar, (de)serialized canonically via fauna-protocol's
 # `encode_canonical` / `decode_strict`. WASM-safe.

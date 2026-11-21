@@ -29,6 +29,15 @@
 //! here; add them when those pages migrate off their HTTP twins (the protocol
 //! payloads already exist in `fauna_protocol::admin`).
 
+// Draft-validity predicates for the admin forms (`docs/goal/ui/README.md`
+// § Offer only what is possible, rule 4 — the form case).
+mod drafts;
+pub use drafts::{
+    admit_actor_possibility, membership_save_possibility, parse_admit_actor,
+    parse_registration_ceiling, region_possibility, registration_ceiling_possibility,
+    serving_port_possibility, tier_caps_possibility, tier_create_possibility,
+};
+
 // The dashboard's one card set — the fold and the five-read snapshot
 // (`admin.md` § 1. Dashboard → *The card set*).
 mod dashboard;
@@ -43,6 +52,7 @@ pub use audit::{
 };
 
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_protocol::ByteBuf;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::admin::{
@@ -1519,9 +1529,11 @@ pub struct AdminUserRowControls {
     /// already-suspended user is deliberate (their own restore control still
     /// stands, so this can't strand them).
     pub make_admin: bool,
-    /// `admin-users-remove-admin-button` — revoke the admin role. Offered on any
-    /// `is_admin` row; the nest, not the client, refuses the last-superadmin
-    /// case (`fauna.admin.conflict`, surfaced on `admin-users-action-error`).
+    /// `admin-users-remove-admin-button` — revoke the admin role. Shown on any
+    /// `is_admin` row; on the nest's last superadmin it is shown *disabled*
+    /// with its reason — [`remove_admin_possibility`] is the full answer this
+    /// bool is the "shown" half of. The nest stays the enforcer
+    /// (`fauna.admin.conflict`).
     pub remove_admin: bool,
     /// `admin-users-take-over-button` — the admin's one family act on a
     /// supervised account: become its guardian at once (`fauna.family.transfer`
@@ -1530,6 +1542,47 @@ pub struct AdminUserRowControls {
     /// the row's lifecycle state; the nest's admissibility check stays the only
     /// enforcer.
     pub take_over: bool,
+}
+
+/// The [`Possibility`] siblings of the row's bools (`docs/goal/ui/README.md`
+/// § Offer only what is possible, rule 6; `admin.md` § 2 → *What a row
+/// offers*). Each control a row does not offer is a move this admin can never
+/// make on this row from this state — absent, never disabled (rule 2). The
+/// bools stay for the FFI and wasm readers; remove-admin's full answer, with
+/// its last-superadmin floor, is [`remove_admin_possibility`].
+impl AdminUserRowControls {
+    fn offered(on: bool) -> Possibility {
+        if on {
+            Possibility::Possible
+        } else {
+            Possibility::Absent
+        }
+    }
+
+    /// `admin-users-suspend-button`.
+    pub fn suspend_possibility(&self) -> Possibility {
+        Self::offered(self.suspend)
+    }
+
+    /// `admin-users-evict-button`.
+    pub fn evict_possibility(&self) -> Possibility {
+        Self::offered(self.evict)
+    }
+
+    /// `admin-users-cancel-eviction-button`.
+    pub fn restore_possibility(&self) -> Possibility {
+        Self::offered(self.restore)
+    }
+
+    /// `admin-users-make-admin-button`.
+    pub fn make_admin_possibility(&self) -> Possibility {
+        Self::offered(self.make_admin)
+    }
+
+    /// `admin-users-take-over-button`.
+    pub fn take_over_possibility(&self) -> Possibility {
+        Self::offered(self.take_over)
+    }
 }
 
 /// Read a row's lifecycle state off the wire projection.
@@ -1600,6 +1653,139 @@ pub fn admin_user_row_controls(user: &AdminUser, viewer: &[u8]) -> AdminUserRowC
             .guardian
             .as_ref()
             .is_some_and(|g| g.actor_id.as_ref() != viewer),
+    }
+}
+
+/// Whether `admin-users-remove-admin-button` can succeed on `user` now
+/// (`docs/goal/ui/README.md` § Offer only what is possible; `admin.md` § 2 →
+/// *What a row offers*): absent on a row that holds no admin role; blocked on
+/// the nest's last superadmin (the floor the nest refuses with
+/// `fauna.admin.conflict`), with the reason naming the unblocking step — make
+/// another user an admin first; possible otherwise. The row's `remove_admin`
+/// bool in [`admin_user_row_controls`] is this answer's `is_shown()`. The nest
+/// re-refuses at the door and at the writer whatever this says.
+pub fn remove_admin_possibility(user: &AdminUser) -> Possibility {
+    if !user.is_admin {
+        Possibility::Absent
+    } else if user.last_superadmin {
+        Possibility::blocked(LocalizedText::key(
+            "admin.users_page.remove_admin_last_superadmin",
+        ))
+    } else {
+        Possibility::Possible
+    }
+}
+
+/// Whether `admin-pending-action-approve-button` can succeed for `viewer` on
+/// `action` (`admin.md` § Pending admin actions): absent on the viewer's own
+/// scheduled action (the nest refuses self-approval — an admin can never
+/// approve what they scheduled) and on an action no longer pending; possible
+/// otherwise. A repeat approval is accepted by the nest as a no-op, so it is
+/// not refused here.
+pub fn pending_approve_possibility(
+    action: &admin::AdminPendingActionSummary,
+    viewer: &[u8],
+) -> Possibility {
+    if !action.is_pending() || action.actor_id.as_ref() == viewer {
+        Possibility::Absent
+    } else {
+        Possibility::Possible
+    }
+}
+
+/// Whether an age-band select on the admit or invite form can be set
+/// (`family-safety.md` § App surface → *Age-band surfaces*): the nest refuses
+/// a band without a guardian designation, so the select is blocked — with
+/// that reason — until a guardian is picked.
+pub fn age_band_possibility(guardian_selected: bool) -> Possibility {
+    if guardian_selected {
+        Possibility::Possible
+    } else {
+        Possibility::blocked(LocalizedText::key(
+            "admin.users_page.age_band_needs_guardian",
+        ))
+    }
+}
+
+/// The tier every nest keeps — the default an account falls back to, which
+/// `fauna.admin.tiers.delete` always refuses (`admin.md` § 3 → *Removing a
+/// tier*).
+pub const UNDELETABLE_TIER: &str = "free";
+
+/// Whether `admin-settings-tier-delete-button` can succeed on the tier named
+/// `tier` (`admin.md` § 3 → *Removing a tier*): absent on `free`, which the
+/// nest always refuses; possible otherwise. A tier still referenced by a
+/// member, invite code or membership link is refused by the nest, and that
+/// refusal is shown on the page's error line: the client cannot see the
+/// references (the user list is paginated), so it never guesses.
+pub fn tier_delete_possibility(tier: &str) -> Possibility {
+    if tier == UNDELETABLE_TIER {
+        Possibility::Absent
+    } else {
+        Possibility::Possible
+    }
+}
+
+/// Whether the admit and invite buttons can succeed with the tier select
+/// offering `tiers` (`admin.md` § 2 → *What a row offers*: they are not offered
+/// enabled beside an empty tier select): blocked with the reason naming the
+/// Tiers page, where a tier is added, while `tiers` is empty; possible
+/// otherwise. The nest keeps `free` undeletable, so a real read always holds
+/// one — this guards a read that came back with none.
+pub fn tier_pick_possibility(tiers: &[String]) -> Possibility {
+    if tiers.is_empty() {
+        Possibility::blocked(LocalizedText::key("admin.users_page.no_tier"))
+    } else {
+        Possibility::Possible
+    }
+}
+
+/// Whether `admin-users-prev-page` (`forward` false) or
+/// `admin-users-next-page` (`forward` true) can step from `offset` through
+/// `total` users paged by `page_size` (`admin.md` § 2, the pagination rule:
+/// a control at its bound is disabled): blocked at page 1 / the last page with
+/// the reason saying so; possible otherwise. The step itself is
+/// `fauna_core::format::{prev,next}_page_offset`, the same bound.
+pub fn users_page_step_possibility(
+    offset: i64,
+    total: i64,
+    page_size: i64,
+    forward: bool,
+) -> Possibility {
+    if forward {
+        match fauna_core::format::next_page_offset(offset, total, page_size) {
+            Some(_) => Possibility::Possible,
+            None => Possibility::blocked(LocalizedText::key("admin.users_page.no_page_after")),
+        }
+    } else {
+        match fauna_core::format::prev_page_offset(offset, page_size) {
+            Some(_) => Possibility::Possible,
+            None => Possibility::blocked(LocalizedText::key("admin.users_page.no_page_before")),
+        }
+    }
+}
+
+/// Whether a membership row's `admin-settings-membership-clear-button` can
+/// clear anything (`admin.md` § 3, membership designations): blocked, saying
+/// nothing is set, while the row holds no designation; possible otherwise.
+pub fn membership_clear_possibility(has_existing: bool) -> Possibility {
+    if has_existing {
+        Possibility::Possible
+    } else {
+        Possibility::blocked(LocalizedText::key(
+            "admin.settings_page.membership_clear_nothing_set",
+        ))
+    }
+}
+
+/// Whether `admin-audit-more-button` can fetch older entries for `view`:
+/// blocked once the whole record is shown (`more_before_id` is `None`, the
+/// bound [`audit::audit_log_view`] computes); possible otherwise.
+pub fn audit_more_possibility(view: &audit::AuditLogView) -> Possibility {
+    if view.more_before_id.is_some() {
+        Possibility::Possible
+    } else {
+        Possibility::blocked(LocalizedText::key("admin.logs_page.audit_no_older"))
     }
 }
 
@@ -2027,6 +2213,19 @@ pub struct AdminWebAppOriginView {
     /// `admin-nest-web-app-origin-central-radio`'s label — it names the
     /// central origin from the one constant, so no app spells the address.
     pub central_label: LocalizedText,
+    /// Whether the whole `admin-nest-web-app-origin-*` section is shown
+    /// (`web-content-hosting.md` § Same-origin security model → *While the
+    /// central origin is not live, the choice is not offered*, rule 5):
+    /// *absent* on a nest that predates the choice, and *absent* when the
+    /// nest's reply is not `central_live` and the stored mode is `bundled` —
+    /// a section holding one radio and a save that changes nothing is no
+    /// choice. Shown otherwise: a stored `central` (set before the ruling) or
+    /// a mode this build cannot name, so the admin can see and leave it.
+    pub section_possibility: Possibility,
+    /// Whether `admin-nest-web-app-origin-central-radio` is offered:
+    /// *possible* only when the nest's reply says `central_live`, else
+    /// *absent* — the nest is the authority, never a constant of the app's.
+    pub central_possibility: Possibility,
 }
 
 /// The never-set state — bundled, the works-out-of-the-box default — **not** a
@@ -2036,7 +2235,55 @@ impl Default for AdminWebAppOriginView {
         admin_web_app_origin_view(Some(&AdminWebAppOriginGetReply::project(
             WebAppOrigin::Bundled,
             None,
+            false,
         )))
+    }
+}
+
+impl AdminWebAppOriginView {
+    /// The [`Possibility`] sibling of [`Self::can_set`] (`admin.md` § N Nest →
+    /// *Web-app origin*; `docs/goal/ui/README.md` § Offer only what is
+    /// possible, rule 6): the radios and `-save-button` are blocked by the
+    /// status sentence itself where they cannot be set — a nest that predates
+    /// the choice, or a mode this build cannot name — so the reason is the
+    /// line the section already paints.
+    pub fn set_possibility(&self) -> Possibility {
+        if self.can_set {
+            Possibility::Possible
+        } else {
+            Possibility::blocked(self.status.clone())
+        }
+    }
+}
+
+/// [`AdminWebAppOriginView::set_possibility`] over the read as a page holds
+/// it: `None` until the reflective read lands, which is never possible
+/// (rule 5: unknown is not possible). `draft` is the mode the save would
+/// write, when the caller holds one: a `central` draft is blocked by the
+/// nest's own refusal sentence while
+/// [`AdminWebAppOriginView::central_possibility`] is not possible — the
+/// refusal the nest gives (`web-content-hosting.md` § While the central
+/// origin is not live, the choice is not offered, rule 5) — so what the page
+/// offers and what the save accepts cannot disagree.
+/// The reason a `central` draft is blocked while the central origin is not
+/// live: the sentence of the nest's own typed refusal
+/// (`fauna.admin.web_app_origin.central_not_live`), so the page, the cli and
+/// the nest say the same thing.
+const CENTRAL_NOT_LIVE_REASON: &str = "error.admin.web_app_origin.central_not_live";
+
+pub fn web_app_origin_set_possibility(
+    view: Option<&AdminWebAppOriginView>,
+    draft: Option<WebAppOrigin>,
+) -> Possibility {
+    let Some(view) = view else {
+        return Possibility::from_read(ReadState::Pending);
+    };
+    let base = view.set_possibility();
+    match draft {
+        Some(WebAppOrigin::Central) if !view.central_possibility.is_possible() => base.and(
+            Possibility::blocked(LocalizedText::key(CENTRAL_NOT_LIVE_REASON)),
+        ),
+        _ => base,
     }
 }
 
@@ -2062,7 +2309,15 @@ pub fn admin_web_app_origin_view(
             scope,
             can_set: false,
             central_label,
+            // A feature the nest does not have: nothing to offer.
+            section_possibility: Possibility::Absent,
+            central_possibility: Possibility::Absent,
         };
+    };
+    let central_possibility = if reply.central_live {
+        Possibility::Possible
+    } else {
+        Possibility::Absent
     };
     let Some(mode) = WebAppOrigin::parse(&reply.mode) else {
         return AdminWebAppOriginView {
@@ -2075,6 +2330,8 @@ pub fn admin_web_app_origin_view(
             scope,
             can_set: false,
             central_label,
+            section_possibility: Possibility::Possible,
+            central_possibility,
         };
     };
     // The target is the nest's projection, read verbatim: the nest owns the
@@ -2092,14 +2349,33 @@ pub fn admin_web_app_origin_view(
             "origin",
             CENTRAL_APP_ORIGIN,
         ),
+        // Stored central on a nest whose build says the central origin is not
+        // live: the nest serves bundled (`BundledCentralNotLive`) and the
+        // sentence says so, with the way back.
+        (WebAppOrigin::Central, None, false) if !reply.central_live => LocalizedText::key_arg(
+            "admin.nest_page.web_app_origin_status_central_not_live",
+            "origin",
+            CENTRAL_APP_ORIGIN,
+        ),
         _ => LocalizedText::key("admin.nest_page.web_app_origin_status_bundled"),
     };
+    let section_possibility = if !reply.central_live && mode == WebAppOrigin::Bundled {
+        Possibility::Absent
+    } else {
+        Possibility::Possible
+    };
+    // A stored central the central radio cannot show marks no radio: picking
+    // bundled and saving is the way back, after which the section goes.
+    let selected =
+        (mode == WebAppOrigin::Bundled || central_possibility.is_possible()).then_some(mode);
     AdminWebAppOriginView {
-        selected: Some(mode),
+        selected,
         status,
         scope,
         can_set: true,
         central_label,
+        section_possibility,
+        central_possibility,
     }
 }
 
@@ -2149,6 +2425,31 @@ impl Default for AdminUpdateChannelView {
     fn default() -> Self {
         admin_update_channel_view(None)
     }
+}
+
+impl AdminUpdateChannelView {
+    /// The [`Possibility`] sibling of [`Self::can_set`]
+    /// (`nest/update-channel.md` § The UI; `docs/goal/ui/README.md` § Offer
+    /// only what is possible, rule 6): where the channel cannot be set — a
+    /// nest the image does not run, one that predates the choice, a channel
+    /// this build cannot name — the radios and `-save-button` are blocked by
+    /// the status sentence the section already paints.
+    pub fn set_possibility(&self) -> Possibility {
+        if self.can_set {
+            Possibility::Possible
+        } else {
+            Possibility::blocked(self.status.clone())
+        }
+    }
+}
+
+/// [`AdminUpdateChannelView::set_possibility`] over the read as a page holds
+/// it: `None` until the reflective read lands, never possible (rule 5).
+pub fn update_channel_set_possibility(view: Option<&AdminUpdateChannelView>) -> Possibility {
+    view.map_or_else(
+        || Possibility::from_read(ReadState::Pending),
+        AdminUpdateChannelView::set_possibility,
+    )
 }
 
 /// The "Following X" sentence key. Its timing wording ("within about a
@@ -2747,9 +3048,13 @@ mod tests {
             "fauna.admin.region.get" => {
                 fauna_protocol::encode_canonical(&AdminRegionStatusReply::default())
             }
-            "fauna.admin.web_app_origin.set" => fauna_protocol::encode_canonical(
-                &AdminWebAppOriginGetReply::project(WebAppOrigin::Central, Some("example.org")),
-            ),
+            "fauna.admin.web_app_origin.set" => {
+                fauna_protocol::encode_canonical(&AdminWebAppOriginGetReply::project(
+                    WebAppOrigin::Central,
+                    Some("example.org"),
+                    true,
+                ))
+            }
             "fauna.admin.update_channel.set" => {
                 fauna_protocol::encode_canonical(&AdminUpdateChannelSetReply {
                     ok: true,
@@ -3837,6 +4142,158 @@ mod tests {
         }
     }
 
+    // ── Offer only what is possible (docs/goal/ui/README.md) ─────────────────
+
+    #[test]
+    fn remove_admin_is_absent_on_a_plain_row() {
+        assert_eq!(
+            remove_admin_possibility(&row(None, false)),
+            Possibility::Absent
+        );
+    }
+
+    #[test]
+    fn remove_admin_is_blocked_on_the_last_superadmin_with_its_reason() {
+        let last = AdminUser {
+            is_admin: true,
+            last_superadmin: true,
+            ..Default::default()
+        };
+        let answer = remove_admin_possibility(&last);
+        assert_eq!(
+            answer.reason().map(|r| r.key.as_str()),
+            Some("admin.users_page.remove_admin_last_superadmin")
+        );
+        // Shown (disabled), so the row's bool still offers the control.
+        assert!(admin_user_row_controls(&last, &[]).remove_admin);
+    }
+
+    /// Each row-control sibling is the bool's answer: offered → possible,
+    /// not offered → absent (a move this admin can never make on this row).
+    #[test]
+    fn row_control_siblings_answer_absent_where_the_bool_is_off() {
+        let plain = admin_user_row_controls(&row(None, false), &[]);
+        assert_eq!(plain.suspend_possibility(), Possibility::Possible);
+        assert_eq!(plain.evict_possibility(), Possibility::Possible);
+        assert_eq!(plain.make_admin_possibility(), Possibility::Possible);
+        assert_eq!(plain.restore_possibility(), Possibility::Absent);
+        assert_eq!(plain.take_over_possibility(), Possibility::Absent);
+        let admin = admin_user_row_controls(&row(None, true), &[]);
+        assert_eq!(admin.suspend_possibility(), Possibility::Absent);
+        assert_eq!(admin.evict_possibility(), Possibility::Absent);
+        assert_eq!(admin.make_admin_possibility(), Possibility::Absent);
+    }
+
+    #[test]
+    fn remove_admin_is_possible_on_a_co_admin() {
+        assert_eq!(
+            remove_admin_possibility(&row(None, true)),
+            Possibility::Possible
+        );
+    }
+
+    fn pending(by: u8, status: &str) -> admin::AdminPendingActionSummary {
+        admin::AdminPendingActionSummary {
+            actor_id: ByteBuf::from(vec![by; 32]),
+            status: status.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn approve_is_absent_on_the_viewers_own_action() {
+        assert_eq!(
+            pending_approve_possibility(&pending(0xAA, "pending"), &[0xAA; 32]),
+            Possibility::Absent
+        );
+    }
+
+    #[test]
+    fn approve_is_possible_on_a_co_admins_pending_action() {
+        assert_eq!(
+            pending_approve_possibility(&pending(0xBB, "pending"), &[0xAA; 32]),
+            Possibility::Possible
+        );
+    }
+
+    #[test]
+    fn approve_is_absent_once_the_action_is_no_longer_pending() {
+        assert_eq!(
+            pending_approve_possibility(&pending(0xBB, "executed"), &[0xAA; 32]),
+            Possibility::Absent
+        );
+    }
+
+    #[test]
+    fn age_band_is_blocked_until_a_guardian_is_picked() {
+        assert_eq!(
+            age_band_possibility(false).reason().map(|r| r.key.as_str()),
+            Some("admin.users_page.age_band_needs_guardian")
+        );
+        assert_eq!(age_band_possibility(true), Possibility::Possible);
+    }
+
+    #[test]
+    fn tier_delete_is_absent_on_free_and_possible_elsewhere() {
+        assert_eq!(tier_delete_possibility("free"), Possibility::Absent);
+        assert_eq!(tier_delete_possibility("plus"), Possibility::Possible);
+    }
+
+    fn key_of(p: &Possibility) -> Option<&str> {
+        p.reason().map(|r| r.key.as_str())
+    }
+
+    #[test]
+    fn tier_pick_possibility_blocks_an_empty_tier_select() {
+        assert_eq!(
+            key_of(&tier_pick_possibility(&[])),
+            Some("admin.users_page.no_tier")
+        );
+        assert!(tier_pick_possibility(&["free".to_string()]).is_possible());
+    }
+
+    #[test]
+    fn users_page_step_possibility_blocks_at_each_bound() {
+        // 25 users, 10 a page: offsets 0, 10, 20.
+        assert_eq!(
+            key_of(&users_page_step_possibility(0, 25, 10, false)),
+            Some("admin.users_page.no_page_before")
+        );
+        assert!(users_page_step_possibility(0, 25, 10, true).is_possible());
+        assert!(users_page_step_possibility(10, 25, 10, false).is_possible());
+        assert_eq!(
+            key_of(&users_page_step_possibility(20, 25, 10, true)),
+            Some("admin.users_page.no_page_after")
+        );
+        // No users at all: both bounds at once.
+        assert!(!users_page_step_possibility(0, 0, 10, true).is_possible());
+    }
+
+    #[test]
+    fn membership_clear_possibility_needs_a_designation() {
+        assert_eq!(
+            key_of(&membership_clear_possibility(false)),
+            Some("admin.settings_page.membership_clear_nothing_set")
+        );
+        assert!(membership_clear_possibility(true).is_possible());
+    }
+
+    #[test]
+    fn audit_more_possibility_blocks_once_the_record_is_whole() {
+        let mut view = AuditLogView {
+            rows: vec![],
+            integrity: AuditIntegrity::Empty,
+            integrity_text: LocalizedText::key("x"),
+            more_before_id: None,
+        };
+        assert_eq!(
+            key_of(&audit_more_possibility(&view)),
+            Some("admin.logs_page.audit_no_older")
+        );
+        view.more_before_id = Some(4);
+        assert!(audit_more_possibility(&view).is_possible());
+    }
+
     #[test]
     fn active_user_offers_both_entry_points_and_no_restore() {
         let c = admin_user_row_controls(&row(None, false), &[]);
@@ -4169,7 +4626,14 @@ mod tests {
     // ── The web-app origin ────────────────────────────────────────────────────
 
     fn origin_reply(mode: WebAppOrigin, domain: Option<&str>) -> AdminWebAppOriginGetReply {
-        AdminWebAppOriginGetReply::project(mode, domain)
+        AdminWebAppOriginGetReply::project(mode, domain, true)
+    }
+
+    fn origin_reply_not_live(
+        mode: WebAppOrigin,
+        domain: Option<&str>,
+    ) -> AdminWebAppOriginGetReply {
+        AdminWebAppOriginGetReply::project(mode, domain, false)
     }
 
     #[test]
@@ -4181,8 +4645,92 @@ mod tests {
             view.status.key,
             "admin.nest_page.web_app_origin_status_bundled"
         );
-        // The never-set default is exactly this state, never a blank line.
+        assert_eq!(view.section_possibility, Possibility::Possible);
+        assert_eq!(view.central_possibility, Possibility::Possible);
+    }
+
+    /// `web-content-hosting.md` § While the central origin is not live, the
+    /// choice is not offered, rule 5: on today's nests the section is absent —
+    /// one radio and a save that changes nothing is no choice.
+    #[test]
+    fn bundled_on_a_nest_whose_central_origin_is_not_live_shows_no_section() {
+        let view =
+            admin_web_app_origin_view(Some(&origin_reply_not_live(WebAppOrigin::Bundled, None)));
+        assert_eq!(view.section_possibility, Possibility::Absent);
+        assert_eq!(view.central_possibility, Possibility::Absent);
+        assert_eq!(view.selected, Some(WebAppOrigin::Bundled));
+        assert_eq!(
+            view.status.key,
+            "admin.nest_page.web_app_origin_status_bundled"
+        );
+        // The never-set default is exactly what today's nest answers, never a
+        // blank line.
         assert_eq!(AdminWebAppOriginView::default(), view);
+    }
+
+    /// A nest holding `central` from before the ruling while its build says
+    /// the central origin is not live: the section stays so the admin can
+    /// leave the state, the central radio is absent, no radio is marked, and
+    /// the status says the address keeps serving the app it ships.
+    #[test]
+    fn stored_central_while_not_live_shows_the_way_back_and_no_central_radio() {
+        for domain in [Some("example.org"), None] {
+            let view = admin_web_app_origin_view(Some(&origin_reply_not_live(
+                WebAppOrigin::Central,
+                domain,
+            )));
+            assert_eq!(view.section_possibility, Possibility::Possible);
+            assert_eq!(view.central_possibility, Possibility::Absent);
+            assert_eq!(view.selected, None);
+            assert!(view.can_set);
+            assert_eq!(
+                view.status.key,
+                "admin.nest_page.web_app_origin_status_central_not_live"
+            );
+            assert_eq!(
+                view.status.args.get("origin").map(String::as_str),
+                Some(CENTRAL_APP_ORIGIN)
+            );
+            // Bundled is the way back; a central draft is refused with the
+            // nest's own refusal sentence.
+            assert_eq!(
+                web_app_origin_set_possibility(Some(&view), Some(WebAppOrigin::Bundled)),
+                Possibility::Possible
+            );
+            assert_eq!(
+                web_app_origin_set_possibility(Some(&view), Some(WebAppOrigin::Central)),
+                Possibility::blocked(LocalizedText::key(CENTRAL_NOT_LIVE_REASON))
+            );
+        }
+    }
+
+    /// An older nest (no `central_live` on the wire) still redirecting: the
+    /// status names the exact address people are sent to, as before, and the
+    /// central radio is absent.
+    #[test]
+    fn an_older_nest_still_redirecting_names_its_target_and_offers_no_central() {
+        let reply = AdminWebAppOriginGetReply {
+            mode: "central".into(),
+            redirect_target: Some("https://app.fauna.social/app/?nest=example.org".into()),
+            ..Default::default()
+        };
+        let view = admin_web_app_origin_view(Some(&reply));
+        assert_eq!(view.section_possibility, Possibility::Possible);
+        assert_eq!(view.central_possibility, Possibility::Absent);
+        assert_eq!(view.selected, None);
+        assert_eq!(
+            view.status.key,
+            "admin.nest_page.web_app_origin_status_central"
+        );
+    }
+
+    #[test]
+    fn a_central_draft_is_possible_once_the_nest_says_central_live() {
+        let view = admin_web_app_origin_view(Some(&origin_reply(WebAppOrigin::Bundled, None)));
+        assert_eq!(
+            web_app_origin_set_possibility(Some(&view), Some(WebAppOrigin::Central)),
+            Possibility::Possible
+        );
     }
 
     #[test]
@@ -4217,6 +4765,8 @@ mod tests {
         let view = admin_web_app_origin_view(None);
         assert_eq!(view.selected, None);
         assert!(!view.can_set);
+        assert_eq!(view.section_possibility, Possibility::Absent);
+        assert_eq!(view.central_possibility, Possibility::Absent);
         assert_eq!(
             view.status.key,
             "admin.nest_page.web_app_origin_status_predates"
@@ -4232,6 +4782,7 @@ mod tests {
         let view = admin_web_app_origin_view(Some(&reply));
         assert_eq!(view.selected, None);
         assert!(!view.can_set);
+        assert_eq!(view.section_possibility, Possibility::Possible);
         assert_eq!(
             view.status.args.get("mode").map(String::as_str),
             Some("elsewhere")
@@ -4421,6 +4972,43 @@ mod tests {
             "admin.nest_page.update_channel_status_unknown"
         );
         assert_eq!(arg(&unknown.status, "channel"), Some("nightly"));
+    }
+
+    /// The `can_set` siblings: blocked by the status line the section paints
+    /// where the choice cannot be set, possible where it can, and blocked
+    /// "still loading" before the read (rule 5).
+    #[test]
+    fn the_nest_choices_answer_set_possibility_from_their_status() {
+        let predates = admin_update_channel_view(None);
+        assert_eq!(
+            predates.set_possibility(),
+            Possibility::blocked(predates.status.clone())
+        );
+        let pinned = admin_update_channel_view(Some(&channel_reply(None, "0.1.4", None)));
+        assert_eq!(pinned.set_possibility(), Possibility::Possible);
+        assert_eq!(
+            update_channel_set_possibility(None),
+            Possibility::from_read(ReadState::Pending)
+        );
+        assert_eq!(
+            update_channel_set_possibility(Some(&pinned)),
+            Possibility::Possible
+        );
+
+        let origin_predates = admin_web_app_origin_view(None);
+        assert_eq!(
+            origin_predates.set_possibility(),
+            Possibility::blocked(origin_predates.status.clone())
+        );
+        let origin = AdminWebAppOriginView::default();
+        assert_eq!(
+            web_app_origin_set_possibility(Some(&origin), None),
+            Possibility::Possible
+        );
+        assert_eq!(
+            web_app_origin_set_possibility(None, None),
+            Possibility::from_read(ReadState::Pending)
+        );
     }
 
     /// The radios carry the wizard's own label and description keys, in the

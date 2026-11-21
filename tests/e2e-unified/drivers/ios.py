@@ -210,6 +210,16 @@ class IosInProcessDriver(InProcessAgentDriver):
     APP_NAME = "ios"
     FFI_RECIPE = "apple-ffi-test-sim"
 
+    # Text selection (`e2e-conventions.md` § Driver primitives → *Reading
+    # whether text can be selected*; the routes are web's, by name and shape).
+    # The agent's ``/element/select-text`` makes the person's long-press in the
+    # app's own process (`Testing/TextSelectionRead.swift`) and answers what the
+    # platform offered: an in-place selection (``selected``), or the edit menu's
+    # Copy action (``copy_offered``, counted by UIKit's own Copy label), which
+    # it takes down before replying. ``/page/selection`` reads the in-place
+    # selection back, ``""`` where the platform gave the menu.
+    _serves_select_text = True
+
     # Same real POST /element/scroll-into-view as macOS — the route lives in the
     # SHARED FaunaKit automation server, so both apple apps gained it in one
     # change (see `MacosInProcessDriver` for the note). On iOS the walk finds the

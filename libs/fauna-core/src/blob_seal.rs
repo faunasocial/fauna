@@ -165,6 +165,13 @@ pub struct SealedBlob {
     /// plaintext one — the discriminator every reader already applies via
     /// [`ChunkManifest::store_keys`].
     pub chunks: Vec<(ContentHash, Vec<u8>)>,
+    /// `(address, bytes)` per page of a paged root, in file order — empty for
+    /// a single manifest, which is every blob [`seal_blob`] makes. A sink
+    /// persists them after the chunks and before the root
+    /// (`docs/goal/behavior/file-sync.md` § Paged manifests → *Transport and
+    /// order*), and a holder of the root carries them wherever the root goes
+    /// (*Compatibility*).
+    pub pages: Vec<(ContentHash, Vec<u8>)>,
     /// The content key the chunks were sealed under — a folder set's M2
     /// version or a group set's generation id — to stamp into a change record.
     /// `None` for owner-only / plaintext seals.
@@ -181,7 +188,10 @@ impl SealedBlob {
     /// directions (compression shrinks, the AEAD frame grows).
     pub fn stored_bytes(&self) -> u64 {
         let chunks: u64 = self.chunks.iter().map(|(_, b)| b.len() as u64).sum();
-        chunks.saturating_add(self.manifest_bytes.len() as u64)
+        let pages: u64 = self.pages.iter().map(|(_, b)| b.len() as u64).sum();
+        chunks
+            .saturating_add(pages)
+            .saturating_add(self.manifest_bytes.len() as u64)
     }
 }
 
@@ -225,6 +235,7 @@ pub fn seal_blob(
         manifest_bytes: sealed.manifest_bytes,
         manifest_hash: sealed.manifest_hash,
         chunks,
+        pages: Vec::new(),
         content_stamp: sealed.content_stamp,
     })
 }
@@ -354,6 +365,7 @@ pub fn seal_reader(
         stored_hashes: seal_root.map(|_| store_keys),
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     let manifest_bytes = crate::encoding::canonical_encode(
         &manifest.wire_form(seal_root.map(|(secret, _)| secret).as_ref())?,
@@ -509,7 +521,7 @@ mod tests {
             assert_eq!(*key, ContentHash::of_raw(data));
             assert_eq!(key, recorded);
         }
-        assert_eq!(sealed.manifest.store_keys(), *stored);
+        assert_eq!(sealed.manifest.store_keys().unwrap(), *stored);
     }
 
     /// A plaintext seal keeps the store key equal to the plaintext hash — the
@@ -520,7 +532,10 @@ mod tests {
 
         assert!(sealed.manifest.stored_hashes.is_none());
         assert_eq!(sealed.content_stamp, None);
-        assert_eq!(sealed.manifest.store_keys(), sealed.manifest.chunk_hashes);
+        assert_eq!(
+            sealed.manifest.store_keys().unwrap(),
+            sealed.manifest.chunk_hashes
+        );
     }
 
     /// The generation stamp rides through untouched — the change record needs it

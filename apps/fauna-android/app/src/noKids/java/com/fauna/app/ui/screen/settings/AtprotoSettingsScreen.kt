@@ -25,12 +25,16 @@ import com.fauna.app.R
 import com.fauna.app.core.FeedTriple
 import com.fauna.app.core.SourceAskRows
 import com.fauna.app.core.UrlOpener
+import com.fauna.app.core.atproto.AtprotoPossibilities
 import com.fauna.app.core.sourceAskRows
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.screen.bridges.BridgeCard
 import com.fauna.app.ui.util.SuppressScreenCapture
+import com.fauna.app.ui.util.blockedReason
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.formatNamed
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
@@ -49,9 +53,13 @@ import kotlinx.coroutines.launch
 import uniffi.fauna_atproto_settings_machine.AppCredentialRow
 import uniffi.fauna_atproto_settings_machine.AtprotoSettingsSnapshot
 import uniffi.fauna_atproto_settings_machine.depthLevelOptions
+import uniffi.fauna_core.Possibility
 import java.text.DateFormat
 import java.util.Date
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The **Bluesky** settings page (`docs/goal/ui/atproto.md`): one page answers
@@ -131,6 +139,7 @@ fun AtprotoSettingsScreen(
     bridgesVm: BridgesVM = hiltViewModel(),
 ) {
     val snapshot by vm.snapshot.collectAsState()
+    val possibilities by vm.possibilities.collectAsState()
     val allBridges by bridgesVm.bridges.collectAsState()
     val follows by bridgesVm.follows.collectAsState()
     val feedAsks by bridgesVm.feedAsks.collectAsState()
@@ -153,6 +162,7 @@ fun AtprotoSettingsScreen(
 
     AtprotoSettingsContent(
         snapshot = snapshot,
+        possibilities = possibilities,
         blueskyBridge = allBridges.find { it.id == "bluesky" },
         blueskyFollows = follows["bluesky"] ?: emptyList(),
         onBack = { navController.popBackStack() },
@@ -178,6 +188,7 @@ fun AtprotoSettingsScreen(
                 UrlOpener.open(context, url)
             }
         },
+        onRefuseBridge = { appMessages.showError(it) },
         onUnlinkBridge = { bridgesVm.unlinkBridge("bluesky") },
         onUpdateBridgeSetting = { key, value -> bridgesVm.updateSetting("bluesky", key, value) },
         onAddBridgeFollow = { id, petname -> bridgesVm.addFollow("bluesky", id, petname) },
@@ -220,6 +231,10 @@ private fun syntheticUnlinkedBluesky() = FfiBridgeStatus(
 @Composable
 fun AtprotoSettingsContent(
     snapshot: AtprotoSettingsSnapshot,
+    // The machine's own `Possibility` answers — every rung and authorize paint
+    // from these, never from the snapshot's deprecated `hostedAllowed` /
+    // `hostedGateReason` (ui/README.md § Offer only what is possible, rule 6).
+    possibilities: AtprotoPossibilities,
     blueskyBridge: FfiBridgeStatus?,
     blueskyFollows: List<FfiBridgeFollow>,
     onBack: () -> Unit,
@@ -244,6 +259,8 @@ fun AtprotoSettingsContent(
     onAuthorizeExternalApps: () -> Unit,
     onDeauthorizeExternalApps: () -> Unit,
     onLinkBridge: (mode: String, fields: Map<String, String>) -> Unit,
+    // A refused Link press's reason, for the page's `error-message`.
+    onRefuseBridge: (String) -> Unit = {},
     onUnlinkBridge: () -> Unit,
     onUpdateBridgeSetting: (String, FfiCborValue) -> Unit,
     onAddBridgeFollow: (String, String?) -> Unit,
@@ -297,6 +314,17 @@ fun AtprotoSettingsContent(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // A machine that failed to build offers nothing (rule 7): every
+            // gesture would drop, so one reason line stands in for every
+            // control; the top bar's back arrow is the way back.
+            if (possibilities.unavailable) {
+                Text(
+                    stringResource(R.string.atproto_settings_page_unavailable),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                return@Column
+            }
+
             // ── The 72 h recovery-fork contest — LEADS the page, above the
             //    selector (behavior/atproto-identity-custody.md § The 72 h
             //    recovery-fork contest). Every string below is
@@ -315,7 +343,7 @@ fun AtprotoSettingsContent(
                 }
             }
 
-            DepthSelector(snapshot, onSelectLevel)
+            DepthSelector(snapshot, possibilities, onSelectLevel)
 
             snapshot.pendingTransition?.let { card ->
                 TransitionCard(
@@ -332,6 +360,7 @@ fun AtprotoSettingsContent(
                     bridge = blueskyBridge ?: syntheticUnlinkedBluesky(),
                     bridgeFollows = blueskyFollows,
                     onLink = onLinkBridge,
+                    onRefuse = onRefuseBridge,
                     onUnlink = onUnlinkBridge,
                     onUpdateSetting = onUpdateBridgeSetting,
                     onAddFollow = onAddBridgeFollow,
@@ -405,7 +434,7 @@ fun AtprotoSettingsContent(
             // the level (`atproto.md` § Layout & flow): a held row renders at
             // every level; the empty state (null) only at full PDS.
             if (snapshot.level == "hosted_full" || snapshot.delegation != null) {
-                DelegationRowSection(snapshot.delegation, onAuthorizeExternalApps, onDeauthorizeExternalApps)
+                DelegationRowSection(snapshot.delegation, possibilities.authorize, onAuthorizeExternalApps, onDeauthorizeExternalApps)
             }
         }
     }
@@ -481,14 +510,25 @@ private fun ContestConfirmCard(
 }
 
 @Composable
-private fun DepthSelector(snapshot: AtprotoSettingsSnapshot, onSelectLevel: (String) -> Unit) {
-    // Rung order, ids, copy and the hosted-gate flag come from the shared
-    // catalog (`atproto.md` § Where logic lives already named the machine the
-    // owner of "level logic … all of it"). Android used to carry a
-    // `DEPTH_LEVELS` list AND a parallel `rungTitles` map, held in sync by the
-    // level string alone.
+private fun DepthSelector(
+    snapshot: AtprotoSettingsSnapshot,
+    possibilities: AtprotoPossibilities,
+    onSelectLevel: (String) -> Unit,
+) {
+    // Rung order, ids and copy come from the shared catalog (`atproto.md`
+    // § Where logic lives already named the machine the owner of "level logic
+    // … all of it"). Whether a rung may be taken NOW is the machine's own
+    // `rung_possibility` answer (rule 6): blocked `common.still_loading` until
+    // the status read resolves, the hosted gate's reason when ENTERING a hosted
+    // level the box refuses (a rung the user is already at stays selectable so
+    // a step-down is reachable), absent for a level this build does not know.
     val rungs = remember { depthLevelOptions() }
-    val reasonText = localized(snapshot.hostedGateReason)
+    // Each distinct reason is painted ONCE beneath the group, not beside every
+    // rung that shares it (two hosted rungs, one reason).
+    val reasons = rungs
+        .mapNotNull { localized(possibilities.rung(it.level).blockedReason) }
+        .filter { it.isNotEmpty() }
+        .distinct()
     // ONE verdict for the whole selector, because the rungs issue ONE kind.
     // `selectLevel` reaches the nest directly only on the effect-free
     // Off -> Linked move; every other pick stages the transition card whose
@@ -511,14 +551,14 @@ private fun DepthSelector(snapshot: AtprotoSettingsSnapshot, onSelectLevel: (Str
             val level = rung.level
             val id = rung.uiId
             val active = snapshot.level == level
-            // `hosted` is the catalog's fact, not a `startsWith("hosted")`
-            // sniff this screen re-runs on a level string it did not define.
-            val gated = rung.hosted && !snapshot.hostedAllowed
-            // The page's own hosted gate AND the offline verdict. Composed, never
-            // replaced: a hosted rung on a non-public domain keeps its own, more
-            // specific reason (rendered inline below) whether or not a nest is
-            // reachable, and a reconnect restores exactly this intent.
-            val enabled = (!gated || active) && levelGate.enabled
+            val answer = possibilities.rung(level)
+            // Absent: this person cannot make it true here — not painted.
+            if (!answer.isShown) continue
+            // The machine's answer AND the offline verdict. Composed, never
+            // replaced: a rung blocked by its own, more specific reason keeps
+            // it whether or not a nest is reachable, and a reconnect restores
+            // exactly this intent.
+            val enabled = answer.isPossible && levelGate.enabled
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -539,11 +579,11 @@ private fun DepthSelector(snapshot: AtprotoSettingsSnapshot, onSelectLevel: (Str
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    if (gated && !reasonText.isNullOrEmpty()) {
-                        Text(reasonText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                    }
                 }
             }
+        }
+        for (reason in reasons) {
+            Text(reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
         DisabledControlReasonText(levelGate.reason)
     }
@@ -688,7 +728,14 @@ private fun DidMethodRung(id: String, titleRes: Int, descRes: Int, selected: Boo
         modifier = Modifier.fillMaxWidth().selectable(selected = selected, onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RadioButton(selected = selected, onClick = onClick, modifier = Modifier.testTag(id))
+        // `state` speaks the depth rungs' vocabulary, `active` / `inactive`, as
+        // every app's DID-method radio does (atproto 22) — never the radio's
+        // native checked `true`/`false` the bridge would otherwise answer.
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
+            modifier = Modifier.testTag(id).semantics { stateDescription = if (selected) "active" else "inactive" },
+        )
         Column(modifier = Modifier.padding(start = 4.dp)) {
             Text(stringResource(titleRes), style = MaterialTheme.typography.bodyMedium)
             Text(stringResource(descRes), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -773,6 +820,11 @@ private fun fmtMillis(millis: Long): String =
 @Composable
 private fun DelegationRowSection(
     row: uniffi.fauna_atproto_settings_machine.DelegationRow?,
+    // `authorize_possibility`: blocked with the no-identity reason where this
+    // app holds no signing identity, so the control is not opened to fail at
+    // its submit (rule 4). Folded with the offline verdict below, first reason
+    // wins — the same `Possibility.and` order the shared combinator uses.
+    authorizeAnswer: Possibility,
     onAuthorize: () -> Unit,
     onDeauthorize: () -> Unit,
 ) {
@@ -787,10 +839,14 @@ private fun DelegationRowSection(
             // both declare — a declaration on only the reachable-today branch
             // would ungate the other state silently.
             val authorizeGate = faunaGate("fauna.bridges.atproto.provision_authoring_delegation")
-            Button(onClick = onAuthorize, enabled = authorizeGate.enabled, modifier = Modifier.testTag(Ids.ATPROTO_DELEGATION_AUTHORIZE)) {
+            Button(
+                onClick = onAuthorize,
+                enabled = authorizeAnswer.isPossible && authorizeGate.enabled,
+                modifier = Modifier.testTag(Ids.ATPROTO_DELEGATION_AUTHORIZE),
+            ) {
                 Text(stringResource(R.string.atproto_settings_delegation_authorize_button))
             }
-            DisabledControlReasonText(authorizeGate.reason)
+            DisabledControlReasonText(localized(authorizeAnswer.blockedReason) ?: authorizeGate.reason)
             return@Column
         }
 
@@ -873,7 +929,11 @@ private fun DelegationRowSection(
         val reauthorizeGate = faunaGate("fauna.bridges.atproto.provision_authoring_delegation")
         val revokeDelegationGate = faunaGate("fauna.bridges.atproto.revoke_authoring_delegation")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onAuthorize, enabled = reauthorizeGate.enabled, modifier = Modifier.testTag(Ids.ATPROTO_DELEGATION_AUTHORIZE)) {
+            Button(
+                onClick = onAuthorize,
+                enabled = authorizeAnswer.isPossible && reauthorizeGate.enabled,
+                modifier = Modifier.testTag(Ids.ATPROTO_DELEGATION_AUTHORIZE),
+            ) {
                 Text(stringResource(R.string.atproto_settings_delegation_reauthorize_button))
             }
             OutlinedButton(
@@ -885,7 +945,7 @@ private fun DelegationRowSection(
                 Text(stringResource(R.string.atproto_settings_delegation_revoke_button))
             }
         }
-        DisabledControlReasonText(reauthorizeGate.reason)
+        DisabledControlReasonText(localized(authorizeAnswer.blockedReason) ?: reauthorizeGate.reason)
         DisabledControlReasonText(revokeDelegationGate.reason)
     }
 }

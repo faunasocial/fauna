@@ -636,6 +636,51 @@ impl FederationChannelPool {
         key: &str,
         host: ClassifiedPeerHost,
     ) -> Result<[u8; 32], PoolError> {
+        let (id, _reply) = self.dial_nest_info(key, host).await?;
+        self.url_nest_ids.lock().await.insert(key.to_string(), id);
+        Ok(id)
+    }
+
+    /// A peer's capability set (`NestInfoReply.capabilities`), read FRESH
+    /// over the same trust-ruled anonymous dial [`Self::resolve_peer_nest_id`]
+    /// takes — never cached, because a peer's set changes across its own
+    /// upgrade or downgrade, and a remembered token a downgraded peer no
+    /// longer honours is the hazard the token exists to prevent (`file-sync.md`
+    /// § Paged manifests → *Compatibility*: an older nest's garbage collector
+    /// would delete a paged file's chunks). Refused as
+    /// [`PoolError::PeerMismatch`] unless the answering nest is
+    /// `expected_nest_id`, so the set read is the one the caller's own leg
+    /// will write to.
+    pub async fn peer_capabilities(
+        &self,
+        peer_url: &str,
+        expected_nest_id: &[u8; 32],
+    ) -> Result<Vec<String>, PoolError> {
+        let key = peer_url.trim_end_matches('/').to_string();
+        crate::federation_channel::validate_peer_url(&key, self.peer_url_origin(&key))
+            .await
+            .map_err(|e| PoolError::Resolve(e.to_string()))?;
+        let host = classify_peer_host_resolving(&key).await?;
+        let (id, reply) = self.dial_nest_info(&key, host).await?;
+        if id != *expected_nest_id {
+            return Err(PoolError::PeerMismatch {
+                url: key,
+                expected: hex::encode(expected_nest_id),
+                resolved: hex::encode(id),
+            });
+        }
+        Ok(reply.capabilities)
+    }
+
+    /// The dial, the discovery trust rule, the `fauna.nest.info` read and the
+    /// paired URL's pin, for a normalized `key` whose host is already
+    /// classified — dialing `host.dial_addr` when the classification resolved
+    /// one (SNI and cert identity still come from `key`). Caches nothing.
+    async fn dial_nest_info(
+        &self,
+        key: &str,
+        host: ClassifiedPeerHost,
+    ) -> Result<([u8; 32], fauna_protocol::discovery::NestInfoReply), PoolError> {
         let key = key.to_string();
         let class = host.class;
         let origin = self.peer_url_origin(&key);
@@ -661,8 +706,7 @@ impl FederationChannelPool {
         // A pinned paired URL answered by another nest: refused before the
         // answer is cached, so it is refused again on the next call.
         self.check_target_pin(&key, &id)?;
-        self.url_nest_ids.lock().await.insert(key, id);
-        Ok(id)
+        Ok((id, reply))
     }
 
     /// The `nest_id` a **handle domain** resolves to — the ordinary anonymous
@@ -1987,7 +2031,7 @@ pub async fn originate_folder_actors_fetch(
 
 /// Originate `fauna.federation.folder.changes.record` (a WRITE, but
 /// **content-idempotent** on the home nest — a re-relayed record with identical
-/// content returns the original seq and charges nothing). `Ok(Ok(seq))` ⇒ the assigned (or existing, on replay) sequence.
+/// content returns the original seq and charges nothing). `Ok(Ok(recorded))` ⇒ the assigned (or existing, on replay) sequence, with the home nest's `prev_set_seq` when it said one.
 #[allow(clippy::too_many_arguments)]
 pub async fn originate_folder_changes_record(
     pool: &FederationChannelPool,
@@ -2009,7 +2053,7 @@ pub async fn originate_folder_changes_record(
     signature: Option<serde_bytes::ByteBuf>,
     signer_key: Option<serde_bytes::ByteBuf>,
     signer_cert: Option<fauna_core::encoding::EmbedAsBytes>,
-) -> Result<Result<i64, RpcError>, PoolError> {
+) -> Result<Result<crate::sync_handlers::RecordedChange, RpcError>, PoolError> {
     let req = FedFolderChangesRecordRequest {
         requesting_actor_id: requesting_actor_hex.to_string(),
         channel_id: channel_id_hex.to_string(),
@@ -2037,7 +2081,14 @@ pub async fn originate_folder_changes_record(
             to_value(&req),
         )
         .await?;
-    Ok(decode_peer_reply::<FedFolderChangesRecordReply>(reply).map(|r| r.seq))
+    Ok(
+        decode_peer_reply::<FedFolderChangesRecordReply>(reply).map(|r| {
+            crate::sync_handlers::RecordedChange {
+                seq: r.seq,
+                prev_set_seq: r.prev_set_seq,
+            }
+        }),
+    )
 }
 
 /// Originate `fauna.federation.folder.write_token.mint` (a mint — a duplicate
@@ -2258,6 +2309,7 @@ pub async fn originate_inbox_deliver(
     let req = FedInboxDeliverRequest {
         recipient_actor_id: recipient_actor_hex.to_string(),
         payload_bytes: payload_bytes.to_vec(),
+        origin_nest_url: state.handle_domain_if_set().map(|d| format!("https://{d}")),
     };
     match pool
         .originate(

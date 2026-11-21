@@ -193,8 +193,57 @@ pub async fn integrity_check(
             // `chunk_hashes` ride sealed, `mls-group-key-material.md` § M2
             // *Sealed manifest hashes*): the walk is over `store_keys()`, and a
             // plaintext chunk's store key IS its plaintext hash.
-            let encrypted = manifest.stored_hashes.is_some();
-            for store_key in manifest.store_keys().iter() {
+            //
+            // Through the one walk (`file-sync.md` § Paged manifests): a paged
+            // root's chunks are named by its pages, each fetched and verified
+            // against its root. A page that is absent is reported as a missing
+            // manifest-class blob (`missing_manifest_page`), one that does not
+            // hold what its root names as a corrupt one
+            // (`manifest_page_invalid`) — never passed as a chunkless file.
+            let encrypted = manifest.stored_hashes.is_some() || manifest.is_sealed();
+            let src = crate::manifest_walk::StorePages {
+                store: blob_store,
+                at_rest_key: encryption_key,
+            };
+            let store_keys = match crate::manifest_walk::store_keys(&manifest, &src).await {
+                Ok(keys) => keys.store_keys,
+                Err(e) => {
+                    use crate::manifest_walk::WalkError;
+                    let (kind, page) = match &e {
+                        WalkError::MissingPage(page) => {
+                            result.missing_manifests += 1;
+                            ("missing_manifest_page", Some(*page))
+                        }
+                        WalkError::Source(_) => ("manifest_page_read_error", None),
+                        WalkError::Invalid(_) => {
+                            result.corrupt_manifests += 1;
+                            ("manifest_page_invalid", None)
+                        }
+                    };
+                    result.errors.push(format!(
+                        "snapshot {}: manifest {}: {e}",
+                        snap.id,
+                        hex::encode(hash_arr)
+                    ));
+                    let mut extra = std::collections::BTreeMap::new();
+                    if let Some(page) = page {
+                        extra.insert(
+                            "page_hash".to_string(),
+                            fauna_protocol::Value::String(hex::encode(page.digest())),
+                        );
+                    }
+                    result.structured_errors.push(SnapshotCheckError {
+                        kind: kind.to_string(),
+                        snapshot_id: Some(snap.id),
+                        path_hash: None,
+                        manifest_hash: Some(manifest_hash_buf.clone()),
+                        chunk_hash: None,
+                        extra,
+                    });
+                    continue;
+                }
+            };
+            for store_key in store_keys.iter() {
                 result.chunks_checked += 1;
 
                 if verify_content && !encrypted {
@@ -338,6 +387,61 @@ mod tests {
     use crate::blob_store::DiskBlobStore;
     use fauna_core::data::ContentHash;
 
+    /// `check` walks a paged root's pages: whole, every chunk is checked and
+    /// nothing is reported; with a page gone, the missing page is reported
+    /// (`missing_manifest_page`, its hash carried) — never passed as a
+    /// chunkless file.
+    #[tokio::test]
+    async fn check_walks_a_paged_root_and_reports_a_missing_page() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn BlobStoreBackend> = Arc::new(DiskBlobStore::new(tmp.path()).unwrap());
+        let actor_id = [1u8; 32];
+        db.create_folder("paged-check", &actor_id).await.unwrap();
+        let fs = db.get_folder("paged-check").await.unwrap().unwrap();
+        let content: Vec<u8> = (0..200u32).map(|i| (i as u8).wrapping_mul(17)).collect();
+        let file =
+            crate::manifest_walk::tests::seed_paged_file(&store, None, None, &content, 16, None)
+                .await;
+        let ph: [u8; 32] = *blake3::hash(b"big.img").as_bytes();
+        db.record_sync_change(
+            &actor_id,
+            &ph,
+            Some(&file.root.digest()),
+            200,
+            "create",
+            Some(fs.id),
+            None,
+            Some("big.img"),
+        )
+        .await
+        .unwrap();
+        db.create_snapshot(fs.id).await.unwrap();
+
+        let whole = integrity_check(&db, &store, fs.id, false, None)
+            .await
+            .unwrap();
+        assert!(whole.errors.is_empty(), "{:?}", whole.errors);
+        assert_eq!(whole.chunks_checked, file.chunks.len());
+
+        store.delete(&file.pages[1]).await.unwrap();
+        let broken = integrity_check(&db, &store, fs.id, false, None)
+            .await
+            .unwrap();
+        assert_eq!(broken.missing_manifests, 1);
+        let finding = broken
+            .structured_errors
+            .iter()
+            .find(|e| e.kind == "missing_manifest_page")
+            .expect("the missing page is reported");
+        assert_eq!(
+            finding.extra.get("page_hash"),
+            Some(&fauna_protocol::Value::String(hex::encode(
+                file.pages[1].digest()
+            )))
+        );
+    }
+
     #[tokio::test]
     async fn check_reports_missing_manifest() {
         let db = Arc::new(CacheDb::open_in_memory().unwrap());
@@ -394,6 +498,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
         store.put(&manifest_hash, &manifest_bytes).await.unwrap();

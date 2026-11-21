@@ -179,7 +179,7 @@ android {
         // `--no-default-features --features kids-safe,kids-floor,file-provider-host`
         // into `src/kids/` — so this variant's bindings carry no feed, search,
         // bridge, web-publishing or catalog face at all, and the hand-written
-        // twin beside them (`src/kids/java/com/fauna/app/`) is what keeps it
+        // twin in `src/kidsTwin/java/com/fauna/app/` is what keeps it
         // compiling.
         create("kids") {
             initWith(getByName("storeSafe"))
@@ -197,7 +197,31 @@ android {
             // put back on `storeSafe` cannot reach the kids listing.
             versionNameSuffix = null
         }
+        // The DRIVABLE Fauna Kids build — `--app android-kids`'s artifact
+        // (feature-catalog.md § Cell semantics: the `android-kids` column is the
+        // kids build product on android's venue). `debug` under the kids
+        // identity and `BuildConfig.KIDS = true`, so `run-as` reaches its data
+        // and the e2e agent (`src/agent/`) rides it — the android twin of the
+        // ios-kids simulator build (`apple-ffi-kids-test-sim`). Over the
+        // `kids-safe,kids-floor,test-helpers` FFI `just android-ffi-kids-test`
+        // stages into `src/kidsDebug/`. NEVER shipped: no shipping recipe
+        // assembles it, the shipped artifact is `kids` above, and
+        // `android-kids-check` keeps fencing that one.
+        create("kidsDebug") {
+            initWith(getByName("debug"))
+            matchingFallbacks += listOf("debug")
+            buildConfigField("boolean", "KIDS", "true")
+            buildConfigField("boolean", "PAYMENTS", "false")
+            buildConfigField("boolean", "P2P_SHARE", "false")
+        }
     }
+
+    // The build type the instrumentation APK (the harness bridge, `androidTest`)
+    // is built against: AGP builds an androidTest APK for exactly one build
+    // type. `debug` unless a recipe names another — `just android-kids-debug`
+    // passes `-PfaunaTestBuildType=kidsDebug`. A build-wiring property, set only
+    // by recipes, never a product knob.
+    testBuildType = (project.findProperty("faunaTestBuildType") as String?) ?: "debug"
 
     // The `payments` plane's glue lives in a per-build-type source set, because
     // Kotlin has no inline compile-time exclusion: `if (BuildConfig.PAYMENTS)`
@@ -212,7 +236,10 @@ android {
     // the same twin its variant does.
     // `src/noAgent` is the same shape for convention 15's automation surface,
     // and `storeSafe` is why it had to become a shared directory. The real
-    // `TestAgent` lives in `src/debug`; its inert same-signature twin used to
+    // `TestAgent` lives in `src/agent` (taken by `debug` and `kidsDebug`), its
+    // arms over kids-excised planes in `KidsExcisedAgent` — built in
+    // `src/agentNoKids` (`debug` only), refusing in `src/agentKids` (`kidsDebug`
+    // only; never `src/noKids`, which shipping types take); its inert same-signature twin used to
     // sit in `src/release/java`, which works only while `release` is the sole
     // shipping flavor. `storeSafe` is a second one, and it cannot simply take
     // `src/release/java` — that directory also holds the release flavor's
@@ -238,7 +265,7 @@ android {
     // that names a declaration the `kids-safe,kids-floor` bindings lack — the
     // feed, search, every bridge, web publishing, the subscriptions author
     // calls, connected apps, the labeler catalog — lives in `src/noKids`, taken
-    // by the four other build types; `src/kids/java/com/fauna/app/` holds the
+    // by the four other build types; `src/kidsTwin/java/com/fauna/app/` holds the
     // inert twin of only what `src/main` still names (`KidsExcisedApi`, the
     // `ApiClient` superclass; `KidsExcisedNav`; `CriticalAlertsHost`). `kids`
     // never takes `src/noKids`.
@@ -261,6 +288,8 @@ android {
             java.srcDir("../automation-shared/java")
         }
         getByName("debug") {
+            java.srcDir("src/agent/java")
+            java.srcDir("src/agentNoKids/java")
             java.srcDir("src/noKids/java")
             java.srcDir("src/payments/java")
             java.srcDir("src/p2pShare/java")
@@ -304,10 +333,28 @@ android {
         // store-age twin; everything else is `storeSafe`'s set.
         getByName("kids") {
             assets.srcDir("build/shipped-notices/kids/assets")
+            java.srcDir("src/kidsTwin/java")
             java.srcDir("src/noPayments/java")
             java.srcDir("src/noP2pShare/java")
             java.srcDir("src/noAgent/java")
             java.srcDir("src/storeAge/java")
+        }
+        // `kidsDebug` is `kids`'s shell over `debug`'s plumbing: the kids twin
+        // and the kids permission manifest, the agent in place of `noAgent`,
+        // and `debug`'s cleartext overlay so the agent reaches a loopback
+        // nest. Its staged bindings are its own (`src/kidsDebug/`). It takes
+        // the inert store-age twin (`foss`'s), so it declares no Play library of
+        // its own: an emulator-driven build has no Play store-age answer to read,
+        // and the shipped `kids` keeps the real twin.
+        getByName("kidsDebug") {
+            manifest.srcFile("src/kids/AndroidManifest.xml")
+            res.srcDir("src/debug/res")
+            java.srcDir("src/kidsTwin/java")
+            java.srcDir("src/agent/java")
+            java.srcDir("src/agentKids/java")
+            java.srcDir("src/noPayments/java")
+            java.srcDir("src/noP2pShare/java")
+            java.srcDir("src/noStoreAge/java")
         }
     }
 
@@ -352,6 +399,12 @@ android {
 // the one place a build type's artifact can take a whole different id.
 androidComponents {
     onVariants(selector().withBuildType("kids")) { variant ->
+        variant.applicationId.set("social.fauna.faunakids")
+    }
+    // The drivable kids build answers to the kids identity too, so the driver
+    // installs, `run-as`es and instruments `social.fauna.faunakids` (the test
+    // APK `social.fauna.faunakids.test`) — the identity the column names.
+    onVariants(selector().withBuildType("kidsDebug")) { variant ->
         variant.applicationId.set("social.fauna.faunakids")
     }
 }

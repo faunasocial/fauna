@@ -2324,12 +2324,19 @@ pub struct FfiSealedChunk {
 /// A whole file sealed for the byte plane by [`webdav_seal_file`].
 #[derive(uniffi::Record)]
 pub struct FfiSealedFile {
-    /// Canonical dag-cbor `ChunkManifest` with `stored_hashes` populated —
-    /// byte-identical to what the sync engine uploads for the same bytes.
+    /// The manifest the change record names, byte-identical to what the sync
+    /// engine uploads for the same bytes: the single canonical `ChunkManifest`
+    /// (store keys populated, plaintext hashes sealed) for a file at or under
+    /// the inline bound, else the paged **root** (`file-sync.md` § Paged
+    /// manifests).
     pub manifest_bytes: Vec<u8>,
     /// `blake3(manifest_bytes)` (32 bytes) — the change record's manifest hash
-    /// and the DAV ETag.
+    /// and the DAV ETag; a paged file's root hash.
     pub manifest_hash: Vec<u8>,
+    /// A paged file's encoded pages, in file order — each POSTed to the page
+    /// door (`/api/v1/manifest-pages`) after the chunks and before the root.
+    /// Empty for a file at or under the inline bound.
+    pub manifest_pages: Vec<Vec<u8>>,
     /// The content-key generation the chunks were sealed under
     /// (`keys.current.version`) — stamp exactly this into the change record.
     pub content_key_version: u64,
@@ -2364,15 +2371,36 @@ fn current_content_root(keys: &FfiFolderContentKeys, what: &str) -> Result<[u8; 
 /// Seals under `current` and returns that generation together, so the record
 /// stamps the generation the bytes were actually sealed under by construction
 /// (the same invariant [`webdav_seal_path`] states for the label).
+///
+/// A file of more chunks than the inline bound comes back paged — the root in
+/// `manifest_bytes`, its pages in `manifest_pages` — cut by the engine's own
+/// writer (`ChunkManifest::into_wire_parts`), so the same content gives the
+/// same root hash whichever of the two wrote it (`file-sync.md` § Paged
+/// manifests).
 #[uniffi::export]
 pub fn webdav_seal_file(
     keys: FfiFolderContentKeys,
     data: Vec<u8>,
 ) -> Result<FfiSealedFile, FfiError> {
+    seal_file_under(
+        keys,
+        &data,
+        &fauna_core::manifest_paging::PagingRule::STANDARD,
+    )
+}
+
+/// [`webdav_seal_file`] under an explicit paging rule — production's is
+/// `PagingRule::STANDARD`; tests pass a small one so a few-megabyte file takes
+/// the paged path.
+fn seal_file_under(
+    keys: FfiFolderContentKeys,
+    data: &[u8],
+    rule: &fauna_core::manifest_paging::PagingRule,
+) -> Result<FfiSealedFile, FfiError> {
     let version = keys.current.version;
     let root = current_content_root(&keys, "webdav seal file")?;
     let sealed = fauna_sync_engine::seal::seal_blob(
-        &data,
+        data,
         Some((
             root,
             Some(fauna_core::blob_seal::SealStamp::Version(version)),
@@ -2381,9 +2409,20 @@ pub fn webdav_seal_file(
     .map_err(|e| FfiError::General {
         msg: format!("webdav seal file: {e:#}"),
     })?;
+    // The engine's writer (its `manifest_wire`): at or under the inline bound
+    // this is `sealed.manifest_bytes` byte for byte, above it the root and its
+    // pages.
+    let (manifest_bytes, manifest_pages) = sealed
+        .manifest
+        .into_wire_parts_with(rule, Some(&root))
+        .map_err(|e| FfiError::General {
+            msg: format!("webdav seal file: manifest wire parts: {e:#}"),
+        })?;
+    let manifest_hash = fauna_core::data::ContentHash::of_raw(&manifest_bytes);
     Ok(FfiSealedFile {
-        manifest_bytes: sealed.manifest_bytes,
-        manifest_hash: sealed.manifest_hash.digest().to_vec(),
+        manifest_bytes,
+        manifest_hash: manifest_hash.digest().to_vec(),
+        manifest_pages,
         content_key_version: version,
         chunks: sealed
             .chunks
@@ -2402,6 +2441,9 @@ pub fn webdav_seal_file(
 struct SuppliedBlobs {
     manifest_hash: fauna_core::data::ContentHash,
     manifest_bytes: Vec<u8>,
+    /// A paged root's pages by address (empty for a single manifest) — the
+    /// walk fetches each from the manifest route, as the nest serves them.
+    pages: std::collections::HashMap<fauna_core::data::ContentHash, Vec<u8>>,
     chunks: std::collections::HashMap<fauna_core::data::ContentHash, Vec<u8>>,
 }
 
@@ -2411,14 +2453,17 @@ impl fauna_core::file_download::BlobFetcher for SuppliedBlobs {
         &self,
         hash: &fauna_core::data::ContentHash,
     ) -> anyhow::Result<Vec<u8>> {
-        if *hash != self.manifest_hash {
-            anyhow::bail!(
-                "webdav open file: the walk asked for manifest {} but the MDA supplied {}",
+        if *hash == self.manifest_hash {
+            return Ok(self.manifest_bytes.clone());
+        }
+        self.pages.get(hash).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "webdav open file: the walk asked for manifest blob {} but the MDA supplied it \
+                 neither as the manifest ({}) nor as a page",
                 hex::encode(hash.digest()),
                 hex::encode(self.manifest_hash.digest())
-            );
-        }
-        Ok(self.manifest_bytes.clone())
+            )
+        })
     }
 
     async fn fetch_chunks(
@@ -2440,6 +2485,81 @@ impl fauna_core::file_download::BlobFetcher for SuppliedBlobs {
     }
 }
 
+/// The one manifest walk without a key (`file-sync.md` § Paged manifests →
+/// *One walk, used by every reader*), split for a caller that does its own
+/// fetching: the page addresses a manifest names, in file order, for the MDA
+/// to fetch from `GET /api/v1/manifests/{hash}` — empty for a single
+/// manifest, whose chunk list is inline. The bytes are decoded and held to
+/// their shape's reader-version, shape and size checks; nothing is opened.
+#[uniffi::export]
+pub fn webdav_manifest_page_hashes(manifest_bytes: Vec<u8>) -> Result<Vec<Vec<u8>>, FfiError> {
+    let walk = open_keyless_walk(&manifest_bytes)?;
+    Ok(walk
+        .page_refs()
+        .iter()
+        .map(|p| p.hash.digest().to_vec())
+        .collect())
+}
+
+/// The file's store keys (32-byte ciphertext hashes for a sealed file), in
+/// file order across every page — what the MDA fetches from
+/// `GET /api/v1/chunks/{key}` before [`webdav_open_file`]. `page_bodies` are
+/// the pages [`webdav_manifest_page_hashes`] named, in that order (empty for a
+/// single manifest); each is verified by the walk against the address, entry
+/// count and byte length its root names before a key in it is used.
+#[uniffi::export]
+pub fn webdav_manifest_store_keys(
+    manifest_bytes: Vec<u8>,
+    page_bodies: Vec<Vec<u8>>,
+) -> Result<Vec<Vec<u8>>, FfiError> {
+    let walk = open_keyless_walk(&manifest_bytes)?;
+    Ok(walk_pages(&walk, &page_bodies)?
+        .into_iter()
+        .flat_map(|p| p.store_keys)
+        .map(|k| k.digest().to_vec())
+        .collect())
+}
+
+/// Decode a manifest of either shape and open it for the keyless walk.
+fn open_keyless_walk(
+    manifest_bytes: &[u8],
+) -> Result<fauna_core::manifest_paging::PageWalk, FfiError> {
+    let manifest: fauna_core::chunk::ChunkManifest =
+        fauna_core::encoding::canonical_decode(manifest_bytes).map_err(|e| FfiError::General {
+            msg: format!("webdav manifest: decode: {e:#}"),
+        })?;
+    fauna_core::manifest_paging::PageWalk::open(manifest, None).map_err(|e| FfiError::General {
+        msg: format!("webdav manifest: {e:#}"),
+    })
+}
+
+/// Every page of `walk` — a root's opened from `page_bodies` in root order, a
+/// count mismatch refused before any page is read; a single manifest's one
+/// page from the manifest itself.
+fn walk_pages(
+    walk: &fauna_core::manifest_paging::PageWalk,
+    page_bodies: &[Vec<u8>],
+) -> Result<Vec<fauna_core::manifest_paging::WalkedPage>, FfiError> {
+    let want = walk.page_refs().len();
+    if page_bodies.len() != want {
+        return Err(FfiError::General {
+            msg: format!(
+                "webdav manifest: the manifest names {want} pages but {} were supplied",
+                page_bodies.len()
+            ),
+        });
+    }
+    (0..walk.page_count())
+        .map(|i| {
+            let bytes = walk.page_to_fetch(i).map(|_| page_bodies[i].as_slice());
+            walk.open_page(i, bytes)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(|e| FfiError::General {
+            msg: format!("webdav manifest: {e:#}"),
+        })
+}
+
 /// Open a DAV GET's file — the apps' shared walk
 /// (`fauna_core::file_download::download_file_bytes_by_manifest`) over the
 /// manifest and ciphertext chunk bodies the MDA fetched by store key, under
@@ -2450,25 +2570,28 @@ impl fauna_core::file_download::BlobFetcher for SuppliedBlobs {
 /// files sealed unframed), and the whole-file
 /// content-address verify. Returns the plaintext.
 ///
-/// `chunk_bodies` are in manifest order — one per `stored_hashes[i]`, exactly
-/// as `deserialize_manifest` lists them; a count mismatch is an error before
-/// any crypto runs.
+/// `page_bodies` are a paged root's pages in root order — as
+/// [`webdav_manifest_page_hashes`] names them; empty for a single manifest —
+/// and `chunk_bodies` the file's chunks in file order, one per store key
+/// exactly as [`webdav_manifest_store_keys`] lists them; a count mismatch is
+/// an error before any crypto runs.
 #[uniffi::export]
 pub fn webdav_open_file(
     keys: FfiFolderContentKeys,
     content_key_version: u64,
     relative_path: String,
     manifest_bytes: Vec<u8>,
+    page_bodies: Vec<Vec<u8>>,
     chunk_bodies: Vec<Vec<u8>>,
 ) -> Result<Vec<u8>, FfiError> {
     use fauna_core::data::ContentHash;
 
     let custody = webdav_custody(keys)?;
-    let manifest: fauna_core::chunk::ChunkManifest =
-        fauna_core::encoding::canonical_decode(&manifest_bytes).map_err(|e| FfiError::General {
-            msg: format!("webdav open file: decode manifest: {e:#}"),
-        })?;
-    let store_keys = manifest.store_keys();
+    let walk = open_keyless_walk(&manifest_bytes)?;
+    let store_keys: Vec<ContentHash> = walk_pages(&walk, &page_bodies)?
+        .into_iter()
+        .flat_map(|p| p.store_keys)
+        .collect();
     if store_keys.len() != chunk_bodies.len() {
         return Err(FfiError::General {
             msg: format!(
@@ -2480,9 +2603,16 @@ pub fn webdav_open_file(
         });
     }
     let manifest_hash = ContentHash::of_raw(&manifest_bytes);
+    let pages = walk
+        .page_refs()
+        .iter()
+        .map(|p| p.hash)
+        .zip(page_bodies)
+        .collect();
     let fetcher = SuppliedBlobs {
         manifest_hash,
         manifest_bytes,
+        pages,
         chunks: store_keys.into_iter().zip(chunk_bodies).collect(),
     };
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2657,6 +2787,7 @@ mod webdav_keys_tests {
             put.content_key_version,
             "docs/report.txt".into(),
             put.manifest_bytes.clone(),
+            Vec::new(),
             bodies_of(&put),
         )
         .unwrap();
@@ -2676,6 +2807,7 @@ mod webdav_keys_tests {
             2,
             "docs/report.txt".into(),
             engine.manifest_bytes.clone(),
+            Vec::new(),
             engine.chunks.iter().map(|(_, b)| b.clone()).collect(),
         )
         .unwrap();
@@ -2710,6 +2842,7 @@ mod webdav_keys_tests {
             2,
             "docs/a.txt".into(),
             engine.manifest_bytes.clone(),
+            Vec::new(),
             bodies.clone(),
         )
         .unwrap();
@@ -2721,6 +2854,7 @@ mod webdav_keys_tests {
             7,
             "docs/a.txt".into(),
             engine.manifest_bytes.clone(),
+            Vec::new(),
             bodies.clone(),
         )
         .unwrap_err();
@@ -2741,6 +2875,7 @@ mod webdav_keys_tests {
                 2,
                 "docs/a.txt".into(),
                 engine.manifest_bytes,
+                Vec::new(),
                 bodies
             )
             .is_err()
@@ -2781,6 +2916,7 @@ mod webdav_keys_tests {
             3,
             "docs/raw.bin".into(),
             manifest_bytes,
+            Vec::new(),
             sealed.into_iter().map(|(_, b)| b).collect(),
         )
         .unwrap();
@@ -2797,11 +2933,250 @@ mod webdav_keys_tests {
         let put = webdav_seal_file(keys.clone(), file_body()).unwrap();
         let mut bodies = bodies_of(&put);
         bodies.pop();
-        let err =
-            webdav_open_file(keys, 3, "docs/x.txt".into(), put.manifest_bytes, bodies).unwrap_err();
+        let err = webdav_open_file(
+            keys,
+            3,
+            "docs/x.txt".into(),
+            put.manifest_bytes,
+            Vec::new(),
+            bodies,
+        )
+        .unwrap_err();
         assert!(
             format!("{err:?}").contains("bodies were supplied"),
             "{err:?}"
+        );
+    }
+
+    // ── Paged manifests: the MDA writes and reads them as the engine does ──
+
+    /// The small rule the paged tests seal under: a file of more than two
+    /// chunks pages, and every entry ends a page (page bounds 1..=2, a cut on
+    /// every key), so a three-chunk file is a root of three pages.
+    fn small_rule() -> fauna_core::manifest_paging::PagingRule {
+        fauna_core::manifest_paging::PagingRule::with_thresholds(2, 1, 2, 0)
+    }
+
+    /// The engine's writer over the same bytes — its `seal_blob` then its
+    /// `manifest_wire` (`ChunkManifest::into_wire_parts_with`) — the parts a
+    /// sync engine posts for this file.
+    fn engine_wire(
+        data: &[u8],
+        root: [u8; 32],
+        version: u64,
+        rule: &fauna_core::manifest_paging::PagingRule,
+    ) -> (
+        Vec<u8>,
+        Vec<Vec<u8>>,
+        Vec<(fauna_core::data::ContentHash, Vec<u8>)>,
+    ) {
+        let sealed = fauna_sync_engine::seal::seal_blob(
+            data,
+            Some((
+                root,
+                Some(fauna_core::blob_seal::SealStamp::Version(version)),
+            )),
+        )
+        .unwrap();
+        let (bytes, pages) = sealed
+            .manifest
+            .into_wire_parts_with(rule, Some(&root))
+            .unwrap();
+        (bytes, pages, sealed.chunks)
+    }
+
+    /// A file over the inline bound comes back from the MDA's seal door as a
+    /// root and its pages — the same bytes the engine posts, so the same
+    /// content uploaded by either yields the same root `manifest_hash`
+    /// (`file-sync.md` § Paged manifests). At or under the bound nothing pages
+    /// and the manifest is the single one, byte for byte.
+    #[test]
+    fn webdav_seal_file_pages_a_large_file_to_the_engines_root() {
+        let keys = FfiFolderContentKeys {
+            current: keygen(3, 0xC1),
+            prior: vec![],
+        };
+        let data = multi_chunk_body();
+        let sealed = seal_file_under(keys.clone(), &data, &small_rule()).unwrap();
+        let (engine_root, engine_pages, engine_chunks) =
+            engine_wire(&data, [0xC1; 32], 3, &small_rule());
+
+        assert!(
+            sealed.chunks.len() > 2,
+            "the fixture must pass the small rule's inline bound"
+        );
+        assert!(!sealed.manifest_pages.is_empty(), "a paged file has pages");
+        assert_eq!(sealed.manifest_bytes, engine_root);
+        assert_eq!(
+            sealed.manifest_hash,
+            fauna_core::data::ContentHash::of_raw(&engine_root)
+                .digest()
+                .to_vec()
+        );
+        assert_eq!(sealed.manifest_pages, engine_pages);
+        assert_eq!(sealed.chunks.len(), engine_chunks.len());
+        let root: fauna_core::chunk::ChunkManifest =
+            fauna_core::encoding::canonical_decode(&sealed.manifest_bytes).unwrap();
+        assert!(root.is_paged(), "the manifest the record names is a root");
+
+        // The production rule: this file is far under the inline bound, so
+        // the single manifest and no pages — the door unchanged.
+        let single = webdav_seal_file(keys, data).unwrap();
+        assert!(single.manifest_pages.is_empty());
+        assert_ne!(single.manifest_hash, sealed.manifest_hash);
+    }
+
+    /// DAV GET of a paged file: the keyless walk names the pages to fetch and
+    /// the store keys across them, and the open walk returns the plaintext —
+    /// for a root the MDA wrote and one an app's engine wrote alike. Pages
+    /// supplied short, or in the wrong order, are refused before any chunk is
+    /// read.
+    #[test]
+    fn webdav_open_file_reads_a_paged_root() {
+        let keys = FfiFolderContentKeys {
+            current: keygen(3, 0xC1),
+            prior: vec![keygen(2, 0xB2)],
+        };
+        let data = multi_chunk_body();
+        let put = seal_file_under(keys.clone(), &data, &small_rule()).unwrap();
+
+        let page_hashes = webdav_manifest_page_hashes(put.manifest_bytes.clone()).unwrap();
+        let want: Vec<Vec<u8>> = put
+            .manifest_pages
+            .iter()
+            .map(|p| fauna_core::data::ContentHash::of_raw(p).digest().to_vec())
+            .collect();
+        assert_eq!(page_hashes, want);
+        let store_keys =
+            webdav_manifest_store_keys(put.manifest_bytes.clone(), put.manifest_pages.clone())
+                .unwrap();
+        let chunk_keys: Vec<Vec<u8>> = put.chunks.iter().map(|c| c.store_key.clone()).collect();
+        assert_eq!(store_keys, chunk_keys);
+
+        let got = webdav_open_file(
+            keys.clone(),
+            3,
+            "docs/large.bin".into(),
+            put.manifest_bytes.clone(),
+            put.manifest_pages.clone(),
+            bodies_of(&put),
+        )
+        .unwrap();
+        assert_eq!(got, data);
+
+        // An app's engine wrote this root under the prior generation.
+        let (root, pages, chunks) = engine_wire(&data, [0xB2; 32], 2, &small_rule());
+        let got = webdav_open_file(
+            keys.clone(),
+            2,
+            "docs/large.bin".into(),
+            root,
+            pages,
+            chunks.into_iter().map(|(_, b)| b).collect(),
+        )
+        .unwrap();
+        assert_eq!(got, data);
+
+        // Short and reordered page lists are refused by the walk.
+        let mut short = put.manifest_pages.clone();
+        short.pop();
+        let err = webdav_manifest_store_keys(put.manifest_bytes.clone(), short).unwrap_err();
+        assert!(format!("{err:?}").contains("pages but"), "{err:?}");
+        let mut swapped = put.manifest_pages.clone();
+        swapped.swap(0, 1);
+        let err = webdav_open_file(
+            keys,
+            3,
+            "docs/large.bin".into(),
+            put.manifest_bytes.clone(),
+            swapped,
+            bodies_of(&put),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("its root names"),
+            "a page out of place must fail its root's check: {err:?}"
+        );
+    }
+
+    /// The Go WebDAV tests' paged fixture
+    /// (`bins/fauna-bridges/internal/mda/webdav/testdata/paged_manifest.json`):
+    /// a file sealed under the small rule by this door, written down so the
+    /// bridge's PUT and GET legs can be tested over a real root and real pages
+    /// without a 64 GB file — the shipped library pages only at the production
+    /// bound. This test holds the committed file to what the seal produces now,
+    /// so a drift in the writer reds here; `FAUNA_WRITE_WEBDAV_PAGED_FIXTURE=1`
+    /// rewrites it.
+    #[test]
+    fn webdav_paged_fixture_for_the_go_bridge_is_current() {
+        let keys = FfiFolderContentKeys {
+            current: FfiContentKeyGeneration {
+                version: 3,
+                key: vec![0x42; 32],
+                rotated_at: 1,
+            },
+            prior: vec![],
+        };
+        // Three constant runs: past the 8 MiB single-chunk threshold, so the
+        // file spans several chunks, and compressible, so the sealed bodies
+        // the fixture carries stay small.
+        let segments: [(u8, usize); 3] = [(b'a', 6 << 20), (b'b', 6 << 20), (b'c', 6 << 20)];
+        let data: Vec<u8> = segments
+            .iter()
+            .flat_map(|&(byte, len)| std::iter::repeat_n(byte, len))
+            .collect();
+        let sealed = seal_file_under(keys, &data, &small_rule()).unwrap();
+        assert!(
+            sealed.manifest_pages.len() >= 3,
+            "the fixture must page into at least three pages"
+        );
+        let root: fauna_core::chunk::ChunkManifest =
+            fauna_core::encoding::canonical_decode(&sealed.manifest_bytes).unwrap();
+        let page_byte_lens: Vec<u64> = root
+            .pages
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|p| p.byte_len)
+            .collect();
+
+        let fixture = serde_json::json!({
+            "about": "Written by libs/fauna-ffi/src/mail.rs \
+                      webdav_paged_fixture_for_the_go_bridge_is_current — do not edit by hand.",
+            "key_version": 3,
+            "key_byte": 0x42,
+            "segments": segments
+                .iter()
+                .map(|&(byte, len)| serde_json::json!({"byte": byte, "len": len}))
+                .collect::<Vec<_>>(),
+            "manifest_hex": hex::encode(&sealed.manifest_bytes),
+            "manifest_hash_hex": hex::encode(&sealed.manifest_hash),
+            "pages_hex": sealed.manifest_pages.iter().map(hex::encode).collect::<Vec<_>>(),
+            "page_byte_lens": page_byte_lens,
+            "chunks": sealed
+                .chunks
+                .iter()
+                .map(|c| serde_json::json!({
+                    "address_hex": hex::encode(&c.store_key),
+                    "body_hex": hex::encode(&c.body),
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let text = serde_json::to_string_pretty(&fixture).unwrap() + "\n";
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bins/fauna-bridges/internal/mda/webdav/testdata/paged_manifest.json");
+        if std::env::var_os("FAUNA_WRITE_WEBDAV_PAGED_FIXTURE").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &text).unwrap();
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            committed == text,
+            "{} is not what the seal writes now — rerun this test with \
+             FAUNA_WRITE_WEBDAV_PAGED_FIXTURE=1 and commit the file with its re-pinned \
+             entries in the publish secret-scan allowlist (its hex runs are \
+             ciphertext and content addresses the secret scan flags by width)",
+            path.display()
         );
     }
 

@@ -28,7 +28,7 @@ Stamped 2026-11-07 at ac836c937b.
 2. [app] Uploading puts the file in the chosen folder, including a folder you just made — `docs/goal/ui/media.md` § User actions
    - `tests/e2e-unified/tests/test_media.py::test_media_upload_into_selected_set`
    - `tests/e2e-unified/tests/test_media.py::test_upload_into_a_freshly_created_empty_folder`
-   - `tests/e2e-unified/tests/test_media.py::test_media_upload_no_set_error`
+   - `tests/e2e-unified/tests/test_media.py::test_media_first_upload_makes_the_first_folder`
    - `tests/e2e-unified/tests/test_media.py::test_media_upload_reaches_the_folder_this_device_serves`
 3. [app] Deleting a file, with one confirmation, removes it from the browser and from your disk; cancelling changes nothing — `docs/goal/ui/media.md` § User actions
    - `tests/e2e-unified/tests/test_media.py::test_media_delete_removes_the_item`
@@ -71,17 +71,19 @@ Stamped 2026-11-07 at ac836c937b.
    - `tests/e2e-unified/tests/test_media_version_retention.py::test_a_scheduled_version_prune_waits_seven_days_and_cancelling_keeps_every_version`
 18. [nest] Only the folder's audience sees a file's versions: an admin outside it, or a non-member, gets nothing — `docs/goal/behavior/file-versions.md` § Wire surface
    - `tests/e2e-unified/tests/api/test_file_versions_metering_audience.py::test_only_the_folders_audience_sees_a_files_versions`
+19. [app] In a folder you may only read, delete and restore-an-earlier-version are not shown, and upload is disabled with the reason beside it before you press; until the page's first read has answered, upload says it is still loading, or failed to load — `docs/goal/ui/media.md` § What this person may write
+    - `tests/e2e-unified/tests/test_media_offer_only_possible.py::test_a_reader_is_not_offered_delete_or_restore_and_upload_says_why`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1e755069 standalone |
-| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
+| web | ⚠ partial | 0.1.5-dev+1e755069 standalone |
+| linux | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | windows | ⚠ partial | 0.1.5-dev+1e755069 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+1e755069 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 | android-kids |  no run recorded | |
@@ -94,7 +96,7 @@ Stamped 2026-11-07 at ac836c937b.
 | 1 | app | `tests/e2e-unified/tests/test_media.py::test_media_empty_state_marks_a_loaded_page_not_a_loading_one` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_into_selected_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_media.py::test_upload_into_a_freshly_created_empty_folder` | tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_no_set_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_first_upload_makes_the_first_folder` | tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_reaches_the_folder_this_device_serves` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_media.py::test_media_delete_removes_the_item` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_media.py::test_media_delete_removes_the_file_from_disk` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
@@ -110,7 +112,7 @@ Stamped 2026-11-07 at ac836c937b.
 | 9 | app | `tests/e2e-unified/tests/test_media.py::test_media_item_shows_its_picture_or_a_placeholder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_version_prune_recovery.py::test_version_prune_soft_prunes_and_the_ui_recovers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_with_no_file_chosen_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_state` | web (linux): failed, linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_state` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_in_a_full_folder_is_reachable_with_no_seat_connected` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_media.py::test_upload_into_a_metadata_only_folder_is_refused_with_its_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_media.py::test_media_sort_direction_select_reverses_the_active_sort_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -122,4 +124,5 @@ Stamped 2026-11-07 at ac836c937b.
 | 17 | app | `tests/e2e-unified/tests/test_version_prune_recovery.py::test_version_prune_soft_prunes_and_the_ui_recovers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_media_version_retention.py::test_a_scheduled_version_prune_waits_seven_days_and_cancelling_keeps_every_version` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 18 | nest | `tests/e2e-unified/tests/api/test_file_versions_metering_audience.py::test_only_the_folders_audience_sees_a_files_versions` | nest (linux): passed |
+| 19 | app | `tests/e2e-unified/tests/test_media_offer_only_possible.py::test_a_reader_is_not_offered_delete_or_restore_and_upload_says_why` — requires `blocked-reason-read` (test harness) (not built: windows) | tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

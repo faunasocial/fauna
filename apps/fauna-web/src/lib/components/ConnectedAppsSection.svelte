@@ -30,9 +30,11 @@
     composeRequestCard,
     composeRequestInstall,
     composeRosterRow,
+    connectCodePossibility,
     createConnectedAppsMachine,
     factsSeparator,
     lineSeparator,
+    requestApprovePossibility,
     type ConnectedAppRow,
     type ConnectedAppsMachine,
     type ConnectedAppsSnapshot,
@@ -47,8 +49,10 @@
     historyLineText,
     principalScopeLabels,
     principalStatusLabel,
+    readPossibility,
     resolveMuaUsername,
   } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal, type Possibility } from '#lib/form-gate';
   import { t } from '#lib/i18n/strings';
   import { localTimestamp } from '#lib/value-format';
   import { IDS } from '#lib/generated/uiIds';
@@ -61,6 +65,12 @@
   // until its own read has returned (`connected-apps.md` § Errors & edge cases).
   let snap = $state<ConnectedAppsSnapshot | null>(null);
   let codeInput = $state('');
+  // `connected-apps-connect-submit`'s answer — the shared
+  // `connect_code_possibility` (`docs/goal/ui/connected-apps.md` § Errors &
+  // edge cases): painted on the button, asked again by the press and Enter
+  // before the lookup, so a blank code is never sent. Unreadable (disabled, no
+  // reason) until the chunk is up.
+  const connectGate = $derived(formGate(askPossibility(() => connectCodePossibility(codeInput))));
   // The row key whose inline revoke confirm is open.
   let revokeArmed = $state<string | null>(null);
   // Mail app-password secrets the user revealed, by row key. Held only while
@@ -73,6 +83,8 @@
   // True while a visit's own read is in flight: the machine still holds the
   // previous visit's snapshot until that read lands, so no fold may paint it.
   let reading = false;
+  // The core wasm is up — the switch's pre-fold answer is askable from here.
+  let wasmReady = $state(false);
 
   function fold(): void {
     if (!machine || destroyed || reading) return;
@@ -89,6 +101,7 @@
     try {
       // The core chunk resolves a mail row's login (`resolveMuaUsername`).
       await ensureWasm();
+      wasmReady = true;
       const built = await createConnectedAppsMachine(
         { onChanged: () => fold() },
         await sharedRpcPort(id.secretHex),
@@ -141,8 +154,13 @@
   });
 
   async function submitCode(): Promise<void> {
+    if (!machine) return;
+    const refusal = formRefusal(askPossibility(() => connectCodePossibility(codeInput)));
+    if (refusal !== null) {
+      error = refusal;
+      return;
+    }
     const code = codeInput.trim();
-    if (!machine || !code) return;
     await machine.submitCode(code);
     codeInput = '';
     fold();
@@ -150,6 +168,16 @@
 
   async function resolveRequest(request: ConsentCardRow, approved: boolean): Promise<void> {
     if (!machine) return;
+    // Approve asks the card's shared answer again (over the freshest snapshot)
+    // and refuses with the same reason; Decline is never gated.
+    if (approved) {
+      const card = snap?.requests.find((r) => r.consent_id_hex === request.consent_id_hex) ?? request;
+      const refusal = formRefusal(askPossibility(() => requestApprovePossibility(card)));
+      if (refusal !== null) {
+        error = refusal;
+        return;
+      }
+    }
     await machine.resolveRequest(request.consent_id_hex, approved);
     fold();
   }
@@ -168,11 +196,36 @@
     fold();
   }
 
+  // `atproto-external-apps-enable`'s answer — the shared
+  // `ConnectedAppsSnapshot::external_apps_possibility` over the page's own
+  // snapshot (`connected-apps.md` § Errors & edge cases): still loading until
+  // this visit's read returned, so the unread flag's default (ON) is never
+  // written back as a choice (`ui/README.md` § Offer only what is possible,
+  // rules 5–7). Before the fold (`snap` null — the machine may still hold the
+  // previous visit's snapshot) the answer is the shared pending read's;
+  // `null` while no wasm core is up. Matches tui's `ConnectedAppsToggleExternalApps`.
+  function externalAppsAnswer(): Possibility | null {
+    if (snap === null || machine === null) {
+      return askPossibility(() => readPossibility('pending'));
+    }
+    const raw = machine.externalAppsPossibilityJson();
+    return raw ? (JSON.parse(raw) as Possibility) : null;
+  }
+  const externalAppsPaint = $derived.by(() => {
+    void snap; // re-read on every fold
+    return formGate(wasmReady ? externalAppsAnswer() : null);
+  });
+
   // Non-optimistic: the machine writes, re-reads, and the toggle paints the
-  // re-read's `external_apps_off`, never a local guess.
+  // re-read's `external_apps_off`, never a local guess. The press asks the
+  // switch's answer again and refuses on `error-message` before the read.
   async function toggleExternalApps(): Promise<void> {
-    if (!machine) return;
-    await machine.setExternalAppsEnabled(!!snap?.external_apps_off);
+    const refusal = formRefusal(externalAppsAnswer());
+    if (refusal !== null || !machine || !snap) {
+      if (refusal) error = refusal;
+      return;
+    }
+    await machine.setExternalAppsEnabled(snap.external_apps_off);
     fold();
   }
 
@@ -287,6 +340,7 @@
     {#each snap?.requests ?? [] as request (request.consent_id_hex)}
       {@const install = composeRequestInstall(request)}
       {@const picker = request.folder_picker ?? null}
+      {@const approveGate = formGate(askPossibility(() => requestApprovePossibility(request)))}
       <div class="card" data-testid={IDS.CONNECTED_APPS_REQUEST_CARD}>
         <!-- The card's lines are composed once in shared Rust
              (`compose::request_card_lines`): heading, who is asking, the scopes
@@ -338,8 +392,10 @@
         <!-- Both controls render unconditionally — never gated on how close the
              request is to expiring: a resolution is reported even past expiry. -->
         <div class="actions">
-          <!-- A bare folder card is approvable only once a folder is chosen. -->
-          <button class="btn btn-primary" data-testid={IDS.CONNECTED_APPS_REQUEST_APPROVE} disabled={picker !== null && picker.chosen === null} onclick={() => resolveRequest(request, true)}>
+          <!-- The card's shared `approve_possibility`: a bare folder card is
+               approvable only once a folder is chosen, else disabled with the
+               picker's reason. -->
+          <button class="btn btn-primary" data-testid={IDS.CONNECTED_APPS_REQUEST_APPROVE} disabled={approveGate.disabled} title={approveGate.reason || undefined} onclick={() => resolveRequest(request, true)}>
             {t.atproto_settings.consent_approve_button}
           </button>
           <button class="btn" data-testid={IDS.CONNECTED_APPS_REQUEST_DECLINE} onclick={() => resolveRequest(request, false)}>
@@ -367,21 +423,31 @@
     <button
       class="btn btn-primary"
       data-testid={IDS.CONNECTED_APPS_CONNECT_SUBMIT}
-      disabled={!codeInput.trim()}
+      disabled={connectGate.disabled}
+      title={connectGate.reason || undefined}
       onclick={submitCode}
     >{t.connected_apps.connect_submit}</button>
   </div>
 
   <!-- 3. The external-apps switch, then the roster it pauses — at every
        integration level (the flag is the account's). An absent snapshot paints
-       the flag's own default, ON. The hint carries no id (ui.yaml gives it none). -->
-  <button
-    class="btn toggle"
-    class:on={!snap?.external_apps_off}
-    data-testid={IDS.ATPROTO_EXTERNAL_APPS_ENABLE}
-    data-state={snap?.external_apps_off ? 'off' : 'on'}
-    onclick={toggleExternalApps}
-  >{t.atproto_settings.external_apps_toggle}</button>
+       the flag's own default, ON, but the switch is not live until the read
+       returned (its shared answer; the reason beside it). The hint carries no
+       id (ui.yaml gives it none). -->
+  {#if externalAppsPaint.shown}
+    <button
+      class="btn toggle"
+      class:on={!snap?.external_apps_off}
+      data-testid={IDS.ATPROTO_EXTERNAL_APPS_ENABLE}
+      data-state={snap?.external_apps_off ? 'off' : 'on'}
+      disabled={externalAppsPaint.disabled}
+      title={externalAppsPaint.reason || undefined}
+      onclick={toggleExternalApps}
+    >{t.atproto_settings.external_apps_toggle}</button>
+    {#if externalAppsPaint.reason}
+      <p class="muted small">{externalAppsPaint.reason}</p>
+    {/if}
+  {/if}
   <p class="muted small">{t.atproto_settings.external_apps_hint}</p>
 
   <!-- The roster — the three-state list: nothing until the read returned,

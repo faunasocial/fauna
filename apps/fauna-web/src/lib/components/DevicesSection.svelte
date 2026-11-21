@@ -18,7 +18,12 @@
     accountEnrollmentNotice,
     accountEnrolledDeviceRow,
     accountKeylessPosture,
+    custodyMintPossibility,
+    custodyMintConfirmPossibility,
+    p2pParticipationPossibility,
   } from '#lib/wasm';
+  import type { P2pParticipationPaint } from '#lib/devices-machine';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import { sessionDevicesMachine } from '#lib/devices-session';
   import {
     custodyDegradedBadgeKey,
@@ -142,21 +147,36 @@
   let mintOpen = $state(false);
   let mintCandidates = $state<MintCandidate[]>([]);
   let mintSelected = $state<number | null>(null);
+  // The candidates this visit read — `null` before the read. The entry is
+  // gated from them (`custody_mint_possibility`, `ui/devices.md` § Errors &
+  // edge cases): not enabled before the read, blocked with the
+  // start-a-conversation step over none — never a refusal on click.
+  let mintRead = $state<MintCandidate[] | null>(null);
+  const mintEntryGate = $derived(formGate(askPossibility(() => custodyMintPossibility(mintRead))));
+  const mintConfirmGate = $derived(
+    formGate(askPossibility(() => custodyMintConfirmPossibility(mintSelected !== null))),
+  );
 
-  async function openMint(): Promise<void> {
+  /** Read the offer's host options; `null` while the conversations rail is not up. */
+  async function readMintCandidates(): Promise<MintCandidate[] | null> {
     const id = $identity;
-    if (!id) return;
-    let candidates: MintCandidate[] = [];
+    if (!id) return null;
     try {
       const mgr = await getConversationsManager();
-      candidates = mgr.custodyMintCandidatesJson(id.secretHex) as MintCandidate[];
+      mintRead = mgr.custodyMintCandidatesJson(id.secretHex) as MintCandidate[];
     } catch (e) {
       console.warn('custody mint: no conversations rail', e);
     }
-    if (candidates.length === 0) {
-      // No 1:1 conversation to ride — say so and stay closed, never an
-      // empty picker.
-      error = t.devices.custody_mint_no_contacts;
+    return mintRead;
+  }
+
+  async function openMint(): Promise<void> {
+    // The press asks the entry answer the button was painted from, over a
+    // fresh read, and refuses with its reason on `error-message`.
+    const candidates = await readMintCandidates();
+    const refusal = formRefusal(askPossibility(() => custodyMintPossibility(candidates)));
+    if (refusal !== null || candidates === null) {
+      error = refusal ?? t.common.still_loading;
       return;
     }
     error = '';
@@ -173,9 +193,12 @@
   async function confirmMint(): Promise<void> {
     const id = $identity;
     const picked = mintSelected === null ? undefined : mintCandidates[mintSelected];
+    const refusal = formRefusal(askPossibility(() => custodyMintConfirmPossibility(picked !== undefined)));
+    if (refusal !== null) {
+      error = refusal;
+      return;
+    }
     if (!id || !picked) return;
-    mintOpen = false;
-    mintSelected = null;
     let err: string | null;
     try {
       const mgr = await getConversationsManager();
@@ -184,6 +207,12 @@
       err = e instanceof Error ? e.message : String(e);
     }
     error = err ?? '';
+    // The flow closes only once the offer went through; a refusal keeps it
+    // open with the pick.
+    if (err === null || err === undefined) {
+      mintOpen = false;
+      mintSelected = null;
+    }
     // The pending row joins the holder group on this refold.
     await loadCustody();
   }
@@ -268,6 +297,7 @@
       // failure here degrades to "no custodians shown" rather than an empty
       // page — the roster is what this page is for.
       void loadCustody();
+      void readMintCandidates();
       void driveCustody().catch((e) => console.warn('custody drive:', e));
       void loadAccountFacts();
       // Periodic re-read so a device registered out-of-band shows up — and
@@ -306,9 +336,11 @@
   // The rename editor (`devices.md` § Device names, rule (1)): ONE editor,
   // keyed by the card's `device_id` — never a painted index — so a refresh
   // that reshapes the roster cannot retarget it. The input opens prefilled
-  // with the machine's opened name; confirm hands the machine the text (it
-  // sends nothing for a blank or unchanged name and paints every refusal on
-  // `error-message`); cancel closes without writing.
+  // with the machine's opened name. Confirm paints from the machine's draft
+  // answer (`renamePossibility`) and hands the machine the text — it asks the
+  // same answer, sends nothing for an unchanged name and paints every refusal
+  // on `error-message`; the editor closes only once the save went through
+  // (`ui/devices.md` § Errors & edge cases). Cancel closes without writing.
   let renamingId = $state<string | null>(null);
   let renameText = $state('');
   const openRenameId = $derived(
@@ -320,16 +352,43 @@
     renameText = machine?.deviceName(deviceId) ?? '';
   }
 
+  function renameGate(deviceId: string) {
+    return formGate(machine ? askPossibility(() => machine!.renamePossibility(deviceId, renameText)) : null);
+  }
+
+  // Whether the card carries `device-rename-button` at all: the shared answer
+  // over the row's unchanged name, Absent only for a row no rename can ever
+  // reach (the nest's WebDAV pseudo-device; `ui/README.md` § Offer only what is
+  // possible). No machine yet → painted, as tui.
+  function renameOffered(deviceId: string): boolean {
+    if (!machine) return true;
+    const name = machine.deviceName(deviceId) ?? '';
+    return formGate(askPossibility(() => machine!.renamePossibility(deviceId, name))).shown;
+  }
+
   async function confirmRename(deviceId: string): Promise<void> {
-    renamingId = null;
-    await machine?.renameDevice(deviceId, renameText);
+    if (!machine) return;
+    const saved = (await machine.saveDeviceName(deviceId, renameText)) as boolean;
+    if (saved) renamingId = null;
     applySnapshot();
   }
 
   // `device-p2p-participation-toggle[index]`: the machine takes the arm (on
   // web always the request-off one) and refreshes, or paints the refusal on
   // `error-message`; the re-snapshot repaints the row either way.
-  async function setP2pParticipation(index: number, on: boolean): Promise<void> {
+  // Painted from the shared `P2pParticipationPaint::possibility`
+  // (`ui/devices.md` § Errors & edge cases): a sibling turning off is blocked
+  // by its own label, an off one by "turn it on from that device"; the press
+  // asks the answer again and sends nothing when it is not possible.
+  function participationGate(paint: P2pParticipationPaint) {
+    return formGate(askPossibility(() => p2pParticipationPossibility(paint)));
+  }
+  async function setP2pParticipation(
+    index: number,
+    paint: P2pParticipationPaint,
+  ): Promise<void> {
+    if (formRefusal(askPossibility(() => p2pParticipationPossibility(paint))) !== null) return;
+    const on = !paint.checked;
     await machine?.setP2pParticipation(index, on);
     applySnapshot();
   }
@@ -459,17 +518,19 @@
                  A null paint is a row not painted yet — nothing to draw. -->
             {#if device.p2p_participation_paint}
               {@const paint = device.p2p_participation_paint}
+              {@const gate = participationGate(paint)}
               <label
                 class="p2p-participation"
                 data-testid={IDS.DEVICE_P2P_PARTICIPATION_TOGGLE}
                 data-checked={paint.checked ? 'true' : 'false'}
-                aria-disabled={paint.actionable ? 'false' : 'true'}
+                aria-disabled={gate.disabled ? 'true' : 'false'}
+                title={gate.reason}
               >
                 <input
                   type="checkbox"
                   checked={paint.checked}
-                  disabled={!paint.actionable}
-                  onchange={() => setP2pParticipation(i, !paint.checked)}
+                  disabled={gate.disabled}
+                  onchange={() => setP2pParticipation(i, paint)}
                 />
                 {resolveLocalized(paint.label)}
               </label>
@@ -486,12 +547,14 @@
                     else if (e.key === 'Escape') renamingId = null;
                   }}
                 />
-                <button class="btn btn-small" data-testid={IDS.DEVICE_RENAME_CONFIRM_BUTTON} onclick={() => confirmRename(device.device_id)}>{t.devices.rename_confirm}</button>
+                <button class="btn btn-small" data-testid={IDS.DEVICE_RENAME_CONFIRM_BUTTON} disabled={renameGate(device.device_id).disabled} title={renameGate(device.device_id).reason || undefined} onclick={() => confirmRename(device.device_id)}>{t.devices.rename_confirm}</button>
                 <button class="btn btn-small" data-testid={IDS.DEVICE_RENAME_CANCEL_BUTTON} onclick={() => (renamingId = null)}>{t.common.cancel}</button>
               </div>
             {/if}
             <div class="device-actions">
-              <button class="btn btn-small" data-testid={IDS.DEVICE_RENAME_BUTTON} onclick={() => openRename(device.device_id)}>{t.devices.rename}</button>
+              {#if renameOffered(device.device_id)}
+                <button class="btn btn-small" data-testid={IDS.DEVICE_RENAME_BUTTON} onclick={() => openRename(device.device_id)}>{t.devices.rename}</button>
+              {/if}
               <button class="btn btn-small btn-danger" data-testid={IDS.DEVICE_REMOVE_BUTTON} onclick={() => removeDevice(i)}>{t.common.remove}</button>
             </div>
           </div>
@@ -593,13 +656,16 @@
   {/if}
 
   <!-- Offer initiation — the mint (`custody-mint-*`, devices.md § Custody
-       facet). Always offered: the button answers "no one to ask yet" on
-       `error-message` rather than hiding, as on tui. -->
+       facet). Always shown, gated at the entry: disabled with its reason
+       (`title`) before the candidates are read or with no one to ask, as on
+       tui. -->
   <section class="section">
     <div class="device-actions">
       <button
         class="btn btn-small"
         data-testid={IDS.CUSTODY_MINT_BUTTON}
+        disabled={mintEntryGate.disabled}
+        title={mintEntryGate.reason || undefined}
         onclick={openMint}
       >{t.devices.custody_mint_button}</button>
     </div>
@@ -628,7 +694,8 @@
           <button
             class="btn btn-small"
             data-testid={IDS.CUSTODY_MINT_CONFIRM_BUTTON}
-            disabled={mintSelected === null}
+            disabled={mintConfirmGate.disabled}
+            title={mintConfirmGate.reason || undefined}
             onclick={confirmMint}
           >{t.devices.custody_mint_confirm}</button>
           <button

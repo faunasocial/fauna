@@ -61,11 +61,12 @@ public class ModerationViewModelSealedTrainTests
         public System.Exception? CorrectionFailure { get; set; }
         public System.Action? OnCorrection { get; set; }
         public Task<bool> SealedSpamWriteAvailableAsync() => Task.FromResult(SealedAvailable);
+        public System.Exception? TrainFailure { get; set; }
         public Task<SpamWriteResult> TrainSpamModelClientAsync(string text, bool isSpam)
         {
             TrainCalls++;
             LastTrain = (text, isSpam);
-            return Task.FromResult(NextResult);
+            return TrainFailure is null ? Task.FromResult(NextResult) : Task.FromException<SpamWriteResult>(TrainFailure);
         }
 
         public Task TrainModerationCorrectionAsync(string contentId, bool isSpam)
@@ -191,5 +192,42 @@ public class ModerationViewModelSealedTrainTests
         Assert.Equal(0, spam.TrainCalls);
         Assert.Contains("bb", local.Removed);
         Assert.Empty(spam.Corrections);
+    }
+
+    // 7. Local row: the train runs FIRST; a dispatch that fails is said on error-message
+    //    and the flag is KEPT, so the correction can be tried again (tui's Op::Correct).
+    [Fact]
+    public async Task Train_LocalRow_TrainFailure_KeepsTheFlag_AndShowsTheError()
+    {
+        var rpc = new MockNestRpcClient();
+        var local = new FakeLocal(LocalRow("bb", "spam", 720, 100)).WithBody("bb", "spam message body");
+        var spam = new FakeSpamWrite { TrainFailure = new System.InvalidOperationException("train dispatch failed") };
+        var vm = new ModerationViewModel(rpc, local, spam);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        await vm.TrainCommand.ExecuteAsync(vm.Actions[0]);
+
+        Assert.Equal(1, spam.TrainCalls);
+        Assert.Empty(local.Removed);
+        Assert.Single(vm.Actions);
+        Assert.NotNull(vm.ErrorMessage);
+    }
+
+    // 8. Local row: a degraded Ok outcome (unsealed, nothing written) stays silent and the
+    //    correction completes — the flag is removed.
+    [Fact]
+    public async Task Train_LocalRow_DegradedOutcome_IsSilent_AndRemoves()
+    {
+        var rpc = new MockNestRpcClient();
+        var local = new FakeLocal(LocalRow("bb", "spam", 720, 100)).WithBody("bb", "spam message body");
+        var spam = new FakeSpamWrite { NextResult = new(Sealed: false, SampleCount: 0) };
+        var vm = new ModerationViewModel(rpc, local, spam);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        await vm.TrainCommand.ExecuteAsync(vm.Actions[0]);
+
+        Assert.Contains("bb", local.Removed);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Empty(vm.Actions);
     }
 }

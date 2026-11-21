@@ -1,4 +1,7 @@
+using System.Collections.Generic;
 using FaunaApp.Core.ViewModels;
+using uniffi.fauna_core;
+using uniffi.fauna_devices_machine;
 using Xunit;
 
 namespace FaunaApp.Tests;
@@ -16,7 +19,16 @@ public class DevicesRenameEditorTests
     [Fact]
     public void ClosedCard_PaintsOnlyTheRenameButton()
     {
-        Assert.Equal(new[] { "device-rename-button" }, DevicesRenameEditor.CardElementIds(false));
+        Assert.Equal(
+            new[] { "device-rename-button" },
+            DevicesRenameEditor.CardElementIds(renameOffered: true, editorOpenOnThisCard: false));
+    }
+
+    [Fact]
+    public void CardOfferingNoRename_PaintsNoRenameElement()
+    {
+        Assert.Empty(DevicesRenameEditor.CardElementIds(renameOffered: false, editorOpenOnThisCard: false));
+        Assert.Empty(DevicesRenameEditor.CardElementIds(renameOffered: false, editorOpenOnThisCard: true));
     }
 
     [Fact]
@@ -30,7 +42,71 @@ public class DevicesRenameEditorTests
                 "device-rename-confirm-button",
                 "device-rename-cancel-button",
             },
-            DevicesRenameEditor.CardElementIds(true));
+            DevicesRenameEditor.CardElementIds(renameOffered: true, editorOpenOnThisCard: true));
+    }
+
+    // ── Which cards offer a rename (ui/devices.md § Device names) ─────────
+
+    /// <summary>A devices machine that answers the shared <c>rename_possibility</c>
+    /// as shared Rust does for the nest's WebDAV pseudo-device row (Absent) and
+    /// for an ordinary listed device (possible over its unchanged name), and
+    /// records the draft each ask carried.</summary>
+    private sealed class FakeRenameMachine : DevicesMachineFakeBase
+    {
+        public const string WebdavRow = "webdav-pseudo";
+        public readonly Dictionary<string, string?> Names = new()
+        {
+            ["dev-a"] = "Kitchen laptop",
+            [WebdavRow] = "WebDAV",
+            ["dev-unnamed"] = null,
+        };
+        public readonly List<(string DeviceId, string Draft)> Asks = new();
+
+        public override string? DeviceName(string deviceId)
+            => Names.TryGetValue(deviceId, out var name) ? name : null;
+
+        public override Possibility RenamePossibility(string deviceId, string draft)
+        {
+            Asks.Add((deviceId, draft));
+            return deviceId == WebdavRow || !Names.ContainsKey(deviceId)
+                ? new Possibility.Absent()
+                : new Possibility.Possible();
+        }
+    }
+
+    [Fact]
+    public void TheWebdavPseudoDeviceCard_OffersNoRename_WhileEveryOtherCardDoes()
+    {
+        var machine = new FakeRenameMachine();
+
+        Assert.False(DevicesRenameEditor.RenameOffered(machine, FakeRenameMachine.WebdavRow));
+        Assert.True(DevicesRenameEditor.RenameOffered(machine, "dev-a"));
+        Assert.True(DevicesRenameEditor.RenameOffered(machine, "dev-unnamed"));
+    }
+
+    [Fact]
+    public void RenameOffered_AsksOverTheRowsUnchangedName_OrEmptyWhenUnknown()
+    {
+        var machine = new FakeRenameMachine();
+
+        DevicesRenameEditor.RenameOffered(machine, "dev-a");
+        DevicesRenameEditor.RenameOffered(machine, "dev-unnamed");
+
+        Assert.Equal(
+            new[] { ("dev-a", "Kitchen laptop"), ("dev-unnamed", "") },
+            machine.Asks);
+    }
+
+    [Fact]
+    public void ARowTheRosterNoLongerLists_OffersNoRename()
+    {
+        Assert.False(DevicesRenameEditor.RenameOffered(new FakeRenameMachine(), "dev-gone"));
+    }
+
+    [Fact]
+    public void NoMachineYet_PaintsTheRenameButton()
+    {
+        Assert.True(DevicesRenameEditor.RenameOffered(null, "dev-a"));
     }
 
     [Fact]

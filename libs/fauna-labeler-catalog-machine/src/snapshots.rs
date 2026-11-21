@@ -249,12 +249,31 @@ impl LabelerCatalogSnapshot {
     /// through [`crate::LabelerCatalogMachine::subscribe_enabled`]), never a
     /// mirrored `verified` check of its own.
     pub fn subscribe_enabled(&self, index: u32) -> bool {
+        self.subscribe_possibility(index).is_possible()
+    }
+
+    /// The same gate as [`Self::subscribe_enabled`], with its reason
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rules 2 and 6;
+    /// the ruling is `docs/goal/ui/settings.md` § Errors & edge cases): absent
+    /// for a row that does not exist; blocked by
+    /// [`LabelerInspectView::subscribe_refusal_key`] when the open inspect view
+    /// is this row's and fails; possible otherwise. A row not yet inspected
+    /// stays possible on purpose: its press IS the inspect — the machine
+    /// verifies first and, on a refusal, opens the panel on the failing view
+    /// with this same reason — so nothing is written on a guess.
+    pub fn subscribe_possibility(&self, index: u32) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
         let Some(entry) = self.entries.get(index as usize) else {
-            return false;
+            return Possibility::Absent;
         };
-        self.inspecting
+        match self
+            .inspecting
             .as_ref()
             .filter(|v| v.labeler_id == entry.labeler_id)
-            .is_none_or(LabelerInspectView::subscribable)
+            .and_then(LabelerInspectView::subscribe_refusal_key)
+        {
+            Some(key) => Possibility::blocked(LocalizedText::key(key)),
+            None => Possibility::Possible,
+        }
     }
 }

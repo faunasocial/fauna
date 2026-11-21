@@ -159,11 +159,14 @@ use crate::bridge_method_allowlist::require_permission_default as require_permis
 /// `admin_actor_ids` so the client can decline to offer the lifecycle controls
 /// the nest refuses on an admin (`admin.md` § 2 → *Cutting a user off*).
 /// `guardian` names a supervised account's guardian (`family-safety.md`
-/// § App surface → *Admin take-over*).
+/// § App surface → *Admin take-over*). `last_superadmin` marks the one actor
+/// the superadmin floor protects, so a client shows removing it disabled with
+/// its reason (`admin.md` § 2 → *What a row offers*).
 fn user_to_wire(
     u: UserRow,
     mail_serving_enabled: bool,
     is_admin: bool,
+    last_superadmin: bool,
     guardian: Option<AdminUserGuardian>,
 ) -> AdminUser {
     let eviction = (!u.eviction_status.is_empty()).then(|| AdminEviction {
@@ -190,6 +193,7 @@ fn user_to_wire(
         eviction,
         mail_serving_enabled,
         is_admin,
+        last_superadmin,
         guardian,
         extra: Default::default(),
     }
@@ -211,6 +215,7 @@ fn guardian_to_wire(actor_id: Vec<u8>, handle: Option<String>) -> AdminUserGuard
 struct UserPageReads {
     serving: std::collections::HashMap<[u8; 32], bool>,
     admins: std::collections::HashSet<Vec<u8>>,
+    sole_superadmin: Option<Vec<u8>>,
     guardians: std::collections::HashMap<Vec<u8>, (Vec<u8>, Option<String>)>,
 }
 
@@ -222,6 +227,7 @@ async fn user_page_reads(state: &AppState) -> Result<UserPageReads, RpcError> {
             .await
             .map_err(internal)?,
         admins: admin_actor_set(state).await?,
+        sole_superadmin: state.db.sole_superadmin().await.map_err(internal)?,
         guardians: state
             .db
             .list_guardians_with_handles()
@@ -238,11 +244,12 @@ fn user_to_wire_with_overrides(u: UserRow, reads: &UserPageReads) -> AdminUser {
         .and_then(|id| reads.serving.get(&id).copied())
         .unwrap_or(true);
     let is_admin = reads.admins.contains(&u.actor_id);
+    let last_superadmin = reads.sole_superadmin.as_deref() == Some(u.actor_id.as_slice());
     let guardian = reads
         .guardians
         .get(&u.actor_id)
         .map(|(g, h)| guardian_to_wire(g.clone(), h.clone()));
-    user_to_wire(u, serving, is_admin, guardian)
+    user_to_wire(u, serving, is_admin, last_superadmin, guardian)
 }
 
 /// The set of actors holding the admin role, as one batch read — the companion
@@ -629,6 +636,7 @@ fn get_handler() -> RpcHandler {
                 .map_err(internal)?
                 .unwrap_or(true);
             let is_admin = state.db.is_admin(&target).await.map_err(internal)?;
+            let last_superadmin = !state.db.can_remove_admin(&target).await.map_err(internal)?;
             let guardian = match state.db.get_guardian_of(&target).await.map_err(internal)? {
                 Some(link) => {
                     let handle = match <[u8; 32]>::try_from(link.guardian_actor_id.as_slice()) {
@@ -645,7 +653,7 @@ fn get_handler() -> RpcHandler {
                 None => None,
             };
             encode_reply(&AdminUserGetReply {
-                user: user_to_wire(user, serving, is_admin, guardian),
+                user: user_to_wire(user, serving, is_admin, last_superadmin, guardian),
                 extra: Default::default(),
             })
         })

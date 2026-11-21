@@ -56,6 +56,7 @@ use fauna_client_mail_settings::{
     MailAliasesMachine, MailAliasesSnapshot, alias_expiry_label, alias_hits_label,
     alias_is_extendable, alias_kind_badge,
 };
+use fauna_core::possibility::Possibility;
 use fauna_i18n::strings::mail_aliases as t;
 
 use super::{Action, SettingsField, SettingsState};
@@ -383,13 +384,14 @@ fn import_result_text(snapshot: &MailAliasesSnapshot) -> Option<String> {
 /// as its `copied` attr after a mint so a test asserts the CONTENTS of the
 /// confirmation (OSC 52 is fire-and-forget; the `account-actor-id-copy-btn`
 /// copy-button contract).
-fn generate_button(a: &MailAliasesState, has_domain: bool) -> Element {
+fn generate_button(a: &MailAliasesState, create: &Possibility) -> Element {
     let button = Element::gesture_button(
         ids::MAIL_ALIASES_GENERATE_DISPOSABLE_BUTTON,
         t::GENERATE_BUTTON,
-        has_domain,
+        create.is_possible(),
         Gesture::Settings(Action::MailAliasesGenerateDisposable),
-    );
+    )
+    .possible(create.clone());
     match &a.minted_copied {
         Some(address) => button.attr("copied", address.clone()),
         None => button,
@@ -405,11 +407,12 @@ pub(super) fn mail_aliases_elements(state: &SettingsState) -> Vec<Element> {
     let a = &state.mail_aliases;
     let snapshot = a.snapshot.as_ref();
     // Every create path (add-sheet Create, the disposable mint, and the bulk
-    // import, which creates exact aliases too) needs a domain to create on. The
-    // machine derives it from the canonical exact alias; without mail enabled
-    // there is none and the nest would reject with `no_canonical_address`, so
-    // the affordances are disabled and the page says why (linux's `has_domain`).
-    let has_domain = snapshot.is_some_and(|s| s.default_domain.is_some());
+    // import, which creates exact aliases too) needs a domain to create on, so
+    // all three paint from the shared `MailAliasesSnapshot::create_possibility`
+    // (`ui/README.md` § Offer only what is possible, rule 6) — blocked with the
+    // reason until the canonical exact alias gives a domain; not known before
+    // the first snapshot (rule 5).
+    let create = snapshot.map_or(Possibility::once_read(false), |s| s.create_possibility());
 
     let mut els = vec![
         Element::label(ids::PAGE_HEADING, t::TITLE),
@@ -417,16 +420,18 @@ pub(super) fn mail_aliases_elements(state: &SettingsState) -> Vec<Element> {
         Element::gesture_button(
             ids::MAIL_ALIASES_ADD_BUTTON,
             t::ADD_BUTTON,
-            has_domain,
+            create.is_possible(),
             Gesture::Settings(Action::MailAliasesOpenAdd),
-        ),
+        )
+        .possible(create.clone()),
         Element::gesture_button(
             ids::MAIL_ALIASES_IMPORT_BUTTON,
             t::IMPORT_BUTTON,
-            has_domain,
+            create.is_possible(),
             Gesture::Settings(Action::MailAliasesOpenImport),
-        ),
-        generate_button(a, has_domain),
+        )
+        .possible(create.clone()),
+        generate_button(a, &create),
     ];
     // The mint's copy confirmation, beside the button that minted it.
     if let Some(address) = &a.minted_copied {
@@ -436,12 +441,12 @@ pub(super) fn mail_aliases_elements(state: &SettingsState) -> Vec<Element> {
     // has resolved and carries no error of its own to show instead.
     //
     // ⚠ Two conditions, two messages (`ui/README.md` rule 5 Q2 — the
-    // `error_no_set` / `error_no_sync_set` precedent). `has_domain` is false
-    // both *before* the hydrate resolves and *after* it resolves with mail
-    // off, and the user's next act differs: wait, versus go enable mail. The
+    // `error_no_set` / `error_no_sync_set` precedent). The create answer is
+    // not possible both *before* the hydrate resolves and *after* it resolves
+    // with no domain, and the user's next act differs: wait, versus go enable mail. The
     // pre-hydrate line rides below with the list, where it also displaces the
     // false "No aliases yet".
-    if snapshot.is_some() && !has_domain {
+    if snapshot.is_some() && !create.is_possible() {
         els.push(Element::chrome(t::NO_DEFAULT_DOMAIN));
     }
 
@@ -530,7 +535,7 @@ pub(super) fn mail_aliases_elements(state: &SettingsState) -> Vec<Element> {
             ids::MAIL_ALIASES_ADD_SHEET_SUBMIT_BUTTON,
             t::SUBMIT,
             // Edit needs no domain (the row already has one); create does.
-            editing || has_domain,
+            editing || create.is_possible(),
             Gesture::Settings(Action::MailAliasesSubmit { editing }),
         ));
         els.push(Element::gesture_button(
@@ -553,12 +558,15 @@ pub(super) fn mail_aliases_elements(state: &SettingsState) -> Vec<Element> {
             )
             .labelled(t::IMPORT_PLACEHOLDER),
         );
-        els.push(Element::gesture_button(
-            ids::MAIL_ALIASES_IMPORT_SUBMIT_BUTTON,
-            t::IMPORT_SUBMIT,
-            has_domain,
-            Gesture::Settings(Action::MailAliasesImportSubmit),
-        ));
+        els.push(
+            Element::gesture_button(
+                ids::MAIL_ALIASES_IMPORT_SUBMIT_BUTTON,
+                t::IMPORT_SUBMIT,
+                create.is_possible(),
+                Gesture::Settings(Action::MailAliasesImportSubmit),
+            )
+            .possible(create.clone()),
+        );
         els.push(Element::gesture_button(
             ids::MAIL_ALIASES_IMPORT_CANCEL_BUTTON,
             t::IMPORT_CANCEL,

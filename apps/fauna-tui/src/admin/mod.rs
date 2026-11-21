@@ -56,6 +56,8 @@ mod web;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use fauna_core::possibility::{Possibility, ReadState};
+
 use fauna_client::{NestClient, SetupStatusReply, SetupStatusRequest};
 use fauna_client_account::AccountClient;
 use fauna_client_accounts::RegistryLaunchPersistence;
@@ -111,7 +113,7 @@ use fauna_protocol::age::AgeBand;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::{App, DataMessage, PageOutcome, UiMessage};
-use crate::element::{Element, Gesture};
+use crate::element::{Element, Field, Gesture};
 use crate::pages::Page;
 
 pub use dashboard::DashboardSnapshot;
@@ -816,6 +818,11 @@ pub struct UsersState {
     /// The freshly minted invite-code token (`AdminInviteCodeCreateReply.code`),
     /// revealed copyable via `admin-users-invite-code-copy-btn` — `None` until a mint.
     pub minted_code: Option<String>,
+    /// `admin-users-invite-code-copy-btn` copied [`Self::minted_code`] to the
+    /// clipboard: the button confirms it and carries the code as its `copied`
+    /// attr (the `account-actor-id-copy-btn` contract). A failed copy says so
+    /// on `admin-users-action-error` instead. Reset by a new mint or Cancel.
+    pub minted_code_copied: bool,
     /// `admin-users-admit-actor-input` — the actor id (64 hex chars) the Admit
     /// section admits directly. Transient form state like the invite drafts —
     /// a re-read must not wipe a half-filled form, so `reseed` leaves it alone.
@@ -1143,6 +1150,11 @@ pub struct AdminState {
     /// until the nav-edge fetch lands (the stat-card `None`-while-empty shape). One
     /// `admin-settings-tier-item` row per tier.
     pub tiers: Option<Vec<AdminTier>>,
+    /// A `tiers.list` read failed before any succeeded: the tier add form then
+    /// says *failed to load*, never *still loading* again (`admin.md` § Errors
+    /// & edge cases → *Controls wait for their read*). Cleared by the next
+    /// clean read; once [`Self::tiers`] holds a read, a failed re-read keeps it.
+    pub tiers_read_failed: bool,
     /// The per-row editable cap drafts, parallel to [`Self::tiers`] — re-seeded
     /// from the persisted caps on every `tiers.list` (`admin.md` § 3 — raw i64).
     pub tier_cap_drafts: Vec<TierCapDrafts>,
@@ -1201,6 +1213,16 @@ pub struct AdminState {
     pub log_filter: u32,
     /// A failed `fauna.admin.logs` read, surfaced on the page's `error-message`.
     pub logs_error: Option<String>,
+    /// The last `log-copy-button` press on this page that failed — the
+    /// clipboard write's failure, or a copy refused with nothing shown —
+    /// leading the page's `error-message` (`docs/goal/ui/README.md` § Offer
+    /// only what is possible, rule 7). Cleared by a copy that succeeds and by
+    /// entering the page.
+    pub logs_copy_failure: Option<String>,
+    /// The page's last successful copy — the text that reached the clipboard —
+    /// so `log-copy-button` reads "Copied!" with its `copied` attr (the
+    /// `account-actor-id-copy-btn` contract). Cleared on entering the page.
+    pub logs_copied: Option<String>,
     /// The audit-log section below the log lines (`admin-audit-section`):
     /// every audit entry fetched so far, the chain summary and the handle
     /// join — the shared `fauna_client_admin::AuditLog`, which folds them into
@@ -1288,6 +1310,22 @@ pub struct AdminState {
     /// snapshot carries the reason ([`Outcome::DnsActionFailed`]). Cleared by the
     /// next successful DNS fold, so it cannot outlive the state it describes.
     pub dns_action_error: Option<String>,
+    /// Why the DNS machine could not be built at [`init`] (the admin keypair
+    /// would not derive), so `dns` is `None`. Painted on the page's
+    /// `error-message` for the whole session: a page whose every DNS control
+    /// silently did nothing would be the failure rule 7 names
+    /// (`docs/goal/ui/README.md` § Offer only what is possible).
+    pub dns_unavailable: Option<String>,
+}
+
+/// The admin-dns form whose save an op carries, so the fold closes it only once
+/// the save has succeeded and leaves it open, with what was typed, when it
+/// failed (`docs/goal/ui/README.md` § Offer only what is possible, rules 4 and 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsForm {
+    AddDomain,
+    AddCredential,
+    RenameSheet,
 }
 
 /// The armed deployment-identity rotation confirm (`admin-nest-seed-rotate-*`).
@@ -1373,23 +1411,41 @@ pub struct AdminWebSnapshot {
     pub serving_domain: String,
     /// The last read/write failure, bridged onto the page's `error-message`.
     pub error: Option<String>,
+    /// Where the apex-designation read stands: `Failed` when
+    /// `fauna.web.get_apex_actor` itself failed (the picker then has nothing
+    /// true to offer), `Resolved` otherwise. A snapshot only exists once a
+    /// read came back, so `Pending` is the absent snapshot's answer.
+    pub read: ReadState,
 }
 
 impl AdminState {
-    /// The `https://<domain>/` the apex serves at, for `admin-web-apex-info`.
+    /// The `admin-web-apex-info` line: where the apex serves, or why there is
+    /// no address.
     ///
     /// The domain is the nest's own web serving domain
     /// (`AdminWebSnapshot::serving_domain`, `fauna.nest.info`'s
     /// `web_serving_domain`) — never the host this app dialed, which under a
-    /// standalone nest is the bind address (`admin.md` § 7). Formatting is the
-    /// shared `fauna_core::web::apex_url`.
-    pub fn apex_url(&self) -> String {
+    /// standalone nest is the bind address (`admin.md` § 7). The decision is
+    /// the shared `fauna_client_web::apex_info_text`, which never composes
+    /// `https:///` from an empty domain.
+    pub fn apex_info(&self) -> String {
         let domain = self
             .web_snapshot
             .as_ref()
             .map(|s| s.serving_domain.as_str())
             .unwrap_or_default();
-        fauna_core::web::apex_url(domain)
+        crate::wizard::localized(&fauna_client_web::apex_info_text(domain))
+    }
+
+    /// `admin-web-apex-actor-select`'s answer (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 5): not enabled before the page's
+    /// read lands, nor when the apex read failed; possible once it resolved.
+    pub fn apex_picker_possibility(&self) -> Possibility {
+        Possibility::from_read(
+            self.web_snapshot
+                .as_ref()
+                .map_or(ReadState::Pending, |s| s.read),
+        )
     }
 }
 
@@ -1465,7 +1521,13 @@ pub fn init(
     session_generation: u64,
 ) -> AdminState {
     use fauna_client_mail_settings::rpc_glue;
+    let dns_keypair = fauna_core::identity::ActorKeypair::from_secret_hex(secret_hex);
+    let dns_unavailable = dns_keypair
+        .as_ref()
+        .err()
+        .map(|e| format!("DNS management is unavailable: derive keypair: {e:#}"));
     let state = AdminState {
+        dns_unavailable,
         caldav: Some(Arc::new(rpc_glue::build_caldav_policy_machine(
             nest.clone(),
         ))),
@@ -1492,7 +1554,7 @@ pub fn init(
         // validation, so the derive is practically infallible; a failure leaves
         // the machine `None` and the page paints its empty state rather than
         // panicking a whole session over it.
-        dns: match fauna_core::identity::ActorKeypair::from_secret_hex(secret_hex) {
+        dns: match dns_keypair {
             Ok(keypair) => Some(Arc::new(
                 fauna_client_dns::build_dns_management_machine_with_credentials(
                     nest.clone(),
@@ -1500,6 +1562,7 @@ pub fn init(
                     account,
                 ),
             )),
+            // Logged here and kept on `dns_unavailable`, which the page paints.
             Err(e) => {
                 tracing::error!("[admin] admin-dns machine: derive keypair: {e:#}");
                 None
@@ -1665,6 +1728,53 @@ pub fn dns_page_open(state: &AdminState) -> bool {
 /// **awaits** it (single-shot reads), the keyboard's spawns it.
 pub fn nav_enter_op(state: &AdminState) -> Option<Op> {
     subpage_load_op(state, state.sub)
+}
+
+/// The re-read the nest connection's return asks of the shown sub-page
+/// (`admin.md` § Errors & edge cases, *Controls wait for their read*: a read
+/// that has not answered is read again when the connection comes back, with no
+/// navigation). `None` once the page's read answered — a reconnect never
+/// re-reads an answered page, so a draft typed over it survives the drop — and
+/// for a page with no read-gated control, whose entry read is its only one.
+/// The caller ([`crate::app`]'s `Reconnected` arm) spawns it only while the
+/// admin shell is on screen; the op is the page's own entry read.
+pub fn reconnect_reread_op(state: &AdminState) -> Option<Op> {
+    if read_answered(state, state.sub) {
+        None
+    } else {
+        subpage_load_op(state, state.sub)
+    }
+}
+
+/// Whether the read deciding `page`'s read-gated controls has answered — the
+/// same reads [`read_possibility`] paints from.
+fn read_answered(state: &AdminState, page: AdminPage) -> bool {
+    fn resolved<M>(m: &Option<Arc<M>>, read: impl FnOnce(&M) -> ReadState) -> bool {
+        m.as_deref().is_some_and(|m| read(m) == ReadState::Resolved)
+    }
+    match page {
+        AdminPage::Nest => {
+            state.nest_snapshot.is_some()
+                && state
+                    .nat
+                    .as_deref()
+                    .is_some_and(|m| m.select_possibility().is_possible())
+        }
+        AdminPage::Calendar => resolved(&state.caldav, |m| m.read_state()),
+        AdminPage::Contacts => resolved(&state.carddav, |m| m.read_state()),
+        AdminPage::Files => resolved(&state.webdav, |m| m.read_state()),
+        AdminPage::Mail => resolved(&state.mail, |m| m.read_state()),
+        AdminPage::Aliases => resolved(&state.forwarders, |m| m.read_state()),
+        AdminPage::Bridges => resolved(&state.bridges, |m| m.read_state()),
+        AdminPage::Settings => state.tiers.is_some(),
+        AdminPage::Users => state.users.snapshot.is_some(),
+        AdminPage::Web => state.apex_picker_possibility().is_possible(),
+        AdminPage::Dashboard
+        | AdminPage::MailReports
+        | AdminPage::CustodyHosting
+        | AdminPage::Dns
+        | AdminPage::Logs => true,
+    }
 }
 
 /// Route the two-element nav `{"view":"admin","id":"<page>"}` to a sub-page and
@@ -2755,6 +2865,30 @@ impl Action {
 /// is awaited, so the `state` attr flips only once the nest confirms), mirroring
 /// the mail serve-here toggle.
 pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
+    // A control a read or a draft decides asks the same answer it painted
+    // from, and a refusal names its reason on the page's error line (rules 4,
+    // 6 and 7): `admin-users-action-error` on the users page (`admin.md`
+    // § Errors & edge cases → per-page error IDs), `error-message` elsewhere.
+    if let Some(answer) = action_possibility(&app.admin, &action)
+        && !answer.is_possible()
+    {
+        if matches!(
+            action,
+            Action::SaveRegistration
+                | Action::AdmitUser
+                | Action::SuspendUser { .. }
+                | Action::EvictUser { .. }
+                | Action::CancelUserEviction { .. }
+                | Action::MakeAdmin { .. }
+                | Action::ArmTakeOver { .. }
+                | Action::RemoveAdmin { .. }
+        ) {
+            app.admin.users.action_error = answer.reason().map(crate::wizard::localized);
+        } else {
+            app.errors.refuse(Page::Admin, &answer);
+        }
+        return None;
+    }
     match action {
         Action::RuleEditor(edit) => {
             let fetch = app.admin.rules.apply(edit)?;
@@ -2779,15 +2913,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::Open(page) => {
             app.admin.sub = page;
+            app.admin.logs_copy_failure = None;
+            app.admin.logs_copied = None;
             subpage_load_op(&app.admin, page)
         }
         Action::ToggleCaldavEnabled => {
-            let enabled = !app
-                .admin
-                .caldav_snapshot
-                .as_ref()
-                .map(|s| s.caldav_enabled)
-                .unwrap_or(false);
+            // The read gate above admits the press only with the snapshot in
+            // hand: the flip is of the persisted value, never a guess.
+            let enabled = !app.admin.caldav_snapshot.as_ref()?.caldav_enabled;
             let machine = app.admin.caldav.clone()?;
             Some(Op::Caldav {
                 machine,
@@ -2815,12 +2948,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             }
         }
         Action::ToggleCarddavEnabled => {
-            let enabled = !app
-                .admin
-                .carddav_snapshot
-                .as_ref()
-                .map(|s| s.carddav_enabled)
-                .unwrap_or(false);
+            let enabled = !app.admin.carddav_snapshot.as_ref()?.carddav_enabled;
             let machine = app.admin.carddav.clone()?;
             Some(Op::Carddav {
                 machine,
@@ -2828,12 +2956,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::ToggleWebdavEnabled => {
-            let enabled = !app
-                .admin
-                .webdav_snapshot
-                .as_ref()
-                .map(|s| s.webdav_enabled)
-                .unwrap_or(false);
+            let enabled = !app.admin.webdav_snapshot.as_ref()?.webdav_enabled;
             let machine = app.admin.webdav.clone()?;
             Some(Op::Webdav {
                 machine,
@@ -2841,12 +2964,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::TogglePairing => {
-            let enabled = !app
-                .admin
-                .nest_snapshot
-                .as_ref()
-                .map(|s| s.pairing_enabled)
-                .unwrap_or(false);
+            let enabled = !app.admin.nest_snapshot.as_ref()?.pairing_enabled;
             let nest = app.admin.nest.clone()?;
             Some(Op::TogglePairing { nest, enabled })
         }
@@ -3286,9 +3404,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::ConfirmBridge(_) => {
-            // The machine disarms as the dispatch starts, so a second click
-            // can't re-fire the act against a card already rejected or rotated.
+            // The press claims the armed act at once and the page re-snapshots,
+            // so the confirm paints in flight in this frame and a second press
+            // is refused with its reason (`common.in_flight`) by the gate above.
             let machine = app.admin.bridges.clone()?;
+            if !machine.begin_confirm() {
+                return None;
+            }
+            app.admin.bridges_snapshot = Some(machine.snapshot());
             Some(Op::Bridges {
                 machine,
                 action: BridgeApprovalAction::Confirm,
@@ -3315,19 +3438,38 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // reverses what it is given — so hand it the oldest-first order it
             // expects, matching the Settings page's payload exactly.
             let mut entries = logs::filtered_nest_entries(&app.admin);
+            // Nothing shown, nothing to copy: refused with the answer that
+            // disables the button (README § Offer only what is possible).
+            if let Some(reason) = logs::copy_possibility(entries.len()).reason() {
+                app.admin.logs_copied = None;
+                app.admin.logs_copy_failure = Some(reason.resolve(fauna_i18n::strings::lookup));
+                return None;
+            }
             entries.reverse();
             let text = fauna_log::format::rendered_text(
                 &entries,
                 crate::settings::logs::local_offset_secs(),
             );
-            crate::wizard::copy_to_clipboard(&text);
+            match crate::wizard::try_copy_to_clipboard(&text) {
+                Ok(()) => {
+                    crate::wizard::log_displayed_notice(fauna_i18n::strings::common::COPIED);
+                    app.admin.logs_copy_failure = None;
+                    app.admin.logs_copied = Some(text);
+                }
+                Err(e) => {
+                    app.admin.logs_copied = None;
+                    app.admin.logs_copy_failure = Some(crate::wizard::copy_failed_text(&e));
+                }
+            }
             None
         }
         Action::SelectApexActor(label) => {
             // Resolve the picked LABEL against the snapshot that painted it, so
             // the gesture never carries a positional index. An unknown label (or
             // the fallback option, which already names the current designation)
-            // resolves to nothing to do — never a silent clear.
+            // resolves to nothing to do — never a silent clear. A pick before
+            // the read lands is refused above by `action_possibility`, with its
+            // reason on `error-message`.
             let snapshot = app.admin.web_snapshot.as_ref()?;
             let actor = match resolve_apex_label(snapshot, &label)? {
                 ApexPick::Clear => None,
@@ -3433,14 +3575,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 None
             }
         },
-        // Nothing to validate locally: the nest decides which tier is removable
-        // (in use, or `free`) and its refusal arrives as `Outcome::Failed`.
-        Action::DeleteTier { row } => tier_delete_name(&app.admin, row).and_then(|name| {
-            app.admin
-                .nest
-                .clone()
-                .map(|nest| Op::DeleteTier { nest, name })
-        }),
+        // `free` is never removable (the shared answer is absent, so the row
+        // offers no button and the action refuses the same way); a tier still
+        // in use is the nest's refusal, arriving as `Outcome::Failed`.
+        Action::DeleteTier { row } => tier_delete_name(&app.admin, row)
+            .filter(|name| fauna_client_admin::tier_delete_possibility(name).is_possible())
+            .and_then(|name| {
+                app.admin
+                    .nest
+                    .clone()
+                    .map(|nest| Op::DeleteTier { nest, name })
+            }),
         // The three membership-row selects are LOCAL drafts — Save reads them
         // directly, nothing dispatches on change (the tier-cap-input precedent).
         Action::SetMembershipTierName { row, tier_name } => {
@@ -3527,7 +3672,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::SaveMailSpam => {
             let machine = app.admin.mail.clone()?;
             let snapshot = app.admin.mail_snapshot.as_ref()?;
-            let policy = app.admin.mail_drafts.gather_spam(&snapshot.spam);
+            let gathered = app.admin.mail_drafts.gather_spam(&snapshot.spam);
+            let policy = refuse_gather(app, gathered)?;
             Some(Op::Mail {
                 machine,
                 action: MailPolicyAction::SaveSpam { policy },
@@ -3535,8 +3681,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::SaveMailAuth => {
             let machine = app.admin.mail.clone()?;
-            let snapshot = app.admin.mail_snapshot.as_ref()?;
-            let policy = app.admin.mail_drafts.gather_auth(&snapshot.auth);
+            app.admin.mail_snapshot.as_ref()?;
+            let gathered = app.admin.mail_drafts.gather_auth();
+            let policy = refuse_gather(app, gathered)?;
             Some(Op::Mail {
                 machine,
                 action: MailPolicyAction::SaveAuth { policy },
@@ -3544,11 +3691,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::SaveMailSubmission => {
             let machine = app.admin.mail.clone()?;
-            let snapshot = app.admin.mail_snapshot.as_ref()?;
-            let policy = app
-                .admin
-                .mail_drafts
-                .gather_submission(&snapshot.submission);
+            app.admin.mail_snapshot.as_ref()?;
+            let gathered = app.admin.mail_drafts.gather_submission();
+            let policy = refuse_gather(app, gathered)?;
             Some(Op::Mail {
                 machine,
                 action: MailPolicyAction::SaveSubmission { policy },
@@ -3556,8 +3701,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::SaveMailImap => {
             let machine = app.admin.mail.clone()?;
-            let snapshot = app.admin.mail_snapshot.as_ref()?;
-            let policy = app.admin.mail_drafts.gather_imap(&snapshot.imap);
+            app.admin.mail_snapshot.as_ref()?;
+            let gathered = app.admin.mail_drafts.gather_imap();
+            let policy = refuse_gather(app, gathered)?;
             Some(Op::Mail {
                 machine,
                 action: MailPolicyAction::SaveImap { policy },
@@ -3566,7 +3712,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::SaveMailOutbound => {
             let machine = app.admin.mail.clone()?;
             let snapshot = app.admin.mail_snapshot.as_ref()?;
-            let policy = app.admin.mail_drafts.gather_outbound(&snapshot.outbound);
+            let gathered = app.admin.mail_drafts.gather_outbound(&snapshot.outbound);
+            let policy = refuse_gather(app, gathered)?;
             Some(Op::Mail {
                 machine,
                 action: MailPolicyAction::SaveOutbound { policy },
@@ -3574,8 +3721,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::SaveMailAlias => {
             let machine = app.admin.mail.clone()?;
-            let snapshot = app.admin.mail_snapshot.as_ref()?;
-            let policy = app.admin.mail_drafts.gather_alias(&snapshot.alias);
+            app.admin.mail_snapshot.as_ref()?;
+            let gathered = app.admin.mail_drafts.gather_alias();
+            let policy = refuse_gather(app, gathered)?;
             Some(Op::Mail {
                 machine,
                 action: MailPolicyAction::SaveAlias { policy },
@@ -3584,7 +3732,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::SaveMailDmarc => {
             let machine = app.admin.mail.clone()?;
             let snapshot = app.admin.mail_snapshot.as_ref()?;
-            let policy = app.admin.mail_drafts.gather_dmarc(&snapshot.dmarc);
+            let gathered = app.admin.mail_drafts.gather_dmarc(&snapshot.dmarc);
+            let policy = refuse_gather(app, gathered)?;
             Some(Op::Mail {
                 machine,
                 action: MailPolicyAction::SaveDmarc { policy },
@@ -3653,12 +3802,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 actor: user_actor_at(&app.admin.users, row)?,
             },
         ),
-        Action::RemoveAdmin { row } => mutate_users_op(
-            app,
-            UsersMutation::RemoveAdmin {
-                actor: user_actor_at(&app.admin.users, row)?,
-            },
-        ),
+        Action::RemoveAdmin { row } => {
+            // The action asks the predicate the button painted from, and
+            // refuses with the same reason (README.md § Offer only what is
+            // possible, rule 6).
+            let user = app.admin.users.snapshot.as_ref()?.users.get(row)?;
+            if let Some(reason) = fauna_client_admin::remove_admin_possibility(user).reason() {
+                app.admin.users.action_error = Some(reason.resolve(fauna_i18n::strings::lookup));
+                return None;
+            }
+            mutate_users_op(
+                app,
+                UsersMutation::RemoveAdmin {
+                    actor: user_actor_at(&app.admin.users, row)?,
+                },
+            )
+        }
         // The admin take-over (`family-safety.md` § App surface → *Admin
         // take-over*): arm captures the ward, confirm disarms BEFORE dispatch.
         Action::ArmTakeOver { row } => {
@@ -3674,7 +3833,27 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let viewer = app.admin.users.viewer_actor.clone();
             mutate_users_op(app, UsersMutation::TakeOver { ward, viewer })
         }
-        Action::ApprovePending { id } => mutate_users_op(app, UsersMutation::ApproveAction { id }),
+        Action::ApprovePending { id } => {
+            // Never dispatch an approval the page does not offer (the viewer's
+            // own action, or one no longer pending).
+            let action = app
+                .admin
+                .users
+                .snapshot
+                .as_ref()?
+                .pending_actions
+                .iter()
+                .find(|a| a.id == id)?;
+            if !fauna_client_admin::pending_approve_possibility(
+                action,
+                &app.admin.users.viewer_actor,
+            )
+            .is_possible()
+            {
+                return None;
+            }
+            mutate_users_op(app, UsersMutation::ApproveAction { id })
+        }
         Action::CancelPending { id } => mutate_users_op(app, UsersMutation::CancelAction { id }),
         Action::UsersNextPage => users_page_op(app, next_users_offset(&app.admin.users)),
         Action::UsersPrevPage => users_page_op(app, prev_users_offset(&app.admin.users)),
@@ -3749,12 +3928,25 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::CancelInviteForm => {
             app.admin.users.invite_form_open = false;
             app.admin.users.minted_code = None;
+            app.admin.users.minted_code_copied = false;
             None
         }
         Action::ConfirmInvite => mutate_users_op(app, create_invite_mutation(&app.admin.users)),
         Action::CopyMintedCode => {
+            // A copy that reached the terminal is confirmed on the button; one
+            // that failed is said on the page's action error, never dropped
+            // (README § Offer only what is possible, rule 7).
             if let Some(code) = app.admin.users.minted_code.as_deref() {
-                crate::wizard::copy_to_clipboard(code);
+                match crate::wizard::try_copy_to_clipboard(code) {
+                    Ok(()) => {
+                        crate::wizard::log_displayed_notice(fauna_i18n::strings::common::COPIED);
+                        app.admin.users.minted_code_copied = true;
+                    }
+                    Err(e) => {
+                        app.admin.users.minted_code_copied = false;
+                        app.admin.users.action_error = Some(crate::wizard::copy_failed_text(&e));
+                    }
+                }
             }
             None
         }
@@ -3807,17 +3999,20 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::SubmitDnsAddDomain => {
-            let domain = app.admin.dns_add_domain_input.trim().to_string();
-            if domain.is_empty() {
+            // The same answer the submit is painted from; a refusal is said on
+            // `error-message` and the form stays open with what was typed. It
+            // closes in the fold, only once the nest has added the domain.
+            let answer = fauna_client_mail_settings::domain_forms::add_domain_possibility(
+                app.admin.local_domains_snapshot.as_ref(),
+                &app.admin.dns_add_domain_input,
+            );
+            if refuse_dns(&mut app.admin, &answer) {
                 return None;
             }
-            // Close the form and clear the draft optimistically — the row either
-            // appears or the nest's refusal lands on `error-message`; either way
-            // the admin is not left staring at a stale half-typed form.
-            app.admin.dns_add_domain_open = false;
-            app.admin.dns_add_domain_input.clear();
-            local_domains_op(
+            let domain = app.admin.dns_add_domain_input.trim().to_string();
+            local_domains_form_op(
                 &app.admin,
+                DnsForm::AddDomain,
                 LocalDomainAction::AddDomain {
                     domain,
                     // The shared default, the same one linux passes — the
@@ -3830,6 +4025,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // The confirm's arm lives in the shared machine and reaches no nest, so it
         // is applied here, synchronously, and the dialog paints on this frame.
         Action::OpenDnsRemoveConfirm { domain } => {
+            let row = app
+                .admin
+                .local_domains_snapshot
+                .as_ref()
+                .and_then(|s| s.active.iter().find(|d| d.domain == domain));
+            let answer = row.map_or(Possibility::once_read(false), |row| {
+                fauna_client_mail_settings::domain_forms::remove_possibility(row)
+            });
+            if refuse_dns(&mut app.admin, &answer) {
+                return None;
+            }
             if let Some(machine) = app.admin.local_domains.as_ref() {
                 machine.arm_remove_domain(domain);
                 app.admin.local_domains_snapshot = Some(machine.snapshot());
@@ -3850,9 +4056,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             local_domains_op(&app.admin, LocalDomainAction::RestoreDomain { domain })
         }
         Action::ToggleDnsDomainMode { domain, managed } => {
+            let answer = dns::mode_answer(&app.admin, &domain, managed);
+            if refuse_dns(&mut app.admin, &answer) {
+                return None;
+            }
             dns_op(&app.admin, DnsAction::SetMode { domain, managed })
         }
         Action::ToggleDnsManageAll { managed } => {
+            let answer = dns::manage_all_answer(&app.admin, managed);
+            if refuse_dns(&mut app.admin, &answer) {
+                return None;
+            }
             // The master switch is "set every active domain's mode at once"; the
             // stored state stays per-domain (`dns-management.md` § The two modes).
             // One dispatch per domain would need N ops, so the whole sweep is one
@@ -3907,6 +4121,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             )
         }
         Action::OpenDnsAddCredential => {
+            let answer = dns::machine_answer(&app.admin);
+            if refuse_dns(&mut app.admin, &answer) {
+                return None;
+            }
             app.admin.dns_add_credential_open = true;
             None
         }
@@ -3926,6 +4144,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::SubmitDnsCredential => {
+            // The same answer the submit is painted from: a provider picked and
+            // every field typed. A refusal is said, never a silent return.
+            let answer = dns::credential_answer(&app.admin);
+            if refuse_dns(&mut app.admin, &answer) {
+                return None;
+            }
             let provider_id = app.admin.dns_credential_provider.clone()?;
             let fields: Vec<fauna_client_dns::DnsCredentialField> =
                 dns::credential_field_ids(&provider_id)
@@ -3941,12 +4165,6 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                         id,
                     })
                     .collect();
-            // Any field left blank ⇒ skip the guaranteed-failing provider
-            // round-trip and keep the form open so the admin can finish (linux's
-            // submit guard).
-            if fields.is_empty() || fields.iter().any(|f| f.value.as_str().trim().is_empty()) {
-                return None;
-            }
             // Label = the provider's translated display name, as on the other apps.
             let label = fauna_provisioning::PROVIDERS
                 .iter()
@@ -3955,18 +4173,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                     || provider_id.clone(),
                     |p| crate::wizard::key(p.display_name_key),
                 );
-            let op = dns_op(
-                &app.admin,
-                DnsAction::PutCredentials {
+            // The form, and the secrets typed into it, stay until the provider
+            // has verified the credential and it is sealed; the fold closes and
+            // clears it then, and a failure leaves it open to correct.
+            app.admin.dns.clone().map(|machine| Op::DnsSave {
+                machine,
+                form: DnsForm::AddCredential,
+                action: DnsAction::PutCredentials {
                     label,
                     provider_id,
                     fields,
                 },
-            );
-            app.admin.dns_add_credential_open = false;
-            app.admin.dns_credential_provider = None;
-            app.admin.dns_credential_fields.clear();
-            op
+            })
         }
         Action::CopyDnsRecord { value } => {
             crate::wizard::copy_to_clipboard(&value);
@@ -3976,6 +4194,21 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             dns_op(&app.admin, DnsAction::ClearCredentials { index })
         }
         Action::OpenDnsRenameSheet { target } => {
+            // The primary row's rename and a non-primary row's promote are
+            // gated at the entry by the same answers they are painted from.
+            let answer = app.admin.local_domains_snapshot.as_ref().map_or(
+                Possibility::once_read(false),
+                |s| {
+                    if target.is_some() {
+                        fauna_client_mail_settings::domain_forms::promote_possibility(s)
+                    } else {
+                        fauna_client_mail_settings::domain_forms::rename_possibility(s)
+                    }
+                },
+            );
+            if refuse_dns(&mut app.admin, &answer) {
+                return None;
+            }
             app.admin.dns_rename_sheet_open = true;
             // A promote-button pre-targets its own row; the primary row's rename
             // button leaves the re-seeded default in place.
@@ -3993,6 +4226,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::SubmitDnsRename => {
+            let answer = fauna_client_mail_settings::domain_forms::rename_draft_possibility(
+                app.admin.local_domains_snapshot.as_ref(),
+                &app.admin.dns_rename_target,
+                &app.admin.dns_rename_grace_days,
+            );
+            if refuse_dns(&mut app.admin, &answer) {
+                return None;
+            }
             // Resolve the picked domain NAME back to its 16-byte `domain_id`
             // against the snapshot that painted the picker, so no positional index
             // crosses the gesture door.
@@ -4002,12 +4243,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .iter()
                 .find(|d| !d.is_primary && d.domain == app.admin.dns_rename_target)
                 .map(|d| d.domain_id.clone())?;
-            // Blank ⇒ the nest's default 7 days; a non-numeric draft likewise
-            // (the nest validates the [1, 30] range it does get).
-            let grace_days = app.admin.dns_rename_grace_days.trim().parse::<i64>().ok();
-            app.admin.dns_rename_sheet_open = false;
-            local_domains_op(
+            // Blank ⇒ the nest's default 7 days; anything else was checked by
+            // the answer above, so it is never silently replaced by a default.
+            let grace_days = fauna_client_mail_settings::domain_forms::parse_rename_days(
+                &app.admin.dns_rename_grace_days,
+            )
+            .ok()?;
+            local_domains_form_op(
                 &app.admin,
+                DnsForm::RenameSheet,
                 LocalDomainAction::StartPrimaryRename {
                     new_primary_domain_id,
                     grace_days,
@@ -4031,13 +4275,19 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             )
         }
         Action::ExtendDnsRenameGrace => {
+            let answer = fauna_client_mail_settings::domain_forms::extend_draft_possibility(
+                &app.admin.dns_rename_extend_days,
+            );
+            if refuse_dns(&mut app.admin, &answer) {
+                return None;
+            }
             let rename_id = active_rename(&app.admin)?.rename_id.clone();
-            let additional_days = app
-                .admin
-                .dns_rename_extend_days
-                .trim()
-                .parse::<i64>()
-                .unwrap_or(DEFAULT_RENAME_EXTEND_DAYS);
+            // Blank ⇒ the default extension; an invalid draft was refused above.
+            let additional_days = fauna_client_mail_settings::domain_forms::parse_rename_days(
+                &app.admin.dns_rename_extend_days,
+            )
+            .ok()?
+            .unwrap_or(DEFAULT_RENAME_EXTEND_DAYS);
             local_domains_op(
                 &app.admin,
                 LocalDomainAction::ExtendPrimaryRenameGrace {
@@ -4066,6 +4316,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             domain,
             single_issue,
         } => match (app.admin.dns.clone(), app.admin.nest.clone()) {
+            _ if {
+                let answer = dns::cert_issue_answer(&app.admin, &domain);
+                refuse_dns(&mut app.admin, &answer)
+            } =>
+            {
+                None
+            }
             (Some(machine), Some(nest)) => Some(Op::DnsIssueCert {
                 machine,
                 nest,
@@ -4118,6 +4375,26 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     }
 }
 
+/// Close a form whose save succeeded and drop what was typed into it — the only
+/// place an admin-dns form closes after a submit (rules 4 and 7).
+fn close_dns_form(state: &mut AdminState, form: DnsForm) {
+    match form {
+        DnsForm::AddDomain => {
+            state.dns_add_domain_open = false;
+            state.dns_add_domain_input.clear();
+        }
+        DnsForm::AddCredential => {
+            // No secret lingers behind a closed write-only form.
+            state.dns_add_credential_open = false;
+            state.dns_credential_provider = None;
+            state.dns_credential_fields.clear();
+        }
+        DnsForm::RenameSheet => {
+            state.dns_rename_sheet_open = false;
+        }
+    }
+}
+
 /// Every zone the admin's held credentials cover, sorted + deduped — the
 /// `admin-dns-cert-delegate-zone-select` option set (`DelegateRenewal` validates
 /// that a held credential covers the chosen zone, so offering anything else would
@@ -4145,7 +4422,34 @@ fn local_domains_op(state: &AdminState, action: LocalDomainAction) -> Option<Op>
         machine,
         dns: state.dns.clone(),
         action,
+        form: None,
     })
+}
+
+/// [`local_domains_op`] for a form's save: the fold closes `form` only once
+/// the dispatch succeeded.
+fn local_domains_form_op(
+    state: &AdminState,
+    form: DnsForm,
+    action: LocalDomainAction,
+) -> Option<Op> {
+    state.local_domains.clone().map(|machine| Op::LocalDomains {
+        machine,
+        dns: state.dns.clone(),
+        action,
+        form: Some(form),
+    })
+}
+
+/// Refuse an admin-dns action whose answer is not possible: its reason goes on
+/// the page's `error-message` (the DNS page paints `dns_action_error`, see
+/// `dns::page_error`), never a silent return. `true` when refused.
+fn refuse_dns(state: &mut AdminState, answer: &Possibility) -> bool {
+    if answer.is_possible() {
+        return false;
+    }
+    state.dns_action_error = answer.reason().map(crate::wizard::localized);
+    true
 }
 
 /// Wrap one `DnsManagementMachine` dispatch as an [`Op`], or `None` when the
@@ -4246,15 +4550,8 @@ fn resolve_guardian(snapshot: &UsersSnapshot, draft: &str) -> Option<Vec<u8>> {
 fn registration_mutation(users: &UsersState) -> Result<UsersMutation, String> {
     let mode = RegistrationMode::from_wire_str(&users.registration_mode_draft)
         .ok_or_else(|| t::users_page::REGISTRATION_MODE_LABEL.to_string())?;
-    let raw = users.max_free_users_input.trim();
-    let max_free = if raw.is_empty() {
-        None
-    } else {
-        Some(
-            raw.parse::<u64>()
-                .map_err(|_| t::users_page::MAX_FREE_USERS_HINT.to_string())?,
-        )
-    };
+    let max_free = fauna_client_admin::parse_registration_ceiling(&users.max_free_users_input)
+        .map_err(|reason| crate::wizard::localized(&reason))?;
     // The age require-knob rides the same save, but only when it changed — an
     // unchanged knob sends nothing (`family-safety.md` § App surface →
     // *Age-band surfaces*: one gesture, no half-saved section).
@@ -4279,17 +4576,7 @@ fn registration_mutation(users: &UsersState) -> Result<UsersMutation, String> {
 /// account; the nest vets a present handle with the same rigour as the other
 /// two account-creation paths).
 fn admit_mutation(users: &UsersState) -> Result<UsersMutation, String> {
-    let raw = users.admit_actor_input.trim();
-    let actor = (raw.len() == 64)
-        .then(|| {
-            (0..raw.len())
-                .step_by(2)
-                // `.get` (not a slice) — a multi-byte char both fails the
-                // parse AND cannot panic on a non-boundary index.
-                .map(|i| u8::from_str_radix(raw.get(i..i + 2)?, 16).ok())
-                .collect::<Option<Vec<u8>>>()
-        })
-        .flatten()
+    let actor = fauna_client_admin::parse_admit_actor(&users.admit_actor_input)
         .ok_or_else(|| t::users_page::ADMIT_ACTOR_HINT.to_string())?;
     let handle = Some(users.admit_handle_input.trim().to_string()).filter(|h| !h.is_empty());
     let guardian = users
@@ -4445,6 +4732,21 @@ fn users_page_op(app: &mut App, new_offset: Option<i64>) -> Option<Op> {
         nest,
         offset: new_offset,
     })
+}
+
+/// A group's gather, or its refusal on `error-message` and nothing sent. The
+/// gate map already refused a draft that does not parse before this runs; this
+/// keeps the save honest should a draft change between the two.
+fn refuse_gather<T>(
+    app: &mut App,
+    gathered: Result<T, fauna_core::localized::LocalizedText>,
+) -> Option<T> {
+    gathered
+        .map_err(|reason| {
+            app.errors
+                .insert(Page::Admin, crate::wizard::localized(&reason));
+        })
+        .ok()
 }
 
 /// Read a bool off the persisted mail snapshot (the non-optimistic toggle reads
@@ -4938,6 +5240,14 @@ pub enum Op {
         machine: Arc<DnsManagementMachine>,
         action: DnsAction,
     },
+    /// A DNS-machine dispatch that is a form's save (today the add-credential
+    /// form): [`Outcome::DnsFormSaved`] on success, so the fold closes the
+    /// form; else the snapshot carrying the error, and the form stays open.
+    DnsSave {
+        machine: Arc<DnsManagementMachine>,
+        form: DnsForm,
+        action: DnsAction,
+    },
     /// One background re-check tick of an open `admin-dns` page
     /// ([`dns_recheck_op`]), then re-snapshot.
     DnsBackgroundRecheck { machine: Arc<DnsManagementMachine> },
@@ -4953,6 +5263,8 @@ pub enum Op {
         machine: Arc<LocalDomainMachine>,
         dns: Option<Arc<DnsManagementMachine>>,
         action: LocalDomainAction,
+        /// The form this dispatch saves, closed by the fold only on success.
+        form: Option<DnsForm>,
     },
     /// `admin-dns-cert-issue-button` — run a client-driven DNS-01 order for
     /// `domain` and deliver the issued cert to the nest that serves it
@@ -5086,6 +5398,9 @@ pub enum Outcome {
     DashboardLoaded(DashboardSnapshot),
     /// A failed dashboard read — lands on the admin page's `error-message`.
     Failed(String),
+    /// The Settings page's `tiers.list` read failed — the detail lands on the
+    /// admin page's `error-message` and the tier add form reads *failed to load*.
+    TiersLoadFailed(String),
     /// A tier was defined: the inner [`Outcome::TiersLoaded`] re-read, folded
     /// after the add form's drafts are cleared.
     TierAdded(Box<Outcome>),
@@ -5234,7 +5549,8 @@ pub enum Outcome {
     DnsLoaded {
         dns: Box<DnsSnapshot>,
         domains: Box<LocalDomainsSnapshot>,
-        actors: Vec<(Vec<u8>, String)>,
+        /// The actor pickers' options, or the failed account read's error line.
+        actors: Result<Vec<(Vec<u8>, String)>, String>,
     },
     /// One `admin-dns` DNS-machine dispatch resolved (success or an error already
     /// recorded on the snapshot).
@@ -5244,6 +5560,13 @@ pub enum Outcome {
     LocalDomainsDispatched {
         domains: Box<LocalDomainsSnapshot>,
         dns: Option<Box<DnsSnapshot>>,
+        /// The form whose save succeeded, for the fold to close.
+        saved: Option<DnsForm>,
+    },
+    /// A [`Op::DnsSave`] succeeded: the snapshot, and the form to close.
+    DnsFormSaved {
+        dns: Box<DnsSnapshot>,
+        form: DnsForm,
     },
     /// An `admin-dns` action failed **before** any machine dispatch, so no
     /// snapshot carries the reason (today: resolving the cert-delivery target nest
@@ -5317,7 +5640,7 @@ impl Op {
             }
             Op::LoadTiers { nest } => match load_settings_snapshot(&nest).await {
                 Ok(outcome) => outcome,
-                Err(e) => Outcome::Failed(format!("load admin tiers: {e}")),
+                Err(e) => Outcome::TiersLoadFailed(format!("load admin tiers: {e}")),
             },
             Op::UpdateTier { nest, req } => {
                 if let Err(e) = AdminClient::new(nest.clone()).tiers_update(req).await {
@@ -5669,6 +5992,19 @@ impl Op {
                 let _ = machine.dispatch(action).await;
                 Outcome::DnsSnapshotOnly(Box::new(machine.snapshot()))
             }
+            Op::DnsSave {
+                machine,
+                form,
+                action,
+            } => {
+                let saved = machine.dispatch(action).await.is_ok();
+                let dns = Box::new(machine.snapshot());
+                if saved {
+                    Outcome::DnsFormSaved { dns, form }
+                } else {
+                    Outcome::DnsSnapshotOnly(dns)
+                }
+            }
             Op::DnsBackgroundRecheck { machine } => {
                 machine.background_recheck().await;
                 Outcome::DnsSnapshotOnly(Box::new(machine.snapshot()))
@@ -5677,6 +6013,7 @@ impl Op {
                 machine,
                 dns,
                 action,
+                form,
             } => {
                 let moves = action.moves_record_matrix();
                 let ok = machine.dispatch(action).await.is_ok();
@@ -5690,6 +6027,7 @@ impl Op {
                 Outcome::LocalDomainsDispatched {
                     domains: Box::new(machine.snapshot()),
                     dns,
+                    saved: form.filter(|_| ok),
                 }
             }
             Op::DnsIssueCert {
@@ -5993,21 +6331,32 @@ async fn load_web_snapshot<R: RpcRequester>(nest: &R) -> AdminWebSnapshot {
                 actors: Vec::new(),
                 serving_domain: String::new(),
                 error: Some(format!("load apex actor: {e}")),
+                read: ReadState::Failed,
             };
         }
     };
-    let actors = users_actor_picker_options(nest).await;
-    // Best-effort like the actor list: a failed read paints the empty-domain
-    // explainer rather than hiding the designation the admin came to set.
+    // The account list and the serving domain degrade rather than blank the
+    // page — the designation the admin came to set still shows — but neither
+    // failure is silent: each reaches `error-message` (`docs/goal/ui/README.md`
+    // § Offer only what is possible, rule 7; `admin.md` § 7 Web).
+    let mut failures: Vec<String> = Vec::new();
+    let actors = users_actor_picker_options(nest).await.unwrap_or_else(|e| {
+        failures.push(e);
+        Vec::new()
+    });
     let serving_domain = WebClient::new(nest)
         .serving_domain()
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            failures.push(format!("load web serving domain: {e}"));
+            String::new()
+        });
     AdminWebSnapshot {
         current,
         actors,
         serving_domain,
-        error: None,
+        error: (!failures.is_empty()).then(|| failures.join("; ")),
+        read: ReadState::Resolved,
     }
 }
 
@@ -6022,11 +6371,17 @@ async fn load_web_snapshot<R: RpcRequester>(nest: &R) -> AdminWebSnapshot {
 /// a fake `RpcRequester` can pin both real build sites directly, rather than a
 /// test re-deriving state by calling `actor_picker_options`
 /// itself.
-async fn users_actor_picker_options<R: RpcRequester>(nest: &R) -> Vec<(Vec<u8>, String)> {
+///
+/// A failed read is an `Err` carrying the page's error line, never an empty
+/// list: an empty picker would silently offer only "None" (`admin.md` § 2 →
+/// *Which accounts a picker offers*).
+async fn users_actor_picker_options<R: RpcRequester>(
+    nest: &R,
+) -> Result<Vec<(Vec<u8>, String)>, String> {
     fauna_client_admin::users_list_all(&AdminClient::new(nest))
         .await
         .map(|users| fauna_client_admin::actor_picker_options(&users))
-        .unwrap_or_default()
+        .map_err(|e| format!("load accounts: {e}"))
 }
 
 /// The `admin-custody-hosting` read wrapper: tui's call sites pass `&Arc<NestClient>`
@@ -6431,6 +6786,10 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::Failed(message) => {
             app.errors.insert(Page::Admin, message);
         }
+        Outcome::TiersLoadFailed(message) => {
+            app.admin.tiers_read_failed = true;
+            app.errors.insert(Page::Admin, message);
+        }
         Outcome::SeedRotateRoster(confirm) => {
             // Only while still armed: a cancel that raced the read must not
             // re-open the confirm under the admin.
@@ -6533,6 +6892,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // prior error.
             app.admin.tier_cap_drafts = tiers.iter().map(TierCapDrafts::from_tier).collect();
             app.admin.tiers = Some(tiers);
+            app.admin.tiers_read_failed = false;
             // Re-seed the membership row drafts: one per owned subscription tier,
             // looked up against the persisted designations (the linux
             // `update_membership_tiers` merge).
@@ -6655,7 +7015,14 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // paints its own `error-message` off the held snapshots (in linux's
             // precedence: domain-CRUD feedback first, then list/verify), so there
             // is nothing to bridge onto `app.errors`.
-            app.admin.dns_action_error = None;
+            // A failed account read leaves the pickers empty AND says so on the
+            // page's `error-message` — never a picker silently offering only
+            // "None" (`admin.md` § 2 → *Which accounts a picker offers*).
+            let (actors, actors_error) = match actors {
+                Ok(actors) => (actors, None),
+                Err(e) => (Vec::new(), Some(e)),
+            };
+            app.admin.dns_action_error = actors_error;
             reseed_dns_rename_target(&mut app.admin, &domains);
             app.admin.dns_snapshot = Some(*dns);
             app.admin.local_domains_snapshot = Some(*domains);
@@ -6665,13 +7032,25 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.admin.dns_action_error = None;
             app.admin.dns_snapshot = Some(*snapshot);
         }
-        Outcome::LocalDomainsDispatched { domains, dns } => {
+        Outcome::LocalDomainsDispatched {
+            domains,
+            dns,
+            saved,
+        } => {
             app.admin.dns_action_error = None;
             reseed_dns_rename_target(&mut app.admin, &domains);
             app.admin.local_domains_snapshot = Some(*domains);
             if let Some(dns) = dns {
                 app.admin.dns_snapshot = Some(*dns);
             }
+            if let Some(form) = saved {
+                close_dns_form(&mut app.admin, form);
+            }
+        }
+        Outcome::DnsFormSaved { dns, form } => {
+            app.admin.dns_action_error = None;
+            app.admin.dns_snapshot = Some(*dns);
+            close_dns_form(&mut app.admin, form);
         }
         Outcome::DnsActionFailed(message) => {
             app.admin.dns_action_error = Some(message);
@@ -6710,6 +7089,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.admin.users.snapshot = Some(snapshot);
             app.admin.users.action_error = None;
             app.admin.users.minted_code = Some(code);
+            app.admin.users.minted_code_copied = false;
         }
     }
 }
@@ -6798,7 +7178,278 @@ pub fn elements(app: &App) -> Vec<Element> {
         AdminPage::Logs => logs::logs_elements(state),
         AdminPage::Bridges => bridges::bridges_elements(state),
     });
+    apply_read_gates(state, &mut els);
     els
+}
+
+/// The answer an admin control that waits on a read paints from and its press
+/// asks (`docs/goal/ui/README.md` § Offer only what is possible, rules 5–7;
+/// `admin.md` § Errors & edge cases → *Controls wait for their read*): the
+/// shared machine's own predicate folded with the page's copy of the snapshot
+/// (both must be in hand — a press between the machine's read and the fold
+/// would act on nothing), or still loading while the page has no machine yet.
+/// `None` for a gesture no read decides.
+pub(crate) fn action_possibility(state: &AdminState, action: &Action) -> Option<Possibility> {
+    match (
+        read_possibility(state, action),
+        draft_possibility(state, action),
+    ) {
+        (Some(read), Some(draft)) => Some(read.and(draft)),
+        (read, draft) => read.or(draft),
+    }
+}
+
+/// The draft half of a submit's answer (`docs/goal/ui/README.md` § Offer only
+/// what is possible, rule 4 — the form case; `admin.md` § Errors & edge cases →
+/// draft validity): whether the form's typed drafts can be sent as they stand,
+/// from the shared predicate beside each form. [`action_possibility`] folds it
+/// after the read gate, so a page still loading says so first; a field's own
+/// answer ([`field_possibility`]) never takes it — a bad draft must stay
+/// editable.
+fn draft_possibility(state: &AdminState, action: &Action) -> Option<Possibility> {
+    use fauna_client_admin as admin;
+    Some(match action {
+        Action::SaveRegistration => {
+            admin::registration_ceiling_possibility(&state.users.max_free_users_input)
+        }
+        Action::AdmitUser => admin::admit_actor_possibility(&state.users.admit_actor_input),
+        Action::SaveTier { row } => {
+            let d = state.tier_cap_drafts.get(*row)?;
+            admin::tier_caps_possibility([&d.inbox, &d.storage, &d.devices, &d.blob_size, &d.feeds])
+        }
+        Action::AddTier => {
+            let c = &state.tier_add_caps;
+            admin::tier_create_possibility(
+                &state.tier_add_name,
+                [&c.inbox, &c.storage, &c.devices, &c.blob_size, &c.feeds],
+            )
+        }
+        Action::SaveMembership { row } => {
+            admin::membership_save_possibility(&state.membership_drafts.get(*row)?.admin_tier)
+        }
+        Action::SaveServingPort => admin::serving_port_possibility(&state.serving_port_input),
+        Action::SaveRegion => admin::region_possibility(&state.region_input),
+        Action::SaveCaldavPort => {
+            CaldavPolicyMachine::port_draft_possibility(&state.caldav_port_input)
+        }
+        Action::CreateForwarder => ForwarderMachine::create_draft_possibility(
+            &state.forwarder_add_domain,
+            &state.forwarder_add_pattern,
+            &state.forwarder_add_target,
+        ),
+        Action::SaveMailSpam
+        | Action::SaveMailAuth
+        | Action::SaveMailSubmission
+        | Action::SaveMailImap
+        | Action::SaveMailOutbound
+        | Action::SaveMailAlias
+        | Action::SaveMailDmarc
+        | Action::SaveMailMicrosoft => state
+            .mail_drafts
+            .save_draft_possibility(action, state.mail_snapshot.as_ref())?,
+        _ => return None,
+    })
+}
+
+/// The read half of a control's answer: whether the read that decides it has
+/// resolved and no change of its own is on its way (rule 5).
+fn read_possibility(state: &AdminState, action: &Action) -> Option<Possibility> {
+    fn machine<M>(m: &Option<Arc<M>>, answer: impl FnOnce(&M) -> Possibility) -> Possibility {
+        m.as_deref()
+            .map(answer)
+            .unwrap_or_else(|| Possibility::from_read(ReadState::Pending))
+    }
+    let copy = |present: bool| Possibility::once_read(present);
+    Some(match action {
+        // Admin → Nest: the reflective read decides pairing and the serving port.
+        Action::TogglePairing | Action::SaveServingPort => copy(state.nest_snapshot.is_some()),
+        Action::SelectNatMode(_) => machine(&state.nat, |m| m.select_possibility()),
+        Action::SaveNatMode => machine(&state.nat, |m| m.save_possibility()),
+        Action::ToggleCaldavEnabled | Action::SaveCaldavPort => {
+            machine(&state.caldav, |m| m.toggle_possibility())
+                .and(copy(state.caldav_snapshot.is_some()))
+        }
+        Action::ToggleCarddavEnabled => machine(&state.carddav, |m| m.toggle_possibility())
+            .and(copy(state.carddav_snapshot.is_some())),
+        Action::ToggleWebdavEnabled => machine(&state.webdav, |m| m.toggle_possibility())
+            .and(copy(state.webdav_snapshot.is_some())),
+        // On a box that cannot enable mail, the turn-on is blocked by the
+        // notice painted under the toggle (`admin.md` § 6 Mail).
+        Action::ToggleMailEnabled => machine(&state.mail, |m| m.write_possibility())
+            .and(copy(state.mail_snapshot.is_some()))
+            .and(
+                state
+                    .mail_snapshot
+                    .as_ref()
+                    .map_or(Possibility::Possible, |s| s.enable_toggle_possibility()),
+            ),
+        Action::ToggleMailAutoEnable
+        | Action::ToggleMailBaselineStanding
+        | Action::SaveMailSpam
+        | Action::SaveMailAuth
+        | Action::SaveMailSubmission
+        | Action::SaveMailImap
+        | Action::SaveMailOutbound
+        | Action::SaveMailAlias
+        | Action::SaveMailDmarc
+        | Action::SaveMailMicrosoft
+        | Action::PressMailConfirm(_) => {
+            machine(&state.mail, |m| m.write_possibility()).and(copy(state.mail_snapshot.is_some()))
+        }
+        // Admin → Aliases: the form needs a hosted domain, the submit a picked
+        // one (`admin.md` § 4, *A forwarder needs a hosted domain*).
+        Action::SelectForwarderDomain(_) => machine(&state.forwarders, |m| m.form_possibility())
+            .and(copy(state.forwarders_snapshot.is_some())),
+        Action::CreateForwarder => machine(&state.forwarders, |m| {
+            m.create_possibility(state.forwarder_add_domain.clone())
+        })
+        .and(copy(state.forwarders_snapshot.is_some())),
+        // Admin → Settings: the add form waits for `tiers.list`, and a failed
+        // read says so; a re-read that fails after one succeeded keeps the
+        // earlier answer (`admin.md` § Errors & edge cases → *Controls wait for
+        // their read*).
+        Action::AddTier => Possibility::from_read(if state.tiers.is_some() {
+            ReadState::Resolved
+        } else if state.tiers_read_failed {
+            ReadState::Failed
+        } else {
+            ReadState::Pending
+        }),
+        // Admin → Users: admit and invite need a tier to pick (`admin.md` § 2,
+        // *What a row offers*); prev/next stop at their bounds.
+        Action::AdmitUser | Action::OpenInviteForm | Action::ConfirmInvite => {
+            match state.users.snapshot.as_ref() {
+                Some(snapshot) => fauna_client_admin::tier_pick_possibility(&snapshot.tiers),
+                None => Possibility::from_read(ReadState::Pending),
+            }
+        }
+        Action::UsersPrevPage | Action::UsersNextPage => match state.users.snapshot.as_ref() {
+            Some(snapshot) => fauna_client_admin::users_page_step_possibility(
+                state.users.offset,
+                snapshot.total,
+                USERS_PAGE_SIZE,
+                matches!(action, Action::UsersNextPage),
+            ),
+            None => Possibility::from_read(ReadState::Pending),
+        },
+        // Admin → Settings: clear needs a persisted designation on the row.
+        Action::ClearMembership { row } => {
+            fauna_client_admin::membership_clear_possibility(membership_has_existing(state, *row))
+        }
+        // Admin → Logs: more stops once the whole record is shown.
+        Action::AuditMore => fauna_client_admin::audit_more_possibility(&state.audit.view()),
+        // Admin → Web: the apex picker waits for its read, and a failed apex
+        // read leaves it blocked (`admin.md` § 7 Web).
+        Action::SelectApexActor(_) => state.apex_picker_possibility(),
+        Action::ConfirmBridge(_) => machine(&state.bridges, |m| m.confirm_possibility()),
+        // Admin → Nest: the web-app origin and update channel are settable
+        // only where the shared view says so, blocked by its status line
+        // (`admin.md` § N Nest).
+        // A central draft is refused while the nest says the central origin
+        // is not live (`web-content-hosting.md` § While the central origin is
+        // not live, the choice is not offered).
+        Action::SelectWebAppOrigin(mode) => fauna_client_admin::web_app_origin_set_possibility(
+            state.nest_snapshot.as_ref().map(|s| &s.web_app_origin),
+            Some(*mode),
+        ),
+        Action::SaveWebAppOrigin => fauna_client_admin::web_app_origin_set_possibility(
+            state.nest_snapshot.as_ref().map(|s| &s.web_app_origin),
+            state.web_app_origin_draft,
+        ),
+        Action::SelectUpdateChannel(_) | Action::SaveUpdateChannel => {
+            fauna_client_admin::update_channel_set_possibility(
+                state.nest_snapshot.as_ref().map(|s| &s.update_channel),
+            )
+        }
+        // Admin → Users: each row control is the shared row decision's answer
+        // (`admin.md` § 2 → *What a row offers*); remove-admin's floor is its
+        // own predicate.
+        Action::SuspendUser { row }
+        | Action::EvictUser { row }
+        | Action::CancelUserEviction { row }
+        | Action::MakeAdmin { row }
+        | Action::ArmTakeOver { row }
+        | Action::RemoveAdmin { row } => {
+            let Some(users) = state.users.snapshot.as_ref() else {
+                return Some(Possibility::from_read(ReadState::Pending));
+            };
+            let Some(user) = users.users.get(*row) else {
+                return Some(Possibility::Absent);
+            };
+            let controls =
+                fauna_client_admin::admin_user_row_controls(user, &state.users.viewer_actor);
+            match action {
+                Action::SuspendUser { .. } => controls.suspend_possibility(),
+                Action::EvictUser { .. } => controls.evict_possibility(),
+                Action::CancelUserEviction { .. } => controls.restore_possibility(),
+                Action::MakeAdmin { .. } => controls.make_admin_possibility(),
+                Action::ArmTakeOver { .. } => controls.take_over_possibility(),
+                _ => fauna_client_admin::remove_admin_possibility(user),
+            }
+        }
+        // Admin → DNS: delegation needs a credential zone; the rename
+        // banner's controls are the shared rename view's answers.
+        Action::OpenDnsDelegate { .. } => {
+            fauna_client_dns::affordances::delegate_possibility(&credential_zones(state))
+        }
+        Action::OpenDnsRenameCompleteConfirm | Action::ConfirmDnsRenameComplete => {
+            active_rename(state).map_or(Possibility::Absent, |r| r.complete_possibility())
+        }
+        Action::OpenDnsRenameAbortConfirm | Action::ConfirmDnsRenameAbort => {
+            active_rename(state).map_or(Possibility::Absent, |r| r.abort_possibility())
+        }
+        _ => return None,
+    })
+}
+
+/// Whether membership row `row` carries a PERSISTED designation — read off the
+/// row's own tier name, never the possibly-locally-edited draft — so its clear
+/// has something to clear (linux's `clear.set_sensitive` shape).
+pub(super) fn membership_has_existing(state: &AdminState, row: usize) -> bool {
+    let own_tier_names = state
+        .own_membership_tier_names
+        .as_deref()
+        .unwrap_or_default();
+    let designations = state.membership_tiers.as_deref().unwrap_or_default();
+    own_tier_names
+        .get(row)
+        .is_some_and(|name| designations.iter().any(|m| &m.tier_name == name))
+}
+
+/// The read-decided answer for an admin text field: the same answer as the
+/// save it feeds (a field live before its read would invite typing over a
+/// value the page has not shown).
+fn field_possibility(state: &AdminState, field: &AdminField) -> Option<Possibility> {
+    let action = match field {
+        AdminField::ServingPort => Action::SaveServingPort,
+        AdminField::CaldavPort => Action::SaveCaldavPort,
+        AdminField::ForwarderPattern | AdminField::ForwarderTarget => {
+            Action::SelectForwarderDomain(String::new())
+        }
+        AdminField::TierAddName | AdminField::TierAddCap(_) => Action::AddTier,
+        _ => return None,
+    };
+    read_possibility(state, &action)
+}
+
+/// Fold every read-decided answer onto the page's elements in one place, so a
+/// page renderer cannot forget one: the element declares its answer, and the
+/// possibility seam (`App::apply_possibility_seam`) desensitizes it and paints
+/// the reason beside it (walk invariant I8). A renderer leaves such an element
+/// enabled and lets the answer decide.
+fn apply_read_gates(state: &AdminState, els: &mut [Element]) {
+    for el in els.iter_mut() {
+        let answer = match (el.gesture(), &el.role) {
+            (Some(Gesture::Admin(action)), _) => action_possibility(state, &action),
+            (_, crate::element::Role::Input(Field::Admin(field))) => {
+                field_possibility(state, field)
+            }
+            _ => None,
+        };
+        if let Some(answer) = answer {
+            el.possibility = Some(answer);
+        }
+    }
 }
 
 /// The admin sub-page switcher — the tui adaptation of the GUI's vertical
@@ -6916,9 +7567,213 @@ mod tests {
     /// (the dispatch itself needs a wired machine, tested by the e2e); an
     /// out-of-range or unparseable draft surfaces the shared invalid message on
     /// `error-message` and dispatches no op.
+    /// A CalDAV seam whose read answers the catalog default, for the tests that
+    /// need the page's read resolved before a press is admitted.
+    struct ResolvedCaldav;
+
+    #[async_trait::async_trait]
+    impl fauna_client_mail_settings::caldav_policy::CaldavPolicyNest for ResolvedCaldav {
+        async fn get_mail_config(
+            &self,
+        ) -> Result<
+            fauna_protocol::bridge_routing::FetchConfigReply,
+            fauna_client_mail_settings::error::NestError,
+        > {
+            Ok(Default::default())
+        }
+        async fn set_caldav_enabled(
+            &self,
+            _: bool,
+        ) -> Result<(), fauna_client_mail_settings::error::NestError> {
+            Ok(())
+        }
+        async fn set_caldav_port(
+            &self,
+            _: u16,
+        ) -> Result<(), fauna_client_mail_settings::error::NestError> {
+            Ok(())
+        }
+    }
+
+    /// A CalDAV seam whose first read fails and every later one answers — a
+    /// nest that dropped and came back.
+    #[derive(Default)]
+    struct CaldavBackAfterDrop {
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl fauna_client_mail_settings::caldav_policy::CaldavPolicyNest for CaldavBackAfterDrop {
+        async fn get_mail_config(
+            &self,
+        ) -> Result<
+            fauna_protocol::bridge_routing::FetchConfigReply,
+            fauna_client_mail_settings::error::NestError,
+        > {
+            if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Err(fauna_client_mail_settings::error::NestError::Transient(
+                    "connection dropped".into(),
+                ))
+            } else {
+                Ok(Default::default())
+            }
+        }
+        async fn set_caldav_enabled(
+            &self,
+            _: bool,
+        ) -> Result<(), fauna_client_mail_settings::error::NestError> {
+            Ok(())
+        }
+        async fn set_caldav_port(
+            &self,
+            _: u16,
+        ) -> Result<(), fauna_client_mail_settings::error::NestError> {
+            Ok(())
+        }
+    }
+
+    /// `admin.md` § Errors & edge cases, *Controls wait for their read*: a read
+    /// that failed is asked again when the nest connection comes back, with no
+    /// navigation — and once it answered, a reconnect asks nothing, so a draft
+    /// typed over the answered page survives the drop.
+    #[tokio::test]
+    async fn a_failed_admin_read_is_asked_again_on_reconnect() {
+        let mut state = AdminState {
+            sub: AdminPage::Calendar,
+            ..Default::default()
+        };
+        let machine = Arc::new(CaldavPolicyMachine::new(Arc::new(
+            CaldavBackAfterDrop::default(),
+        )));
+        state.caldav = Some(machine.clone());
+        // Before any read, and after the entry read failed, the reconnect asks.
+        assert!(reconnect_reread_op(&state).is_some());
+        let _ = machine.dispatch(CaldavPolicyAction::Refresh).await;
+        assert_eq!(machine.read_state(), ReadState::Failed);
+        let op = reconnect_reread_op(&state).expect("a failed read is asked again");
+        assert!(matches!(
+            op,
+            Op::Caldav {
+                action: CaldavPolicyAction::Refresh,
+                ..
+            }
+        ));
+        op.run().await;
+        assert_eq!(machine.read_state(), ReadState::Resolved);
+        assert!(
+            reconnect_reread_op(&state).is_none(),
+            "an answered page is not read again on reconnect"
+        );
+        // The Settings page's own read: failed → asked; answered → not.
+        state.sub = AdminPage::Settings;
+        state.nest = Some(NestClient::new(
+            "http://127.0.0.1:1".to_string(),
+            fauna_core::identity::ActorKeypair::generate(),
+        ));
+        state.tiers_read_failed = true;
+        assert!(matches!(
+            reconnect_reread_op(&state),
+            Some(Op::LoadTiers { .. })
+        ));
+        state.tiers = Some(Vec::new());
+        assert!(reconnect_reread_op(&state).is_none());
+    }
+
+    /// Rule 5 (`docs/goal/ui/README.md` § Offer only what is possible): before
+    /// the page's read, the CalDAV toggle and port save paint blocked and a
+    /// press is refused with the reason on `error-message`, writing nothing.
+    #[test]
+    fn caldav_controls_wait_for_the_read() {
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Calendar;
+        app.admin.caldav = Some(Arc::new(CaldavPolicyMachine::new(Arc::new(ResolvedCaldav))));
+        let toggle = |app: &App| {
+            elements(app)
+                .into_iter()
+                .find(|e| e.id == fauna_ui_ids::ADMIN_CALENDAR_ENABLED_TOGGLE)
+                .and_then(|e| e.possibility)
+                .expect("the toggle declares its answer")
+        };
+        assert_eq!(
+            toggle(&app).reason().map(|r| r.key.as_str()),
+            Some("common.still_loading")
+        );
+        assert!(apply_local(&mut app, Action::ToggleCaldavEnabled).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Admin).map(String::as_str),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+
+        let machine = app.admin.caldav.clone().unwrap();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(machine.hydrate())
+            .unwrap();
+        app.admin.caldav_snapshot = Some(machine.snapshot());
+        assert!(toggle(&app).is_possible());
+        assert!(apply_local(&mut app, Action::ToggleCaldavEnabled).is_some());
+    }
+
+    /// `admin.md` § Errors & edge cases → *Controls wait for their read*: the
+    /// Settings tier add form waits for `tiers.list` — *still loading* before
+    /// it, *failed to load* after a failed one (never *still loading* again),
+    /// a press refused with that reason on `error-message`, nothing sent; a
+    /// clean re-read lifts it.
+    #[test]
+    fn tier_add_form_says_failed_to_load_after_a_failed_read() {
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Settings;
+        let reason = |app: &App| {
+            action_possibility(&app.admin, &Action::AddTier)
+                .and_then(|p| p.reason().map(|r| r.key.clone()))
+        };
+        assert_eq!(reason(&app).as_deref(), Some("common.still_loading"));
+
+        apply_outcome(
+            &mut app,
+            Outcome::TiersLoadFailed("load admin tiers: gone".into()),
+        );
+        assert_eq!(reason(&app).as_deref(), Some("common.load_failed"));
+        assert_eq!(
+            app.errors.get(&Page::Admin).map(String::as_str),
+            Some("load admin tiers: gone"),
+            "the failed read's own detail reaches error-message"
+        );
+        assert!(
+            apply_local(&mut app, Action::AddTier).is_none(),
+            "nothing sent"
+        );
+        assert_eq!(
+            app.errors.get(&Page::Admin).map(String::as_str),
+            Some(fauna_i18n::strings::common::LOAD_FAILED)
+        );
+
+        apply_outcome(
+            &mut app,
+            Outcome::TiersLoaded {
+                tiers: Vec::new(),
+                own_membership_tier_names: Vec::new(),
+                membership_tiers: Vec::new(),
+            },
+        );
+        assert_ne!(reason(&app).as_deref(), Some("common.load_failed"));
+        assert_ne!(reason(&app).as_deref(), Some("common.still_loading"));
+
+        // A re-read that fails after one succeeded keeps the earlier answer.
+        apply_outcome(&mut app, Outcome::TiersLoadFailed("reload: gone".into()));
+        assert_ne!(reason(&app).as_deref(), Some("common.load_failed"));
+    }
+
     #[test]
     fn save_caldav_port_validates_client_side() {
         let mut app = crate::app::tests::test_app();
+        let machine = Arc::new(CaldavPolicyMachine::new(Arc::new(ResolvedCaldav)));
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(machine.hydrate())
+            .unwrap();
+        app.admin.caldav_snapshot = Some(machine.snapshot());
+        app.admin.caldav = Some(machine);
         for good in ["8443", "1", "65535"] {
             app.errors.remove(&Page::Admin);
             app.admin.caldav_port_input = good.to_string();
@@ -6939,6 +7794,77 @@ mod tests {
                 "{bad:?} surfaces the invalid message",
             );
         }
+    }
+
+    /// The form case (`admin.md` § Errors & edge cases → draft validity): a
+    /// malformed draft blocks its submit with the shared reason BEFORE the
+    /// press, the input it came from stays editable (the draft answer never
+    /// reaches a field), and the press refuses with that same reason.
+    #[test]
+    fn a_malformed_draft_blocks_its_submit_but_never_its_input() {
+        let mut app = crate::app::tests::test_app();
+        let machine = Arc::new(CaldavPolicyMachine::new(Arc::new(ResolvedCaldav)));
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(machine.hydrate())
+            .unwrap();
+        app.admin.caldav_snapshot = Some(machine.snapshot());
+        app.admin.caldav = Some(machine);
+        app.admin.caldav_port_input = "port".into();
+        app.admin.region_input = "no".into();
+        app.admin.users.max_free_users_input = "lots".into();
+        app.admin.users.admit_actor_input = "abc".into();
+        // The users read has resolved with a tier to pick, so the admit press
+        // reaches its draft half (the read gate answers first otherwise).
+        app.admin.users.snapshot = Some(UsersSnapshot {
+            tiers: vec!["free".to_string()],
+            ..Default::default()
+        });
+        for (action, reason) in [
+            (
+                Action::SaveCaldavPort,
+                t::calendar_page::CALDAV_PORT_INVALID,
+            ),
+            (Action::SaveRegion, t::nest_page::REGION_INVALID),
+            (
+                Action::SaveRegistration,
+                t::users_page::MAX_FREE_USERS_INVALID,
+            ),
+            (Action::AdmitUser, t::users_page::ADMIT_ACTOR_HINT),
+            (
+                Action::CreateForwarder,
+                t::aliases_page::FORWARDER_DRAFT_INCOMPLETE,
+            ),
+        ] {
+            let answer = draft_possibility(&app.admin, &action).expect("a draft answer");
+            assert_eq!(
+                answer.reason().map(crate::wizard::localized).as_deref(),
+                Some(reason),
+                "{action:?} paints the shared reason"
+            );
+        }
+        assert_eq!(
+            field_possibility(&app.admin, &AdminField::CaldavPort),
+            Some(Possibility::Possible),
+            "the bad draft's own input stays editable"
+        );
+        assert!(apply_local(&mut app, Action::SaveCaldavPort).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Admin).map(String::as_str),
+            Some(t::calendar_page::CALDAV_PORT_INVALID)
+        );
+        assert!(apply_local(&mut app, Action::AdmitUser).is_none());
+        assert_eq!(
+            app.admin.users.action_error.as_deref(),
+            Some(t::users_page::ADMIT_ACTOR_HINT),
+            "a users-page refusal lands on the users page's own error line"
+        );
+        app.admin.caldav_port_input = "9443".into();
+        assert!(
+            action_possibility(&app.admin, &Action::SaveCaldavPort)
+                .is_some_and(|a| a.is_possible()),
+            "a fixed draft makes the save live again"
+        );
     }
 
     /// The takedown console's arm honours the shared fold: a citation-less
@@ -7302,10 +8228,10 @@ mod tests {
         );
         assert_eq!(
             users_actor_picker_options(&fake).await,
-            vec![
+            Ok(vec![
                 (vec![1u8; 32], "alex".to_string()),
                 (vec![2u8; 32], "alex2".to_string()),
-            ],
+            ]),
         );
     }
 
@@ -7335,10 +8261,10 @@ mod tests {
         ]);
         assert_eq!(
             users_actor_picker_options(&fake).await,
-            vec![
+            Ok(vec![
                 (vec![1u8; 32], "newest".to_string()),
                 (vec![2u8; 32], "claimer".to_string()),
-            ],
+            ]),
         );
         assert_eq!(fake.remaining(), 0, "no request past total");
     }
@@ -7368,7 +8294,9 @@ mod tests {
             },
         );
         let state = AdminState {
-            dns_actors: users_actor_picker_options(&fake).await,
+            dns_actors: users_actor_picker_options(&fake)
+                .await
+                .expect("the account read answers"),
             ..Default::default()
         };
         assert_eq!(

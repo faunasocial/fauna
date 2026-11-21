@@ -27,8 +27,13 @@ import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.MailTransferText
 import com.fauna.app.ui.util.AutomationAttributePack
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.pressAsked
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.MailImportVM
@@ -45,7 +50,14 @@ import uniffi.fauna_client_mail_settings.importMailboxProgressText
 import uniffi.fauna_client_mail_settings.importSelectedTotals
 import uniffi.fauna_client_mail_settings.importSourceKindLabel
 import uniffi.fauna_client_mail_settings.importTlsModeLabel
+import uniffi.fauna_client_mail_settings.mailImportNextPossibility
+import uniffi.fauna_client_mail_settings.mailImportOutlookSourcePossibility
+import uniffi.fauna_client_mail_settings.mailImportStartPossibility
+import uniffi.fauna_core.Possibility
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The per-account `mail-import` wizard (`mailbox-migration.md`): Source → Scope
@@ -80,9 +92,13 @@ import social.fauna.generated.Ids
  * Microsoft's code is out, `mail-import-source-oauth-code` paints the code and
  * the address beside an id-less **Open in browser**, its `code` and `url`
  * attributes packed on the node, and the grant connects by itself — the step
- * moves on to Scope with nothing more pressed. A platform without a
- * registration paints the unavailable sentence and keeps the button inert
- * (`MailImportSnapshot.microsoftSigninAvailable`).
+ * moves on to Scope with nothing more pressed. The Outlook source is painted
+ * from the shared answer `mail_import_outlook_source_possibility`
+ * (`mailbox-migration.md`; `ui/README.md` § Offer only what is possible,
+ * rules 2 and 6): absent on a build with no Microsoft sign-in transport — the
+ * picker leaves Outlook out and no button is painted — blocked with the
+ * unavailable reason while no registration is saved (the button inert beside
+ * it), possible otherwise.
  *
  * ## The text fields are DRAFTS, committed at the transition
  *
@@ -109,6 +125,9 @@ fun MailImportScreen(
 
     MailImportContent(
         snapshot = snapshot,
+        // The Outlook source's shared answer; FFI lives here, off the testable
+        // Content.
+        outlookAnswer = mailImportOutlookSourcePossibility(snapshot),
         // The two picker vocabularies come from the shared Rust maps; FFI lives
         // here, off the testable Content (the MailExportScreen shape).
         sourceKindLabel = { k -> resolveLocalized(context, importSourceKindLabel(k)).orEmpty() },
@@ -131,6 +150,7 @@ fun MailImportScreen(
         onForgetSource = vm::forgetSource,
         onSetImportDuplicates = vm::setImportDuplicates,
         onViewImported = { navController.popBackStack() },
+        onRefuse = { appMessages.showError(it) },
     )
 }
 
@@ -138,6 +158,10 @@ fun MailImportScreen(
 @Composable
 fun MailImportContent(
     snapshot: MailImportSnapshot,
+    // `MailImportSnapshot::outlook_source_possibility` (shared Rust), computed
+    // by the wrapper: paints the picker's Outlook option and the Sign in with
+    // Microsoft button.
+    outlookAnswer: Possibility,
     sourceKindLabel: (ImportSourceKind) -> String,
     tlsModeLabel: (ImportTlsMode) -> String,
     onBack: () -> Unit,
@@ -158,6 +182,9 @@ fun MailImportContent(
     onForgetSource: () -> Unit,
     onSetImportDuplicates: (Boolean) -> Unit,
     onViewImported: () -> Unit,
+    // A refused press's reason (Next off Scope, Start), for the page's
+    // `error-message` (the wrapper's banner) — rule 6's second half.
+    onRefuse: (String) -> Unit = {},
 ) {
     Scaffold(
         topBar = {
@@ -188,10 +215,10 @@ fun MailImportContent(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             when (snapshot.step) {
-                ImportStep.SOURCE -> SourceStep(snapshot, sourceKindLabel, tlsModeLabel, onSelectSourceKind, onSetTlsMode, onConnect, onSignInWithMicrosoft, onForgetSource)
-                ImportStep.SCOPE -> ScopeStep(snapshot, onToggleMailbox, onSetImportDuplicates, onScopeNext, onPrev)
-                ImportStep.CONFIRM -> ConfirmStep(snapshot, sourceKindLabel, onPrev, onStart)
-                ImportStep.PROGRESS -> ProgressStep(snapshot, onSetTlsMode, tlsModeLabel, onSignInWithMicrosoft, onPause, onResume, onRestart, onDismiss, onCancel, onSkipRest)
+                ImportStep.SOURCE -> SourceStep(snapshot, outlookAnswer, sourceKindLabel, tlsModeLabel, onSelectSourceKind, onSetTlsMode, onConnect, onSignInWithMicrosoft, onForgetSource)
+                ImportStep.SCOPE -> ScopeStep(snapshot, onToggleMailbox, onSetImportDuplicates, onScopeNext, onPrev, onRefuse)
+                ImportStep.CONFIRM -> ConfirmStep(snapshot, sourceKindLabel, onPrev, onStart, onRefuse)
+                ImportStep.PROGRESS -> ProgressStep(snapshot, outlookAnswer, onSetTlsMode, tlsModeLabel, onSignInWithMicrosoft, onPause, onResume, onRestart, onDismiss, onCancel, onSkipRest)
                 ImportStep.DONE -> DoneStep(snapshot, onViewImported)
             }
         }
@@ -201,6 +228,7 @@ fun MailImportContent(
 @Composable
 private fun SourceStep(
     snapshot: MailImportSnapshot,
+    outlookAnswer: Possibility,
     sourceKindLabel: (ImportSourceKind) -> String,
     tlsModeLabel: (ImportTlsMode) -> String,
     onSelectSourceKind: (ImportSourceKind) -> Unit,
@@ -281,7 +309,11 @@ private fun SourceStep(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         SourceOption(ImportSourceKind.GMAIL, kind, sourceKindLabel, onSelectSourceKind)
-        SourceOption(ImportSourceKind.OUTLOOK, kind, sourceKindLabel, onSelectSourceKind)
+        // Left out where the shared answer is absent: a build with no Microsoft
+        // sign-in transport can never import from Outlook (rule 2).
+        if (outlookAnswer.isShown) {
+            SourceOption(ImportSourceKind.OUTLOOK, kind, sourceKindLabel, onSelectSourceKind)
+        }
         SourceOption(ImportSourceKind.I_CLOUD, kind, sourceKindLabel, onSelectSourceKind)
         SourceOption(ImportSourceKind.GENERIC, kind, sourceKindLabel, onSelectSourceKind)
     }
@@ -333,7 +365,7 @@ private fun SourceStep(
     }
 
     if (outlook) {
-        MicrosoftSignIn(snapshot) { onSignInWithMicrosoft(username) }
+        MicrosoftSignIn(snapshot, outlookAnswer) { onSignInWithMicrosoft(username) }
     }
 
     if (imapFieldsKind) {
@@ -386,15 +418,16 @@ private fun SourceStep(
 }
 
 /**
- * The Outlook source's Microsoft sign-in: the button — inert beside the
- * unavailable sentence until this platform can sign in, and while a sign-in is
- * in flight — then, once Microsoft has answered, the code and its address with
+ * The Outlook source's Microsoft sign-in, painted from the shared [answer]: not
+ * painted when absent; the button — inert beside the answer's reason while
+ * blocked, and while a sign-in is in flight — then, once Microsoft has answered, the code and its address with
  * Open in browser. Shared by the Source step and an adopted session's Progress
  * step, which repaint the same ids.
  */
 @Composable
-private fun MicrosoftSignIn(snapshot: MailImportSnapshot, onSignIn: () -> Unit) {
-    val available = snapshot.microsoftSigninAvailable
+private fun MicrosoftSignIn(snapshot: MailImportSnapshot, answer: Possibility, onSignIn: () -> Unit) {
+    if (!answer.isShown) return
+    val available = answer.isPossible
     val view = snapshot.microsoftSignin
     val inFlight = view != null && (
         view.state == MicrosoftSignInState.REQUESTING ||
@@ -407,11 +440,7 @@ private fun MicrosoftSignIn(snapshot: MailImportSnapshot, onSignIn: () -> Unit) 
         modifier = Modifier.testTag(Ids.MAIL_IMPORT_SOURCE_OAUTH_BUTTON),
     ) { Text(stringResource(R.string.mail_import_source_oauth_button)) }
     if (!available) {
-        Text(
-            stringResource(R.string.mail_import_microsoft_unavailable),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        DisabledControlReasonText(localized(answer.blockedReason))
         return
     }
     if (view != null && view.state == MicrosoftSignInState.WAITING && view.userCode.isNotEmpty()) {
@@ -449,6 +478,7 @@ private fun MicrosoftSignIn(snapshot: MailImportSnapshot, onSignIn: () -> Unit) 
 @Composable
 private fun ResumeCredentialFields(
     snapshot: MailImportSnapshot,
+    outlookAnswer: Possibility,
     tlsModeLabel: (ImportTlsMode) -> String,
     onSetTlsMode: (ImportTlsMode) -> Unit,
     onSignInWithMicrosoft: () -> Unit,
@@ -501,7 +531,7 @@ private fun ResumeCredentialFields(
                 modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_IMPORT_SOURCE_PASSWORD),
             )
         }
-        ImportSourceKind.OUTLOOK -> MicrosoftSignIn(snapshot, onSignInWithMicrosoft)
+        ImportSourceKind.OUTLOOK -> MicrosoftSignIn(snapshot, outlookAnswer, onSignInWithMicrosoft)
     }
 }
 
@@ -538,7 +568,9 @@ private fun ScopeStep(
     onSetImportDuplicates: (Boolean) -> Unit,
     onScopeNext: (String, String) -> Unit,
     onPrev: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     var dateFrom by remember { mutableStateOf("") }
     // MB — the field's unit; the action takes bytes. Seeded from the machine
     // snapshot's own value (the default on a fresh wizard, what Next last
@@ -609,15 +641,21 @@ private fun ScopeStep(
         Text(stringResource(R.string.mail_import_scope_import_duplicates_label))
     }
 
+    // The machine's own answer over the typed since-date draft (zero
+    // mailboxes, a malformed date — `mailbox-migration.md` § Wizard steps),
+    // painted and asked again at the press.
+    val nextAnswer = askForm { mailImportNextPossibility(snapshot, dateFrom) }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = onPrev, modifier = Modifier.testTag(Ids.WIZARD_BACK_BUTTON)) {
             Text(stringResource(R.string.mail_import_back))
         }
         Button(
-            onClick = { onScopeNext(dateFrom, maxSizeMb) },
+            onClick = { pressAsked(context, nextAnswer, onRefuse) { onScopeNext(dateFrom, maxSizeMb) } },
+            enabled = nextAnswer.isPossible,
             modifier = Modifier.testTag(Ids.WIZARD_NEXT_BUTTON),
         ) { Text(stringResource(R.string.mail_import_next)) }
     }
+    DisabledControlReasonText(localized(nextAnswer.blockedReason))
 }
 
 /** The shared elapsed time / time left of this session (`mailbox-migration.md` § Wizard steps steps 5–6). */
@@ -636,7 +674,9 @@ private fun ConfirmStep(
     sourceKindLabel: (ImportSourceKind) -> String,
     onPrev: () -> Unit,
     onStart: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     // The Confirm estimate is the shared `selected_totals` sum (§ Wizard steps
     // step 4): messages and, when every selected mailbox was sized, roughly how
     // much data — never re-summed here.
@@ -665,25 +705,29 @@ private fun ConfirmStep(
         modifier = Modifier.testTag(Ids.MAIL_IMPORT_CONFIRM_SUMMARY),
     )
     // Start opens an import session on the nest (OnlineOnly); Back stays live.
+    // It also waits on the scope's own answer, re-asked at the press
+    // (`MailImportSnapshot::start_possibility`).
     val startGate = faunaGate("fauna.bridges.start_import_session")
+    val startAnswer = askForm { mailImportStartPossibility(snapshot) }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = onPrev, modifier = Modifier.testTag(Ids.WIZARD_BACK_BUTTON)) {
             Text(stringResource(R.string.mail_import_back))
         }
         Button(
-            onClick = onStart,
-            enabled = startGate.enabled,
+            onClick = { pressAsked(context, startAnswer, onRefuse, onStart) },
+            enabled = startGate.enabled && startAnswer.isPossible,
             modifier = Modifier.testTag(Ids.MAIL_IMPORT_START_BUTTON),
         ) {
             Text(stringResource(R.string.mail_import_start_button))
         }
     }
-    DisabledControlReasonText(startGate.reason)
+    DisabledControlReasonText(startGate.reason ?: localized(startAnswer.blockedReason))
 }
 
 @Composable
 private fun ProgressStep(
     snapshot: MailImportSnapshot,
+    outlookAnswer: Possibility,
     onSetTlsMode: (ImportTlsMode) -> Unit,
     tlsModeLabel: (ImportTlsMode) -> String,
     onSignInWithMicrosoft: (String) -> Unit,
@@ -735,7 +779,7 @@ private fun ProgressStep(
     )
     if (needsCredentials) {
         ResumeCredentialFields(
-            snapshot, tlsModeLabel, onSetTlsMode,
+            snapshot, outlookAnswer, tlsModeLabel, onSetTlsMode,
             // An adopted session signs in with its own address.
             { onSignInWithMicrosoft("") },
             port, { port = it }, password, { password = it },

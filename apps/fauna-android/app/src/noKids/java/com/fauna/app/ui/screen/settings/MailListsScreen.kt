@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
@@ -20,14 +21,29 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.pressAsked
+import com.fauna.ffi.readPossibility
 import com.fauna.app.ui.viewmodel.MailListsVM
 import uniffi.fauna_client_mail_settings.ListDraft
 import uniffi.fauna_client_mail_settings.ListView
 import uniffi.fauna_client_mail_settings.ListsStatus
 import uniffi.fauna_client_mail_settings.archiveUrlNeedsConfirm
+import uniffi.fauna_client_mail_settings.listSubmitPossibility
+import uniffi.fauna_client_mail_settings.mailListsCreatePossibility
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import java.net.URLEncoder
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The per-account `mail-lists` page (`mail-mass-mailing.md`): list / create /
@@ -55,12 +71,18 @@ fun MailListsScreen(
     MailListsContent(
         lists = snapshot.lists,
         localDomains = snapshot.localDomains,
+        // The add affordance's shared answer
+        // (`MailListsSnapshot::create_possibility`): blocked waiting before the
+        // first read (`Possibility::once_read(false)`, rule 5), then the
+        // snapshot's own. FFI lives here, off the testable Content.
+        createAnswer = if (hydrated) mailListsCreatePossibility(snapshot) else readPossibility(ReadState.PENDING),
         hydrated = hydrated,
         working = snapshot.status == ListsStatus.WORKING,
         onBack = { navController.popBackStack() },
         onCreate = vm::create,
         onUpdate = vm::update,
         onDelete = vm::delete,
+        onRefuse = { appMessages.showError(it) },
         onViewMembers = { list ->
             val name = URLEncoder.encode(list.friendlyName, "UTF-8")
             navController.navigate("settings/mail-list-members/${list.listIdHex}/$name")
@@ -79,6 +101,11 @@ private sealed interface ListSheetMode {
 fun MailListsContent(
     lists: List<ListView>,
     localDomains: List<String>,
+    // Whether a new list can be created now — the shared answer
+    // (`MailListsSnapshot::create_possibility`, `ui/README.md` § Offer only
+    // what is possible, rule 6) the add affordance paints from; never
+    // re-derived here from [localDomains].
+    createAnswer: Possibility,
     // Loading-vs-resolved-empty (`ui/README.md` rule 5). Defaults true so
     // existing/other-purpose call sites keep rendering the resolved state.
     hydrated: Boolean = true,
@@ -88,9 +115,11 @@ fun MailListsContent(
     onUpdate: (String, ListDraft) -> Unit,
     onDelete: (String) -> Unit,
     onViewMembers: (ListView) -> Unit,
+    // A refused submit's reason, onto the page's `error-message` (rule 7).
+    onRefuse: (String) -> Unit = {},
 ) {
     var sheet by remember { mutableStateOf<ListSheetMode>(ListSheetMode.Closed) }
-    val canAdd = localDomains.isNotEmpty() && !working
+    val canAdd = createAnswer.isPossible && !working
 
     Scaffold(
         topBar = {
@@ -125,31 +154,31 @@ fun MailListsContent(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (localDomains.isEmpty()) {
-                Text(
-                    stringResource(R.string.mail_lists_no_domain),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
             Button(
                 onClick = { sheet = ListSheetMode.Add },
                 enabled = canAdd,
                 modifier = Modifier.testTag(Ids.MAIL_LISTS_ADD_BUTTON),
             ) { Text(stringResource(R.string.mail_lists_add_button)) }
+            // The answer's reason beside the add affordance (rule 2): no
+            // domain to create on, or waiting for the first read.
+            DisabledControlReasonText(localized(createAnswer.blockedReason))
 
             when (val mode = sheet) {
                 is ListSheetMode.Add -> ListSheet(
                     editing = null,
+                    createAnswer = createAnswer,
                     localDomains = localDomains,
                     onSubmit = { draft -> onCreate(draft); sheet = ListSheetMode.Closed },
                     onCancel = { sheet = ListSheetMode.Closed },
+                    onRefuse = onRefuse,
                 )
                 is ListSheetMode.Edit -> ListSheet(
                     editing = mode.list,
+                    createAnswer = createAnswer,
                     localDomains = localDomains,
                     onSubmit = { draft -> onUpdate(mode.list.listIdHex, draft); sheet = ListSheetMode.Closed },
                     onCancel = { sheet = ListSheetMode.Closed },
+                    onRefuse = onRefuse,
                 )
                 ListSheetMode.Closed -> {}
             }
@@ -187,10 +216,14 @@ fun MailListsContent(
 @Composable
 private fun ListSheet(
     editing: ListView?,
+    // The page's create answer: an edit needs none, a create does.
+    createAnswer: Possibility,
     localDomains: List<String>,
     onSubmit: (ListDraft) -> Unit,
     onCancel: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     var name by remember(editing) { mutableStateOf(editing?.friendlyName ?: "") }
     var localPart by remember(editing) { mutableStateOf(editing?.localPart ?: "") }
     var domain by remember(editing) {
@@ -285,7 +318,15 @@ private fun ListSheet(
             val submitGate = faunaGate(
                 if (editing != null) "fauna.bridges.update_account_list"
                 else "fauna.bridges.create_account_list",
+                enabled = editing != null || createAnswer.isPossible,
             )
+            // The draft's own answer (`list_submit_possibility`, `mail-settings.md`
+            // § Errors & edge cases, *The in-page predicates*): create needs the
+            // local part and a domain; a typed per-send cap must be a whole
+            // number. Painted here and asked again at the press (rules 4, 6, 7).
+            val submitAnswer = askForm {
+                listSubmitPossibility(editing != null, localPart, domain, perSend)
+            }
             // Off-server archive link: a List-Archive URL on a host the user
             // does not own is published to every recipient, so the first press
             // relabels the submit with the confirm string and saves nothing
@@ -302,22 +343,24 @@ private fun ListSheet(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
-                        val save = {
-                            onSubmit(
-                                ListDraft(
-                                    friendlyName = name,
-                                    localPart = localPart,
-                                    localDomain = domain,
-                                    description = description,
-                                    listHelpUrl = helpUrl,
-                                    listArchiveUrl = archiveUrl,
-                                    recipientsPerSend = perSend.toUIntOrNull(),
+                        pressAsked(context, submitAnswer, onRefuse) {
+                            val save = {
+                                onSubmit(
+                                    ListDraft(
+                                        friendlyName = name,
+                                        localPart = localPart,
+                                        localDomain = domain,
+                                        description = description,
+                                        listHelpUrl = helpUrl,
+                                        listArchiveUrl = archiveUrl,
+                                        recipientsPerSend = perSend.toUIntOrNull(),
+                                    )
                                 )
-                            )
+                            }
+                            if (needsArchiveConfirm) archiveArm.press(save) else save()
                         }
-                        if (needsArchiveConfirm) archiveArm.press(save) else save()
                     },
-                    enabled = submitGate.enabled,
+                    enabled = submitGate.enabled && submitAnswer.isPossible,
                     modifier = Modifier.testTag(Ids.MAIL_LISTS_ADD_SHEET_SUBMIT_BUTTON),
                 ) {
                     Text(
@@ -335,7 +378,7 @@ private fun ListSheet(
                     modifier = Modifier.testTag(Ids.MAIL_LISTS_ADD_SHEET_CANCEL_BUTTON),
                 ) { Text(stringResource(R.string.mail_lists_cancel)) }
             }
-            DisabledControlReasonText(submitGate.reason)
+            DisabledControlReasonText(submitGate.reason ?: localized(submitAnswer.blockedReason))
         }
     }
 }

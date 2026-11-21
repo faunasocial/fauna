@@ -1,6 +1,13 @@
-"""The windows MSI — its builder, its cache and its staged ffi: what the
-collection-time prebuild and the MSI's one door, the session fixture
-`conftest.py::msi_path`, must agree on.
+"""The windows MSIs — their builders, their caches and the full-feature one's
+staged ffi: what the collection-time prebuild and each MSI's one door must agree
+on. Two packages, two doors: the full-feature MSI (`../Package.wxs`, the one
+the public release builds today) through `conftest.py::msi_path`, and the nest
+MSI (`installer/nest/Package.wxs`, installers/windows.md § Direct download, 1)
+through `conftest.py::nest_msi_path`, read by its structure suite
+`tests/platform/windows/test_nest_installer_structure.py`. The nest MSI has no
+app, so its build publishes nothing and stages no ffi flavor; each door has its
+own stamp and its own inputs. What follows describes the full-feature door; the
+nest door is the same shape (`nest_*` below).
 
 Two suites read the MSI through that door: the install suite
 (`tests/platform/windows/test_installer.py`, elevated, since it installs it) and
@@ -60,19 +67,52 @@ SOURCE_PATTERNS = [
 ]
 
 
-def workspace_inputs() -> tuple[tuple[str, ...], list[str]]:
+#: The nest MSI's WiX sources, relative to `apps/fauna-windows/installer/`: its
+#: own package and the fragments it shares with the full-feature one. The one
+#: list both its builder (`build_nest_msi`) and its inputs (`NEST_SOURCE_PATTERNS`)
+#: read; the release workflow names the same set when it builds this package.
+NEST_WXS = (
+    "nest/Package.wxs",
+    "Directories.wxs",
+    "ServiceNest.wxs",
+    "ServiceBridge.wxs",
+    "TerminalApp.wxs",
+    "Notices.wxs",
+    "UI.wxs",
+)
+
+#: The nest MSI's own inputs beside its staged Rust binaries (as
+#: `SOURCE_PATTERNS` for the full-feature one).
+NEST_SOURCE_PATTERNS = [
+    *(f"apps/fauna-windows/installer/{wxs}" for wxs in NEST_WXS),
+    "apps/fauna-windows/installer/*.wxl",
+    "apps/fauna-windows/installer/*.rtf",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "installer/shipped-notices.toml",
+    "scripts/shipped-notices.py",
+    # The Add/Remove Programs icon (ARPPRODUCTICON), the app's own icon file.
+    "apps/fauna-windows/FaunaApp/FaunaApp/Assets/AppIcon.ico",
+    "bins/fauna-bridges/**/*.go",
+    "tests/e2e-unified/helpers/helper_bins.py",
+]
+
+
+def workspace_inputs(fixture: str | None = None) -> tuple[tuple[str, ...], list[str]]:
     """The roots the staged Rust binaries are built from, and the excludes over
     them — the helper bins' own input definition (`helper_bins._newest_source_mtime`):
     the workspace every binary links (`libs/`, `Cargo.lock`, the toolchain pin)
     plus the own crates of each registry entry the MSI stages. Every staged binary — the
     agent, the nest service, the release `fauna_ffi.dll` the publish bundles —
-    links most of `libs/`, so an edit to any crate there is an input."""
+    links most of `libs/`, so an edit to any crate there is an input. `fixture`
+    names the door whose entries count (the full-feature MSI's by default)."""
     from common.nest import _EXAMPLE_SOURCE_ROOTS, _NEST_SOURCE_EXCLUDES
     from helpers import helper_bins
 
+    door = fixture or helper_bins.WINDOWS_MSI
     roots = list(_EXAMPLE_SOURCE_ROOTS)
     for entry in helper_bins.REGISTRY.values():
-        if helper_bins.WINDOWS_MSI in entry.fixtures:
+        if door in entry.fixtures:
             roots.extend(rel for rel in entry.sources if rel not in roots)
     return tuple(roots), list(_NEST_SOURCE_EXCLUDES)
 
@@ -218,6 +258,58 @@ def msi_build_owed(repo: str, items) -> bool:
     return any(reads_msi(item) for item in items) and not msi_is_cached(repo, source_mtime(repo))
 
 
+# ── the nest MSI's door: the same questions, its own answers ─────────────────
+
+
+def nest_msi_paths(repo: str) -> tuple[str, str]:
+    """(the nest MSI, its freshness stamp) — a stamp of its own, beside the
+    full-feature MSI's, so neither door's build stales the other's cache."""
+    build_dir = os.path.join(repo, "build", "installer")
+    return (
+        os.path.join(build_dir, "Fauna-Nest-Setup-arm64.msi"),
+        os.path.join(build_dir, "nest-build.stamp"),
+    )
+
+
+def nest_source_mtime(repo: str) -> float:
+    """The newest of the nest MSI's tracked inputs (`source_mtime`'s rule over
+    `NEST_SOURCE_PATTERNS` and the crates of the entries its door declares)."""
+    from helpers import helper_bins
+
+    roots, excludes = workspace_inputs(helper_bins.WINDOWS_NEST_MSI)
+    return _newest([
+        *(p for pattern in NEST_SOURCE_PATTERNS for p in glob.glob(os.path.join(repo, pattern), recursive=True)),
+        *_tree_files(repo, roots, excludes),
+    ])
+
+
+def nest_msi_is_cached(repo: str, current_mtime: float) -> bool:
+    msi, stamp = nest_msi_paths(repo)
+    if not (os.path.exists(msi) and os.path.exists(stamp)):
+        return False
+    try:
+        with open(stamp) as f:
+            return float(f.read().strip()) >= current_mtime
+    except (ValueError, OSError):
+        return False
+
+
+def reads_nest_msi(item) -> bool:
+    """Whether a selected item will read the nest MSI (`reads_msi`'s rule, for
+    its own door `nest_msi_path`)."""
+    from helpers import helper_bins
+    from helpers.fixture_closure import real_fixture_closure
+
+    return helper_bins.WINDOWS_NEST_MSI in real_fixture_closure(item) and not _skip_marked(item)
+
+
+def nest_msi_build_owed(repo: str, items) -> bool:
+    """Whether a run collecting `items` will build the nest MSI (`msi_build_owed`'s
+    rule, for its own door and stamp)."""
+    return (any(reads_nest_msi(item) for item in items)
+            and not nest_msi_is_cached(repo, nest_source_mtime(repo)))
+
+
 def release_ffi_dll(repo: str) -> str:
     """The flavor-private dll the publish bundles a copy of, never the shared
     `target/release/fauna_ffi.dll` every host build of fauna-ffi writes
@@ -240,7 +332,7 @@ MSI_BUNDLED_COMPONENTS = 3
 MSI_BUNDLED_FILES = 7
 
 
-def msi_notices_faults(lines, rid: str = "win-arm64") -> list[str]:
+def msi_notices_faults(lines, rid: str = "win-arm64", artifact: str = "windows-msi") -> list[str]:
     """What the MSI's notices run (`just windows-msi-notices`) left out of the
     closure, read off the generator's verdict lines alone — the notices file is
     dependency-authored text no test opens (shipped-notices.md § How the
@@ -251,23 +343,26 @@ def msi_notices_faults(lines, rid: str = "win-arm64") -> list[str]:
     bundled components — the Bridge feature's libunwind.dll, the mingw-w64
     runtime linked into the mail bridge and the WiX Toolset code the package
     itself carries — with every licence file their build staged copied.
-    Empty = all present."""
+    `artifact` names the manifest artifact the run wrote: the nest MSI's
+    (`windows-nest-msi`) ships no app, so only its bundled line and its verdict
+    are asked of it. Empty = all present."""
     import re
 
     lines = list(lines)
     faults = []
-    packs = [m for m in (re.match(rf"shipped-notices: nuget runtime packs from FaunaApp\.deps\.json \(\S*/{re.escape(rid)}\): (\d+)$", ln) for ln in lines) if m]
-    if not packs or int(packs[-1].group(1)) == 0:
-        faults.append(f"no runtime pack read off the {rid} publish's FaunaApp.deps.json: the .NET runtime is missing from the notices")
-    if not any(re.match(rf"shipped-notices: nuget app host Microsoft\.NETCore\.App\.Host\.{re.escape(rid)}@\S+ \(", ln) for ln in lines):
-        faults.append(f"the .NET app host for {rid} (FaunaApp.exe is its launcher) is not in the notices")
-    bundled = (rf"shipped-notices: windows-msi bundled: components={MSI_BUNDLED_COMPONENTS} "
+    if artifact == "windows-msi":
+        packs = [m for m in (re.match(rf"shipped-notices: nuget runtime packs from FaunaApp\.deps\.json \(\S*/{re.escape(rid)}\): (\d+)$", ln) for ln in lines) if m]
+        if not packs or int(packs[-1].group(1)) == 0:
+            faults.append(f"no runtime pack read off the {rid} publish's FaunaApp.deps.json: the .NET runtime is missing from the notices")
+        if not any(re.match(rf"shipped-notices: nuget app host Microsoft\.NETCore\.App\.Host\.{re.escape(rid)}@\S+ \(", ln) for ln in lines):
+            faults.append(f"the .NET app host for {rid} (FaunaApp.exe is its launcher) is not in the notices")
+    bundled = (rf"shipped-notices: {re.escape(artifact)} bundled: components={MSI_BUNDLED_COMPONENTS} "
                rf"files-copied={MSI_BUNDLED_FILES} fallbacks=0 left-out=0 refused=0$")
     if not any(re.match(bundled, ln) for ln in lines):
         faults.append("libunwind.dll, the mingw-w64 runtime and the WiX Toolset install-time code are not in the notices "
                       "with every licence file their build staged copied")
-    if not any(re.match(r"shipped-notices: windows-msi OK ", ln) for ln in lines):
-        faults.append("the generator printed no OK verdict for windows-msi")
+    if not any(re.match(rf"shipped-notices: {re.escape(artifact)} OK ", ln) for ln in lines):
+        faults.append(f"the generator printed no OK verdict for {artifact}")
     return faults
 
 
@@ -321,27 +416,7 @@ def build_msi(repo: str) -> str:
     ws_dir = os.path.join(repo, "apps", "fauna-windows")
 
     # 0. Ensure WiX extensions are installed (version must match WiX v6)
-    wix_ver = subprocess.run(
-        ["wix", "--version"], capture_output=True, text=True,
-    )
-    ext_ver = wix_ver.stdout.strip().split("+")[0]
-    ext_errors = []
-    # Firewall.wixext is NOT optional: ServiceNest.wxs opens inbound TCP 443 for the
-    # nest through <firewall:FirewallException>, so a build without this extension dies
-    # with WIX0200 "unhandled extension element 'FirewallException'". It was added to
-    # wix.json, Package.wxs's build comment and installer/README.md when the rule landed,
-    # but not here, so this builder had been unable to link an MSI at all.
-    for ext in ["WixToolset.Util.wixext", "WixToolset.UI.wixext",
-                "WixToolset.Firewall.wixext"]:
-        r = subprocess.run(
-            ["wix", "extension", "add", "-g", f"{ext}/{ext_ver}"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode != 0:
-            ext_errors.append(f"{ext}/{ext_ver}: rc={r.returncode} "
-                              f"stdout={r.stdout.strip()} stderr={r.stderr.strip()}")
-    if ext_errors:
-        pytest.fail(f"WiX extension install failed:\n" + "\n".join(ext_errors))
+    _ensure_wix_extensions()
 
     # The prebuild staged this flavor last; anything else here would package the
     # wrong core without a word.
@@ -480,24 +555,13 @@ def build_msi(repo: str) -> str:
         pytest.fail("the MSI's notices leave out part of its closure:\n  " + "\n  ".join(faults)
                     + "\nthe generator's verdict lines:\n" + "\n".join(l for l in notices_out if l.startswith("shipped-notices")))
 
-    # 2b. The ShellExt feature ships Fauna-Sparse.msix as a component
-    # (ShellExt.wxs's $(var.SparsePackage)). It is ProcessorArchitecture="neutral" —
-    # built ONCE and shared by every arch — by a dedicated dev-fleet packaging script
-    # that is deliberately not in this tree (installer/README.md § 2. Build the sparse
-    # package), so this builder consumes the prebuilt artifact and never tries to make
-    # one. Without the -d below, `wix build` dies with WIX0150 "Undefined preprocessor
-    # variable '$(var.SparsePackage)'"; fail here instead, naming what is missing and
-    # where it comes from, exactly as the staged-binary checks above do.
-    sparse_pkg = os.path.join(repo, "build", "installer", "Fauna-Sparse.msix")
-    if not os.path.exists(sparse_pkg):
-        pytest.fail(
-            f"Sparse package missing: {sparse_pkg} — the ShellExt feature ships it as a "
-            "component. It is built once (arch-neutral) by the dev-fleet packaging "
-            "script described in apps/fauna-windows/installer/README.md § 2, which is "
-            "not part of this tree; copy the artifact in rather than rebuilding it here."
-        )
-
-    # 3. Build MSI
+    # 3. Build MSI — in the release's shape: `-d NoSparsePackage=1`, as
+    # release.yml's MSI step passes it. The sparse identity package retired with its
+    # sources (installers/windows.md § Direct download, 6), so nothing can build the
+    # `Fauna-Sparse.msix` ShellExt.wxs's FaunaSparsePackage component would ship; the
+    # define leaves the component out, explicitly (a build that merely forgets
+    # $(var.SparsePackage) still dies WIX0150). The register CA then finds no package
+    # beside the shell DLL and does nothing, as on a released install.
     installer_dir = os.path.join(ws_dir, "installer")
     wxs_files = glob.glob(os.path.join(installer_dir, "*.wxs"))
     wxl_files = glob.glob(os.path.join(installer_dir, "*.wxl"))
@@ -510,6 +574,7 @@ def build_msi(repo: str) -> str:
             "-ext", "WixToolset.Util.wixext",
             "-ext", "WixToolset.UI.wixext",
             "-ext", "WixToolset.Firewall.wixext",
+            "-intermediatefolder", wix_intermediate(build_dir, "app-arm64"),
             "-o", msi_path,
         ] + wxs_files + loc_args + [
             "-d", f"SyncBin={os.path.join(stage_dir, 'fauna-sync-agent.exe')}",
@@ -527,7 +592,7 @@ def build_msi(repo: str) -> str:
             "-d", f"IconDir={os.path.join(stage_dir, 'icons')}\\",
             "-d", f"AppDir={os.path.join(stage_dir, 'app')}\\",
             "-d", f"NoticesDir={notices_dir}\\",
-            "-d", f"SparsePackage={sparse_pkg}",
+            "-d", "NoSparsePackage=1",
         ],
         # The link compresses a ~310 MB staged payload (the self-contained WinUI
         # publish) into a ~180 MB MSI: 71 s on an idle Windows host, far longer under the
@@ -536,4 +601,132 @@ def build_msi(repo: str) -> str:
         "WiX build (wix build -arch arm64)", cwd=installer_dir,
     )
 
+    return msi_path
+
+
+def wix_intermediate(build_dir: str, kind: str) -> str:
+    """A fresh WiX working folder under `build_dir` for one MSI `kind`. Without
+    `-intermediatefolder`, `wix build` works in a random 8.3-named folder in `%TEMP%`
+    (its cabinets and each extension's intermediate, 100-250 MB a build) and leaves it
+    behind when the build is killed, a fleet-made tree no prefix or root can attribute
+    (fleet-disk.md § Attribution). Under the checkout's `build/` it is tree output,
+    reclaimed with the checkout's other build output."""
+    d = os.path.join(build_dir, "wix-obj", kind)
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    return d
+
+
+def _ensure_wix_extensions() -> None:
+    """The three WiX extensions every MSI build loads, at the WiX tool's own
+    version — both builders (`build_msi`, `build_nest_msi`)."""
+    import pytest
+
+    wix_ver = subprocess.run(
+        ["wix", "--version"], capture_output=True, text=True,
+    )
+    ext_ver = wix_ver.stdout.strip().split("+")[0]
+    ext_errors = []
+    # Firewall.wixext is NOT optional: ServiceNest.wxs opens inbound TCP 443 for the
+    # nest through <firewall:FirewallException>, so a build without this extension dies
+    # with WIX0200 "unhandled extension element 'FirewallException'". It was added to
+    # wix.json, Package.wxs's build comment and installer/README.md when the rule landed,
+    # but not here, so this builder had been unable to link an MSI at all.
+    for ext in ["WixToolset.Util.wixext", "WixToolset.UI.wixext",
+                "WixToolset.Firewall.wixext"]:
+        r = subprocess.run(
+            ["wix", "extension", "add", "-g", f"{ext}/{ext_ver}"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if r.returncode != 0:
+            ext_errors.append(f"{ext}/{ext_ver}: rc={r.returncode} "
+                              f"stdout={r.stdout.strip()} stderr={r.stderr.strip()}")
+    if ext_errors:
+        pytest.fail(f"WiX extension install failed:\n" + "\n".join(ext_errors))
+
+
+def build_nest_msi(repo: str) -> str:
+    """Build the nest MSI from source (installers/windows.md § Direct download, 1):
+    the licence files and the WiX link of `NEST_WXS`, nothing else — no publish,
+    since it carries no app, and every staged binary a collection-time prebuild
+    (`nest_msi_build_owed`), replayed here and never built. Returns the MSI path.
+    Called by its door alone (`conftest.py::nest_msi_path`), on a cache miss;
+    needs no elevation."""
+    import pytest
+
+    from helpers.build_step import run_build_step
+    from helpers.helper_bins import helper_bin
+
+    build_dir = os.path.join(repo, "build", "installer")
+    stage_dir = os.path.join(build_dir, "stage-nest", "arm64")
+    msi_path, _stamp = nest_msi_paths(repo)
+    if os.path.isdir(stage_dir):
+        shutil.rmtree(stage_dir)
+    os.makedirs(os.path.join(stage_dir, "icons"))
+    ws_dir = os.path.join(repo, "apps", "fauna-windows")
+
+    _ensure_wix_extensions()
+
+    # The four Rust binaries the Nest, Bridge and Terminal App features ship.
+    for name in ["fauna-nest-svc", "fauna-bridge-svc", "fauna-tui", "fauna-cli"]:
+        src = helper_bin(name)
+        shutil.copy2(src, os.path.join(stage_dir, src.name))
+
+    # The Go MDA and its gnullvm runtime pieces, from the root target/ (as build_msi).
+    root_target = os.path.join(repo, "target")
+    for fname in ["fauna-mail-bridge.exe", "fauna_ffi.dll", "libunwind.dll"]:
+        src = os.path.join(root_target, fname)
+        if not os.path.exists(src):
+            pytest.fail(
+                f"Expected MDA build artifact missing: {src} "
+                "(just windows-mail-bridge-build should have staged it in target/)"
+            )
+        shutil.copy2(src, os.path.join(stage_dir, fname))
+
+    # The Add/Remove Programs icon (ARPPRODUCTICON) — the package's one icon; it
+    # installs no overlay icons, having no shell extension.
+    app_icon = os.path.join(ws_dir, "FaunaApp", "FaunaApp", "Assets", "AppIcon.ico")
+    if not os.path.exists(app_icon):
+        pytest.fail(f"App icon missing: {app_icon} — nest/Package.wxs stages it as ARPPRODUCTICON.")
+    shutil.copy2(app_icon, os.path.join(stage_dir, "icons", "AppIcon.ico"))
+
+    # The three licence files, for the nest MSI's own manifest artifact (no app,
+    # so no publish runs before it); a refusing generator fails the build here.
+    notices_dir = os.path.join(stage_dir, "notices")
+    notices_out = run_build_step(
+        ["just", "windows-nest-msi-notices", notices_dir.replace("\\", "/"), "arm64",
+         os.path.join(root_target, "fauna-mail-bridge.exe").replace("\\", "/")],
+        "the nest MSI's licence and notices files (just windows-nest-msi-notices)", cwd=repo,
+    )
+    faults = msi_notices_faults(notices_out, "win-arm64", "windows-nest-msi")
+    if faults:
+        pytest.fail("the nest MSI's notices leave out part of its closure:\n  " + "\n  ".join(faults)
+                    + "\nthe generator's verdict lines:\n" + "\n".join(l for l in notices_out if l.startswith("shipped-notices")))
+
+    installer_dir = os.path.join(ws_dir, "installer")
+    wxs_files = [os.path.join(installer_dir, *rel.split("/")) for rel in NEST_WXS]
+    loc_args = []
+    for wxl in glob.glob(os.path.join(installer_dir, "*.wxl")):
+        loc_args.extend(["-loc", wxl])
+    run_build_step(
+        [
+            "wix", "build", "-arch", "arm64",
+            "-ext", "WixToolset.Util.wixext",
+            "-ext", "WixToolset.UI.wixext",
+            "-ext", "WixToolset.Firewall.wixext",
+            "-intermediatefolder", wix_intermediate(build_dir, "nest-arm64"),
+            "-o", msi_path,
+        ] + wxs_files + loc_args + [
+            "-d", f"NestBin={os.path.join(stage_dir, 'fauna-nest-svc.exe')}",
+            "-d", f"BridgeBin={os.path.join(stage_dir, 'fauna-bridge-svc.exe')}",
+            "-d", f"MailBridgeBin={os.path.join(stage_dir, 'fauna-mail-bridge.exe')}",
+            "-d", f"MailBridgeFfiDll={os.path.join(stage_dir, 'fauna_ffi.dll')}",
+            "-d", f"MailBridgeLibunwindDll={os.path.join(stage_dir, 'libunwind.dll')}",
+            "-d", f"TuiBin={os.path.join(stage_dir, 'fauna-tui.exe')}",
+            "-d", f"CliBin={os.path.join(stage_dir, 'fauna-cli.exe')}",
+            "-d", f"IconDir={os.path.join(stage_dir, 'icons')}\\",
+            "-d", f"NoticesDir={notices_dir}\\",
+        ],
+        "WiX build of the nest MSI (wix build -arch arm64)", cwd=installer_dir,
+    )
     return msi_path

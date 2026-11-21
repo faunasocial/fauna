@@ -62,3 +62,35 @@ private func user(
     #expect(first == "alex99")
     #expect(second == "bao77")
 }
+
+// `dns-management.md` § Errors & edge cases (*Offer only what is possible on
+// `admin-dns`*): before either read has answered, every gated control's
+// answer is not possible — never offered on a guess — and the action refuses
+// with that same reason on `error-message`, dispatching nothing.
+
+@Test @MainActor func answersAreNotPossibleBeforeTheReadsResolve() {
+    let vm = AdminDnsVM()
+    #expect(vm.resolvedDns == nil)
+    #expect(vm.resolvedLocal == nil)
+    #expect(!vm.manageAllAnswer(managed: true).isPossible)
+    #expect(!vm.setModeAnswer(domain: "example.org", managed: true).isPossible)
+    #expect(!vm.addDomainAnswer(draft: "example.org").isPossible)
+    #expect(!vm.renameAnswer.isPossible)
+    #expect(!vm.promoteAnswer.isPossible)
+    #expect(!vm.removeAnswer(domain: "example.org").isPossible)
+    #expect(!vm.renameDraftAnswer(target: "example.org", graceDays: "").isPossible)
+}
+
+@Test @MainActor func aRefusedAddKeepsTheFormOpenAndSaysWhy() async {
+    let vm = AdminDnsVM()
+    let answer = vm.addDomainAnswer(draft: "example.org")
+    let saved = await vm.addDomain("example.org")
+    #expect(!saved)
+    #expect(vm.errorMessage == answer.refusal)
+}
+
+@Test @MainActor func aPossibleAnswerIsNotRefused() {
+    let vm = AdminDnsVM()
+    #expect(!vm.refused(.possible))
+    #expect(vm.errorMessage == nil)
+}

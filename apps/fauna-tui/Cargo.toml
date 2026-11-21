@@ -145,6 +145,9 @@ e2e-agent = [
     # The FAUNA_E2E_REGION_REGISTRY seed — the synthetic authority a tier_3
     # region journey trusts (`fauna_client_region::effective_registry`).
     "fauna-client-region/e2e-agent",
+    # The Folders page's mail-custody read hold
+    # (`folders_hold_custody_reads`, `folders.md` § Errors & edge cases).
+    "fauna-client-folders/test-helpers",
     # The FAUNA_E2E_CREDENTIAL_DIR store redirect — where the identity secret
     # is read and written; also FAUNA_E2E_FORCE_HEADLESS_STORE (the sealed-arm
     # forcing the tui headless constructor honours in test builds).
@@ -317,6 +320,9 @@ fauna-peer-share = { workspace = true, optional = true }
 # The share-plane host's shared half (`p2p.md` § Cross-user shared-set transfer
 # → *What a leg still writes*): `ShareHostSeams` + the durable sink. Same gate.
 fauna-client-share-host = { path = "../../libs/fauna-client-share-host", optional = true }
+# The share-link gate's typed answer (`share_link_possibility`), declared on
+# the media detail's "Share a link" element.
+fauna-client-share = { path = "../../libs/fauna-client-share" }
 # The `ShareIngestDoor` seam's error contract (share_pump's Result); the
 # agent adapter in sync_agent.rs implements it.
 anyhow = { workspace = true }

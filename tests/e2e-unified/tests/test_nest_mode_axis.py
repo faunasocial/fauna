@@ -39,6 +39,7 @@ import urllib.request
 import pytest
 
 from helpers import nest_mode as nm
+from helpers import source_scan
 
 pytestmark = pytest.mark.tier_1
 
@@ -533,8 +534,10 @@ def test_no_port_keyed_dial_hard_codes_a_plaintext_scheme():
 
     root = Path(__file__).resolve().parents[1]
     offenders = []
-    for source in sorted(root.rglob("*.py")):
-        for node in ast.walk(ast.parse(source.read_text())):
+    # Both spellings need `_base_url` or `scheme` in the file's text
+    # (`helpers/source_scan.py`: only those files are parsed).
+    for source, text in source_scan.spelling({"_base_url", "scheme"}, root=root):
+        for node in ast.walk(ast.parse(text)):
             if not isinstance(node, ast.Call):
                 continue
             target = node.func
@@ -874,7 +877,10 @@ def test_no_routed_nest_consumer_composes_a_nest_url_by_hand():
 
     root = Path(__file__).resolve().parents[1] / "tests"
     offenders = []
-    for source in sorted(root.rglob("test_*.py")):
+    # A consumer takes a routed fixture as an argument, so its file spells the
+    # name (`helpers/source_scan.py`: only those files are parsed).
+    for source, text in source_scan.spelling(
+            routed, root=root.parent, within=("tests",), pattern="test_*.py"):
         rel = source.relative_to(root.parent).as_posix()
         if source.name == "test_nest_mode_axis.py":
             continue
@@ -882,7 +888,7 @@ def test_no_routed_nest_consumer_composes_a_nest_url_by_hand():
             continue
         if rel in _COMPOSED_AUTHORITY_IS_NOT_A_NEST:
             continue
-        tree = ast.parse(source.read_text())
+        tree = ast.parse(text)
         consumes = any(
             isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
             and any(a.arg in routed for a in n.args.args)
@@ -1192,51 +1198,16 @@ def _nest_starting_helpers(source):
     return reaching - roots
 
 
-#: Directories no tree walk below descends into: never test sources, and a
-#: `node_modules` or `.venv` can hold more files than the tree itself.
-_UNWALKED_DIRS = frozenset({".venv", "__pycache__", "node_modules"})
-
 #: The two nest-start entry points every start-option derivation is rooted at.
 _NEST_START_ROOTS = frozenset({"_make_nest", "_start_dedicated_nest"})
 
-
-def _names_any(source, names):
-    """Whether `source`'s text holds any of `names` — the test a file must pass
-    before it is parsed. A function can only call a name its file spells, so a
-    file spelling none of a closure's roots adds nothing to it, and skipping its
-    parse changes no answer. It changes the cost: one parse of the whole tree is
-    30–80 s on a loaded Windows (34 MB of source, measured 2026-11-09), and the
-    files that spell a nest-start name are a small share of it."""
-    return _name_pattern(frozenset(names)).search(source) is not None
-
-
-@functools.cache
-def _name_pattern(names):
-    return re.compile("|".join(re.escape(n) for n in sorted(names)))
-
-
-@functools.cache
-def _walkable_sources(root):
-    """`{path: source}` for every `.py` under the e2e tree worth parsing,
-    read-only.
-
-    Read ONCE per process (cached on `root`): several tests walk the tree, and
-    the collision pin used to walk it again for every repeated fixture name, so
-    on a loaded Windows one test ran past the 900 s timeout — whose thread method
-    ends the whole run there, hiding every test after it. The skipped
-    directories are pruned as the walk meets them, not filtered after
-    `rglob` has listed everything under them."""
-    paths = []
-    for here, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in _UNWALKED_DIRS]
-        paths.extend(pathlib.Path(here, f) for f in files if f.endswith(".py"))
-    sources = {}
-    for path in sorted(paths):
-        try:
-            sources[path] = path.read_text()
-        except OSError:
-            continue
-    return types.MappingProxyType(sources)
+# The tree's text is read ONCE per process (`source_scan.sources`, cached on
+# its root) and a file is parsed only when its text spells a name the question
+# keys on (`source_scan.spells_any`). Both began here (2026-11-09: the
+# collision pin re-walked the tree for every repeated fixture name and ran past
+# the 900 s timeout on a loaded Windows host, whose thread method ends the whole run)
+# and were lifted to `helpers/source_scan.py` on 2026-11-18 so every
+# source-scanning pin in the directory shares the one read.
 
 
 @functools.cache
@@ -1248,8 +1219,8 @@ def _tree_nest_starting_helpers(root):
     imported helper then existed for the tree walk and not for the collision
     pin."""
     helpers = set()
-    for source in _walkable_sources(root).values():
-        if not _names_any(source, _NEST_START_ROOTS):
+    for source in source_scan.sources(root).values():
+        if not source_scan.spells_any(source, _NEST_START_ROOTS):
             continue
         try:
             helpers |= _nest_starting_helpers(source)
@@ -1273,8 +1244,8 @@ def _derived_start_options_tree(root):
     derived = {}
     options = _tree_start_options(root)
     helpers = _tree_nest_starting_helpers(root)
-    for path, source in _walkable_sources(root).items():
-        if not _names_any(source, _NEST_START_ROOTS | helpers):
+    for path, source in source_scan.sources(root).items():
+        if not source_scan.spells_any(source, _NEST_START_ROOTS | helpers):
             continue  # no fixture here reaches a start: it asks for nothing
         try:
             found = _derive_start_options(source, options, helpers)
@@ -1390,7 +1361,7 @@ def test_no_two_nest_fixtures_share_a_name_while_asking_for_different_options():
     root = _e2e_root()
     options = _tree_start_options(root)
     helpers = _tree_nest_starting_helpers(root)
-    sources = _walkable_sources(root)
+    sources = source_scan.sources(root)
     conflicting = {}
     for name, where in collisions.items():
         per_file = {
@@ -1419,22 +1390,12 @@ def test_the_tree_is_walked_and_derived_once_per_process():
     (the collision pin used to re-walk for every repeated fixture name). A
     `functools.cache` dropped from any of them puts that back."""
     root = _e2e_root()
-    assert _walkable_sources(root) is _walkable_sources(root)
+    assert source_scan.sources(root) is source_scan.sources(root)
     assert _tree_nest_starting_helpers(root) is _tree_nest_starting_helpers(root)
     assert _derive_start_options_tree() is _derive_start_options_tree()
 
 
-def test_the_tree_walk_prunes_venv_node_modules_and_pycache(tmp_path):
-    """`_walkable_sources` reads the tree's own `.py` files only, and skips the
-    directories that are never test sources at any depth."""
-    for rel in ("conftest.py", "tests/test_a.py", "node_modules/pkg/x.py",
-                "web/node_modules/y.py", "tools/.venv/lib/z.py",
-                "tests/__pycache__/w.py", "notes.txt"):
-        path = tmp_path / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("x = 1\n")
-    assert list(_walkable_sources(tmp_path)) == [
-        tmp_path / "conftest.py", tmp_path / "tests" / "test_a.py"]
+# The walk's pruning pin moved with the walk: `test_source_scan.py`.
 
 
 def test_the_option_table_covers_every_local_nest_fixture():
@@ -1641,9 +1602,14 @@ def test_every_fixture_that_COMPILES_a_nest_is_named_in_the_binary_set():
         return False
 
     offenders = []
-    for path in sorted(root.rglob("*.py")):
+    # A fixture reaching a build within its module means the module spells
+    # `fixture` and a builder's name, or the argv's `"fauna-nest"` constant
+    # literally (`helpers/source_scan.py`: only those files are parsed).
+    for path, text in source_scan.spelling(
+            {"_nest_binary", "build_node", "build_nest", "fauna-nest"},
+            root=root, requiring={"fixture"}):
         try:
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(text)
         except SyntaxError:  # pragma: no cover - a broken file is another test's job
             continue
         module_fns = {
@@ -1796,9 +1762,13 @@ def test_every_fixture_pinning_a_feature_set_is_dispositioned():
     # collisions would be a different bug; assert that rather than assume it.
     pinners: dict[str, str] = {}
     trees: dict[Path, ast.Module] = {}
-    for path in sorted(root.rglob("*.py")):
+    # A pinner calls a builder by name or spells the argv's `"fauna-nest"`
+    # constant literally (`helpers/source_scan.py`: only those files are parsed
+    # here; the fixture pass below adds the files naming a pinner).
+    builders = {"build_node", "build_nest", "fauna-nest"}
+    for path, text in source_scan.spelling(builders, root=root):
         try:
-            trees[path] = ast.parse(path.read_text())
+            trees[path] = ast.parse(text)
         except SyntaxError:  # pragma: no cover - a broken file is another test's job
             continue
         # MODULE-LEVEL functions only. `explicit_features` walks each one's
@@ -1834,7 +1804,16 @@ def test_every_fixture_pinning_a_feature_set_is_dispositioned():
         return False
 
     found: dict[str, str] = {}
-    for path, tree in trees.items():
+    # A fixture that pins a set spells `fixture` and either a builder or the
+    # name of the pinner it reaches.
+    for path, text in source_scan.spelling(
+            builders | set(pinners), root=root, requiring={"fixture"}):
+        tree = trees.get(path)
+        if tree is None:
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:  # pragma: no cover - a broken file is another test's job
+                continue
         module_fns = {
             n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
         }
@@ -3208,9 +3187,11 @@ def test_every_fixture_that_SPAWNS_A_BRIDGE_is_named_in_the_bridge_set():
         return False
 
     offenders = []
-    for path in sorted(root.rglob("*.py")):
+    # A fixture reaching a `_spawn_*_bridge` call within its module means the
+    # module spells both (`helpers/source_scan.py`: only those files are parsed).
+    for path, text in source_scan.spelling({"_spawn_"}, root=root, requiring={"fixture"}):
         try:
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(text)
         except SyntaxError:  # pragma: no cover - a broken file is another test's job
             continue
         module_fns = {
@@ -4382,6 +4363,7 @@ def test_the_own_image_reason_names_the_tag_it_actually_boots():
     assert "fauna-nest-test:src-<source key>" in reason
 
 
+@functools.cache
 def _package_own_image_fixtures():
     """Re-derive the class from `tests/platform/docker/`'s AST.
 
@@ -4392,7 +4374,9 @@ def _package_own_image_fixtures():
     `serving_nest` rather than defining its own.
 
     Returns `(fixtures, requests_of)` — the second so the redundancy pin below
-    can ask what a dropped name would have carried.
+    can ask what a dropped name would have carried. Derived once per process
+    and returned read-only: four pins ask it, and each derivation parses the
+    whole package (a minute's share of a Windows run in four).
     """
     import ast
     from pathlib import Path
@@ -4447,8 +4431,9 @@ def _package_own_image_fixtures():
                 reaches.add(name)
                 grew = True
 
-    fixtures = {n for n in reaches if is_fixture(funcs[n])}
-    return fixtures, {n: requested_names(funcs[n]) for n in fixtures}
+    fixtures = frozenset(n for n in reaches if is_fixture(funcs[n]))
+    return fixtures, types.MappingProxyType(
+        {n: frozenset(requested_names(funcs[n])) for n in fixtures})
 
 
 def _package_tests_booting_the_image_in_their_body():
@@ -4497,23 +4482,30 @@ def _package_tests_booting_the_image_in_their_body():
     return sorted(found)
 
 
-def _fixture_names_defined_outside_the_docker_package():
-    """Every fixture name defined anywhere in the e2e tree but that package."""
+def _fixture_names_defined_outside_the_docker_package(among):
+    """Those of `among` defined as a fixture anywhere in the e2e tree but that
+    package. A fixture named X is spelled `def X`, so only the files spelling
+    one of `among` (and `fixture`) are parsed (`helpers/source_scan.py`)."""
     import ast
     from pathlib import Path
 
+    among = frozenset(among)
+    if not among:
+        return set()
     root = Path(__file__).resolve().parents[1]
     pkg = root / "tests" / "platform" / "docker"
     names = set()
-    for source in sorted(root.rglob("*.py")):
+    for source, text in source_scan.spelling(among, root=root, requiring={"fixture"}):
         if source.parent == pkg:
             continue
         try:
-            tree = ast.parse(source.read_text())
+            tree = ast.parse(text)
         except SyntaxError:
             continue
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name not in among:
                 continue
             if any("fixture" in ast.unparse(d) for d in node.decorator_list):
                 names.add(node.name)
@@ -4540,13 +4532,26 @@ def _start_options_per_definition() -> dict[str, dict[str, frozenset]]:
     # default" spelling).
     plumbing = {None, "port", "tmp_dir", "config_name", "label"}
 
+    from helpers import nest_surface as ns
+
     root = Path(__file__).resolve().parents[1]
     per: dict[str, dict[str, frozenset]] = defaultdict(dict)
-    for source in sorted(root.rglob("*.py")):
+
+    # Two passes, so only the files that can change the answer are parsed
+    # (`helpers/source_scan.py`). A definition asks for something only where
+    # its file spells a starter; a disagreement needs one such definition, and
+    # the table check needs every definition of a name it declares — so the
+    # second pass reads every other file defining a name that asks or that the
+    # table declares (a definition `def X` spells X), all of whose definitions
+    # there ask for nothing.
+    parsed = set()
+
+    def scan(source, text):
+        parsed.add(source)
         try:
-            tree = ast.parse(source.read_text())
+            tree = ast.parse(text)
         except SyntaxError:
-            continue
+            return
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -4570,6 +4575,15 @@ def _start_options_per_definition() -> dict[str, dict[str, frozenset]]:
                     asked.add(kw.arg)
             rel = source.relative_to(root.parent).as_posix()
             per[node.name][rel] = frozenset(asked)
+
+    for source, text in source_scan.spelling(starters, root=root, requiring={"fixture"}):
+        scan(source, text)
+    wanted = {n for n, sites in per.items() if any(sites.values())}
+    wanted |= set(ns.FIXTURE_START_OPTIONS)
+    if wanted:
+        for source, text in source_scan.spelling(wanted, root=root, requiring={"fixture"}):
+            if source not in parsed:
+                scan(source, text)
     return per
 
 
@@ -4651,7 +4665,7 @@ def test_the_own_image_fixture_list_matches_the_platform_docker_package():
     from helpers import nest_surface as ns
 
     derived, _ = _package_own_image_fixtures()
-    expected = derived - _fixture_names_defined_outside_the_docker_package()
+    expected = derived - _fixture_names_defined_outside_the_docker_package(derived)
     assert expected == set(ns.OWN_IMAGE_FIXTURES), (
         "tests/platform/docker/'s own-image fixtures and "
         "nest_surface.OWN_IMAGE_FIXTURES have diverged.\n"
@@ -4691,7 +4705,7 @@ def test_no_own_image_name_collides_with_a_fixture_outside_the_package():
     """
     from helpers import nest_surface as ns
 
-    collisions = set(ns.OWN_IMAGE_FIXTURES) & _fixture_names_defined_outside_the_docker_package()
+    collisions = _fixture_names_defined_outside_the_docker_package(ns.OWN_IMAGE_FIXTURES)
     assert not collisions, (
         f"{sorted(collisions)} name a fixture both inside and outside "
         "tests/platform/docker/, so matching on the name would deselect tests "
@@ -4976,6 +4990,7 @@ _OWN_AUTHORITY_FIXTURES = (
     "_start_handled_tls_nest",
     "caldav_cross_nest_peer",
     "cross_nest_foreign_ephemeral",
+    "invite_only_handled_nest",
     "smoke_handled_nest",
     "store_nest",
 )
@@ -5052,7 +5067,9 @@ def test_the_own_authority_sentinel_is_only_passed_by_fixtures_that_declare_it()
 
     root = Path(__file__).resolve().parents[1]
     passers = set()
-    for path, source in _walkable_sources(root).items():
+    # A passer spells the sentinel (`helpers/source_scan.py`: only those files
+    # are parsed).
+    for path, source in source_scan.spelling({"OWN_DIAL_AUTHORITY"}, root=root):
         if path.name == Path(__file__).name:
             continue
         try:
@@ -5132,7 +5149,10 @@ def test_a_handle_domain_seed_fixture_left_the_binary_closure():
     )
     wanted = seeds - exempt
     seen = {}
-    for source in _walkable_sources(root).values():
+    # A definition `def X` spells X (`helpers/source_scan.py`: only the files
+    # defining a wanted name are parsed).
+    for _path, source in (source_scan.spelling(wanted, root=root, requiring={"fixture"})
+                          if wanted else ()):
         try:
             tree = ast.parse(source)
         except SyntaxError:
@@ -6956,9 +6976,12 @@ def _peer_fields_not_fed_from_peer_url() -> set[str]:
 
     root = Path(__file__).resolve().parents[1]
     out: set[str] = set()
-    for path in sorted(root.rglob("*.py")):
+    # Every peer field spells `nest_url` or `contributor_seeds`, as a keyword or
+    # as a subscript key's literal (`helpers/source_scan.py`: only those files
+    # are parsed).
+    for path, text in source_scan.spelling({"nest_url", "contributor_seeds"}, root=root):
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            tree = ast.parse(text)
         except SyntaxError:
             continue
         for fn in ast.walk(tree):
@@ -7467,13 +7490,12 @@ def test_no_test_reads_a_bridge_process_or_log_path_directly():
 
     root = Path(__file__).resolve().parents[1]
     found = set()
-    for folder in ("tests", "helpers", "actions", "common"):
-        for source in sorted((root / folder).rglob("*.py")):
-            if source.name == "test_nest_mode_axis.py":
-                continue
-            rel = source.relative_to(root).as_posix()
-            if any(n in source.read_text() for n in needles):
-                found.add(rel)
+    # The tree's text is read once per process (`helpers/source_scan.py`).
+    for source, _text in source_scan.spelling(
+            needles, root=root, within=("tests", "helpers", "actions", "common")):
+        if source.name == "test_nest_mode_axis.py":
+            continue
+        found.add(source.relative_to(root).as_posix())
 
     unmapped = sorted(found - set(_BRIDGE_PROCESS_READERS))
     assert not unmapped, (
@@ -7697,12 +7719,14 @@ def test_mail_venue_host_affordance_readers_are_exactly_pinned():
                 return True
         return False
 
-    for source_path in sorted((root / "tests").rglob("*.py")):
+    # A reader takes a venue fixture as an argument, so its file spells the
+    # name (`helpers/source_scan.py`: only those files are parsed).
+    for source_path, text in source_scan.spelling(seeds, root=root, within=("tests",)):
         if source_path.name == "test_nest_mode_axis.py":
             continue
         try:
-            tree = _ast.parse(source_path.read_text())
-        except (OSError, SyntaxError):
+            tree = _ast.parse(text)
+        except SyntaxError:
             continue
         rel = source_path.relative_to(root).as_posix()
         helpers = {
@@ -8073,9 +8097,13 @@ def test_every_surviving_node_binary_consumer_is_accounted_for():
 
     root = Path(__file__).resolve().parents[1]
     found = {}
-    for source in sorted((root / "tests" / "api").glob("*.py")):
+    # A consumer takes `node_binary` as an argument, so its file spells it
+    # (`helpers/source_scan.py`: only those files are parsed).
+    for source, text in source_scan.spelling({"node_binary"}, root=root, within=("tests/api",)):
+        if source.parent != root / "tests" / "api":
+            continue
         rel = source.relative_to(root).as_posix()
-        tree = ast.parse(source.read_text())
+        tree = ast.parse(text)
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -8646,9 +8674,11 @@ _NEST_BINARY_DISPOSITIONS = {
 _NEST_BINARY_FILES_AWAITING_TRIAGE = frozenset()
 
 
+@functools.cache
 def _nest_binary_consumer_closures() -> dict:
     """`{qualified test -> its transitive fixture-name closure}`, for every test
-    whose closure reaches a `NEST_BINARY_FIXTURES` name.
+    whose closure reaches a `NEST_BINARY_FIXTURES` name. Derived once per
+    process and returned read-only: three pins ask it.
 
     Resolved through the CONFTEST CHAIN as well as the test module, because that
     is the only way the scan sees the same population pytest does: most of the
@@ -8679,11 +8709,12 @@ def _nest_binary_consumer_closures() -> dict:
     from helpers import nest_surface as ns
 
     root = Path(__file__).resolve().parents[1]
+    texts = source_scan.sources(root)
 
     def fixtures_in(path: Path) -> dict:
         out = {}
         try:
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(texts[path] if path in texts else path.read_text())
         except (SyntaxError, OSError):
             return out
         for node in ast.walk(tree):
@@ -8695,12 +8726,35 @@ def _nest_binary_consumer_closures() -> dict:
                     out[node.name] = [a.arg for a in node.args.args]
         return out
 
-    conftests, found = {}, {}
-    for source in sorted(root.glob("tests/**/*.py")):
+    # Only a module spelling a name that can lead to a binary is parsed
+    # (`helpers/source_scan.py`). A test reaches one only through its own
+    # arguments and its module's fixtures, all spelled in the module: through a
+    # binary fixture's own name, or through a conftest fixture whose closure
+    # reaches one. `reach` is that set, closed over every conftest's fixtures
+    # merged — a superset of any one chain's, so it can only let more in.
+    conftests = {
+        p: fixtures_in(p) for p in texts
+        if p.name == "conftest.py" and (p == root / "conftest.py" or p.is_relative_to(root / "tests"))
+    }
+    merged: dict = {}
+    for table in conftests.values():
+        for name, args in table.items():
+            merged.setdefault(name, set()).update(args)
+    reach = set(ns.NEST_BINARY_FIXTURES)
+    grew = True
+    while grew:
+        grew = False
+        for name, args in merged.items():
+            if name not in reach and args & reach:
+                reach.add(name)
+                grew = True
+
+    found = {}
+    for source, text in source_scan.spelling(reach, root=root, within=("tests",)):
         if source.name == "conftest.py":
             continue
         try:
-            tree = ast.parse(source.read_text())
+            tree = ast.parse(text)
         except SyntaxError:
             continue
 
@@ -8756,7 +8810,7 @@ def _nest_binary_consumer_closures() -> dict:
                     found["::".join([rel, *prefix, child.name])] = frozenset(seen)
 
         visit(tree, [])
-    return found
+    return types.MappingProxyType(found)
 
 
 def _fact_rules() -> frozenset:
@@ -9130,11 +9184,14 @@ def test_the_prebuild_trigger_covers_every_provider_routed_nest_fixture():
     )
 
     root = Path(__file__).resolve().parents[1]
-    sources = [root / "conftest.py"] + sorted((root / "tests").rglob("*.py"))
     offenders = []
-    for source in sources:
+    # A fixture calling the seam spells it and `fixture`
+    # (`helpers/source_scan.py`: only those files are parsed).
+    for source, text in source_scan.spelling(
+            {"_start_dedicated_nest"}, root=root, within=("conftest.py", "tests"),
+            requiring={"fixture"}):
         try:
-            tree = ast.parse(source.read_text())
+            tree = ast.parse(text)
         except SyntaxError:  # pragma: no cover — another test's job
             continue
         for node in ast.walk(tree):
@@ -9303,7 +9360,9 @@ def test_every_named_build_is_declared_and_image_servable():
 
     root = Path(__file__).resolve().parents[1]
     found = {}
-    for path, source in _walkable_sources(root).items():
+    # A call spells `_start_dedicated_nest` (`helpers/source_scan.py`: only
+    # those files are parsed).
+    for path, source in source_scan.spelling({"_start_dedicated_nest"}, root=root):
         try:
             tree = ast.parse(source)
         except SyntaxError:
@@ -9762,9 +9821,11 @@ def _files_that_fingerprint_an_spki() -> set:
 
     root = Path(__file__).resolve().parents[1]
     found = set()
-    for path in root.rglob("*.py"):
+    # Both halves spell `getpeercert` or `SubjectPublicKeyInfo`
+    # (`helpers/source_scan.py`: only those files are parsed).
+    for path, text in source_scan.spelling({"getpeercert", "SubjectPublicKeyInfo"}, root=root):
         try:
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(text)
         except SyntaxError:  # pragma: no cover — a syntax error is its own red
             continue
         # One hop: every name bound anywhere in the file to an expression that
@@ -9855,13 +9916,13 @@ def test_the_no_redirect_opener_has_exactly_one_home():
              Path(__file__).resolve().parents[2] / "common")
     home = Path(__file__).resolve().parents[2] / "common" / "auth.py"
     found = set()
+    # A subclass spells `HTTPRedirectHandler` (`helpers/source_scan.py`: only
+    # those files are parsed; the walk already skips `.venv`).
     for tree in trees:
-        for path in sorted(tree.rglob("*.py")):
-            if ".venv" in path.parts:
-                continue
+        for path, text in source_scan.spelling({"HTTPRedirectHandler"}, root=tree):
             try:
-                module = _ast.parse(path.read_text())
-            except (OSError, SyntaxError):
+                module = _ast.parse(text)
+            except SyntaxError:
                 continue
             for node in _ast.walk(module):
                 if isinstance(node, _ast.ClassDef) and any(

@@ -6,9 +6,11 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
+import com.fauna.app.R
 import com.fauna.app.core.AftermathProgress
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.app.ui.viewmodel.RecoveryKitUiState
@@ -25,14 +27,17 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import social.fauna.generated.Ids
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_core.QrMatrix
 
 /**
  * Compose-level coverage for the stateless [RecoveryKitSectionContent]
  * (`docs/goal/ui/settings.md` § Recovery kit) — one test per status the chain
  * read can answer, the two affordances that belong to a single state (the
- * escrow re-seal, the veto), and the shown-once kit display. No Hilt, no VM, no
- * FFI: the two native reads ([pendingDays], [qrMatrixOf]) are injected.
+ * escrow re-seal, the veto), and the shown-once kit display. No Hilt, no VM:
+ * the two native reads ([pendingDays], [qrMatrixOf]) are injected; the stolen
+ * trigger's draft answer is the shared `recovery_stolen_entry_possibility`
+ * (FFI-touching → `just android-host-test`).
  *
  * Enablement is fed through the status record's `allows_*` fields exactly as
  * shared Rust computes them (`libs/fauna-ffi/src/recovery.rs`); the tests pin
@@ -266,8 +271,39 @@ class RecoveryKitSectionContentTest {
     }
 
     @Test
-    fun theConfirmWordArmsTheStolenTrigger() {
+    fun theStolenTriggerSaysTheSharedDraftsReasonKitFirst() {
+        // Blank kit, word typed: the kit's line, beside the disabled press.
         renderLeg(RecoveryKitUiState(status = status("registered", allowsReplace = true), stolenConfirmInput = "SUCCEED"))
+        node(Ids.IDENTITY_STOLEN_BUTTON).assertIsNotEnabled()
+        composeTestRule.onNodeWithText(getString(R.string.settings_recovery_kit_kit_phrase_required)).assertExists()
+    }
+
+    @Test
+    fun aWrongWordKeepsTheStolenTriggerDisarmedWithTheWordsPrompt() {
+        val state = RecoveryKitUiState(
+            status = status("registered", allowsReplace = true),
+            phraseInput = "held-kit",
+            stolenConfirmInput = "succeed",
+        )
+        // Case matters: the word is compared as the literal, never localized.
+        assertEquals(
+            "settings.recovery_kit.stolen_confirm_placeholder",
+            (state.stolenAnswer as Possibility.Blocked).reason.key,
+        )
+        renderLeg(state)
+        node(Ids.IDENTITY_STOLEN_BUTTON).assertIsNotEnabled()
+        composeTestRule.onNodeWithText(getString(R.string.settings_recovery_kit_kit_phrase_required)).assertDoesNotExist()
+    }
+
+    @Test
+    fun theConfirmWordArmsTheStolenTrigger() {
+        renderLeg(
+            RecoveryKitUiState(
+                status = status("registered", allowsReplace = true),
+                phraseInput = "held-kit",
+                stolenConfirmInput = "SUCCEED",
+            ),
+        )
 
         node(Ids.IDENTITY_STOLEN_BUTTON).assertIsEnabled()
         // The trigger sits below the fold of the unscrolled test window, where an
@@ -547,4 +583,8 @@ class RecoveryKitSectionContentTest {
         render(RecoveryKitUiState(status = null), inheritedFiltersOpen = 0)
         assertAbsent(Ids.RECOVERY_KIT_INHERITED_FILTERS_STATUS)
     }
+
+    private fun getString(resId: Int): String =
+        androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+            .getString(resId)
 }

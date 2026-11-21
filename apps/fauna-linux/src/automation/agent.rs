@@ -103,7 +103,89 @@ pub fn perform(req: &ElementReq) -> Value {
         // against (`fauna_e2e_agent::ElementKind::Registry`).
         ElementKind::Registry => super::registry::snapshot_json(),
         ElementKind::ClipboardText => clipboard_text(),
+        // Deliberately UNGATED, like the reads: Select All acts on no control
+        // (a control's caption is never selectable, `read_text.rs`).
+        ElementKind::SelectText => match find::find_indexed_scoped(scope, id, req.index) {
+            Some(w) => select_text(&w),
+            None => json!({ "error": "not found" }),
+        },
+        ElementKind::Selection => json!({ "selected": current_selection() }),
     }
+}
+
+/// The selection a person makes in `w`'s text, made with the label's own
+/// Select All — gtk's `selection.select-all`, the item its context menu
+/// offers, after the focus a click on it gives — then what it holds
+/// (`POST /element/select-text`). A pointer drag cannot be made in-process: a
+/// `gtk::GestureDrag` signal emitted with no input event behind it selects
+/// nothing (measured 2026-11-19), and gtk 4 builds no input event for a
+/// client, so the twin of macos's click + Edit ▸ Select All is the one
+/// gesture this agent can make; the selection is never written as a range.
+/// A label `read_text.rs` left unselectable answers `""` — its Select All is
+/// a no-op — as does an element holding no label.
+fn select_text(w: &gtk::Widget) -> Value {
+    let Some(label) = first_text_label(w) else {
+        return json!({ "selected": "", "why": "the element holds no label" });
+    };
+    if label.is_selectable() {
+        label.grab_focus();
+    }
+    let _ = label.activate_action("selection.select-all", None);
+    match label_selection(&label) {
+        Some(text) => json!({ "selected": text }),
+        None => json!({
+            "selected": "",
+            "why": if label.is_selectable() {
+                "Select All left no selection"
+            } else {
+                "the label is not selectable"
+            }
+        }),
+    }
+}
+
+/// The text `label`'s live selection holds, or `None` when it holds none —
+/// gtk's selection bounds are character offsets into the label's text.
+fn label_selection(label: &gtk::Label) -> Option<String> {
+    let (start, end) = label.selection_bounds()?;
+    let (lo, hi) = (
+        start.min(end).max(0) as usize,
+        start.max(end).max(0) as usize,
+    );
+    if lo == hi {
+        return None;
+    }
+    Some(label.text().chars().skip(lo).take(hi - lo).collect())
+}
+
+/// What the current selection holds (`POST /page/selection`): the selection
+/// of the showing label that holds one, searched over every visible toplevel
+/// window, `""` when none does. gtk keeps a selection per label, so this is
+/// the label the person last selected in that kept it.
+fn current_selection() -> String {
+    fn walk(w: &gtk::Widget) -> Option<String> {
+        if !w.is_visible() {
+            return None;
+        }
+        if let Some(label) = w.downcast_ref::<gtk::Label>()
+            && let Some(text) = label_selection(label)
+        {
+            return Some(text);
+        }
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            if let Some(found) = walk(&c) {
+                return Some(found);
+            }
+            child = c.next_sibling();
+        }
+        None
+    }
+    gtk::Window::list_toplevels()
+        .iter()
+        .filter_map(|t| t.downcast_ref::<gtk::Widget>().and_then(walk))
+        .next()
+        .unwrap_or_default()
 }
 
 /// Every `id` match's text, in the order `/element/text?index=i` reads them —
@@ -339,6 +421,19 @@ fn attr(scope: &[find::ScopeStep], id: &str, name: &str, index: usize) -> Value 
                 };
                 active.map_or(Value::Null, |on| json!(if on { "true" } else { "false" }))
             }),
+        // `selectable`: whether the element's text can be selected with gtk's
+        // own selection (`docs/goal/ui/README.md` § Text the person reads can
+        // be copied; `drivers/base.py::is_text_selectable`) — the live
+        // `gtk::Label::is_selectable` of the element's label, or of the first
+        // visible label under it carrying text, which is the property
+        // `read_text.rs` decides. `Value::Null` when the element holds no label.
+        "selectable" => first_text_label(&w).map_or(Value::Null, |label| {
+            json!(if label.is_selectable() {
+                "true"
+            } else {
+                "false"
+            })
+        }),
         // `options`: every option a picker PAINTS, JSON-encoded in model order —
         // the contract `drivers/base.py::option_texts` reads, which tui and web
         // already serve. The selected-value read (`get_text`) cannot see an
@@ -525,6 +620,29 @@ fn picture_of(w: &gtk::Widget) -> Option<gtk::Picture> {
         .child()?
         .downcast::<gtk::Picture>()
         .ok()
+}
+
+/// `w` itself when it is a label, else the first visible label under it, in
+/// document order, whose text is not blank — the label a person would drag
+/// across to select the element's text (`selectable` in [`attr`]).
+fn first_text_label(w: &gtk::Widget) -> Option<gtk::Label> {
+    if let Some(label) = w.downcast_ref::<gtk::Label>() {
+        return Some(label.clone());
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if c.is_visible() {
+            if let Some(label) = c.downcast_ref::<gtk::Label>() {
+                if !label.text().trim().is_empty() {
+                    return Some(label.clone());
+                }
+            } else if let Some(found) = first_text_label(&c) {
+                return Some(found);
+            }
+        }
+        child = c.next_sibling();
+    }
+    None
 }
 
 /// The `gtk::Video` that is `w` or one of its direct children — where
@@ -1953,6 +2071,68 @@ mod tests {
             });
             chooser.unparent();
             window.close();
+        });
+    }
+
+    /// A page with a shown message, a button and a text entry, mapped through
+    /// `read_text::install` so the message is read-only text and the button's
+    /// caption a control — the decision the app makes for every label.
+    fn selection_page() -> (gtk::Window, gtk::Label, gtk::Button, gtk::Entry) {
+        crate::read_text::install();
+        let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let message = gtk::Label::new(Some("error: no route to nest"));
+        let button = gtk::Button::with_label("Continue");
+        let entry = gtk::Entry::new();
+        page.append(&message);
+        page.append(&button);
+        page.append(&entry);
+        let window = gtk::Window::new();
+        window.set_child(Some(&page));
+        window.present();
+        pump_until("the selection page never mapped", || {
+            message.is_mapped() && message.is_selectable()
+        });
+        (window, message, button, entry)
+    }
+
+    /// `/element/select-text` makes the selection with the label's own Select
+    /// All and replies what it holds; `/page/selection` reads it back, and it
+    /// stands through a repaint with the same text and a focus move (rule 2).
+    #[test]
+    fn select_text_selects_with_select_all_and_the_page_reads_it_back() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (window, message, _button, entry) = selection_page();
+            assert_eq!(current_selection(), "", "nothing is selected yet");
+            let reply = select_text(message.upcast_ref());
+            assert_eq!(reply["selected"], "error: no route to nest", "{reply}");
+            assert_eq!(current_selection(), "error: no route to nest");
+            message.set_text("error: no route to nest");
+            entry.grab_focus();
+            let ctx = gtk::glib::MainContext::default();
+            while ctx.iteration(false) {}
+            assert_eq!(
+                current_selection(),
+                "error: no route to nest",
+                "a same-text repaint and a focus move keep the selection"
+            );
+            message.set_text("error: a different message");
+            assert_eq!(current_selection(), "", "a changed value resets it");
+            window.destroy();
+        });
+    }
+
+    /// A control's caption is never selectable, so Select All on it selects
+    /// nothing and the route says why — the answer comes from the label's own
+    /// selection, never from a flag.
+    #[test]
+    fn select_text_on_a_control_caption_selects_nothing() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (window, _message, button, _entry) = selection_page();
+            let reply = select_text(button.upcast_ref());
+            assert_eq!(reply["selected"], "", "{reply}");
+            assert_eq!(reply["why"], "the label is not selectable", "{reply}");
+            assert_eq!(current_selection(), "");
+            window.destroy();
         });
     }
 }

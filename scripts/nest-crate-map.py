@@ -110,7 +110,7 @@ PLAN = {
         web_render_fault_test_hook web_render_park_test_hook version_prune_test_hook pending_actions_test_hook web_blank_site_test_hook
         outbound_clock_test_hook keypackage_age_test_hook share_link_age_test_hook mta_sts_advance_test_hook
         mail_domain_gc_test_hook mail_health_state_test_hook mass_mailing_test_hook membership_lapse_test_hook
-        blocklist_self_check_test_hook spam_history_gc_test_hook room_seat_key_test_hook""",
+        blocklist_self_check_test_hook spam_history_gc_test_hook room_seat_key_test_hook starttls_probe_test_hook""",
     "nest": "<lib.rs> <main.rs> bridge_legs bridge_schema",
 }
 

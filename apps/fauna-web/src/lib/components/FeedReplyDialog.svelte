@@ -10,6 +10,8 @@
   import { authorName, type FeedPostHost } from '#lib/feed-post-host.svelte';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
+  import { feedReplySubmitPossibility } from '#lib/wasm';
+  import { askPossibility, formGate } from '#lib/form-gate';
 
   let { host }: { host: FeedPostHost } = $props();
 
@@ -18,6 +20,14 @@
     void $contactsRevision;
     return target ? authorName(target) : '';
   });
+  // `feed-reply-submit-button` painted from the shared draft-validity answer
+  // (`fauna_feed::forms::reply_submit_possibility`, `feed.md` § Errors & edge
+  // cases): disabled with its reason on `title`, re-asked as the user types;
+  // `host.submitReply` asks it again before it sends. The dialog only opens
+  // over a built manager, so the wasm core is up.
+  const submitGate = $derived(
+    formGate(askPossibility(() => feedReplySubmitPossibility(host.reply.text))),
+  );
   const audienceCopy = $derived.by<string>(() => {
     const p = target;
     switch (p?.reply_audience) {
@@ -66,12 +76,18 @@
           {t.feed.post.reply_public_confirm}
         </label>
       {/if}
+      {#if host.reply.error}
+        <!-- The dialog's own `error-message` (`ui/README.md` § Offer only what
+             is possible, rule 7): the page's stands down while this shows. -->
+        <p class="compose-dialog-error" data-testid={IDS.ERROR_MESSAGE}>{host.reply.error}</p>
+      {/if}
       <div class="compose-dialog-actions">
         <button class="btn-secondary" onclick={host.closeReplyDialog}>{t.common.cancel}</button>
         <button
           class="btn-primary"
           data-testid={IDS.FEED_REPLY_SUBMIT_BUTTON}
-          disabled={!host.reply.text.trim()}
+          disabled={host.reply.sending || submitGate.disabled}
+          title={submitGate.reason || undefined}
           onclick={host.submitReply}
         >{t.common.reply}</button>
       </div>
@@ -99,6 +115,11 @@
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
+  }
+  .compose-dialog-error {
+    color: var(--error, #e74c3c);
+    font-size: 0.8rem;
+    margin: 0;
   }
   .compose-dialog h3 {
     margin: 0;

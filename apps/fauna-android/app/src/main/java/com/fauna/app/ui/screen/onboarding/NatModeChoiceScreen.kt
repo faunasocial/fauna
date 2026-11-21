@@ -13,6 +13,10 @@ import androidx.lifecycle.ViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.ffi.onboarding.NatModeState
 import com.fauna.ffi.onboarding.OnboardingStep
 import com.fauna.ffi.onboarding.WizardOutcome
@@ -21,6 +25,8 @@ import kotlinx.coroutines.launch
 import uniffi.fauna_core.NodeMode
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * Snapshot-driven view of `OnboardingMachine.natModeSnapshot()` per
@@ -51,6 +57,8 @@ fun NatModeChoiceScreen(
 ) {
     val tick by vm.host.tick.collectAsState()
     val snap = remember(tick) { vm.host.machine.natModeSnapshot() }
+    // Confirm's answer is the machine's (`ui/README.md` § Offer only what is possible, rule 6).
+    val confirmAnswer = remember(tick) { vm.host.machine.natModeSubmitPossibility() }
     val coroutineScope = rememberCoroutineScope()
 
     val submitting = snap.state is NatModeState.Submitting
@@ -146,14 +154,15 @@ fun NatModeChoiceScreen(
         Spacer(Modifier.weight(1f))
 
         // ONE confirm button, always visible (unlike the retired encryption
-        // page's two). `submitEnabled` drives enabled/disabled only, never
+        // page's two). The machine's answer drives enabled/disabled only, never
         // visibility — and the NAT set is a mutable upsert, so submit stays
         // enabled after an error and a resubmit is always allowed.
         Button(
             onClick = { coroutineScope.launch { routeStep(vm.submit()) } },
-            enabled = snap.submitEnabled,
+            enabled = confirmAnswer.isPossible,
             modifier = Modifier.fillMaxWidth().testTag(Ids.NAT_MODE_CONFIRM_BUTTON),
         ) { Text(stringResource(R.string.onboarding_nat_mode_confirm_button)) }
+        DisabledControlReasonText(localized(confirmAnswer.blockedReason))
 
         Spacer(Modifier.height(8.dp))
         // Defer sends nothing and persists no resume slot: the seeded mode is

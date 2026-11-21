@@ -9,13 +9,13 @@ run — the verify queue's on Windows included — with no leg skipped on a miss
 or stale build.
 """
 
-import ctypes
-from ctypes import wintypes
 import os
 import subprocess
 import sys
 
 import pytest
+
+from helpers.msi_database import MsiDatabase
 
 # The MSI is this suite's subject too: the door's publish and WiX link are
 # charged to the first test that asks (e2e-conventions.md point 9: a subject
@@ -52,66 +52,6 @@ def _pe_subsystem(path):
     e_lfanew = int.from_bytes(data[0x3C:0x40], "little")
     off = e_lfanew + 92
     return int.from_bytes(data[off:off + 2], "little")
-
-
-class MsiDatabase:
-    """Read-only wrapper around an MSI database using msi.dll via ctypes."""
-
-    def __init__(self, msi_path):
-        self._msi = ctypes.windll.msi
-        self._handle = wintypes.HANDLE()
-        rc = self._msi.MsiOpenDatabaseW(msi_path, 0, ctypes.byref(self._handle))
-        if rc != 0:
-            raise RuntimeError(f"MsiOpenDatabase failed: rc={rc}")
-
-    def query(self, sql):
-        """Execute a SQL query and return rows as lists of strings."""
-        hview = wintypes.HANDLE()
-        rc = self._msi.MsiDatabaseOpenViewW(self._handle, sql, ctypes.byref(hview))
-        if rc != 0:
-            raise RuntimeError(f"MsiDatabaseOpenView failed: rc={rc} sql={sql}")
-        self._msi.MsiViewExecute(hview, 0)
-
-        ERROR_MORE_DATA = 234
-        rows = []
-        buf = ctypes.create_unicode_buffer(1024)
-        while True:
-            hrec = wintypes.HANDLE()
-            if self._msi.MsiViewFetch(hview, ctypes.byref(hrec)) != 0:
-                break
-            field_count = self._msi.MsiRecordGetFieldCount(hrec.value)
-            row = []
-            for i in range(1, field_count + 1):
-                sz = wintypes.DWORD(len(buf) - 1)
-                rc = self._msi.MsiRecordGetStringW(hrec.value, i, buf, ctypes.byref(sz))
-                if rc == ERROR_MORE_DATA:
-                    # buf was too small (e.g. a long deferred-CA PowerShell Target) —
-                    # sz now holds the required length (excl. null terminator);
-                    # MSI truncates on overflow rather than erroring, so a caller that
-                    # ignores rc silently gets a cut-off string (proven live 2026-07-17,
-                    # a 1023-char CleanShellDlls Target read back missing its tail).
-                    big = ctypes.create_unicode_buffer(sz.value + 1)
-                    sz = wintypes.DWORD(len(big) - 1)
-                    self._msi.MsiRecordGetStringW(hrec.value, i, big, ctypes.byref(sz))
-                    row.append(big.value)
-                else:
-                    row.append(buf.value)
-            self._msi.MsiCloseHandle(hrec.value)
-            rows.append(row)
-
-        self._msi.MsiCloseHandle(hview.value)
-        return rows
-
-    def close(self):
-        if self._handle.value:
-            self._msi.MsiCloseHandle(self._handle.value)
-            self._handle.value = 0
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
 
 
 # ── Fixture ──
@@ -1035,10 +975,13 @@ class TestRegistryTable:
 
 # ── Sparse-package registration (STEP E — the Win11 default context menu) ──
 
-# The sparse package's Identity/@Name (AppxManifest.xml.in), by which the deregister
-# CA finds the provisioned + per-user registrations to remove.
+# The retired sparse package's Identity/@Name, by which the deregister CA finds the
+# provisioned + per-user registrations to remove. The CAs, and so this suite, stay
+# while the full-feature package's sources do (installers/windows.md § Direct
+# download, 1 and 6).
 SPARSE_IDENTITY_NAME = "FaunaSocial.Fauna"
-# The .msix the MSI ships into INSTALLFOLDER and the register CA hands to Add-AppxPackage.
+# The .msix the register CA looks for beside the shell DLL — which no MSI ships any
+# more (`test_no_sparse_msix_ships`).
 SPARSE_MSIX_NAME = "Fauna-Sparse.msix"
 # Packaging-with-external-location floor (Windows 10 2004); below it the register CA
 # no-ops and the HKCR verb (ShellExt.wxs) remains the only, correct, surface.
@@ -1217,25 +1160,20 @@ class TestSparsePackageRegistration:
         assert clean and s < clean[1], \
             "DeregisterSparsePackage must run before CleanShellDlls (release the surrogate first)"
 
-    # ── the .msix ships in the MSI under the ShellExt feature ──
+    # ── no .msix ships: the MSI is built in the release's shape ──
 
-    def test_msix_shipped_under_shellext(self, msi_db):
-        """The sparse .msix ships into INSTALLFOLDER as a component of the ShellExt
-        feature — so it is present for the register CA and removed on uninstall alongside
-        the rest of the shell integration."""
-        files = {
-            (r[0].split("|")[-1] if "|" in r[0] else r[0]): r[1]
-            for r in msi_db.query("SELECT FileName, Component_ FROM File")
-        }
-        assert SPARSE_MSIX_NAME in files, f"{SPARSE_MSIX_NAME} missing from the MSI File table"
-        component = files[SPARSE_MSIX_NAME]
-        shellext_components = {
-            c for f, c in msi_db.query("SELECT Feature_, Component_ FROM FeatureComponents")
-            if f == "ShellExt"
-        }
-        assert component in shellext_components, (
-            f"{SPARSE_MSIX_NAME} rides component {component!r}, not a ShellExt component "
-            f"{sorted(shellext_components)}"
+    def test_no_sparse_msix_ships(self, msi_db):
+        """The sparse identity package retired with its sources (installers/windows.md
+        § Direct download, 6), so nothing builds the `.msix` ShellExt.wxs's
+        FaunaSparsePackage component would ship: the dev MSI is linked
+        `-d NoSparsePackage=1`, as release.yml's MSI step links the published one, and
+        its File table carries no package. The two CAs above stay in the source until
+        the full-feature package retires; with no package beside the shell DLL the
+        register CA does nothing."""
+        files = {r[0].split("|")[-1] for r in msi_db.query("SELECT FileName FROM File")}
+        assert SPARSE_MSIX_NAME not in files, (
+            f"{SPARSE_MSIX_NAME} is in the MSI File table — the MSI was linked without "
+            "-d NoSparsePackage=1, the release's shape (helpers/windows_installer.py::build_msi)"
         )
 
 

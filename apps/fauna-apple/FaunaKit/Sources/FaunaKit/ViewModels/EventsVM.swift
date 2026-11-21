@@ -3,7 +3,49 @@ import SwiftUI
 @MainActor @Observable
 public class EventsVM {
     public var calendars: [FaunaCalendar] = []
+    /// The calendar read's shared answer (events.md § Errors & edge cases →
+    /// *No calendar to hold an event*, rulings 2 and 5). `.unresolved` until
+    /// the first read lands, and while the account's key is still being minted:
+    /// the page paints loading, never the empty state.
+    public var calendarsRead: FfiCalendarsRead = .unresolved
+    /// The compose form's own `error-message`: the whole sentence of a refused
+    /// create or failed save (ruling 4). The form stays open with what was typed.
+    public var createFormError: String?
     public var selectedCalendar: FaunaCalendar?
+
+    /// Can an event compose open (and a create be sent) now? The shared
+    /// predicate; every door asks it and `createEvent` asks it again.
+    public var createPossibility: Possibility {
+        eventCreatePossibility(read: calendarsRead)
+    }
+
+    /// Can a calendar be created or an `.ics` imported now? The shared
+    /// `calendar_write_possibility` (events.md § Errors & edge cases → *The
+    /// other calendar writes*, ruling 1): `new-calendar-btn`, `create-calendar`
+    /// and `calendar-import-button` paint from it, and each action asks it
+    /// again before it sends.
+    public var calendarWriteGate: Possibility {
+        calendarWritePossibility(read: calendarsRead)
+    }
+
+    /// The reason a calendar write is refused now, in words; `nil` when it may go.
+    var calendarWriteRefusal: String? {
+        let gate = calendarWriteGate
+        if gate.isPossible { return nil }
+        return gate.reasonText ?? ""
+    }
+
+    /// How many listed calendars would not unseal on the last read — left out
+    /// of `calendars` and said once per change on `error-message`
+    /// (`events.calendars_unreadable`, ruling 3 of *The other calendar writes*).
+    public private(set) var unreadableCalendars: UInt32 = 0
+
+    /// The calendar list's empty state is the reason, only while no calendar can
+    /// hold an event and the read is resolved (loading is its own state).
+    public var calendarsLoading: Bool {
+        if case .unresolved = calendarsRead { return true }
+        return false
+    }
     /// The `calendar-visibility` display filter's checked set (events.md §
     /// Where logic lives → *Which calendars display*) — client-side only,
     /// never persisted server-side. An **empty** set means "no filter" (the
@@ -170,7 +212,20 @@ public class EventsVM {
 
     public func nextPeriod() { pan(forward: true) }
 
+    /// Can the pan pair move now? The shared `calendar_pan_possibility(mode)`
+    /// (events.md § User actions): blocked with `events.pan_none_in_agenda`
+    /// in agenda, possible in month/week/day. `events-prev-month` /
+    /// `events-next-month` paint from it and `pan` asks it again.
+    public var panPossibility: Possibility {
+        calendarPanPossibility(mode: viewMode).resolvingNestedArgs()
+    }
+
     private func pan(forward: Bool) {
+        let gate = panPossibility
+        if !gate.isPossible {
+            errorMessage = gate.reasonText ?? ""
+            return
+        }
         let moved = viewMode.panned(from: displayDate, forward: forward)
         guard moved != displayDate else { return }
         displayDate = moved
@@ -218,6 +273,9 @@ public class EventsVM {
         attachEventDrafts(nil)
         api = nil
         calendars = []
+        calendarsRead = .unresolved
+        unreadableCalendars = 0
+        createFormError = nil
         selectedCalendar = nil
         visibleCalendarIds = []
         events = []
@@ -521,12 +579,15 @@ public class EventsVM {
         await loadRefusedChanges()
         do {
             let previous = calendars
-            let loaded = try await api.listCalendars()
+            let load = try await api.readCalendars()
+            let loaded = load.calendars
             // The in-flight clause (`account-scoping.md` § The scoping taxonomy): a
             // read already suspended for the outgoing account is not cancelled
             // mid-call, so it returns after the drop and would still assign.
             guard self.api === api else { return }
+            calendarsRead = load.read
             calendars = loaded
+            noteUnreadableCalendars(load.read)
             seedVisibleCalendarIds(previous: previous, next: calendars)
             let generation = beginEventsQuery()
             let items = try await queryEventItems()
@@ -640,21 +701,71 @@ public class EventsVM {
         }
     }
 
+    /// `new-calendar-btn`: closes an open new-calendar form, else opens one only
+    /// when the shared write predicate says a calendar can be made, refusing with
+    /// its reason on `error-message` otherwise (*The other calendar writes*, rule 1).
+    public func toggleNewCalendar() {
+        if showNewCalendar { showNewCalendar = false; return }
+        if let refusal = calendarWriteRefusal {
+            errorMessage = refusal
+            return
+        }
+        showNewCalendar = true
+    }
+
+    /// `create-calendar`: asks the write predicate again before it sends and
+    /// refuses with its reason; a re-listing that comes back with no calendar is
+    /// the read's *provision failed* answer and says its sentence (rule 3).
     public func createCalendar(name: String) async {
         guard let api else { return }
+        if let refusal = calendarWriteRefusal {
+            errorMessage = refusal
+            return
+        }
         creatingCalendar = true
         defer { creatingCalendar = false }
         do {
             try await api.createCalendar(name: name)
             await loadCalendars()
+            guard self.api === api else { return }
+            if case .provisionFailed = calendarsRead {
+                errorMessage = calendarWriteRefusal
+                return
+            }
             showNewCalendar = false
         } catch {
-            errorMessage = DisplayError.http(error)
+            errorMessage = calendarWriteError(error)
         }
     }
 
-    public func createEvent(_ request: CreateEventRequest) async {
-        guard let api else { return }
+    /// A calendar write's failure in words. The key lost between the paint and
+    /// the act (the FFI's no-key refusal) is the predicate's "loading" — the
+    /// mint is in flight — never "calendar requires mail" (rule 1).
+    func calendarWriteError(_ error: Error) -> String? {
+        if DisplayError.message(error) == L.errors.calendarRequiresMail {
+            return calendarWritePossibility(read: .unresolved).reasonText
+        }
+        return DisplayError.http(error)
+    }
+
+    /// Say the unreadable-calendar count on `error-message` once per change of
+    /// the count (rule 3); a read with none clears it silently.
+    private func noteUnreadableCalendars(_ read: FfiCalendarsRead) {
+        guard case .loaded(_, let unreadable) = read else { return }
+        guard unreadable != unreadableCalendars else { return }
+        unreadableCalendars = unreadable
+        if unreadable > 0 {
+            errorMessage = L.events.calendarsUnreadable(count: String(unreadable))
+        }
+    }
+
+    /// Returns whether the event was created — the iOS sheet dismisses on
+    /// success only; a refusal or failed save is `createFormError`, painted in
+    /// the form's own `error-message`, the form still open with its text.
+    @discardableResult
+    public func createEvent(_ request: CreateEventRequest) async -> Bool {
+        guard let api else { return false }
+        createFormError = nil
         // Fall back to the first available calendar when none is explicitly
         // selected — the cross-app create-without-select contract (matches
         // linux/windows; the week/day/month grids create without a prior select).
@@ -663,13 +774,22 @@ public class EventsVM {
         // the union-of-all-calendars browsing state (selectedCalendar == nil)
         // stays in that state afterwards instead of silently narrowing the page
         // to a single calendar.
-        guard let cal = selectedCalendar ?? calendars.first else { return }
+        // The submit asks the shared predicate again (ruling 3): refused with
+        // its reason — never a silent return, never an empty calendar id.
+        let target = eventCreateTarget(read: calendarsRead, selected: selectedCalendar?.id)
+        let calId: String
+        switch target {
+        case .calendar(let id): calId = id
+        case .refused(let reason):
+            createFormError = renderLocalizedText(reason)
+            return false
+        }
         creatingEvent = true
         defer { creatingEvent = false }
         // Honor the resolved calendar even when the form built the request with an
         // empty calendarId (no selection at submit time).
         let req = request.calendarId.isEmpty
-            ? CreateEventRequest(calendarId: cal.id, summary: request.summary,
+            ? CreateEventRequest(calendarId: calId, summary: request.summary,
                                  dtstart: request.dtstart, dtend: request.dtend,
                                  description: request.description, location: request.location)
             : request
@@ -688,9 +808,20 @@ public class EventsVM {
             // create above leaves the compose open and the draft intact so
             // the user can retry.
             clearDraftsRail()
+            return true
         } catch {
-            errorMessage = DisplayError.http(error)
+            createFormError = L.events.saveFailed(error: DisplayError.http(error) ?? error.localizedDescription)
+            return false
         }
+    }
+
+    /// The `new-event-btn` door: closes an open compose, else opens one only
+    /// when the shared predicate says an event can be held (ruling 3).
+    public func toggleNewEvent() {
+        if showNewEvent { showNewEvent = false; return }
+        guard createPossibility.isPossible else { return }
+        createFormError = nil
+        showNewEvent = true
     }
 
     /// Open the new-event compose for a **whole day** — the month grid's
@@ -727,6 +858,10 @@ public class EventsVM {
 
     /// The form seeds its start from `composePrefillDate` on appear.
     private func beginCompose(prefill date: Date) {
+        // Every door asks the shared predicate; none opens a compose that
+        // cannot succeed (events.md § *No calendar to hold an event*, ruling 3).
+        guard createPossibility.isPossible else { return }
+        createFormError = nil
         // A day-cell gesture starts fresh (events.md § Persistence) — clear
         // the rail before the form opens, so its `.onAppear` resume check
         // (`resumableDraft == nil`) never fires for this open.
@@ -870,7 +1005,7 @@ public class EventsVM {
                          generation: generation)
             return result
         } catch {
-            errorMessage = DisplayError.http(error)
+            errorMessage = calendarWriteError(error)
             return nil
         }
     }
@@ -904,6 +1039,12 @@ public class EventsVM {
     public func importCalendarFile(atPath path: String) async {
         errorMessage = nil
         icsNotice = nil
+        // The write predicate first (rule 1); the no-file refusal stays at the
+        // press after it (rule 2).
+        if let refusal = calendarWriteRefusal {
+            errorMessage = refusal
+            return
+        }
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             errorMessage = L.events.icsFileRequired
@@ -989,6 +1130,13 @@ public class EventsVM {
     /// `RefreshIfChangedAsync`).
     private func refreshIfChanged() async {
         guard let api else { return }
+        // Until a calendar can hold an event the poll re-runs the whole read
+        // (the credential may have been added elsewhere); once loaded it keeps
+        // the cheap id-set diff below.
+        if case .loaded = calendarsRead {} else {
+            await loadCalendars()
+            return
+        }
         if let fetched = try? await api.listCalendars(),
             // The in-flight clause, and the poll is where it bites hardest: this loop
             // lives in the page's `.task`, so before the session-keyed re-key it kept

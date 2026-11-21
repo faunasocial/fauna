@@ -670,6 +670,19 @@ def subcommand_at(cmd: list[str]) -> int:
     return i
 
 
+def host_triple() -> str | None:
+    """The build host's Rust target triple, from the platform (no `rustc` call), or None
+    on a host the boundary has no primitive for."""
+    machine = {"arm64": "aarch64", "amd64": "x86_64"}.get(platform.machine().lower(),
+                                                         platform.machine().lower())
+    system = platform.system()
+    if system == "Darwin":
+        return f"{machine}-apple-darwin"
+    if system == "Linux":
+        return f"{machine}-unknown-linux-gnu"
+    return None
+
+
 def plan(cmd: list[str]) -> tuple[list[str], list[str], list[str] | None]:
     """(the `cargo fetch` prelude, the half run inside the boundary, the half run
     outside after it or None). `run` builds inside (`build` with the same
@@ -699,6 +712,15 @@ def plan(cmd: list[str]) -> tuple[list[str], list[str], list[str] | None]:
         elif w in GLOBAL_VALUE_OPTS and j + 1 < len(words):
             j += 1  # a global option's value is never a flag of its own
         j += 1
+    # A `--target` fetch holds that platform's crates only, but a cross build also
+    # compiles its build scripts and proc-macros for the host, and the compile inside
+    # has no network: fetch the host's platform too (cargo takes several `--target`s).
+    targets = [w.split("=", 1)[1] if w.startswith("--target=") else fetch[k + 1]
+               for k, w in enumerate(fetch)
+               if w.startswith("--target=") or (w == "--target" and k + 1 < len(fetch))]
+    host = host_triple() if targets else None
+    if host and host not in targets:
+        fetch += ["--target", host]
     if sub in ("run", "r"):
         return fetch, [*head, "build", *args], list(cmd)
     if sub in ("test", "t", "bench") and "--no-run" not in args and "--doc" not in args:

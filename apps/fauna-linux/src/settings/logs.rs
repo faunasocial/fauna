@@ -35,6 +35,9 @@ use crate::testid::set_test_id;
 /// Widget handles the render closures need.
 struct Widgets {
     filter: gtk::DropDown,
+    copy_button: gtk::Button,
+    clear_button: gtk::Button,
+    error_label: gtk::Label,
     list_group: adw::PreferencesGroup,
     placeholder_row: adw::ActionRow,
     rows: RefCell<Vec<adw::ActionRow>>,
@@ -105,6 +108,9 @@ pub fn build_logs_page() -> gtk::Box {
     let ctx = Rc::new(Ctx {
         w: Widgets {
             filter: filter.clone(),
+            copy_button: copy_button.clone(),
+            clear_button: clear_button.clone(),
+            error_label: error_label.clone(),
             list_group,
             placeholder_row,
             rows: RefCell::new(Vec::new()),
@@ -125,20 +131,34 @@ pub fn build_logs_page() -> gtk::Box {
         let ctx = Rc::clone(&ctx);
         filter.connect_selected_notify(move |_| render(&ctx));
     }
-    // Copy → put the currently-rendered lines on the clipboard.
+    // Copy → put the currently-rendered lines on the clipboard, confirmed on
+    // the button, a failure said on `error-message`; refused on an empty ring
+    // by the same answer that disables the button.
     {
         let ctx = Rc::clone(&ctx);
         copy_button.connect_clicked(move |btn| {
-            btn.clipboard().set_text(&fauna_log::format::rendered_text(
+            logs_view::copy_shown(
+                btn,
+                &ctx.w.error_label,
                 &filtered_entries(&ctx),
-                logs_view::local_offset_secs(),
-            ));
+                logs_view::DEVICE_EMPTY_KEY,
+                crate::clipboard::try_copy_text,
+            );
         });
     }
-    // Clear → drop the in-memory ring (NOT the on-disk file) + re-render empty.
+    // Clear → drop the in-memory ring (NOT the on-disk file) + re-render empty;
+    // an empty ring has nothing to clear, refused with the same answer.
     {
         let ctx = Rc::clone(&ctx);
         clear_button.connect_clicked(move |_| {
+            let shown = filtered_entries(&ctx).len();
+            if logs_view::ring_action_refused(
+                shown,
+                logs_view::DEVICE_EMPTY_KEY,
+                &ctx.w.error_label,
+            ) {
+                return;
+            }
             fauna_log::clear();
             render(&ctx);
         });
@@ -163,6 +183,13 @@ fn render(ctx: &Rc<Ctx>) {
         &ctx.w.placeholder_row,
         &ctx.w.rows,
         &entries,
+    );
+    // Copy and clear can act only on what the filter shows (the page's own
+    // empty line is the reason when it shows nothing).
+    logs_view::paint_ring_actions(
+        &[&ctx.w.copy_button, &ctx.w.clear_button],
+        entries.len(),
+        logs_view::DEVICE_EMPTY_KEY,
     );
 }
 

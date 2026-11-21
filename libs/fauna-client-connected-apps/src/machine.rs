@@ -47,6 +47,11 @@ type PrincipalFolders = Option<BTreeMap<[u8; 32], FolderSetNames>>;
 struct TrustReads<'a> {
     grant_log: Option<&'a SuccessionLedger>,
     folders: Option<&'a BTreeMap<[u8; 32], FolderSetNames>>,
+    /// The owner's folder id → name map a `deposit` tuple's folder is named
+    /// from ([`fauna_client_pair::name_deposit_folders`]) — `None` when no
+    /// grant in the log deposits or the owner's folders could not be read, so
+    /// a deposit folder is never guessed deleted from a map never read.
+    deposit_folders: Option<&'a BTreeMap<i64, String>>,
 }
 
 /// "Failed to load connected apps: {message}".
@@ -337,10 +342,16 @@ impl ConnectedAppsMachine {
     }
 
     /// Re-read the whole page. Non-optimistic: every gesture below ends here,
-    /// so what paints is what the nest now says. Notifies once.
+    /// so what paints is what the nest now says. Notifies once — or, when a
+    /// read met an account store that has not listed the account yet, once
+    /// for the page it could paint and once more when the wait for the store
+    /// ends ([`Self::settle_not_ready`]).
     pub async fn refresh(&self) {
-        self.reload().await;
+        let not_ready = self.reload().await;
         self.observer.on_changed();
+        if not_ready.is_some() {
+            self.settle_not_ready().await;
+        }
     }
 
     /// *Connect an app* — claim the typed code and show its card in the tray.
@@ -855,6 +866,27 @@ impl ConnectedAppsMachine {
         }
     }
 
+    /// The owner's folder names a principal's `deposit` grants are worded
+    /// with ([`TrustReads::deposit_folders`]): read only when the log holds a
+    /// deposit grant, from the same folder list the consent card's picker
+    /// reads (`connected-apps.md` § The trust facet and history lens → *The
+    /// words rule*).
+    async fn deposit_folders(
+        &self,
+        grant_log: Option<&SuccessionLedger>,
+    ) -> Option<BTreeMap<i64, String>> {
+        let deposits = grant_log?.grant_events.iter().any(|e| {
+            e.scope
+                .iter()
+                .any(|t| t.class == fauna_core::grant_event::CLASS_DEPOSIT)
+        });
+        if !deposits {
+            return None;
+        }
+        let folders = consent_folder_options(self.consent_grant_seams().as_deref()).await?;
+        Some(folders.into_iter().map(|f| (f.id, f.name)).collect())
+    }
+
     /// Which folder each principal's folder read grants cover
     /// ([`PrincipalFolders`]), read once per roster read over the log already
     /// loaded — the owner secret derives each generation's grant id
@@ -931,11 +963,24 @@ impl ConnectedAppsMachine {
     /// error. The mail app passwords are read through the mail-settings
     /// machine, not the nest's roster, so their failure keeps the mail rows
     /// already on screen without holding back the rest of the roster.
-    async fn reload(&self) {
+    ///
+    /// A read that meets an account store which has not listed the account
+    /// yet ([`ConnectedAppsApiError::NotReady`] — right after sign-in) is no
+    /// failure either: it contributes nothing, keeps what is on screen, and
+    /// sets no error; the answer is its reason key, which
+    /// [`Self::refresh`] waits out ([`Self::settle_not_ready`]).
+    async fn reload(&self) -> Option<String> {
         let mut error: Option<LocalizedText> = None;
-        let mut fail = |e: ConnectedAppsApiError| {
-            if !matches!(e, ConnectedAppsApiError::Unavailable { .. }) && error.is_none() {
-                error = Some(keyed(REFRESH_ERROR_KEY, e.detail()));
+        let mut not_ready: Option<String> = None;
+        let mut fail = |e: ConnectedAppsApiError| match e {
+            ConnectedAppsApiError::Unavailable { .. } => {}
+            ConnectedAppsApiError::NotReady { detail } => {
+                not_ready.get_or_insert(detail);
+            }
+            e => {
+                if error.is_none() {
+                    error = Some(keyed(REFRESH_ERROR_KEY, e.detail()));
+                }
             }
         };
 
@@ -985,6 +1030,7 @@ impl ConnectedAppsMachine {
                 let folders = self
                     .principal_folders(&principals, grant_log.as_ref())
                     .await;
+                let deposit_folders = self.deposit_folders(grant_log.as_ref()).await;
                 let fresh_mail = mail.is_some();
                 let holders = principals
                     .iter()
@@ -1006,6 +1052,7 @@ impl ConnectedAppsMachine {
                     TrustReads {
                         grant_log: grant_log.as_ref(),
                         folders: folders.as_ref(),
+                        deposit_folders: deposit_folders.as_ref(),
                     },
                     external_apps_off,
                 );
@@ -1112,6 +1159,45 @@ impl ConnectedAppsMachine {
             tracing::warn!(target: "fauna_connected_apps", "{}", err.log_line());
         }
         s.error = error;
+        not_ready
+    }
+
+    /// Wait out a read [`Self::reload`] answered not-ready for, then re-read
+    /// the page and notify. The wait is the store seam's own
+    /// ([`fauna_client_config::wait_out_not_ready`]: one bound,
+    /// [`LEDGER_READY_WAIT`](fauna_client_config::LEDGER_READY_WAIT), re-reading
+    /// the mail app passwords — the one leg that crosses the account store —
+    /// every [`LEDGER_READY_POLL`](fauna_client_config::LEDGER_READY_POLL)); a
+    /// refusal no wait outlasts (another device must act) ends it at once. A
+    /// store still not ready after it is the surface's failed-load state with
+    /// the seam's reason, never the raw refresh error
+    /// (`account-client-lifecycle.md` § The client-side lifecycle → *The
+    /// first listing*, clause (4)).
+    async fn settle_not_ready(&self) {
+        let _ = fauna_client_config::wait_out_not_ready(
+            fauna_sleep::sleep(fauna_client_config::LEDGER_READY_WAIT),
+            || fauna_sleep::sleep(fauna_client_config::LEDGER_READY_POLL),
+            || async {
+                match self.nest_api.list_mail_credentials().await {
+                    Err(ConnectedAppsApiError::NotReady { detail })
+                        if detail == fauna_client_config::NEEDS_NEST_KEY =>
+                    {
+                        Err(fauna_client_config::StoreError::Load(
+                            fauna_client_config::LEDGER_NOT_READY.into(),
+                        ))
+                    }
+                    _ => Ok(()),
+                }
+            },
+        )
+        .await;
+        if let Some(reason) = self.reload().await {
+            let mut s = self.state.lock().unwrap();
+            if s.error.is_none() {
+                s.error = Some(LocalizedText::key(reason));
+            }
+        }
+        self.observer.on_changed();
     }
 }
 
@@ -1338,16 +1424,30 @@ fn principal_row(
 fn principal_trust(p: &PrincipalInfo, reads: TrustReads<'_>) -> Option<PrincipalTrust> {
     let (log, holder) = reads.grant_log.zip(holder_key(p))?;
     let names = reads.folders.and_then(|f| f.get(&holder));
+    let deposits = reads.deposit_folders;
+    let name_deposits = |scope: &mut Vec<fauna_client_pair::TrustScope>| {
+        if let Some(deposits) = deposits {
+            fauna_client_pair::name_deposit_folders(scope, deposits);
+        }
+    };
     Some(PrincipalTrust {
         lens: TrustLens::Now,
         grants: principal_trust_facet(log, &holder, now_epoch_secs())
             .grants
             .into_iter()
-            .map(|g| project_principal_grant(g, names))
+            .map(|g| {
+                let mut row = project_principal_grant(g, names);
+                name_deposits(&mut row.scope);
+                row
+            })
             .collect(),
         history: principal_history(log, &holder)
             .into_iter()
-            .map(|h| project_history(h, names))
+            .map(|h| {
+                let mut row = project_history(h, names);
+                name_deposits(&mut row.scope);
+                row
+            })
             .collect(),
     })
 }

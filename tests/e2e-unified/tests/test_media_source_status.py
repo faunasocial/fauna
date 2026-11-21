@@ -94,13 +94,10 @@ def _await_wire_verdicts(nest_instance, secret_key: str, folder: str, want: tupl
         time.sleep(0.5)
 
 
-# tui leads. web and linux ran 2026-10-06 and failed before their app was
-# asked anything, on the same red as tui's own arm: the holder DID record the
-# file, but the seat's start stamps the sealed set name, after which the item's
-# plaintext `folder` is blank and only `folder_hash` names the set — the
-# plaintext-only match `item_in_set` replaced read the record as missing. They
-# join with their own run; android joins with its venue.
 @pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.timeout(int(SEAT_READY_BUDGET_S + RECORD_BUDGET_S + 6 * ITEM_BUDGET_S + 180))

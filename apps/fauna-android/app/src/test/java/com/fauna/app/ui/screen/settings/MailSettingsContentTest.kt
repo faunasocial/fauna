@@ -16,6 +16,8 @@ import uniffi.fauna_client_mail_settings.MailCredentialSummary
 import uniffi.fauna_client_mail_settings.MuaInstructions
 import uniffi.fauna_client_mail_settings.PendingRotationStatus
 import uniffi.fauna_client_mail_settings.SettingsStatus
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [MailSettingsContent] (the
@@ -55,16 +57,19 @@ class MailSettingsContentTest {
 
     private fun render(
         enabled: Boolean = true,
+        mailUsable: Possibility = if (enabled) Possibility.Possible else Possibility.Blocked(LocalizedText("mail_settings.usable_needs_mail_on", emptyMap())),
         mailUnavailableHere: Boolean = false,
         caldavEnabled: Boolean = false,
         carddavEnabled: Boolean = false,
         servesWebdavSet: Boolean = false,
-        // Mirrors the shared `MailSettingsSnapshot::credential_management_reachable`
-        // predicate; defaults to the same disjunction the shared machine computes
-        // so existing call sites don't need updating, but can be overridden
-        // (e.g. a WebDAV-only mailbox with all of enabled/caldavEnabled/
-        // carddavEnabled false).
-        credentialManagementReachable: Boolean = enabled || caldavEnabled || carddavEnabled || servesWebdavSet,
+        // Mirrors the shared `MailSettingsSnapshot::credential_management_possibility`
+        // answer over the reachability disjunction the shared machine computes:
+        // possible when reachable, else blocked naming the enable toggle (a
+        // read snapshot on a box that can serve mail). Overridable for the
+        // absent case.
+        credentialAnswer: Possibility =
+            if (enabled || caldavEnabled || carddavEnabled || servesWebdavSet) Possibility.Possible
+            else Possibility.Blocked(LocalizedText("mail_settings.credentials_need_mail_on", emptyMap())),
         servingEnabled: Boolean = true,
         credentials: List<MailCredentialSummary> = emptyList(),
         pendingRotation: PendingRotationStatus? = null,
@@ -108,15 +113,20 @@ class MailSettingsContentTest {
         quotaText: String? = null,
         submissionQuotaText: String? = null,
         overQuotaNotice: String? = null,
+        enableAnswer: Possibility = Possibility.Possible,
+        forwardAllAnswer: Possibility = Possibility.Possible,
+        autorespondAnswer: Possibility = Possibility.Possible,
+        onCommitForwardAllTo: (String) -> Unit = {},
     ) {
         composeTestRule.setContent {
             MailSettingsContent(
                 enabled = enabled,
+                mailUsable = mailUsable,
                 mailUnavailableHere = mailUnavailableHere,
                 caldavEnabled = caldavEnabled,
                 carddavEnabled = carddavEnabled,
                 servesWebdavSet = servesWebdavSet,
-                credentialManagementReachable = credentialManagementReachable,
+                credentialAnswer = credentialAnswer,
                 servingEnabled = servingEnabled,
                 credentials = credentials,
                 mua = mua,
@@ -152,8 +162,77 @@ class MailSettingsContentTest {
                 quotaText = quotaText,
                 submissionQuotaText = submissionQuotaText,
                 overQuotaNotice = overQuotaNotice,
+                enableAnswer = enableAnswer,
+                forwardAllAnswer = forwardAllAnswer,
+                autorespondAnswer = autorespondAnswer,
+                // Mirrors the shared `MailSettingsSnapshot::rotate_keys_possibility`:
+                // this page's own rotation in flight → still saving; a pending
+                // rotation → resume it from the banner; else possible.
+                rotateAnswer = { inFlight ->
+                    when {
+                        inFlight -> Possibility.Blocked(LocalizedText("common.in_flight", emptyMap()))
+                        pendingRotation != null ->
+                            Possibility.Blocked(LocalizedText("mail_settings.rotate_pending", emptyMap()))
+                        else -> Possibility.Possible
+                    }
+                },
+                onCommitForwardAllTo = onCommitForwardAllTo,
             )
         }
+    }
+
+    // ── Controls wait for their reads (mail-settings.md § Errors & edge
+    //    cases, *Controls wait for their reads*) — the answers the shared
+    //    `Possibility::from_read` gives, seeded as data (no native call). ──
+
+    private val stillLoading = Possibility.Blocked(LocalizedText("common.still_loading", emptyMap()))
+    private val loadFailed = Possibility.Blocked(LocalizedText("common.load_failed", emptyMap()))
+
+    @Test
+    fun enableToggleIsDisabledWithTheReasonBeforeTheFirstHydrate() {
+        render(enabled = false, enableAnswer = stillLoading)
+        composeTestRule.onNodeWithTag("mail-settings-enabled-toggle").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(text(R.string.common_still_loading)).assertIsDisplayed()
+        // The never-read "off" never opens the enable form.
+        composeTestRule.onNodeWithTag("mail-settings-enabled-toggle").performClick()
+        composeTestRule.onAllNodesWithTag("mail-add-credential-name-input").assertCountEquals(0)
+    }
+
+    @Test
+    fun enableToggleIsLiveOnceRead() {
+        render(enabled = false, enableAnswer = Possibility.Possible)
+        composeTestRule.onNodeWithTag("mail-settings-enabled-toggle").assertIsEnabled()
+        composeTestRule.onAllNodesWithText(text(R.string.common_still_loading)).assertCountEquals(0)
+    }
+
+    @Test
+    fun forwardAllInputWaitsForItsReadWithTheReasonOnALineOfItsOwn() {
+        var commits = 0
+        render(enabled = true, forwardAllAnswer = stillLoading, onCommitForwardAllTo = { commits++ })
+        composeTestRule.onNodeWithTag("mail-settings-forward-all-to-input").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText(text(R.string.common_still_loading)).performScrollTo().assertIsDisplayed()
+        assertEquals(0, commits)
+    }
+
+    @Test
+    fun forwardAllInputSaysTheReadFailedAfterAFailedRead() {
+        render(enabled = true, forwardAllAnswer = loadFailed)
+        composeTestRule.onNodeWithTag("mail-settings-forward-all-to-input").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText(text(R.string.common_load_failed)).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun autorespondMessageWaitsForItsReadWithTheReason() {
+        render(enabled = true, autorespondAnswer = stillLoading)
+        composeTestRule.onNodeWithTag("mail-settings-autorespond-message-input").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText(text(R.string.common_still_loading)).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun forwardAllAndAutorespondAreLiveOnceRead() {
+        render(enabled = true)
+        composeTestRule.onNodeWithTag("mail-settings-forward-all-to-input").performScrollTo().assertIsEnabled()
+        composeTestRule.onNodeWithTag("mail-settings-autorespond-message-input").performScrollTo().assertIsEnabled()
     }
 
     @Test
@@ -417,11 +496,41 @@ class MailSettingsContentTest {
         composeTestRule.onAllNodesWithTag("mail-settings-disable-confirm").assertCountEquals(0)
     }
 
+    // ── The credential section's shared answer (mail-settings.md § Errors &
+    // edge cases, *The in-page predicates*; ui/README.md § Offer only what is
+    // possible, rules 2 and 6) ──
+
     @Test
-    fun disabledHidesManagementControls() {
+    fun disabledShowsAddPasswordBlockedWithTheReasonAndHidesTheRest() {
         render(enabled = false)
         composeTestRule.onNodeWithTag("mail-settings-enabled-toggle").assertExists()
+        composeTestRule.onNodeWithTag("mail-settings-add-credential-button")
+            .performScrollTo().assertIsDisplayed().assertIsNotEnabled()
+        composeTestRule.onNodeWithText(text(R.string.mail_settings_credentials_need_mail_on))
+            .performScrollTo().assertIsDisplayed()
+        composeTestRule.onAllNodesWithTag("mail-settings-rotate-keys-button").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("mail-settings-keys-info").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("mail-settings-serve-here-toggle").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("mail-settings-mua-instructions").assertCountEquals(0)
+    }
+
+    @Test
+    fun anAbsentCredentialAnswerPaintsNoSection() {
+        render(enabled = false, mailUnavailableHere = true, credentialAnswer = Possibility.Absent)
         composeTestRule.onAllNodesWithTag("mail-settings-add-credential-button").assertCountEquals(0)
+        composeTestRule.onAllNodesWithText(text(R.string.mail_settings_credentials_need_mail_on))
+            .assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("mail-settings-rotate-keys-button").assertCountEquals(0)
+    }
+
+    @Test
+    fun aPossibleCredentialAnswerPaintsTheLiveSection() {
+        render(enabled = true, credentialAnswer = Possibility.Possible)
+        composeTestRule.onNodeWithTag("mail-settings-add-credential-button")
+            .performScrollTo().assertIsEnabled()
+        composeTestRule.onNodeWithTag("mail-settings-keys-info").assertExists()
+        composeTestRule.onAllNodesWithText(text(R.string.mail_settings_credentials_need_mail_on))
+            .assertCountEquals(0)
     }
 
     @Test
@@ -538,5 +647,50 @@ class MailSettingsContentTest {
         render(enabled = true, servingEnabled = false)
         composeTestRule.onNodeWithTag("mail-settings-serve-here-toggle").performScrollTo()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "off"))
+    }
+
+    // ── The mail-usable gate on the sub-page rows (mail-settings.md § Errors &
+    // edge cases, the mail-usable gate) ──
+
+    private fun text(id: Int) = RuntimeEnvironment.getApplication().getString(id)
+
+    private val subpageRows = listOf(
+        R.string.mail_aliases_title,
+        R.string.mail_lists_title,
+        R.string.mail_export_title,
+        R.string.mail_import_title,
+        R.string.mail_spam_title,
+    )
+
+    @Test
+    fun subpageRowsAreAbsentWhereTheBoxCanNeverServeMail() {
+        render(enabled = false, mailUnavailableHere = true, mailUsable = Possibility.Absent)
+        subpageRows.forEach { composeTestRule.onAllNodesWithText(text(it)).assertCountEquals(0) }
+    }
+
+    @Test
+    fun subpageRowsAreDisabledWithTheSharedReasonWhileBlocked() {
+        var taps = 0
+        render(
+            enabled = false,
+            mailUsable = Possibility.Blocked(LocalizedText("mail_settings.usable_needs_mail_on", emptyMap())),
+            onNavAliases = { taps++ },
+        )
+        subpageRows.forEach {
+            composeTestRule.onNodeWithText(text(it)).performScrollTo().assertIsDisplayed()
+        }
+        composeTestRule.onNodeWithText(text(R.string.mail_settings_usable_needs_mail_on))
+            .performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText(text(R.string.mail_aliases_title)).performClick()
+        assertEquals(0, taps)
+    }
+
+    @Test
+    fun subpageRowsAreLiveWhenPossible() {
+        var taps = 0
+        render(enabled = true, mailUsable = Possibility.Possible, onNavAliases = { taps++ })
+        composeTestRule.onNodeWithText(text(R.string.mail_aliases_title)).performScrollTo().performClick()
+        assertEquals(1, taps)
+        composeTestRule.onAllNodesWithText(text(R.string.mail_settings_usable_needs_mail_on)).assertCountEquals(0)
     }
 }

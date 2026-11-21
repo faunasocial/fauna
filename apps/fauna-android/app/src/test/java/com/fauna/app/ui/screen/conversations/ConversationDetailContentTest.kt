@@ -292,6 +292,7 @@ class ConversationDetailContentTest {
         onKeepMember: (ByteArray) -> Unit = {},
         onRemoveParticipant: (TypedAddress) -> Unit = {},
         pageError: LocalizedText? = null,
+        keepFailure: String? = null,
         receiveStopped: Boolean = false,
         stateNeedsNewerApp: Boolean = false,
         unopenableMail: UInt = 0u,
@@ -314,6 +315,7 @@ class ConversationDetailContentTest {
                 onKeepMember = onKeepMember,
                 onRemoveParticipant = onRemoveParticipant,
                 pageError = pageError,
+                keepFailure = keepFailure,
                 receiveStopped = receiveStopped,
                 stateNeedsNewerApp = stateNeedsNewerApp,
                 unopenableMail = unopenableMail,
@@ -642,6 +644,31 @@ class ConversationDetailContentTest {
             .assertTextContains("Could not remove them", substring = true)
     }
 
+    // A member-chip Keep that did not land says so on `error-message`, never
+    // only the log (`ui/conversations.md` § Errors & edge cases → *The
+    // new-thread composer offers only what it can send*; tui's
+    // `Outcome::MemberReviews(Err(_))`), over a stale compose-send failure.
+    @Test
+    fun aFailedKeepSaysSoOnErrorMessage() {
+        render(
+            detail(
+                compose = composeState(
+                    sendState = SendState.Failed(
+                        LocalizedText(
+                            key = "conversations.unified.error_send",
+                            args = mapOf("message" to "send failed"),
+                        ),
+                    ),
+                ),
+            ),
+            keepFailure = "store offline",
+        )
+        composeTestRule.onNodeWithTag("error-message")
+            .assertTextContains("Could not record your decision yet", substring = true)
+            .assertTextContains("store offline", substring = true)
+        composeTestRule.onAllNodesWithTag("error-message").assertCountEquals(1)
+    }
+
     @Test
     fun pageErrorOutranksAFailedComposeSend() {
         // Every `pageError` producer clears it on entry, so it is always the
@@ -815,6 +842,121 @@ class ConversationDetailContentTest {
     fun addParticipantShownWhenSupported() {
         render(detail(capabilities = caps(membershipChange = true)))
         composeTestRule.onNodeWithTag("thread-add-participant-button").assertExists()
+    }
+
+    // ── Controls this person can never use (`ui/conversations.md` § Errors &
+    // edge cases): the role- or rail-gated controls paint the shared
+    // `ThreadControl` answer through the host `.so` — absent, never greyed.
+
+    @Test
+    fun addParticipantAbsentForAViewerWhoseRoleMayNotInvite() {
+        render(detail(capabilities = caps(membershipChange = true).copy(canInvite = false)))
+        composeTestRule.onAllNodesWithTag("thread-add-participant-button").assertCountEquals(0)
+    }
+
+    @Test
+    fun memberChipsAreTheInertRosterWithoutTheRemove() {
+        var removed: TypedAddress? = null
+        render(
+            detail(capabilities = caps(membershipChange = true).copy(canRemoveMembers = false)),
+            onRemoveParticipant = { removed = it },
+        )
+        composeTestRule.onAllNodesWithTag("thread-member-chip").assertCountEquals(2)
+        composeTestRule.onAllNodesWithTag("thread-member-chip")[1].performClick()
+        assertEquals(null, removed)
+    }
+
+    @Test
+    fun topicToggleAbsentWhereTheRailHasNoSubject() {
+        render(detail(capabilities = caps(subject = false)))
+        composeTestRule.onAllNodesWithTag("topic-toggle-button").assertCountEquals(0)
+    }
+
+    /** A governed room whose viewer holds [role], with the capability vector
+     *  the room's gate gives that seat. */
+    private fun governedRoom(role: uniffi.fauna_conversations.RoomRole): ThreadDetail {
+        val owner = role == uniffi.fauna_conversations.RoomRole.OWNER
+        return detail(
+            flavor = ThreadFlavor.MlsGroup,
+            capabilities = caps(membershipChange = true).copy(
+                canInvite = owner,
+                canRemoveMembers = owner,
+                canSetPolicy = owner,
+                canAppointAdmins = owner,
+                canTransferOwnership = owner,
+                canLeaveRoom = !owner,
+            ),
+            room = uniffi.fauna_conversations.RoomSnapshot(
+                `class` = uniffi.fauna_conversations.RoomClass.END_TO_END,
+                members = emptyList(),
+                policy = uniffi.fauna_conversations.RoomPolicySnapshot(
+                    version = 1UL,
+                    name = null,
+                    joinRule = uniffi.fauna_conversations.JoinRule.INVITE,
+                    historyPolicy = uniffi.fauna_conversations.HistoryPolicy.NONE,
+                ),
+                myRole = role,
+                nestRead = null,
+                labelers = null,
+                awaitingKey = false,
+                moderationUnverified = false,
+                pendingInvites = null,
+            ),
+        )
+    }
+
+    private fun renderRoomEditor(detail: ThreadDetail) {
+        val draft = uniffi.fauna_conversations.roomSettingsSeed(detail)
+            ?: error("a governed room seeds an editor draft")
+        composeTestRule.setContent {
+            RoomSettingsDialog(
+                draft = draft,
+                detail = detail,
+                onDraftChange = {},
+                onWithdrawInvite = {},
+                onLeave = {},
+                onRemove = {},
+                onSave = {},
+                onDismiss = {},
+            )
+        }
+    }
+
+    @Test
+    fun aPlainMembersRoomEditorOffersOnlyTheWalkOut() {
+        renderRoomEditor(governedRoom(uniffi.fauna_conversations.RoomRole.MEMBER))
+        for (id in listOf(
+            "room-join-rule-select",
+            "room-history-policy-select",
+            "room-admin-toggle",
+            "room-owner-transfer-button",
+            "room-settings-save-button",
+            "room-remove-button",
+        )) {
+            composeTestRule.onAllNodesWithTag(id).assertCountEquals(0)
+        }
+        composeTestRule.onNodeWithTag("room-leave-button").assertIsEnabled()
+        // Each policy value is read as a tagged plain line where its picker
+        // would sit, the picker's token on it (`value` rides stateDescription).
+        composeTestRule.onNodeWithTag("room-join-rule-line")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "invite"))
+        composeTestRule.onAllNodesWithTag("room-history-policy-line").assertCountEquals(1)
+    }
+
+    @Test
+    fun theOwnersWalkOutIsBlockedWithTheHandOverInView() {
+        renderRoomEditor(governedRoom(uniffi.fauna_conversations.RoomRole.OWNER))
+        // No plain line beside the live controls.
+        for (id in listOf("room-join-rule-line", "room-history-policy-line")) {
+            composeTestRule.onAllNodesWithTag(id).assertCountEquals(0)
+        }
+        composeTestRule.onNodeWithTag("room-settings-save-button").assertIsEnabled()
+        composeTestRule.onAllNodesWithTag("room-admin-toggle").assertCountEquals(2)
+        composeTestRule.onNodeWithTag("room-leave-button").assertIsNotEnabled()
+        // The blocked walk-out names its remedy within eyeshot — the same
+        // sentence `leave_room` refuses with.
+        composeTestRule.onNodeWithText("Hand the room over", substring = true).assertExists()
+        composeTestRule.onAllNodesWithTag("room-remove-button").assertCountEquals(0)
     }
 
     @Test
@@ -1072,11 +1214,36 @@ class ConversationDetailContentTest {
 
     @Test
     fun composeBarRendersOnOpenThread() {
-        render(detail(messages = listOf(msg("m1"))))
+        render(detail(messages = listOf(msg("m1")), capabilities = caps(subject = true)))
         composeTestRule.onNodeWithTag("dm-text-field").assertExists()
         composeTestRule.onNodeWithTag("dm-send-button").assertExists()
         composeTestRule.onNodeWithTag("topic-toggle-button").assertExists()
         composeTestRule.onNodeWithTag("attachment-button").assertExists()
+    }
+
+    /** The reply bar paints from the shared `thread_send_possibility`, never
+     *  `canSend` read in the app: blocked on a bridged room no bridge serves,
+     *  the field and Send disabled with the reason beside Send. */
+    @Test
+    fun replyBarBlockedBySharedSendAnswerPaintsTheReason() {
+        var sent = 0
+        render(detail(capabilities = caps().copy(canSend = false)), onSend = { sent++ })
+        composeTestRule.onNodeWithTag("dm-text-field").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("dm-send-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(
+            "The app that carried this conversation is no longer connected. You can still read it, but you can't send.",
+        ).assertExists()
+        assertEquals(0, sent)
+    }
+
+    @Test
+    fun replyBarPossibleBySharedSendAnswerIsLive() {
+        render(detail(capabilities = caps()))
+        composeTestRule.onNodeWithTag("dm-text-field").assertIsEnabled()
+        composeTestRule.onNodeWithTag("dm-send-button").assertIsEnabled()
+        composeTestRule.onAllNodesWithText(
+            "The app that carried this conversation is no longer connected. You can still read it, but you can't send.",
+        ).assertCountEquals(0)
     }
 
     @Test

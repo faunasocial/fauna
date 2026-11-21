@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use fauna_client_recovery::ceremony::{LandedSuccession, STOLEN_CONFIRM_WORD, StolenOutcome};
+use fauna_client_recovery::ceremony::{LandedSuccession, StolenOutcome, stolen_entry_possibility};
 use fauna_core::secret::SecretString;
 use fauna_i18n::strings::onboarding::launch as l;
 use fauna_i18n::strings::settings::recovery_kit as rk;
@@ -123,12 +123,19 @@ pub fn entry_elements(app: &App) -> Vec<Element> {
             Field::Locked(LockedField::Confirm),
         )
         .labelled(rk::STOLEN_CONFIRM_PLACEHOLDER),
+        // The draft (a kit pasted, the word typed) through the shared
+        // predicate the submit re-asks (`begin_stolen`); a running ceremony
+        // keeps the button down on its own.
         Element::gesture_button(
             ids::IDENTITY_STOLEN_BUTTON,
             rk::STOLEN,
-            !state.busy && state.confirm == STOLEN_CONFIRM_WORD,
+            !state.busy,
             Gesture::Launch(LaunchAction::SubmitStolen),
-        ),
+        )
+        .possible(stolen_entry_possibility(
+            state.phrase.as_str(),
+            &state.confirm,
+        )),
         Element::gesture_button(
             ids::RECOVERY_ENTRY_BACK_BUTTON,
             fauna_i18n::strings::common::BACK,
@@ -250,12 +257,12 @@ pub fn begin_stolen(app: &mut App) -> Option<StolenJob> {
     if !matches!(app.launch, LaunchSurface::IdentityStolenEntry { .. }) || app.locked.busy {
         return None;
     }
-    if app.locked.confirm != STOLEN_CONFIRM_WORD {
-        app.locked.error = Some(rk::STOLEN_CONFIRM_PLACEHOLDER.to_string());
-        return None;
-    }
-    if app.locked.phrase.as_str().trim().is_empty() {
-        app.locked.error = Some(rk::KIT_PHRASE_REQUIRED.to_string());
+    // The draft predicate the button is painted from, asked again — the
+    // refusal is its own reason, on `error-message`.
+    if let Some(reason) =
+        stolen_entry_possibility(app.locked.phrase.as_str(), &app.locked.confirm).reason()
+    {
+        app.locked.error = Some(reason.resolve(fauna_i18n::strings::lookup));
         return None;
     }
     let Some((Some(nest_url), secret_hex, _handle)) = crate::session::stored_account(app) else {
@@ -361,6 +368,7 @@ pub fn spawn_submit(app: &mut App, tx: &UnboundedSender<UiMessage>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fauna_client_recovery::ceremony::STOLEN_CONFIRM_WORD;
     use fauna_launch_machine::{LaunchPhase, LaunchSnapshot};
 
     const UNTIL: u64 = 1_800_000_000;
@@ -475,7 +483,15 @@ mod tests {
             Field::Locked(LockedField::Confirm),
             STOLEN_CONFIRM_WORD.to_string(),
         );
-        assert!(app.page_elements()[2].enabled, "armed by the literal word");
+        assert!(
+            !app.page_elements()[2].enabled,
+            "the word alone does not arm it: the kit is blank"
+        );
+        let _ = app.set_field(Field::Locked(LockedField::Phrase), "ab".repeat(32));
+        assert!(
+            app.page_elements()[2].enabled,
+            "armed by a pasted kit and the literal word"
+        );
 
         // No machine on this test app, so Back has nothing to re-read and
         // lands on the notice it came from.
@@ -498,20 +514,24 @@ mod tests {
             locked_until_secs: UNTIL,
         };
 
-        assert!(begin_stolen(&mut app).is_none());
-        assert_eq!(
-            app.screen_error_text().as_deref(),
-            Some(rk::STOLEN_CONFIRM_PLACEHOLDER),
-            "the wrong confirm word is refused out loud"
-        );
-
-        app.locked.confirm = STOLEN_CONFIRM_WORD.to_string();
+        // In the form's field order, through the shared draft predicate the
+        // button is painted from: the kit first, then the word.
         assert!(begin_stolen(&mut app).is_none());
         assert_eq!(
             app.screen_error_text().as_deref(),
             Some(rk::KIT_PHRASE_REQUIRED),
             "an empty phrase is refused out loud"
         );
+
+        app.locked.phrase = "ab".repeat(32).into();
+        assert!(begin_stolen(&mut app).is_none());
+        assert_eq!(
+            app.screen_error_text().as_deref(),
+            Some(rk::STOLEN_CONFIRM_PLACEHOLDER),
+            "the wrong confirm word is refused out loud"
+        );
+        app.locked.phrase = String::new().into();
+        app.locked.confirm = STOLEN_CONFIRM_WORD.to_string();
         assert!(!app.locked.busy, "a refused press claims nothing");
 
         // Off the step entirely the action is inert — it cannot become a

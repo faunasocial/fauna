@@ -93,6 +93,19 @@ class ConversationsVM @Inject constructor(
     fun noteContentEnforcement(messageId: String, labels: List<ContentLabelEntry>) =
         familyNotifyStore.record(messageId, labels)
 
+    /**
+     * Re-read the imported archives' message threads onto the `Archive` rail
+     * (`archive-import.md` § What each category becomes): called when the
+     * conversations page is shown, so an import finished since login lists with
+     * no re-login. The rows arrive in the shared snapshot already read-only
+     * (no send capability), so nothing here paints. No session is a no-op; the
+     * kids build's twin is inert. Mirrors FaunaKit's `refreshArchiveThreads`.
+     */
+    suspend fun refreshArchiveThreads() {
+        val session = conversationsHost.session ?: return
+        api.refreshArchiveThreads(session)
+    }
+
     /** The shared manager, for routing user actions to its mutators. */
     val conversationsManager: ConversationsManager get() = conversationsHost.manager
 
@@ -231,10 +244,20 @@ class ConversationsVM @Inject constructor(
      *  [MemberReviewVM.keep]). */
     fun keepMemberReview(person: ByteArray) {
         viewModelScope.launch {
-            runCatching { api.memberReviewKeep(person) }
+            // A Keep that did not land says so on `error-message` — the person
+            // stays listed until it does — never only the log (`ui/README.md`
+            // § Offer only what is possible, rule 7; tui's
+            // `Outcome::MemberReviews(Err(_))`).
+            memberReviewKeepFailure.value = runCatching { api.memberReviewKeep(person) }
+                .exceptionOrNull()
+                ?.let { it.message ?: it.toString() }
             loadMemberReviewRoster()
         }
     }
+
+    /** The last Keep's failure text (`null` once a Keep lands), which the
+     *  detail page paints as `settings.recovery_kit.review_keep_failed`. */
+    val memberReviewKeepFailure = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 
     /** The review mark each of [threadId]'s member chips carries,
      *  index-parallel with `ThreadDetail.participantDisplays` — see

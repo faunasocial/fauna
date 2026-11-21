@@ -169,6 +169,9 @@ fn decode_alias_id(alias_id_hex: &str) -> Result<Vec<u8>, DispatchError> {
 pub struct ForwarderMachine {
     nest: Arc<dyn ForwarderNest>,
     inner: Mutex<ForwardersSnapshot>,
+    /// Where the page's forwarder read stands (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 5).
+    read: Mutex<fauna_core::possibility::ReadState>,
 }
 
 // `new` takes `Arc<dyn ForwarderNest>` (not an FFI type), so it stays in a plain
@@ -180,6 +183,45 @@ impl ForwarderMachine {
         Self {
             nest,
             inner: Mutex::new(ForwardersSnapshot::empty()),
+            read: Mutex::new(fauna_core::possibility::ReadState::Pending),
+        }
+    }
+
+    /// Whether the forwarder add form's drafts can be sent: a domain picked
+    /// and a non-blank local part and destination (`admin.md` § 4). The app
+    /// folds it with [`Self::add_possibility`] (the read gate). What only the
+    /// nest can judge — a reserved local part, a collision, a hosted target —
+    /// stays its refusal, shown on the page's error line.
+    pub fn create_draft_possibility(
+        local_domain: &str,
+        pattern: &str,
+        forward_target: &str,
+    ) -> fauna_core::possibility::Possibility {
+        if [local_domain, pattern, forward_target]
+            .iter()
+            .any(|d| d.trim().is_empty())
+        {
+            fauna_core::possibility::Possibility::blocked(
+                fauna_core::localized::LocalizedText::key(
+                    "admin.aliases_page.forwarder_draft_incomplete",
+                ),
+            )
+        } else {
+            fauna_core::possibility::Possibility::Possible
+        }
+    }
+
+    async fn refresh(&self) -> Result<(), DispatchError> {
+        match self.read_forwarders().await {
+            Ok(()) => {
+                *self.read.lock().expect("read mutex") =
+                    fauna_core::possibility::ReadState::Resolved;
+                Ok(())
+            }
+            Err(e) => {
+                crate::bool_toggle_policy::note_read_failed(&self.read);
+                Err(e)
+            }
         }
     }
 
@@ -187,7 +229,7 @@ impl ForwarderMachine {
         self.inner.lock().expect("snapshot mutex").status = status;
     }
 
-    async fn refresh(&self) -> Result<(), DispatchError> {
+    async fn read_forwarders(&self) -> Result<(), DispatchError> {
         self.set_status(ForwarderStatus::Loading);
         // Both reads before taking the lock (no .await while holding it).
         let forwarders = self.nest.list_forwarders().await?;
@@ -205,6 +247,20 @@ impl ForwarderMachine {
         pattern: String,
         forward_target: String,
     ) -> Result<(), DispatchError> {
+        // The submit's own answer, asked again: a create the page could not
+        // offer never reaches the nest (`ui/README.md` § Offer only what is
+        // possible, rule 6).
+        let domains = self
+            .inner
+            .lock()
+            .expect("snapshot mutex")
+            .local_domains
+            .clone();
+        if let Some(reason) = forwarder_create_possibility(&domains, &local_domain).reason() {
+            return Err(DispatchError::InvalidState(
+                reason.resolve(fauna_i18n::strings::lookup),
+            ));
+        }
         self.set_status(ForwarderStatus::Working);
         self.nest
             .create_forwarder(local_domain, pattern, forward_target)
@@ -227,6 +283,96 @@ impl ForwarderMachine {
     pub fn snapshot(&self) -> ForwardersSnapshot {
         fauna_core::clone_locked(&self.inner, |s| s)
     }
+
+    /// Where the forwarder list read stands — the page paints its empty state
+    /// only once it resolved (an unread list is not an empty one).
+    pub fn read_state(&self) -> fauna_core::possibility::ReadState {
+        *self.read.lock().expect("read mutex")
+    }
+
+    /// Whether the forwarder add form and its submit are live: the list and
+    /// local-domain read resolved (the form's domain choice comes from it) and
+    /// no change is on its way. The submit asks the same answer.
+    pub fn add_possibility(&self) -> fauna_core::possibility::Possibility {
+        let idle = self.inner.lock().expect("snapshot mutex").status == ForwarderStatus::Idle;
+        crate::bool_toggle_policy::toggle_possibility(self.read_state(), idle)
+    }
+
+    /// Whether the add form's domain picker and text fields are live
+    /// (`admin.md` § 4, *A forwarder needs a hosted domain*):
+    /// [`Self::add_possibility`], then [`forwarder_form_possibility`] over the
+    /// hosted local domains the read holds.
+    pub fn form_possibility(&self) -> fauna_core::possibility::Possibility {
+        let domains = self
+            .inner
+            .lock()
+            .expect("snapshot mutex")
+            .local_domains
+            .clone();
+        self.add_possibility()
+            .and(forwarder_form_possibility(&domains))
+    }
+
+    /// Whether `admin-aliases-forwarder-add-submit-button` can create a
+    /// forwarder on `local_domain` now: [`Self::add_possibility`], then
+    /// [`forwarder_create_possibility`]. The create itself asks the same answer
+    /// and refuses with its reason, so an empty `local_domain` never reaches
+    /// the nest.
+    pub fn create_possibility(&self, local_domain: String) -> fauna_core::possibility::Possibility {
+        let domains = self
+            .inner
+            .lock()
+            .expect("snapshot mutex")
+            .local_domains
+            .clone();
+        self.add_possibility()
+            .and(forwarder_create_possibility(&domains, &local_domain))
+    }
+}
+
+/// Blocked reason: no hosted local domain exists, so a forwarder has nowhere to
+/// live; the step that unblocks it is adding a domain on `admin-dns`.
+pub const NO_HOSTED_DOMAIN: &str = "admin.aliases_page.no_hosted_domain";
+/// Blocked reason: the submit names no hosted local domain.
+pub const DOMAIN_REQUIRED: &str = "admin.aliases_page.domain_required";
+
+/// Whether the forwarder add form can be filled in at all (`admin.md` § 4, *A
+/// forwarder needs a hosted domain*; `ui/README.md` § Offer only what is
+/// possible, rules 2–4): blocked with [`NO_HOSTED_DOMAIN`] — naming the DNS
+/// page, the step that unblocks it — while the nest hosts no local domain;
+/// possible otherwise. The page offers that step (`admin-aliases-forwarder-
+/// add-domains-step`) exactly when this is blocked. Pure over the read's
+/// domain list: a caller folds the read's own answer in first.
+pub fn forwarder_form_possibility(
+    local_domains: &[String],
+) -> fauna_core::possibility::Possibility {
+    if local_domains.is_empty() {
+        fauna_core::possibility::Possibility::blocked(fauna_core::localized::LocalizedText::key(
+            NO_HOSTED_DOMAIN,
+        ))
+    } else {
+        fauna_core::possibility::Possibility::Possible
+    }
+}
+
+/// Whether a create on `local_domain` can succeed: [`forwarder_form_possibility`],
+/// then blocked with [`DOMAIN_REQUIRED`] unless `local_domain` (trimmed) is one
+/// of the hosted `local_domains` — so an empty `local_domain` is never sent.
+/// The pattern and target drafts are the nest's to judge.
+pub fn forwarder_create_possibility(
+    local_domains: &[String],
+    local_domain: &str,
+) -> fauna_core::possibility::Possibility {
+    let local_domain = local_domain.trim();
+    forwarder_form_possibility(local_domains).and(
+        if local_domains.iter().any(|d| d == local_domain) {
+            fauna_core::possibility::Possibility::Possible
+        } else {
+            fauna_core::possibility::Possibility::blocked(
+                fauna_core::localized::LocalizedText::key(DOMAIN_REQUIRED),
+            )
+        },
+    )
 }
 
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
@@ -258,6 +404,25 @@ impl ForwarderMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forwarder_draft_needs_domain_local_part_and_destination() {
+        let f = ForwarderMachine::create_draft_possibility;
+        assert!(f("example.org", "info", "a@elsewhere.example").is_possible());
+        for (d, p, t) in [
+            ("", "info", "a@elsewhere.example"),
+            ("example.org", "  ", "a@elsewhere.example"),
+            ("example.org", "info", ""),
+        ] {
+            assert_eq!(
+                f(d, p, t).reason().map(|r| r.key.as_str()),
+                Some("admin.aliases_page.forwarder_draft_incomplete")
+            );
+        }
+        assert!(
+            fauna_i18n::strings::lookup("admin.aliases_page.forwarder_draft_incomplete").is_some()
+        );
+    }
     use fauna_protocol::ByteBuf;
     use std::sync::Mutex as StdMutex;
 
@@ -341,6 +506,85 @@ mod tests {
             domains: StdMutex::new(domains.into_iter().map(String::from).collect()),
             next_id: StdMutex::new(0x10),
         }))
+    }
+
+    #[tokio::test]
+    async fn the_add_form_waits_for_the_read() {
+        let m = machine_with(vec![], vec![]);
+        assert_eq!(
+            m.add_possibility().reason().map(|r| r.key.clone()),
+            Some("common.still_loading".to_string())
+        );
+        assert_eq!(m.read_state(), fauna_core::possibility::ReadState::Pending);
+        m.hydrate().await.unwrap();
+        assert!(m.add_possibility().is_possible());
+        assert_eq!(m.read_state(), fauna_core::possibility::ReadState::Resolved);
+    }
+
+    fn reason_key(p: &fauna_core::possibility::Possibility) -> Option<String> {
+        p.reason().map(|r| r.key.clone())
+    }
+
+    #[test]
+    fn forwarder_create_possibility_needs_a_hosted_domain() {
+        assert_eq!(
+            reason_key(&forwarder_form_possibility(&[])),
+            Some(NO_HOSTED_DOMAIN.to_string())
+        );
+        // No domain at all: the Domains reason wins over the empty pick.
+        assert_eq!(
+            reason_key(&forwarder_create_possibility(&[], "")),
+            Some(NO_HOSTED_DOMAIN.to_string())
+        );
+    }
+
+    #[test]
+    fn forwarder_create_possibility_refuses_an_empty_or_unhosted_domain() {
+        let domains = vec!["example.net".to_string()];
+        assert!(forwarder_form_possibility(&domains).is_possible());
+        assert_eq!(
+            reason_key(&forwarder_create_possibility(&domains, "")),
+            Some(DOMAIN_REQUIRED.to_string())
+        );
+        assert_eq!(
+            reason_key(&forwarder_create_possibility(&domains, "other.test")),
+            Some(DOMAIN_REQUIRED.to_string())
+        );
+        assert!(forwarder_create_possibility(&domains, " example.net ").is_possible());
+    }
+
+    #[tokio::test]
+    async fn create_possibility_folds_the_read_then_the_domain() {
+        let m = machine_with(vec![], vec![]);
+        assert_eq!(
+            reason_key(&m.create_possibility("example.net".into())),
+            Some("common.still_loading".to_string())
+        );
+        m.hydrate().await.unwrap();
+        assert_eq!(
+            reason_key(&m.form_possibility()),
+            Some(NO_HOSTED_DOMAIN.to_string())
+        );
+        assert_eq!(
+            reason_key(&m.create_possibility(String::new())),
+            Some(NO_HOSTED_DOMAIN.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_no_hosted_domain_never_reaches_the_nest() {
+        let m = machine_with(vec![], vec![]);
+        m.hydrate().await.unwrap();
+        m.dispatch(ForwarderAction::Create {
+            local_domain: String::new(),
+            pattern: "info".into(),
+            forward_target: "a@b.example".into(),
+        })
+        .await
+        .unwrap_err();
+        let snap = m.snapshot();
+        assert!(snap.forwarders.is_empty());
+        assert!(snap.error.is_some(), "the refusal is shown, never silent");
     }
 
     #[tokio::test]

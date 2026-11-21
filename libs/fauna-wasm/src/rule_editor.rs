@@ -86,6 +86,15 @@ impl WasmRuleEditor {
         to_js(&self.editor.borrow().view())
     }
 
+    /// Whether `rule-editor-save-button` can save now
+    /// (`RuleEditor::save_possibility`), in `Possibility`'s serde form for
+    /// `#lib/possibility`'s `paintPossibility` — the UniFFI
+    /// `FfiRuleEditor::save_possibility` twin.
+    #[wasm_bindgen(js_name = savePossibility)]
+    pub fn save_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.editor.borrow().save_possibility())
+    }
+
     /// `rule-editor-add-button` — `kind` is `"category"` | `"keywords"` |
     /// `"labeler"` | `"prompt"`; the new rule's index, or `undefined`.
     #[wasm_bindgen(js_name = addRule)]

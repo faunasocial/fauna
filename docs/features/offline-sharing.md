@@ -50,9 +50,9 @@ Stamped 2026-10-21 at 77c610862e.
 | linux | ✅ full | 0.1.5-dev+0cfdd6c6 standalone |
 | windows | ✅ full | 0.1.6-dev+00ef95a1 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | 🚧 unbuilt | 0.1.5-dev+2e009c0f standalone |
+| ios | ✅ full | 0.1.7-dev+07ddec56 standalone |
 | android | 🚧 unbuilt | |
-| tui | ✅ full | 0.1.6 docker |
+| tui | ✅ full | 0.1.7 docker |
 | android-kids | 🚧 unbuilt | |
 | ios-kids | 🚧 unbuilt | |
 
@@ -61,13 +61,13 @@ Stamped 2026-10-21 at 77c610862e.
 | 1 | app | `tests/e2e-unified/tests/test_offline_share_initiation.py::test_the_compare_code_the_app_shows_is_this_actors_own_key` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_offline_share_initiation.py::test_the_act_button_refuses_an_unusable_code_and_accepts_a_real_one` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_offline_share_initiation.py::test_the_two_panels_are_exclusive_and_cancel_returns_to_the_entry` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_co_present_ceremony_lists_the_shared_set_on_both_seats` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_declined_invitation_lists_nothing_and_stops_knocking` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_stranger_cannot_start_a_ceremony_nobody_asked_for` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_the_two_seats_never_show_each_other_their_own_code` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped` — requires `group-set-feed` (not built: web, ios, android, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 4 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_co_present_ceremony_completes_while_the_nest_is_unreachable` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_connection_dropped_part_way_picks_the_same_share_up_again` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_receive_window_that_lapsed_refuses_the_initiator_like_a_stranger` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 7 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restored` — requires `group-set-feed` (not built: web, ios, android, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_co_present_ceremony_lists_the_shared_set_on_both_seats` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_declined_invitation_lists_nothing_and_stops_knocking` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_stranger_cannot_start_a_ceremony_nobody_asked_for` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_the_two_seats_never_show_each_other_their_own_code` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped` — requires `group-set-feed` (not built: web, android, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_co_present_ceremony_completes_while_the_nest_is_unreachable` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_connection_dropped_part_way_picks_the_same_share_up_again` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_receive_window_that_lapsed_refuses_the_initiator_like_a_stranger` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 7 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restored` — requires `group-set-feed` (not built: web, android, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 <!-- features-render:end -->

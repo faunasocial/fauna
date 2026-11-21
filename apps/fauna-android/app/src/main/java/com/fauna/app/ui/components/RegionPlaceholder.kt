@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
@@ -17,6 +16,7 @@ import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.ffi.FfiRegionPlaceholder
 import androidx.compose.ui.res.stringResource
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The region placeholder painted **in place of** a region-withheld item

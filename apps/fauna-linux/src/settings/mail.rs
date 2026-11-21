@@ -53,6 +53,7 @@ use fauna_client_mail_settings::{
 };
 
 use fauna_client_bridges::MailAccountClient;
+use fauna_core::possibility::{Possibility, ReadState};
 
 use crate::async_helper::spawn_with_snapshot;
 use crate::i18n::strings::common;
@@ -67,6 +68,30 @@ enum FormMode {
     Enable,
     /// New credential on an already-enabled actor → `AddCredential`.
     Add,
+}
+
+/// The credential-management section's widgets — everything
+/// [`paint_credential_section`] paints from the shared
+/// `MailSettingsSnapshot::credential_management_possibility()` answer.
+#[derive(Clone)]
+struct CredentialWidgets {
+    /// The section title and the one-line pointer to Settings → Connected
+    /// apps, where the app passwords now list (`mail-settings.md` § Where the
+    /// credential rows render).
+    group: adw::PreferencesGroup,
+    pointer: gtk::Label,
+    /// The add + rotate rows.
+    manage_group: adw::PreferencesGroup,
+    /// `mail-settings-add-credential-button`.
+    add_btn: gtk::Button,
+    /// The add button's reason line, beside it (rule 2: within eyeshot).
+    reason: gtk::Label,
+    /// The keys explainer + rotate-keys row.
+    rotate_row: adw::ActionRow,
+    /// The MUA connection details.
+    mua_group: adw::PreferencesGroup,
+    /// The serve-here toggle's group.
+    serve_here_group: adw::PreferencesGroup,
 }
 
 /// Handles to the widgets the snapshot renders into. GTK objects are
@@ -84,13 +109,9 @@ struct MailPageWidgets {
     banner_group: adw::PreferencesGroup,
     resume_btn: gtk::Button,
 
-    // The one-line pointer to Settings → Connected apps, where the app
-    // passwords now list (`mail-settings.md` § Where the credential rows render).
-    credentials_group: adw::PreferencesGroup,
-
-    // Manage group (add + rotate buttons).
-    manage_group: adw::PreferencesGroup,
-    add_credential_btn: gtk::Button,
+    // The credential-management section, painted from one shared answer
+    // ([`paint_credential_section`]).
+    credentials: CredentialWidgets,
     rotate_keys_btn: gtk::Button,
 
     // Add-credential inline form.
@@ -134,7 +155,6 @@ struct MailPageWidgets {
     // AUTH are shared by all three, so they show whenever the group does. The
     // per-protocol row handles are held so render() can gate each protocol's rows
     // individually within the one `mail-settings-mua-instructions` group.
-    mua_group: adw::PreferencesGroup,
     mua_imap_host_row: adw::ActionRow,
     mua_imap_host: gtk::Label,
     mua_imap_port_row: adw::ActionRow,
@@ -152,8 +172,7 @@ struct MailPageWidgets {
     mua_username: gtk::Label,
     mua_auth: gtk::Label,
 
-    // Local IMAP/CalDAV-serving toggle group (visible when enabled).
-    serve_here_group: adw::PreferencesGroup,
+    // Local IMAP/CalDAV-serving toggle (its group rides `credentials`).
     serve_here_toggle: adw::SwitchRow,
 
     // Forwarding group (visible while mail is enabled; mail-forwarding.md
@@ -177,7 +196,6 @@ struct MailPageWidgets {
     scan_result_visible_toggle: adw::SwitchRow,
     autorespond_toggle: adw::SwitchRow,
     autorespond_message_input: gtk::Entry,
-    autorespond_message_row: adw::ActionRow,
     mailbox_quota_row: adw::ActionRow,
     mailbox_quota: gtk::Label,
     submission_quota_row: adw::ActionRow,
@@ -189,6 +207,16 @@ struct MailPageWidgets {
     switches: Rc<Cell<Option<(bool, bool, bool)>>>,
     /// Whether the automatic reply is on, as the filter rules last read it.
     autorespond_on: Rc<Cell<Option<bool>>>,
+    /// Where the forward-all read stands: the input and its commit wait on it
+    /// (`mail-settings.md` § Errors & edge cases, *Controls wait for their
+    /// reads*), so a pre-read empty draft never clears a forward.
+    forward_all_read: Rc<Cell<ReadState>>,
+    /// Where the forward-rate read stands: the limit and its commit wait on
+    /// it, since the ceiling that bounds the value comes with it.
+    forward_per_hour_read: Rc<Cell<ReadState>>,
+    /// Where the automatic-reply read stands: the toggle, the message input
+    /// and its commit — which also turns the reply on — wait on it.
+    autorespond_read: Rc<Cell<ReadState>>,
 }
 
 /// Everything the page's event handlers + render need: the shared machine, the
@@ -317,6 +345,7 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         .build();
     credentials_group.add(&credentials_pointer);
     credentials_group.set_visible(false);
+    credentials_pointer.set_visible(false);
     page.add(&credentials_group);
 
     // --- Manage group: add-credential + rotate-keys buttons ---
@@ -333,7 +362,17 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         &add_credential_btn,
         ids::MAIL_SETTINGS_ADD_CREDENTIAL_BUTTON,
     );
+    // The button's reason line (mail off → names the enable toggle above),
+    // painted by `crate::possible::paint`; hidden while the button is live.
+    let credentials_reason = gtk::Label::builder()
+        .wrap(true)
+        .xalign(0.0)
+        .hexpand(true)
+        .visible(false)
+        .css_classes(["dim-label"])
+        .build();
     let add_row = adw::ActionRow::builder().activatable(false).build();
+    add_row.add_prefix(&credentials_reason);
     add_row.add_suffix(&add_credential_btn);
     manage_group.add(&add_row);
 
@@ -761,6 +800,8 @@ pub fn build_mail_page() -> adw::PreferencesPage {
     account_group.add(&receive_toggle);
     account_group.add(&send_toggle);
     account_group.add(&scan_result_visible_toggle);
+    // Shown from the start, blocked until its read lands (`paint_read_gated`).
+    autorespond_toggle.set_visible(true);
     account_group.add(&autorespond_toggle);
     let autorespond_message_input = gtk::Entry::builder().valign(gtk::Align::Center).build();
     set_test_id(
@@ -803,9 +844,16 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         error_label,
         banner_group,
         resume_btn,
-        credentials_group,
-        manage_group,
-        add_credential_btn,
+        credentials: CredentialWidgets {
+            group: credentials_group,
+            pointer: credentials_pointer,
+            manage_group,
+            add_btn: add_credential_btn,
+            reason: credentials_reason,
+            rotate_row,
+            mua_group,
+            serve_here_group,
+        },
         rotate_keys_btn,
         form_group,
         form_input_box,
@@ -829,7 +877,6 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         rotate_confirm_btn,
         rotate_cancel_btn,
         rotation_in_flight: Rc::new(Cell::new(None)),
-        mua_group,
         mua_imap_host_row: imap_host_row,
         mua_imap_host,
         mua_imap_port_row: imap_port_row,
@@ -846,7 +893,6 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         mua_webdav_url,
         mua_username,
         mua_auth,
-        serve_here_group,
         serve_here_toggle,
         forwarding_group,
         forward_all_to_input,
@@ -859,7 +905,6 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         scan_result_visible_toggle,
         autorespond_toggle,
         autorespond_message_input,
-        autorespond_message_row,
         mailbox_quota_row,
         mailbox_quota,
         submission_quota_row,
@@ -868,7 +913,19 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         over_quota_notice,
         switches: Rc::new(Cell::new(None)),
         autorespond_on: Rc::new(Cell::new(None)),
+        forward_all_read: Rc::new(Cell::new(ReadState::Pending)),
+        forward_per_hour_read: Rc::new(Cell::new(ReadState::Pending)),
+        autorespond_read: Rc::new(Cell::new(ReadState::Pending)),
     };
+    // Nothing a read decides is live before it lands: the enable toggle waits
+    // for the first hydrate, the forward-all and automatic-reply controls for
+    // their own reads (`wire_unbuilt` repaints them with the unbuilt reason).
+    crate::possible::paint(
+        &widgets.enabled_toggle,
+        None,
+        MailSettingsSnapshot::default().enable_toggle_possibility(),
+    );
+    paint_read_gated(&widgets);
     wire_machine(&page, widgets);
 
     page
@@ -898,13 +955,13 @@ fn mua_field_row(title: &str, value: &str, id: &str) -> (adw::ActionRow, gtk::La
 fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
     let client = match crate::settings::get_client() {
         Some(c) => c,
-        None => return,
+        None => return wire_unbuilt(&widgets),
     };
     let machine = match crate::mail_glue::build_mail_settings_machine(&client) {
         Ok(m) => Arc::new(m),
         Err(e) => {
             tracing::error!("mail-settings: build machine failed: {e}");
-            return;
+            return wire_unbuilt(&widgets);
         }
     };
 
@@ -979,7 +1036,11 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
             .autorespond_toggle
             .clone()
             .connect_active_notify(move |btn| {
-                if c.guard.get() || c.w.autorespond_on.get().is_none() {
+                if c.guard.get() {
+                    return;
+                }
+                if crate::possible::refused_at_press(&autorespond_answer(&c.w), &c.w.error_label) {
+                    paint_autorespond_toggle(&c);
                     return;
                 }
                 if btn.is_active() {
@@ -1053,6 +1114,17 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
             if ctx.guard.get() {
                 return; // Programmatic sync from render(); not a user action.
             }
+            // The flip asks the answer the toggle paints from: before the
+            // first hydrate (or on a box that cannot serve mail) it is
+            // refused with its reason and the switch snaps back — the enable
+            // form never opens on the never-read "off".
+            let answer = ctx.machine.snapshot().enable_toggle_possibility();
+            if crate::possible::refused_at_press(&answer, &ctx.w.error_label) {
+                ctx.guard.set(true);
+                btn.set_active(!btn.is_active());
+                ctx.guard.set(false);
+                return;
+            }
             if btn.is_active() {
                 open_form(&ctx, FormMode::Enable);
             } else {
@@ -1069,7 +1141,7 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
     // Add-credential button → open the form in Add mode.
     {
         let ctx = Rc::clone(&ctx);
-        ctx.w.add_credential_btn.clone().connect_clicked(move |_| {
+        ctx.w.credentials.add_btn.clone().connect_clicked(move |_| {
             open_form(&ctx, FormMode::Add);
         });
     }
@@ -1188,7 +1260,13 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
     {
         let ctx = Rc::clone(&ctx);
         ctx.w.rotate_keys_btn.clone().connect_clicked(move |_| {
-            open_rotate_form(&ctx);
+            // The answer the button painted from, asked again; a refusal says
+            // why on `error-message` (rules 6 and 7).
+            let answer = rotate_answer(&ctx.w, &ctx.machine.snapshot());
+            match crate::possible::reason_text(&answer) {
+                Some(reason) => super::render_error_label(&ctx.w.error_label, Some(&reason)),
+                None => open_rotate_form(&ctx),
+            }
         });
     }
 
@@ -1201,7 +1279,11 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
     {
         let ctx = Rc::clone(&ctx);
         ctx.w.rotate_confirm_btn.clone().connect_clicked(move |_| {
-            if ctx.w.rotation_in_flight.get().is_some() {
+            // The confirm asks the same answer as the button that opened it; a
+            // pending rotation is resumed from its banner, not confirmed again.
+            let answer = rotate_answer(&ctx.w, &ctx.machine.snapshot());
+            if let Some(reason) = crate::possible::reason_text(&answer) {
+                super::render_error_label(&ctx.w.error_label, Some(&reason));
                 return;
             }
             let excluded: Vec<String> = ctx
@@ -1216,8 +1298,8 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
             ctx.w.rotation_in_flight.set(Some(
                 fauna_client_mail_settings::state::rotation_rewrap_count(&snap, &excluded),
             ));
-            paint_rotate_form(&ctx.w, &snap.status);
-            ctx.w.rotate_keys_btn.set_sensitive(false);
+            paint_rotate_form(&ctx.w, &snap);
+            paint_rotate_button(&ctx.w, &snap);
             let machine = Arc::clone(&ctx.machine);
             let ctx_render = Rc::clone(&ctx);
             spawn_with_snapshot(
@@ -1292,14 +1374,34 @@ fn open_rotate_form(ctx: &Rc<MailPageCtx>) {
 /// label while a rotation runs — this page's own, held open from confirm until
 /// its dispatch returns, or one the snapshot reports — with confirm and cancel
 /// disabled while this page's own rotation is in flight.
-fn paint_rotate_form(w: &MailPageWidgets, status: &SettingsStatus) {
+fn paint_rotate_form(w: &MailPageWidgets, snap: &MailSettingsSnapshot) {
     paint_rotate_controls(
         &w.rotate_progress,
         &w.rotate_confirm_btn,
         &w.rotate_cancel_btn,
-        status,
+        &snap.status,
         w.rotation_in_flight.get(),
     );
+    // The confirm paints from the same answer as the rotate button.
+    crate::possible::paint(&w.rotate_confirm_btn, None, rotate_answer(w, snap));
+}
+
+/// `mail-settings-rotate-keys-button`'s and the rotate confirm's answer: the
+/// shared `MailSettingsSnapshot::rotate_keys_possibility`, in flight while
+/// this page's own rotation runs or the snapshot reports one running
+/// (`mail-settings.md` § Errors & edge cases, *The in-page predicates*).
+fn rotate_answer(w: &MailPageWidgets, snap: &MailSettingsSnapshot) -> Possibility {
+    let in_flight = w.rotation_in_flight.get().is_some()
+        || matches!(snap.status, SettingsStatus::RotationInProgress { .. });
+    snap.rotate_keys_possibility(in_flight)
+}
+
+/// Paint the rotate button from its answer, the reason on its tooltip; it is
+/// shown only with at least one credential (its row rides the credential
+/// section's answer).
+fn paint_rotate_button(w: &MailPageWidgets, snap: &MailSettingsSnapshot) {
+    crate::possible::paint(&w.rotate_keys_btn, None, rotate_answer(w, snap));
+    w.rotate_keys_btn.set_visible(!snap.credentials.is_empty());
 }
 
 fn paint_rotate_controls(
@@ -1523,6 +1625,9 @@ fn hydrate_account(ctx: &Rc<MailPageCtx>) {
 /// refuse it for the same reason — one rule, priority #2). Blank clears; the
 /// field repaints from the nest's re-read.
 fn commit_forward_all_to(ctx: &Rc<MailPageCtx>) {
+    if crate::possible::refused_at_press(&forward_all_answer(&ctx.w), &ctx.w.error_label) {
+        return;
+    }
     let value = match fauna_client_mail_settings::parse_forward_all_to_draft(
         &ctx.w.forward_all_to_input.text(),
     ) {
@@ -1553,9 +1658,13 @@ fn commit_forward_all_to(ctx: &Rc<MailPageCtx>) {
 }
 
 /// Commit the hourly limit, bounded by the ceiling the nest returned. No
-/// ceiling yet = the first read has not resolved: the commit is inert.
+/// ceiling yet = the read has not resolved: nothing to bound the value by, so
+/// the commit refuses with the read's answer (still loading, or failed to
+/// load) — never silent (rules 5 and 7).
 fn commit_forward_per_hour(ctx: &Rc<MailPageCtx>) {
     let Some(ceiling) = ctx.w.forward_ceiling.get() else {
+        let reason = crate::possible::reason_text(&forward_per_hour_answer(&ctx.w));
+        super::render_error_label(&ctx.w.error_label, reason.as_deref());
         return;
     };
     let value = match fauna_client_mail_settings::parse_forward_per_hour_draft(
@@ -1665,6 +1774,10 @@ fn commit_autorespond(ctx: &Rc<MailPageCtx>, message: Option<String>) {
 /// decides first, a refused (blank) draft names its reason on `error-message`
 /// and sends nothing.
 fn commit_autorespond_message(ctx: &Rc<MailPageCtx>) {
+    if crate::possible::refused_at_press(&autorespond_answer(&ctx.w), &ctx.w.error_label) {
+        paint_autorespond_toggle(ctx);
+        return;
+    }
     match fauna_client_mail_settings::parse_autorespond_message_draft(
         &ctx.w.autorespond_message_input.text(),
     ) {
@@ -1676,6 +1789,43 @@ fn commit_autorespond_message(ctx: &Rc<MailPageCtx>) {
             paint_autorespond_toggle(ctx);
         }
     }
+}
+
+/// `mail-settings-forward-all-to-input` and its commit: decided by the
+/// forward-all read (tui's `MailState::forward_all_answer`).
+fn forward_all_answer(w: &MailPageWidgets) -> Possibility {
+    Possibility::from_read(w.forward_all_read.get())
+}
+
+/// `mail-settings-forward-per-hour-input` and its commit: wait for the read
+/// that brings the ceiling bounding the value (tui's
+/// `MailState::forward_per_hour_answer`); the ceiling is only ever set from a
+/// read.
+fn forward_per_hour_answer(w: &MailPageWidgets) -> Possibility {
+    if w.forward_ceiling.get().is_some() {
+        return Possibility::Possible;
+    }
+    Possibility::from_read(w.forward_per_hour_read.get())
+}
+
+/// `mail-settings-autorespond-toggle`, the message input and its commit:
+/// decided by the automatic-reply read; a held reply is only ever set from a
+/// read (tui's `MailState::autorespond_answer`).
+fn autorespond_answer(w: &MailPageWidgets) -> Possibility {
+    if w.autorespond_on.get().is_some() {
+        return Possibility::Possible;
+    }
+    Possibility::from_read(w.autorespond_read.get())
+}
+
+/// Paint the controls whose own read decides them through the possibility
+/// seam; the reason rides each control's tooltip and `reason` attr.
+fn paint_read_gated(w: &MailPageWidgets) {
+    crate::possible::paint(&w.forward_all_to_input, None, forward_all_answer(w));
+    crate::possible::paint(&w.forward_per_hour_input, None, forward_per_hour_answer(w));
+    let autorespond = autorespond_answer(w);
+    crate::possible::paint(&w.autorespond_toggle, None, autorespond.clone());
+    crate::possible::paint(&w.autorespond_message_input, None, autorespond);
 }
 
 /// Repaint the automatic-reply toggle from the last confirmed read.
@@ -1699,6 +1849,18 @@ fn paint_autorespond_toggle(ctx: &Rc<MailPageCtx>) {
 fn render_account(ctx: &Rc<MailPageCtx>, read: AccountRead) {
     let w = &ctx.w;
     let mut error = None;
+    if let Some(part) = &read.forward_all_to {
+        w.forward_all_read
+            .set(w.forward_all_read.get().after(part.is_ok()));
+    }
+    if let Some(part) = &read.forward_per_hour {
+        w.forward_per_hour_read
+            .set(w.forward_per_hour_read.get().after(part.is_ok()));
+    }
+    if let Some(part) = &read.autorespond {
+        w.autorespond_read
+            .set(w.autorespond_read.get().after(part.is_ok()));
+    }
     match read.forward_all_to {
         Some(Ok(address)) => w
             .forward_all_to_input
@@ -1761,9 +1923,8 @@ fn render_account(ctx: &Rc<MailPageCtx>, read: AccountRead) {
         Some(Err(msg)) => error = error.or(Some(msg)),
         None => {}
     }
+    paint_read_gated(w);
     if w.autorespond_on.get().is_some() {
-        w.autorespond_toggle.set_visible(true);
-        w.autorespond_message_row.set_visible(true);
         paint_autorespond_toggle(ctx);
     }
     match read.quotas {
@@ -1834,7 +1995,10 @@ fn render(ctx: &Rc<MailPageCtx>, snap: &MailSettingsSnapshot) {
             (false, false) => "off",
         },
     );
-    w.enabled_toggle.set_sensitive(!unavailable);
+    // The toggle's answer is the shared one: blocked *still loading* before
+    // the first hydrate, then blocked by the unavailable notice for a turn-on
+    // on a box that cannot serve mail.
+    crate::possible::paint(&w.enabled_toggle, None, snap.enable_toggle_possibility());
     w.enabled_toggle
         .set_subtitle(if unavailable { "" } else { SM::ENABLE_SUBTITLE });
     w.unavailable_row.set_visible(unavailable);
@@ -1859,41 +2023,25 @@ fn render(ctx: &Rc<MailPageCtx>, snap: &MailSettingsSnapshot) {
     // Pending-rotation banner: shown when a previous rotation left a sentinel.
     w.banner_group.set_visible(snap.pending_rotation.is_some());
 
-    paint_rotate_form(w, &snap.status);
+    paint_rotate_form(w, snap);
 
     super::render_error_label(&w.error_label, snap.error.as_deref());
 
-    // The shared credential-management section (credentials list, add/rotate,
-    // serve-here) renders whenever the actor has a provisioned mailbox — email
-    // OR CalDAV OR CardDAV OR serving >=1 folder over WebDAV — so a DAV-only
-    // deployment (email off) can still obtain and manage its one shared bridge
-    // password (`mail-settings.md` § CalDAV-only mailbox; `caldav-server.md` /
-    // `carddav-server.md` § Authentication — the same `(actor, default)`
-    // credential AUTHs IMAP + SMTP + CalDAV + CardDAV + WebDAV, so there is
-    // nothing protocol-specific to mint, only a previously-hidden affordance to
-    // surface). The predicate is computed once in shared Rust (priority #2/#4:
-    // `MailSettingsSnapshot::credential_management_reachable`) rather than
-    // re-derived per client.
-    let mailbox = snap.credential_management_reachable;
-    w.credentials_group.set_visible(mailbox);
+    // The shared credential-management section (the Connected apps pointer,
+    // add/rotate, the MUA details, serve-here) is painted from ONE answer, the
+    // shared `MailSettingsSnapshot::credential_management_possibility()` over
+    // the `credential_management_reachable` field — read, never re-derived
+    // (§ Credential-management reachability: email OR CalDAV OR CardDAV OR
+    // serving >=1 folder over WebDAV, so a DAV-only deployment with email off
+    // still obtains and manages its one shared bridge password; `ui/README.md`
+    // § Offer only what is possible, rule 6). See [`paint_credential_section`].
+    paint_credential_section(&w.credentials, snap.credential_management_possibility());
 
-    // Manage buttons: add visible when a mailbox exists; rotate when ≥1 credential.
-    w.manage_group.set_visible(mailbox);
-    w.rotate_keys_btn.set_visible(!snap.credentials.is_empty());
-    // Disabled while a rotation is pending or running (`mail-settings.md`
-    // § Architectural rules 5: no second rotation racing the first) — the
-    // banner's Resume is the way on; the shared machine refuses a second
-    // StartRotation too, so this is the visible half.
-    w.rotate_keys_btn.set_sensitive(
-        snap.pending_rotation.is_none()
-            && w.rotation_in_flight.get().is_none()
-            && !matches!(snap.status, SettingsStatus::RotationInProgress { .. }),
-    );
-
-    // Serve-here toggle: the per-actor "serve my mailbox over IMAP/CalDAV here"
-    // flip applies to a CalDAV-only mailbox just as much as an email one, so it
-    // follows `mailbox`, not `enabled`.
-    w.serve_here_group.set_visible(mailbox);
+    // Rotate: visible with ≥1 credential, blocked with its reason while a
+    // rotation is pending or running (`mail-settings.md` § Architectural
+    // rules 5: no second rotation racing the first) — the banner's Resume is
+    // the way on; the shared machine refuses a second StartRotation too.
+    paint_rotate_button(w, snap);
 
     // Forwarding is a mail feature, so it shows while mail is enabled (not for
     // a CalDAV-only mailbox).
@@ -1910,8 +2058,8 @@ fn render(ctx: &Rc<MailPageCtx>, snap: &MailSettingsSnapshot) {
     // full collection-root URL, no host/port split — no SRV autodiscovery exists
     // for WebDAV). Username + AUTH are shared by all (one credential AUTHs
     // IMAP+SMTP+CalDAV+CardDAV+WebDAV), so they show whenever the group does.
-    // Values are set unconditionally; per-row visibility decides what the user sees.
-    w.mua_group.set_visible(mailbox);
+    // Values are set unconditionally; per-row visibility decides what the user
+    // sees, and the group itself rides the section's answer.
     w.mua_imap_host_row.set_visible(snap.enabled);
     w.mua_imap_port_row.set_visible(snap.enabled);
     w.mua_smtp_host_row.set_visible(snap.enabled);
@@ -1931,6 +2079,71 @@ fn render(ctx: &Rc<MailPageCtx>, snap: &MailSettingsSnapshot) {
     w.mua_auth.set_text(&snap.mua.auth_mechanism);
 }
 
+/// The page with no machine (no client, or its build failed): every press
+/// says so on `error-message` with the shared unbuilt reason (`ui/README.md`
+/// § Offer only what is possible, rule 7: never silent). The enabled toggle
+/// is flipped back, so it never shows a state no machine wrote.
+fn wire_unbuilt(w: &MailPageWidgets) {
+    // No machine: nothing about mail can succeed until it is rebuilt, so the
+    // read-decided controls carry that reason rather than "still loading".
+    let unbuilt = fauna_client_mail_settings::mail_usable_unbuilt();
+    crate::possible::paint(&w.enabled_toggle, None, unbuilt.clone());
+    crate::possible::paint(&w.forward_all_to_input, None, unbuilt.clone());
+    crate::possible::paint(&w.forward_per_hour_input, None, unbuilt.clone());
+    crate::possible::paint(&w.autorespond_toggle, None, unbuilt.clone());
+    crate::possible::paint(&w.autorespond_message_input, None, unbuilt);
+    super::mail_gate::wire_unbuilt(
+        &w.error_label,
+        &[
+            &w.credentials.add_btn,
+            &w.resume_btn,
+            &w.rotate_keys_btn,
+            &w.submit_btn,
+            &w.rotate_confirm_btn,
+        ],
+    );
+    let reverting = Rc::new(Cell::new(false));
+    for toggle in [&w.enabled_toggle, &w.serve_here_toggle] {
+        let error_label = w.error_label.clone();
+        let reverting = Rc::clone(&reverting);
+        toggle.connect_active_notify(move |row| {
+            if reverting.get() {
+                return;
+            }
+            reverting.set(true);
+            row.set_active(!row.is_active());
+            reverting.set(false);
+            super::mail_gate::refuse_unbuilt(&error_label);
+        });
+    }
+}
+
+/// Paint the credential-management section from its one shared answer
+/// (`MailSettingsSnapshot::credential_management_possibility()`; tui's
+/// `mail_elements` is the reference):
+///
+/// - absent (a box that can never serve mail, nothing else reaching the
+///   credential) → no section at all;
+/// - blocked (mail off, or the first read not resolved) → the section title
+///   and Add password stay visible, the button disabled with the reason
+///   beside it (rule 2) — the rest of the section exists only once a
+///   credential can;
+/// - possible → the whole section.
+///
+/// The Add password button is painted through the seam
+/// (`crate::possible::paint`), never by hand.
+fn paint_credential_section(c: &CredentialWidgets, answer: fauna_core::possibility::Possibility) {
+    let shown = answer.is_shown();
+    let possible = answer.is_possible();
+    c.group.set_visible(shown);
+    c.pointer.set_visible(possible);
+    c.manage_group.set_visible(shown);
+    c.rotate_row.set_visible(possible);
+    c.mua_group.set_visible(possible);
+    c.serve_here_group.set_visible(possible);
+    crate::possible::paint(&c.add_btn, Some(&c.reason), answer);
+}
+
 /// Paint the status line and the rotate button from the machine's live
 /// snapshot (the 250 ms tick in [`wire_machine`]). Writes only on change, so an
 /// idle page does not churn the accessibility tree.
@@ -1943,11 +2156,12 @@ fn paint_live_status(ctx: &Rc<MailPageCtx>) {
         w.status_marker.set_text(&text);
         w.status_row.set_subtitle(&text);
     }
-    let rotatable = snap.pending_rotation.is_none()
-        && w.rotation_in_flight.get().is_none()
-        && !matches!(snap.status, SettingsStatus::RotationInProgress { .. });
-    if w.rotate_keys_btn.is_sensitive() != rotatable {
-        w.rotate_keys_btn.set_sensitive(rotatable);
+    let answer = rotate_answer(w, &snap);
+    let tip = crate::possible::reason_text(&answer);
+    if w.rotate_keys_btn.is_sensitive() != answer.is_possible()
+        || w.rotate_keys_btn.tooltip_text().map(|t| t.to_string()) != tip
+    {
+        paint_rotate_button(w, &snap);
     }
 }
 
@@ -2188,6 +2402,31 @@ mod tests {
                 "serve-here row must disable Pango markup: i18n strings are plain text \
              and may contain '&'/'<'/'>' which break markup parsing",
             );
+        });
+    }
+
+    /// Every control a read decides is painted blocked with a reason before
+    /// any read lands — never live on a guess (`mail-settings.md` § Errors &
+    /// edge cases, *Controls wait for their reads*). With no client the page
+    /// has no machine, so the reason is the unbuilt one.
+    #[test]
+    fn read_decided_controls_are_blocked_before_their_reads() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let page = build_mail_page();
+            for id in [
+                "mail-settings-enabled-toggle",
+                "mail-settings-forward-all-to-input",
+                "mail-settings-forward-per-hour-input",
+                "mail-settings-autorespond-toggle",
+                "mail-settings-autorespond-message-input",
+            ] {
+                let widget = crate::testid::find_by_test_id(&page, id)
+                    .unwrap_or_else(|| panic!("{id} missing"));
+                assert!(!widget.is_sensitive(), "{id} live before its read");
+                let reason = crate::testid::test_attr_text(&widget, "reason").unwrap_or_default();
+                assert!(!reason.is_empty(), "{id} blocked without a reason");
+            }
         });
     }
 }

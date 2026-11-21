@@ -32,6 +32,31 @@ public final class BridgeApprovalVM: MachineBackedVM {
     public internal(set) var isLoading = false
 
     var machine: BridgeApprovalMachine?
+    /// The machine could not be built: the lists will never be read.
+    private var buildFailed = false
+
+    /// Where the pending and approved list read stands — the shared
+    /// `BridgeApprovalMachine::read_state` (admin.md § Errors & edge cases,
+    /// *Controls wait for their read*): each section says it is loading (or
+    /// failed) until the read resolves, never its empty text. Reads
+    /// `snapshot` so a body painting it re-renders on every re-read.
+    /// Whether the read this page's read-gated controls wait for has resolved
+    /// (``AdminPageReading``): the pending and approved list read. An unanswered one is asked again when the
+    /// nest connection comes back.
+    public var readAnswered: Bool { listRead == .resolved }
+
+    public var listRead: ReadState {
+        _ = snapshot
+        guard let machine else { return buildFailed ? .failed : .pending }
+        return machine.readState()
+    }
+
+    /// The open confirm's answer — `confirm_possibility`: live only while
+    /// something is armed and no act is on its way.
+    public var confirmAnswer: Possibility {
+        _ = snapshot
+        return machinePossibility(machine, buildFailed: buildFailed) { $0.confirmPossibility() }
+    }
 
     public init() {}
 
@@ -66,7 +91,10 @@ public final class BridgeApprovalVM: MachineBackedVM {
         } catch {
             // A concurrent build that succeeded owns the page; this one's
             // failure is not the page's.
-            if machine == nil { errorMessage = DisplayError.message(error) }
+            if machine == nil {
+                errorMessage = DisplayError.message(error)
+                buildFailed = true
+            }
             return
         }
         // Re-entrant `configure`: the build that finishes first wins; a later
@@ -76,6 +104,7 @@ public final class BridgeApprovalVM: MachineBackedVM {
             return
         }
         machine = built
+        buildFailed = false
         snapshot = built.snapshot()
         await hydrate()
     }
@@ -120,6 +149,13 @@ public final class BridgeApprovalVM: MachineBackedVM {
     /// The open dialog's confirm button: the machine runs the armed act
     /// (`reject_pending_bridge` / `revoke_service_user`) and re-reads the feed.
     public func confirm() async {
+        // The press asks the machine; a second press after the first took the
+        // arm is refused with *still saving* (or *nothing to confirm*), never
+        // the machine's raw invalid-state error, and nothing reaches the nest.
+        if refusePress(confirmAnswer, errorMessage: &errorMessage) { return }
+        guard let machine, machine.beginConfirm() else { return }
+        // Paint the in-flight answer now, before the act's round trip.
+        snapshot = machine.snapshot()
         await dispatch(.confirm)
     }
 

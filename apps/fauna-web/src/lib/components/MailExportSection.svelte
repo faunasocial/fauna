@@ -24,11 +24,22 @@
   //     nest's URL, which would hand the user the still-sealed blob. The save
   //     itself is `#lib/mail-export-save` (§ Download flow step 5), and the
   //     Done summary then names the saved file, so the press is visible.
-  import { identity, reconnectTick } from '#lib/store';
+  import { connectionStatus, identity, reconnectTick } from '#lib/store';
   import { mailExportMachine, onPushEvent, staleSurfacesForPushKind } from '#lib/rpc';
   import { isFailedExport } from '#lib/mail-export-failed';
   import { sweepStaleExportArchives } from '#lib/mail-export-save';
-  import { ensureWasm, exportConfirmEstimate, exportFormatLabel, transferTiming, type ExportConfirmEstimate, type TransferTiming } from '#lib/wasm';
+  import {
+    ensureWasm,
+    exportConfirmEstimate,
+    exportFormatLabel,
+    transferTiming,
+    carveOutPossibility,
+    mailUsableUnbuilt,
+    type ExportConfirmEstimate,
+    type TransferTiming,
+  } from '#lib/wasm';
+  import { blockedReason, paintAnswer, refusal } from '#lib/mail-affordances';
+  import type { Possibility } from '#lib/possibility';
   import { byteSize, durationSecs } from '#lib/value-format';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { onDestroy, onMount } from 'svelte';
@@ -138,8 +149,59 @@
     if (cancelArmTimer) clearTimeout(cancelArmTimer);
   });
 
+  // Download's answer. Its GET of `download_url` is an HTTP fetch, not a wire
+  // kind, so the offline gate's per-kind class cannot name it; it still needs a
+  // live nest, so it paints from the gate's carve-out answer
+  // (`fauna_protocol::offline_class::carve_out_affordance` over wasm) — the
+  // offline words and reason every other offline control uses
+  // (`mail-export.md` § Download flow; `ui/README.md` § Offer only what is
+  // possible, rule 6). `null` only while there is no snapshot to paint.
+  const downloadAnswer = $derived(snap ? carveOutPossibility($connectionStatus) : null);
+  const downloadPaint = $derived(paintAnswer(downloadAnswer));
+
+  // Next off Scope and the Start, from the machine's own answers (zero
+  // mailboxes, a malformed or inverted range — `mail-export.md` § Wizard
+  // steps); the date drafts are the snapshot's, since each keystroke
+  // dispatches. The press asks the same answer again. `gatedAnswer` reads
+  // `snap`, so each repaints on every snapshot.
+  const scopeNextPaint = $derived.by(() => paintAnswer(gatedAnswer('Next')));
+  const startPaint = $derived.by(() => paintAnswer(gatedAnswer('Start')));
+
+  /** The answer a gesture's control was painted from, asked again at the
+   *  press (rule 6); `null` for a gesture no answer gates. */
+  function gatedAnswer(action: unknown): Possibility | null {
+    if (!machine || !snap) return null;
+    if (action === 'Next' && snap.step === 'Scope') {
+      return machine.nextPossibility(snap.date_from, snap.date_to) as Possibility;
+    }
+    if (action === 'Start') return machine.startPossibility() as Possibility;
+    return null;
+  }
+
   async function dispatch(action: unknown): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      // Rule 7: a gesture whose machine is missing refuses with the shared
+      // unbuilt reason on the page's `error-message`, never silently.
+      error = resolveLocalized(blockedReason(mailUsableUnbuilt()));
+      return;
+    }
+    if (action === 'Download') {
+      // The press asks the Download's answer again before the machine runs:
+      // offline it refuses with the reason, never a request failing mid-stream.
+      const verdict = refusal(carveOutPossibility($connectionStatus));
+      if (verdict.refused) {
+        if (verdict.reason) error = resolveLocalized(verdict.reason);
+        return;
+      }
+    }
+    const asked = gatedAnswer(action);
+    if (asked) {
+      const verdict = refusal(asked);
+      if (verdict.refused) {
+        if (verdict.reason) error = resolveLocalized(verdict.reason);
+        return;
+      }
+    }
     const shouldRun = action === 'Start' || action === 'Resume';
     if (shouldRun || action === 'Download') {
       // The handle names the archive's root directory and the saved file, and
@@ -356,8 +418,17 @@
         </label>
         <div class="nav">
           <button class="btn" data-testid={IDS.WIZARD_BACK_BUTTON} onclick={() => dispatch('Back')} disabled={busy}>{t.mail_export.back}</button>
-          <button class="btn primary" data-testid={IDS.WIZARD_NEXT_BUTTON} onclick={() => dispatch('Next')} disabled={busy}>{t.mail_export.next}</button>
+          <button
+            class="btn primary"
+            data-testid={IDS.WIZARD_NEXT_BUTTON}
+            onclick={() => dispatch('Next')}
+            disabled={busy || scopeNextPaint.disabled}
+            title={scopeNextPaint.reason ? resolveLocalized(scopeNextPaint.reason) : undefined}
+          >{t.mail_export.next}</button>
         </div>
+        {#if scopeNextPaint.reason}
+          <p class="muted small">{resolveLocalized(scopeNextPaint.reason)}</p>
+        {/if}
       </div>
     {/if}
 
@@ -374,10 +445,19 @@
         {/if}
         <div class="nav">
           <button class="btn" data-testid={IDS.WIZARD_BACK_BUTTON} onclick={() => dispatch('Back')} disabled={busy}>{t.mail_export.back}</button>
-          <button class="btn primary" data-testid={IDS.MAIL_EXPORT_START_BUTTON} onclick={() => dispatch('Start')} disabled={busy}>
+          <button
+            class="btn primary"
+            data-testid={IDS.MAIL_EXPORT_START_BUTTON}
+            onclick={() => dispatch('Start')}
+            disabled={busy || startPaint.disabled}
+            title={startPaint.reason ? resolveLocalized(startPaint.reason) : undefined}
+          >
             {t.mail_export.start_button}
           </button>
         </div>
+        {#if startPaint.reason}
+          <p class="muted small">{resolveLocalized(startPaint.reason)}</p>
+        {/if}
       </div>
     {/if}
 
@@ -428,7 +508,8 @@
           class="btn primary"
           data-testid={IDS.MAIL_EXPORT_DOWNLOAD_BUTTON}
           onclick={() => dispatch('Download')}
-          disabled={busy || !snap.download_url}
+          disabled={busy || !snap.download_url || downloadPaint.disabled}
+          title={downloadPaint.reason ? resolveLocalized(downloadPaint.reason) : undefined}
         >{t.mail_export.download_button}</button>
         <span class="muted small mono" data-testid={IDS.MAIL_EXPORT_DOWNLOAD_URL}>{snap.download_url}</span>
         <div class="nav">

@@ -291,6 +291,34 @@ impl WasmArchiveImportMachine {
         to_js(&self.inner.snapshot())
     }
 
+    /// `wizard-next-button`'s answer — `ArchiveImportSnapshot::next_possibility`
+    /// over the LIVE snapshot with the Scope step's typed date drafts folded
+    /// in (`archive_import_next_possibility`; `archive-import.md` § Wizard
+    /// steps), in `Possibility`'s serde form. Sync.
+    #[wasm_bindgen(js_name = nextPossibility)]
+    pub fn next_possibility(&self, date_from: &str, date_to: &str) -> Result<JsValue, JsValue> {
+        to_js(
+            &fauna_archive_import_machine::archive_import_next_possibility(
+                self.inner.snapshot(),
+                date_from,
+                date_to,
+            ),
+        )
+    }
+
+    /// `archive-import-start-button`'s answer — `start_possibility`. Sync.
+    #[wasm_bindgen(js_name = startPossibility)]
+    pub fn start_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().start_possibility())
+    }
+
+    /// `archive-import-profile-prefill-button`'s answer —
+    /// `profile_prefill_possibility`. Sync.
+    #[wasm_bindgen(js_name = profilePrefillPossibility)]
+    pub fn profile_prefill_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().profile_prefill_possibility())
+    }
+
     /// The page's lines for the current snapshot —
     /// `fauna_archive_import_machine::text::page_text` as JSON, each line a
     /// `ComposedText` the SPA resolves with `resolveComposed`.

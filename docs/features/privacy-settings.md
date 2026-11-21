@@ -8,9 +8,7 @@ guide: docs/guides/who-can-see-what.md § The short version
 
 ## What a user gets
 
-Choose who may start a conversation with you: anyone, contacts only, or nobody.
-Contacts only isn't applied yet to someone on another nest who starts a
-conversation with you, unless they do it by inviting you to a room. Set how
+Choose who may start a conversation with you: anyone, people who first send you a contact request you accept, contacts only, or nobody. The contact-request and contacts-only choices aren't applied to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room. Set how
 aggressive your spam filter is and whether your training helps others. Both
 persist across relaunch and show the real value, never a default — and while
 your nest is still being asked, the page says so rather than marking a guess.

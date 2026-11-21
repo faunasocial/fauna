@@ -25,6 +25,28 @@ const PRINCIPAL: [u8; 16] = [0x5E; 16];
 struct TestDoor {
     holder: [u8; 32],
     asked: Mutex<Vec<OracleOp>>,
+    /// What `ListRooms` answers: `None` is a custodian whose rooms have not
+    /// loaded yet; `Some` the list it holds (the default fixture's one room).
+    rooms: Option<Vec<OracleRoom>>,
+}
+
+impl TestDoor {
+    fn new(holder: [u8; 32]) -> Self {
+        Self {
+            holder,
+            asked: Mutex::default(),
+            rooms: Some(vec![OracleRoom {
+                room_id: "room-1".into(),
+                title: "Family".into(),
+                class: "end-to-end".into(),
+                members: vec!["Alice".into()],
+                last_activity_ms: 5,
+                unread: 1,
+                can_send: true,
+                can_search_room: false,
+            }]),
+        }
+    }
 }
 
 impl OracleDoor for TestDoor {
@@ -63,16 +85,10 @@ impl OracleDoor for TestDoor {
         Box::pin(async move {
             self.asked.lock().unwrap().push(op.clone());
             match op {
-                OracleOp::ListRooms => Ok(OracleReply::Rooms(vec![OracleRoom {
-                    room_id: "room-1".into(),
-                    title: "Family".into(),
-                    class: "end-to-end".into(),
-                    members: vec!["Alice".into()],
-                    last_activity_ms: 5,
-                    unread: 1,
-                    can_send: true,
-                    can_search_room: false,
-                }])),
+                OracleOp::ListRooms => match &self.rooms {
+                    Some(rooms) => Ok(OracleReply::Rooms(rooms.clone())),
+                    None => Err(OracleRefusal::NotLoaded),
+                },
                 OracleOp::ReadRoom { room_id, .. } => Ok(OracleReply::Page(OracleMessagePage {
                     room_id,
                     messages: vec![OracleMessage {
@@ -149,10 +165,7 @@ async fn run(
 #[tokio::test(flavor = "multi_thread")]
 async fn each_tool_crosses_as_its_doors_operation_and_a_refusal_is_relayed_verbatim() {
     let holder = Arc::new(HolderKey::generate());
-    let door = Arc::new(TestDoor {
-        holder: holder.public(),
-        asked: Mutex::default(),
-    });
+    let door = Arc::new(TestDoor::new(holder.public()));
     let (endpoint, stop) = serve("ops", door.clone()).await;
 
     let rooms = run(&endpoint, holder.clone(), ConversationOp::ListRooms)
@@ -228,10 +241,7 @@ async fn each_tool_crosses_as_its_doors_operation_and_a_refusal_is_relayed_verba
 /// A key the consent did not attest opens nothing: the door performs nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn another_holder_key_cannot_enter() {
-    let door = Arc::new(TestDoor {
-        holder: HolderKey::generate().public(),
-        asked: Mutex::default(),
-    });
+    let door = Arc::new(TestDoor::new(HolderKey::generate().public()));
     let (endpoint, stop) = serve("key", door.clone()).await;
     let refused = run(
         &endpoint,
@@ -260,4 +270,37 @@ async fn no_custodian_is_one_sentence_the_model_can_relay() {
         refused,
         "open Fauna on this device to let this app reach your conversations"
     );
+}
+
+/// A custodian whose rooms have not loaded refuses the listing with a reason
+/// the model can act on — an error, never `[]` — and once loaded an empty list
+/// answers empty (`apps/cli.md` § A tool that cannot run, rule 4).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listing_before_the_rooms_load_refuses_and_a_loaded_empty_list_is_empty() {
+    let holder = Arc::new(HolderKey::generate());
+    let cold = Arc::new(TestDoor {
+        rooms: None,
+        ..TestDoor::new(holder.public())
+    });
+    let (endpoint, stop) = serve("cold", cold).await;
+    let refused = run(&endpoint, holder.clone(), ConversationOp::ListRooms)
+        .await
+        .unwrap_err();
+    assert_eq!(refused, OracleRefusal::NotLoaded.to_string());
+    assert!(
+        refused.contains("try again"),
+        "the refusal names the wait: {refused}"
+    );
+    stop.send(true).unwrap();
+
+    let empty = Arc::new(TestDoor {
+        rooms: Some(vec![]),
+        ..TestDoor::new(holder.public())
+    });
+    let (endpoint, stop) = serve("empty", empty).await;
+    let rooms = run(&endpoint, holder, ConversationOp::ListRooms)
+        .await
+        .unwrap();
+    assert_eq!(rooms["rooms"], json!([]));
+    stop.send(true).unwrap();
 }

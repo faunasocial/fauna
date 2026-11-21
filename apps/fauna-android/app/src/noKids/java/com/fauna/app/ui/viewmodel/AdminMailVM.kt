@@ -1,10 +1,14 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
+import com.fauna.app.ui.util.machinePossibility
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_client_mail_settings.AliasPolicyView
 import uniffi.fauna_client_mail_settings.AuthPolicyView
@@ -19,6 +23,7 @@ import uniffi.fauna_client_mail_settings.MicrosoftRegistrationView
 import uniffi.fauna_client_mail_settings.OutboundPolicyView
 import uniffi.fauna_client_mail_settings.SpamPolicyView
 import uniffi.fauna_client_mail_settings.SubmissionPolicyView
+import uniffi.fauna_core.ReadState
 import javax.inject.Inject
 
 /**
@@ -35,15 +40,38 @@ import javax.inject.Inject
 @HiltViewModel
 class AdminMailVM @Inject constructor(
     private val api: ApiClient,
+    @ApplicationContext context: Context,
 ) : ViewModel() {
 
     private val machine: MailPolicyMachine? = api.buildMailPolicyMachine()
 
+    // Every action but the health re-check writes what the policy read decides
+    // (admin.md § Errors & edge cases, *Controls wait for their read*): the
+    // shared `MailPolicyMachine::write_possibility` — still loading, failed to
+    // load, still saving.
+    private val write = ReadGatedWrite(context) { machinePossibility(machine) { it.writePossibility() } }
+
+    /** What every write control on the page is painted from. */
+    val writeAnswer: StateFlow<uniffi.fauna_core.Possibility> = write.answer
+
     val snapshot = MutableStateFlow(machine?.snapshot() ?: EMPTY_SNAPSHOT)
     val errorMessage = MutableStateFlow<String?>(null)
 
+    /** A return by Back to this page reads it again (`AdminEntryReread`). */
+    val entryReread = AdminEntryReread(::hydrate)
+
     init {
         hydrate()
+        // A read that has not answered is read again when the nest connection
+        // comes back (`docs/goal/behavior/admin.md` § Errors & edge cases,
+        // *Controls wait for their read*; tui's `reconnect_reread_op`): only
+        // while the shared machine's `read_state` is unresolved, so a draft
+        // over an answered page survives.
+        viewModelScope.rereadOnReconnect(
+            api.reconnectTick,
+            answered = { machine?.readState() == ReadState.RESOLVED },
+            reread = ::hydrate,
+        )
     }
 
     /** Load the effective config (`get_mail_config` + `get_alias_policy`); retry
@@ -67,7 +95,7 @@ class AdminMailVM @Inject constructor(
 
     /** `admin-mail-health-recheck-button`: a fresh blocklist self-check + diagnostics
      *  run, then a health re-read. */
-    fun recheckHealth() = dispatch(MailPolicyAction.RecheckHealth)
+    fun recheckHealth() = dispatch(MailPolicyAction.RecheckHealth, gated = false)
 
     /** One press of a same-button two-click confirm (the warm-up reset, the two
      *  secret rotations): the shared machine arms it, or — when it is the armed
@@ -94,14 +122,19 @@ class AdminMailVM @Inject constructor(
     fun setBaselineStandingPublish(enabled: Boolean) =
         dispatch(MailPolicyAction.SetBaselineStandingPublish(enabled = enabled))
 
-    private fun dispatch(action: MailPolicyAction) {
-        val m = machine ?: return
+    private fun dispatch(action: MailPolicyAction, gated: Boolean = true) {
+        // The press asks the answer its control was painted from, live: a press
+        // racing the read, or one while an earlier write is on its way, is
+        // refused with its reason on `error-message` and nothing is sent.
+        if (gated && !write.begin { errorMessage.value = it }) return
+        val m = machine ?: return if (gated) write.end() else Unit
         viewModelScope.launch {
             try {
                 m.dispatch(action)
             } catch (e: Exception) {
                 errorMessage.value = e.message
             }
+            if (gated) write.end()
             publish(m)
         }
     }
@@ -110,6 +143,7 @@ class AdminMailVM @Inject constructor(
         val snap = m.snapshot()
         snapshot.value = snap
         errorMessage.value = snap.error
+        write.refresh()
     }
 
     private companion object {

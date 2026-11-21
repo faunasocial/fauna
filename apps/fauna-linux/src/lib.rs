@@ -17,6 +17,7 @@ mod account_registry_census_test;
 mod account_runtime;
 mod account_scope;
 mod actor_scope;
+mod admin_reread;
 mod app;
 mod app_settings;
 mod archive_glue;
@@ -40,6 +41,7 @@ mod drafts_autosave;
 mod feature_editor;
 mod feed;
 mod file_manager_share;
+mod form_gate;
 mod i18n;
 mod instance_remote;
 mod launch_currency;
@@ -49,6 +51,7 @@ mod mail_glue;
 mod main_loop_meter;
 mod media_loads;
 mod mls;
+mod modal_escape;
 mod nest_rules;
 mod notifications;
 mod offline_gate;
@@ -61,8 +64,10 @@ mod offline_share;
 mod p2p;
 #[cfg(test)]
 mod packaging_identity_test;
+mod possible;
 mod push;
 mod qr_widget;
+mod read_text;
 mod region;
 mod report;
 mod routes;
@@ -94,6 +99,7 @@ mod views;
 #[cfg(test)]
 mod walk;
 mod ward_asks;
+mod window_host;
 mod window_state;
 mod wire_kind_dropdown;
 
@@ -226,6 +232,7 @@ pub fn run(build_commit: Option<&'static str>) {
     // close-to-tray-off path in `connect_close_request`.
     application.connect_startup(|app| {
         load_css();
+        read_text::install();
         settings::general::apply_saved_theme();
         // Close-to-tray is a persisted user choice, so it must be restored
         // before any window can be closed. It defaults ON (the app hosts the
@@ -546,7 +553,11 @@ where
     if tray::TRAY_HOST_ANSWERED.load(Ordering::SeqCst) {
         let hidden = autostart::should_start_hidden(true, tray::tray_host_available());
         autostart::record_launch_window(!hidden);
-        if !hidden {
+        if hidden {
+            // The main window is built in the launch screen's own window
+            // (`window_host`), which is already on screen.
+            win.set_visible(false);
+        } else {
             show_window(win);
         }
         return;
@@ -572,6 +583,7 @@ where
         } else {
             tracing::info!("[autostart] tray host confirmed — starting tray-resident (hidden)");
             autostart::record_launch_window(false);
+            win.set_visible(false);
         }
         glib::ControlFlow::Break
     });
@@ -779,6 +791,51 @@ fn show_launch_instance_chooser(application: &adw::Application) -> bool {
     );
     show_window(&view.window);
     *view_holder.borrow_mut() = Some(view);
+
+    // The chooser's watch (`account-scoping.md` § Concurrent instances → the
+    // colliding instance's surface): while shown, it re-reads the facts it
+    // rests on through the shared `chooser_watch_step`. Freed — the serving
+    // instance quit — continues as the plain launch, the same continuation as
+    // focus-existing's no-longer-served arm, with no input; Choices replaces
+    // the list. Every exit takes the view out of the holder, which is what
+    // stops the source on its next tick.
+    let holder_for_watch = view_holder.clone();
+    let app_for_watch = application.clone();
+    let mut shown = choices;
+    gtk::glib::timeout_add_local(fauna_client_accounts::CHOOSER_WATCH_INTERVAL, move || {
+        if holder_for_watch.borrow().is_none() {
+            return gtk::glib::ControlFlow::Break;
+        }
+        let Some(base) = account_scope::install_state_base() else {
+            return gtk::glib::ControlFlow::Continue;
+        };
+        let entries: Vec<(String, Option<String>)> = account_registry()
+            .list()
+            .into_iter()
+            .map(|e| (e.actor_id, e.handle))
+            .collect();
+        match fauna_client_accounts::chooser_watch_step(&base, &served, &entries, &shown) {
+            fauna_client_accounts::ChooserWatchStep::Unchanged => gtk::glib::ControlFlow::Continue,
+            fauna_client_accounts::ChooserWatchStep::Freed => {
+                tracing::info!(
+                    "[launch-instance-chooser] {served} is no longer served — continuing as a plain launch"
+                );
+                if let Some(v) = holder_for_watch.borrow_mut().take() {
+                    v.window.destroy();
+                }
+                LAUNCH_COLLIDED.store(false, Ordering::SeqCst);
+                build_ui(&app_for_watch);
+                gtk::glib::ControlFlow::Break
+            }
+            fauna_client_accounts::ChooserWatchStep::Choices(now) => {
+                if let Some(v) = holder_for_watch.borrow().as_ref() {
+                    (v.set_choices)(&now);
+                }
+                shown = now;
+                gtk::glib::ControlFlow::Continue
+            }
+        }
+    });
     true
 }
 
@@ -1603,7 +1660,24 @@ fn register_switch_account_handler(application: &adw::Application) {
                     // un-provisioned (part of the stop this waited for); the
                     // incoming account re-provisions at its post-auth.
                     tray::TRAY_COMPOSE.store(false, Ordering::SeqCst);
+                    // The append wizard that asked for this switch is the one
+                    // window the person is looking at: it is kept, and the
+                    // incoming account's launch runs in it (`onboarding.md`
+                    // § Wizard exit handling → *The wizard becomes the app in
+                    // place*: an append-mode switch never leaves the app with
+                    // no window). A route that lands on a wizard instead builds
+                    // that wizard first and closes this window after it.
+                    let handover: Rc<std::cell::RefCell<Option<adw::ApplicationWindow>>> =
+                        Rc::new(std::cell::RefCell::new(None));
                     for win in app.windows() {
+                        if handover.borrow().is_none()
+                            && win.is_visible()
+                            && win.widget_name() == views::onboarding::WIZARD_WINDOW_NAME
+                            && let Ok(wizard) = win.clone().downcast::<adw::ApplicationWindow>()
+                        {
+                            *handover.borrow_mut() = Some(wizard);
+                            continue;
+                        }
                         win.destroy();
                     }
                     if let Some(c) = outgoing_client {
@@ -1636,6 +1710,7 @@ fn register_switch_account_handler(application: &adw::Application) {
                     let route =
                         stored_launch_route(Some((node_url, secret_hex.as_str().to_string())));
                     let app_for_auth = app.clone();
+                    let handover_for_auth = Rc::clone(&handover);
                     present_launch_route(
                         &app,
                         route,
@@ -1660,14 +1735,21 @@ fn register_switch_account_handler(application: &adw::Application) {
                             {
                                 refusal.exit(&actor_id);
                             }
-                            launch_silent_challenge_flow(
+                            launch_silent_challenge_flow_in(
                                 &app_for_auth,
                                 node_url,
                                 secret_hex,
                                 AgentWiring::Rebind,
+                                handover_for_auth.borrow_mut().take(),
+                                None,
                             );
                         },
                     );
+                    // A wizard route built its own window: the kept one goes
+                    // now, after the next surface is up.
+                    if let Some(wizard) = handover.borrow_mut().take() {
+                        wizard.destroy();
+                    }
                     // The outgoing session is gone and a launch-routed surface is up
                     // (none of them offers the switcher until it reaches the main
                     // window) — allow the next switch.
@@ -1742,6 +1824,52 @@ fn launch_silent_challenge_flow(
     secret_hex: String,
     wiring: AgentWiring,
 ) {
+    launch_silent_challenge_flow_in(application, node_url, secret_hex, wiring, None, None);
+}
+
+/// The glue a wizard's first sign-in runs on the authenticated client before
+/// the main window is built (DNS credential, trust mint, recovery kit, serving
+/// enablement) — held by the launch through every Retry, run once at `Online`,
+/// dropped with the launch screen on any other exit.
+pub(crate) type FirstSetup = Box<dyn FnOnce(&Rc<client::FaunaClient>)>;
+
+/// The wizard's `LoggedIn` exit: the launch for the account it signed in, run
+/// in the wizard's own window with the cold launch's verdict routing
+/// (`onboarding.md` § Wizard exit handling → *The wizard becomes the app in
+/// place*, *The finished wizard holds until the session is signed in*). The
+/// window shows `launch_progress`, then `launch_retry` while the connection
+/// cannot be made, and becomes the main window at `Online`, where
+/// `first_setup` runs.
+pub(crate) fn launch_after_wizard(
+    application: &adw::Application,
+    node_url: String,
+    secret_hex: String,
+    wizard_window: adw::ApplicationWindow,
+    first_setup: FirstSetup,
+) {
+    // The wizard's drain is already running: re-point it, as an account
+    // switch does.
+    launch_silent_challenge_flow_in(
+        application,
+        node_url,
+        secret_hex,
+        AgentWiring::Rebind,
+        Some(wizard_window),
+        Some(first_setup),
+    );
+}
+
+/// [`launch_silent_challenge_flow`] with the window the launch screen is
+/// painted in (`host`, else a new one) and the first-setup glue its `Online`
+/// arm runs.
+fn launch_silent_challenge_flow_in(
+    application: &adw::Application,
+    node_url: String,
+    secret_hex: String,
+    wiring: AgentWiring,
+    host: Option<adw::ApplicationWindow>,
+    first_setup: Option<FirstSetup>,
+) {
     use std::cell::RefCell;
 
     let view_holder: Rc<RefCell<Option<views::launch::LaunchView>>> = Rc::new(RefCell::new(None));
@@ -1757,6 +1885,7 @@ fn launch_silent_challenge_flow(
 
     let view = views::launch::build_launch_window(
         application,
+        host,
         // Retry: switch back to Launching phase, re-run the challenge.
         {
             let app = application.clone();
@@ -2000,6 +2129,7 @@ fn launch_silent_challenge_flow(
     );
 
     show_window(&view.window);
+    *view.first_setup.borrow_mut() = first_setup;
     *view_holder.borrow_mut() = Some(view);
 
     // Kick off the first silent challenge.
@@ -2418,11 +2548,14 @@ fn handle_launch_phase(
             // one extra round-trip on launch, the pre-optimization behaviour.
             // (Unifying the display cache onto the registry index is a Stage-1
             // switcher follow-up.)
-            if let Some(v) = view_holder.borrow_mut().take() {
-                // destroy() bypasses connect_close_request — close() would
-                // fire the user-X-clicks handler that calls app.quit().
-                v.window.destroy();
-            }
+            // The launch screen's window becomes the main window
+            // (`onboarding.md` § Wizard exit handling → *The wizard becomes
+            // the app in place*) — the cold launch's and, after the wizard,
+            // the wizard's own — so no moment passes with no window.
+            let Some(view) = view_holder.borrow_mut().take() else {
+                return;
+            };
+            let first_setup = view.first_setup.borrow_mut().take();
             // A test agent's session patch already built the authenticated shell
             // while this challenge was in flight: that patch is the session the
             // driver is now steering, so a second shell here would split the app
@@ -2433,9 +2566,23 @@ fn handle_launch_phase(
                     "[launch] Online: the test agent's session patch already mounted the \
                      authenticated shell — keeping it, building no second one"
                 );
+                // destroy() bypasses connect_close_request — close() would
+                // fire the user-X-clicks handler that calls app.quit().
+                view.window.destroy();
                 return;
             }
-            let result = launch_authenticated(&app, &node_url, &secret_hex, machine, |_| {});
+            let result = launch_authenticated(
+                &app,
+                &node_url,
+                &secret_hex,
+                machine,
+                Some(view.window.clone()),
+                move |client| {
+                    if let Some(first_setup) = first_setup {
+                        first_setup(client);
+                    }
+                },
+            );
             hand_to_agent(&app, wiring, AgentSurface::Main(&result));
             match wiring {
                 // The only site an auto-started launch reaches: routing landed
@@ -2818,7 +2965,8 @@ fn handle_launch_phase(
 /// Build the authenticated main window over a fresh `FaunaClient` — the ONE
 /// funnel every authenticated launch goes through: a returning user's boot, an
 /// account switch, a test-agent session patch, and the post-wizard first sign-in
-/// (`views::onboarding::finish_launch_after_signin`). It runs the post-auth hooks
+/// (through `launch_after_wizard`, at its `Online`). With `host` the window is the
+/// one the launch screen ran in (`window_host`). It runs the post-auth hooks
 /// every session needs, among them the background silent sign-in that fills the
 /// server-data display cache (handle/domain/tier) and pushes `IdentityRefreshed`
 /// — the conversations session's only source of its `<handle>@<domain>` send
@@ -2838,6 +2986,7 @@ fn launch_authenticated(
     node_url: &str,
     secret_hex: &str,
     machine: std::sync::Arc<fauna_launch_machine::LaunchMachine>,
+    host: Option<adw::ApplicationWindow>,
     first_setup: impl FnOnce(&Rc<client::FaunaClient>),
 ) -> LaunchResult {
     // Which door built this shell: a session that ends up with two is a split
@@ -2889,7 +3038,7 @@ fn launch_authenticated(
     // before the window exists (the wizard's first-setup provisioning).
     first_setup(&fauna_client);
 
-    let result = app::build_main_window(application, &fauna_client);
+    let result = app::build_main_window(application, &fauna_client, host);
     result.widgets.status_node_url_row.set_subtitle(node_url);
 
     // Pre-populate from the server-data cache so the user sees their
@@ -2917,7 +3066,9 @@ fn launch_authenticated(
     // Close-to-tray handler.
     let stack_for_close = result.stack.clone();
     let cal_state_for_close = Rc::clone(&result.widgets.events_handles.calendar.state);
-    result.window.connect_close_request(move |window| {
+    // Replaces the launch screen's quit-on-close when the window is the one the
+    // launch ran in (`window_host`).
+    window_host::set_close_handler(&result.window, move |window| {
         let sidebar_item = stack_for_close
             .visible_child_name()
             .map(|n| n.to_string())
@@ -2983,18 +3134,31 @@ fn launch_authenticated(
     // flow applies now (`routes.rs`).
     routes::signed_in(&result.window, pump_shutdown.clone());
 
+    // The pump's drain, shared by its own 50 ms tick and by a frame read
+    // (`GET /registry`), which applies every message already delivered before
+    // it walks the frame (`async_helper::settle_for_frame_read`).
+    let drain: Rc<dyn Fn()> = {
+        let pump_shutdown = pump_shutdown.clone();
+        Rc::new(move || {
+            if pump_shutdown.get() {
+                return;
+            }
+            main_loop_meter::drain("ui-pump", |tick| {
+                while let Ok(msg) = rx.try_recv() {
+                    tick.item(
+                        || main_loop_meter::variant_path(&msg),
+                        || app::handle_ui_message(&msg, &state, &widgets, &client_for_msg),
+                    );
+                }
+            });
+        })
+    };
+    crate::async_helper::register_ui_pump(&drain);
     glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
         if pump_shutdown.get() {
             return glib::ControlFlow::Break;
         }
-        main_loop_meter::drain("ui-pump", |tick| {
-            while let Ok(msg) = rx.try_recv() {
-                tick.item(
-                    || main_loop_meter::variant_path(&msg),
-                    || app::handle_ui_message(&msg, &state, &widgets, &client_for_msg),
-                );
-            }
-        });
+        drain();
         // TRAY_RAISE is consumed by the global poller registered in
         // `connect_startup` (via `app.activate()`), which re-enters
         // `build_ui` and presents the existing main window. We only react
@@ -3062,6 +3226,10 @@ fn start_element_agent_once(application: &adw::Application) {
     if STARTED.set(()).is_err() {
         return; // already started on an earlier call
     }
+    // The visible-window journal (`fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY`),
+    // installed before the first window is shown so the witness of
+    // `onboarding.md` § Wizard exit handling sees every transition.
+    automation::toplevel_windows::install();
 
     let (op_tx, op_rx) = async_channel::unbounded::<automation::agent::ElementOp>();
 
@@ -4137,7 +4305,8 @@ fn handle_test_command(
                                 refusal.exit(&actor_id);
                             }
                         }
-                        let result = launch_authenticated(application, &url, &hex, machine, |_| {});
+                        let result =
+                            launch_authenticated(application, &url, &hex, machine, None, |_| {});
 
                         // Hook up stack tracking on the new window.
                         let shared_for_stack = shared.clone();
@@ -4438,8 +4607,21 @@ fn handle_test_command(
                                 label.set_visible(true);
                             }
                         }
-                    } else {
+                    } else if stack.child_by_name(gtk_target).is_some() {
                         stack.set_visible_child_name(gtk_target);
+                    } else {
+                        // Convention 11: a view naming no page fails LOUDLY.
+                        // GTK's own `set_visible_child_name` on a missing name
+                        // only logs and leaves the old page up, which a caller
+                        // reads as the page it asked for (the actuation sweep
+                        // once judged Feed as "nostr" this way).
+                        let msg =
+                            format!("[test-agent] nav to view='{view}' names no page on this app");
+                        tracing::error!("{msg}");
+                        if let Some(ref label) = *current_error_label.borrow() {
+                            label.set_text(&msg);
+                            label.set_visible(true);
+                        }
                     }
 
                     // Sidebar-swap shells (admin AND settings): a second
@@ -4498,23 +4680,12 @@ fn handle_test_command(
                             if sub_id == "p2p" {
                                 crate::settings::p2p_tab::refresh_contacts_list();
                             }
-                            // The status sub-page's feature-limits section is
-                            // fetched once at post-auth setup (app.rs) and never
-                            // again — an admin policy change while the user is
-                            // elsewhere in the app would otherwise render stale
-                            // until the next full relaunch. Re-fetch on every
-                            // re-nav (test_an_admin_limit_reaches_
-                            // the_screen_naming_the_admin's "the nav edge re-reads"
-                            // contract).
-                            if sub_id == "status"
-                                && let Some(ref client) = *current_client.borrow()
-                            {
-                                client.fetch_features();
-                                // The node and MLS legs: one read per visit
-                                // (`status.md` § State & data shape).
-                                client.fetch_node_leg();
-                                client.fetch_key_package_count();
-                            }
+                            // The status sub-page's per-visit reads (feature limits,
+                            // node and MLS legs, quota) run from the shell's own
+                            // visible-child notify, which `navigate_shell_subpage`'s
+                            // forced select fires (`views::settings_shell`, the
+                            // `status_visit` door) — production and the agent take
+                            // one door.
                         }
                     }
                 }
@@ -5250,6 +5421,20 @@ fn handle_test_command(
         }
         "subscriptions_release_author_drain" => {
             fauna_client_subscriptions::orchestration::release_author_drain_for_test();
+        }
+        // Hold / release the Folders page's mail-custody reads, so
+        // `folder-webdav-toggle` is read while that read is out (`folders.md`
+        // § Errors & edge cases, *Own-tier and mail gates* — blocked "still
+        // loading") — the tui arm's twin. An account-store read, so no nest
+        // reply hold reaches it; the hold is shared Rust's process-wide gate
+        // (`fauna_client_folders::webdav_provision::hold_custody_reads_for_test`),
+        // so pre-auth is fine. The page spawns the read and never blocks this
+        // agent on it, so nothing here starts-rather-than-awaits while held.
+        "folders_hold_custody_reads" => {
+            fauna_client_folders::webdav_provision::hold_custody_reads_for_test();
+        }
+        "folders_release_custody_reads" => {
+            fauna_client_folders::webdav_provision::release_custody_reads_for_test();
         }
         "feed_hold_next_reload" | "feed_release_held_reload" => {
             let Some(manager) = crate::feed::host::manager() else {
@@ -7303,6 +7488,16 @@ fn update_shared_state(
     state_json[fauna_e2e_agent::PAINTED_TEXT_AREA_KEY] = painted_text_area;
     state_json[fauna_e2e_agent::LAUNCH_VERDICTS_KEY] = launch_currency::verdicts_json();
     //
+    // The visible top-level windows and every change of that set — the witness
+    // of `onboarding.md` § Wizard exit handling's one-surface rule
+    // (`fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY` owns the contract).
+    state_json[fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY] =
+        automation::toplevel_windows::toplevel_windows_json();
+    // What the root showed, per painted frame — the held-launch witness's
+    // reading (`fauna_e2e_agent::ROOT_SURFACE_KEY` owns the contract).
+    state_json[fauna_e2e_agent::ROOT_SURFACE_KEY] =
+        automation::toplevel_windows::root_surface_json();
+    //
     // The knock toasts this process raised — the witness for `notifications`
     // outcome 15 (`fauna_e2e_agent::KNOCK_NOTICES_KEY`, which owns the
     // contract); the shared `KnockNotices` log, fed at the `PushEvent::Knock`
@@ -7421,23 +7616,59 @@ mod launch_funnel_tests {
     }
 
     #[test]
-    fn the_post_wizard_launch_goes_through_the_one_authenticated_funnel() {
+    fn the_post_wizard_launch_is_the_cold_launch_in_the_wizards_window() {
         let body = fn_body(
             include_str!("views/onboarding/mod.rs"),
-            "fn finish_launch_after_signin(",
+            "fn launch_main_app_after_signin(",
         );
         assert!(
-            body.contains("crate::launch_authenticated("),
-            "the post-wizard launch must go through `launch_authenticated`, the one funnel \
-             that follows the session's identity"
+            body.contains("crate::launch_after_wizard("),
+            "the post-wizard launch must run the cold launch's verdict routing \
+             (`onboarding.md` § Wizard exit handling → *The finished wizard holds*)"
         );
-        for built_here in ["FaunaClient::new(", "build_main_window(", "ui_channel("] {
+        for built_here in [
+            "FaunaClient::new(",
+            "build_main_window(",
+            "ui_channel(",
+            "launch_authenticated(",
+            "LaunchMachine::new(",
+            ".destroy()",
+        ] {
             assert!(
                 !body.contains(built_here),
                 "the post-wizard launch calls `{built_here}` itself again — a second launch \
-                 path is exactly how the identity follow was skipped"
+                 path builds the app whatever the verdict, or closes the wizard's window"
             );
         }
+        let flow = fn_body(include_str!("lib.rs"), "fn launch_after_wizard(");
+        assert!(
+            flow.contains("Some(wizard_window)") && flow.contains("Some(first_setup)"),
+            "the launch runs in the wizard's window and holds its first-setup glue"
+        );
+    }
+
+    #[test]
+    fn only_the_online_verdict_builds_the_main_window_in_the_launch_window() {
+        let body = fn_body(include_str!("lib.rs"), "fn handle_launch_phase(");
+        assert_eq!(
+            body.matches("launch_authenticated(").count(),
+            1,
+            "`handle_launch_phase` builds the main window in one arm"
+        );
+        let online = body.find("LaunchPhase::Online =>").expect("the Online arm");
+        let next_arm = body[online..]
+            .find("LaunchPhase::WizardAt")
+            .map(|i| online + i)
+            .expect("an arm follows Online");
+        let build = body.find("launch_authenticated(").expect("the build");
+        assert!(
+            online < build && build < next_arm,
+            "the main window is built in the Online arm alone"
+        );
+        assert!(
+            body[build..next_arm].contains("Some(view.window.clone())"),
+            "the Online arm builds the main window in the launch screen's own window"
+        );
     }
 
     #[test]

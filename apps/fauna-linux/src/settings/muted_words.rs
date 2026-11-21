@@ -36,7 +36,7 @@
 //! so the collapse works on a fresh launch without visiting this page first.)
 
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -72,6 +72,24 @@ struct Widgets {
 struct Ctx {
     rt: tokio::runtime::Handle,
     w: Widgets,
+    /// A mutation is on its way — the add answer's in-flight half.
+    busy: Cell<bool>,
+}
+
+impl Ctx {
+    /// `muted-word-add-button`'s answer, painted on the button and asked again
+    /// by the press (`docs/goal/ui/settings.md` § Errors & edge cases,
+    /// *Personal form submits paint from their draft*): the shared
+    /// `fauna_client_config::muted_word_add_possibility` over the draft and
+    /// the in-flight mutation.
+    fn add_answer(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_config::muted_word_add_possibility(&self.w.input.text(), self.busy.get())
+    }
+
+    /// Paint the add button from [`Self::add_answer`].
+    fn paint_add(&self) {
+        crate::form_gate::paint_submit(&self.w.add_button, &self.add_answer(), None);
+    }
 }
 
 /// Build the "Muted words" preferences page. Returns the widget plus a
@@ -174,9 +192,18 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
     let ctx = Rc::new(Ctx {
         rt: client.runtime_handle(),
         w: widgets,
+        busy: Cell::new(false),
     });
 
+    ctx.paint_add();
     refresh(&ctx);
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .input
+            .clone()
+            .connect_changed(move |_| ctx.paint_add());
+    }
 
     {
         let ctx = Rc::clone(&ctx);
@@ -196,12 +223,13 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
     ctx
 }
 
-/// Read the input and dispatch an add, if non-empty.
+/// The press (and the input's Enter) asks the add answer again and refuses
+/// with its reason on `error-message`; a possible answer dispatches the add.
 fn submit_add(ctx: &Rc<Ctx>) {
-    let term = ctx.w.input.text().trim().to_string();
-    if term.is_empty() {
+    if crate::form_gate::refuse(&ctx.add_answer(), &ctx.w.error_label) {
         return;
     }
+    let term = ctx.w.input.text().trim().to_string();
     dispatch(ctx, Mutation::Add(term));
 }
 
@@ -231,7 +259,8 @@ enum Mutation {
 
 /// Run a mutation on the tokio runtime, then apply the result on the GTK thread.
 fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
-    ctx.w.add_button.set_sensitive(false);
+    ctx.busy.set(true);
+    ctx.paint_add();
     // The rows' remove buttons and level pickers wait with the add button
     // until the round trip's record repaints them.
     ctx.w.list.set_sensitive(false);
@@ -254,7 +283,7 @@ fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
 /// and on success the draft clears and the rows re-render from the
 /// freshly-persisted list. On error the message shows; the rows are untouched.
 fn apply(ctx: &Rc<Ctx>, result: MutationResult) {
-    ctx.w.add_button.set_sensitive(true);
+    ctx.busy.set(false);
     ctx.w.list.set_sensitive(true);
     match result {
         Ok(snapshot) => {
@@ -264,6 +293,7 @@ fn apply(ctx: &Rc<Ctx>, result: MutationResult) {
         }
         Err(msg) => super::render_error_label(&ctx.w.error_label, Some(&msg)),
     }
+    ctx.paint_add();
 }
 
 /// Render a LOAD's outcome (GTK main thread) — the mount, the on-visible

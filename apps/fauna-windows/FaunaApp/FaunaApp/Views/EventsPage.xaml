@@ -40,8 +40,16 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
 
-            <Button Grid.Column="0" Content="&#xE76B;" FontFamily="Segoe MDL2 Assets"
+            <!-- The pan pair is painted from the shared pan_possibility
+                 (EventsViewModel.PanPossibility; events.md § User actions): in agenda
+                 both stay shown, disabled, with the reason on PanReasonText below
+                 them, never withdrawn. -->
+            <Button Grid.Column="0" x:Name="PrevMonthButton" Content="&#xE76B;" FontFamily="Segoe MDL2 Assets"
                     Click="PrevMonth_Click" Padding="8"
                     AutomationProperties.AutomationId="{x:Bind ids:Ids.EventsPrevMonth}"
                     AutomationProperties.Name="events-prev-month" />
@@ -49,7 +57,7 @@
                        AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarDateLabel}"
                        Style="{StaticResource TitleTextBlockStyle}"
                        HorizontalAlignment="Center" VerticalAlignment="Center" />
-            <Button Grid.Column="2" Content="&#xE76C;" FontFamily="Segoe MDL2 Assets"
+            <Button Grid.Column="2" x:Name="NextMonthButton" Content="&#xE76C;" FontFamily="Segoe MDL2 Assets"
                     Click="NextMonth_Click" Padding="8"
                     AutomationProperties.AutomationId="{x:Bind ids:Ids.EventsNextMonth}"
                     AutomationProperties.Name="events-next-month" />
@@ -75,6 +83,10 @@
                     Click="NewEvent_Click" Padding="8"
                     AutomationProperties.AutomationId="{x:Bind ids:Ids.NewEventBtn}"
                     AutomationProperties.Name="new-event-btn" />
+
+            <TextBlock Grid.Row="1" Grid.ColumnSpan="6" x:Name="PanReasonText"
+                       Visibility="Collapsed" TextWrapping="Wrap" Margin="0,4,0,0"
+                       Style="{StaticResource CaptionTextBlockStyle}" />
         </Grid>
 
         <StackPanel Grid.Row="2">

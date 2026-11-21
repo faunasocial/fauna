@@ -27,6 +27,11 @@ public final class LabelerCatalogVM {
     /// are surfaced through `errorMessage`.
     public private(set) var connectError: String?
 
+    /// A press the shared answer refused — said on `error-message` until the
+    /// next gesture (`settings.md` § Errors & edge cases, *Personal form
+    /// submits paint from their draft*: the press refuses with the reason).
+    public private(set) var pressError: String?
+
     private let observerBox = LabelerCatalogObserverBox()
 
     public init() {}
@@ -79,23 +84,43 @@ public final class LabelerCatalogVM {
     /// machine snapshot's localized `error`.
     public var errorMessage: String? {
         _ = _observerTick
-        return firstNonNil(connectError, machine?.snapshot().error.map(renderLocalizedText))
+        return firstNonNil(pressError, connectError, machine?.snapshot().error.map(renderLocalizedText))
     }
 
-    /// Whether row `index`'s subscribe affordance is enabled — the shared machine's
-    /// one read (a labeler whose signature does not check out, or that cannot run,
-    /// is refused), never `verified` mirrored app-side
-    /// (content-moderation-and-ranking.md § Tier-3 community models).
-    public func subscribeEnabled(index: Int) -> Bool {
+    /// Row `index`'s Subscribe answer — the shared machine's one read
+    /// (`LabelerCatalogSnapshot::subscribe_possibility`: blocked with the
+    /// refusal's reason once this row's inspect failed; a row not yet
+    /// inspected stays offered, because its press is the inspect), never
+    /// `verified` mirrored app-side (content-moderation-and-ranking.md §
+    /// Tier-3 community models). Before the machine exists the page has not
+    /// read (*still loading*), or never will (*failed to load*).
+    public func subscribeAnswer(index: Int) -> Possibility {
         _ = _observerTick
-        return machine?.subscribeEnabled(index: UInt32(index)) ?? false
+        return machinePossibility(machine, buildFailed: connectError != nil) {
+            $0.subscribePossibility(index: UInt32(index))
+        }
     }
 
     public func refresh() async { await machine?.refresh() }
-    public func inspect(index: Int) async { await machine?.inspect(index: UInt32(index)) }
-    public func closeInspect() { machine?.closeInspect() }
-    public func subscribe(index: Int) async { await machine?.subscribe(index: UInt32(index)) }
-    public func unsubscribe(index: Int) async { await machine?.unsubscribe(index: UInt32(index)) }
+    public func inspect(index: Int) async {
+        pressError = nil
+        await machine?.inspect(index: UInt32(index))
+    }
+    public func closeInspect() {
+        pressError = nil
+        machine?.closeInspect()
+    }
+    /// The press asks `subscribeAnswer` again and refuses with its reason on
+    /// `error-message`; nothing reaches the machine.
+    public func subscribe(index: Int) async {
+        if refusePress(subscribeAnswer(index: index), errorMessage: &pressError) { return }
+        pressError = nil
+        await machine?.subscribe(index: UInt32(index))
+    }
+    public func unsubscribe(index: Int) async {
+        pressError = nil
+        await machine?.unsubscribe(index: UInt32(index))
+    }
 }
 
 /// Trampoline conforming to UniFFI's `LabelerCatalogObserver`. The machine

@@ -225,13 +225,16 @@
                                           MinWidth="0" VerticalAlignment="Center"
                                           Tag="{Binding Index}" Click="ParticipationToggle_Click" />
                                 <!-- The rename affordance (ui/devices.md § Device names; IDs
-                                     user-approved 2026-11-01): on every card, opens the one
-                                     editor below keyed by device_id. Literal id for the same
-                                     reason as device-card above. -->
+                                     user-approved 2026-11-01): on every card but the nest's
+                                     WebDAV pseudo-device row (the shared rename_possibility
+                                     answers Absent for it — DevicesRenameEditor.RenameOffered),
+                                     opens the one editor below keyed by device_id. Literal id
+                                     for the same reason as device-card above. -->
                                 <Button
                                         AutomationProperties.AutomationId="device-rename-button"
                                         Content="{loc:Localize Key=devices/rename}"
                                         Padding="8,2" FontSize="12" VerticalAlignment="Center"
+                                        Visibility="{Binding RenameButtonVisibility}"
                                         Click="RenameOpen_Click" />
                                 </controls:WrapStack>
                                 <!-- The open name editor (one at a time, keyed by device_id).

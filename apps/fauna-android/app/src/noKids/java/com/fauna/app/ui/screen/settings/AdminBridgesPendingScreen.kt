@@ -1,5 +1,14 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.faunaReadGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.paintedReason
+import com.fauna.app.ui.util.pressAsked
+import uniffi.fauna_core.Possibility
+
 import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -24,12 +33,15 @@ import com.fauna.app.ui.util.FaunaGateVerdict
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.AdminBridgesPendingVM
+import com.fauna.app.ui.viewmodel.AdminEntryRereadEffect
 import uniffi.fauna_client_mail_settings.ApprovedBridgeView
 import uniffi.fauna_client_mail_settings.BridgeApprovalStatus
 import uniffi.fauna_client_mail_settings.BridgeConfirm
 import uniffi.fauna_client_mail_settings.PendingBridgeView
 import uniffi.fauna_client_mail_settings.bridgeDisplayName
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * The admin `admin-bridges-pending` page (`mail-bridge-lifecycle.md` § Pending
@@ -52,8 +64,11 @@ fun AdminBridgesPendingScreen(
     navController: NavController,
     vm: AdminBridgesPendingVM = hiltViewModel(),
 ) {
+    AdminEntryRereadEffect(vm.entryReread)
     val snapshot by vm.snapshot.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val listRead by vm.listRead.collectAsState()
+    val confirmAnswer by vm.confirmAnswer.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
 
@@ -77,6 +92,9 @@ fun AdminBridgesPendingScreen(
         // local timestamp display), injected so the stateless Content stays FFI-free
         // under Robolectric (the DevicesScreen `memberEnrolledAt` idiom).
         formatTimestamp = { ms -> com.fauna.ffi.formatUnixLocalMs(ms) },
+        listRead = askForm { com.fauna.ffi.readPossibility(listRead) },
+        confirmAnswer = confirmAnswer,
+        onRefused = appMessages::showError,
     )
 }
 
@@ -94,7 +112,20 @@ fun AdminBridgesPendingContent(
     onDisarm: () -> Unit,
     onConfirm: () -> Unit,
     formatTimestamp: (Long) -> String = { "" },
+    // The list read's answer — `read_possibility` over the shared
+    // `BridgeApprovalMachine::read_state` (admin.md § Errors & edge cases,
+    // *Controls wait for their read*): until it resolves each section paints
+    // the read's reason (*still loading* / *failed to load*) beside its
+    // heading — published as the heading's automation `reason` — never its
+    // empty text; an unread list is not an empty one.
+    listRead: Possibility = Possibility.Possible,
+    // The open confirm's answer — the shared `confirm_possibility`: not live
+    // while its act is in flight. Painted, and asked again at the press.
+    confirmAnswer: Possibility = Possibility.Possible,
+    // A refused press's reason, for the global `error-message` banner.
+    onRefused: (String) -> Unit = {},
 ) {
+    val unread = localized(listRead.blockedReason)
     Scaffold(
         topBar = {
             TopAppBar(
@@ -132,8 +163,11 @@ fun AdminBridgesPendingContent(
             Text(
                 stringResource(R.string.admin_bridges_pending_pending_section),
                 style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_PENDING_SECTION).paintedReason(unread),
             )
-            if (pending.isEmpty()) {
+            if (unread != null) {
+                ListNotRead(unread)
+            } else if (pending.isEmpty()) {
                 Text(
                     stringResource(R.string.admin_bridges_pending_empty),
                     style = MaterialTheme.typography.bodyLarge,
@@ -155,6 +189,8 @@ fun AdminBridgesPendingContent(
                         onArm = onArm,
                         onDisarm = onDisarm,
                         onConfirm = onConfirm,
+                        confirmAnswer = confirmAnswer,
+                        onRefused = onRefused,
                     )
                 }
             }
@@ -162,8 +198,11 @@ fun AdminBridgesPendingContent(
             Text(
                 stringResource(R.string.admin_bridges_pending_approved_section),
                 style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_APPROVED_SECTION).paintedReason(unread),
             )
-            if (approved.isEmpty()) {
+            if (unread != null) {
+                ListNotRead(unread)
+            } else if (approved.isEmpty()) {
                 Text(
                     stringResource(R.string.admin_bridges_pending_approved_empty),
                     style = MaterialTheme.typography.bodyLarge,
@@ -179,6 +218,8 @@ fun AdminBridgesPendingContent(
                         onArm = onArm,
                         onDisarm = onDisarm,
                         onConfirm = onConfirm,
+                        confirmAnswer = confirmAnswer,
+                        onRefused = onRefused,
                     )
                 }
             }
@@ -198,6 +239,8 @@ private fun PendingBridgeCard(
     onArm: (BridgeConfirm) -> Unit,
     onDisarm: () -> Unit,
     onConfirm: () -> Unit,
+    confirmAnswer: Possibility,
+    onRefused: (String) -> Unit,
 ) {
     val firstSeen = remember(bridge.firstSeenAt) { formatTimestamp(bridge.firstSeenAt.toLong()) }
 
@@ -271,6 +314,8 @@ private fun PendingBridgeCard(
                     gate = rejectGate,
                     onConfirm = onConfirm,
                     onCancel = onDisarm,
+                    confirmAnswer = confirmAnswer,
+                    onRefused = onRefused,
                 )
             } else {
                 DisabledControlReasonText(approveGate.reason)
@@ -295,6 +340,8 @@ private fun ApprovedBridgeCard(
     onArm: (BridgeConfirm) -> Unit,
     onDisarm: () -> Unit,
     onConfirm: () -> Unit,
+    confirmAnswer: Possibility,
+    onRefused: (String) -> Unit,
 ) {
     val approvedAt = remember(bridge.approvedAt) {
         bridge.approvedAt?.let { formatTimestamp(it.toLong()) } ?: "—"
@@ -332,6 +379,8 @@ private fun ApprovedBridgeCard(
                     working = working,
                     onConfirm = onConfirm,
                     onCancel = onDisarm,
+                    confirmAnswer = confirmAnswer,
+                    onRefused = onRefused,
                 )
             } else {
                 Row(
@@ -361,7 +410,12 @@ private fun RejectBridgeConfirm(
     gate: FaunaGateVerdict,
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
+    confirmAnswer: Possibility,
+    onRefused: (String) -> Unit,
 ) {
+    val context = LocalContext.current
+    // Not live while its act is in flight (`confirm_possibility`).
+    val verdict = faunaReadGate(confirmAnswer, gate)
     Column(
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp).testTag(Ids.ADMIN_BRIDGES_REJECT_CONFIRM),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -374,17 +428,17 @@ private fun RejectBridgeConfirm(
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = onConfirm,
-                enabled = gate.enabled,
+                onClick = { pressAsked(context, confirmAnswer, onRefused) { onConfirm() } },
+                enabled = verdict.enabled,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_REJECT_CONFIRM_BUTTON),
+                modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_REJECT_CONFIRM_BUTTON).paintedReason(verdict.reason),
             ) { Text(stringResource(R.string.admin_bridges_reject_confirm)) }
             OutlinedButton(
                 onClick = onCancel,
                 modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_REJECT_CANCEL_BUTTON),
             ) { Text(stringResource(R.string.admin_bridges_reject_cancel)) }
         }
-        DisabledControlReasonText(gate.reason)
+        DisabledControlReasonText(verdict.reason)
     }
 }
 
@@ -398,7 +452,10 @@ private fun RotateBridgeConfirm(
     working: Boolean,
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
+    confirmAnswer: Possibility,
+    onRefused: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp).testTag(Ids.ADMIN_BRIDGES_ROTATE_CONFIRM),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -420,13 +477,17 @@ private fun RotateBridgeConfirm(
         //
         // The CONFIRM declares; the opener that revealed this form stays live,
         // because the warning text above is worth reading with no nest.
-        val rotateGate = faunaGate("fauna.bridges.revoke_service_user", enabled = !working)
+        // Not live while its act is in flight (`confirm_possibility`).
+        val rotateGate = faunaReadGate(
+            confirmAnswer,
+            faunaGate("fauna.bridges.revoke_service_user", enabled = !working && confirmAnswer.isPossible),
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = onConfirm,
+                onClick = { pressAsked(context, confirmAnswer, onRefused) { onConfirm() } },
                 enabled = rotateGate.enabled,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_ROTATE_CONFIRM_BUTTON),
+                modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_ROTATE_CONFIRM_BUTTON).paintedReason(rotateGate.reason),
             ) { Text(stringResource(R.string.admin_bridges_rotate_confirm)) }
             OutlinedButton(
                 onClick = onCancel,
@@ -436,6 +497,21 @@ private fun RotateBridgeConfirm(
         }
         DisabledControlReasonText(rotateGate.reason)
     }
+}
+
+/**
+ * What a section shows before the list read resolves: the read's own reason
+ * (*still loading* / *failed to load*), never the empty text (admin.md
+ * § Errors & edge cases, *Controls wait for their read*). Un-id'd: the section
+ * headings carry the ids and publish the same reason.
+ */
+@Composable
+private fun ListNotRead(reason: String) {
+    Text(
+        reason,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /** A caption + value row; the testTag goes on the VALUE (mirrors linux pending_field_row). */

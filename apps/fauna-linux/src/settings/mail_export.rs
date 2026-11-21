@@ -87,9 +87,14 @@ struct ExportWidgets {
     date_from_input: gtk::Entry,
     date_to_input: gtk::Entry,
     strip_headers_toggle: gtk::Switch,
+    /// The Scope step's `wizard-next-button` — painted from
+    /// `MailExportSnapshot::next_possibility` (`mail-export.md` § Wizard steps).
+    scope_next: gtk::Button,
 
     // Step 3 — Confirm.
     confirm_group: adw::PreferencesGroup,
+    /// `mail-export-start-button` — painted from `start_possibility`.
+    start_button: gtk::Button,
     confirm_row: adw::ActionRow,
     confirm_summary: gtk::Label,
 
@@ -107,6 +112,9 @@ struct ExportWidgets {
     done_group: adw::PreferencesGroup,
     done_summary: gtk::Label,
     download_url: gtk::Label,
+    /// `mail-export-download-button` — painted from the offline carve-out
+    /// answer ([`paint_download`]); also threaded into `WizardButtons`.
+    download_button: gtk::Button,
 }
 
 /// Everything the page's handlers + render need. `Rc`-shared into every closure.
@@ -339,6 +347,16 @@ pub fn build_mail_export_page() -> adw::PreferencesPage {
         .css_classes(["suggested-action"])
         .build();
     set_test_id(&download_button, ids::MAIL_EXPORT_DOWNLOAD_BUTTON);
+    paint_download(&download_button);
+    // The connection word moved, so the carve-out answer may have.
+    {
+        let weak = download_button.downgrade();
+        crate::offline_gate::on_connection_change(Rc::new(move || {
+            if let Some(button) = weak.upgrade() {
+                paint_download(&button);
+            }
+        }));
+    }
     let download_row = adw::ActionRow::builder().activatable(false).build();
     download_row.add_suffix(&download_button);
     done_group.add(&download_row);
@@ -369,7 +387,9 @@ pub fn build_mail_export_page() -> adw::PreferencesPage {
         date_from_input,
         date_to_input,
         strip_headers_toggle,
+        scope_next: scope_next.clone(),
         confirm_group,
+        start_button: start_button.clone(),
         confirm_row,
         confirm_summary,
         progress_group,
@@ -383,6 +403,7 @@ pub fn build_mail_export_page() -> adw::PreferencesPage {
         done_group,
         done_summary,
         download_url,
+        download_button: download_button.clone(),
     };
     // Re-read the export sessions every time the page is shown — tui's
     // self-hydrate-on-every-visit, and for its reasons: an export started,
@@ -446,7 +467,27 @@ struct WizardButtons {
 /// every interaction. Returns the re-hydrate the page runs each time it is
 /// shown; `None` (and a no-op) when no client is available (the unit test).
 fn wire_machine(widgets: ExportWidgets, b: WizardButtons) -> Option<impl Fn() + 'static> {
-    let client = crate::settings::get_client()?;
+    let Some(client) = crate::settings::get_client() else {
+        // No machine: every gesture says so on `error-message` (rule 7:
+        // never silent) instead of doing nothing.
+        super::mail_gate::wire_unbuilt(
+            &widgets.error_label,
+            &[
+                &b.format_next,
+                &b.scope_back,
+                &b.scope_next,
+                &b.confirm_back,
+                &b.start_button,
+                &b.pause_button,
+                &b.resume_button,
+                &b.cancel_button,
+                &b.download_button,
+                &b.discard_button,
+                &b.dismiss_button,
+            ],
+        );
+        return None;
+    };
     let machine = Arc::new(crate::mail_glue::build_mail_export_machine(&client));
 
     let ctx = Rc::new(ExportCtx {
@@ -519,12 +560,28 @@ fn wire_machine(widgets: ExportWidgets, b: WizardButtons) -> Option<impl Fn() + 
     // Navigation + lifecycle buttons.
     wire_dispatch(&ctx, &b.format_next, MailExportAction::Next);
     wire_dispatch(&ctx, &b.scope_back, MailExportAction::Back);
-    wire_dispatch(&ctx, &b.scope_next, MailExportAction::Next);
+    // Scope's Next and the Start ask the machine's answer again at the press
+    // (rule 6): blocked → the reason the button painted, on `error-message`.
+    wire_asked(&ctx, &b.scope_next, MailExportAction::Next, |s| {
+        s.next_possibility()
+    });
     wire_dispatch(&ctx, &b.confirm_back, MailExportAction::Back);
-    wire_dispatch(&ctx, &b.start_button, MailExportAction::Start);
+    wire_asked(&ctx, &b.start_button, MailExportAction::Start, |s| {
+        s.start_possibility()
+    });
     wire_dispatch(&ctx, &b.pause_button, MailExportAction::Pause);
     wire_dispatch(&ctx, &b.resume_button, MailExportAction::Resume);
-    wire_dispatch(&ctx, &b.download_button, MailExportAction::Download);
+    // Download asks its own answer first (rule 6): offline, the GET cannot
+    // reach the nest, so the press refuses with the reason the button carries
+    // on `error-message` rather than failing inside the stream.
+    {
+        let ctx = Rc::clone(&ctx);
+        b.download_button.connect_clicked(move |_| {
+            if download_allowed(&ctx.w.error_label) {
+                dispatch_action(&ctx, MailExportAction::Download);
+            }
+        });
+    }
     wire_dispatch(&ctx, &b.discard_button, MailExportAction::Discard);
     wire_dispatch(&ctx, &b.dismiss_button, MailExportAction::Discard);
     // Cancel is destructive — two-click inline confirm.
@@ -539,6 +596,52 @@ fn wire_machine(widgets: ExportWidgets, b: WizardButtons) -> Option<impl Fn() + 
         move || dispatch_action(&ctx, MailExportAction::Cancel),
     );
     Some(move || hydrate_and_render(&refresh_ctx))
+}
+
+/// Paint the Download from the offline carve-out answer
+/// (`crate::offline_gate::carve_out_possibility`): the GET of the session's
+/// `download_url` has no wire kind, so the carve-out answer stands in for it —
+/// it needs a live nest, the backups page's file-download shape. Blocked → the
+/// reason on its tooltip.
+fn paint_download(button: &gtk::Button) {
+    crate::possible::paint(button, None, crate::offline_gate::carve_out_possibility());
+}
+
+/// Ask the Download's answer again at the press: blocked → the reason on the
+/// page's `error-message` and `false` (tui's `mail_export_download_possibility`
+/// refusal).
+fn download_allowed(error_label: &gtk::Label) -> bool {
+    match crate::offline_gate::carve_out_possibility() {
+        fauna_core::possibility::Possibility::Possible => true,
+        fauna_core::possibility::Possibility::Blocked { reason } => {
+            super::render_error_label(
+                error_label,
+                Some(&reason.resolve(crate::i18n::strings::lookup)),
+            );
+            false
+        }
+        fauna_core::possibility::Possibility::Absent => false,
+    }
+}
+
+/// Wire a button whose press first asks `answer` of the machine's snapshot
+/// (the one its paint came from — the date drafts are dispatched as typed, so
+/// the snapshot already holds them): blocked → refused with the reason on
+/// `error-message`, nothing dispatched.
+fn wire_asked(
+    ctx: &Rc<ExportCtx>,
+    button: &gtk::Button,
+    action: MailExportAction,
+    answer: fn(&MailExportSnapshot) -> fauna_core::possibility::Possibility,
+) {
+    let ctx = Rc::clone(ctx);
+    button.connect_clicked(move |_| {
+        let snap = ctx.machine.snapshot();
+        if crate::form_gate::refuse(&answer(&snap), &ctx.w.error_label) {
+            return;
+        }
+        dispatch_action(&ctx, action.clone());
+    });
 }
 
 /// Wire a button to a single fire-and-render action.
@@ -709,6 +812,12 @@ fn render(ctx: &Rc<ExportCtx>, snap: &MailExportSnapshot) {
         .set_visible(snap.step == ExportStep::Progress);
     w.done_group.set_visible(snap.step == ExportStep::Done);
 
+    // Next off Scope and the Start, from the machine's own answers (zero
+    // mailboxes, a malformed or inverted range — `mail-export.md` § Wizard
+    // steps); blocked → insensitive with the reason on the tooltip.
+    crate::possible::paint(&w.scope_next, None, snap.next_possibility());
+    crate::possible::paint(&w.start_button, None, snap.start_possibility());
+
     // Format picker (echo-guarded).
     ctx.syncing.set(true);
     if w.format_picker.selected() != index_of(snap.format) {
@@ -815,6 +924,7 @@ fn render(ctx: &Rc<ExportCtx>, snap: &MailExportSnapshot) {
     // Done fields.
     w.done_summary.set_text(&done_text(snap));
     w.download_url.set_text(&snap.download_url);
+    paint_download(&w.download_button);
 }
 
 /// The confirm step's summary (`mail-export.md` § Wizard steps step 3): the
@@ -906,6 +1016,58 @@ fn format_label(format: ExportFormat) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Download paints from the offline carve-out answer and its press asks
+    /// it again: offline → inert with the reason, and a press refuses with that
+    /// reason on `error-message`; online → live and the press goes through.
+    /// Red-verify by making `paint_download` a no-op.
+    #[test]
+    fn the_download_is_blocked_while_offline_with_its_reason() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("disconnected");
+            let button = gtk::Button::new();
+            paint_download(&button);
+            let reason = crate::offline_gate::carve_out_possibility()
+                .reason()
+                .expect("offline, the carve-out is blocked")
+                .resolve(crate::i18n::strings::lookup);
+            assert!(button.is_visible() && !button.is_sensitive());
+            assert_eq!(button.tooltip_text().as_deref(), Some(reason.as_str()));
+            let error_label = gtk::Label::new(None);
+            assert!(!download_allowed(&error_label));
+            assert!(error_label.is_visible());
+            assert_eq!(error_label.text().as_str(), reason);
+
+            crate::offline_gate::reset_for_test("connected");
+            paint_download(&button);
+            assert!(button.is_sensitive());
+            assert!(download_allowed(&gtk::Label::new(None)));
+            crate::offline_gate::reset_for_test("disconnected");
+        });
+    }
+
+    /// With no machine, a wizard press refuses with the unbuilt reason on
+    /// `error-message` instead of doing nothing (rule 7). Red-verify by
+    /// dropping `wire_unbuilt` from `wire_machine`'s no-client path.
+    #[test]
+    fn a_press_with_no_machine_says_so() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let page = build_mail_export_page();
+            let next = crate::testid::find_by_test_id(&page, fauna_ui_ids::WIZARD_NEXT_BUTTON)
+                .and_then(|w| w.downcast::<gtk::Button>().ok())
+                .expect("the Format step's Next");
+            next.emit_clicked();
+            let error = crate::testid::find_by_test_id(&page, fauna_ui_ids::ERROR_MESSAGE)
+                .and_then(|w| w.downcast::<gtk::Label>().ok())
+                .expect("error-message");
+            assert!(error.is_visible());
+            assert_eq!(
+                error.text().as_str(),
+                crate::i18n::strings::mail_settings::USABLE_UNBUILT
+            );
+        });
+    }
 
     #[test]
     fn the_progress_tick_arm_site_captures_the_generation_and_passes_the_real_check() {

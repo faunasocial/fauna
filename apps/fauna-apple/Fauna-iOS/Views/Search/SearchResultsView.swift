@@ -68,9 +68,9 @@ struct SearchResultsView: View {
         VStack(spacing: 0) {
             // `search-type-filter` — one shared mapping applies the token to
             // BOTH search backends (search.md § State & data shape); re-fires
-            // the LIVE buffer under the new token (a no-op while the buffer is
-            // empty, mirroring tui/linux/web — the picker then redraws back to
-            // the still-committed value on the next snapshot read).
+            // the LIVE buffer under the new token; over an empty buffer the shared
+            // manager holds the token for the next search instead, so the
+            // picker keeps showing what was chosen (search.md § User actions).
             Picker("Type", selection: Binding(
                 get: { vm.typeFilter },
                 set: { token in Task { await vm.search(newTypeFilter: token) } }

@@ -58,14 +58,18 @@ pub use nest_api::{
 #[cfg(any(test, feature = "test-helpers"))]
 pub use nest_api::{FakeCall, FakeDevicesNestApi, FakeWizardFactory};
 pub use observer::DevicesObserver;
-pub use p2p_participation::{P2pParticipationPaint, p2p_participation_paint};
+pub use p2p_participation::{
+    P2P_ON_FROM_THAT_DEVICE, P2pParticipationPaint, p2p_participation_paint,
+};
 pub use places::place_rows;
 pub use row_read_errors::RowReadErrors;
 pub use snapshots::*;
 pub use this_device::this_device_row;
 
-// Re-export the wizard types clients render the embedded wizard from, so a
-// consumer reaches the whole Devices surface through this one crate.
+// Re-export the wizard types clients render the embedded wizard from — and
+// its Next / Create answers — so a consumer reaches the whole Devices surface
+// through this one crate.
+pub use fauna_folders_machine::possibility as folder_wizard_possibility;
 pub use fauna_folders_machine::{
     DeviceOption, FolderWizardMachine, FolderWizardObserver, FolderWizardSnapshot,
 };

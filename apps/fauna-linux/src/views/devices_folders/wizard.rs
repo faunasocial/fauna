@@ -128,7 +128,16 @@ impl FolderWizardView {
         set_test_id(&next_btn, ids::WIZARD_NEXT_BUTTON);
         {
             let wiz = wiz.clone();
-            next_btn.connect_clicked(move |_| wiz.next());
+            next_btn.connect_clicked(move |_| {
+                // The press asks the same shared answer the paint did; the
+                // painted button carries its reason, so a refused press is
+                // the insensitive one and does nothing more.
+                if fauna_folders_machine::possibility::wizard_next_possibility(&wiz.snapshot())
+                    .is_possible()
+                {
+                    wiz.next();
+                }
+            });
         }
 
         let create_btn = gtk::Button::with_label(strings::devices::wizard::CREATE);
@@ -143,6 +152,11 @@ impl FolderWizardView {
         {
             let wiz = wiz.clone();
             create_btn.connect_clicked(move |_| {
+                if !fauna_folders_machine::possibility::wizard_create_possibility(&wiz.snapshot())
+                    .is_possible()
+                {
+                    return;
+                }
                 let wiz = wiz.clone();
                 // `submit()` ticks `on_changed()` (Submitting → Failed/Done) via
                 // the page observer, so the page render loop drives the UI; the
@@ -228,24 +242,29 @@ impl FolderWizardView {
         }
 
         // Footer: Back from step 2+, Next on steps 1–2, Create only on Review.
+        // Next and Create are painted from the folders machine's shared answers
+        // (`folders.md` § Errors & edge cases, *Own-tier and mail gates*): a
+        // blank name, a create in flight and a pending declassify confirm each
+        // carry their reason; Next is absent past Devices.
         self.back_btn.set_visible(step != FolderWizardStep::Name);
-        let on_nav = matches!(step, FolderWizardStep::Name | FolderWizardStep::Devices);
-        self.next_btn.set_visible(on_nav);
-        if on_nav {
-            // Only the name step can gate Next (needs a non-empty name).
-            let enabled = step != FolderWizardStep::Name || wiz.name_snapshot().continue_enabled;
-            self.next_btn.set_sensitive(enabled);
-        }
+        let snap = wiz.snapshot();
+        crate::possible::paint(
+            &self.next_btn,
+            None,
+            fauna_folders_machine::possibility::wizard_next_possibility(&snap),
+        );
         let on_review = step == FolderWizardStep::Review;
-        self.create_btn.set_visible(on_review);
         if on_review {
-            let review = wiz.review_snapshot();
-            // While the declassify confirm asks, Create stays painted but dim:
-            // answering the dialog is the gesture that creates.
-            self.create_btn
-                .set_sensitive(review.create_enabled && !review.declassify_armed);
-            self.present_declassify_if_armed(wiz, review.declassify_armed);
+            // While the declassify confirm asks, Create stays painted but dim
+            // with its reason: answering the dialog is the gesture that creates.
+            crate::possible::paint(
+                &self.create_btn,
+                None,
+                fauna_folders_machine::possibility::wizard_create_possibility(&snap),
+            );
+            self.present_declassify_if_armed(wiz, snap.review.declassify_armed);
         } else {
+            self.create_btn.set_visible(false);
             self.declassify_presented.set(false);
         }
     }

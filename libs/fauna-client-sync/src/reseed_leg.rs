@@ -90,7 +90,7 @@ impl ReseedReport {
     }
 }
 
-/// Bytes first, then the manifest — the shared
+/// Bytes first, then a paged root's pages, then the manifest — the shared
 /// [`fauna_client_backup::recover_leg::push_sealed`], read back as a
 /// [`ReseedReport`] for the two legs that count in those terms.
 pub async fn push_sealed<P: BlobPushSink>(sink: &P, sealed: &SealedBlob) -> Result<ReseedReport> {

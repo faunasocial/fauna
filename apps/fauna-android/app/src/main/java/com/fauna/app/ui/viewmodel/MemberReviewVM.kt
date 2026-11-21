@@ -7,7 +7,10 @@ import com.fauna.app.R
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.SuccessionAftermathHost
 import com.fauna.app.ui.util.getStringFmt
+import com.fauna.app.ui.util.answerRefusal
 import com.fauna.app.ui.util.resolveLocalized
+import com.fauna.ffi.memberReviewRemovePossibility
+import uniffi.fauna_core.Possibility
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
@@ -60,6 +63,16 @@ class MemberReviewVM @Inject constructor(
     val loaded = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
 
+    /** `member-review-remove-button`'s answer — the shared
+     *  `fauna_core::data::member_review_remove_possibility` over whether the
+     *  conversations session is up (`succession-propagation.md` § Propagation):
+     *  blocked *your groups are still loading* until it is. Every row's
+     *  Remove is painted from it and [remove] asks it again; Keep (a ledger
+     *  write alone) is not gated. Re-asked on every roster read. */
+    val removeAnswer = MutableStateFlow(removeAnswerNow())
+
+    private fun removeAnswerNow(): Possibility = memberReviewRemovePossibility(api.conversationsSessionUp)
+
     init {
         load()
         // The aftermath's raises have settled: a roster item raised by the
@@ -88,6 +101,7 @@ class MemberReviewVM @Inject constructor(
                         )
                     }
                     loaded.value = true
+                    removeAnswer.value = removeAnswerNow()
                     return@launch
                 } catch (e: Exception) {
                     if (attempt == HYDRATE_ATTEMPTS - 1) {
@@ -125,8 +139,18 @@ class MemberReviewVM @Inject constructor(
      *  re-reads the roster regardless: a full eviction drops the row, a
      *  partial one re-renders from the unchanged state. `who` is resolved
      *  from the cached row BEFORE the call — there is no seat left to read a
-     *  handle off afterward. */
+     *  handle off afterward.
+     *
+     *  Asks [removeAnswer]'s predicate again first: with no conversations
+     *  session it refuses with the answer's reason on `error-message` and
+     *  evicts nothing — never a silent return, never a bare verdict write. */
     fun remove(person: ByteArray) {
+        val answer = removeAnswerNow()
+        removeAnswer.value = answer
+        answerRefusal(context, answer)?.let { refusal ->
+            refusal.reason?.let { errorMessage.value = it }
+            return
+        }
         val who = resolveLocalized(context, rows.value.firstOrNull { it.person.contentEquals(person) }?.text?.who)
             ?: context.getString(R.string.settings_recovery_kit_review_unknown_person)
         viewModelScope.launch {

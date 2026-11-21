@@ -14,15 +14,20 @@ import SwiftUI
 /// readout, and two one-click controls (no confirm).
 public struct AdminPendingActionsSection: View {
     let pendingActions: [FfiAdminPendingAction]
+    /// Approve's shared answer per row (`AdminVM.approvePossibility`): absent on
+    /// the viewer's own action (`admin.md` § 2, *What a row offers*).
+    let approvePossibility: (FfiAdminPendingAction) -> Possibility
     let onApprove: (Int64) -> Void
     let onCancel: (Int64) -> Void
 
     public init(
         pendingActions: [FfiAdminPendingAction],
+        approvePossibility: @escaping (FfiAdminPendingAction) -> Possibility,
         onApprove: @escaping (Int64) -> Void,
         onCancel: @escaping (Int64) -> Void
     ) {
         self.pendingActions = pendingActions
+        self.approvePossibility = approvePossibility
         self.onApprove = onApprove
         self.onCancel = onCancel
     }
@@ -75,6 +80,7 @@ public struct AdminPendingActionsSection: View {
             .automationActivate(Ids.adminPendingActionApproveButton) {
                 onApprove(action.id)
             }
+            .faunaPossible(approvePossibility(action))
 
             Button(L.settings.pendingActions.cancel) {
                 onCancel(action.id)

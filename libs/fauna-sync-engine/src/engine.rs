@@ -246,6 +246,12 @@ pub struct StaleHydratedRow {
 /// the record landing from dropping a live intent.
 pub const OWED_RESTORE_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// Why the review list's "use the other version" is refused over a file whose
+/// bytes are not on this disk ([`SyncEngine::restore_retained_version`]).
+pub const RESTORE_OVER_CLOUD_ONLY: &str = "this file's copy on this device has been freed, so \
+     the other version cannot replace it yet: open the file so it downloads, then use the other \
+     version again";
+
 /// What one [`SyncEngine::drain_owed_restores`] pass did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OwedRestoreDrain {
@@ -757,6 +763,109 @@ pub struct ResealedVersion {
     pub size_bytes: i64,
 }
 
+/// A manifest as the engine posts it ([`SyncEngine::manifest_wire`]).
+struct ManifestWire {
+    /// The single manifest's wire form, or a paged file's root.
+    bytes: Vec<u8>,
+    /// `blake3(bytes)` — the one hash every record names.
+    hash: ContentHash,
+    /// A paged file's encoded pages, in file order; empty otherwise.
+    pages: Vec<Vec<u8>>,
+}
+
+/// The paged-manifest refusal (one type for the upload and the re-seal) —
+/// owned by `fauna_core::nest_reseal`.
+pub use fauna_core::nest_reseal::{FileTooLargeForNest, is_file_too_large_for_nest};
+
+/// The content-free reason class a [`FileTooLargeForNest`] refusal is filed
+/// under (`details` of its `too_large_for_nest` row and report).
+pub const FILE_TOO_LARGE_FOR_NEST_REASON: &str = "file_too_large_for_nest";
+
+/// The paging rule a new engine cuts its manifests under: always
+/// [`PagingRule::STANDARD`] in a production build. An e2e seat reaches the
+/// paged path with a few-megabyte file through `FAUNA_E2E_PAGING_RULE` =
+/// `inline,page_min,page_max,cut_bits` (`PagingRule::with_thresholds`) —
+/// compile-gated outer, env inner (`testing.md` convention 15): a production
+/// release build never reads the variable, and an unset or malformed value
+/// falls back to the standard rule.
+///
+/// [`PagingRule::STANDARD`]: fauna_core::manifest_paging::PagingRule::STANDARD
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+fn initial_paging_rule() -> fauna_core::manifest_paging::PagingRule {
+    use fauna_core::manifest_paging::PagingRule;
+    std::env::var("FAUNA_E2E_PAGING_RULE")
+        .ok()
+        .and_then(|v| parse_e2e_paging_rule(&v))
+        .unwrap_or(PagingRule::STANDARD)
+}
+
+#[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+fn initial_paging_rule() -> fauna_core::manifest_paging::PagingRule {
+    fauna_core::manifest_paging::PagingRule::STANDARD
+}
+
+/// [`initial_paging_rule`]'s parse: four comma-separated numbers within
+/// `with_thresholds`' bounds, else `None`.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+fn parse_e2e_paging_rule(value: &str) -> Option<fauna_core::manifest_paging::PagingRule> {
+    let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+    let [inline, min, max, bits] = parts.as_slice() else {
+        return None;
+    };
+    let (inline, min, max, bits): (usize, usize, usize, u32) = (
+        inline.parse().ok()?,
+        min.parse().ok()?,
+        max.parse().ok()?,
+        bits.parse().ok()?,
+    );
+    let in_bounds = min >= 1
+        && min <= max
+        && max <= fauna_core::manifest_paging::MANIFEST_PAGE_MAX
+        && bits < 64;
+    in_bounds
+        .then(|| fauna_core::manifest_paging::PagingRule::with_thresholds(inline, min, max, bits))
+}
+
+#[cfg(test)]
+mod e2e_paging_rule_test {
+    use super::parse_e2e_paging_rule;
+    use fauna_core::manifest_paging::PagingRule;
+
+    #[test]
+    fn the_e2e_paging_rule_parses_four_numbers_within_bounds() {
+        assert_eq!(
+            parse_e2e_paging_rule("2, 2,3,1"),
+            Some(PagingRule::with_thresholds(2, 2, 3, 1))
+        );
+        for bad in [
+            "",
+            "2,2,3",
+            "2,3,2,1",
+            "2,0,3,1",
+            "2,2,3,64",
+            "a,2,3,1",
+            "2,2,99999999,1",
+        ] {
+            assert_eq!(parse_e2e_paging_rule(bad), None, "{bad:?} falls back");
+        }
+    }
+}
+
+/// A blob sealed for upload by [`SyncEngine::seal_for_upload`]: the shared
+/// seal, its manifest bytes and hash replaced by the root's when the engine's
+/// paging rule pages it, and the pages that go up before that root.
+pub(crate) struct SealedForUpload {
+    pub(crate) blob: crate::seal::SealedBlob,
+    pub(crate) pages: Vec<Vec<u8>>,
+}
+
+impl std::ops::Deref for SealedForUpload {
+    type Target = crate::seal::SealedBlob;
+    fn deref(&self) -> &Self::Target {
+        &self.blob
+    }
+}
+
 /// Result of the shared chunked-upload pipeline used by both
 /// [`SyncEngine::upload_file`] and [`SyncEngine::upload_bytes`].
 struct UploadedManifest {
@@ -869,24 +978,28 @@ pub fn is_mass_delete_floor(missing: usize, total: usize) -> bool {
 /// a failing disk, an `ESTALE` on a network mount, and the user still has every
 /// byte). `docs/goal/behavior/succession-aftermath.md`'s rule, *unreadable is
 /// not absent*, applied to the delete rail.
-struct MissingFromScan {
+pub(crate) struct MissingFromScan {
     /// Rows the scan **proves** are gone: their directory was enumerated and
     /// they were not in it. The floor's numerator, and the only rows any delete
     /// is ever recorded for.
-    missing: Vec<crate::db::SyncEntry>,
+    pub(crate) missing: Vec<crate::db::SyncEntry>,
     /// Rows withheld because they sit under a directory the scan could not
     /// enumerate. Not deleted, not held by the floor, not counted by it —
     /// reported outward so the fault is visible, and re-derived from scratch
     /// next pass (nothing is stored, exactly like the hold itself).
-    withheld_unreadable: Vec<String>,
+    pub(crate) withheld_unreadable: Vec<String>,
+    /// Published pending rows missing from the scan whose file the re-stat
+    /// found present — the scan raced a save. Out of this pass's universe:
+    /// neither missing nor counted in the floor's denominator.
+    left_out: usize,
 }
 
 impl MissingFromScan {
     /// How many rows with evidence ([`SyncEngine::rows_with_evidence`]) this pass
     /// could actually observe — the floor's denominator. `total_synced` is the
     /// full row count the caller fetched.
-    fn observable(&self, total_synced: usize) -> usize {
-        total_synced.saturating_sub(self.withheld_unreadable.len())
+    pub(crate) fn observable(&self, total_synced: usize) -> usize {
+        total_synced.saturating_sub(self.withheld_unreadable.len() + self.left_out)
     }
 }
 
@@ -986,12 +1099,80 @@ pub struct SiblingPullReport {
     pub refused: usize,
 }
 
+/// The gate a paged manifest passes before any of its file's chunks is sent
+/// (`file-sync.md` § Paged manifests → *Compatibility*): the nest advertises
+/// `paged-manifests`, or the file is refused with [`FileTooLargeForNest`] —
+/// permanent while the nest stays as it is. An unreadable capability set
+/// refuses nothing; the write fails as a transient and the next pass asks
+/// again. Shared by the upload ([`SyncEngine::admit_paged_manifest`]) and
+/// the re-seal's sink ([`EngineChunkSink`]).
+async fn require_paged_manifests_on(
+    control: &dyn crate::nest_api::SyncControlApi,
+    chunks: usize,
+) -> Result<()> {
+    let capabilities = control
+        .nest_capabilities()
+        .await
+        .map_err(|e| anyhow::anyhow!("reading the nest's capabilities: {e}"))?;
+    use fauna_protocol::discovery::capability;
+    if !capability::supports(&capabilities, capability::PAGED_MANIFESTS) {
+        return Err(anyhow::Error::new(FileTooLargeForNest {
+            chunks: Some(chunks),
+        }));
+    }
+    Ok(())
+}
+
+/// Post a manifest the way the nest's order needs it (`file-sync.md`
+/// § Paged manifests → *Transport and order*): after its chunks, the pages
+/// the nest does not already hold — the existing existence check sees a page
+/// like any blob — then the root. A single manifest (no pages) is the one
+/// post it always was. Returns the pages sent, also added to `pages_sent`.
+async fn post_manifest_parts(
+    client: &SyncClient,
+    pages_sent: &std::sync::atomic::AtomicUsize,
+    bytes: &[u8],
+    pages: &[Vec<u8>],
+) -> Result<usize> {
+    let mut sent = 0;
+    if !pages.is_empty() {
+        let hashes: Vec<ContentHash> = pages.iter().map(|p| ContentHash::of_raw(p)).collect();
+        let missing: std::collections::HashSet<ContentHash> = client
+            .check_chunks(&hashes)
+            .await
+            .context("checking manifest pages with the nest")?
+            .into_iter()
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for (page, hash) in pages.iter().zip(&hashes) {
+            if missing.contains(hash) && seen.insert(*hash) {
+                client
+                    .upload_manifest_page(page)
+                    .await
+                    .context("uploading a manifest page")?;
+                sent += 1;
+            }
+        }
+        pages_sent.fetch_add(sent, std::sync::atomic::Ordering::Relaxed);
+    }
+    client.upload_manifest(bytes).await?;
+    Ok(sent)
+}
+
 /// The engine's binding of the shared re-seal's write seam
 /// ([`fauna_core::nest_reseal::ChunkStoreSink`]): a dedup check, then the
 /// pooled upload of what is missing — the [`EngineBlobFetcher`] twin, built per
-/// call in [`SyncEngine::reseal_nest_copy_windowed`].
+/// call in [`SyncEngine::reseal_nest_copy_windowed`]. A paged result goes
+/// through the engine's own paging rule, token gate and page-then-root post,
+/// the ones every upload uses.
 struct EngineChunkSink<'a> {
     client: &'a SyncClient,
+    /// The engine's control seam at the time of the call (the token read).
+    control: Arc<dyn crate::nest_api::SyncControlApi>,
+    /// The engine's paging rule at the time of the call.
+    paging_rule: fauna_core::manifest_paging::PagingRule,
+    /// The engine's count of pages sent.
+    manifest_pages_sent: &'a std::sync::atomic::AtomicUsize,
     transfer_pool: &'a crate::transfer::TransferPool,
     /// Phase 5: a metadata-only folder's bytes never rest on the nest, so its
     /// chunk puts are skipped (the manifest still posts).
@@ -1040,8 +1221,24 @@ impl fauna_core::nest_reseal::ChunkStoreSink for EngineChunkSink<'_> {
         &self,
         _manifest_hash: ContentHash,
         manifest_bytes: Vec<u8>,
+        pages: Vec<Vec<u8>>,
     ) -> Result<()> {
-        self.client.upload_manifest(&manifest_bytes).await
+        post_manifest_parts(
+            self.client,
+            self.manifest_pages_sent,
+            &manifest_bytes,
+            &pages,
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn paging_rule(&self) -> fauna_core::manifest_paging::PagingRule {
+        self.paging_rule
+    }
+
+    async fn admit_paged_manifest(&self, chunks: usize) -> Result<()> {
+        require_paged_manifests_on(self.control.as_ref(), chunks).await
     }
 }
 
@@ -1192,6 +1389,17 @@ pub struct SyncEngine {
     /// only because the engine's other flags are shared-reference reads; one
     /// thread ever writes it.
     placeholders_off_disk: std::sync::atomic::AtomicBool,
+    /// The paging rule every manifest this engine writes is cut under
+    /// (`file-sync.md` § Paged manifests): [`PagingRule::STANDARD`] always in
+    /// production; a test sets small thresholds
+    /// ([`Self::set_paging_rule`]) to reach the paged path with a few-megabyte
+    /// file.
+    ///
+    /// [`PagingRule::STANDARD`]: fauna_core::manifest_paging::PagingRule::STANDARD
+    paging_rule: std::sync::Mutex<fauna_core::manifest_paging::PagingRule>,
+    /// How many manifest pages this engine has sent to its nest — pages the
+    /// nest already held are skipped and not counted.
+    manifest_pages_sent: std::sync::atomic::AtomicUsize,
     /// Epoch secret for per-chunk encryption. None = plaintext (an unkeyed or unbound engine).
     epoch_secret: Option<[u8; 32]>,
     /// The owner-audience key for per-chunk owner-only encryption. When set,
@@ -1826,6 +2034,8 @@ impl SyncEngine {
             recent_removals: Mutex::new(HashSet::new()),
             applied_held_by_os_deletes: Mutex::new(HashMap::new()),
             placeholders_off_disk: std::sync::atomic::AtomicBool::new(false),
+            paging_rule: std::sync::Mutex::new(initial_paging_rule()),
+            manifest_pages_sent: std::sync::atomic::AtomicUsize::new(0),
             epoch_secret,
             backup_key,
             predecessor_backup_keys: Vec::new(),
@@ -3384,6 +3594,102 @@ impl SyncEngine {
         *self.control.write().unwrap() = control;
     }
 
+    /// Cut this engine's manifests under `rule` — a test's small thresholds
+    /// (`PagingRule::with_thresholds`), so a few-megabyte file takes the paged
+    /// path. Production never calls it: the rule's four numbers are
+    /// hard-coded constants (`file-sync.md` § Paged manifests).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_paging_rule(&self, rule: fauna_core::manifest_paging::PagingRule) {
+        *self.paging_rule.lock().unwrap() = rule;
+    }
+
+    /// How many manifest pages this engine has sent to its nest so far; a
+    /// page the nest already held is skipped and not counted.
+    pub fn manifest_pages_sent(&self) -> usize {
+        self.manifest_pages_sent
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn paging_rule(&self) -> fauna_core::manifest_paging::PagingRule {
+        *self.paging_rule.lock().unwrap()
+    }
+
+    /// The bytes this engine posts for `manifest` (its writer's plaintext
+    /// view) under its paging rule: the single manifest's wire form and no
+    /// pages at or under the inline bound, else the root and its pages
+    /// (`ChunkManifest::into_wire_parts`). `hash` is what the change record
+    /// names — the root's, for a paged file.
+    fn manifest_wire(
+        &self,
+        manifest: &fauna_core::chunk::ChunkManifest,
+        seal_root: Option<&[u8; 32]>,
+    ) -> Result<ManifestWire> {
+        let (bytes, pages) = manifest
+            .clone()
+            .into_wire_parts_with(&self.paging_rule(), seal_root)
+            .context("encoding the manifest's wire parts")?;
+        Ok(ManifestWire {
+            hash: ContentHash::of_raw(&bytes),
+            bytes,
+            pages,
+        })
+    }
+
+    /// Retain a manifest for the share leg's serve-side byte half — and, for
+    /// a paged root, each of its pages under its own hash beside it, PAGES
+    /// FIRST: a peer fetches a page exactly as it fetches a manifest, and the
+    /// serve side offers a root only while every page it names is retained
+    /// (`peer_share_store::held_pages`; `file-sync.md` § Paged manifests →
+    /// *Compatibility*), so a failure part-way leaves no root on offer.
+    fn retain_manifest_with_pages(
+        &self,
+        hash: &ContentHash,
+        bytes: &[u8],
+        pages: &[Vec<u8>],
+        relative_path: &str,
+        content_stamp: Option<SealStamp>,
+    ) -> Result<()> {
+        for page in pages {
+            self.db.retain_manifest(
+                &hex::encode(ContentHash::of_raw(page).digest()),
+                page,
+                relative_path,
+                content_stamp,
+            )?;
+        }
+        self.db.retain_manifest(
+            &hex::encode(hash.digest()),
+            bytes,
+            relative_path,
+            content_stamp,
+        )
+    }
+
+    /// The gate a paged manifest passes before any of its file's chunks is
+    /// sent (`file-sync.md` § Paged manifests → *Compatibility*): a nest that
+    /// does not advertise `paged-manifests` would garbage-collect the chunks a
+    /// root's pages name, so the file is refused with
+    /// [`FileTooLargeForNest`] — permanent while the nest stays as it is. No
+    /// pages: nothing to ask. An unreadable capability set refuses nothing;
+    /// the upload fails as a transient and the next pass asks again.
+    async fn admit_paged_manifest(&self, pages: &[Vec<u8>], chunks: usize) -> Result<()> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        self.require_paged_manifests(chunks).await
+    }
+
+    async fn require_paged_manifests(&self, chunks: usize) -> Result<()> {
+        let control = Arc::clone(&*self.control.read().unwrap());
+        require_paged_manifests_on(control.as_ref(), chunks).await
+    }
+
+    /// Post a manifest the way the nest's order needs it — see
+    /// [`post_manifest_parts`]. Returns the pages sent.
+    async fn post_manifest(&self, bytes: &[u8], pages: &[Vec<u8>]) -> Result<usize> {
+        post_manifest_parts(&self.client, &self.manifest_pages_sent, bytes, pages).await
+    }
+
     /// Share this engine's terminal park state with the host that built it
     /// (D4). The cross-nest byte plane needs it: its `WriteTokenBearer` is
     /// constructed *before* the engine (it is the engine's own `SyncClient`'s
@@ -4246,7 +4552,7 @@ impl SyncEngine {
         let sealed = crate::custodian_store::Sealed::Staged(staged);
         let manifest_hash = *staged.manifest_hash();
         if !self.is_metadata_only_residency() {
-            let keys = sealed.store_keys();
+            let keys = sealed.store_keys()?;
             let missing: std::collections::HashSet<ContentHash> = self
                 .client
                 .check_chunks(&keys)
@@ -4357,8 +4663,25 @@ impl SyncEngine {
     /// call): offline, the sealed manifest this returns IS the one the
     /// pending row serves and the eventual record carries — `seal_blob` is
     /// deterministic over `(bytes, seal_root)`.
-    pub(crate) fn seal_for_upload(&self, bytes: &[u8]) -> Result<crate::seal::SealedBlob> {
-        crate::seal::seal_blob(bytes, self.upload_seal_root()?)
+    pub(crate) fn seal_for_upload(&self, bytes: &[u8]) -> Result<SealedForUpload> {
+        let seal_root = self.upload_seal_root()?;
+        let mut blob = crate::seal::seal_blob(bytes, seal_root)?;
+        // A file past the inline bound is posted as a root and its pages
+        // (`file-sync.md` § Paged manifests); the root's hash is the one the
+        // pending mint and the record name. Under it, the shared seal's own
+        // bytes are already the single manifest's wire form.
+        let pages = if self
+            .paging_rule()
+            .is_paged(blob.manifest.chunk_hashes.len())
+        {
+            let wire = self.manifest_wire(&blob.manifest, seal_root.as_ref().map(|(k, _)| k))?;
+            blob.manifest_bytes = wire.bytes;
+            blob.manifest_hash = wire.hash;
+            wire.pages
+        } else {
+            Vec::new()
+        };
+        Ok(SealedForUpload { blob, pages })
     }
 
     /// The root (and generation to stamp) every upload of this engine seals
@@ -4415,17 +4738,27 @@ impl SyncEngine {
     /// missing chunks (optionally enqueueing resume), upload the manifest.
     async fn upload_sealed(
         &self,
-        sealed: crate::seal::SealedBlob,
+        sealed: SealedForUpload,
         relative_path: &str,
         enqueue_resume: bool,
     ) -> Result<UploadedManifest> {
-        let crate::seal::SealedBlob {
-            manifest,
-            manifest_bytes,
-            manifest_hash,
-            chunks,
-            content_stamp,
+        let SealedForUpload {
+            blob:
+                crate::seal::SealedBlob {
+                    manifest,
+                    manifest_bytes,
+                    manifest_hash,
+                    chunks,
+                    content_stamp,
+                    // Empty: an upload's pages ride `SealedForUpload::pages`.
+                    pages: _,
+                },
+            pages,
         } = sealed;
+        // Before any chunk goes up: a paged manifest only to a nest that
+        // takes pages.
+        self.admit_paged_manifest(&pages, manifest.chunk_hashes.len())
+            .await?;
 
         // Phase 5 (`file-sync.md` § Content residency): a metadata-only
         // folder's chunk bytes never rest on the nest — skip the check and
@@ -4435,8 +4768,7 @@ impl SyncEngine {
         // engine can never be armed — the nest refuses the flip there — so
         // the segment-backup caller below is untouched by construction.)
         if self.is_metadata_only_residency() {
-            self.client
-                .upload_manifest(&manifest_bytes)
+            self.post_manifest(&manifest_bytes, &pages)
                 .await
                 .context("upload_sealed: uploading manifest (metadata-only)")?;
             return Ok(UploadedManifest {
@@ -4507,9 +4839,8 @@ impl SyncEngine {
             }
         }
 
-        // Upload the manifest.
-        self.client
-            .upload_manifest(&manifest_bytes)
+        // Upload the manifest (a paged file's pages, then its root).
+        self.post_manifest(&manifest_bytes, &pages)
             .await
             .context("upload_sealed: uploading manifest")?;
 
@@ -4564,6 +4895,16 @@ impl SyncEngine {
         force_record: bool,
     ) -> Result<Option<ResealUpload>> {
         let attempt = self.upload_file_attempt(relative_path, force_record).await;
+        // A refused upload reaches the person (`conflicts.md` § Refused uploads
+        // reach the review list): the refusal is recorded once per path and
+        // reported; a file that uploads cures its refusal.
+        match &attempt {
+            Ok(Some(_)) => self.cure_upload_refusal(relative_path).await,
+            Err(e) if is_file_too_large_for_nest(e) => {
+                self.record_upload_refusal(relative_path).await;
+            }
+            _ => {}
+        }
         if attempt.is_err()
             && let Ok(Some(entry)) = self.db.get_entry(relative_path)
             && entry.state == SyncState::Uploading
@@ -4684,6 +5025,14 @@ impl SyncEngine {
             return Ok(None);
         }
 
+        // A file refused as too large for this nest, unchanged since (its size
+        // and mtime as recorded), meeting the same nest, is refused again from
+        // its metadata alone: never re-read and re-cut on every pass
+        // (`conflicts.md` § Refused uploads reach the review list).
+        if self.upload_refusal_still_holds(relative_path, &meta).await {
+            return Err(anyhow::Error::new(FileTooLargeForNest { chunks: None }));
+        }
+
         let file_size = meta.len();
 
         if file_size >= fauna_core::chunker_stream::STREAMING_THRESHOLD {
@@ -4692,6 +5041,9 @@ impl SyncEngine {
                 .await;
         }
 
+        // The edit claim is fixed before the bytes are read (`conflicts.md`
+        // § the causal watermark, *the claim is read before the bytes are*).
+        let edit_claim = self.edit_stamp(relative_path);
         let data = tokio::fs::read(&full_path).await.with_context(|| {
             format!(
                 "reading {}",
@@ -4833,19 +5185,32 @@ impl SyncEngine {
         // Own-PENDING retention mint (B2.5) — after the local seal, before
         // the first network call: offline, this row is exactly what the share
         // leg serves; online the record's `Ok(seq)` upgrades it in place.
+        // The one stamp both the own-pending row and the record carry. A
+        // PROVEN reissue (the re-seal migration re-uploading recorded bytes)
+        // carries the no-novel-content stamp, so receivers skip it rather
+        // than merge it (gap-1 ruling), at the bare floor-reduced claim; a
+        // fresh local edit carries the claim fixed before the read
+        // (lower-bound law, `conflicts.md` clause 5, widened over this
+        // device's own acknowledged run).
+        let causal = if proven_reissue {
+            self.resolution_stamp(relative_path)
+        } else {
+            edit_claim
+        };
         self.mint_pending_own_change(
             relative_path,
             &sealed.manifest_hash,
             data.len() as i64,
             sealed.content_stamp,
-            proven_reissue,
+            causal,
             group_base,
         );
         // Manifest retention for the share leg's serve-side byte half (slice
         // E) — the streaming path's twin; see that site's comment.
-        if let Err(e) = self.db.retain_manifest(
-            &hex::encode(sealed.manifest_hash.digest()),
+        if let Err(e) = self.retain_manifest_with_pages(
+            &sealed.manifest_hash,
             &sealed.manifest_bytes,
+            &sealed.pages,
             relative_path,
             sealed.content_stamp,
         ) {
@@ -4905,6 +5270,7 @@ impl SyncEngine {
             &self.transfer_pool.progress_tx,
             crate::progress::ProgressEvent::FileDone {
                 path: relative_path.to_string(),
+                direction: crate::progress::TransferDirection::Upload,
             },
         );
         // Content moved: stamp the honest `last_transfer_at` (best-effort — the
@@ -4960,18 +5326,8 @@ impl SyncEngine {
                     "create",
                     uploaded.content_stamp,
                     thumbnail_hash.as_deref(),
-                    // A fresh local edit derives from everything this engine
-                    // has honestly incorporated (lower-bound law,
-                    // `conflicts.md` clause 5). A PROVEN reissue (the re-seal
-                    // migration re-uploading recorded bytes) carries the
-                    // no-novel-content stamp instead, so receivers skip it
-                    // rather than merge it (gap-1 ruling) — at the same
-                    // floor-reduced claim.
-                    if proven_reissue {
-                        self.resolution_stamp(relative_path)
-                    } else {
-                        self.edit_stamp(relative_path)
-                    },
+                    // The stamp the own-pending row was minted with.
+                    causal,
                     self.deposit_mark(relative_path, &file_hash),
                 )
                 .await
@@ -5180,6 +5536,9 @@ impl SyncEngine {
     ) -> Result<Option<ResealUpload>> {
         use fauna_core::chunker_stream::{chunk_file_streaming, content_hash_streaming};
 
+        // The edit claim is fixed before the bytes are read, as in the
+        // in-memory path.
+        let edit_claim = self.edit_stamp(relative_path);
         // Stream hash — no full-file allocation.
         let file_hash = content_hash_streaming(full_path).with_context(|| {
             format!(
@@ -5346,16 +5705,29 @@ impl SyncEngine {
         // The bytes are the WIRE form (a sealed set's plaintext hashes ride
         // only sealed — `ChunkManifest::wire_form`); `manifest` stays this
         // writer's plaintext view, which the upload loop below walks.
-        let manifest_bytes =
-            fauna_core::encoding::canonical_encode(&manifest.wire_form(chunk_root.as_ref())?)
-                .context("serializing manifest (streaming)")?;
-        let manifest_hash = ContentHash::of_raw(&manifest_bytes);
+        // A file past the inline bound is a root and its pages
+        // (`file-sync.md` § Paged manifests): `manifest_bytes` is then the
+        // root, and its hash the one every record names.
+        let ManifestWire {
+            bytes: manifest_bytes,
+            hash: manifest_hash,
+            pages: manifest_pages,
+        } = self
+            .manifest_wire(&manifest, chunk_root.as_ref())
+            .context("serializing manifest (streaming)")?;
+        // The one stamp both the own-pending row and the record carry (see
+        // the in-memory path).
+        let causal = if proven_reissue {
+            self.resolution_stamp(relative_path)
+        } else {
+            edit_claim
+        };
         self.mint_pending_own_change(
             relative_path,
             &manifest_hash,
             file_size as i64,
             content_stamp,
-            proven_reissue,
+            causal,
             group_base,
         );
         // Manifest retention for the share leg's serve-side byte half (slice
@@ -5363,9 +5735,10 @@ impl SyncEngine {
         // (key == blake3(bytes)), so retention is unconditional and
         // best-effort like the row retention (B2.1) — losing the row costs
         // offline serveability only.
-        if let Err(e) = self.db.retain_manifest(
-            &hex::encode(manifest_hash.digest()),
+        if let Err(e) = self.retain_manifest_with_pages(
+            &manifest_hash,
             &manifest_bytes,
+            &manifest_pages,
             relative_path,
             content_stamp,
         ) {
@@ -5399,11 +5772,16 @@ impl SyncEngine {
             );
         }
 
+        // Before any chunk goes up: a paged manifest only to a nest that
+        // takes pages (`file-sync.md` § Paged manifests → *Compatibility*).
+        self.admit_paged_manifest(&manifest_pages, manifest.chunk_hashes.len())
+            .await?;
+
         // Check which chunks the node needs — addressed by store key. A
         // metadata-only folder (phase 5) uploads no byte by design, so
         // nothing is ever "missing" at the nest: the empty set makes every
         // per-chunk stage below a no-op while the manifest still posts.
-        let store_keys = manifest.store_keys();
+        let store_keys = manifest.store_keys()?;
         let missing: std::collections::HashSet<ContentHash> = if self.is_metadata_only_residency() {
             Default::default()
         } else {
@@ -5497,13 +5875,13 @@ impl SyncEngine {
             &self.transfer_pool.progress_tx,
             crate::progress::ProgressEvent::FileDone {
                 path: relative_path.to_string(),
+                direction: crate::progress::TransferDirection::Upload,
             },
         );
 
         // Upload the manifest (canonical bytes computed at the mint point
         // above — the manifest has not changed since).
-        self.client
-            .upload_manifest(&manifest_bytes)
+        self.post_manifest(&manifest_bytes, &manifest_pages)
             .await
             .context("uploading manifest (streaming)")?;
 
@@ -5560,14 +5938,9 @@ impl SyncEngine {
                     "create",
                     content_stamp,
                     thumbnail_hash.as_deref(),
-                    // Proven reissue → no-novel-content stamp; else a fresh
-                    // edit — both at the honest claim (gap-1 ruling — see the
+                    // The stamp the own-pending row was minted with (see the
                     // in-memory path).
-                    if proven_reissue {
-                        self.resolution_stamp(relative_path)
-                    } else {
-                        self.edit_stamp(relative_path)
-                    },
+                    causal,
                     self.deposit_mark(relative_path, &file_hash),
                 )
                 .await
@@ -5618,6 +5991,26 @@ impl SyncEngine {
     /// the delete would be acked locally gone but silently never
     /// propagate.
     pub async fn handle_delete(&self, relative_path: &str) -> Result<UploadOutcome> {
+        // A refused file the person deleted no longer waits to be uploaded.
+        let owed_head = self.db.upload_refusal_owed_head(relative_path)?;
+        self.cure_upload_refusal(relative_path).await;
+        // A refused file that never reached the nest, over which another
+        // device's change did not apply: the path's head on the nest is that
+        // device's version, so a delete recorded here would erase it from
+        // every device. The row settles as the reconcile pass settles it
+        // (`Self::settle_vanished_pending`) and the head is applied.
+        if let Some(seq) = owed_head
+            && self.db.get_entry(relative_path)?.is_some_and(|entry| {
+                entry.state == SyncState::LocallyModified && entry.manifest_hash.is_none()
+            })
+        {
+            self.db.remove_entry(relative_path)?;
+            self.apply_owed_head(relative_path, seq).await;
+            return Ok(UploadOutcome {
+                recorded: true,
+                ..Default::default()
+            });
+        }
         // Nothing tracked, or already tombstoned — vacuously complete. A retry
         // of a delete whose record already landed (and whose ack was lost)
         // resolves here and must ack, not spin.
@@ -5722,7 +6115,13 @@ impl SyncEngine {
     /// `Synced` row, every **seen** `Placeholder` row (this engine put it on the
     /// disk, or a scan observed it there — `SyncEntry::seen_on_disk`), and every
     /// `LocallyDeleted` row (a seen placeholder already found gone, its delete
-    /// still owed to the nest). A never-seen `Placeholder` row is excluded: lazy
+    /// still owed to the nest), and every **published** `LocallyModified` row —
+    /// an edit, not yet uploaded, of a path the nest holds (a recorded manifest
+    /// on the row; `delete-propagation.md`, **A published pending row is a row
+    /// with evidence**): its file was a real file on this disk. A never-published
+    /// pending row stays out — the nest never held its path, and
+    /// [`Self::settle_vanished_pending`] settles it; `Uploading` and `Conflicted`
+    /// stay out too. A never-seen `Placeholder` row is excluded: lazy
     /// population leaves most of them off the disk by design, and its absence is
     /// evidence of nothing. The one derivation both delete verbs read, so the
     /// hold, its count and the confirm cover the same rows.
@@ -5733,7 +6132,7 @@ impl SyncEngine {
     /// its disk, so its absence from a scan says nothing — whatever a mark that
     /// slipped through claims. `LocallyDeleted` rows stay: they are deletes the
     /// user made through the mount, still owed to the nest.
-    fn rows_with_evidence(&self) -> Result<Vec<crate::db::SyncEntry>> {
+    pub(crate) fn rows_with_evidence(&self) -> Result<Vec<crate::db::SyncEntry>> {
         let mut rows = self.db.list_by_state(SyncState::Synced)?;
         if !self.placeholders_off_disk() {
             rows.extend(
@@ -5744,6 +6143,12 @@ impl SyncEngine {
             );
         }
         rows.extend(self.db.list_by_state(SyncState::LocallyDeleted)?);
+        rows.extend(
+            self.db
+                .list_by_state(SyncState::LocallyModified)?
+                .into_iter()
+                .filter(|e| e.manifest_hash.is_some()),
+        );
         Ok(rows)
     }
 
@@ -5765,7 +6170,16 @@ impl SyncEngine {
     /// unreadable-prefix rule cannot be applied to one and forgotten on the
     /// other — a split that would leave `apply_held_deletes` propagating the
     /// very rows `reconcile` had just withheld.
-    fn missing_from_scan(
+    ///
+    /// **A pending row is re-stat'd before it counts as missing**
+    /// (`delete-propagation.md`, **A published pending row is a row with
+    /// evidence**): a `LocallyModified` row is the one in the universe a save in
+    /// flight can hide from the scan (an editor's atomic replace), so only
+    /// [`crate::presence::Presence::Absent`] counts; `Present` leaves the row
+    /// out of the pass's universe, and `Unknown` withholds it like an unreadable
+    /// prefix. Here, where both verbs read it, never in one caller.
+    pub(crate) fn missing_from_scan(
+        &self,
         scan: &crate::watcher::DirectoryScan,
         synced: Vec<crate::db::SyncEntry>,
     ) -> MissingFromScan {
@@ -5776,6 +6190,7 @@ impl SyncEngine {
             .collect();
         let mut missing = Vec::new();
         let mut withheld_unreadable = Vec::new();
+        let mut left_out = 0;
         for entry in synced {
             if scanned_paths.contains(entry.path.as_str()) {
                 continue;
@@ -5785,18 +6200,101 @@ impl SyncEngine {
             // unreadable prefix it is evidence of nothing.
             if scan.hides(&entry.path) {
                 withheld_unreadable.push(entry.path);
-            } else {
-                missing.push(entry);
+                continue;
             }
+            if entry.state == SyncState::LocallyModified {
+                match crate::presence::path_presence(&self.watch_dir.join(&entry.path)) {
+                    crate::presence::Presence::Absent => {}
+                    crate::presence::Presence::Present => {
+                        left_out += 1;
+                        continue;
+                    }
+                    crate::presence::Presence::Unknown(_) => {
+                        withheld_unreadable.push(entry.path);
+                        continue;
+                    }
+                }
+            }
+            missing.push(entry);
         }
         MissingFromScan {
             missing,
             withheld_unreadable,
+            left_out,
         }
+    }
+
+    /// The **never-published** pending rows (`LocallyModified`, no recorded
+    /// manifest) whose file this scan could read the place of and did not find
+    /// — a file created here, then removed while no watcher ran. The nest never
+    /// held the path, so they are outside the delete universe
+    /// ([`Self::rows_with_evidence`]); without this nothing ever settles them,
+    /// and `upload_pending` retries each for ever. The row is removed outright —
+    /// nothing is recorded on the nest, and it never feeds the mass-delete floor
+    /// — and a refused upload of it is cured (`conflicts.md` § Refused uploads
+    /// reach the review list, *Lifecycle*: cured "when the person deletes it").
+    /// Another device's change the refused file kept from applying is applied
+    /// now ([`Self::apply_owed_head`]).
+    ///
+    /// A **published** pending row is in the delete universe and its absence
+    /// goes through [`Self::handle_delete`], which cures its refusal itself
+    /// (`delete-propagation.md`, **A published pending row is a row with
+    /// evidence**).
+    ///
+    /// Runs only when the floor did not hold the pass's deletes: a vanished
+    /// folder takes its pending files with it, and those come back with it.
+    async fn settle_vanished_pending(&self, scan: &crate::watcher::DirectoryScan) -> Result<()> {
+        let scanned_paths: std::collections::HashSet<&str> = scan
+            .files
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect();
+        for entry in self.db.list_by_state(SyncState::LocallyModified)? {
+            if entry.manifest_hash.is_some()
+                || scanned_paths.contains(entry.path.as_str())
+                || scan.hides(&entry.path)
+            {
+                continue;
+            }
+            // The scan raced a write: the file is back, or never left.
+            if self.watch_dir.join(&entry.path).exists() {
+                continue;
+            }
+            let owed_head = self.db.upload_refusal_owed_head(&entry.path)?;
+            self.cure_upload_refusal(&entry.path).await;
+            self.db.remove_entry(&entry.path)?;
+            tracing::info!(
+                path = %fauna_core::log_redact::log_path(&entry.path),
+                "a pending file that never reached the nest is gone; its row is settled"
+            );
+            if let Some(seq) = owed_head {
+                self.apply_owed_head(&entry.path, seq).await;
+            }
+        }
+        Ok(())
     }
 
     /// Perform a full reconciliation scan: compare filesystem state against the sync database.
     pub async fn reconcile(&self) -> Result<ReconcileStats> {
+        self.reconcile_pass(true).await
+    }
+
+    /// The delete half of [`Self::reconcile`] alone: the seen-mark self-heal,
+    /// the delete detection, decision (d)'s `LocallyDeleted` flip and the floor
+    /// — with nothing taken up (no new file recorded, no edit re-hashed or
+    /// flagged). What a local pass held for its folder row still runs
+    /// (`LocalWriteHost::converge`; `file-sync.md` § Status, the first-pass
+    /// hold): the hold exists because an unread exclusion list is not an empty
+    /// one, which is a take-up question only. Over a matcher that excludes
+    /// nothing the scan sees MORE of the disk than an armed one, and the delete
+    /// universe ([`Self::rows_with_evidence`]) is not filtered by the matcher,
+    /// so this pass can only find fewer deletes than the armed pass, never more.
+    pub async fn reconcile_deletes(&self) -> Result<ReconcileStats> {
+        self.reconcile_pass(false).await
+    }
+
+    /// [`Self::reconcile`]'s body; `take_up: false` is [`Self::reconcile_deletes`].
+    async fn reconcile_pass(&self, take_up: bool) -> Result<ReconcileStats> {
         let scanned =
             crate::watcher::full_scan_filtered(&self.watch_dir, &self.ignore.read().unwrap())?;
         let mut stats = ReconcileStats::default();
@@ -5819,6 +6317,12 @@ impl SyncEngine {
             if file.is_placeholder {
                 stats.placeholder_files += 1;
                 observed_placeholders.push(&file.relative_path);
+                continue;
+            }
+            // The delete half records nothing a file on the disk says: every
+            // arm below is take-up (a new row, an edit flagged for upload, a
+            // re-stat refreshed). Its file still counts as present in `scanned`.
+            if !take_up {
                 continue;
             }
 
@@ -5952,7 +6456,7 @@ impl SyncEngine {
         // `a_dehydrated_file_is_never_recorded_as_a_delete`.
         let synced = self.rows_with_evidence()?;
         let synced_len = synced.len();
-        let derived = Self::missing_from_scan(&scanned, synced);
+        let derived = self.missing_from_scan(&scanned, synced);
         let observable_synced = derived.observable(synced_len);
         let missing = derived.missing;
 
@@ -6023,6 +6527,7 @@ impl SyncEngine {
                     stats.deleted_files += 1;
                 }
             }
+            self.settle_vanished_pending(&scanned).await?;
         }
         // Report the verdict outward so the sync-agent status projection can
         // render it (`file-sync.md` § Files Appear Automatically: the captured
@@ -6049,6 +6554,7 @@ impl SyncEngine {
         }
 
         tracing::info!(
+            take_up,
             new = stats.new_files,
             modified = stats.modified_files,
             unchanged = stats.unchanged_files,
@@ -6105,7 +6611,7 @@ impl SyncEngine {
             crate::watcher::full_scan_filtered(&self.watch_dir, &self.ignore.read().unwrap())?;
         let synced = self.rows_with_evidence()?;
         let synced_len = synced.len();
-        let derived = Self::missing_from_scan(&scanned, synced);
+        let derived = self.missing_from_scan(&scanned, synced);
         let observable_synced = derived.observable(synced_len);
         if !derived.withheld_unreadable.is_empty() {
             tracing::warn!(
@@ -8487,6 +8993,9 @@ impl SyncEngine {
             anyhow::bail!("re-seal of the nest copy held back: {hold}");
         }
         let sink = EngineChunkSink {
+            control: Arc::clone(&*self.control.read().unwrap()),
+            paging_rule: self.paging_rule(),
+            manifest_pages_sent: &self.manifest_pages_sent,
             client: &self.client,
             transfer_pool: &self.transfer_pool,
             metadata_only: self.is_metadata_only_residency(),
@@ -8656,17 +9165,11 @@ impl SyncEngine {
         manifest_hash: &ContentHash,
         size_bytes: i64,
         content_stamp: Option<SealStamp>,
-        proven_reissue: bool,
+        causal: CausalStamp,
         group_base: Option<ContentHash>,
     ) {
-        // The same stamp the record will carry (`upload_file_inner`'s
-        // `Ok(seq)` arm): a fresh edit derives from the honest anchor; a
-        // proven reissue is no-novel-content at the same claim.
-        let causal = if proven_reissue {
-            self.resolution_stamp(relative_path)
-        } else {
-            self.edit_stamp(relative_path)
-        };
+        // `causal` is the very stamp the record will carry (the caller
+        // computes it once for both).
         self.mint_pending_own_row(
             relative_path,
             Some(manifest_hash),
@@ -8723,16 +9226,30 @@ impl SyncEngine {
         } else {
             self.seal_recorded_path(relative_path)
         };
+        // The edit's instant is when it was first taken in. A re-mint of the
+        // same change — the host handed the same bytes again, a re-drive
+        // re-sealing them — keeps it: the instant is the row's `LwwStamp` on a
+        // group set's plane (`group-set.md` decision 7), and a stamp that moved
+        // on every re-ingest would let an earlier save outrank a later one.
+        let manifest_hex = manifest_hash.map(|h| hex::encode(h.digest()));
+        let created_at = match self.db.own_pending_change(relative_path) {
+            Ok(Some(prev))
+                if prev.manifest_hash == manifest_hex && prev.change_type == change_type =>
+            {
+                prev.created_at
+            }
+            _ => fauna_core::data::Timestamp::now_millis() as i64,
+        };
         let minted = path_sealed.and_then(|path_sealed| {
             let mut pending = crate::db::OwnChangeRow {
                 seq: None,
                 path: relative_path.to_string(),
                 path_hash: hex::encode(fauna_core::sync::path_hash(relative_path)),
                 path_sealed,
-                manifest_hash: manifest_hash.map(|h| hex::encode(h.digest())),
+                manifest_hash: manifest_hex,
                 size_bytes,
                 change_type: change_type.to_string(),
-                created_at: fauna_core::data::Timestamp::now_millis() as i64,
+                created_at,
                 content_stamp,
                 // Computed after the upload — the sequenced upgrade
                 // carries it; a pending row serves without one.
@@ -8835,73 +9352,83 @@ impl SyncEngine {
         };
         let path_sealed = self.seal_recorded_path(path)?;
 
-        let seq = if let Some((home_nest_url, channel_id_hex)) = self.foreign_routing() {
-            use fauna_protocol::RpcRequester;
-            let mut req = fauna_protocol::sync::SyncChangeRecordRequest {
-                folder_id: None,
-                folder: folder.to_string(),
-                device_id: self.client.device_id_hex().to_string(),
-                path: path.to_string(),
-                manifest_hash: manifest_hash.map(str::to_string),
-                size_bytes,
-                change_type: change_type.to_string(),
-                content_key_version,
-                thumbnail_hash: thumbnail_hash.map(str::to_string),
-                nest_url: Some(home_nest_url),
-                channel_id: Some(channel_id_hex),
-                path_sealed: path_sealed.clone().map(fauna_protocol::ByteBuf::from),
-                name_hash: None,
-                derived_through: causal.derived_through,
-                is_resolution: causal.is_resolution,
-                deposited_by: deposited_by.map(hex::encode),
-                extra: Default::default(),
-                signature: None,
-                signer_key: None,
-                signer_cert: None,
-            };
-            // Through the row-aware funnel like the same-nest arm: a foreign
-            // set's ref is `Foreign`, which stamps no row — the channel form
-            // above is its address.
-            req = fauna_protocol::folders::addressed_at(req, self.folder_row());
-            // Signed last, over the final field values; the relay carries the
-            // cert inline (the home nest holds no row of this writer's grants).
-            self.sign_record(&mut req);
-            let reply: fauna_protocol::sync::SyncChangeRecordReply = self
-                .nest_client
-                .request("fauna.sync.changes.record", req)
-                .await
-                .map_err(|e| {
-                    self.note_access_refusal(folder, &e);
-                    anyhow::anyhow!("cross-nest fauna.sync.changes.record: {e}")
-                })?;
-            reply.seq
-        } else {
-            let reply = self
-                .record_client()
-                .changes_record(
-                    folder,
-                    self.client.device_id_hex(),
-                    path,
-                    manifest_hash.map(str::to_string),
+        let (seq, prev_set_seq) =
+            if let Some((home_nest_url, channel_id_hex)) = self.foreign_routing() {
+                use fauna_protocol::RpcRequester;
+                let mut req = fauna_protocol::sync::SyncChangeRecordRequest {
+                    folder_id: None,
+                    folder: folder.to_string(),
+                    device_id: self.client.device_id_hex().to_string(),
+                    path: path.to_string(),
+                    manifest_hash: manifest_hash.map(str::to_string),
                     size_bytes,
-                    change_type,
+                    change_type: change_type.to_string(),
                     content_key_version,
-                    // The hex hash of the sealed thumbnail blob the producer uploaded
-                    // for this file (`maybe_upload_thumbnail`), or `None` for a
-                    // non-image / small image / non-owner-sealed set. Surfaces as
-                    // `fauna.media.list` → `MediaItem.thumbnail_hash`.
-                    thumbnail_hash.map(str::to_string),
-                    path_sealed.clone(),
-                    causal.derived_through,
-                    causal.is_resolution,
-                    deposited_by,
-                    self.folder_row(),
-                )
-                .await
-                .inspect_err(|e| self.note_access_refusal(folder, e))
-                .context("fauna.sync.changes.record")?;
-            reply.seq
-        };
+                    thumbnail_hash: thumbnail_hash.map(str::to_string),
+                    nest_url: Some(home_nest_url),
+                    channel_id: Some(channel_id_hex),
+                    path_sealed: path_sealed.clone().map(fauna_protocol::ByteBuf::from),
+                    name_hash: None,
+                    derived_through: causal.derived_through,
+                    is_resolution: causal.is_resolution,
+                    deposited_by: deposited_by.map(hex::encode),
+                    extra: Default::default(),
+                    signature: None,
+                    signer_key: None,
+                    signer_cert: None,
+                };
+                // Through the row-aware funnel like the same-nest arm: a foreign
+                // set's ref is `Foreign`, which stamps no row — the channel form
+                // above is its address.
+                req = fauna_protocol::folders::addressed_at(req, self.folder_row());
+                // Signed last, over the final field values; the relay carries the
+                // cert inline (the home nest holds no row of this writer's grants).
+                self.sign_record(&mut req);
+                let reply: fauna_protocol::sync::SyncChangeRecordReply = self
+                    .nest_client
+                    .request("fauna.sync.changes.record", req)
+                    .await
+                    .map_err(|e| {
+                        self.note_access_refusal(folder, &e);
+                        anyhow::anyhow!("cross-nest fauna.sync.changes.record: {e}")
+                    })?;
+                (reply.seq, reply.prev_set_seq)
+            } else {
+                let reply = self
+                    .record_client()
+                    .changes_record(
+                        folder,
+                        self.client.device_id_hex(),
+                        path,
+                        manifest_hash.map(str::to_string),
+                        size_bytes,
+                        change_type,
+                        content_key_version,
+                        // The hex hash of the sealed thumbnail blob the producer uploaded
+                        // for this file (`maybe_upload_thumbnail`), or `None` for a
+                        // non-image / small image / non-owner-sealed set. Surfaces as
+                        // `fauna.media.list` → `MediaItem.thumbnail_hash`.
+                        thumbnail_hash.map(str::to_string),
+                        path_sealed.clone(),
+                        causal.derived_through,
+                        causal.is_resolution,
+                        deposited_by,
+                        self.folder_row(),
+                    )
+                    .await
+                    .inspect_err(|e| self.note_access_refusal(folder, e))
+                    .context("fauna.sync.changes.record")?;
+                (reply.seq, reply.prev_set_seq)
+            };
+
+        // The record-ack folds into this device's own acknowledged run
+        // (`conflicts.md` § the causal watermark, *An edit stamp reaches
+        // across the writer's own acknowledged run*): the run grows to `seq`
+        // only when the nest says no row of the set lies between it and what
+        // this device already accounts for. Group-set seats never get here
+        // (the `nest_leg_absent` backstop above): no ack, no run.
+        self.causal()
+            .note_own_record_ack(self.db.get_anchor().unwrap_or(0), seq, prev_set_seq);
 
         // The share leg's ROW-half retention (B2 — `p2p-shared-set-build.md` § Build design —
         // the row half): the ack names the seq, so the row provably exists in
@@ -9267,14 +9794,9 @@ impl SyncEngine {
                 ));
                 continue;
             };
-            let disk = match tokio::fs::metadata(&full_path).await {
-                Ok(m) if m.is_file() => Some(
-                    fauna_core::chunker_stream::content_hash_streaming(&full_path).with_context(
-                        || format!("hashing local {}", fauna_core::log_redact::log_path(path)),
-                    )?,
-                ),
-                _ => None,
-            };
+            // Never opens a cloud-only placeholder: this runs on the thread
+            // that serves an on-demand root (`read_local_body`).
+            let disk = crate::peer_share_store::read_local_body(&full_path, path).await?;
 
             let local = LocalPathState { entry, disk };
             match judge_materialization(&local, &peer_manifest) {
@@ -9350,7 +9872,7 @@ impl SyncEngine {
                         let own_head = self.db.own_latest_change(path)?;
                         if let (Some(own_edit), Some(local_hash)) = (
                             superseded_own_edit(&local, own_head.as_ref(), row.group_base.as_ref()),
-                            local.disk,
+                            local.disk.hash(),
                         ) && !self
                             .retain_superseded_own_edit(
                                 path,
@@ -9494,14 +10016,7 @@ impl SyncEngine {
         if let Some(full_path) =
             crate::path_guard::resolved_target_within_root(&self.watch_dir, path)
         {
-            let disk = match tokio::fs::metadata(&full_path).await {
-                Ok(m) if m.is_file() => Some(
-                    fauna_core::chunker_stream::content_hash_streaming(&full_path).with_context(
-                        || format!("hashing local {}", fauna_core::log_redact::log_path(path)),
-                    )?,
-                ),
-                _ => None,
-            };
+            let disk = crate::peer_share_store::read_local_body(&full_path, path).await?;
             let local = LocalPathState {
                 entry: Some(entry),
                 disk,
@@ -9509,7 +10024,7 @@ impl SyncEngine {
             let own_head = self.db.own_latest_change(path)?;
             if let (Some(own_edit), Some(local_hash)) = (
                 superseded_own_edit(&local, own_head.as_ref(), group_base.as_ref()),
-                local.disk,
+                local.disk.hash(),
             ) && !self
                 .retain_superseded_own_edit(
                     path,
@@ -9662,9 +10177,13 @@ impl SyncEngine {
         };
 
         // What decision 9's retention reads, kept before the judge takes it.
+        // The kept root is the engine's own directory, never a cloud root.
         let local = converged.then(|| crate::peer_share_store::LocalPathState {
             entry: entry.clone(),
-            disk: kept,
+            disk: kept.map_or(
+                crate::peer_share_store::LocalBody::Absent,
+                crate::peer_share_store::LocalBody::Local,
+            ),
         });
         // What the answered-pending rule reads, likewise.
         let prior_entry = entry.clone();
@@ -9762,7 +10281,7 @@ impl SyncEngine {
                             own_head.as_ref(),
                             group_base.as_ref(),
                         ),
-                        local.disk,
+                        local.disk.hash(),
                     ) && !self
                         .retain_superseded_own_edit(
                             path, &kept_path, &own_edit, &kept_hash, change, report,
@@ -9905,6 +10424,13 @@ impl SyncEngine {
             // source) answer, never serve bytes that would fail the puller's
             // own check anyway.
             if ContentHash::of_raw(&retained.bytes).digest() == *manifest_hash {
+                // A paged root travels with its pages or not at all
+                // (`peer_share_store::held_pages`); the re-seal fallback
+                // cannot rebuild a root either.
+                let Some(pages) = crate::peer_share_store::held_pages(&retained.bytes, &self.db)
+                else {
+                    return Ok(None);
+                };
                 crate::peer_share_store::index_share_manifest(
                     &self.share_serve_memo,
                     *manifest_hash,
@@ -9912,6 +10438,7 @@ impl SyncEngine {
                     retained.content_stamp,
                     &retained.bytes,
                     self.serve_content_keys().as_ref(),
+                    &pages,
                 );
                 return Ok(Some(retained.bytes));
             }
@@ -10349,12 +10876,18 @@ impl SyncEngine {
             );
             return Ok(None);
         }
+        self.admit_paged_manifest(&sealed.pages, sealed.manifest.chunk_hashes.len())
+            .await?;
         let keys: Vec<ContentHash> = sealed.chunks.iter().map(|(key, _)| *key).collect();
         let missing = self
             .client
             .check_chunks(&keys)
             .await
             .context("thumbnail: checking chunks with destination")?;
+        let SealedForUpload {
+            blob: sealed,
+            pages,
+        } = sealed;
         let bodies: Vec<(ContentHash, Vec<u8>)> = sealed
             .chunks
             .into_iter()
@@ -10367,8 +10900,7 @@ impl SyncEngine {
                 .await;
             refuse_rejected_chunks(&results, relative_path)?;
         }
-        self.client
-            .upload_manifest(&sealed.manifest_bytes)
+        self.post_manifest(&sealed.manifest_bytes, &pages)
             .await
             .context("thumbnail: uploading manifest")?;
         Ok(Some(hex::encode(sealed.manifest_hash.digest())))
@@ -11478,8 +12010,19 @@ impl SyncEngine {
     /// path grew a permanent skip — it accounts for rows this device never
     /// read. [`crate::causal::CausalStore::honest_anchor`] owns the
     /// reduction (per path, self-releasing) and the reasoning.
+    ///
+    /// An edit's claim also reaches across this device's own acknowledged run
+    /// ([`crate::causal::CausalStore::honest_edit_claim`]; `conflicts.md`
+    /// § the causal watermark, *An edit stamp reaches across the writer's own
+    /// acknowledged run*), so a second save inside the writer's echo window is
+    /// stamped at or past its first. An upload takes this stamp BEFORE it
+    /// reads the bytes it records: a record acked between the read and the
+    /// send is never claimed by bytes that predate it.
     pub(crate) fn edit_stamp(&self, relative_path: &str) -> CausalStamp {
-        CausalStamp::edit(self.honest_anchor(relative_path))
+        CausalStamp::edit(
+            self.causal()
+                .honest_edit_claim(relative_path, self.db.get_anchor().unwrap_or(0)),
+        )
     }
 
     /// The no-novel-content stamp for `relative_path` — a proven reissue (the
@@ -14906,6 +15449,16 @@ impl SyncEngine {
     /// (`conflicts.md`), so an edit landing during the fetch is not overwritten.
     /// No listing context rides the report, so the door judges as it does for
     /// any caller without one.
+    ///
+    /// **A cloud-only file is never opened** (`crate::placeholder`): the stale
+    /// copy's invalidation reaches this from the on-demand fold
+    /// ([`Self::replace_superseded_own_record`]), on the thread that serves the
+    /// root, where the provider's own read of its own cfapi placeholder stalls
+    /// for cfapi's 60 s timeout and then fails. A freed file is no recorded body
+    /// on this disk, so it is `Ok(false)`, nothing touched — what the stalled
+    /// read used to answer. The holder-keeps gate pins such a body out of the
+    /// OS's reach (`assert_in_sync_on_proof` in the cfapi host), so this is the
+    /// fail-safe for a state the binding works to prevent.
     async fn write_head_over_recorded_copy(
         &self,
         row: &StaleHydratedRow,
@@ -14916,6 +15469,9 @@ impl SyncEngine {
             return Ok(false);
         }
         let full_path = self.watch_dir.join(rel);
+        if crate::placeholder::path_is_cloud_placeholder(&full_path) {
+            return Ok(false);
+        }
         match fauna_core::chunker_stream::content_hash_streaming(&full_path) {
             Ok(disk) if entry.recorded_content_hash == Some(disk) => {}
             _ => return Ok(false),
@@ -16028,6 +16584,7 @@ impl SyncEngine {
             &self.transfer_pool.progress_tx,
             crate::progress::ProgressEvent::FileDone {
                 path: relative_path.to_string(),
+                direction: crate::progress::TransferDirection::Download,
             },
         );
         // Content moved (download side): stamp the honest `last_transfer_at`.
@@ -16556,7 +17113,7 @@ impl SyncEngine {
     /// watcher the same way (a dot component), keyed by the manifest hash
     /// the own row names. Resolved on use, not at construction — only a
     /// group set ever retains, so no other engine grows the directory.
-    fn retained_version_path(&self, manifest: &ContentHash) -> PathBuf {
+    pub(crate) fn retained_version_path(&self, manifest: &ContentHash) -> PathBuf {
         Self::resolve_state_dir(
             &self.watch_dir,
             self.folder.as_deref(),
@@ -16589,6 +17146,18 @@ impl SyncEngine {
     /// ([`crate::always_resident::EngineCommand::RestoreRetainedVersion`]) or
     /// its in-process host, so no fold lands between the check and the write.
     ///
+    /// **Refuses a cloud-only file the same way, never opening it**
+    /// ([`RESTORE_OVER_CLOUD_ONLY`]). The command arm runs on the thread that
+    /// serves an on-demand root, and the provider's own read of its own cfapi
+    /// placeholder is answered by nobody: it would stall the command for
+    /// cfapi's 60 s timeout and then fail (`crate::placeholder`). A freed file
+    /// holds no unshared edit, but its file is the platform's, not this write's
+    /// to replace — the share ingest's landing declines it alike
+    /// ([`crate::peer_share_store::judge_materialization`]) — and a group set
+    /// never frees a body ([`Self::is_dehydration_safe`]), so this is the
+    /// fail-safe for a state no path of ours makes. Opening the file brings its
+    /// bytes back, and the restore then runs.
+    ///
     /// **Re-entrant:** a disk already at the retained bytes is a restore that
     /// stopped before its row resolved, and it finishes here. The bytes are
     /// removed once nothing on record names them — a version a base-matched
@@ -16609,6 +17178,9 @@ impl SyncEngine {
             anyhow::bail!("the other version is no longer on this device");
         };
         let full_path = self.watch_dir.join(&loser.path);
+        if crate::placeholder::path_is_cloud_placeholder(&full_path) {
+            anyhow::bail!(RESTORE_OVER_CLOUD_ONLY);
+        }
         let disk = match tokio::fs::read(&full_path).await {
             Ok(on_disk) => Some(ContentHash::of_raw(&on_disk)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -16900,7 +17472,7 @@ impl SyncEngine {
             self.report_conflict_ws(
                 &folder,
                 &skip.path,
-                crate::db::CATCHUP_FAILED,
+                &skip.kind,
                 skip.details.clone(),
                 Vec::new(),
                 None,
@@ -17000,6 +17572,9 @@ impl SyncEngine {
     /// path never opened — is resolved locally, and each reported one's nest
     /// row gets the candidate-free resolve.
     async fn cure_skipped_path(&self, relative_path: &str) {
+        // A later change landing on the path also replaces a refused local
+        // file's claim to be uploaded.
+        self.cure_upload_refusal(relative_path).await;
         let hash_hex = hex::encode(fauna_core::sync::path_hash(relative_path));
         let cured = match self
             .db
@@ -17017,6 +17592,133 @@ impl SyncEngine {
                 "a later change landed on a skipped path; the skip is cured"
             );
             self.resolve_skip_on_nest(skip).await;
+        }
+    }
+
+    /// The size and mtime (epoch secs) a refusal of `meta`'s file is
+    /// fingerprinted by.
+    fn refusal_fingerprint(meta: &std::fs::Metadata) -> (i64, i64) {
+        let mtime = meta
+            .modified()
+            .ok()
+            .map(fauna_core::data::Timestamp::secs_or_zero)
+            .unwrap_or(0);
+        (i64::try_from(meta.len()).unwrap_or(i64::MAX), mtime)
+    }
+
+    /// Record `relative_path` as refused because the nest cannot store it
+    /// ([`FileTooLargeForNest`]) and report it to the nest as an unresolved,
+    /// candidate-free `too_large_for_nest` conflict — once per path; a repeat
+    /// refreshes the recorded fingerprint and reports nothing new.
+    async fn record_upload_refusal(&self, relative_path: &str) {
+        let meta = match tokio::fs::metadata(self.watch_dir.join(relative_path)).await {
+            Ok(meta) => meta,
+            Err(e) => {
+                tracing::warn!(error = %e, "a refused file could not be read back for its record");
+                return;
+            }
+        };
+        let (size, mtime) = Self::refusal_fingerprint(&meta);
+        match self.db.record_upload_refusal(
+            relative_path,
+            FILE_TOO_LARGE_FOR_NEST_REASON,
+            size,
+            mtime,
+        ) {
+            Ok(Some(row)) => {
+                tracing::warn!(
+                    path = %fauna_core::log_redact::log_path(relative_path),
+                    "a file too large for this nest was refused; nothing of it was sent"
+                );
+                self.report_skipped_change(&row).await;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = ?e, "recording a refused upload failed"),
+        }
+    }
+
+    /// Whether the recorded refusal of `relative_path` still holds for the
+    /// file `meta` describes: the same size and mtime, and a nest that still
+    /// does not advertise `paged-manifests`. An unreadable capability set
+    /// holds nothing — the full attempt runs and asks again.
+    async fn upload_refusal_still_holds(
+        &self,
+        relative_path: &str,
+        meta: &std::fs::Metadata,
+    ) -> bool {
+        let Ok(Some(recorded)) = self.db.upload_refusal_fingerprint(relative_path) else {
+            return false;
+        };
+        if recorded != Self::refusal_fingerprint(meta) {
+            return false;
+        }
+        let control = Arc::clone(&*self.control.read().unwrap());
+        match control.nest_capabilities().await {
+            Ok(capabilities) => {
+                use fauna_protocol::discovery::capability;
+                !capability::supports(&capabilities, capability::PAGED_MANIFESTS)
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Apply the set's head for `relative_path` that a refused local file
+    /// kept from applying (`conflicts.md` § Refused uploads reach the review
+    /// list, *Lifecycle*), now that the file is gone. The pull consumed the
+    /// row at `seq` — its cursor is past it — so it is read again from the
+    /// nest and folded as a passed head ([`Self::fold_passed_heads`]): the
+    /// latest admitted row of the path at or below the cursor, applied only
+    /// above everything this device has for the path. A failure leaves the
+    /// path absent, as before, with a warning; nothing else is affected.
+    async fn apply_owed_head(&self, relative_path: &str, seq: i64) {
+        let Some(folder) = self.folder.clone() else {
+            return;
+        };
+        let result: Result<usize> = async {
+            let cursor = self.db.get_anchor()?;
+            let (page, certs) = self.list_changes(&folder, seq - 1).await?;
+            let Some(owed) = page.iter().find(|c| c.seq == seq) else {
+                return Ok(0);
+            };
+            let key = owed.path_hash.to_ascii_lowercase();
+            let rows: Vec<_> = page
+                .into_iter()
+                .filter(|c| c.seq <= cursor && c.path_hash.eq_ignore_ascii_case(&key))
+                .collect();
+            Ok(self.fold_passed_heads(rows, &certs, cursor).await?.folded)
+        }
+        .await;
+        match result {
+            Ok(folded) => tracing::info!(
+                path = %fauna_core::log_redact::log_path(relative_path),
+                folded,
+                "a refused file is gone; the head it kept from applying is applied"
+            ),
+            Err(e) => tracing::warn!(
+                path = %fauna_core::log_redact::log_path(relative_path),
+                error = %format!("{e:#}"),
+                "applying the head a refused file kept from applying failed"
+            ),
+        }
+    }
+
+    /// The cure of a refused upload: `relative_path` uploaded, was deleted,
+    /// or a later change to it applied — its local refusal is resolved and a
+    /// reported one's nest row gets the candidate-free resolve.
+    async fn cure_upload_refusal(&self, relative_path: &str) {
+        let cured = match self.db.cure_upload_refusals_for_path(relative_path) {
+            Ok(cured) => cured,
+            Err(e) => {
+                tracing::warn!(error = ?e, "curing a refused upload failed");
+                return;
+            }
+        };
+        for row in &cured {
+            tracing::info!(
+                path = %fauna_core::log_redact::log_path(relative_path),
+                "a refused upload is cured"
+            );
+            self.resolve_skip_on_nest(row).await;
         }
     }
 
@@ -17135,6 +17837,28 @@ impl SyncEngine {
             .await
         {
             Ok(u) => u,
+            // A local version this nest cannot store (`conflicts.md` § Refused
+            // uploads reach the review list, *Lifecycle*): the local file is
+            // kept — it exists nowhere else — and the incoming change does not
+            // apply over it. The refusal row is the one entry: a candidate-free
+            // `concurrent_edit` beside it could never be chosen from or cured.
+            Err(e) if is_file_too_large_for_nest(&e) => {
+                tracing::warn!(
+                    path = %fauna_core::log_redact::log_path(relative_path),
+                    "conflict: the local version is too large for this nest — keeping local; \
+                     the refusal is its review row"
+                );
+                self.record_upload_refusal(relative_path).await;
+                // The incoming row is consumed here (the cursor passes it),
+                // so the refusal keeps it owed: once the refused file is gone
+                // the set's head is applied ([`Self::apply_owed_head`]).
+                if let Some(seq) = incoming_seq
+                    && let Err(e) = self.db.note_refusal_owed_head(relative_path, seq)
+                {
+                    tracing::warn!(error = ?e, "noting the head a refusal kept from applying failed");
+                }
+                return ResolvedApply::Unresolved;
+            }
             Err(e) => {
                 tracing::warn!(
                     path = %fauna_core::log_redact::log_path(relative_path),
@@ -17337,6 +18061,25 @@ impl SyncEngine {
                 .record_conflict(relative_path, "delete_declined", details.as_deref());
             return false;
         };
+        // A cloud-only file is never opened (`crate::placeholder`): on cfapi the
+        // provider's own read of its own placeholder is answered by nobody, and
+        // it would hold this caller — the on-demand fold, on the thread that
+        // serves the root — for cfapi's 60 s timeout and then fail. Such a file
+        // holds no bytes this device could upload as the survivor (the verdict
+        // keeps it for the row's in-flight state, never for bytes it read), so
+        // the conflict is recorded here alone, as an unreadable file's is below:
+        // the outcome the stalled read used to reach, without the stall.
+        if crate::placeholder::path_is_cloud_placeholder(full_path) {
+            tracing::info!(
+                path = %fauna_core::log_redact::log_path(relative_path),
+                "declined delete: the surviving file is cloud-only on this device, so nothing is \
+                 uploaded; recording the conflict locally"
+            );
+            let _ = self
+                .db
+                .record_conflict(relative_path, "delete_declined", details.as_deref());
+            return false;
+        }
         let local_data = match tokio::fs::read(full_path).await {
             Ok(b) => b,
             Err(e) => {
@@ -17891,6 +18634,14 @@ impl crate::provider_face::ProviderEngine for SyncEngine {
         SyncEngine::holds_provisional_peer_body(self, rel)
     }
 
+    fn change_feed_state(&self) -> Result<Option<String>> {
+        self.db.provider_change_feed()
+    }
+
+    fn set_change_feed_state(&self, state: &str) -> Result<()> {
+        self.db.set_provider_change_feed(state)
+    }
+
     fn is_ignored(&self, rel: &str) -> bool {
         SyncEngine::is_ignored(self, rel)
     }
@@ -18387,7 +19138,7 @@ mod tests {
         let stamp = sealed.content_stamp;
         let hash = sealed.manifest_hash;
         let got = fauna_core::file_download::download_file_bytes_by_manifest(
-            &OneBlob(sealed),
+            &OneBlob(sealed.blob),
             &engine.download_keys(),
             hash,
             stamp,

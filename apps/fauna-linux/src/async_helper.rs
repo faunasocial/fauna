@@ -238,6 +238,10 @@ where
     let source =
         crate::main_loop_meter::site_source("snapshot-render", std::panic::Location::caller());
     let (tx, rx) = async_channel::bounded::<S>(1);
+    // Owed from the spawn until the render has painted (or the produce side
+    // was dropped): the read is one-shot by construction, so its owed count
+    // always returns to zero ([`reads_owed`]).
+    let owed = ReadOwed::new();
     rt.spawn(async move {
         let _ = tx.send(produce().await).await;
     });
@@ -245,7 +249,162 @@ where
         if let Ok(snap) = rx.recv().await {
             crate::main_loop_meter::dispatch(source, String::new, || render(snap));
         }
+        drop(owed);
     });
+}
+
+/// One-shot reads in flight: started, and not yet delivered to the GTK main
+/// thread. A page's first paint is a read like any other — the Events page's
+/// calendar list, Settings' quota, the feed's first page — so a frame read
+/// while this is above zero may still be missing what the page is about to
+/// paint. `GET /registry` reports it beside the frame (`reads_owed`), and the
+/// actuation sweep reads a page's entry frame only once it is zero
+/// (`e2e-systematic-ui-walks.md` § The possibility invariants, layer (c)).
+///
+/// Counted at the two one-shot doors: [`spawn_with_snapshot`] (owed until its
+/// render has run) and `FaunaClient::spawn_bg` (owed until the task's future
+/// has finished — after its last `UiSender::send`). A task that never finishes
+/// by design (a push listener, a reconnect loop) is spawned untracked, or it
+/// would hold the count up for the session's life.
+static READS_OWED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The source line each owed read was started from, with how many are owed
+/// there: what a frame read reports beside the count, so a read that never
+/// returns names itself (`reads_owed_by`).
+static OWED_BY: std::sync::Mutex<Vec<(&'static std::panic::Location<'static>, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// A held one-shot read: counted in [`reads_owed`] from `new` until drop.
+#[must_use = "a read is owed only while the guard is held"]
+pub struct ReadOwed(&'static std::panic::Location<'static>);
+
+impl ReadOwed {
+    /// Owed from here, attributed to the caller's caller chain of
+    /// `#[track_caller]` functions — the page code that started the read.
+    #[track_caller]
+    pub fn new() -> Self {
+        let at = std::panic::Location::caller();
+        READS_OWED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut by = OWED_BY.lock().unwrap_or_else(|e| e.into_inner());
+        match by.iter_mut().find(|(l, _)| *l == at) {
+            Some((_, n)) => *n += 1,
+            None => by.push((at, 1)),
+        }
+        ReadOwed(at)
+    }
+}
+
+impl Default for ReadOwed {
+    #[track_caller]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ReadOwed {
+    fn drop(&mut self) {
+        {
+            let mut by = OWED_BY.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(i) = by.iter().position(|(l, _)| *l == self.0) {
+                by[i].1 -= 1;
+                if by[i].1 == 0 {
+                    by.swap_remove(i);
+                }
+            }
+        }
+        READS_OWED.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The owed reads by the source line that started them (`file:line` → count),
+/// for a frame read to name what it is still waiting on.
+pub fn reads_owed_by() -> Vec<(String, usize)> {
+    let by = OWED_BY.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out: Vec<(String, usize)> = by
+        .iter()
+        .map(|(l, n)| (format!("{}:{}", l.file(), l.line()), *n))
+        .collect();
+    out.sort();
+    out
+}
+
+/// How many one-shot reads are owed right now ([`READS_OWED`]).
+pub fn reads_owed() -> usize {
+    READS_OWED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+thread_local! {
+    /// The signed-in window's UI-message pump ([`register_ui_pump`]): held weak,
+    /// so it dies with the pump's own timeout source at sign-out.
+    static UI_PUMP: std::cell::RefCell<Option<std::rc::Weak<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Register the UI-message pump's drain, so a frame read can apply every
+/// message already delivered before it reads ([`drain_ui_pump`]).
+pub fn register_ui_pump(drain: &std::rc::Rc<dyn Fn()>) {
+    UI_PUMP.with(|p| *p.borrow_mut() = Some(std::rc::Rc::downgrade(drain)));
+}
+
+/// Apply every UI message already delivered to the pump, now, rather than at
+/// its next 50 ms tick. A message a finished read sent is otherwise still
+/// unapplied when a frame is read, though [`reads_owed`] no longer counts it.
+pub fn drain_ui_pump() {
+    let drain = UI_PUMP.with(|p| p.borrow().as_ref().and_then(std::rc::Weak::upgrade));
+    if let Some(drain) = drain {
+        drain();
+    }
+}
+
+/// The read `GET /registry` reports: the owed count, then every delivered
+/// message applied — in that order. A read finishes by sending its message
+/// and only then releasing its count, so a zero read FIRST means every
+/// finished read's message is already in the pump, and the drain that follows
+/// applies it before the frame is walked.
+pub fn settle_for_frame_read() -> usize {
+    let owed = reads_owed();
+    drain_ui_pump();
+    owed
+}
+
+#[cfg(test)]
+mod reads_owed_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[test]
+    fn a_guard_is_owed_until_dropped() {
+        // The count is process-wide and other tests may hold guards at the same
+        // time, so only what this guard alone guarantees is asserted.
+        let g = ReadOwed::new();
+        assert!(reads_owed() >= 1);
+        drop(g);
+    }
+
+    /// The frame read reads the count BEFORE it drains the pump: a read that
+    /// sent and released between the two would otherwise read zero with its
+    /// message unapplied.
+    #[test]
+    fn the_frame_read_counts_then_drains() {
+        let seen = Rc::new(Cell::new(None::<usize>));
+        let drained = Rc::new(Cell::new(false));
+        let guard = std::cell::RefCell::new(Some(ReadOwed::new()));
+        let drain: Rc<dyn Fn()> = {
+            let drained = Rc::clone(&drained);
+            Rc::new(move || {
+                // The read's message is applied and its guard released here,
+                // after the count was taken.
+                guard.borrow_mut().take();
+                drained.set(true);
+            })
+        };
+        register_ui_pump(&drain);
+        seen.set(Some(settle_for_frame_read()));
+        assert!(drained.get());
+        // Counted while the guard was still held: at least this read.
+        assert!(seen.get().unwrap() >= 1);
+    }
 }
 
 /// The wake channel behind a shared-Rust snapshot observer

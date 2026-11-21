@@ -111,8 +111,14 @@ pub mod chunk_store {
     /// (the nest refuses a body that is not one). Bearer-authed as
     /// [`CHUNKS_UPLOAD`].
     pub const MANIFESTS_UPLOAD: &str = "/api/v1/manifests";
+    /// `POST /api/v1/manifest-pages` — store one canonical-encoded
+    /// `ManifestPage` of a paged manifest (`file-sync.md` § Paged manifests),
+    /// uploaded after its chunks and before its root (the nest refuses a body
+    /// that is not a page). Bearer-authed as [`CHUNKS_UPLOAD`].
+    pub const MANIFEST_PAGES_UPLOAD: &str = "/api/v1/manifest-pages";
     /// `GET /api/v1/manifests/{hash_hex}` — the canonical-encoded `ChunkManifest`
-    /// bytes (sealed hash lists included; opening is the walk's job).
+    /// bytes, or a page's `ManifestPage` bytes (sealed hash lists included;
+    /// opening is the walk's job).
     pub fn manifest_by_hash(hash_hex: &str) -> String {
         format!("/api/v1/manifests/{hash_hex}")
     }

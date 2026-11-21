@@ -13,18 +13,24 @@
 //! same either-order shape as the succession ledger's post-store-ready pass
 //! (`crate::succession::spawn_ledger_pass`).
 //!
-//! The post-auth half is the SPA's warning sink for this account: a run that
-//! ends with custody unconfirmed for an admin of the bound nest calls it with
-//! the shared `LocalizedText` (`fauna_client_config::custody_leg_warning`),
+//! The post-auth half is the SPA's warning sink for this account, handed
+//! every run's `fauna_client_config::CustodyLegSignal` ([`emit_signal`]): a
+//! run that ends with custody unconfirmed for an admin of the bound nest calls
+//! it with the shared `LocalizedText` (`fauna_client_config::custody_leg_warning`),
 //! which the SPA renders through its one resolver onto the shell's message
-//! banner — the choice between the warnings is never the SPA's. The seed never leaves Rust: the leg fetches it over
+//! banner; a run that leaves nothing owed calls it with `null` — the cleared
+//! mark — and the custody warnings it may take down, so a warning an earlier
+//! run painted is withdrawn, and only that warning
+//! (`fauna_client_config::is_custody_leg_warning`). The choice between the
+//! warnings is never the SPA's. The seed never leaves Rust: the leg fetches it over
 //! `fauna.admin.deployment_seed.get` and merges it through the plane door.
 
 use std::cell::RefCell;
 
 use fauna_account_plane::account_driver::AccountStoreHandle;
 use fauna_client_config::{
-    DeploymentSeedCustody, SupersessionMarks, custody_leg_unattempted_warning, custody_leg_warning,
+    CUSTODY_MISMATCH_KEY, CUSTODY_UNCONFIRMED_KEY, CustodyLegSignal, DeploymentSeedCustody,
+    SupersessionMarks, custody_leg_unattempted_warning,
 };
 use fauna_client_pair::deployment_seed::run_custody_leg_bound;
 use fauna_core::localized::LocalizedText;
@@ -45,10 +51,10 @@ thread_local! {
 }
 
 /// The leg's outcome as the token the post-auth promise resolves to (for the
-/// console ring), plus the warning a run owes the admin, if any.
+/// console ring), plus the signal the run owes the SPA's sink.
 pub(crate) struct LegRun {
     pub(crate) token: &'static str,
-    pub(crate) warning: Option<LocalizedText>,
+    pub(crate) signal: CustodyLegSignal,
 }
 
 /// Record the post-auth half for `actor_id_hex`, replacing any earlier one.
@@ -72,18 +78,37 @@ fn warning_sink_for(actor_id_hex: &str) -> Option<js_sys::Function> {
     })
 }
 
-/// Hand a warning to the SPA's sink as a JS `LocalizedText`. A throwing (or
-/// unencodable) sink is logged, never propagated — the leg's outcome is
-/// already settled.
-pub(crate) fn emit_warning(sink: &js_sys::Function, warning: &LocalizedText) {
-    let value = match crate::rpc::to_js(warning) {
-        Ok(value) => value,
+/// The custody warnings a cleared mark may take down — every text
+/// [`fauna_client_config::is_custody_leg_warning`] counts as one — handed to
+/// the sink with the mark, so the SPA compares the banner against its own
+/// rendering of them and never spells the keys itself.
+fn custody_warnings() -> Vec<LocalizedText> {
+    [CUSTODY_MISMATCH_KEY, CUSTODY_UNCONFIRMED_KEY]
+        .into_iter()
+        .map(LocalizedText::key)
+        .collect()
+}
+
+/// Hand a run's signal to the SPA's sink: a warning as `sink(warning)`, a JS
+/// `LocalizedText`; the cleared mark as `sink(null, custodyWarnings)`. A
+/// throwing (or unencodable) sink is logged, never propagated — the leg's
+/// outcome is already settled.
+pub(crate) fn emit_signal(sink: &js_sys::Function, signal: &CustodyLegSignal) {
+    let encoded = match signal {
+        CustodyLegSignal::Warning(warning) => {
+            crate::rpc::to_js(warning).map(|w| (w, wasm_bindgen::JsValue::UNDEFINED))
+        }
+        CustodyLegSignal::Cleared => crate::rpc::to_js(&custody_warnings())
+            .map(|warnings| (wasm_bindgen::JsValue::NULL, warnings)),
+    };
+    let (first, second) = match encoded {
+        Ok(args) => args,
         Err(e) => {
-            tracing::warn!("[wasm/seed-custody] the warning did not encode: {e:?}");
+            tracing::warn!("[wasm/seed-custody] the signal did not encode: {e:?}");
             return;
         }
     };
-    if let Err(e) = sink.call1(&wasm_bindgen::JsValue::NULL, &value) {
+    if let Err(e) = sink.call2(&wasm_bindgen::JsValue::NULL, &first, &second) {
         tracing::warn!("[wasm/seed-custody] the warning sink threw: {e:?}");
     }
 }
@@ -101,7 +126,7 @@ pub(crate) async fn run_leg(client: &InnerClient, handle: &AccountStoreHandle) -
             tracing::warn!("[wasm/seed-custody] bound nest id unresolved: {e}");
             return LegRun {
                 token: "bound_unresolved",
-                warning: Some(custody_leg_unattempted_warning()),
+                signal: CustodyLegSignal::Warning(custody_leg_unattempted_warning()),
             };
         }
     };
@@ -136,7 +161,7 @@ pub(crate) async fn run_leg(client: &InnerClient, handle: &AccountStoreHandle) -
     }
     LegRun {
         token,
-        warning: custody_leg_warning(custody),
+        signal: CustodyLegSignal::of(custody),
     }
 }
 
@@ -153,8 +178,6 @@ pub(crate) fn spawn_at_store_ready(
     };
     wasm_bindgen_futures::spawn_local(async move {
         let run = run_leg(&client, &handle).await;
-        if let Some(warning) = run.warning {
-            emit_warning(&sink, &warning);
-        }
+        emit_signal(&sink, &run.signal);
     });
 }

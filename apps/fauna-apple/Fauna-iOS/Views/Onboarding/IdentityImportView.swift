@@ -101,11 +101,14 @@ struct IdentityImportView: View {
             Button(L.onboarding.identityImport.`import`) { submitImport() }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(importSecret.isEmpty)
             .accessibilityIdentifier(Ids.importSubmitButton)
-            .automationActivate(Ids.importSubmitButton, isEnabled: { !importSecret.isEmpty }) {
+            .automationActivate(Ids.importSubmitButton) {
                 submitImport()
             }
+            // Painted from the shared draft answer; `importIdentity` re-asks
+            // it (`ui/README.md` § Offer only what is possible, rule 4).
+            .faunaPossible(vm.importPossibility(importSecret))
+            FaunaPossibilityReason(vm.importPossibility(importSecret))
         }
         .padding(.horizontal)
     }

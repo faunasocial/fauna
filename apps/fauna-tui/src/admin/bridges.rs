@@ -82,11 +82,32 @@ pub(super) fn bridges_elements(state: &AdminState) -> Vec<Element> {
     ];
 
     // ── Pending approval ────────────────────────────────────────────────────
-    els.push(Element::label(
+    // An unread list is not an empty one (`docs/goal/ui/README.md` § Offer
+    // only what is possible, rule 5): until the read resolves each section
+    // says it is loading, or that the read failed — the line painted under its
+    // heading, and the heading's `reason` attr (`drivers/base.py::painted_reason`).
+    let read = state
+        .bridges
+        .as_ref()
+        .map(|m| m.read_state())
+        .unwrap_or_default();
+    let read_reason = fauna_core::possibility::Possibility::from_read(read)
+        .reason()
+        .map(|r| r.resolve(fauna_i18n::strings::lookup));
+    let section = |id: &str, title: &str| {
+        let heading = Element::label(id, title);
+        match &read_reason {
+            Some(reason) => heading.attr("reason", reason.clone()),
+            None => heading,
+        }
+    };
+    els.push(section(
         ids::ADMIN_BRIDGES_PENDING_SECTION,
         t::bridges_pending::PENDING_SECTION,
     ));
-    if pending.is_empty() {
+    if let Some(reason) = &read_reason {
+        els.push(Element::chrome(reason.clone()));
+    } else if pending.is_empty() {
         els.push(Element::chrome(t::bridges_pending::EMPTY));
     }
     for bridge in pending {
@@ -162,11 +183,16 @@ pub(super) fn bridges_elements(state: &AdminState) -> Vec<Element> {
     }
 
     // ── Approved bridges ────────────────────────────────────────────────────
-    els.push(Element::label(
+    els.push(section(
         ids::ADMIN_BRIDGES_APPROVED_SECTION,
         t::bridges_pending::APPROVED_SECTION,
     ));
-    if approved.is_empty() {
+    // The same read fills both lists, so the approved section says the same
+    // (`admin.md` § Errors & edge cases → *Controls wait for their read*,
+    // Bridges: "the pending and approved sections say they are loading").
+    if let Some(reason) = &read_reason {
+        els.push(Element::chrome(reason.clone()));
+    } else if approved.is_empty() {
         els.push(Element::chrome(t::bridges_pending::APPROVED_EMPTY));
     }
     for bridge in approved {
@@ -338,6 +364,42 @@ mod tests {
             .filter(|e| e.id == id)
             .map(|e| e.text.as_str())
             .collect()
+    }
+
+    /// Before the list read answers, BOTH sections say so — a line under each
+    /// heading and the heading's `reason` attr — and neither says it is empty
+    /// (`admin.md` § Errors & edge cases → *Controls wait for their read*).
+    #[test]
+    fn both_sections_say_loading_until_the_list_is_read() {
+        let app = app_with(snapshot(Vec::new(), Vec::new()));
+        assert!(
+            app.admin.bridges.is_none(),
+            "no machine: the read is pending"
+        );
+        let els = bridges_elements(&app.admin);
+        let loading = fauna_i18n::strings::common::STILL_LOADING;
+        for id in [
+            ids::ADMIN_BRIDGES_PENDING_SECTION,
+            ids::ADMIN_BRIDGES_APPROVED_SECTION,
+        ] {
+            let heading = els.iter().find(|e| e.id == id).expect("section heading");
+            assert_eq!(
+                heading
+                    .attrs
+                    .iter()
+                    .find(|(k, _)| k == "reason")
+                    .map(|(_, v)| v.as_str()),
+                Some(loading),
+                "{id} must say the list is loading"
+            );
+        }
+        let lines = els.iter().filter(|e| e.text == loading).count();
+        assert_eq!(lines, 2, "one loading line under each section heading");
+        assert!(
+            !els.iter().any(|e| e.text == t::bridges_pending::EMPTY
+                || e.text == t::bridges_pending::APPROVED_EMPTY),
+            "an unread list is never painted empty"
+        );
     }
 
     /// An mta card names "Mail bridge" (SMTP only — no calendar) and still shows

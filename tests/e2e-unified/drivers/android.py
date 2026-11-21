@@ -183,6 +183,29 @@ def _fatal_line(opener: str, block: list[str]) -> str:
 class AndroidBridgeDriver(HttpBridgeDriver):
     """Connects to the Kotlin bridge on an Android device via ADB port-forward."""
 
+    #: The installed app's application id (`applicationId` in `app/build.gradle.kts`;
+    #: the source namespace stays `com.fauna.app`). Every `run-as`, `pm`, `am`,
+    #: locale and logcat call names the app through it, so the kids subclass
+    #: (`AndroidKidsBridgeDriver`) changes the identity in one place.
+    APPLICATION_ID = "social.fauna.fauna"
+
+    #: The app-axis value this driver launches (`--app android`).
+    APP_NAME = "android"
+
+    # The bridge's ``/element/select-text`` makes the person's long-press on the
+    # element (`ElementOps.selectText`) and answers what the selection it made
+    # holds, read with the selection's own Ctrl+C copy into a sentinel-primed
+    # clipboard (``selected``) — or ``copy_offered`` with a ``why`` when the
+    # toolbar came up but the copy wrote nothing. ``/page/selection`` reads the
+    # standing selection the same way, never with the toolbar's Copy, which ends
+    # it. Both reads write the device clipboard.
+    _serves_select_text = True
+
+    @property
+    def TEST_PACKAGE(self) -> str:
+        """The instrumentation APK's package: AGP names it `<applicationId>.test`."""
+        return f"{self.APPLICATION_ID}.test"
+
     def log_scope_across_relaunch(self) -> str:
         """``"per-launch"`` — the reader slices from a byte floor taken at launch.
 
@@ -241,8 +264,9 @@ class AndroidBridgeDriver(HttpBridgeDriver):
     DOCUMENTS_ROOT_ID = "fauna"
 
     def documents_children(self, parent: str = DOCUMENTS_ROOT_ID) -> list[dict]:
-        """``parent``'s children as ``{id, name, flags}`` — the root lists the
-        account's presented sets."""
+        """``parent``'s children as ``{id, name, flags, size}`` — the root lists
+        the account's presented sets; ``size`` is the row's size as a picker
+        reads it (``None`` for a directory)."""
         return list(self._get("/documents/children", {"parent": parent}).get("children", []))
 
     def documents_create(self, parent: str, name: str) -> str:
@@ -274,6 +298,27 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         import base64
 
         return base64.b64decode(self._get("/documents/read", {"document_id": document_id})["body_b64"])
+
+    def documents_residency(self, document_id: str) -> dict:
+        """Where ``document_id``'s body rests on the device, read in-process
+        off the host the provider calls — never an open, so it never hydrates
+        (the twin of a desktop leg's ``stat``): ``{listed, size, hydrated,
+        root, body_bytes}``, ``root`` being ``"kept"`` (an edit the nest has
+        not recorded), ``"cache"`` (a recorded body) or ``None`` (a
+        placeholder: the bytes are on no disk of this device);
+        ``{listed: False}`` when the set lists no such document
+        (``on-demand-files-android.md`` § Android SAF DocumentsProvider
+        binding, *Two roots per set*)."""
+        return dict(self._get("/documents/residency", {"document_id": document_id})["residency"])
+
+    def documents_reclaim_cache(self) -> int:
+        """Trim the signed-in account's on-demand cache roots as the OS does
+        under storage pressure or on the user's "Clear cache" — the binding's
+        *free up space*, which is never a Fauna gesture. Nothing in the app is
+        told: the host observes the reclaim at its next open or pull (a
+        directory re-query is one). The kept root is untouched. Returns how
+        many files went."""
+        return int(self._post("/documents/reclaim-cache", {})["reclaimed"])
 
     def documents_parks(self) -> list[dict]:
         """Each presented set's park read, in-process off the host's state DB:
@@ -626,7 +671,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
              "-e", "port", str(self._device_port),
              # Test-APK package = applicationId + ".test"; the runner CLASS
              # keeps the source-package name (namespace stays com.fauna.app).
-             "social.fauna.fauna.test/com.fauna.app.bridge.BridgeInstrumentation"],
+             f"{self.TEST_PACKAGE}/com.fauna.app.bridge.BridgeInstrumentation"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             **popen_group_kwargs(),
@@ -673,7 +718,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         ``check=False`` is teardown's: it must not raise over a device that went
         away, and the next launch's wipe covers what this one could not reach."""
         adb = self._adb_cmd()
-        package = "social.fauna.fauna"
+        package = self.APPLICATION_ID
         subprocess.run(
             [*adb, "shell", "am", "force-stop", package],
             check=check, capture_output=True, timeout=15,
@@ -695,7 +740,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         `finally` (``set_app_locale(None)``)."""
         adb = self._adb_cmd()
         subprocess.run(
-            [*adb, "shell", "cmd", "locale", "set-app-locales", "social.fauna.fauna",
+            [*adb, "shell", "cmd", "locale", "set-app-locales", self.APPLICATION_ID,
              "--locales", tag or ""],
             check=True, capture_output=True, timeout=15,
         )
@@ -705,7 +750,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         env = config.get("environment", {})
         env["FAUNA_E2E_BRIDGE"] = f"http://127.0.0.1:{self._device_port}"
         body = {
-            "app": "social.fauna.fauna",
+            "app": self.APPLICATION_ID,
             "environment": env,
             # This driver's first launch is a new install: the bridge clears the
             # install-scoped state the other apps' per-test install dir starts
@@ -811,7 +856,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             rel = f"{self._DEVICE_STORE_ROOT}/{actor}/account-store"
             done = subprocess.run(
                 [*self._adb_cmd(), "shell",
-                 f'run-as social.fauna.fauna sh -c "rm -rf {rel} && test ! -e {rel} && echo FAUNA_WIPED"'],
+                 f'run-as {self.APPLICATION_ID} sh -c "rm -rf {rel} && test ! -e {rel} && echo FAUNA_WIPED"'],
                 capture_output=True, text=True, timeout=30,
             )
             if "FAUNA_WIPED" not in (done.stdout or ""):
@@ -906,7 +951,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         """SIGKILL the CURRENT launch's app process on the device (see
         `PlatformDriver.kill_uncleanly` for the crash-simulation contract).
 
-        The verb is `adb shell run-as social.fauna.fauna kill -9 <pid>`: the
+        The verb is `adb shell run-as <APPLICATION_ID> kill -9 <pid>`: the
         e2e build is debuggable, so `run-as` runs `kill` under the APP's own uid
         — the one uid that may signal it without root, and one that can reach no
         other app's process. SIGKILL is uncatchable, so nothing of the app runs:
@@ -1317,7 +1362,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             self._widget_mirror = tempfile.mkdtemp(prefix="fauna-e2e-android-widget-")
         local = os.path.join(self._widget_mirror, os.path.basename(self._WIDGET_SNAPSHOT))
         result = subprocess.run(
-            [*self._adb_cmd(), "exec-out", "run-as", "social.fauna.fauna",
+            [*self._adb_cmd(), "exec-out", "run-as", self.APPLICATION_ID,
              "cat", self._WIDGET_SNAPSHOT],
             capture_output=True, timeout=15,
         )
@@ -1344,7 +1389,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
 
     def app_data_exists(self, rel_path: str) -> bool:
         """Whether ``rel_path`` exists under the app's private data directory
-        (``/data/user/0/social.fauna.fauna``: ``files/…``, ``databases/…``).
+        (``/data/user/0/<APPLICATION_ID>``: ``files/…``, ``databases/…``).
 
         The account-scoped directories (`AccountStores.kt`: ``<filesDir>/<actor>``
         and ``<databases>/<actor>``) are on-device, where no host path reaches
@@ -1362,7 +1407,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             raise ValueError(f"not a plain relative app-data path: {rel_path!r}")
         result = subprocess.run(
             [*self._adb_cmd(), "exec-out",
-             f'run-as social.fauna.fauna sh -c "test -e {rel_path} && echo FAUNA_PRESENT"'],
+             f'run-as {self.APPLICATION_ID} sh -c "test -e {rel_path} && echo FAUNA_PRESENT"'],
             capture_output=True, timeout=15,
         )
         return b"FAUNA_PRESENT" in result.stdout
@@ -1374,7 +1419,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         ``app_data_exists`` is. Empty when the directory is absent."""
         self._require_plain_app_path(rel_dir)
         result = subprocess.run(
-            [*self._adb_cmd(), "exec-out", "run-as", "social.fauna.fauna",
+            [*self._adb_cmd(), "exec-out", "run-as", self.APPLICATION_ID,
              "find", rel_dir, "-maxdepth", str(int(max_depth))],
             capture_output=True, timeout=30,
         )
@@ -1395,7 +1440,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
 
     def _run_as_script(self, script: str, *, timeout: float = 30) -> bytes:
         result = subprocess.run(
-            [*self._adb_cmd(), "exec-out", f'run-as social.fauna.fauna sh -c "{script}"'],
+            [*self._adb_cmd(), "exec-out", f'run-as {self.APPLICATION_ID} sh -c "{script}"'],
             capture_output=True, timeout=timeout,
         )
         return result.stdout
@@ -1485,7 +1530,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         is no archive raises, never reading as a device with nothing on it.
         """
         result = subprocess.run(
-            [*self._adb_cmd(), "exec-out", "run-as", "social.fauna.fauna",
+            [*self._adb_cmd(), "exec-out", "run-as", self.APPLICATION_ID,
              "tar", "-cf", "-", "."],
             capture_output=True, timeout=120,
         )
@@ -1518,7 +1563,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         only, like ``helpers.sync_agent_config.custodian_store_blobs``.
         """
         result = subprocess.run(
-            [*self._adb_cmd(), "exec-out", "run-as", "social.fauna.fauna",
+            [*self._adb_cmd(), "exec-out", "run-as", self.APPLICATION_ID,
              "find", "files", "-type", "f", "-path", "*/backup-custodian/blobs/*"],
             capture_output=True, timeout=30,
         )
@@ -1552,7 +1597,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             f"while read f; do printf {self._CUSTODIAN_ROT} > \\$f && echo FAUNA_ROTTED; done"
         )
         result = subprocess.run(
-            [*self._adb_cmd(), "exec-out", f'run-as social.fauna.fauna sh -c "{script}"'],
+            [*self._adb_cmd(), "exec-out", f'run-as {self.APPLICATION_ID} sh -c "{script}"'],
             capture_output=True, timeout=60,
         )
         return result.stdout.count(b"FAUNA_ROTTED")
@@ -1570,7 +1615,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             f"[ \\\"\\$(cat \\$f)\\\" = {rot} ] && echo FAUNA_STILL_ROT; done; true"
         )
         result = subprocess.run(
-            [*self._adb_cmd(), "exec-out", f'run-as social.fauna.fauna sh -c "{script}"'],
+            [*self._adb_cmd(), "exec-out", f'run-as {self.APPLICATION_ID} sh -c "{script}"'],
             capture_output=True, timeout=60,
         )
         return result.stdout.count(b"FAUNA_STILL_ROT")
@@ -1618,12 +1663,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
                 )
         deadline = time.monotonic() + 30
         while True:
-            query = subprocess.run(
-                [*self._adb_cmd(), "shell", "content", "query", "--uri",
-                 "content://media/external/images/media", "--projection",
-                 "_display_name", "--where", f"_display_name='{name}'"],
-                capture_output=True, text=True, timeout=30,
-            )
+            query = self._media_store_query(name)
             if name in query.stdout:
                 return
             if time.monotonic() > deadline:
@@ -1633,6 +1673,31 @@ class AndroidBridgeDriver(HttpBridgeDriver):
                     f"last query: {query.stdout.strip()!r} {query.stderr.strip()!r}"
                 )
             time.sleep(0.5)
+
+    def _media_store_query(self, name: str) -> subprocess.CompletedProcess:
+        """MediaStore's image rows whose display name is ``name`` — the same
+        provider the app's `PhotoBackupEngine.scanMediaStore` reads."""
+        return subprocess.run(
+            [*self._adb_cmd(), "shell", "content", "query", "--uri",
+             "content://media/external/images/media", "--projection",
+             "_display_name", "--where", f"_display_name='{name}'"],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def photo_library_holds(self, host_path: str) -> bool:
+        """Whether the emulator's gallery still holds the photo
+        :meth:`add_photo_to_library` put there (matched by file name) — what
+        "the camera roll still has it" means on android, read from MediaStore
+        itself rather than through any counter of the app's. Raises on a failed
+        query, so an adb fault never reads as a missing photo."""
+        name = Path(host_path).name
+        query = self._media_store_query(name)
+        if query.returncode != 0:
+            raise RuntimeError(
+                f"MediaStore query for {name!r} failed (rc={query.returncode}): "
+                f"{query.stderr.strip()}"
+            )
+        return name in query.stdout
 
     def grant_notifications(self) -> None:
         """Pre-grant ``POST_NOTIFICATIONS`` (API 33+) before ``launch()``
@@ -1667,7 +1732,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             permissions += ("android.permission.POST_NOTIFICATIONS",)
         for permission in permissions:
             subprocess.run(
-                [*self._adb_cmd(), "shell", "pm", "grant", "social.fauna.fauna", permission],
+                [*self._adb_cmd(), "shell", "pm", "grant", self.APPLICATION_ID, permission],
                 check=True, capture_output=True, timeout=15,
             )
 
@@ -1725,10 +1790,6 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             if parts.hostname in ("127.0.0.1", "localhost") and parts.port:
                 self.ensure_reverse(parts.port)
         super().set_provider_base_urls(urls)
-
-    #: The installed app's application id (`applicationId` in `app/build.gradle.kts`;
-    #: the source namespace stays `com.fauna.app`).
-    APPLICATION_ID = "social.fauna.fauna"
 
     def dumpsys_package(self) -> str:
         """``dumpsys package`` for the INSTALLED app, read from the device —
@@ -1871,3 +1932,16 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             machine=machine,
             notes=notes,
         )
+
+
+class AndroidKidsBridgeDriver(AndroidBridgeDriver):
+    """`--app android-kids`: the android driver launching the Fauna Kids build on
+    android's venue (`feature-catalog.md` § Cell semantics). The one difference is
+    the identity — the application id every `run-as`, `pm`, `am`, locale and logcat
+    call names, and so the test-APK package the bridge is instrumented under — and
+    the artifact conftest built (`just android-kids-debug`: the drivable
+    `kidsDebug` build type over `just android-ffi-kids-test`). The android twin of
+    `IosKidsInProcessDriver`."""
+
+    APPLICATION_ID = "social.fauna.faunakids"
+    APP_NAME = "android-kids"

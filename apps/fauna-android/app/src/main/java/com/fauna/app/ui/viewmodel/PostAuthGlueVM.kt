@@ -2,12 +2,38 @@ package com.fauna.app.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.AppMessages
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.ShellLog
 import com.fauna.app.core.SuccessionAftermathHost
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import com.fauna.ffi.FfiCustodyLegSink
 import uniffi.fauna_core.LocalizedText
+
+/**
+ * The custody leg's signals on the warning banner (`box-recovery.md` § The
+ * plane-era recovery floor, *(c) The writes*): a warning is painted; the
+ * cleared mark — a later run, the reconnect retry, confirmed custody — takes
+ * the banner down only while it still shows a custody warning, [custodyWarnings]
+ * rendered through [render] (the shared `is_custody_leg_warning` rule), so an
+ * unrelated warning shown since stands. Called on a runtime thread; the
+ * banner's state flows are thread-safe and the clear is atomic.
+ */
+class CustodyWarningSink(
+    private val messages: AppMessages,
+    private val render: (LocalizedText) -> String?,
+    private val custodyWarnings: List<LocalizedText>,
+) : FfiCustodyLegSink {
+    override fun onWarning(warning: LocalizedText) {
+        ShellLog.w("DeploymentSeedGlue", "custody leg: custody unconfirmed (${warning.key})")
+        render(warning)?.let { messages.showWarning(it) }
+    }
+
+    override fun onCleared() {
+        messages.clearWarningIf { shown -> custodyWarnings.any { render(it) == shown } }
+    }
+}
 
 /**
  * The legs every flavor runs at the universal post-auth hook (the authed app
@@ -167,20 +193,20 @@ class PostAuthGlueVM @Inject constructor(
      * store yet is retried there and at the next connect.
      *
      * A run that ends with custody **unconfirmed for an admin** is USER-VISIBLE,
-     * never a silent log: the answer is the shared warning
-     * (`fauna_client_config::custody_leg_warning`) as a [LocalizedText], which the
-     * launch surface renders through [com.fauna.app.ui.util.resolveLocalized] onto
-     * its warning banner (the android idiom of linux's toast). `null` — custody
-     * held or captured, or not an admin here — shows nothing. Which warning, and
-     * its wording, is decided in Rust, never here.
+     * never a silent log: every run's signal goes to [sink] ([custodySink]) —
+     * the first run's and each reconnect retry's — which paints the shared
+     * warning (`fauna_client_config::custody_leg_warning`) on the warning banner
+     * (the android idiom of linux's toast) and takes it down on a later run's
+     * cleared mark. Which warning, and its wording, is decided in Rust, never
+     * here.
      */
-    suspend fun runDeploymentSeedCustodyLeg(): LocalizedText? {
-        val warning = api.selfHealDeploymentSeedCustody()
-        if (warning != null) {
-            ShellLog.w("DeploymentSeedGlue", "custody leg: custody unconfirmed (${warning.key})")
-        }
-        return warning
+    suspend fun runDeploymentSeedCustodyLeg(sink: FfiCustodyLegSink) {
+        api.selfHealDeploymentSeedCustody(sink)
     }
+
+    /** The custody leg's sink over [messages], rendering through [render]. */
+    fun custodySink(messages: AppMessages, render: (LocalizedText) -> String?): FfiCustodyLegSink =
+        CustodyWarningSink(messages, render, api.deploymentSeedCustodyWarnings())
 
     /**
      * The S8 D1 + D3 client-driven seal backfill (`file-sync.md` § Sealed

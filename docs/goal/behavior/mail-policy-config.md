@@ -350,6 +350,8 @@ These knobs live on the user's **`mail-settings` page family** in their own Faun
 | List-send per-account daily recipient cap (≤ admin ceiling) | 20000 / day | `mail.account.list_recipients_per_day` | `account-detail-mail-list-recipients-per-day` |
 | List-send per-account daily send count cap | 5 sends / day | `mail.account.list_sends_per_day` | `account-detail-mail-list-sends-per-day` |
 
+The user's Tier-3 controls wait for the read of the value they write before they are live, and a commit made before it sends nothing — an empty pre-read override is never "clear the override": owned by [`../ui/mail-settings.md`](../ui/mail-settings.md) § Errors & edge cases (*Controls wait for their reads*).
+
 ### Compile-time decisions (NOT in this catalog)
 
 These are intentionally not configurable; changing them would require a code change + a deliberate security review:
@@ -433,8 +435,9 @@ UX details (the ui.yaml ids for the flat admin pane + `mail-settings` family, pe
 
 Every integer knob in this catalog rides the wire as `Option<u32>` / `Option<u64>`, so a negative
 is *unrepresentable* rather than merely rejected (the best shape sweep named), and the apps
-save each field as `parse_count(text).unwrap_or(prev)` — an unparseable edit keeps the persisted
-value (`value-formatting.md` § Mail-knob validation). **So a `0` reaching a door is always a
+refuse a save whose field does not parse rather than send it (`admin.md` § Errors & edge cases →
+*A form's submit is live only for a draft the nest would accept*; the parse is `value-formatting.md`
+§ Mail-knob validation). **So a `0` reaching a door is always a
 deliberate keystroke, never a parse artifact**, and every knob owes an answer to "what does `0`
 mean here?". Swept knob-by-knob against the consumer (sweep, 2026-08-18).
 

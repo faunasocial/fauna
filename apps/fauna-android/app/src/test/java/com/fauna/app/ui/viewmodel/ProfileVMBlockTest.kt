@@ -2,6 +2,8 @@ package com.fauna.app.ui.viewmodel
 
 import android.content.Context
 import androidx.lifecycle.SavedStateHandle
+import androidx.test.core.app.ApplicationProvider
+import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.SecureStorage
 import com.fauna.app.core.WardAsks
@@ -15,6 +17,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.mockingDetails
 import org.mockito.Mockito.`when` as whenever
@@ -27,6 +31,8 @@ import org.mockito.Mockito.`when` as whenever
  * `a_late_open_hydration_does_not_rewind_the_user_toggle`, driven through the VM.
  */
 @ExperimentalCoroutinesApi
+@RunWith(FaunaRobolectricTestRunner::class)
+@Config(sdk = [34])
 class ProfileVMBlockTest {
 
     @Before
@@ -39,7 +45,8 @@ class ProfileVMBlockTest {
 
     private fun vm(api: ApiClient): ProfileVM {
         val storage = mock(SecureStorage::class.java)
-        val context = mock(Context::class.java)
+        // A real context: a refused press resolves its reason for `error-message`.
+        val context: Context = ApplicationProvider.getApplicationContext()
         whenever(api.wardAsks).thenReturn(WardAsks())
         whenever(storage.secretHex).thenReturn("11".repeat(32))
         return ProfileVM(SavedStateHandle(mapOf("actorId" to peer)), storage, api, context)
@@ -56,9 +63,13 @@ class ProfileVMBlockTest {
         assertFalse("the edge is not yet known at open", vm.blockKnown.value)
         vm.toggleBlock()
         assertEquals0("a press before the read lands issues nothing", blockCalls(api))
+        // Rule 6: the press asks the toggle's own answer and refuses with its reason.
+        org.junit.Assert.assertEquals("Still loading — try again in a moment", vm.errorMessage.value)
+        assertFalse(vm.blockAnswer.value is uniffi.fauna_core.Possibility.Possible)
 
         vm.applyBlockRead(true)
         assertTrue(vm.blockKnown.value)
+        assertTrue(vm.blockAnswer.value is uniffi.fauna_core.Possibility.Possible)
         assertTrue("the read says blocked", vm.blocked.value)
     }
 
@@ -74,6 +85,36 @@ class ProfileVMBlockTest {
         // The open-time read, issued before the press, finally returns not-blocked.
         vm.applyBlockRead(false)
         assertTrue("a read issued before the press must not rewind it", vm.blocked.value)
+    }
+
+    @Test
+    fun aFailedOpenTimeReadBlocksTheToggleWithLoadFailed() {
+        val api = mock(ApiClient::class.java)
+        val vm = vm(api)
+
+        vm.applyBlockRead(null)
+        assertFalse("a failed read never marks the edge known", vm.blockKnown.value)
+        assertFalse(vm.blockAnswer.value is uniffi.fauna_core.Possibility.Possible)
+        org.junit.Assert.assertEquals(
+            uniffi.fauna_core.Possibility.Blocked(uniffi.fauna_core.LocalizedText("common.load_failed", emptyMap())),
+            vm.blockAnswer.value,
+        )
+        vm.toggleBlock()
+        assertEquals0("a press after a failed read issues nothing", blockCalls(api))
+    }
+
+    @Test
+    fun aLateFailedReadDoesNotUndoTheViewersPress() {
+        val api = mock(ApiClient::class.java)
+        val vm = vm(api)
+        vm.applyBlockRead(false)
+        vm.toggleBlock() // blocks
+        assertTrue(vm.blocked.value)
+
+        vm.applyBlockRead(null)
+        assertTrue(vm.blocked.value)
+        assertTrue(vm.blockKnown.value)
+        assertTrue(vm.blockAnswer.value is uniffi.fauna_core.Possibility.Possible)
     }
 
     private fun assertEquals0(message: String, actual: Int) =

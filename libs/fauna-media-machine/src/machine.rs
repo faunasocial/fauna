@@ -19,9 +19,11 @@ use fauna_client_media::media::MediaItem;
 use fauna_client_media::{FolderFilter, MediaSnapshot, MediaSortKey};
 use fauna_core::crypto::BackupKey;
 use fauna_core::file_download::{FileDownloadKeys, PredecessorSealKey, RecordSigner};
+use fauna_core::folder_create::{FIRST_FOLDER_NAME, PlainFolderMaker};
 use fauna_core::followed_media::{FollowedFetchError, FollowedMediaScope, FollowedMediaSource};
 use fauna_core::localized::LocalizedText;
 use fauna_core::path_crypto;
+use fauna_core::possibility::{Possibility, ReadState};
 
 use crate::blob_uploader::MediaBlobUploader;
 use crate::nest_api::{MediaApiError, MediaNestApi};
@@ -47,16 +49,28 @@ const SHARE_CREATE_ERROR_KEY: &str = "share_link.error_create";
 const SHARE_LIST_ERROR_KEY: &str = "share_link.error_list";
 /// i18n key for a failed revoke ("Couldn't revoke the link: {message}").
 const SHARE_REVOKE_ERROR_KEY: &str = "share_link.error_revoke";
-/// i18n key for an `upload_selected()` with no set to target because the
-/// caller has **no folders at all** — the create-one-first copy. No
-/// `{message}` arg — a pure client-side condition. An *empty* set is a valid
-/// target and never lands here — every own folder is an upload target
-/// (`media.md` § Layout & flow).
-const NO_SET_ERROR_KEY: &str = "media.error_no_set";
+/// i18n key for an `upload_selected()` on a folderless account whose first
+/// folder could not be made (`media.md` § Errors & edge cases → *No folder to
+/// upload into*, ruling 6) — a whole sentence carrying the create's own
+/// reason as `{message}`. Nothing is uploaded; the next upload tries again.
+const FIRST_FOLDER_ERROR_KEY: &str = "media.error_first_folder";
+/// The `{message}` of [`FIRST_FOLDER_ERROR_KEY`] on a machine no builder
+/// handed a maker ([`MediaMachine::set_folder_maker`]).
+const NO_FOLDER_MAKER_DETAIL: &str = "this app cannot create folders yet";
+/// The `{message}` of [`FIRST_FOLDER_ERROR_KEY`] when the create answered but
+/// the re-read does not carry the folder (ruling 4): uploading into it would
+/// send the record into `not_found`.
+const FIRST_FOLDER_NOT_LISTED_DETAIL: &str =
+    "the folder was created but your folders do not list it yet — try again in a moment";
+/// The `{message}` an [`MediaMachine::upload`] reports through
+/// [`UPLOAD_ERROR_KEY`] when the folder it was handed is not among the
+/// caller's folders on a complete read (deleted meanwhile, or never theirs).
+const FOLDER_GONE_DETAIL: &str = "that folder is no longer among your folders — pick another";
 /// The `{message}` an upload reports through [`REFRESH_ERROR_KEY`] when it
 /// found no target and the page's reads never completed (rows or own sets
 /// still held back for want of custody, or the folder list unread): the
-/// caller may well have a folder, so "create one first" would be false.
+/// caller may well have a folder, so neither making one nor saying it is
+/// gone would be true.
 const FOLDERS_NOT_LOADED_DETAIL: &str =
     "your folders have not finished loading yet — try again in a moment";
 
@@ -211,7 +225,7 @@ struct State {
     /// Whether the last committed read was **complete** — nothing held back
     /// for want of custody, and the folder list read. `false` before any read.
     /// The upload gestures read it: no target on an incomplete read is "your
-    /// folders have not loaded yet", never `media.error_no_set`.
+    /// folders have not loaded yet", never a first folder made on a guess.
     complete: bool,
     /// The generation of the newest read that has committed (0 = none) — the
     /// newest-landed rule `MediaMachine::refresh_gen` documents.
@@ -559,7 +573,132 @@ impl ForeignActive {
     }
 }
 
+/// What the page's own list says about a write into one set: whether the
+/// caller may only read it, and whether its content stays on the owner's
+/// devices. One reading for the upload, delete and restore answers and for
+/// the actions that ask them (`ui/README.md` § Offer only what is possible,
+/// rule 6). A set the list does not carry reads as neither: the nest's own
+/// gate still decides it, and the action reports what the nest says.
+#[derive(Debug, Clone, Copy, Default)]
+struct WriteStanding {
+    reader: bool,
+    metadata_only: bool,
+}
+
+impl WriteStanding {
+    fn of(raw: &MediaSnapshot, target: SetKey) -> Self {
+        match target {
+            SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel)) => raw
+                .foreign_set(&channel)
+                .map(|f| Self {
+                    reader: !f.writer,
+                    metadata_only: f.metadata_only,
+                })
+                .unwrap_or_default(),
+            _ => target
+                .row_in(&raw.known_folders)
+                .map(|f| Self {
+                    reader: f.member && !f.writer,
+                    metadata_only: f.metadata_only,
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Why an upload into the set is refused: the metadata-only reading first
+    /// (this door keeps no copy, whoever writes), then the reader's.
+    fn upload_refusal(self) -> Option<&'static str> {
+        if self.metadata_only {
+            Some(METADATA_ONLY_FOLDER_ERROR_KEY)
+        } else if self.reader {
+            Some(READ_ONLY_SHARED_FOLDER_ERROR_KEY)
+        } else {
+            None
+        }
+    }
+}
+
 impl State {
+    /// The set an upload's target **value** writes into, with the name its
+    /// record carries — [`MediaMachine::resolve_target`]'s answer over a held
+    /// lock, so a predicate and its action resolve alike.
+    fn resolve_target(&self, filter: &FolderFilter) -> Option<(String, SetKey)> {
+        match filter {
+            // A foreign set has no row on this nest: it resolves to the set the
+            // options offer (`ui/media.md` § Cross-nest shared sets), its name
+            // the one the record carries — the channel form is its address.
+            FolderFilter::Ref(r @ fauna_core::folder_keys::FolderRef::Foreign(channel)) => {
+                let set = self.raw.foreign_set(channel)?;
+                Some((set.name.clone(), SetKey::Ref(*r)))
+            }
+            FolderFilter::Ref(r) => {
+                let row = self.raw.row_for(filter)?;
+                Some((row.name.clone(), SetKey::Ref(*r)))
+            }
+            FolderFilter::Name(name) => Some((
+                name.clone(),
+                SetKey::of(self.raw.own_row(name).map(|f| f.id), name),
+            )),
+        }
+    }
+
+    /// The upload target `upload_selected` resolves: the selected set's
+    /// value, else the all-media default (the first own set).
+    fn upload_pick(&self) -> Option<String> {
+        self.filter
+            .as_ref()
+            .map(FolderFilter::value)
+            .or_else(|| self.raw.default_upload_target())
+    }
+
+    /// The upload's answer (`ui/media.md` § Errors & edge cases → *What this
+    /// person may write*): absent inside a followed scope (structurally
+    /// read-only); blocked while the first read has not resolved (rule 5);
+    /// blocked with the action's own reason when the target is a set the
+    /// caller may only read or a metadata-only one; else possible — a
+    /// folderless account included (*No folder to upload into*, ruling 5).
+    fn upload_possibility(&self) -> Possibility {
+        if self.followed_active.is_some() {
+            return Possibility::Absent;
+        }
+        if !self.loaded {
+            return Possibility::from_read(if self.error.is_some() {
+                ReadState::Failed
+            } else {
+                ReadState::Pending
+            });
+        }
+        let refusal = self
+            .upload_pick()
+            .and_then(|value| self.resolve_target(&FolderFilter::parse(&value)))
+            .and_then(|(_, target)| WriteStanding::of(&self.raw, target).upload_refusal());
+        match refusal {
+            Some(key) => Possibility::blocked(LocalizedText::key(key)),
+            None => Possibility::Possible,
+        }
+    }
+
+    /// Why a delete or a restore into `target` is refused, if it is: inside a
+    /// followed scope, the followed reason; in a set the caller may only read,
+    /// the reader's. A metadata-only set takes both — they write no bytes.
+    fn write_refusal(&self, target: Option<SetKey>) -> Option<&'static str> {
+        if self.followed_active.is_some() {
+            return Some(FOLLOWED_READ_ONLY_ERROR_KEY);
+        }
+        target
+            .filter(|t| WriteStanding::of(&self.raw, *t).reader)
+            .map(|_| READ_ONLY_SHARED_FOLDER_ERROR_KEY)
+    }
+
+    /// The delete / restore answer over [`Self::write_refusal`]: a refusal is
+    /// one this person can never lift from here, so the control is absent.
+    fn write_possibility(&self, target: Option<SetKey>) -> Possibility {
+        match self.write_refusal(target) {
+            Some(_) => Possibility::Absent,
+            None => Possibility::Possible,
+        }
+    }
+
     /// A new gesture began: the held press answer (`held_error`) stops
     /// standing, and leaves the page if it is still the one shown.
     fn drop_held_error(&mut self) {
@@ -660,6 +799,12 @@ pub struct MediaMachine {
     /// Devices machine holds, so a Media browse fetch feeds the very cache the
     /// Folders page's probe reads.
     followed_source: std::sync::OnceLock<Arc<dyn FollowedMediaSource>>,
+    /// The first folder's maker (`ui/media.md` § Errors & edge cases → *No
+    /// folder to upload into*): the ordinary folder create, driven headlessly
+    /// (`fauna_folders_machine::first_folder::HeadlessFolderMaker`). Set once
+    /// post-construction by the platform builder ([`Self::set_folder_maker`]);
+    /// unset → a folderless upload says the folder could not be made.
+    folder_maker: std::sync::OnceLock<Arc<dyn PlainFolderMaker>>,
     /// The client's MLS join-filter over the member-visible folder rows
     /// (`fauna_protocol::member_rows`, the one filter the Folders page runs —
     /// `media.md` § Layout & flow → *Where the offerable sets come from*).
@@ -758,6 +903,7 @@ impl MediaMachine {
             folder_keys,
             foreign_fetchers: std::sync::OnceLock::new(),
             followed_source: std::sync::OnceLock::new(),
+            folder_maker: std::sync::OnceLock::new(),
             mls_query: Mutex::new(None),
             owner_backup_key: Mutex::new(None),
             predecessor_backup_keys: Mutex::new(Vec::new()),
@@ -783,6 +929,12 @@ impl MediaMachine {
     /// the platform builder after `new()`; later calls are no-ops.
     pub fn set_followed_media_source(&self, source: Arc<dyn FollowedMediaSource>) {
         let _ = self.followed_source.set(source);
+    }
+
+    /// Wire the first folder's maker (see the field doc). Set once by the
+    /// platform builder after `new()`; later calls are no-ops.
+    pub fn set_folder_maker(&self, maker: Arc<dyn PlainFolderMaker>) {
+        let _ = self.folder_maker.set(maker);
     }
 
     /// Wire the client's MLS join-filter (see the field doc) — the
@@ -903,6 +1055,14 @@ impl MediaMachine {
     /// (`path-sealing.md` § S8 D2). Kept out of the UniFFI-exported blocks.
     pub fn has_folder_keys(&self) -> bool {
         self.folder_keys.is_some()
+    }
+
+    /// Whether a builder handed this machine the first folder's maker
+    /// ([`Self::set_folder_maker`]) — the same kind of call-site pin, since a
+    /// machine built without one cannot make a folderless account's first
+    /// folder and its first upload fails. Kept out of the UniFFI-exported blocks.
+    pub fn has_folder_maker(&self) -> bool {
+        self.folder_maker.get().is_some()
     }
 }
 
@@ -1264,22 +1424,16 @@ impl MediaMachine {
     /// write); a name to the caller's own set of that name, else the name
     /// degrade ([`Self::target_set_key`]).
     fn resolve_target(&self, filter: &FolderFilter) -> Option<(String, SetKey)> {
-        match filter {
-            // A foreign set has no row on this nest: it resolves to the set the
-            // options offer (`ui/media.md` § Cross-nest shared sets), its name
-            // the one the record carries — the channel form is its address.
-            FolderFilter::Ref(r @ fauna_core::folder_keys::FolderRef::Foreign(channel)) => {
-                let s = self.state.lock().unwrap();
-                let set = s.raw.foreign_set(channel)?;
-                Some((set.name.clone(), SetKey::Ref(*r)))
-            }
-            FolderFilter::Ref(r) => {
-                let s = self.state.lock().unwrap();
-                let row = s.raw.row_for(filter)?;
-                Some((row.name.clone(), SetKey::Ref(*r)))
-            }
-            FolderFilter::Name(name) => Some((name.clone(), self.target_set_key(name))),
-        }
+        self.state.lock().unwrap().resolve_target(filter)
+    }
+
+    /// Set the page error to `key`'s sentence (no detail) and notify — the
+    /// refusal a gesture gives with the reason its predicate answered.
+    fn refuse_with(&self, key: &str) {
+        let err = LocalizedText::key(key);
+        tracing::warn!(target: "fauna_media", "{}", err.log_line());
+        self.state.lock().unwrap().error = Some(err);
+        self.observer.on_changed();
     }
 
     /// The owner key injected by [`Self::set_owner_backup_key`], cloned out from
@@ -1646,14 +1800,49 @@ impl MediaMachine {
         self.state.lock().unwrap().complete
     }
 
-    /// The refusal for an upload with no target: `media.error_no_set` only
-    /// when a complete read found no own folder (`media.md` § Errors & edge
-    /// cases); otherwise the folders have not loaded yet.
-    fn refuse_no_target(&self, complete: bool) {
-        if complete {
-            self.set_error_no_upload_target();
-        } else {
-            self.set_error(REFRESH_ERROR_KEY, FOLDERS_NOT_LOADED_DETAIL);
+    /// The refusal for an upload whose reads never completed: the caller may
+    /// well have a folder, so the folders have not loaded yet — never a folder
+    /// made on a guess (`media.md` § Errors & edge cases → *No folder to upload
+    /// into*, ruling 2).
+    fn refuse_folders_not_loaded(&self) {
+        self.set_error(REFRESH_ERROR_KEY, FOLDERS_NOT_LOADED_DETAIL);
+    }
+
+    /// The first folder (`media.md` § Errors & edge cases → *No folder to
+    /// upload into*, rulings 2–4, 6): an upload with no selected target on a
+    /// page whose COMPLETE read found no own folder makes
+    /// [`FIRST_FOLDER_NAME`] through the ordinary create (the injected
+    /// [`PlainFolderMaker`]), re-reads — the create reply carries no row, and
+    /// a duplicate made by another device is learned the same way — and
+    /// uploads into it. A failed create, or one the re-read does not carry,
+    /// sets [`FIRST_FOLDER_ERROR_KEY`] and uploads nothing.
+    async fn upload_into_first_folder(
+        &self,
+        device_id: String,
+        path: String,
+        raw_bytes: Vec<u8>,
+        backup_key: Vec<u8>,
+    ) {
+        let Some(maker) = self.folder_maker.get().map(Arc::clone) else {
+            self.set_error(FIRST_FOLDER_ERROR_KEY, NO_FOLDER_MAKER_DETAIL);
+            return;
+        };
+        if let Err(reason) = maker.make_plain_folder(FIRST_FOLDER_NAME).await {
+            self.set_error(FIRST_FOLDER_ERROR_KEY, &reason);
+            return;
+        }
+        let owner = <[u8; 32]>::try_from(backup_key.as_slice())
+            .ok()
+            .map(BackupKey::from_bytes)
+            .or_else(|| self.owner_key());
+        self.refresh_settling(owner, true).await;
+        let target = self.state.lock().unwrap().upload_pick();
+        match target {
+            Some(folder) => {
+                self.upload(folder, device_id, path, raw_bytes, backup_key)
+                    .await
+            }
+            None => self.set_error(FIRST_FOLDER_ERROR_KEY, FIRST_FOLDER_NOT_LISTED_DETAIL),
         }
     }
 
@@ -2018,6 +2207,31 @@ impl MediaMachine {
     /// active filter sorted by the active key, the filter options, the view state,
     /// and any error. Filter + sort run in shared Rust
     /// (`MediaSnapshot::view`); `media.md` § Where logic lives.
+    /// Whether the upload control (`file-upload` / `upload-button`) can
+    /// succeed now (`ui/README.md` § Offer only what is possible; `ui/media.md`
+    /// § Errors & edge cases → *What this person may write*). *Absent* inside a
+    /// followed scope; *blocked* "still loading" before the first read
+    /// resolves (or "load failed" when it failed); *blocked* with the action's
+    /// own reason when the target is a set the caller may only read or a
+    /// metadata-only one; else *possible* — a folderless account included.
+    /// `upload_selected` refuses on the same readings.
+    pub fn upload_possibility(&self) -> Possibility {
+        self.state.lock().unwrap().upload_possibility()
+    }
+
+    /// Whether a delete or a version restore can succeed on an item of the
+    /// set `folder` names (a filter value: the item's `filter_value`).
+    /// *Absent* inside a followed scope and in a set the caller may only read
+    /// — this person can never write there; else *possible*. `delete` and
+    /// `restore_version` refuse on the same reading.
+    pub fn write_possibility(&self, folder: String) -> Possibility {
+        let s = self.state.lock().unwrap();
+        let target = s
+            .resolve_target(&FolderFilter::parse(&folder))
+            .map(|(_, t)| t);
+        s.write_possibility(target)
+    }
+
     pub fn snapshot(&self) -> MediaPageSnapshot {
         let author_held = self.share_author_held();
         let s = self.state.lock().unwrap();
@@ -2174,6 +2388,25 @@ impl MediaMachine {
 
     // ── Gestures ────────────────────────────────────────────────────────
 
+    /// The page's entry read — every app's become-visible door (linux's map
+    /// hook, tui's nav edge). A visit starts fresh: the held press answer
+    /// ([`MediaMachine::report_error`]) answered a press on an earlier visit
+    /// and stops standing, then the page re-reads as [`MediaMachine::refresh`].
+    /// A re-read inside the visit (a sync push, the settle) keeps calling
+    /// `refresh`, which keeps the answer.
+    pub async fn refresh_on_visit(&self, backup_key: Option<Vec<u8>>) {
+        let dropped = {
+            let mut s = self.state.lock().unwrap();
+            let before = s.error.is_some();
+            s.drop_held_error();
+            before && s.error.is_none()
+        };
+        if dropped {
+            self.observer.on_changed();
+        }
+        self.refresh(backup_key).await;
+    }
+
     /// Re-read the cross-set all-media aggregate (`fauna.media.list`, paged). On a
     /// read failure the prior data is kept and the page error is set; on success
     /// the error clears. The view state (sort / filter / toggle) is untouched.
@@ -2243,7 +2476,10 @@ impl MediaMachine {
                 self.upload_into(name, target, device_id, path, raw_bytes, backup_key)
                     .await
             }
-            None => self.refuse_no_target(complete),
+            // The folder this upload was handed is not the caller's on a
+            // complete read — never a first folder: a target was named.
+            None if complete => self.set_error(UPLOAD_ERROR_KEY, FOLDER_GONE_DETAIL),
+            None => self.refuse_folders_not_loaded(),
         }
     }
 
@@ -2257,8 +2493,9 @@ impl MediaMachine {
     /// never a shared one: `media.md` § Encryption at rest → *The filter and
     /// the upload target address the row*, (d)) — the goal doc's "the client
     /// … defaults the target set; the upload always lands in exactly one set."
-    /// When the caller has no own folder at all the page error is set and
-    /// nothing is uploaded.
+    /// When a complete read finds no own folder the upload makes the first
+    /// folder and lands in it (`media.md` § Errors & edge cases → *No folder
+    /// to upload into*).
     ///
     /// The default used to be "the first set that *has media*", which made a
     /// brand-new empty set impossible to upload into: it could not be defaulted
@@ -2275,12 +2512,7 @@ impl MediaMachine {
         raw_bytes: Vec<u8>,
         backup_key: Vec<u8>,
     ) {
-        let pick = |s: &State| {
-            s.filter
-                .as_ref()
-                .map(FolderFilter::value)
-                .or_else(|| s.raw.default_upload_target())
-        };
+        let pick = State::upload_pick;
         // Inside a foreign browse scope the filter holds the scope's
         // `foreign:` ref, so the upload targets the set the user is looking at;
         // a reader's or a metadata-only set's refusal is `upload_into`'s
@@ -2306,8 +2538,8 @@ impl MediaMachine {
         if target.is_none() {
             // No own folder on a page whose reads never completed — right
             // after sign-in every signed row and sealed own-set name is held
-            // until custody reads. Settle first; "create a folder first" is
-            // only true of a complete read (`media.md` § Errors & edge cases).
+            // until custody reads. Settle first; "you own no folder" (which makes
+            // the first one) is only true of a complete read (`media.md` ruling 2).
             complete = self.settle_before_refusing(&backup_key).await;
             target = pick(&self.state.lock().unwrap());
         }
@@ -2316,7 +2548,11 @@ impl MediaMachine {
                 self.upload(folder, device_id, path, raw_bytes, backup_key)
                     .await
             }
-            None => self.refuse_no_target(complete),
+            None if complete => {
+                self.upload_into_first_folder(device_id, path, raw_bytes, backup_key)
+                    .await
+            }
+            None => self.refuse_folders_not_loaded(),
         }
     }
 
@@ -2653,6 +2889,13 @@ impl MediaMachine {
             self.set_error(DELETE_ERROR_KEY, &format!("no listed set is {folder}"));
             return;
         };
+        // The answer the delete control paints from (`Self::write_possibility`):
+        // a set the caller may only read is refused here with its reason.
+        let refusal = self.state.lock().unwrap().write_refusal(Some(target));
+        if let Some(key) = refusal {
+            self.refuse_with(key);
+            return;
+        }
         let path_sealed = self.seal_record_path(target, &path).await;
         // A writer member's delete in a set homed on another nest is the same
         // relayed record door the upload uses — a tombstone (`ui/media.md`
@@ -2846,6 +3089,13 @@ impl MediaMachine {
             }
             None => self.version_set_key(&folder, &path, &version),
         };
+        // The answer the restore control paints from (`Self::write_possibility`):
+        // a same-nest set the caller may only read is refused here too.
+        let refusal = self.state.lock().unwrap().write_refusal(Some(set));
+        if let Some(key) = refusal {
+            self.refuse_with(key);
+            return;
+        }
         let folder_id = version.folder_id;
         // Same seal contract as `delete` — the re-point row is append-only
         // nest-side, so the gesture is this row's only chance to seal. A
@@ -3609,38 +3859,15 @@ impl MediaMachine {
         raw_bytes: Vec<u8>,
         backup_key: Vec<u8>,
     ) {
+        // The reading the upload's answer paints from (`State::upload_possibility`):
+        // a foreign set off its custody record, a same-nest one off its row,
+        // the metadata-only refusal first.
         let refusal = {
             let s = self.state.lock().unwrap();
-            match target {
-                // A foreign set refuses on the same two readings, off its
-                // custody record, the metadata-only one first.
-                SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel)) => {
-                    s.raw.foreign_set(&channel).and_then(|f| {
-                        if f.metadata_only {
-                            Some(METADATA_ONLY_FOLDER_ERROR_KEY)
-                        } else if !f.writer {
-                            Some(READ_ONLY_SHARED_FOLDER_ERROR_KEY)
-                        } else {
-                            None
-                        }
-                    })
-                }
-                _ => target.row_in(&s.raw.known_folders).and_then(|f| {
-                    if f.metadata_only {
-                        Some(METADATA_ONLY_FOLDER_ERROR_KEY)
-                    } else if f.member && !f.writer {
-                        Some(READ_ONLY_SHARED_FOLDER_ERROR_KEY)
-                    } else {
-                        None
-                    }
-                }),
-            }
+            WriteStanding::of(&s.raw, target).upload_refusal()
         };
         if let Some(key) = refusal {
-            let err = LocalizedText::key(key);
-            tracing::warn!(target: "fauna_media", "{}", err.log_line());
-            self.state.lock().unwrap().error = Some(err);
-            self.observer.on_changed();
+            self.refuse_with(key);
             return;
         }
         match self
@@ -4005,8 +4232,8 @@ impl MediaMachine {
             // the version's manifest as the nest holds it, which the mint
             // unseals under the owner root (or a predecessor's) to derive the
             // link's chunk keys — refusing one no held root opens.
-            let manifest = self.fetch_link_manifest(manifest_hash).await?;
-            fauna_client_share::mint_private_link(&author, &file, manifest, lifetime, now)
+            let (manifest, pages) = self.fetch_link_manifest(manifest_hash).await?;
+            fauna_client_share::mint_private_link(&author, &file, manifest, &pages, lifetime, now)
         } else {
             // No owner root is at stake whoever signed the version: the public
             // arm is offered only on a folder whose bytes rest unsealed and
@@ -4026,30 +4253,29 @@ impl MediaMachine {
 
     /// The sealed manifest a private link names, fetched over the byte routes
     /// and checked against its address before anything reads it (the root of
-    /// the integrity chain the viewer walks).
+    /// the integrity chain the viewer walks) — with, for a paged root, every
+    /// page it names, each checked against the root through the one keyless
+    /// walk (`fauna_core::file_download::fetch_manifest_blobs`;
+    /// `file-sync.md` § Paged manifests), so the mint can open the file's
+    /// plaintext hashes whichever shape its manifest has.
     async fn fetch_link_manifest(
         &self,
         manifest_hash: [u8; 32],
-    ) -> Result<fauna_core::chunk::ChunkManifest, String> {
+    ) -> Result<(fauna_core::chunk::ChunkManifest, Vec<Vec<u8>>), String> {
         let fetcher = self
             .download_fetcher
             .as_ref()
             .ok_or_else(|| "file download is not supported on this platform".to_string())?;
         let address = fauna_core::data::ContentHash::from_digest_raw(manifest_hash);
-        let bytes = fetcher
-            .fetch_manifest(&address)
+        let blobs = fauna_core::file_download::fetch_manifest_blobs(fetcher.as_ref(), &address)
             .await
             .map_err(|e| format!("the file's manifest could not be fetched: {e:#}"))?;
-        if fauna_core::data::ContentHash::of_raw(&bytes) != address {
-            return Err("the nest served a different manifest".to_string());
-        }
-        let manifest: fauna_core::chunk::ChunkManifest =
-            fauna_core::encoding::canonical_decode(&bytes)
-                .map_err(|e| format!("the file's manifest is malformed: {e:#}"))?;
-        manifest
+        blobs
+            .manifest
             .check_hash_shape()
             .map_err(|e| format!("the file's manifest is malformed: {e:#}"))?;
-        Ok(manifest)
+        let pages = blobs.pages.into_iter().map(|(_, bytes)| bytes).collect();
+        Ok((blobs.manifest, pages))
     }
 
     /// Read + render the list into state (loaded on success; on failure the
@@ -4091,16 +4317,6 @@ impl MediaMachine {
         tracing::warn!(target: "fauna_media", "{}", err.log_line());
         self.state.lock().unwrap().error = Some(err);
         self.observer.on_changed();
-    }
-
-    /// Surface the "no set to upload into" page error (`upload_selected`;
-    /// `media.md` § Layout & flow): the caller has **no folders at all** →
-    /// [`NO_SET_ERROR_KEY`] ("create one first"). Every own folder is an
-    /// upload target, so this is the one condition; an *empty* folder is a
-    /// valid target and never reaches it. A pure client-side condition → a
-    /// no-arg localized banner (no `{message}`).
-    fn set_error_no_upload_target(&self) {
-        self.report_error(LocalizedText::key(NO_SET_ERROR_KEY));
     }
 
     /// Put an app-glue page error into the snapshot — a guard the shared

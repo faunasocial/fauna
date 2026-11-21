@@ -193,8 +193,8 @@ class OfflineShareHost @Inject constructor(
                 ?.let { com.fauna.ffi.offlineShareCodeErrorLabel(it) },
             showsEntryButtons = gates.showsEntryButtons,
             showsCodeWidgets = gates.showsCodeWidgets,
-            canBegin = gates.canBegin,
-            canExpect = gates.canExpect,
+            beginAnswer = com.fauna.ffi.offlineShareBeginPossibility(view),
+            expectAnswer = com.fauna.ffi.offlineShareExpectPossibility(view),
             showsCancel = gates.showsCancel,
         )
     }

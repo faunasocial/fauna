@@ -6,13 +6,17 @@ import com.fauna.ffi.FfiFamilyContactRequest
 import com.fauna.ffi.FfiFamilyFeedRequest
 import com.fauna.ffi.FfiFeedRequestState
 import com.fauna.ffi.FfiReachPolicy
+import com.fauna.ffi.wardAcceptPossibility
 import com.fauna.ffi.wardContactAskPending
 import com.fauna.ffi.wardFeedRequestState
+import com.fauna.ffi.wardGuardianDecidesContact
+import com.fauna.ffi.wardKnockPossibility
 import com.fauna.ffi.wardKnocksAwaitGuardian
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import uniffi.fauna_core.Possibility
 
 // The supervised ward's in-place asks and the guardian's un-deny list — the
 // android lift of four family-safety surfaces (family-safety.md
@@ -30,7 +34,9 @@ import kotlinx.coroutines.flow.asStateFlow
 // linux (`apps/fauna-linux/src/ward_asks.rs`) and web
 // (`apps/fauna-web/src/lib/ward-asks.ts`) carry the same shape. The rules every
 // app copies rather than re-derives:
-//   (a) the ask is offered ONLY on the typed refusal
+//   (a) the ask is offered at the entry when the shared
+//       `guardian_decides_contact` says the guardian decides the peer
+//       (contacts.md § Errors & edge cases), and still on the typed refusal
 //       (`FfiException.GuardianApprovalRequired`) — never on message text;
 //   (b) the refusal stays on `error-message` — the page's job;
 //   (c) pending is durable — read from `status.contact_requests` /
@@ -65,6 +71,7 @@ class WardAsks {
     private val _feedRequests = MutableStateFlow<List<FfiFamilyFeedRequest>>(emptyList())
     private val _refusedFeed = MutableStateFlow<List<FeedTriple>>(emptyList())
     private val _knocksAwaitGuardian = MutableStateFlow(false)
+    private val _supervision = MutableStateFlow(OwnSupervision.UNREAD)
 
     /** The ward's own outstanding contact asks (durable, rule (c)). */
     val contactRequests: StateFlow<List<FfiFamilyContactRequest>> = _contactRequests.asStateFlow()
@@ -91,6 +98,15 @@ class WardAsks {
     val knocksAwaitGuardian: StateFlow<Boolean> = _knocksAwaitGuardian.asStateFlow()
 
     /**
+     * What this account knows of its OWN supervision — whether a status read
+     * of this run has succeeded, and the policy it carried while supervised
+     * (tui's `FamilyState::status_read` / `own_policy`). The Contacts page's
+     * entry gate answers from it ([knockPossibility], [acceptPossibility],
+     * [guardianDecides]); collected so a late status read repaints the page.
+     */
+    val supervision: StateFlow<OwnSupervision> = _supervision.asStateFlow()
+
+    /**
      * Fold one successful `fauna.family.status` read. [supervised] is whether it
      * named a guardian: a graduated account has no guardian to be waiting on,
      * so a stale ask from an earlier read must not keep painting "asked —
@@ -106,7 +122,26 @@ class WardAsks {
         _contactRequests.value = if (supervised) contact else emptyList()
         _feedRequests.value = if (supervised) feed else emptyList()
         _knocksAwaitGuardian.value = supervised && wardKnocksAwaitGuardian(ownPolicy)
+        _supervision.value = OwnSupervision(statusRead = true, policy = if (supervised) ownPolicy else null)
     }
+
+    /** The knock's answer for a resolved peer — what `contacts-add-button`
+     *  paints from and what the knock asks before it sends (`contacts.md`
+     *  § Errors & edge cases). [peerStatus] is the caller's roster edge to the
+     *  peer, `null` with none. The shared `fauna_client_family::knock_possibility`. */
+    fun knockPossibility(peerStatus: String?): Possibility =
+        _supervision.value.let { wardKnockPossibility(it.statusRead, it.policy, peerStatus) }
+
+    /** The accept's answer — what each `contacts-accept-button` paints from and
+     *  what the accept asks first. The shared `fauna_client_family::accept_possibility`. */
+    fun acceptPossibility(): Possibility =
+        _supervision.value.let { wardAcceptPossibility(it.statusRead, it.policy) }
+
+    /** Whether the guardian decides contact with this peer — when
+     *  `contact-request-guardian-button` is the result's one step, before
+     *  anything was refused. The shared `fauna_client_family::guardian_decides_contact`. */
+    fun guardianDecides(peerStatus: String?): Boolean =
+        _supervision.value.let { wardGuardianDecidesContact(it.statusRead, it.policy, peerStatus) }
 
     /** A landed contact ask's re-read. Empty = the re-read FAILED (the ask
      *  itself landed — the guardian has been rung): keep what we hold. */
@@ -137,8 +172,24 @@ class WardAsks {
         _feedRequests.value = emptyList()
         _refusedFeed.value = emptyList()
         _knocksAwaitGuardian.value = false
+        _supervision.value = OwnSupervision.UNREAD
     }
 }
+
+/** What the caller knows of its own supervision: unread until this run's
+ *  first successful status read, then that read's policy (`null` unsupervised)
+ *  — the shared `fauna_client_family::OwnSupervision`, carried flat. */
+data class OwnSupervision(val statusRead: Boolean, val policy: FfiReachPolicy?) {
+    companion object {
+        val UNREAD = OwnSupervision(statusRead = false, policy = null)
+    }
+}
+
+/** The caller's roster edge to [peerHex], `null` with none — case-insensitive,
+ *  because the Find User form's id is whatever was typed and the roster's is
+ *  canonical (tui's `roster_status`). [roster] is `(peerId, status)` pairs. */
+fun rosterStatus(roster: List<Pair<String, String>>, peerHex: String): String? =
+    roster.firstOrNull { it.first.equals(peerHex, ignoreCase = true) }?.second
 
 // ── Contact ask (contacts page + profile page) ─────────────────────────────
 
@@ -240,13 +291,18 @@ enum class ContactAskRender { PENDING, ASK }
 /**
  * The pair's render: the durable pending label (read FIRST — it survives
  * navigation and a restart, and is honest on a session that never saw the
- * refusal), else the ask button only after a TYPED refusal this open saw, else
- * nothing (`null`). [durablePending] is `WardAsks.contactAskPending(peer)` —
- * the shared compare over the durable list; no supervision test here (rule (h)).
+ * refusal), else the ask button when it is offered — [guardianDecides] (the
+ * shared `guardian_decides_contact`, the ask at the entry) or a TYPED refusal
+ * this open saw — else nothing (`null`). [durablePending] is
+ * `WardAsks.contactAskPending(peer)` — the shared compare over the durable list.
  */
-fun contactAskRender(durablePending: Boolean, state: KnockAskState): ContactAskRender? = when {
+fun contactAskRender(
+    durablePending: Boolean,
+    state: KnockAskState,
+    guardianDecides: Boolean = false,
+): ContactAskRender? = when {
     durablePending || state.askSent -> ContactAskRender.PENDING
-    state.guardianRefused -> ContactAskRender.ASK
+    guardianDecides || state.guardianRefused -> ContactAskRender.ASK
     else -> null
 }
 

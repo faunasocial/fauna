@@ -101,10 +101,11 @@ public struct LaunchAccountLockedView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.red)
                         .controlSize(.large)
-                        .disabled(!model.armed)
                         .accessibilityIdentifier(Ids.identityStolenButton)
-                        .automationActivate(Ids.identityStolenButton, isEnabled: { model.armed }) { succeed() }
+                        .automationActivate(Ids.identityStolenButton) { succeed() }
+                        .faunaPossible(model.answer)
                 }
+                FaunaPossibilityReason(model.answer)
             }
             .padding(24)
             .frame(maxWidth: 560, alignment: .leading)
@@ -157,7 +158,13 @@ public final class LockedLaunchModel {
         inStolenEntry || launchLockNoticeHolds(snapshot: snapshot, shownLockedUntilSecs: lockedUntilSecs)
     }
 
-    var armed: Bool { !busy && confirm == RecoveryKitVM.stolenConfirmWord }
+    /// `identity-stolen-button`'s one answer — the shared draft predicate
+    /// (`recovery_stolen_entry_possibility`: a kit pasted, then the word), then
+    /// no ceremony in flight. The press re-asks it.
+    var answer: Possibility {
+        recoveryStolenEntryPossibility(phrase: phrase, confirmWord: confirm)
+            .and(writeAfterReadPossibility(read: .resolved, idle: !busy))
+    }
 
     func openStolenEntry() {
         inStolenEntry = true
@@ -187,12 +194,8 @@ public final class LockedLaunchModel {
     /// carries the only copy of the successor's key, so it goes on screen.
     func succeed(onSwitch: @MainActor (String) async -> Void) async {
         guard !busy else { return }
-        guard confirm == RecoveryKitVM.stolenConfirmWord else {
-            error = L.settings.recoveryKit.stolenConfirmPlaceholder
-            return
-        }
-        guard !phrase.isEmpty else {
-            error = L.settings.recoveryKit.kitPhraseRequired
+        if let refusal = answer.refusal {
+            error = refusal
             return
         }
         guard let material = FaunaAccounts.sessionMaterial(), let nestUrl = material.nestUrl else {

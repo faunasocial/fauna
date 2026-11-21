@@ -185,6 +185,16 @@ pub fn set_test_attr(widget: &impl IsA<gtk::Widget>, name: &str, value: &str) {
     widget.add_css_class(&format!("{prefix}{value}"));
 }
 
+/// Drop every [`set_test_attr`] value for `name`: the attribute reads absent.
+pub fn clear_test_attr(widget: &impl IsA<gtk::Widget>, name: &str) {
+    let prefix = format!("test-attr-{name}-");
+    for cls in widget.css_classes() {
+        if cls.starts_with(&prefix) {
+            widget.remove_css_class(&cls);
+        }
+    }
+}
+
 /// Expose a FREE-TEXT test attribute (`get_attr(id, name)`) — the
 /// [`set_test_text`] carrier for an attribute whose value is painted text, not
 /// a CSS-safe token (a queue row's `"88%"` confidence, a localized action
@@ -578,10 +588,24 @@ where
 
     match done_rx.recv_timeout(Duration::from_secs(GTK_TEST_BUDGET_SECS)) {
         Ok(Ok(value)) => value,
-        // The body panicked on the GTK thread. Re-raise the *same* payload here
-        // so libtest fails this test with the original assertion message; the
-        // default hook already printed file:line from the GTK thread.
-        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        // The body panicked on the GTK thread. The default hook's report from
+        // there is lost: the thread inherited the output capture of the FIRST
+        // test that spawned it, so the message lands in that test's buffer,
+        // and `resume_unwind` prints nothing. A gate log then names a failed
+        // test with no reason. So re-raise the
+        // message with `panic!` on THIS thread, whose capture libtest shows
+        // under `failures:` (a `should_panic(expected)` still matches it); a
+        // payload that is not a string is re-raised as it came.
+        Ok(Err(panic)) => {
+            let message = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()));
+            match message {
+                Some(message) => panic!("{message}"),
+                None => std::panic::resume_unwind(panic),
+            }
+        }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             WEDGED.store(true, Ordering::SeqCst);
             panic!(

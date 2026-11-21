@@ -798,7 +798,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
             matches!(class, BridgeMta | BridgeMda | ThirdParty | User)
         }
         // Phase G — the bridged-conversation family. The bridge's six are
-        // `ThirdParty` only; the user's six are `User` and caller-scoped.
+        // `ThirdParty` only; the user's seven are `User` and caller-scoped.
         "fauna.bridges.conversation.deposit" => matches!(class, ThirdParty),
         "fauna.bridges.conversation.outbox.fetch" => matches!(class, ThirdParty),
         "fauna.bridges.conversation.outbox.ack" => matches!(class, ThirdParty),
@@ -807,6 +807,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.bridges.conversation.receipt" => matches!(class, ThirdParty),
         "fauna.bridges.conversation.rooms.list" => matches!(class, User),
         "fauna.bridges.conversation.rooms.open" => matches!(class, User),
+        "fauna.bridges.conversation.address.admit" => matches!(class, User),
         "fauna.bridges.conversation.inbox.fetch" => matches!(class, User),
         "fauna.bridges.conversation.send" => matches!(class, User),
         "fauna.bridges.conversation.messages.remove" => matches!(class, User),

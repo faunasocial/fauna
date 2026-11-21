@@ -165,6 +165,12 @@ pub struct FfiAdminUser {
     /// 2026-11-14.
     #[uniffi(default = None)]
     pub guardian: Option<FfiAdminUserGuardian>,
+    /// Whether removing this row's admin role would leave the nest with no
+    /// superadmin — the floor the nest refuses (`admin.md` § 2 → *What a row
+    /// offers*); read by [`admin_remove_admin_possibility`]. Additive
+    /// 2026-11-17; `false` from an older nest.
+    #[uniffi(default = false)]
+    pub last_superadmin: bool,
 }
 
 /// FFI mirror of [`fauna_protocol::admin::AdminUserGuardian`].
@@ -210,6 +216,7 @@ impl From<AdminUser> for FfiAdminUser {
             mail_serving_enabled: u.mail_serving_enabled,
             is_admin: u.is_admin,
             guardian: u.guardian.map(Into::into),
+            last_superadmin: u.last_superadmin,
         }
     }
 }
@@ -321,6 +328,221 @@ pub fn admin_picker_option(user: FfiAdminUser) -> String {
         ..Default::default()
     };
     fauna_client_admin::admin_picker_option(&wire)
+}
+
+// The users page's offer-only-what-is-possible answers (`admin.md` § 2 →
+// *What a row offers*, § 3 → *Removing a tier*): each forwards one shared
+// `fauna_client_admin` predicate untouched, so the natives paint the control
+// and re-ask it before the action from the same `Possibility` tui, linux and
+// web read. Linux calls the crate directly; web goes through the wasm twins.
+// Gated `value-format` for the bare-`fauna_core`-type reason `forms.rs` gives.
+
+/// `admin-users-remove-admin-button`:
+/// `fauna_client_admin::remove_admin_possibility` — absent without the role,
+/// blocked on the nest's last superadmin.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_remove_admin_possibility(user: FfiAdminUser) -> fauna_core::possibility::Possibility {
+    let wire = AdminUser {
+        is_admin: user.is_admin,
+        last_superadmin: user.last_superadmin,
+        ..Default::default()
+    };
+    fauna_client_admin::remove_admin_possibility(&wire)
+}
+
+/// One of the users-row controls whose answer is offered-or-absent
+/// (`fauna_client_admin::AdminUserRowControls`' `*_possibility` siblings);
+/// remove-admin, which also has a blocked state, is
+/// [`admin_remove_admin_possibility`]. Gated `value-format` with the face that
+/// reads it, so the Go mail-bridge bindings do not carry it.
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiAdminUserRowControl {
+    /// `admin-users-suspend-button`.
+    Suspend,
+    /// `admin-users-evict-button`.
+    Evict,
+    /// `admin-users-cancel-eviction-button`.
+    Restore,
+    /// `admin-users-make-admin-button`.
+    MakeAdmin,
+    /// `admin-users-take-over-button`.
+    TakeOver,
+}
+
+/// `control` on a row whose controls are `controls` (the
+/// [`admin_user_row_controls`] answer): the shared
+/// `AdminUserRowControls::{suspend,evict,restore,make_admin,take_over}_possibility`
+/// — possible where the row offers it, absent otherwise (`admin.md` § Errors
+/// & edge cases, *Role and state gates answer one `Possibility` too*). The
+/// record crosses by value and carries no method, so the app passes the one
+/// it holds and names the control.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_user_row_control_possibility(
+    controls: FfiAdminUserRowControls,
+    control: FfiAdminUserRowControl,
+) -> fauna_core::possibility::Possibility {
+    let shared = fauna_client_admin::AdminUserRowControls {
+        suspend: controls.suspend,
+        evict: controls.evict,
+        restore: controls.restore,
+        make_admin: controls.make_admin,
+        remove_admin: controls.remove_admin,
+        take_over: controls.take_over,
+    };
+    match control {
+        FfiAdminUserRowControl::Suspend => shared.suspend_possibility(),
+        FfiAdminUserRowControl::Evict => shared.evict_possibility(),
+        FfiAdminUserRowControl::Restore => shared.restore_possibility(),
+        FfiAdminUserRowControl::MakeAdmin => shared.make_admin_possibility(),
+        FfiAdminUserRowControl::TakeOver => shared.take_over_possibility(),
+    }
+}
+
+/// `admin-pending-action-approve-button`:
+/// `fauna_client_admin::pending_approve_possibility` — absent on the
+/// viewer's own scheduled action and on one no longer pending. `viewer` is
+/// the viewing admin's raw actor id.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_pending_approve_possibility(
+    action: FfiAdminPendingAction,
+    viewer: Vec<u8>,
+) -> fauna_core::possibility::Possibility {
+    let wire = fauna_protocol::admin::AdminPendingActionSummary {
+        actor_id: fauna_protocol::ByteBuf::from(action.actor_id),
+        status: action.status,
+        ..Default::default()
+    };
+    fauna_client_admin::pending_approve_possibility(&wire, &viewer)
+}
+
+/// The admit and invite forms' age-band selects:
+/// `fauna_client_admin::age_band_possibility` — blocked until a guardian is
+/// picked.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_age_band_possibility(guardian_selected: bool) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::age_band_possibility(guardian_selected)
+}
+
+/// `admin-settings-tier-delete-button`:
+/// `fauna_client_admin::tier_delete_possibility` — absent on `free`.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_tier_delete_possibility(tier: String) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::tier_delete_possibility(&tier)
+}
+
+/// `admin-users-admit-button`, `create-invite-code-btn` and
+/// `create-invite-confirm-btn`: `fauna_client_admin::tier_pick_possibility`
+/// — blocked, naming the Tiers page, while the tier select offers none.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_tier_pick_possibility(tiers: Vec<String>) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::tier_pick_possibility(&tiers)
+}
+
+/// `admin-users-prev-page` (`forward` false) / `admin-users-next-page`
+/// (`forward` true): `fauna_client_admin::users_page_step_possibility` —
+/// blocked at page 1 / the last page, saying so.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_users_page_step_possibility(
+    offset: i64,
+    total: i64,
+    page_size: i64,
+    forward: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::users_page_step_possibility(offset, total, page_size, forward)
+}
+
+/// `admin-settings-membership-clear-button`:
+/// `fauna_client_admin::membership_clear_possibility` — blocked, saying
+/// nothing is set, while the row holds no persisted designation.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_membership_clear_possibility(
+    has_existing: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::membership_clear_possibility(has_existing)
+}
+
+// The admin forms' draft-validity answers (`admin.md` § Errors & edge cases →
+// *A form's submit is live only for a draft the nest would accept*): each
+// forwards one `fauna_client_admin::drafts` predicate untouched, so the natives
+// paint a submit from the same answer tui and linux read, fold it after the
+// page's read gate (`Possibility::and`), and ask it again at the press.
+
+/// `admin-users-registration-save-button`:
+/// `fauna_client_admin::registration_ceiling_possibility`.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_registration_ceiling_possibility(raw: String) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::registration_ceiling_possibility(&raw)
+}
+
+/// `admin-users-admit-button`: `fauna_client_admin::admit_actor_possibility`.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_admit_actor_possibility(raw: String) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::admit_actor_possibility(&raw)
+}
+
+/// A tier row's save: `fauna_client_admin::tier_caps_possibility` over its five
+/// cap drafts (inbox, storage, devices, blob size, feeds). A list of any other
+/// length is blocked like a malformed cap.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_tier_caps_possibility(caps: Vec<String>) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::tier_caps_possibility(five_caps(&caps))
+}
+
+/// The add-a-tier form: `fauna_client_admin::tier_create_possibility` over its
+/// name and five cap drafts (same order as [`admin_tier_caps_possibility`]).
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_tier_create_possibility(
+    name: String,
+    caps: Vec<String>,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::tier_create_possibility(&name, five_caps(&caps))
+}
+
+/// The five cap drafts as the shared predicates take them; a list of the wrong
+/// length reads as five malformed caps, so it is refused, never padded.
+#[cfg(feature = "value-format")]
+fn five_caps(caps: &[String]) -> [&str; 5] {
+    match caps {
+        [a, b, c, d, e] => [a, b, c, d, e],
+        _ => ["?"; 5],
+    }
+}
+
+/// A membership row's save: `fauna_client_admin::membership_save_possibility`.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_membership_save_possibility(
+    admin_tier: String,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::membership_save_possibility(&admin_tier)
+}
+
+/// `admin-nest-serving-port-save-button`:
+/// `fauna_client_admin::serving_port_possibility`.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_serving_port_possibility(raw: String) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::serving_port_possibility(&raw)
+}
+
+/// `admin-nest-region-save-button`: `fauna_client_admin::region_possibility`.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_region_possibility(raw: String) -> fauna_core::possibility::Possibility {
+    fauna_client_admin::region_possibility(&raw)
 }
 
 /// FFI mirror of [`fauna_protocol::admin::AdminUsersListReply`] — a page of
@@ -1399,6 +1621,19 @@ impl FfiAuditLog {
 }
 
 #[cfg(feature = "value-format")]
+#[uniffi::export]
+impl FfiAuditLog {
+    /// Whether `admin-audit-more-button` can fetch older entries now:
+    /// `fauna_client_admin::audit_more_possibility` over the held view —
+    /// blocked, saying so, once the whole record is shown. The native paints
+    /// the button from it and asks again before `more`.
+    pub fn more_possibility(&self) -> fauna_core::possibility::Possibility {
+        let log = self.log.lock().unwrap_or_else(|p| p.into_inner());
+        fauna_client_admin::audit_more_possibility(&log.view())
+    }
+}
+
+#[cfg(feature = "value-format")]
 #[fauna_uniffi_async::export]
 impl FfiAuditLog {
     /// Read the newest page (entering the page, or a refresh), replacing what
@@ -1880,6 +2115,15 @@ pub struct FfiAdminWebAppOriginView {
     /// `admin-nest-web-app-origin-central-radio`'s label (it names the central
     /// origin from the one constant).
     pub central_label: LocalizedText,
+    /// Whether the whole section is shown — the shared
+    /// `AdminWebAppOriginView::section_possibility` (absent on a nest that
+    /// predates the choice, and while the central origin is not live and the
+    /// stored mode is bundled).
+    pub section_possibility: fauna_core::possibility::Possibility,
+    /// Whether `admin-nest-web-app-origin-central-radio` is offered — the
+    /// shared `AdminWebAppOriginView::central_possibility` (possible only when
+    /// the nest says the central origin is live).
+    pub central_possibility: fauna_core::possibility::Possibility,
 }
 
 #[cfg(feature = "value-format")]
@@ -1891,6 +2135,8 @@ impl From<fauna_client_admin::AdminWebAppOriginView> for FfiAdminWebAppOriginVie
             scope: v.scope,
             can_set: v.can_set,
             central_label: v.central_label,
+            section_possibility: v.section_possibility,
+            central_possibility: v.central_possibility,
         }
     }
 }
@@ -1923,6 +2169,33 @@ pub async fn admin_set_web_app_origin(
         .await
         .map_err(stringify)?;
     Ok(fauna_client_admin::admin_web_app_origin_view(Some(&reply)).into())
+}
+
+/// `admin-nest-web-app-origin-*-radio` and `-save-button`:
+/// [`fauna_client_admin::web_app_origin_set_possibility`] over the read as the
+/// page holds it — `None` until the read lands (blocked *still loading*),
+/// blocked by the status sentence where the choice cannot be set. `draft` is
+/// the mode the press would take (a radio's own mode, or the save's marked
+/// draft): a `central` draft is refused with the nest's own reason while the
+/// central origin is not live (`web-content-hosting.md` § Same-origin security
+/// model → *While the central origin is not live, the choice is not offered*,
+/// rule 5), as web's wasm face does.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_web_app_origin_set_possibility(
+    view: Option<FfiAdminWebAppOriginView>,
+    draft: Option<FfiWebAppOrigin>,
+) -> fauna_core::possibility::Possibility {
+    let shared = view.map(|v| fauna_client_admin::AdminWebAppOriginView {
+        selected: v.selected.map(Into::into),
+        status: v.status,
+        scope: v.scope,
+        can_set: v.can_set,
+        central_label: v.central_label,
+        section_possibility: v.section_possibility,
+        central_possibility: v.central_possibility,
+    });
+    fauna_client_admin::web_app_origin_set_possibility(shared.as_ref(), draft.map(Into::into))
 }
 
 // ── Update channel (`admin-nest-update-channel-*`) ─────────────────────────
@@ -2008,6 +2281,32 @@ pub async fn admin_set_update_channel(
         .map_err(stringify)?;
     let reply = client.update_channel().await.map_err(stringify)?;
     Ok(fauna_client_admin::admin_update_channel_view(reply.as_ref()).into())
+}
+
+/// `admin-nest-update-channel-*-radio` and `-save-button`:
+/// [`fauna_client_admin::update_channel_set_possibility`] over the read as the
+/// page holds it — `None` until the read lands (blocked *still loading*),
+/// blocked by the status sentence where the channel cannot be set.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_update_channel_set_possibility(
+    view: Option<FfiAdminUpdateChannelView>,
+) -> fauna_core::possibility::Possibility {
+    let shared = view.map(|v| fauna_client_admin::AdminUpdateChannelView {
+        selected: v.selected,
+        status: v.status,
+        can_set: v.can_set,
+        options: v
+            .options
+            .into_iter()
+            .map(|o| fauna_client_admin::UpdateChannelOption {
+                channel: o.channel,
+                label: o.label,
+                description: o.description,
+            })
+            .collect(),
+    });
+    fauna_client_admin::update_channel_set_possibility(shared.as_ref())
 }
 
 // ── Outside-app sign-in keys (`admin-nest-oauth-*`) ──────────────────────
@@ -2289,6 +2588,20 @@ mod tests {
     use fauna_protocol::ByteBuf;
     use fauna_protocol::admin::AdminAdminsListReply;
 
+    /// The tier faces hand the five caps through in order, and a list of the
+    /// wrong length is refused like a malformed cap, never padded.
+    #[cfg(feature = "value-format")]
+    #[test]
+    fn tier_draft_faces_take_exactly_five_caps() {
+        let caps = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(admin_tier_caps_possibility(caps(&["1", "1", "1", "1", "1"])).is_possible());
+        assert!(!admin_tier_caps_possibility(caps(&["1", "1", "1", "1"])).is_possible());
+        assert!(!admin_tier_caps_possibility(caps(&["1", "1", "x", "1", "1"])).is_possible());
+        assert!(admin_tier_create_possibility("gold".into(), caps(&["1"; 5])).is_possible());
+        assert!(!admin_tier_create_possibility(" ".into(), caps(&["1"; 5])).is_possible());
+        assert!(!admin_tier_create_possibility("gold".into(), caps(&["1"; 6])).is_possible());
+    }
+
     #[test]
     fn admin_pending_action_maps_with_derived_fields() {
         let proto = fauna_protocol::admin::AdminPendingActionSummary {
@@ -2354,6 +2667,67 @@ mod tests {
         };
         let ffi = FfiAdminUser::from(proto);
         assert_eq!(ffi.handle, None);
+    }
+
+    #[cfg(feature = "value-format")]
+    #[test]
+    fn offer_only_what_is_possible_faces_forward() {
+        let key = |p: fauna_core::possibility::Possibility| p.reason().map(|r| r.key.clone());
+        let last = FfiAdminUser::from(ProtoUser {
+            is_admin: true,
+            last_superadmin: true,
+            ..Default::default()
+        });
+        assert!(last.last_superadmin);
+        assert_eq!(
+            key(admin_remove_admin_possibility(last.clone())).as_deref(),
+            Some("admin.users_page.remove_admin_last_superadmin")
+        );
+        let co_admin = FfiAdminUser {
+            last_superadmin: false,
+            ..last.clone()
+        };
+        assert!(admin_remove_admin_possibility(co_admin).is_possible());
+        let plain = FfiAdminUser {
+            is_admin: false,
+            ..last
+        };
+        assert!(!admin_remove_admin_possibility(plain).is_shown());
+
+        let own = FfiAdminPendingAction::from(fauna_protocol::admin::AdminPendingActionSummary {
+            actor_id: ByteBuf::from(vec![7u8; 32]),
+            status: "pending".into(),
+            ..Default::default()
+        });
+        assert!(!admin_pending_approve_possibility(own.clone(), vec![7u8; 32]).is_shown());
+        assert!(admin_pending_approve_possibility(own, vec![8u8; 32]).is_possible());
+
+        assert_eq!(
+            key(admin_age_band_possibility(false)).as_deref(),
+            Some("admin.users_page.age_band_needs_guardian")
+        );
+        assert!(admin_age_band_possibility(true).is_possible());
+        assert!(!admin_tier_delete_possibility("free".into()).is_shown());
+        assert!(admin_tier_delete_possibility("personal".into()).is_possible());
+        assert_eq!(
+            key(admin_tier_pick_possibility(vec![])).as_deref(),
+            Some("admin.users_page.no_tier")
+        );
+        assert!(admin_tier_pick_possibility(vec!["free".into()]).is_possible());
+        assert_eq!(
+            key(admin_users_page_step_possibility(0, 120, 50, false)).as_deref(),
+            Some("admin.users_page.no_page_before")
+        );
+        assert!(admin_users_page_step_possibility(0, 120, 50, true).is_possible());
+        assert_eq!(
+            key(admin_users_page_step_possibility(100, 120, 50, true)).as_deref(),
+            Some("admin.users_page.no_page_after")
+        );
+        assert_eq!(
+            key(admin_membership_clear_possibility(false)).as_deref(),
+            Some("admin.settings_page.membership_clear_nothing_set")
+        );
+        assert!(admin_membership_clear_possibility(true).is_possible());
     }
 
     #[test]
@@ -2620,5 +2994,135 @@ mod tests {
     fn admin_parse_region_code_rejects_lower_case() {
         assert!(admin_parse_region_code("no".to_string()).is_err());
         assert_eq!(admin_parse_region_code("NO".to_string()).unwrap(), "NO");
+    }
+}
+
+#[cfg(all(test, feature = "value-format"))]
+mod role_gate_possibility_face_tests {
+    use super::*;
+    use fauna_core::possibility::Possibility;
+
+    const ALL: [FfiAdminUserRowControl; 5] = [
+        FfiAdminUserRowControl::Suspend,
+        FfiAdminUserRowControl::Evict,
+        FfiAdminUserRowControl::Restore,
+        FfiAdminUserRowControl::MakeAdmin,
+        FfiAdminUserRowControl::TakeOver,
+    ];
+
+    fn only(on: FfiAdminUserRowControl) -> FfiAdminUserRowControls {
+        FfiAdminUserRowControls {
+            suspend: on == FfiAdminUserRowControl::Suspend,
+            evict: on == FfiAdminUserRowControl::Evict,
+            restore: on == FfiAdminUserRowControl::Restore,
+            make_admin: on == FfiAdminUserRowControl::MakeAdmin,
+            remove_admin: false,
+            take_over: on == FfiAdminUserRowControl::TakeOver,
+        }
+    }
+
+    #[test]
+    fn each_row_control_answers_its_own_offer() {
+        for on in ALL {
+            for asked in ALL {
+                let want = if on == asked {
+                    Possibility::Possible
+                } else {
+                    Possibility::Absent
+                };
+                assert_eq!(
+                    admin_user_row_control_possibility(only(on), asked),
+                    want,
+                    "{on:?} offered, {asked:?} asked"
+                );
+            }
+        }
+    }
+
+    /// A stored central while the central origin is not live: a bundled
+    /// press (the way back) is offered, a central one is refused with the
+    /// nest's own reason — the draft reaches the shared answer.
+    #[test]
+    fn origin_set_answer_asks_with_the_draft() {
+        let not_live = FfiAdminWebAppOriginView {
+            selected: Some(FfiWebAppOrigin::Central),
+            status: LocalizedText::key("admin.nest_page.web_app_origin_status_central_not_live"),
+            scope: LocalizedText::key("admin.nest_page.web_app_origin_scope"),
+            can_set: true,
+            central_label: LocalizedText::key("admin.nest_page.web_app_origin_central"),
+            section_possibility: Possibility::Possible,
+            central_possibility: Possibility::Absent,
+        };
+        assert_eq!(
+            admin_web_app_origin_set_possibility(
+                Some(not_live.clone()),
+                Some(FfiWebAppOrigin::Bundled)
+            ),
+            Possibility::Possible
+        );
+        assert_eq!(
+            admin_web_app_origin_set_possibility(
+                Some(not_live.clone()),
+                Some(FfiWebAppOrigin::Central)
+            ),
+            Possibility::blocked(LocalizedText::key(
+                "error.admin.web_app_origin.central_not_live"
+            ))
+        );
+        let live = FfiAdminWebAppOriginView {
+            central_possibility: Possibility::Possible,
+            ..not_live
+        };
+        assert_eq!(
+            admin_web_app_origin_set_possibility(Some(live), Some(FfiWebAppOrigin::Central)),
+            Possibility::Possible
+        );
+    }
+
+    #[test]
+    fn origin_and_channel_wait_for_their_read_then_follow_can_set() {
+        let pending = Possibility::from_read(fauna_core::possibility::ReadState::Pending);
+        assert_eq!(admin_web_app_origin_set_possibility(None, None), pending);
+        assert_eq!(admin_update_channel_set_possibility(None), pending);
+
+        let status = LocalizedText::key("admin.nest_page.web_app_origin_scope");
+        let origin = |can_set| FfiAdminWebAppOriginView {
+            selected: None,
+            status: status.clone(),
+            scope: LocalizedText::key("admin.nest_page.web_app_origin_scope"),
+            can_set,
+            central_label: LocalizedText::key("admin.nest_page.web_app_origin_central"),
+            section_possibility: Possibility::Possible,
+            central_possibility: Possibility::Possible,
+        };
+        assert_eq!(
+            admin_web_app_origin_set_possibility(Some(origin(true)), None),
+            Possibility::Possible
+        );
+        assert_eq!(
+            admin_web_app_origin_set_possibility(Some(origin(false)), None),
+            Possibility::blocked(status.clone())
+        );
+
+        let channel = |can_set| FfiAdminUpdateChannelView {
+            selected: None,
+            status: status.clone(),
+            can_set,
+            options: Vec::new(),
+        };
+        assert_eq!(
+            admin_update_channel_set_possibility(Some(channel(true))),
+            Possibility::Possible
+        );
+        assert_eq!(
+            admin_update_channel_set_possibility(Some(channel(false))),
+            Possibility::blocked(status)
+        );
+    }
+
+    #[test]
+    fn the_admin_entry_is_absent_for_a_non_admin() {
+        assert_eq!(crate::admin_entry_possibility(true), Possibility::Possible);
+        assert_eq!(crate::admin_entry_possibility(false), Possibility::Absent);
     }
 }

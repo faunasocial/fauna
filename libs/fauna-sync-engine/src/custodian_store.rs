@@ -575,11 +575,23 @@ impl Sealed<'_> {
         }
     }
 
-    /// Every chunk's store key, in manifest order.
-    pub(crate) fn store_keys(&self) -> Vec<ContentHash> {
+    /// Every chunk's store key, in file order. A whole blob's are its chunk
+    /// list's own (a paged root's included: [`SealedBlob::chunks`] spans every
+    /// page). A staged seal is [`fauna_core::blob_seal::seal_reader`]'s, which
+    /// writes one manifest and never pages, so its keys read straight off it.
+    pub(crate) fn store_keys(&self) -> Result<Vec<ContentHash>, fauna_core::chunk::PagedRootError> {
         match self {
-            Self::Whole(s) => s.chunks.iter().map(|(key, _)| *key).collect(),
+            Self::Whole(s) => Ok(s.chunks.iter().map(|(key, _)| *key).collect()),
             Self::Staged(s) => s.sealed.manifest.store_keys(),
+        }
+    }
+
+    /// A paged root's pages, `(address, bytes)` in file order — empty for a
+    /// single manifest, and always for a staged seal (above).
+    fn pages(&self) -> &[(ContentHash, Vec<u8>)] {
+        match self {
+            Self::Whole(s) => &s.pages,
+            Self::Staged(_) => &[],
         }
     }
 
@@ -1430,7 +1442,8 @@ impl CustodianStore {
         Ok(true)
     }
 
-    /// Write one sealed generation's chunk bodies and its manifest.
+    /// Write one sealed generation's chunk bodies, a paged root's pages and
+    /// its manifest.
     ///
     /// The one byte-writing door, so the convergent skip and the repair's
     /// unconditional rewrite are the same code reading one flag rather than two
@@ -1441,7 +1454,7 @@ impl CustodianStore {
         manifest_hex: &str,
         rewrite: Rewrite,
     ) -> Result<()> {
-        for (index, key) in sealed.store_keys().iter().enumerate() {
+        for (index, key) in sealed.store_keys()?.iter().enumerate() {
             let target = self.blob_path(key);
             if rewrite == Rewrite::OnlyMissing && tokio::fs::metadata(&target).await.is_ok() {
                 continue;
@@ -1450,6 +1463,19 @@ impl CustodianStore {
             atomic_write_file(&target, &body)
                 .await
                 .with_context(|| format!("store custodian chunk {}", target.display()))?;
+        }
+        // A paged root's pages beside it in the manifest store, after the
+        // chunks they name and before the root — the store's chunks-then-
+        // manifest rule extended, so a root is never held whose pages are not
+        // (`file-sync.md` § Paged manifests → *Transport and order*).
+        for (page, bytes) in sealed.pages() {
+            let target = self.manifest_path(&hex::encode(page.digest()));
+            if rewrite == Rewrite::OnlyMissing && tokio::fs::metadata(&target).await.is_ok() {
+                continue;
+            }
+            atomic_write_file(&target, bytes)
+                .await
+                .with_context(|| format!("store custodian manifest page {}", target.display()))?;
         }
         let manifest_target = self.manifest_path(manifest_hex);
         if rewrite == Rewrite::Always || tokio::fs::metadata(&manifest_target).await.is_err() {
@@ -1579,8 +1605,23 @@ impl CustodianStore {
                 continue;
             }
             keep_manifests.insert(row.manifest_hash.clone());
-            let manifest = self.read_manifest(&row.manifest_hash).await?;
-            for key in manifest.store_keys() {
+            let digest = fauna_core::hex32::decode(&row.manifest_hash).map_err(|e| {
+                anyhow::anyhow!(
+                    "custodian row {} has a malformed manifest hash: {e}",
+                    fauna_core::log_redact::log_path(&row.path)
+                )
+            })?;
+            // Through the walk: a paged root keeps its pages and every chunk
+            // they name. A root or page that cannot be walked stops the sweep
+            // rather than drop bytes a survivor may still name.
+            let held = self
+                .held_blobs(&ContentHash::from_digest_raw(digest))
+                .await
+                .with_context(|| format!("walk custodian manifest {}", row.manifest_hash))?;
+            for (page, _) in &held.pages {
+                keep_manifests.insert(hex::encode(page.digest()));
+            }
+            for key in held.store_keys {
                 keep_blobs.insert(hex::encode(key.digest()));
             }
         }
@@ -1595,7 +1636,9 @@ impl CustodianStore {
     }
 
     /// The held manifest named by `manifest_hex`, decoded — also the size the
-    /// re-home statement signs (`crate::reseed`'s `sign_folder_rehome`).
+    /// re-home statement signs (`crate::reseed`'s `sign_folder_rehome`). A
+    /// paged root decodes too and carries its `total_size`; its chunk list is
+    /// read only through [`Self::held_blobs`], never off this.
     pub(crate) async fn read_manifest(&self, manifest_hex: &str) -> Result<ChunkManifest> {
         let path = self.manifest_path(manifest_hex);
         let bytes = tokio::fs::read(&path)
@@ -1746,21 +1789,18 @@ impl CustodianStore {
         let manifest_hash = ContentHash::from_digest_raw(digest);
 
         let blobs = LocalBlobs { store: self };
-        let manifest_bytes =
-            fauna_core::file_download::BlobFetcher::fetch_manifest(&blobs, &manifest_hash)
-                .await
-                .map_err(|e| anyhow::anyhow!("{path}: manifest is not producible: {e}"))?;
-        if ContentHash::of_raw(&manifest_bytes) != manifest_hash {
-            anyhow::bail!(
-                "{path}: manifest bytes do not hash to {}",
-                row.manifest_hash
-            );
-        }
-        let manifest: fauna_core::chunk::ChunkManifest =
-            fauna_core::encoding::canonical_decode(&manifest_bytes)
-                .map_err(|e| anyhow::anyhow!("{path}: manifest does not decode: {e}"))?;
-
-        let store_keys = manifest.store_keys();
+        // The one keyless walk: the root checked against its address, a paged
+        // root's pages read from this store's own manifest files and checked
+        // against what the root names.
+        let fauna_core::file_download::ManifestBlobs {
+            manifest_bytes,
+            manifest,
+            pages,
+            store_keys,
+        } = self
+            .held_blobs(&manifest_hash)
+            .await
+            .map_err(|e| anyhow::anyhow!("{path}: manifest is not producible: {e:#}"))?;
         let bodies =
             fauna_core::file_download::BlobFetcher::fetch_chunks(&blobs, &store_keys, path)
                 .await
@@ -1789,8 +1829,23 @@ impl CustodianStore {
             manifest_bytes,
             manifest_hash,
             chunks: store_keys.into_iter().zip(bodies).collect(),
+            pages,
             content_stamp: None,
         })
+    }
+
+    /// A held generation's root, its pages (a paged root's, in file order)
+    /// and the file's store keys, read through the one keyless walk over this
+    /// store's own manifest files (`file-sync.md` § Paged manifests → *One
+    /// walk, used by every reader*) — the root checked against its address,
+    /// each page against the hash, entry count and byte length the root names.
+    /// Every store read of a held file's chunk list goes through it.
+    async fn held_blobs(
+        &self,
+        manifest_hash: &ContentHash,
+    ) -> Result<fauna_core::file_download::ManifestBlobs> {
+        fauna_core::file_download::fetch_manifest_blobs(&LocalBlobs { store: self }, manifest_hash)
+            .await
     }
 
     /// Produce one live path **without opening it** — [`Self::read_as_is`] with
@@ -2186,6 +2241,52 @@ impl BlobFetcher for LocalBlobs<'_> {
 /// so it keeps its flag — clearing it would be clearing on non-observation.
 fn trim_repaired(current: &mut Vec<String>, standing: &[String], remaining: &[String]) {
     current.retain(|p| remaining.contains(p) || !standing.contains(p));
+}
+
+/// A covered folder's file of `n` already-sealed chunks as its source holds
+/// it, cut under small paging thresholds so it rests as a root and several
+/// pages — the shape the folder pull stores as-is and the re-seed delivers
+/// (`file-sync.md` § Paged manifests). `manifest` is the root's wire form,
+/// as [`CustodianStore::read_as_is`] returns it; `seal_root` is the source
+/// folder's own, a key this device never holds.
+#[cfg(test)]
+pub(crate) fn paged_mirror_for_test(n: usize, seal_root: &[u8; 32]) -> SealedBlob {
+    let bodies: Vec<Vec<u8>> = (0..n)
+        .map(|i| format!("sealed chunk body {i} of a paged mirror").into_bytes())
+        .collect();
+    let keys: Vec<ContentHash> = bodies.iter().map(|b| ContentHash::of_raw(b)).collect();
+    let view = ChunkManifest {
+        file_hash: ContentHash::of_raw(b"plaintext this custodian never sees"),
+        total_size: bodies.iter().map(|b| b.len() as u64).sum(),
+        chunk_hashes: (0..n)
+            .map(|i| ContentHash::of_raw(format!("plain chunk {i}").as_bytes()))
+            .collect(),
+        chunk_sizes: bodies.iter().map(|b| b.len() as u64).collect(),
+        stored_hashes: Some(keys.clone()),
+        sealed_hashes: None,
+        min_reader: None,
+        pages: None,
+    };
+    let rule = fauna_core::manifest_paging::PagingRule::with_thresholds(16, 4, 32, 3);
+    let (root, pages) = view
+        .into_wire_parts_with(&rule, Some(seal_root))
+        .expect("cut the mirror's manifest into a root and pages");
+    let manifest: ChunkManifest = fauna_core::encoding::canonical_decode(&root).unwrap();
+    assert!(
+        manifest.is_paged() && pages.len() > 1,
+        "{n} chunks must page"
+    );
+    SealedBlob {
+        manifest,
+        manifest_hash: ContentHash::of_raw(&root),
+        manifest_bytes: root,
+        chunks: keys.into_iter().zip(bodies).collect(),
+        pages: pages
+            .into_iter()
+            .map(|p| (ContentHash::of_raw(&p), p))
+            .collect(),
+        content_stamp: None,
+    }
 }
 
 #[cfg(test)]
@@ -3367,6 +3468,7 @@ mod tests {
             stored_hashes: Some(vec![key]),
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
         SealedBlob {
@@ -3374,6 +3476,7 @@ mod tests {
             manifest,
             manifest_bytes,
             chunks: vec![(key, ciphertext.to_vec())],
+            pages: Vec::new(),
             content_stamp: None,
         }
     }

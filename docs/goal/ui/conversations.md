@@ -32,6 +32,8 @@ branch on rail — only on `capabilities.*`.
 
 ## Implementation status today
 
+**The list's `loaded` bit (§ Layout & flow → *Loading is not empty*; built 2026-11-17, tui lead).** `ConversationsSnapshot.loaded` is built in shared Rust: the native receive loop marks it only after a sweep that read every rail cleanly, and web's JS tick marks it through `markRoomsLoaded`. Pinned by `receive_cycle_poke_tests.rs` (a failed first read stays unloaded, and the snapshot follows `rooms_loaded()`). tui paints its empty line on the bit (`the_empty_state_paints_only_once_the_room_list_has_loaded`). web, linux and android paint it on the bit too (built 2026-11-18; web gates through `showEmptyState`, linux installs the placeholder only once loaded, android's `ConversationsListContent` takes `loaded`). macos and ios paint it on the bit too (built 2026-11-18): both list views read FaunaKit's `ConversationsVM.showsEmptyState`, pinned by `ConversationsEmptyStateTests.swift`; before that they painted no empty line at all. **One app still paints the empty state from `threads` alone and follows in its trickle-down:** windows.
+
 **Unread tracking (ratified + shared Rust built 2026-09-21; § State & data shape → *When a thread is read*).** `ThreadSummary.unread_count` is real and a thread is read by opening it, both decided in `fauna_conversations` — so all 7 apps, which already paint `dm-unread-indicator` from the count and already select through the shared `select_thread`, show and clear it with no app change. **Read state is the account's (2026-09-24):** a mail thread's is the mailbox's `\Seen` flag on every app, a native thread's the synced read marker on every app that hosts an account runtime (one carrier per rail — owner [`../behavior/conversation-read-state.md`](../behavior/conversation-read-state.md)). android closes the thread on the way back to the list too (`ClearSelectionOnLeave`, mounted by the detail screen, 2026-10-11), so no app is wrong; the android e2e witness rides the next android sweep. Residue: none — every app's redundant select-time `mark_read` call (web's went with the build, macos's and ios's with the apple trickle-down, windows' last) is retired; the manager's read-on-select is the only caller left.
 
 **Recipient suggestions (ratified 2026-10-13; § Where logic lives → *Recipient suggestions*) — built in shared Rust and on all 7 apps (windows the last, 2026-11-05).** The manager derives both pickers' `suggestions` / `suggestion_displays` on every snapshot (`ConversationsManager::recipient_suggestions`, ranked and capped by `rank_recipient_suggestions`; the match, the trust-tier ranking and the dedupe gate on `proven_roster` as § *Matching* rules, since 2026-10-15); `accept_suggestion(i)` and `remove_recipient_chip(i)` exist on the manager, the UniFFI face and the wasm face (`acceptSuggestion` / `removeRecipientChip`); the roster reaches `ContactsCache` through the `ContactRosterSource` seam, implemented once as `fauna_client_conversations::NestContactRoster` and registered by the tui, linux and UniFFI session factories and by web's `with_conversations` — the native receive loop re-reads it at start, on reconnect, on every backstop tick and when a picker opens, while web's JS receive tick (and both pickers opening) call the wasm `refreshContactRoster`. tui, web, linux, android, macos and ios route `recipient-picker-suggestion[i]` to `accept_suggestion(i)`, paint the derived label with the address beside it, and give each chip its × (`remove_recipient_chip`) — web in both pickers (its add-participant overlay paints the suggestion list too). windows does all three in both pickers: the click went to `accept_suggestion(i)` 2026-10-30, and the `label · address` row text and the chip × (`RecipientPicker.ChipRemoved` → `ConversationsViewModel.RemoveRecipientChip`) landed 2026-11-05.
@@ -174,6 +176,8 @@ awaiting the owner's ruling.
 
 **The room's search — designed 2026-10-16, its five element ids approved and in ui.yaml 2026-10-19, built on tui, android and linux 2026-10-19.** Owner [`../behavior/room-search.md`](../behavior/room-search.md) § Implementation status today.
 
+**The bridged rail's keystroke probe has no effect (RULED 2026-11-19 — BUILT 2026-11-19).** Owner § Errors & edge cases → *The picker tells the truth*, rule 4. `BridgedBackend::resolve_address` asks the effect-free `conversation.address.admit` through the glue's `resolve_inner` (`libs/fauna-client-conversations/src/bridged_glue.rs`), whose nest handler matches the declared grammars of the bridges serving the account and nothing else — no far lookup, no room row, no push, and an unfinished or overlong spelling answers no bridge rather than a refusal (`bins/fauna-nest/src/bridged_conversation_handlers.rs`, the one-and-only-one filter shared with `rooms.open`); an older nest's `unknown_kind` reads as no bridge. `send_new_thread` hands each chip to `RailBackend::open_recipient` after its flush and before the thread is keyed (the identity on every rail but the bridged one); the bridged rail opens the room there through `BridgedSink::open` (`conversation.rooms.open` on the chip's bridge) and the thread keys on the far id answered, while a refusal sends nothing, makes no thread, keeps the chip and stamps `Failed` with `conversations.unified.recipient_resolve_not_found`. `rooms.open` is now called from the glue's send (a room not yet known) and `open` only. Pinned by the nest's `address_admit_names_the_one_bridge_and_opens_no_room`, the glue's `the_probe_admits_and_only_open_opens_the_room`, and `backends::bridged`'s `a_new_thread_opens_its_room_at_send_and_keys_on_the_far_id` / `a_refused_open_sends_nothing_and_keeps_the_chip`. The add-participant overlay commits a bridged chip into the thread snapshot only (no bridged wire step), and the backend refuses a send naming more than one far address before the sink, so no path hands a bridge the typed spelling.
+
 **A home-nest handle found but not yet addressable is terminal (RULED 2026-10-23 — BUILT 2026-11-02, the value and label owner-approved 2026-11-01).** Owner § Errors & edge cases → *The picker tells the truth*, rule 2. `FaunaMlsBackend::resolve_address`'s same-nest HANDLE arm answers the terminal `ResolveResult::NotReachable` for a found-but-unaddressable handle (the actor-id form keeps `NotFound`; `libs/fauna-conversations/src/backends/fauna_mls.rs`), `ConversationsManager::probe_address` stops the chain on it as on `Error`, and the picker lands in `ResolveState::NotReachable` with nothing resolved and no chip (`conversations.unified.recipient_resolve_not_reachable`). Every app renders it through the shared `recipient_resolve_status` view — tui lifted onto it in the same change. Witnesses: `fauna_mls_backend_tests.rs::resolve_address_handle_resolved_but_no_keypackage_not_reachable`, `manager_integration_tests.rs::resolve_recipient_not_reachable_is_terminal_over_smtp`, and the tui e2e `test_recipient_picker.py::test_home_nest_account_without_key_packages_reads_not_reachable`.
 
 ## Layout & flow
@@ -257,6 +261,8 @@ test files or app code.
 **Empty states.** No thread selected → detail pane is hint text. New
 compose active → detail pane shows recipient picker. Thread with zero
 messages → header + compose bar visible, bubble area blank.
+
+**Loading is not empty (`../ui/README.md` § List pages: loading is not empty).** The list's "no conversations" line paints only on `ConversationsSnapshot.loaded && threads.is_empty()`. `loaded` is the shared manager's `rooms_loaded()`, set by the first receive sweep that read every rail (the inbox drain, the bound channels, mail, bridged) without an error under the current identity, and keyed by the identity epoch so an account switch starts it over. A sweep with a failed read marks nothing, so a failed first read keeps the page loading and `error-message` does the talking. Before `loaded`, zero rows paint no empty-state line, and that absence is the loading state (no ID of its own). On web the two pump rails each record the epoch they last read cleanly under, and the second to arrive marks the manager (`markRoomsLoaded`).
 
 ### The room's search (designed 2026-10-16; owner [`../behavior/room-search.md`](../behavior/room-search.md))
 
@@ -487,20 +493,26 @@ domain). Orientation: the page composes the components `dm-compose-form`,
     leaving is a plain member's verb and the editor is where it lives, so the
     door gated the one control a member needs behind the one capability a
     member never has — caught by the leave journey, which got a 409 on a
-    member's click. The greying moved INSIDE, per control (§ Architectural
-    rules 5, which is what that rule asks for anyway): a member opening this
-    reads the room's settings with both selects, both per-participant
-    controls and Save greyed, and only `room-leave-button` live.
+    member's click. The gate moved INSIDE, per control (§ Architectural
+    rules 5): a member opening this reads the room's settings as plain
+    lines, with no select, per-participant control or Save, and
+    `room-leave-button` live (§ Errors & edge cases → *Controls this person
+    can never use*).
   - The editor, the sub-page `room_settings` of `conversations` (trigger:
     click `thread-room-settings-button`): `room-join-rule-select`
     (tokens `invite | member-invite`) and `room-history-policy-select`
     (`none | full`) — token round-trips on `select`/`get_text`, the
-    `event-detail-reminder-select` contract; `room-admin-toggle[i]`
-    (indexed like the chips, `checked` attribute `true | false`; greyed
+    `event-detail-reminder-select` contract — for a viewer the policy editor
+    is absent for, `room-join-rule-line` and `room-history-policy-line`
+    (declared 2026-11-17 under rule A's advisory class) stand where the
+    selects would sit, each a `text` whose text is the rule's shared value
+    label and whose `value` attribute is the select's token, painted exactly
+    when its select is absent; `room-admin-toggle[i]`
+    (indexed like the chips, `checked` attribute `true | false`; absent
     unless `capabilities.can_appoint_admins`, and never live on the owner's
     own chip); `room-owner-transfer-button[i]` (user-approved 2026-09-09;
     indexed like the chips, `checked` attribute `true | false` with at most
-    one row staged — staging a second un-stages the first; greyed unless
+    one row staged — staging a second un-stages the first; absent unless
     `capabilities.can_transfer_ownership`, never live on the owner's own
     chip; behavior owner
     [`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md)
@@ -518,9 +530,11 @@ domain). Orientation: the page composes the components `dm-compose-form`,
     § Roles and authorization → *Leaving — the mechanism*).** Built on tui
     first; the six others follow in the batched trickle-down.
     `room-leave-button` sits in the `room_settings` editor **below** Save and
-    outside its staged set, greyed unless `capabilities.can_leave_room` (§
-    Architectural rules 5: greyed, never hidden — the owner sees it dead and
-    hands the room over first, which is the remedy the copy names). It opens
+    outside its staged set, live while `capabilities.can_leave_room` holds and
+    otherwise blocked for the owner — painted dead with the hand-over as its
+    reason, the remedy the copy names — and absent where the room has no
+    walk-out (§ Errors & edge cases → *Controls this person can never use*).
+    It opens
     `room-leave-confirm`, the `thread-rename-confirm` /
     `add-participant-confirm` shape this page already uses; confirming acts
     **immediately** rather than staging, because leaving is not a policy edit.
@@ -584,7 +598,9 @@ domain). Orientation: the page composes the components `dm-compose-form`,
     `room-nest-read-toggle` in the `room_settings` editor, before Save — the
     home nest's read, painted only when the draft carries one
     (`RoomSettingsDraft::nest_read` is `Some`: a community room whose answer
-    this device has read), with a `checked` attribute, greyed unless
+    this device has read), with a `checked` attribute, absent (read as
+    `room-nest-read-line`, the same sentence and `checked` attribute,
+    declared 2026-11-17) unless
     `capabilities.can_set_policy`; staged, and Save commits it as a rotation
     with the nest in or out, before any hand-over.
   - **The room's labeler set (user-approved 2026-09-25 under rule A;
@@ -600,7 +616,8 @@ domain). Orientation: the page composes the components `dm-compose-form`,
     as a kind a room may name (`room_may_name_labeler_kind`: `wasm` or
     `text-model`), in catalog order, its text naming the kind and the id,
     `checked` attribute `true | false` (`RoomSettingsDraft::labeler_staged`);
-    greyed unless `capabilities.can_set_policy`, and an unchecked row
+    absent (each row read as `room-labeler-line[i]`, the same text and
+    `checked` attribute, declared 2026-11-17) unless `capabilities.can_set_policy`, and an unchecked row
     greyed once the staged set is full (`labeler_toggle_live`, bounded at
     `MAX_ROOM_LABELERS`) so un-naming always stays open. Staged like the
     other policy controls: Save sends the whole set as one signed record,
@@ -798,9 +815,10 @@ Key types:
   per emit from the viewer's effective role by `RoomSnapshot::gate`
   ([`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md)
   § Roles and authorization) and stays **open** wherever no policy governs.
-  Apps grey `thread-add-participant-button` on `!can_invite` and the chip's
-  remove on `!can_remove_members`, and never branch on a role themselves
-  (§ Architectural rules 5). `encryption` is `E2E | TransportOnly | None |
+  Apps paint `thread-add-participant-button`, the chip's remove and the
+  room editor's controls from the `ThreadControl` answer over these
+  (§ Errors & edge cases → *Controls this person can never use*), and never
+  branch on a role themselves (§ Architectural rules 5). `encryption` is `E2E | TransportOnly | None |
   NestReadable` — the room class's render; `NestReadable` is the community
   arm, produced by no roster until the nest plane lands.
   `supports_reactions` + `supports_message_delete` are FaunaMls-only today (every
@@ -1235,7 +1253,7 @@ the Nostr leg's rows and kinds had moved onto the family.
 
 ### Recipient suggestions (ratified 2026-10-13)
 
-`recipient-picker-suggestion[i]` is a **completion over people this account already knows**, computed locally in shared Rust from two sets the client already holds — never a nest query and never a directory (a typed prefix reaches a nest only through the per-keystroke probe that § Errors & edge cases → *The picker tells the truth* rule 1 already runs, so suggestions disclose nothing new):
+`recipient-picker-suggestion[i]` is a **completion over people this account already knows**, computed locally in shared Rust from two sets the client already holds — never a nest query and never a directory (a typed prefix reaches a nest only through the per-keystroke probe that § Errors & edge cases → *The picker tells the truth* rule 1 already runs, and by rule 4 of the same bullet that probe carries it no further than a nest and has no effect there, so suggestions disclose nothing new):
 
 1. **Correspondents** — every participant of every thread the manager holds (`ThreadDetail::participants`, on any rail: a Fauna peer, a mail address, a bridged address), ordered by the thread's `last_activity_ms`, newest first.
 2. **Contacts** — the account's accepted and confirmed contact edges (`fauna.contacts.list` → `ContactItem { peer_id, handle, domain }`, [`contacts.md`](contacts.md) § State & data shape), each a `TypedAddress::Fauna` whose handle is `handle@domain` when the nest knows one, else the actor id. The roster is fed into the manager's `ContactsCache` beside the overlay projection by the session that holds `ContactsClient` (`libs/fauna-client-conversations`), loaded on login and reloaded on every contacts change; the engine crate itself stays contacts-free, as it is for the overlay ([`contacts.md`](contacts.md) § The private overlay).
@@ -1508,7 +1526,7 @@ conformance.
 - **The picker tells the truth (ratified 2026-08-29).** The `recipient-resolve-status`
   state is a statement about what a rail *confirmed*, never about what the
   typed text *looks like*, and a chip is only ever an address a rail confirmed.
-  Three rules, all shared Rust (`ConversationsManager`), zero app edits:
+  Four rules, all shared Rust (`ConversationsManager`), zero app edits:
   1. **Typing owes a probe.** `set_new_thread_recipient_input` /
      `set_add_participant_recipient_input` stamp `resolving` for any non-empty
      input (empty → `idle`); only the async `resolve_recipient` moves the state to
@@ -1565,6 +1583,44 @@ conformance.
      flush of a typed-but-uncommitted recipient resolves first and then commits
      by the same rule, so *Send* without Enter is equally honest (and a send
      with nothing committed fails loudly, as before).
+  4. **A probe has no effect, and typed text stays on the home nest (ruled
+     and built 2026-11-19 — § Implementation status today).** The probe runs on
+     every keystroke, so it runs on text the user has not finished and may never
+     commit (`bob`, `bob@`, `@alice@exam`). It may therefore read, on the home
+     nest or on a nest the FaunaMls rail already asks under
+     [`../architecture/foreign-handle-resolution.md`](../architecture/foreign-handle-resolution.md),
+     and nothing more: it writes no row, opens no room, raises no refusal for
+     text that is merely unfinished, and causes no lookup on a bridge's far
+     network. The bridged rail keeps this with two steps.
+     **(a) The keystroke asks which bridge admits the spelling** —
+     `conversation.address.admit` (kind owner
+     [`../architecture/apps/bridges.md`](../architecture/apps/bridges.md) § Bridge-kind
+     catalogue → Phase G): the home nest matches the text against the declared
+     grammars of the bridges serving the account and answers the one bridge, or
+     none. One bridge → `resolved`, carrying `TypedAddress::Bridged` with the
+     spelling as typed; none, several, or a nest that cannot be asked → the
+     rail does not claim the text. `resolved` on a bridged address therefore
+     says *a connected bridge accepts this spelling* — the strength of the mail
+     rail's shape claim — and not that the far network knows the person.
+     **(b) Send opens the room.** `send_new_thread`, after its flush and before
+     the thread is keyed, hands each chip to its rail
+     (`RailBackend::open_recipient`, the identity on every rail but the
+     bridged one); the bridged rail calls `conversation.rooms.open` on the
+     chip's bridge, which resolves the spelling on the far network, finds or
+     mints the room, and answers the stable far id (a Fediverse actor URI, a
+     Bluesky DID, a Nostr key in hex). The thread is keyed on that id, never on
+     the typed spelling, so the thread opened from the picker, the Sent copy
+     and the peer's replies stay one thread. A spelling the far network does
+     not know is refused there: nothing is sent, no thread is made, the chip
+     stays, and `send_state` is `Failed` with
+     `conversations.unified.recipient_resolve_not_found` as its reason. So a
+     far network hears of an address once, when the user sends to it — the
+     disclosure the user asked for — and a room exists only for an address
+     someone sent to. Debouncing the probe was rejected: it lowers the count
+     of lookups and rooms, and fixes neither. A probe held back until Enter
+     was rejected too: `accept_current_recipient_chip` is synchronous on every
+     app, and the picker would have to read `not-found` or sit on `resolving`
+     for a well-formed bridged address while it is typed.
   The e2e twin: `test_fauna_mls_cross_nest_roundtrip.py::test_known_peer_unreachable_never_downgrades_to_email`
   (status `error`, no chip, no thread on any rail) and
   `::test_first_contact_with_unreachable_authority_is_email`.
@@ -1737,6 +1793,8 @@ conformance.
   showed without its original). Only a reply with **both** an unresolvable
   `In-Reply-To` **and** a divergent subject still forks — the residual
   "Cross-side thread continuity" degraded case.
+- **Controls this person can never use (ruled 2026-11-16, applying [`README.md`](README.md) § Offer only what is possible, rules 2 and 6; built on tui, the six follow in their trickle-down).** Every thread and room control gated by the viewer's role or by the rail answers one shared predicate, `ThreadCapabilities::possibility(control, my_role) -> Possibility` (`libs/fauna-conversations/src/thread_controls.rs`; FFI twin `thread_control_possibility`), over the `ThreadControl` set: `Invite` (`thread-add-participant-button`), `RemoveMember` (the chip's remove), `SetPolicy` (`room-join-rule-select`, `room-history-policy-select`, `room-nest-read-toggle`, `room-labeler-toggle[i]`, `room-settings-save-button`), `AppointAdmins` (`room-admin-toggle[i]`), `TransferOwnership` (`room-owner-transfer-button[i]`), `LeaveRoom` (`room-leave-button`, `room-leave-confirm`), `LocalRemove` (`room-remove-button`, `room-remove-confirm`) and `Subject` (the reply bar's `topic-toggle-button`). The booleans stay — `RoomSnapshot::gate` writes them and the manager's refusals read them; the predicate only says *why* a `false` is, and the why decides the paint. **Absent** is every `false` but one: a role only the owner or an admin grants is not something this person can make true from this app, and a rail with no such act never will, so the control is not painted at all. **Blocked** is the one exception, the owner's walk-out: a room is never owner-less, the owner lifts it by handing the room over, so `room-leave-button` is shown disabled with `error.send.room_owner_cannot_leave` as its reason — the same sentence `leave_room` refuses with — and the hand-over controls stand live above it in the same editor. Rule 3's page-level highlight does not apply here: the editor's main acts (the policy edits) do not wait on the hand-over, only the walk-out does, and its reason names the step. Three shapes keep what a member still reads: the member chips stay painted as the inert roster (with their `role` attribute) when the remove is absent, since the chip *is* the roster; a viewer the policy editor is absent for reads the join rule, the history policy, the home nest's read and each labeler row as plain lines where the controls would sit (`room-join-rule-line`, `room-history-policy-line`, `room-nest-read-line`, `room-labeler-line[i]`, each painted exactly when the control it stands in for is absent; ids declared 2026-11-17, painted on every app but windows, which follows); and a per-participant list that is shown keeps one row per participant, the owner's own row dead, so `[i]` stays the chip's index. Each handler asks the same predicate before it acts (tui's `open_thread_control`), and the wire refusals stay the manager's. tui declares each answer on its element (`Element::possible`), so walk invariant I8 holds it. **Implementation status today:** built in shared Rust and on tui, macos and ios (FaunaKit's `ThreadControlAnswers`, painted through `faunaPossible`), linux, android and web (web over the wasm twin `threadControlPossibility`; linux paints through its possibility seam, so its walk invariant I9 holds it); windows still paints these from the booleans (greyed) until its trickle-down row lands, so the e2e journeys accept either shape meanwhile (not offered live). The plain-line ids are painted on tui, macos, ios, linux, web and android; windows paints those lines without ids until its lift lands, so the journey that reads them skips windows (its surface gate).
+- **The new-thread composer offers only what it can send (ruled 2026-11-16, applying [`README.md`](README.md) § Offer only what is possible, rules 4, 6 and 7; built on tui, linux, android, web, macos and ios, windows follows in its trickle-down).** A thread not yet created has no `ThreadCapabilities`, so the composer's gated controls answer one shared predicate over its draft, `new_thread_possibility(compose, control) -> Possibility` (`libs/fauna-conversations/src/new_thread_controls.rs`; FFI twin `new_thread_control_possibility`), over the `NewThreadControl` set `Send` (`dm-send-button`), `Attach` (`attachment-button`) and `Topic` (`topic-toggle-button`). The rail is decided by the *deciding recipient*: the first committed chip (the one `send_new_thread` routes on), else the typed recipient the picker's probe resolved (the chip Send's flush would commit). **Send** is possible once there is anyone to send to — a committed chip, or typed text Send flushes into one (§ User actions, the `dm-send-button` row) — and blocked otherwise, with `conversations.compose.needs_recipient`; a first chip of a kind this build has no rail for blocks it with `conversations.compose.recipient_unsupported`. `send_new_thread` asks the same predicate after its flush and stamps any refusal on the draft's `send_state` (`conversations.unified.error_send`, the reason as `{message}`), the composer staying open with what was typed; a typed recipient the flush could not resolve refuses with the picker's own resolve sentence. Nothing returns silently: the returned error is never discarded by an app, and an error no draft carries is shown from its detail. **Attach and topic follow the deciding recipient's rail**: blocked with `conversations.compose.no_attachments_here` / `no_topic_here` on a rail that carries neither (`Bridged` today), a topic already open always closable. **Before any recipient decides a rail they are possible** — the rail is not unknown there, only not chosen yet: the draft holds the file and the topic whatever it turns out to be (a message is written first and addressed later, and survives a restart that way — § Persistence), so no input is spent on something that cannot be saved (rule 4), and rule 5 (a pending read) does not apply. Each handler asks the same predicate before it acts and refuses with its reason on `error-message` (tui's `new_thread_control`); tui declares each answer on its element (`Element::possible`), so walk invariant I8 holds it. A post-succession *Keep* (`thread-member-keep-button`) whose review-list write or re-read fails says so on `error-message` (`settings.recovery_kit.review_keep_failed`), the mark staying. **Implementation status today:** built in shared Rust (with the wasm twin `newThreadControlPossibility`), on tui, linux, android and web, and on macos and ios (FaunaKit's `NewThreadControlAnswers`, painted in the shared `DmComposeBar`; the send's error and a failed *Keep* reach `error-message`); windows still paints Send enabled and attach/topic from their own default until their trickle-down rows land.
 
 ## Architectural rules
 
@@ -1752,8 +1810,10 @@ conformance.
    `dm-message-text[i]`, `dm-reply-button[i]`, `recipient-picker-chip[i]`,
    `recipient-picker-suggestion[i]`, `protocol-icon[i]`) — scoped
    queries only, never global count + slice.
-5. **Capability gating.** Apps render every affordance unconditionally
-   and gray out / disable based on `capabilities.*`. They never branch
+5. **Capability gating.** Apps paint every affordance from
+   `capabilities.*` — a role- or rail-gated control from its
+   `ThreadControl` answer, absent or blocked with its reason (§ Errors &
+   edge cases → *Controls this person can never use*). They never branch
    on `rail` directly. This rule extends to the action layer (Python
    e2e) and the viewmodel — neither layer may branch on rail. Adding a
    sixth rail must be a backend change with zero app edits.

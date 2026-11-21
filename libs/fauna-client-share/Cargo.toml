@@ -30,5 +30,7 @@ fauna-protocol = { path = "../fauna-protocol", default-features = false, feature
 [dev-dependencies]
 # The shared `RpcRequester` doubles + `block_on` (one owner for the seam's fake).
 fauna-client-testkit = { path = "../fauna-client-testkit" }
+# `PagingRule::with_thresholds` — a paged manifest without a 64 GB file.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["test-util"] }
 serde = { workspace = true }
 base64 = { workspace = true }

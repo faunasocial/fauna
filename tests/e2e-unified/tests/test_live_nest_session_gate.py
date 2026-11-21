@@ -266,7 +266,9 @@ def _closure_reads(path):
     """
     import ast
 
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    from helpers import source_scan
+
+    tree = source_scan.parsed(path)  # shared, read-only: the visitor only reads
     found, stack = [], []
 
     class _V(ast.NodeVisitor):
@@ -297,18 +299,31 @@ def _closure_reads(path):
     return found
 
 
+def _closure_read_candidates(root):
+    """conftest.py and `helpers/*.py` — only those spelling `fixturenames`,
+    which both read spellings do, so no other file can hold one
+    (`helpers/source_scan.py`: the tree's text is read once per process)."""
+    from helpers import source_scan
+
+    texts = source_scan.sources(root)
+    paths = [root / "conftest.py", *(p for p in texts if p.parent == root / "helpers")]
+    return [p for p in paths if p in texts and "fixturenames" in texts[p]]
+
+
 def test_every_closure_read_goes_through_the_discriminator():
     import ast
     from pathlib import Path
 
+    from helpers import source_scan
+
     root = Path(__file__).resolve().parents[1]
-    sources = [root / "conftest.py", *sorted((root / "helpers").glob("*.py"))]
+    sources = _closure_read_candidates(root)
 
     offenders = []
     for path in sources:
         if path.name == "fixture_closure.py":
             continue  # the discriminator itself
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = source_scan.parsed(path)  # shared, read-only
         funcs = {
             n.name: n
             for n in ast.walk(tree)
@@ -344,7 +359,7 @@ def test_the_allowlist_does_not_outlive_its_reads():
     root = Path(__file__).resolve().parents[1]
     live = {
         (path.name, fn_name)
-        for path in [root / "conftest.py", *sorted((root / "helpers").glob("*.py"))]
+        for path in _closure_read_candidates(root)
         for fn_name, _ in _closure_reads(path)
     }
     stale = set(_BARE_CLOSURE_READS_ALLOWED) - live

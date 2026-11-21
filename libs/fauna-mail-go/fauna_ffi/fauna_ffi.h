@@ -851,6 +851,11 @@ uint64_t uniffi_fauna_ffi_fn_method_fficarddavclient_locate_card_by_uid_hash(uin
 uint64_t uniffi_fauna_ffi_fn_method_fficarddavclient_query_cards(uint64_t ptr, RustBuffer addressbook_id_hex
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFICARDDAVCLIENT_READ_ADDRESSBOOKS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFICARDDAVCLIENT_READ_ADDRESSBOOKS
+uint64_t uniffi_fauna_ffi_fn_method_fficarddavclient_read_addressbooks(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFICLOUDBACKUPEXCLUDER
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFICLOUDBACKUPEXCLUDER
 uint64_t uniffi_fauna_ffi_fn_clone_fficloudbackupexcluder(uint64_t handle, RustCallStatus *out_status
@@ -2151,6 +2156,11 @@ int8_t uniffi_fauna_ffi_fn_func_is_unified_bridges_page_bridge(RustBuffer id, Ru
 RustBuffer uniffi_fauna_ffi_fn_func_setting_control(RustBuffer setting_type, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CALENDAR_PAN_POSSIBILITY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CALENDAR_PAN_POSSIBILITY
+RustBuffer uniffi_fauna_ffi_fn_func_calendar_pan_possibility(RustBuffer mode, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CALENDAR_PAN_STEP
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CALENDAR_PAN_STEP
 RustBuffer uniffi_fauna_ffi_fn_func_calendar_pan_step(RustBuffer mode, RustCallStatus *out_status
@@ -2370,6 +2380,11 @@ RustBuffer uniffi_fauna_ffi_fn_func_ios_age_attestation_app_id(RustCallStatus *o
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KIDS_APP_ELIGIBILITY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KIDS_APP_ELIGIBILITY
+RustBuffer uniffi_fauna_ffi_fn_func_kids_app_eligibility(RustBuffer latest_read, RustBuffer snapshot, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KIDS_APP_ELIGIBLE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KIDS_APP_ELIGIBLE
 int8_t uniffi_fauna_ffi_fn_func_kids_app_eligible(RustBuffer status, RustCallStatus *out_status
@@ -2394,6 +2409,11 @@ int8_t uniffi_fauna_ffi_fn_func_ward_contact_ask_pending(RustBuffer asks, RustBu
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_FEED_REQUEST_STATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_FEED_REQUEST_STATE
 RustBuffer uniffi_fauna_ffi_fn_func_ward_feed_request_state(RustBuffer asks, RustBuffer bridge_id, RustBuffer operation, RustBuffer target, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_GUARDIAN_DECIDES_CONTACT
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_GUARDIAN_DECIDES_CONTACT
+int8_t uniffi_fauna_ffi_fn_func_ward_guardian_decides_contact(int8_t status_read, RustBuffer own_policy, RustBuffer peer_status, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_KNOCKS_AWAIT_GUARDIAN
@@ -2679,9 +2699,19 @@ uint64_t uniffi_fauna_ffi_fn_func_unwrap_msek_blob(RustBuffer blob_bytes, RustBu
 RustBuffer uniffi_fauna_ffi_fn_func_webdav_decode_folder_keys_header(RustBuffer value, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WEBDAV_MANIFEST_PAGE_HASHES
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WEBDAV_MANIFEST_PAGE_HASHES
+RustBuffer uniffi_fauna_ffi_fn_func_webdav_manifest_page_hashes(RustBuffer manifest_bytes, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WEBDAV_MANIFEST_STORE_KEYS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WEBDAV_MANIFEST_STORE_KEYS
+RustBuffer uniffi_fauna_ffi_fn_func_webdav_manifest_store_keys(RustBuffer manifest_bytes, RustBuffer page_bodies, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WEBDAV_OPEN_FILE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WEBDAV_OPEN_FILE
-RustBuffer uniffi_fauna_ffi_fn_func_webdav_open_file(RustBuffer keys, uint64_t content_key_version, RustBuffer relative_path, RustBuffer manifest_bytes, RustBuffer chunk_bodies, RustCallStatus *out_status
+RustBuffer uniffi_fauna_ffi_fn_func_webdav_open_file(RustBuffer keys, uint64_t content_key_version, RustBuffer relative_path, RustBuffer manifest_bytes, RustBuffer page_bodies, RustBuffer chunk_bodies, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WEBDAV_RENDER_PATHS
@@ -3411,6 +3441,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_setting_control(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_CALENDAR_PAN_POSSIBILITY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_CALENDAR_PAN_POSSIBILITY
+uint16_t uniffi_fauna_ffi_checksum_func_calendar_pan_possibility(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_CALENDAR_PAN_STEP
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_CALENDAR_PAN_STEP
 uint16_t uniffi_fauna_ffi_checksum_func_calendar_pan_step(void
@@ -3669,6 +3705,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_ios_age_attestation_app_id(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KIDS_APP_ELIGIBILITY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KIDS_APP_ELIGIBILITY
+uint16_t uniffi_fauna_ffi_checksum_func_kids_app_eligibility(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KIDS_APP_ELIGIBLE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KIDS_APP_ELIGIBLE
 uint16_t uniffi_fauna_ffi_checksum_func_kids_app_eligible(void
@@ -3696,6 +3738,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_ward_contact_ask_pending(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_FEED_REQUEST_STATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_FEED_REQUEST_STATE
 uint16_t uniffi_fauna_ffi_checksum_func_ward_feed_request_state(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_GUARDIAN_DECIDES_CONTACT
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_GUARDIAN_DECIDES_CONTACT
+uint16_t uniffi_fauna_ffi_checksum_func_ward_guardian_decides_contact(void
     
 );
 #endif
@@ -4032,6 +4080,18 @@ uint16_t uniffi_fauna_ffi_checksum_func_unwrap_msek_blob(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WEBDAV_DECODE_FOLDER_KEYS_HEADER
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WEBDAV_DECODE_FOLDER_KEYS_HEADER
 uint16_t uniffi_fauna_ffi_checksum_func_webdav_decode_folder_keys_header(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WEBDAV_MANIFEST_PAGE_HASHES
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WEBDAV_MANIFEST_PAGE_HASHES
+uint16_t uniffi_fauna_ffi_checksum_func_webdav_manifest_page_hashes(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WEBDAV_MANIFEST_STORE_KEYS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WEBDAV_MANIFEST_STORE_KEYS
+uint16_t uniffi_fauna_ffi_checksum_func_webdav_manifest_store_keys(void
     
 );
 #endif
@@ -4848,6 +4908,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_fficarddavclient_locate_card_by_uid_ha
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFICARDDAVCLIENT_QUERY_CARDS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFICARDDAVCLIENT_QUERY_CARDS
 uint16_t uniffi_fauna_ffi_checksum_method_fficarddavclient_query_cards(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFICARDDAVCLIENT_READ_ADDRESSBOOKS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFICARDDAVCLIENT_READ_ADDRESSBOOKS
+uint16_t uniffi_fauna_ffi_checksum_method_fficarddavclient_read_addressbooks(void
     
 );
 #endif

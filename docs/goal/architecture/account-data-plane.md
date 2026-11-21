@@ -741,7 +741,12 @@ part of the plane itself:
    deleted reporter's open reports are withdrawn, words gone and the home
    nest's copy followed through the queue, resolved rows stay whole; ruling
    owned by [`../behavior/moderation.md`](../behavior/moderation.md) § Where
-   it lands, who acts, and with what). **A second hand-written leg reaches a
+   it lands, who acts, and with what); `sync_changes` and `sync_signer_certs`
+   joined it 2026-11-18 — a deleted writer's rows in a set another owner
+   holds stay, with the certs they verify under, and the actor's
+   writer-of-record marks are recorded first; ruling owned by
+   [`writer-signed-change-records.md`](writer-signed-change-records.md)
+   ruling (12)). **A second hand-written leg reaches a
    table's SECOND person (2026-09-22)**, whom a registry
    keyed on one column cannot: a deleted reader's pending `subscribe` requests
    leave the author's `subscribe_requests` queue, paid or not. Each is only an
@@ -2076,6 +2081,11 @@ derived per-host figure), the door's over-bound refusal for a NEW row
 `conformance_custody_hosting_client.rs`), and the pump passing the squeeze
 from its own enumeration with `meter_and_evict` taking `Option<u64>` so a
 squeeze to `Some(0)` holds the floor instead of inheriting the default cap.
+The tier bound, at the door and in the pump, applies only where the nest
+enforces tier quotas (`enforce_tier_quotas`): the standalone server passes
+`true`; the embedded desktop nest (the Windows installer's service,
+`desktop_serve::run_serve_loop`) passes `false`, so there only the per-row
+ceiling and the per-host row count of `bound_hosting_deposit` bound a host.
 The **admin surface** (piece 3) is BUILT nest-side (2026-08-17):
 `fauna.admin.custody_hosting.{list,remove}` — Admin-class, the nest-wide
 host-attributed list the per-caller door deliberately is not, and a remove

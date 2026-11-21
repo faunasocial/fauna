@@ -805,10 +805,29 @@ pub struct BridgedSent {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait BridgedSink: MaybeSendSync {
     /// Ask the nest which bridge's declared grammar admits `raw` — `Ok(None)`
-    /// when none does. The grammar is matched nest-side only; no app compiles a
-    /// third party's pattern (`ui/conversations.md` § Where logic lives → *The
-    /// `Bridged` adapter*, ruling 2 (d)).
+    /// when none, or more than one, does. The grammar is matched nest-side
+    /// only; no app compiles a third party's pattern (`ui/conversations.md`
+    /// § Where logic lives → *The `Bridged` adapter*, ruling 2 (d)). The
+    /// picker asks on every keystroke, so this is the effect-free
+    /// `conversation.address.admit`: the answer carries the spelling as typed,
+    /// no room is opened and the far network hears nothing (`ui/conversations.md`
+    /// § Errors & edge cases → *The picker tells the truth*, rule 4 (a)).
     async fn resolve(&self, raw: String) -> Result<Option<BridgedResolved>, String>;
+
+    /// Open the room for `address` on `bridge_id` — `conversation.rooms.open`,
+    /// which resolves the spelling on the far network and answers the stable
+    /// far id the room keys on, as [`BridgedResolved::address`]. `Ok(None)`
+    /// when the far network does not know the address (the nest's
+    /// `address_refused`). Called only when a new thread is sent
+    /// ([`RailBackend::open_recipient`], rule 4 (b)). The default answers the
+    /// address unchanged — a sink with no room to open (a test double).
+    async fn open(
+        &self,
+        bridge_id: String,
+        address: String,
+    ) -> Result<Option<BridgedResolved>, String> {
+        Ok(Some(BridgedResolved { bridge_id, address }))
+    }
 
     /// Seal and submit one outbound message (see [`BridgedOutbound`]).
     async fn send(&self, outbound: BridgedOutbound) -> Result<BridgedSent, String>;
@@ -4370,6 +4389,17 @@ pub trait RailBackend: MaybeSendSync {
     /// recognises as its own and cannot confirm right now, never for "not mine"
     /// (that is [`ResolveResult::NotFound`], which lets the chain fall through).
     async fn resolve_address(&self, raw: &str) -> ResolveResult;
+
+    /// The canonical form of a recipient a new thread is about to be keyed
+    /// on, asked once per chip by `ConversationsManager::send_new_thread`
+    /// after its flush (`ui/conversations.md` § Errors & edge cases → *The
+    /// picker tells the truth*, rule 4 (b)). The identity on every rail but
+    /// the bridged one, whose probe answers the spelling as typed and which
+    /// opens the room here, answering the stable far id. An `Err` sends
+    /// nothing and makes no thread.
+    async fn open_recipient(&self, address: TypedAddress) -> Result<TypedAddress, BackendError> {
+        Ok(address)
+    }
 
     /// The participants of every thread this account holds, shown to the rail
     /// right before each probe (`ConversationsManager::probe_address`) so a

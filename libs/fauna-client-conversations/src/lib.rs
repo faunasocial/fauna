@@ -179,7 +179,8 @@ pub use custody_ceremony_glue::custody_mint_candidates;
 pub use custody_ceremony_glue::{
     BackendCustodyPoster, CustodyCeremonyIngestCounts, CustodyCeremonyObserver,
     CustodyMintCandidate, StoreCustodyCeremonySink, custody_ceremony_ingest_counts,
-    custody_mint_candidates_over, drive_ceremony_pass, mint_candidates_from_channels,
+    custody_mint_candidates_over, custody_mint_confirm_possibility, custody_mint_possibility,
+    drive_ceremony_pass, mint_candidates_from_channels,
 };
 
 /// Test-only tracing capture for the drain-side Welcome-ingest-failure pin — kept crate-local because it

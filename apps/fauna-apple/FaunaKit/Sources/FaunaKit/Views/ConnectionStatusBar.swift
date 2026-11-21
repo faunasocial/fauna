@@ -20,18 +20,25 @@ import SwiftUI
 /// state. Reading `client.connectionState` in `body` also establishes the
 /// SwiftUI Observation dependency that re-renders the visible `Text` on each
 /// transition.
+///
+/// `alignment` places the text inside the full-width bar: centred by default
+/// (the iOS shell's top strip); macOS passes `.leading`, because there the bar
+/// sits at the top of the sidebar column over `SyncAgentStatusBar`, the two
+/// reading as one block (`sync-agent.md` § Local agent health).
 public struct ConnectionStatusBar: View {
     private let client: FaunaClient?
+    private let alignment: Alignment
 
-    public init(client: FaunaClient?) {
+    public init(client: FaunaClient?, alignment: Alignment = .center) {
         self.client = client
+        self.alignment = alignment
     }
 
     public var body: some View {
         Text(label)
             .font(.caption)
             .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: alignment)
             .padding(.horizontal, 16)
             .padding(.vertical, 4)
             .background(.bar)

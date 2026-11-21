@@ -422,6 +422,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_func_new_thread_control_possibility()
+		})
+		if checksum != 28790 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_new_thread_control_possibility: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_func_more_grid_emojis()
 		})
 		if checksum != 17214 {
@@ -746,11 +755,38 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_func_sort_order_label()
+		})
+		if checksum != 5569 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_sort_order_label: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_func_sort_order_name()
 		})
 		if checksum != 53782 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_sort_order_name: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_func_thread_control_possibility()
+		})
+		if checksum != 49188 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_thread_control_possibility: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_func_thread_send_possibility()
+		})
+		if checksum != 3999 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_thread_send_possibility: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -6821,6 +6857,14 @@ type ConversationsSnapshot struct {
 	// bridges by label and never matches an address itself). Empty with no
 	// bridge consented.
 	Bridges []fauna_core.BridgeIdentitySnapshot
+	// Whether this account's room list has **loaded** — a receive sweep has
+	// read every rail without an error since this identity's state was set up
+	// ([`crate::manager::ConversationsManager::rooms_loaded`]). The page's
+	// second painting condition for its empty state: before it, an empty
+	// `threads` means "not read yet" and the page paints no empty state
+	// (`ui/README.md` § List pages: loading is not empty).
+	// Monotonic within an identity; an identity change starts it over.
+	Loaded bool
 }
 
 func (r *ConversationsSnapshot) Destroy() {
@@ -6834,6 +6878,7 @@ func (r *ConversationsSnapshot) Destroy() {
 	FfiDestroyerInt64{}.Destroy(r.LaunchFloorMs)
 	FfiDestroyerSequenceRoomInvitationSnapshot{}.Destroy(r.RoomInvitations)
 	FfiDestroyerSequenceBridgeIdentitySnapshot{}.Destroy(r.Bridges)
+	FfiDestroyerBool{}.Destroy(r.Loaded)
 }
 
 type FfiConverterConversationsSnapshot struct{}
@@ -6856,6 +6901,7 @@ func (c FfiConverterConversationsSnapshot) Read(reader io.Reader) ConversationsS
 		FfiConverterInt64INSTANCE.Read(reader),
 		FfiConverterSequenceRoomInvitationSnapshotINSTANCE.Read(reader),
 		FfiConverterSequenceBridgeIdentitySnapshotINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
 
@@ -6878,6 +6924,7 @@ func (c FfiConverterConversationsSnapshot) Write(writer io.Writer, value Convers
 	FfiConverterInt64INSTANCE.Write(writer, value.LaunchFloorMs)
 	FfiConverterSequenceRoomInvitationSnapshotINSTANCE.Write(writer, value.RoomInvitations)
 	FfiConverterSequenceBridgeIdentitySnapshotINSTANCE.Write(writer, value.Bridges)
+	FfiConverterBoolINSTANCE.Write(writer, value.Loaded)
 }
 
 type FfiDestroyerConversationsSnapshot struct{}
@@ -9738,6 +9785,47 @@ type FfiDestroyerJoinRule struct{}
 func (_ FfiDestroyerJoinRule) Destroy(value JoinRule) {
 }
 
+// A new-thread composer control whose possibility follows the recipient.
+type NewThreadControl uint
+
+const (
+	// `dm-send-button`.
+	NewThreadControlSend NewThreadControl = 1
+	// `attachment-button`.
+	NewThreadControlAttach NewThreadControl = 2
+	// `topic-toggle-button`.
+	NewThreadControlTopic NewThreadControl = 3
+)
+
+type FfiConverterNewThreadControl struct{}
+
+var FfiConverterNewThreadControlINSTANCE = FfiConverterNewThreadControl{}
+
+func (c FfiConverterNewThreadControl) Lift(rb RustBufferI) NewThreadControl {
+	return LiftFromRustBuffer[NewThreadControl](c, rb)
+}
+
+func (c FfiConverterNewThreadControl) Lower(value NewThreadControl) C.RustBuffer {
+	return LowerIntoRustBuffer[NewThreadControl](c, value)
+}
+
+func (c FfiConverterNewThreadControl) LowerExternal(value NewThreadControl) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[NewThreadControl](c, value))
+}
+func (FfiConverterNewThreadControl) Read(reader io.Reader) NewThreadControl {
+	id := readInt32(reader)
+	return NewThreadControl(id)
+}
+
+func (FfiConverterNewThreadControl) Write(writer io.Writer, value NewThreadControl) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerNewThreadControl struct{}
+
+func (_ FfiDestroyerNewThreadControl) Destroy(value NewThreadControl) {
+}
+
 // What kind of principal a member is (`conversation-rooms.md` § The room →
 // *Principals*). The class derives from the kinds alone.
 type PrincipalKind uint
@@ -10548,6 +10636,62 @@ func (FfiConverterSortOrder) Write(writer io.Writer, value SortOrder) {
 type FfiDestroyerSortOrder struct{}
 
 func (_ FfiDestroyerSortOrder) Destroy(value SortOrder) {
+}
+
+// A thread or room control whose possibility follows the viewer's role or the
+// rail. Each names the element(s) it paints.
+type ThreadControl uint
+
+const (
+	// `thread-add-participant-button`.
+	ThreadControlInvite ThreadControl = 1
+	// The remove gesture of `thread-member-chip[i]` (the chip itself stays:
+	// it is the roster).
+	ThreadControlRemoveMember ThreadControl = 2
+	// The room policy editor's staged controls and their Save:
+	// `room-join-rule-select`, `room-history-policy-select`,
+	// `room-nest-read-toggle`, `room-labeler-toggle[i]`,
+	// `room-settings-save-button`.
+	ThreadControlSetPolicy ThreadControl = 3
+	// `room-admin-toggle[i]`.
+	ThreadControlAppointAdmins ThreadControl = 4
+	// `room-owner-transfer-button[i]`.
+	ThreadControlTransferOwnership ThreadControl = 5
+	// `room-leave-button` and `room-leave-confirm`.
+	ThreadControlLeaveRoom ThreadControl = 6
+	// `room-remove-button` and `room-remove-confirm`.
+	ThreadControlLocalRemove ThreadControl = 7
+	// The reply bar's `topic-toggle-button`.
+	ThreadControlSubject ThreadControl = 8
+)
+
+type FfiConverterThreadControl struct{}
+
+var FfiConverterThreadControlINSTANCE = FfiConverterThreadControl{}
+
+func (c FfiConverterThreadControl) Lift(rb RustBufferI) ThreadControl {
+	return LiftFromRustBuffer[ThreadControl](c, rb)
+}
+
+func (c FfiConverterThreadControl) Lower(value ThreadControl) C.RustBuffer {
+	return LowerIntoRustBuffer[ThreadControl](c, value)
+}
+
+func (c FfiConverterThreadControl) LowerExternal(value ThreadControl) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ThreadControl](c, value))
+}
+func (FfiConverterThreadControl) Read(reader io.Reader) ThreadControl {
+	id := readInt32(reader)
+	return ThreadControl(id)
+}
+
+func (FfiConverterThreadControl) Write(writer io.Writer, value ThreadControl) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerThreadControl struct{}
+
+func (_ FfiDestroyerThreadControl) Destroy(value ThreadControl) {
 }
 
 // Per-thread transport-crypto level — the **render of the room's class**
@@ -13452,6 +13596,16 @@ func RecipientResolveStatus(state ResolveState) ResolveStatusView {
 	}))
 }
 
+// [`new_thread_possibility`] over FFI and wasm: the app families hand in the
+// snapshot's `new_thread_compose` (the `thread_control_possibility` shape).
+func NewThreadControlPossibility(compose *ComposeState, control NewThreadControl) fauna_core.Possibility {
+	return fauna_core.FfiConverterPossibilityINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_func_new_thread_control_possibility(FfiConverterOptionalComposeStateINSTANCE.Lower(compose), FfiConverterNewThreadControlINSTANCE.Lower(control), _uniffiStatus),
+		}
+	}))
+}
+
 // FFI face of [`MORE_GRID_EMOJIS`] — the [`quickset_emojis`] shape, for windows over
 // UniFFI and web through the wasm twin (`moreGridEmojis` in `libs/fauna-wasm`).
 func MoreGridEmojis() []string {
@@ -13808,12 +13962,44 @@ func NextSortOrder(current SortOrder) SortOrder {
 	}))
 }
 
+// [`SortOrder::label`] over UniFFI — the order in force, named, for the
+// `conversation-sort` control's text or tooltip.
+func SortOrderLabel(order SortOrder) fauna_core.LocalizedText {
+	return fauna_core.FfiConverterLocalizedTextINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_func_sort_order_label(FfiConverterSortOrderINSTANCE.Lower(order), _uniffiStatus),
+		}
+	}))
+}
+
 // [`SortOrder::name`] over UniFFI — the stable label a cycle-button's
 // automation value reads (Swift `ConversationsUI.sortLabel` hand-wrote it).
 func SortOrderName(order SortOrder) string {
 	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_conversations_fn_func_sort_order_name(FfiConverterSortOrderINSTANCE.Lower(order), _uniffiStatus),
+		}
+	}))
+}
+
+// [`ThreadCapabilities::possibility`] over FFI: a UniFFI record carries no
+// methods, so the app families read the predicate through this function
+// (the `mail_settings_mail_usable` shape).
+func ThreadControlPossibility(capabilities ThreadCapabilities, control ThreadControl, myRole *RoomRole) fauna_core.Possibility {
+	return fauna_core.FfiConverterPossibilityINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_func_thread_control_possibility(FfiConverterThreadCapabilitiesINSTANCE.Lower(capabilities), FfiConverterThreadControlINSTANCE.Lower(control), FfiConverterOptionalRoomRoleINSTANCE.Lower(myRole), _uniffiStatus),
+		}
+	}))
+}
+
+// [`ThreadCapabilities::send_possibility`] over FFI — the reply bar's
+// (`dm-text-field`, `dm-send-button`) answer, read through a free function for
+// the same no-methods-on-a-record reason as [`thread_control_possibility`].
+func ThreadSendPossibility(capabilities ThreadCapabilities) fauna_core.Possibility {
+	return fauna_core.FfiConverterPossibilityINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_func_thread_send_possibility(FfiConverterThreadCapabilitiesINSTANCE.Lower(capabilities), _uniffiStatus),
 		}
 	}))
 }

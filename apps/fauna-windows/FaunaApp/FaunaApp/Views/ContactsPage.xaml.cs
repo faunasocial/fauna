@@ -52,6 +52,10 @@ public sealed partial class ContactsPage : Page
                 // OnNavigatedFrom.
                 _rpc.AddressBookPushChanged += OnAddressBookPushChanged;
                 _rpc.Reconnected += OnAddressBookReconnected;
+                // The shared store-change notice re-runs an UNRESOLVED book read:
+                // the key the first-connect mint writes lands in the account store,
+                // and this is how the loading line turns into the books.
+                _rpc.StoreChanged += OnAddressBookStoreChanged;
             }
             // Re-read the names when the private overlay's projection moves (a late
             // load after a relaunch, a sibling device's edit, this device's Save).
@@ -93,6 +97,7 @@ public sealed partial class ContactsPage : Page
             _rpc.KnockReceived -= OnKnockReceived;
             _rpc.AddressBookPushChanged -= OnAddressBookPushChanged;
             _rpc.Reconnected -= OnAddressBookReconnected;
+            _rpc.StoreChanged -= OnAddressBookStoreChanged;
         }
         _viewModel?.CleanupReconnect();
         if (_viewModel is not null)
@@ -547,6 +552,18 @@ public sealed partial class ContactsPage : Page
 
     private void OnAddressBookReconnected() => RefreshAddressBookIfShowing();
 
+    /// <summary>The book read's last answer — unresolved until one lands, and while
+    /// custody holds no key yet (the mint in flight). Read by the store-change
+    /// notice, which re-runs only an unresolved read (linux's
+    /// <c>AccountStoreChanged</c> arm, tui's <c>contacts::store_resync_op</c>).</summary>
+    private bool _addressBookResolved;
+
+    private void OnAddressBookStoreChanged()
+    {
+        if (_addressBookResolved) return;
+        RefreshAddressBookIfShowing();
+    }
+
     /// <summary>Re-read the books and the open book's cards, ONLY while the Address
     /// Book segment is showing (page-gated: off-segment, the nav-in read is the
     /// backstop and a re-read would be work nobody sees).</summary>
@@ -598,10 +615,15 @@ public sealed partial class ContactsPage : Page
         AddressBookErrorBar.IsOpen = false;
         try
         {
-            var rows = await _rpc.CarddavListAddressbooksAsync();
-            var books = rows.Select(AddressbookInfo.FromFfi).ToList();
+            // The typed read (contacts.md § Errors & edge cases): an unresolved
+            // answer — a missing key included — paints the loading line in place of
+            // the books, never "No address books yet." (AddressBookRead decides).
+            var read = AddressBookRead.Of(await _rpc.CarddavReadAddressbooksAsync());
+            _addressBookResolved = read.Resolved;
+            var books = read.Books;
             AddressbooksList.ItemsSource = books;
-            NoAddressbooksText.Visibility = books.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            NoAddressbooksText.Text = read.Placeholder ?? string.Empty;
+            NoAddressbooksText.Visibility = read.Placeholder is null ? Visibility.Collapsed : Visibility.Visible;
             // Keep the open book open across a re-list; else auto-open the first so the
             // card list isn't empty on entry (web/linux parity: loadAddressbooks /
             // update_book_list).

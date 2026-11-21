@@ -339,7 +339,7 @@ def test_the_android_auto_renew_wake_is_compiled_out_of_a_release_build():
     production loop reaches it only through `TestAgent.autoRenewWaiter`, whose
     shipping twin (`src/noAgent`, taken by every shipping flavor) is a bare
     `delay` — so a release APK carries no notifier."""
-    assert (_ANDROID / "debug" / "java" / "com" / "fauna" / "app" / "testing" / "AutoRenewWake.kt").is_file()
+    assert (_ANDROID / "agent" / "java" / "com" / "fauna" / "app" / "testing" / "AutoRenewWake.kt").is_file()
     for shipping in ("main", "noAgent", "noKids", "kids"):
         for kt in (_ANDROID / shipping).rglob("*.kt"):
             assert "AutoRenewWake" not in kt.read_text(encoding="utf-8"), (

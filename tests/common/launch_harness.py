@@ -441,10 +441,23 @@ class AndroidLaunchHarness(NativeLaunchHarness):
             seed_trust=seed_trust, extra_launch_config=extra_launch_config,
         )
 
+    def launch(self, **kwargs):
+        driver = super().launch(**kwargs)
+        # From here the device file is the store: `store` reads it over this
+        # driver's bridge (case G's post-reset read), never the pending seed.
+        self._store.attach(driver)
+        return driver
+
     def relaunch(self) -> None:
         # Once launched, the device file is the store; the seed was a one-shot.
         self._config.pop("seed_credentials", None)
         super().relaunch()
+
+    def relaunch_as_launched(self) -> None:
+        # The same one-shot seed, withheld on the reopen that keeps the first
+        # launch's trust read too: the device file is what the app reads back.
+        self._config.pop("seed_credentials", None)
+        super().relaunch_as_launched()
 
 
 class WebLaunchHarness(LaunchHarness):
@@ -582,6 +595,7 @@ class WebLaunchHarness(LaunchHarness):
 def make_launch_harness(
     client: str, *, tmp_path=None, app_path=None, spa_url=None, file_backed=False,
     udid=None, extra_launch_config=None, seed_trust=None,
+    test_apk=None, device_serial=None, adb_server=None,
 ) -> LaunchHarness:
     """Build the launch harness for ``client``.
 
@@ -592,6 +606,11 @@ def make_launch_harness(
       the escrow-trust seed for each launch's ``trust`` nest into its
       environment. Without it every launch would run a dormant generation
       plane, silently, so a native harness refuses to be built without one.
+    * android takes the run facts ``helpers.app_launch.app_launch_config``
+      hands back beside ``app_path`` — ``test_apk``, ``device_serial``,
+      ``adb_server`` — so every caller can spread that dict in; each one left
+      ``None`` falls back to this run's own (``android_device.run_launch_facts``).
+      Any other client refuses them.
     * ios ALSO needs ``udid`` (the already-booted simulator ``drivers/ios.py``
       ``launch()`` requires alongside ``app_path`` — pass ``ios_setup["udid"]``).
 
@@ -609,6 +628,15 @@ def make_launch_harness(
     the shared ``AccountRegistry``, which honors the file backend independently of
     an unlocked keyring — so that case is headless-safe (ignored for web, whose
     store is the browser's localStorage regardless)."""
+    android_facts = {
+        k: v for k, v in
+        (("test_apk", test_apk), ("device_serial", device_serial), ("adb_server", adb_server))
+        if v is not None
+    }
+    if android_facts and client != "android":
+        raise ValueError(
+            f"{sorted(android_facts)} are android launch facts; {client!r} cannot honor them"
+        )
     if client == "web":
         if spa_url is None:
             raise ValueError("web launch harness needs spa_url (the SPA proxy origin)")
@@ -639,7 +667,10 @@ def make_launch_harness(
 
         # `tests/common/` → the repo root the APK paths are relative to.
         repo_root = Path(__file__).resolve().parents[2]
-        extra = {**android_device.run_launch_facts(repo_root), **(extra_launch_config or {})}
+        extra = {
+            **android_device.run_launch_facts(repo_root), **android_facts,
+            **(extra_launch_config or {}),
+        }
         return AndroidLaunchHarness(
             make_cred_store("android", tmp_path), app_path,
             seed_trust=seed_trust, extra_launch_config=extra,

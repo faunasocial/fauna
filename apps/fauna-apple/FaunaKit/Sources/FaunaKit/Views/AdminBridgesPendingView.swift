@@ -34,7 +34,6 @@ import SwiftUI
 ///
 /// `admin-nav-back` is provided by the admin shell rail (macOS), not this page.
 public struct AdminBridgesPendingView: View {
-    @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = BridgeApprovalVM()
     /// Reload trigger — macOS passes the shell's `navGeneration` so each
     /// (re)navigation re-reads the feed; iOS leaves it 0 (the NavigationLink
@@ -57,7 +56,9 @@ public struct AdminBridgesPendingView: View {
                     .foregroundStyle(.secondary)
 
                 sectionHeader(L.admin.bridgesPending.pendingSection, id: Ids.adminBridgesPendingSection)
-                if vm.pending.isEmpty {
+                if vm.listRead != .resolved {
+                    listNotRead
+                } else if vm.pending.isEmpty {
                     emptyState
                 } else {
                     ForEach(Array(vm.pending.enumerated()), id: \.element.pubkeyHex) { _, view in
@@ -66,7 +67,9 @@ public struct AdminBridgesPendingView: View {
                 }
 
                 sectionHeader(L.admin.bridgesPending.approvedSection, id: Ids.adminBridgesApprovedSection)
-                if vm.approved.isEmpty {
+                if vm.listRead != .resolved {
+                    listNotRead
+                } else if vm.approved.isEmpty {
                     Text(L.admin.bridgesPending.approvedEmpty)
                         .font(.headline)
                         .foregroundStyle(.secondary)
@@ -87,10 +90,7 @@ public struct AdminBridgesPendingView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task(id: reloadToken) {
-            guard let client else { return }
-            await vm.configure(api: client.api)
-        }
+        .adminReadOnEntryAndReconnect(vm, reloadToken: reloadToken)
     }
 
     // MARK: - Section headers
@@ -100,8 +100,21 @@ public struct AdminBridgesPendingView: View {
     /// heading labels (`admin-bridges-pending-section` / `admin-bridges-approved-section`,
     /// ui.yaml `admin-bridges-pending`), unconditional unlike the empty-state chrome
     /// and the per-bridge cards below them — the canary a rail-click test waits on.
+    ///
+    /// Until the list read resolves the heading also publishes the line painted
+    /// under it (``listNotRead``: *still loading* / *failed to load*) as its
+    /// `reason` attribute, the e2e driver's `painted_reason` read (admin.md
+    /// § Errors & edge cases, *Controls wait for their read*); once read it
+    /// publishes none, so the read answers `nil`.
     private func sectionHeader(_ text: String, id: String) -> some View {
-        automationText(id, text)
+        Text(text)
+            .accessibilityIdentifier(id)
+            .automationValue(id, text: { text }, attributes: {
+                guard vm.listRead != .resolved,
+                      let reason = readPossibility(read: vm.listRead).reasonText
+                else { return [:] }
+                return ["reason": reason]
+            })
             .font(.headline)
             .padding(.top, 4)
     }
@@ -262,6 +275,17 @@ public struct AdminBridgesPendingView: View {
 
     /// One inline confirm box over the shared arm: confirm dispatches
     /// `BridgeApprovalAction.confirm`, cancel disarms (no write).
+    /// What a section shows before the list read resolves: the read's own
+    /// reason (*still loading* / *failed to load*) — an unread list is not an
+    /// empty one (admin.md § Errors & edge cases, *Controls wait for their
+    /// read*). Un-id'd: the section headers carry the ids.
+    private var listNotRead: some View {
+        Text(readPossibility(read: vm.listRead).reasonText ?? "")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 8)
+    }
+
     private func confirmBox(title: String, warning: String, confirmLabel: String, cancelLabel: String,
                             boxId: String, warningId: String, confirmId: String, cancelId: String,
                             gate: String) -> some View {
@@ -274,6 +298,8 @@ public struct AdminBridgesPendingView: View {
                 Button(confirmLabel, role: .destructive) { Task { await vm.confirm() } }
                     .accessibilityIdentifier(confirmId)
                     .automationActivate(confirmId) { Task { await vm.confirm() } }
+                    // Not live while its act is in flight (`confirm_possibility`).
+                    .faunaPossible(vm.confirmAnswer)
                     .faunaGate(gate)
                 Button(cancelLabel, role: .cancel) { vm.cancelConfirm() }
                     .accessibilityIdentifier(cancelId)

@@ -57,6 +57,7 @@ use fauna_atproto_settings_machine::{
 };
 use fauna_client_bridges::bridges_ui::BridgeStatus;
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 
 use crate::async_helper::spawn_with_snapshot;
 use crate::i18n::strings::atproto_settings as BS;
@@ -102,6 +103,12 @@ struct AtprotoPageWidgets {
     depth_selector: gtk::Box,
     /// The four rung radios, in `DEPTH_LEVELS` order.
     depth_rungs: [gtk::CheckButton; 4],
+    /// The group holding the rungs (hidden with the rest when the page is
+    /// unavailable).
+    depth_group: adw::PreferencesGroup,
+    /// The one line shown instead of every control when the machine failed to
+    /// build (`atproto_settings.page_unavailable`).
+    unavailable_label: gtk::Label,
     /// The visible one-line gate reason under the hosted rungs.
     depth_reason: gtk::Label,
 
@@ -190,6 +197,20 @@ struct AtprotoPageCtx {
 /// Build the **Bluesky** settings sub-page. Static skeleton only — data +
 /// gestures are wired by `wire_machine` (no-op when no client is registered).
 pub fn build_atproto_settings_page() -> adw::PreferencesPage {
+    let (page, mint_btn, mint_dm_access, widgets) = build_page();
+    wire_machine(&page, mint_btn, mint_dm_access, widgets);
+    page
+}
+
+/// The client-free half of [`build_atproto_settings_page`]: the widget tree in
+/// its pre-read state (every rung blocked `common.still_loading`, authorize
+/// not yet built), split out so a test can inspect it without a client.
+fn build_page() -> (
+    adw::PreferencesPage,
+    gtk::Button,
+    gtk::CheckButton,
+    AtprotoPageWidgets,
+) {
     let page = adw::PreferencesPage::builder()
         .title(BS::TITLE)
         .icon_name("network-transmit-receive-symbolic")
@@ -207,6 +228,15 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
     let error_row = adw::ActionRow::builder().activatable(false).build();
     error_row.add_suffix(&error_label);
     top_group.add(&error_row);
+    // One line standing in for every control when the machine failed to build
+    // (`atproto.md` § Errors & edge cases); hidden until then.
+    let unavailable_label = gtk::Label::builder()
+        .label(BS::PAGE_UNAVAILABLE)
+        .visible(false)
+        .wrap(true)
+        .xalign(0.0)
+        .build();
+    top_group.add(&unavailable_label);
     page.add(&top_group);
 
     // --- Recovery-fork contest ceremony: LEADS the page, above the depth
@@ -312,6 +342,18 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
     let depth_rungs: [gtk::CheckButton; 4] = rungs
         .try_into()
         .expect("depth_level_options() has exactly four entries");
+    // Before the machine's first status read no rung is offered on a guess
+    // (`ui/README.md` rule 5): every rung starts blocked `common.still_loading`.
+    paint_rungs(
+        &depth_rungs,
+        &depth_reason,
+        &[
+            still_loading(),
+            still_loading(),
+            still_loading(),
+            still_loading(),
+        ],
+    );
 
     // --- Transition card ---
     let card_group = adw::PreferencesGroup::builder()
@@ -515,6 +557,8 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
         contest_cancel_btn,
         depth_selector,
         depth_rungs,
+        depth_group: selector_group,
+        unavailable_label,
         depth_reason,
         card_group,
         card_lines,
@@ -549,9 +593,68 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
         delegation_rows: RefCell::new(Vec::new()),
     };
 
-    wire_machine(&page, mint_btn, mint_dm_access, widgets);
+    (page, mint_btn, mint_dm_access, widgets)
+}
 
-    page
+fn still_loading() -> Possibility {
+    Possibility::blocked(LocalizedText::key("common.still_loading"))
+}
+
+/// Paint the four rungs from their answers, and each distinct reason once on
+/// the shared reason line under them.
+fn paint_rungs(
+    rungs: &[gtk::CheckButton; 4],
+    reason_line: &gtk::Label,
+    answers: &[Possibility; 4],
+) {
+    let mut reasons: Vec<String> = Vec::new();
+    for (rung, answer) in rungs.iter().zip(answers) {
+        crate::possible::paint(rung, None, answer.clone());
+        if let Some(reason) = answer.reason() {
+            let text = resolve(reason);
+            if !reasons.contains(&text) {
+                reasons.push(text);
+            }
+        }
+    }
+    if reasons.is_empty() {
+        reason_line.set_visible(false);
+    } else {
+        reason_line.set_text(&reasons.join("\n"));
+        reason_line.set_visible(true);
+    }
+}
+
+/// Paint an `atproto-delegation-authorize` button from the machine's answer.
+fn paint_authorize(btn: &gtk::Button, answer: Possibility) {
+    crate::possible::paint(btn, None, answer);
+}
+
+impl AtprotoPageWidgets {
+    /// Every content group below the heading/error group.
+    fn content_groups(&self) -> [&adw::PreferencesGroup; 10] {
+        [
+            &self.contest_group,
+            &self.depth_group,
+            &self.card_group,
+            &self.linked_group,
+            &self.hosted_group,
+            &self.identity_group,
+            &self.delete_group,
+            &self.fullpds_group,
+            &self.credentials_group,
+            &self.delegation_group,
+        ]
+    }
+}
+
+/// A machine that failed to build: hide every control, show the one
+/// `page_unavailable` line (the shell's own back navigation stays).
+fn show_unavailable(w: &AtprotoPageWidgets) {
+    for group in w.content_groups() {
+        group.set_visible(false);
+    }
+    w.unavailable_label.set_visible(true);
 }
 
 /// One radio rung: a titled `gtk::CheckButton` carrying `id`, with a dim
@@ -603,6 +706,7 @@ fn wire_machine(
         Ok(m) => m,
         Err(e) => {
             tracing::error!("atproto page: build machine failed: {e}");
+            show_unavailable(&widgets);
             return;
         }
     };
@@ -967,30 +1071,19 @@ fn render(ctx: &Rc<AtprotoPageCtx>) {
 
     // ── Depth selector ──────────────────────────────────────────────────
     set_test_attr(&w.depth_selector, "state", &snap.level);
-    let reason_text = snap
-        .hosted_gate_reason
-        .as_ref()
-        .map(resolve)
-        .unwrap_or_default();
     for (rung, opt) in w.depth_rungs.iter().zip(depth_level_options()) {
         let active = snap.level == opt.level;
         rung.set_active(active);
         set_test_attr(rung, "state", if active { "active" } else { "inactive" });
-        // `hosted` is the catalog's fact, not a `starts_with("hosted")` sniff
-        // this page re-runs on a level string it did not define.
-        let gated = opt.hosted && !snap.hosted_allowed;
-        // A hosted rung the user is *already at* stays sensitive so a step-down
-        // is reachable even if the domain later stops being public; the gate
-        // only ever blocks *entering* a hosted level from a lower one.
-        rung.set_sensitive(!gated || active);
-        set_test_attr(rung, "reason", if gated { "gated" } else { "ok" });
     }
-    if snap.hosted_allowed || reason_text.is_empty() {
-        w.depth_reason.set_visible(false);
-    } else {
-        w.depth_reason.set_text(&reason_text);
-        w.depth_reason.set_visible(true);
-    }
+    let answers: Vec<Possibility> = depth_level_options()
+        .into_iter()
+        .map(|opt| ctx.machine.rung_possibility(opt.level))
+        .collect();
+    let answers: [Possibility; 4] = answers
+        .try_into()
+        .expect("depth_level_options() has exactly four entries");
+    paint_rungs(&w.depth_rungs, &w.depth_reason, &answers);
 
     // ── Transition card ─────────────────────────────────────────────────
     match &snap.pending_transition {
@@ -1204,6 +1297,7 @@ fn sync_delegation_row(ctx: &Rc<AtprotoPageCtx>, row: Option<&DelegationRow>) {
             BS::DELEGATION_AUTHORIZE_BUTTON,
             true,
         );
+        paint_authorize(&authorize, ctx.machine.authorize_possibility());
         empty.add_suffix(&authorize);
         w.delegation_group.add(&empty);
         widgets.push(empty.upcast());
@@ -1288,12 +1382,14 @@ fn sync_delegation_row(ctx: &Rc<AtprotoPageCtx>, row: Option<&DelegationRow>) {
 
     // Renewal is the same control, relabeled — never a revoke-then-re-mint.
     let actions = adw::ActionRow::builder().activatable(false).build();
-    actions.add_suffix(&delegation_button(
+    let reauthorize = delegation_button(
         ctx,
         "atproto-delegation-authorize",
         BS::DELEGATION_REAUTHORIZE_BUTTON,
         true,
-    ));
+    );
+    paint_authorize(&reauthorize, ctx.machine.authorize_possibility());
+    actions.add_suffix(&reauthorize);
     actions.add_suffix(&delegation_button(
         ctx,
         "atproto-delegation-revoke",
@@ -1537,4 +1633,61 @@ fn build_credential_row(ctx: &Rc<AtprotoPageCtx>, cred: &AppCredentialRow) -> ad
     row.add_suffix(&revoke_btn);
 
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Before the first status read no rung is enabled on a guess, and the
+    /// still-loading reason is on the page (`ui/README.md` rule 5).
+    #[test]
+    fn every_rung_starts_blocked_still_loading() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let (_page, _mint, _dm, w) = build_page();
+            for rung in &w.depth_rungs {
+                assert!(!rung.is_sensitive(), "a pre-read rung must be insensitive");
+            }
+            assert!(w.depth_reason.is_visible());
+            assert_eq!(
+                w.depth_reason.text(),
+                crate::i18n::strings::common::STILL_LOADING
+            );
+        });
+    }
+
+    /// A no-identity answer leaves authorize insensitive carrying its reason.
+    #[test]
+    fn authorize_blocked_carries_the_no_identity_reason() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let btn = gtk::Button::new();
+            paint_authorize(
+                &btn,
+                Possibility::blocked(LocalizedText::key("atproto_settings.error_no_identity")),
+            );
+            assert!(!btn.is_sensitive());
+            assert_eq!(
+                crate::testid::test_attr_text(&btn, "reason").as_deref(),
+                Some(BS::ERROR_NO_IDENTITY)
+            );
+        });
+    }
+
+    /// A failed machine build hides every control group and shows only the
+    /// unavailable line.
+    #[test]
+    fn unavailable_hides_every_control_and_shows_the_line() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let (_page, _mint, _dm, w) = build_page();
+            show_unavailable(&w);
+            assert!(w.unavailable_label.is_visible());
+            assert_eq!(w.unavailable_label.text(), BS::PAGE_UNAVAILABLE);
+            for g in w.content_groups() {
+                assert!(!g.is_visible());
+            }
+        });
+    }
 }

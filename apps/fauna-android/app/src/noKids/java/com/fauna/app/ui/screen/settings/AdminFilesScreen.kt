@@ -19,7 +19,14 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.faunaReadGate
+import com.fauna.app.ui.util.paintedReason
+import com.fauna.app.ui.util.pressAsked
+import androidx.compose.ui.platform.LocalContext
+import uniffi.fauna_core.Possibility
 import com.fauna.app.ui.viewmodel.AdminFilesVM
+import com.fauna.app.ui.viewmodel.AdminEntryRereadEffect
 import uniffi.fauna_client_mail_settings.WebdavPolicyStatus
 import social.fauna.generated.Ids
 
@@ -45,8 +52,10 @@ fun AdminFilesScreen(
     navController: NavController,
     vm: AdminFilesVM = hiltViewModel(),
 ) {
+    AdminEntryRereadEffect(vm.entryReread)
     val snapshot by vm.snapshot.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val toggleAnswer by vm.toggleAnswer.collectAsState()
     val appMessages = LocalAppMessages.current
 
     LaunchedEffect(errorMessage) { errorMessage?.let { appMessages.showError(it) } }
@@ -56,6 +65,8 @@ fun AdminFilesScreen(
         working = snapshot.status == WebdavPolicyStatus.WORKING,
         onBack = { navController.exitAdminToPrimary() },
         onSetWebdavEnabled = vm::setWebdavEnabled,
+        toggleAnswer = toggleAnswer,
+        onRefused = appMessages::showError,
     )
 }
 
@@ -66,7 +77,15 @@ fun AdminFilesContent(
     working: Boolean,
     onBack: () -> Unit,
     onSetWebdavEnabled: (Boolean) -> Unit,
+    // The toggle's answer — the shared `WebdavPolicyMachine::toggle_possibility`
+    // (admin.md § Errors & edge cases, *Controls wait for their read*): blocked
+    // until `get_mail_config` resolves, after a failed read, and while its own
+    // change is on its way. Painted, and asked again at the press.
+    toggleAnswer: Possibility = Possibility.Possible,
+    // A refused press's reason, for the global `error-message` banner.
+    onRefused: (String) -> Unit = {},
 ) {
+    val context = LocalContext.current
     Scaffold(
         topBar = {
             TopAppBar(
@@ -104,7 +123,10 @@ fun AdminFilesContent(
             // ── WebDAV enable (deployment-wide master toggle; files sibling
             //    of the contacts enable) ──
             // A dispatch-on-change toggle IS the commit — no buffer, no save.
-            val webdavGate = faunaGate("fauna.bridges.set_webdav_enabled", enabled = !working)
+            val webdavGate = faunaReadGate(
+                toggleAnswer,
+                faunaGate("fauna.bridges.set_webdav_enabled", enabled = !working && toggleAnswer.isPossible),
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -124,9 +146,9 @@ fun AdminFilesContent(
                 }
                 Switch(
                     checked = webdavEnabled,
-                    onCheckedChange = onSetWebdavEnabled,
+                    onCheckedChange = { on -> pressAsked(context, toggleAnswer, onRefused) { onSetWebdavEnabled(on) } },
                     enabled = webdavGate.enabled,
-                    modifier = Modifier.testTag(Ids.ADMIN_FILES_WEBDAV_ENABLED_TOGGLE),
+                    modifier = Modifier.testTag(Ids.ADMIN_FILES_WEBDAV_ENABLED_TOGGLE).paintedReason(webdavGate.reason),
                 )
             }
         }

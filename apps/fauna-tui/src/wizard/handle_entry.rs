@@ -46,23 +46,18 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
             Field::Wizard(WizardField::Handle),
         )
         .labelled(common::HANDLE),
+        // Painted from the machine's answer: a handle typed (the draft) and
+        // no check already running (`ui/README.md` § Offer only what is
+        // possible, rule 4's form case).
         Element::button(
             ids::HANDLE_CHECK_BUTTON,
             common::CHECK,
-            !handle.is_empty() && !w.machine.is_loading(),
+            true,
             Action::StartHandleCheck,
-        ),
+        )
+        .possible(w.machine.handle_check_possibility(handle.clone())),
         Element::label(ids::HANDLE_MESSAGE_AREA, localized(&snap.message)),
     ];
-
-    if snap.control_checkbox_visible {
-        out.push(Element::checkbox(
-            ids::HANDLE_CONTROL_CHECKBOX,
-            t::CONTROL_CHECKBOX,
-            snap.control_checkbox_checked,
-            Action::SetControlCheckbox(!snap.control_checkbox_checked),
-        ));
-    }
 
     // Above the bottom row, only while Continue signs in — the snapshot's
     // field, never an outcome comparison here.
@@ -72,15 +67,20 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         if let Some(rules) = w.machine.joining_nest_rules(crate::nest_rules::UI_LANG) {
             out.extend(crate::nest_rules::joining_elements(&rules));
         }
-        out.extend(super::terms_notice());
+        out.extend(super::terms_notice(w.terms_copied));
     }
 
-    out.push(Element::button(
-        ids::HANDLE_ENTRY_CONTINUE_BUTTON,
-        common::CONTINUE,
-        snap.continue_enabled,
-        Action::SubmitHandleCheckContinue,
-    ));
+    // The snapshot's answer, blocked by the line `handle-message-area`
+    // already paints (`ui/README.md` § Offer only what is possible, rule 6).
+    out.push(
+        Element::button(
+            ids::HANDLE_ENTRY_CONTINUE_BUTTON,
+            common::CONTINUE,
+            true,
+            Action::SubmitHandleCheckContinue,
+        )
+        .possible(snap.continue_possibility()),
+    );
     out.push(Element::button(
         ids::HANDLE_ENTRY_BACK_BUTTON,
         common::BACK,
@@ -136,10 +136,6 @@ mod tests {
         machine.start_handle_check(machine.current_handle()).await;
 
         let els = app.wizard.elements();
-        assert!(
-            !els.iter().any(|e| e.id == ids::HANDLE_CONTROL_CHECKBOX),
-            "a local target has no DNS to control — no control checkbox"
-        );
         let message = els
             .iter()
             .find(|e| e.id == ids::HANDLE_MESSAGE_AREA)
@@ -156,12 +152,11 @@ mod tests {
         let continue_enabled = els
             .iter()
             .find(|e| e.id == ids::HANDLE_ENTRY_CONTINUE_BUTTON)
-            .map(|e| e.enabled)
+            .map(|e| e.offered())
             .expect("Continue paints");
         assert!(!continue_enabled, "nothing to continue to without a nest");
 
-        // Even a forced checkbox tick must not route a local target to DNS.
-        machine.set_control_checkbox(true);
+        // Even a forced Continue must not route a local target to DNS.
         assert_ne!(
             machine.submit_handle_check_continue().await,
             OnboardingStep::DnsConfig,

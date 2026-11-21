@@ -815,8 +815,43 @@ def launch_on_home(
     driver = create_driver(client)
     driver.launch(config)
     if seed_via_set_state:
+        if client in _SEED_AFTER_FIRST_LAUNCH_VERDICT:
+            _await_first_launch_verdict(driver, client)
         driver.set_state(_session_patch(nest, user, "at-rest", device_id))
     return driver, ActionLayer(driver)
+
+
+#: The apps whose seed patch waits for the launch's first verdict. An apple app's
+#: first launch of a process is deferred by its sign-out gate across a detached finish,
+#: and a build that predates `LaunchMachineBox.claim(resuming:)` — the PINNED build
+#: this module launches — holds no claim across that finish: a patch landing then
+#: retires nothing, the re-entered launch signs the patched actor in on the production
+#: path, and the process runs two conversations sessions, the patch's MLS engine retired
+#: under the first send ("handed over to a newer engine").
+#: A verdict counted in `launch_verdicts` (published since before the pin) means the
+#: re-entry already ran, so the patch lands after the one launch the process makes.
+_SEED_AFTER_FIRST_LAUNCH_VERDICT = ("macos", "ios")
+
+
+def _await_first_launch_verdict(driver, client: str) -> None:
+    """Hold the seed patch until the launch machine has delivered one verdict
+    (routed or superseded — either says the deferred launch has re-entered)."""
+    from helpers import budgets
+
+    def _delivered(state: dict) -> bool:
+        counts = state.get("launch_verdicts") or {}
+        return sum(int(v) for v in counts.values()) >= 1
+
+    try:
+        driver.wait_for_state(_delivered, timeout=budgets.LAUNCH_VERDICT_S)
+    except TimeoutError:
+        state = driver.get_state() or {}
+        pytest.fail(
+            f"[{client}] the seeded launch delivered no launch verdict within "
+            f"{budgets.LAUNCH_VERDICT_S:.0f}s, so the seed patch would race the deferred "
+            f"launch; launch_verdicts={state.get('launch_verdicts')!r} "
+            f"session={state.get('session')!r}"
+        )
 
 
 def _seat_keys(client: str, request, second_seat=None) -> dict:

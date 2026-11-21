@@ -1,6 +1,7 @@
 package com.fauna.app.p2pshare
 
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * App-owned mirrors of the co-present offline-share ceremony's read models —
@@ -23,7 +24,8 @@ enum class OfflinePanel { CLOSED, INITIATE, RECEIVE }
 
 /**
  * The affordance's whole paint decision, from shared Rust: its
- * `OfflineShareView`, that view's `offline_share_gates`, and the two readings
+ * `OfflineShareView`, that view's `offline_share_gates`, the begin / expect
+ * buttons' shared answers, and the two readings
  * (status, typed-code refusal) still as [LocalizedText] — the Screen resolves
  * them, so this record carries no Android context.
  */
@@ -38,8 +40,10 @@ data class OfflineShareDecision(
     val codeError: LocalizedText?,
     val showsEntryButtons: Boolean,
     val showsCodeWidgets: Boolean,
-    val canBegin: Boolean,
-    val canExpect: Boolean,
+    /** `offline-share-begin-button`'s answer (`offline_share_begin_possibility`). */
+    val beginAnswer: Possibility,
+    /** `offline-receive-expect-button`'s answer (`offline_share_expect_possibility`). */
+    val expectAnswer: Possibility,
     val showsCancel: Boolean,
 )
 

@@ -1408,3 +1408,93 @@ async fn a_siblings_own_account_row_is_admitted_and_kept_for_relay_but_this_devi
     );
     assert_eq!(relayed[0].device_id.as_deref(), Some(SIBLING_DEVICE));
 }
+
+/// A peer page over a path whose bytes are not on this disk — a cloud-only
+/// placeholder — never opens the file (`peer_share_store::read_local_body`;
+/// `on-demand-files.md` § On-Demand Files, *Nothing the serve loop waits on
+/// holds up the root*).
+///
+/// The member's on-demand root that froze after its owner's identity
+/// succession: the nudge pull's fold freed the member's hydrated copy of the
+/// owner's earlier file (its row now a placeholder at the nest's head), and
+/// the next share page for that path hashed it. On cfapi the sync service is
+/// the provider, so its own read of its own placeholder is answered by nobody
+/// (`crate::placeholder`): it held the thread that serves the root for cfapi's
+/// 60 s timeout, and every page queued behind it held the root again.
+///
+/// The file here is held open with no sharing, so an open by the ingest fails
+/// (it would wedge on a live root); `FILE_ATTRIBUTE_OFFLINE` is the half of the
+/// cloud-only attributes an ordinary process may set (`crate::placeholder`'s own
+/// pin of the predicate).
+#[cfg(windows)]
+#[tokio::test]
+async fn a_peer_row_over_a_cloud_only_placeholder_never_opens_it() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let watch = tempfile::tempdir().unwrap();
+    let engine = ingest_engine(watch.path().to_path_buf());
+    engine
+        .db()
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
+        .unwrap();
+
+    // The fold's re-point: the row is a placeholder at the nest's head.
+    let rel = "owner-before.txt";
+    let nest_head = sealed_blob(b"the owner's file, re-sealed after the succession\n");
+    let described = b"the size and name the placeholder keeps".to_vec();
+    engine
+        .db()
+        .upsert_entry(
+            rel,
+            None,
+            None,
+            Some(nest_head.manifest_hash),
+            SyncState::Placeholder,
+            0,
+            1_760_000_000,
+            described.len() as i64,
+            1,
+            None,
+        )
+        .unwrap();
+    let abs = watch.path().join(rel);
+    std::fs::write(&abs, &described).unwrap();
+    crate::placeholder::set_offline_for_test(&abs, true);
+    assert!(
+        crate::placeholder::path_is_cloud_placeholder(&abs),
+        "precondition: the file reads as cloud-only"
+    );
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&abs)
+        .expect("hold the placeholder with no sharing");
+
+    // The owner's earlier file as the owner's seat serves it.
+    let served = sealed_blob(b"the owner's file, before the recovery\n");
+    let report = engine
+        .ingest_peer_share_rows(
+            &[peer_row(4, rel, served.manifest_hash, "modify")],
+            &PEER_ACTOR_HEX,
+            &FixtureFetcher::serving(&[&served]),
+        )
+        .await
+        .expect("the ingest must not open a cloud-only file");
+    drop(held);
+
+    assert_eq!(
+        report.overlaid, 1,
+        "the row lands in the overlay: {report:?}"
+    );
+    assert_eq!(report.materialized, 0, "{report:?}");
+    assert_eq!(
+        report.skipped,
+        vec![(rel.to_string(), "placeholder — storage policy")],
+        "the row alone decides a placeholder's landing"
+    );
+    assert_eq!(
+        engine.db().get_entry(rel).unwrap().map(|e| e.state),
+        Some(SyncState::Placeholder),
+        "the placeholder row stands"
+    );
+}

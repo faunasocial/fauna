@@ -14,7 +14,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
   import { connectionStatus, identity } from '#lib/store';
-  import { offlineAffordance, ensureWasm } from '#lib/wasm';
+  import { offlinePossibility, ensureWasm } from '#lib/wasm';
   import { makeOfflineGate } from '#lib/offline-gate';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { pluginsAvailable, pluginsSetSetting, sharedRpcPort, type PluginCardText } from '#lib/rpc';
@@ -27,7 +27,7 @@
   let { error = $bindable('') } = $props();
 
   // Connect and Disconnect are `OnlineOnly`: the offline gate greys them.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // `null` until the read returned: nothing is painted, then the cards.
   let cards = $state<PluginCardText[] | null>(null);

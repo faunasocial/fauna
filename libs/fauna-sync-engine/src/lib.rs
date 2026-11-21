@@ -363,6 +363,8 @@ mod resident_placeholder_test;
 #[cfg(test)]
 mod resident_restore_test;
 #[cfg(test)]
+mod retained_restore_placeholder_test;
+#[cfg(test)]
 mod seal_recorded_path_test;
 #[cfg(test)]
 mod self_echo_local_body_test;
@@ -372,6 +374,8 @@ mod set_row_stamp_test;
 mod stale_cache_placeholder_test;
 #[cfg(test)]
 mod superseded_own_record_test;
+#[cfg(test)]
+mod vanished_pending_delete_test;
 // The mock nest (`MockNest`/`BlobStore`) other crates' tests reach through
 // `test-helpers`. Gate deliberately without rule (a)'s `debug_assertions` arm —
 // the module's own docs carry the reason, and it matches `nest_api::FakeSyncControl`'s

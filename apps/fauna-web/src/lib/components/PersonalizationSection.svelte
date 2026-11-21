@@ -15,12 +15,18 @@
   import { identity } from '#lib/store';
   import { sharedRpcPort } from '#lib/rpc';
   import {
+    engagementClearPossibility,
+    engagementShareSignalsPossibility,
     ensureWasm,
     publishKindOptions,
     ngramDirectionLabel,
     ngramDocCountLabel,
     textModelNeedsNewerApp,
+    trainedFactorNamePossibility,
+    trainedFactorPublishOpenPossibility,
+    trainedFactorPublishSubmitPossibility,
   } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import { createLabelerCatalogMachine } from '#lib/wasm-labeler-catalog';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { onMount, onDestroy } from 'svelte';
@@ -41,7 +47,8 @@
     type PublishModelError,
     type PublishNgram,
   } from '#lib/rpc';
-  import { getFeedManager } from '#lib/feed';
+  import { feedManagerIfReady, getFeedManager } from '#lib/feed';
+  import { readFailed, type ReadWord } from '#lib/read-gate';
   import { onStoreChange } from '#lib/store-change';
   import { IDS } from '#lib/generated/uiIds';
 
@@ -80,6 +87,18 @@
   let renamingId = $state<string | null>(null);
   let busy = $state(false);
 
+  // The trained-topic forms' answers (`docs/goal/ui/settings.md` § Errors &
+  // edge cases, *Personal form submits paint from their draft*): the shared
+  // `fauna_client_personalization::drafts`, painted on each button and asked
+  // again by its press, which refuses with the same reason.
+  const nameGate = $derived(formGate(askPossibility(() => trainedFactorNamePossibility(topicName, busy))));
+  /** Whether the live feed manager — whose loaded window is the publish
+   *  corpus — is up; re-read on each topics load and at every press. */
+  let managerReady = $state(feedManagerIfReady() !== null);
+  function publishOpenAnswer(row: TrainedTopicRow) {
+    return trainedFactorPublishOpenPossibility(!!row.factor_key, feedManagerIfReady() !== null, busy);
+  }
+
   /**
    * The wasm layer rejects with a machine-readable `code` (never a pre-formatted
    * English sentence), so the cap message is localized HERE with its limit.
@@ -103,6 +122,8 @@
     try {
       const before = topicGestures;
       const rows = await trainedTopicsList(secretHex);
+      // The feed manager may have come up since the rows were painted.
+      managerReady = feedManagerIfReady() !== null;
       if (before === topicGestures) topics = rows;
     } catch (e: unknown) {
       topicsReadError = topicsError(e);
@@ -154,12 +175,13 @@
    *  silent no-op that leaves the user wondering why nothing was created. */
   async function submitTopic(): Promise<void> {
     const id = $identity;
-    const name = topicName.trim();
-    if (!id || busy) return;
-    if (!name) {
-      error = t.personalization.trained_factor_blank_name;
+    if (!id) return;
+    const refusal = formRefusal(askPossibility(() => trainedFactorNamePossibility(topicName, busy)));
+    if (refusal !== null) {
+      error = refusal;
       return;
     }
+    const name = topicName.trim();
     busy = true;
     try {
       const rows = renamingId
@@ -219,12 +241,18 @@
 
   /** "Clear activity data" — deletes the sealed cues:v1 rollup from the
    *  user's own nest and resets the live cue engine (engagement-cues.md §
-   *  At rest; the user-revocable affordance the capture invariant requires). */
+   *  At rest; the user-revocable affordance the capture invariant requires).
+   *  Asks the button's answer again: no live feed manager refuses on
+   *  `error-message`, never a silent return (`ui/README.md` § Offer only what
+   *  is possible, rule 7). */
   async function clearEngagementData(): Promise<void> {
-    const id = $identity;
-    if (!id) return;
+    const manager = feedManagerIfReady();
+    const refusal = formRefusal(askPossibility(() => engagementClearPossibility(manager !== null)));
+    if (refusal !== null || manager === null) {
+      if (refusal) error = refusal;
+      return;
+    }
     try {
-      const manager = await getFeedManager();
       await manager.deleteCueRollup();
       clearErrorUnlessPublishOpen();
     } catch (e: unknown) {
@@ -245,26 +273,67 @@
   let shareSignals = $state(false);
   let signalPublished = $state<SignalShareEntry[]>([]);
   let signalBusy = $state(false);
+  // Both engagement controls act through the live feed manager (`managerReady`
+  // above), so neither is live before it (`engagement-cues.md` § Layer B).
+  // Where the `signal_share.status` read stands: the toggle waits on it, so
+  // the pre-read `false` is never flipped into a guessed `true` (rule 5).
+  let shareRead = $state<ReadWord>('pending');
+  // The wasm core is up — the shared answers are askable from here on (before
+  // it, both controls paint disabled with no reason: `formGate(null)`).
+  let wasmReady = $state(false);
 
   function applySignalShare(reply: { share: boolean; published: SignalShareEntry[] }): void {
     shareSignals = reply.share;
     signalPublished = reply.published;
+    shareRead = 'resolved';
   }
 
+  // The two controls' answers — shared Rust
+  // (`fauna_client_personalization::engagement::{share_signals_possibility,
+  // clear_engagement_possibility}`), painted here and asked again by each
+  // handler. Matches tui's `EngagementCuesState::{share_answer, clear_answer}`.
+  const sharePaint = $derived(
+    formGate(
+      wasmReady ? askPossibility(() => engagementShareSignalsPossibility(managerReady, shareRead)) : null,
+    ),
+  );
+  const clearPaint = $derived(
+    formGate(wasmReady ? askPossibility(() => engagementClearPossibility(managerReady)) : null),
+  );
+
   async function loadSignalShare(): Promise<void> {
+    let manager;
     try {
-      const manager = await getFeedManager();
+      manager = await getFeedManager();
+      managerReady = true;
+    } catch (e: unknown) {
+      managerReady = feedManagerIfReady() !== null;
+      error = e instanceof Error ? e.message : String(e);
+      return;
+    }
+    try {
       applySignalShare(await manager.signalShareStatus());
     } catch (e: unknown) {
+      shareRead = readFailed(shareRead);
       error = e instanceof Error ? e.message : String(e);
     }
   }
 
+  // Writes the flip of the nest-confirmed value only: the press asks the
+  // toggle's answer again and refuses on `error-message` before the read or
+  // without the live manager — no guessed write, no silent return.
   async function toggleShareSignals(): Promise<void> {
     if (signalBusy) return;
+    const manager = feedManagerIfReady();
+    const refusal = formRefusal(
+      askPossibility(() => engagementShareSignalsPossibility(manager !== null, shareRead)),
+    );
+    if (refusal !== null || manager === null) {
+      if (refusal) error = refusal;
+      return;
+    }
     signalBusy = true;
     try {
-      const manager = await getFeedManager();
       applySignalShare(await manager.setSignalSharing(!shareSignals));
       clearErrorUnlessPublishOpen();
     } catch (e: unknown) {
@@ -333,6 +402,15 @@
 
   let publishAnyNgramIncluded = $derived(publishNgrams.some((n) => n.include));
 
+  /** The sheet's Publish answer — `drafts::publish_submit_possibility` over the
+   *  public name, whether any item of the open kind is kept, and the publish
+   *  in flight. */
+  function publishSubmitAnswer() {
+    const anyKept = publishKind === PUBLISH_KIND_MODEL ? publishAnyNgramIncluded : publishAnyIncluded;
+    return trainedFactorPublishSubmitPossibility(publishName, anyKept, publishBusy);
+  }
+  const publishSubmitGate = $derived(formGate(askPossibility(() => publishSubmitAnswer())));
+
   /** `-publish-kind-select`: swap which artifact kind the open sheet reviews.
    *  DISCARDS the prune and re-reads — the two kinds review different
    *  objects through different shared faces, so a carried-over prune would
@@ -393,6 +471,13 @@
    *  feed window, deliberately not a paging crawl (§ Publishing's accepted
    *  limitation). */
   async function openPublishSheet(row: TrainedTopicRow): Promise<void> {
+    // The row's answer, asked again: no sheet opens onto nothing.
+    managerReady = feedManagerIfReady() !== null;
+    const refusal = formRefusal(askPossibility(() => publishOpenAnswer(row)));
+    if (refusal !== null) {
+      error = refusal;
+      return;
+    }
     publishTarget = row;
     // The sheet always opens on the List kind — the weaker disclosure default.
     publishKind = PUBLISH_KIND_LIST;
@@ -438,11 +523,15 @@
    *  open. */
   async function submitPublish(): Promise<void> {
     const id = $identity;
-    if (!id || !publishTarget || publishBusy) return;
-    // A blank name is refused here rather than at the wire — the same guard
-    // the create/rename flow uses.
+    if (!id || !publishTarget) return;
+    // The painted answer, asked again: refused with its reason on
+    // `error-message` rather than at the wire.
+    const refusal = formRefusal(askPossibility(() => publishSubmitAnswer()));
+    if (refusal !== null) {
+      error = refusal;
+      return;
+    }
     const name = publishName.trim();
-    if (!name) return;
     publishBusy = true;
     try {
       if (publishKind === PUBLISH_KIND_MODEL) {
@@ -502,6 +591,7 @@
     }
     try {
       await ensureWasm();
+      wasmReady = true;
       publishKindOpts = publishKindOptions().map((o) => ({
         value: o.value,
         label: resolveLocalized(o.label),
@@ -568,7 +658,8 @@
       <button
         class="btn btn-small"
         data-testid={IDS.PERSONALIZATION_TRAINED_FACTOR_CREATE_BUTTON}
-        disabled={busy}
+        disabled={nameGate.disabled}
+        title={nameGate.reason || undefined}
         onclick={submitTopic}
       >
         {renamingId ? t.personalization.trained_factor_save : t.personalization.trained_factor_create}
@@ -585,6 +676,7 @@
     {/if}
     <div class="labeler-list" data-testid={IDS.PERSONALIZATION_TRAINED_FACTOR_LIST}>
       {#each topics as row (row.id)}
+          {@const publishGate = formGate(askPossibility(() => trainedFactorPublishOpenPossibility(!!row.factor_key, managerReady, busy)))}
           <!-- data-factor = the minted key's hex. The registry is sealed, so the
                e2e has no wire-side way to learn the key it must pass to the
                feed-factor-select; the web bridge answers get_attr(id, "factor")
@@ -623,16 +715,21 @@
               </button>
               <!-- Publish… — open the review-prune sheet against THIS factor
                    (topic-factors.md § Publishing a trained factor; frame D8).
-                   A corrupt (non-16-byte) id has no addressable model, so the
-                   row simply offers no publish. -->
-              <button
-                class="btn btn-small"
-                data-testid={IDS.PERSONALIZATION_TRAINED_FACTOR_PUBLISH_BUTTON}
-                disabled={!row.factor_key}
-                onclick={() => openPublishSheet(row)}
-              >
-                {t.personalization.trained_factor_publish}
-              </button>
+                   The shared `publish_open_possibility`: a corrupt (non-16-byte)
+                   id has no addressable model, so the row offers no publish
+                   (absent); without the live feed manager it is disabled with
+                   its reason, so no sheet opens onto nothing. -->
+              {#if publishGate.shown}
+                <button
+                  class="btn btn-small"
+                  data-testid={IDS.PERSONALIZATION_TRAINED_FACTOR_PUBLISH_BUTTON}
+                  disabled={publishGate.disabled}
+                  title={publishGate.reason || undefined}
+                  onclick={() => openPublishSheet(row)}
+                >
+                  {t.personalization.trained_factor_publish}
+                </button>
+              {/if}
               <button
                 class="btn btn-small"
                 data-testid={IDS.PERSONALIZATION_TRAINED_FACTOR_DELETE_BUTTON}
@@ -691,7 +788,9 @@
         </label>
         <!-- Starts blank on every open: the sealed registry name is PRIVATE
              (§ Publishing), so prefilling it would leak the user's own label
-             into a public artifact by default. -->
+             into a public artifact by default. Enter is the sheet's submit:
+             the same press as Publish, refused with its reason while the
+             draft cannot succeed (ui/settings.md § Errors & edge cases). -->
         <input
           id="publish-name-input"
           type="text"
@@ -699,6 +798,7 @@
           data-testid={IDS.PERSONALIZATION_TRAINED_FACTOR_PUBLISH_NAME_INPUT}
           placeholder={t.personalization.publish_name_placeholder}
           bind:value={publishName}
+          onkeydown={(e) => { if (e.key === 'Enter') submitPublish(); }}
         />
         {#if publishKind === PUBLISH_KIND_MODEL}
           <!-- The Model kind's review body — EVERY surviving n-gram. Where
@@ -782,14 +882,16 @@
           </div>
         {/if}
         <div class="row-actions">
-          <!-- Publishing nothing is not a thing the artifact means, so the
-               button goes insensitive rather than no-op'ing a click (the
-               restore-confirm-button precedent). Covers both "the corpus
-               scored/scrubbed nothing" and "the user unchecked everything". -->
+          <!-- The shared `publish_submit_possibility`: a public name within
+               the bound, at least one kept item of the open kind ("the corpus
+               scored/scrubbed nothing" and "the user unchecked everything"
+               alike) and no publish in flight — disabled with its reason,
+               never a click that does nothing. -->
           <button
             class="btn btn-small"
             data-testid={IDS.PERSONALIZATION_TRAINED_FACTOR_PUBLISH_SUBMIT_BUTTON}
-            disabled={(publishKind === PUBLISH_KIND_MODEL ? !publishAnyNgramIncluded : !publishAnyIncluded) || publishBusy}
+            disabled={publishSubmitGate.disabled}
+            title={publishSubmitGate.reason || undefined}
             onclick={submitPublish}
           >
             {t.personalization.publish_submit}
@@ -808,29 +910,41 @@
     <!-- "Clear activity data" (engagement-cues.md § At rest): the
          user-revocable affordance for the sealed engagement-cue rollup —
          deletes cues:v1 from the user's own nest and resets the live engine. -->
-    <button
-      class="btn"
-      data-testid={IDS.PERSONALIZATION_CLEAR_ENGAGEMENT_DATA_BUTTON}
-      onclick={clearEngagementData}
-    >
-      {t.personalization.clear_engagement_data}
-    </button>
+    {#if clearPaint.shown}
+      <button
+        class="btn"
+        data-testid={IDS.PERSONALIZATION_CLEAR_ENGAGEMENT_DATA_BUTTON}
+        disabled={clearPaint.disabled}
+        title={clearPaint.reason || undefined}
+        onclick={clearEngagementData}
+      >
+        {t.personalization.clear_engagement_data}
+      </button>
+      {#if clearPaint.reason}
+        <p class="muted small">{clearPaint.reason}</p>
+      {/if}
+    {/if}
 
     <!-- Layer-B opt-in (default off). `state` carries "on"/"off" — the
          report-share toggle contract every app answers, NOT the bare-switch
          "true"/"false" the per-topic engagement toggle above uses. -->
     <h3>{t.personalization.share_signals_title}</h3>
-    <label class="combo-label">
-      <input
-        type="checkbox"
-        data-testid={IDS.PERSONALIZATION_SHARE_SIGNALS_TOGGLE}
-        data-state={shareSignals ? 'on' : 'off'}
-        checked={shareSignals}
-        disabled={signalBusy}
-        onchange={(e) => { e.currentTarget.checked = shareSignals; void toggleShareSignals(); }}
-      />
-      {t.personalization.share_signals_label}
-    </label>
+    {#if sharePaint.shown}
+      <label class="combo-label" title={sharePaint.reason || undefined}>
+        <input
+          type="checkbox"
+          data-testid={IDS.PERSONALIZATION_SHARE_SIGNALS_TOGGLE}
+          data-state={shareSignals ? 'on' : 'off'}
+          checked={shareSignals}
+          disabled={signalBusy || sharePaint.disabled}
+          onchange={(e) => { e.currentTarget.checked = shareSignals; void toggleShareSignals(); }}
+        />
+        {t.personalization.share_signals_label}
+      </label>
+      {#if sharePaint.reason}
+        <p class="muted small">{sharePaint.reason}</p>
+      {/if}
+    {/if}
     <p class="muted">{t.personalization.share_signals_subtitle}</p>
 
     <!-- The transparency pane: the nest-wide ≥k export view, exactly as a peer

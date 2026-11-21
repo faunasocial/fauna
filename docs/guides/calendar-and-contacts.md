@@ -2,7 +2,7 @@
 
 > **Status — this guide describes Fauna as it is taking shape.** Most of it is
 > built and tested; the [table at the end](#where-this-stands-today) says
-> exactly what is available now, what is landing, and what is planned.
+> exactly what is available now.
 
 ---
 
@@ -24,8 +24,9 @@ per-event reminder, and `.ics` import/export for moving calendars in and out.
 
 The back and forward arrows above the calendar move by whatever you're
 currently looking at — a month in month view, a week in week view, a day in
-day view. The agenda is a running list rather than a fixed span, so the
-arrows do nothing there.
+day view. The agenda is a running list rather than a fixed span, so there
+the arrows are switched off and the app says why: switch to Month, Week or
+Day to move through dates.
 
 Your calendars are listed down the side, each with a checkbox. By default
 you see everything at once; clear a calendar's checkbox to take it off the
@@ -47,8 +48,9 @@ skip. Pressing Import before choosing a file just tells you to choose one.
 The quickest way to add something is to click where it belongs. In week or
 day view, click an empty stretch of the timetable and the new-event form
 opens already filled in with that day and that time — click 9:15 on Tuesday
-and you get Tuesday at 9:15. In month view, double-click a day to do the same
-thing for the whole day; a single click there takes you into that day.
+and you get Tuesday at 9:15. In month view, double-click a day and the form
+opens on that day at 9:00, the start of the working day; a single click there
+takes you into that day.
 
 An event you start writing but don't finish is kept for you. Close the app
 halfway through filling in the form and the next time you open **New event**
@@ -80,10 +82,9 @@ Calendar invitations use the same open standard (iMIP — invitations over
 email) that Exchange, Google Calendar, and Apple Calendar speak among
 themselves. If your nest has [mail enabled](own-your-mail.md):
 
-- **Invite anyone by email address.** A Gmail invitee gets the normal
-  invitation with inline Yes/Maybe/No; an Outlook invitee sees a normal
-  meeting request. Their responses come back and update the roster on your
-  event.
+- **Invite anyone by email address.** People on Gmail or Outlook get an
+  email invitation and answer from their own calendar. Their responses come
+  back and update the roster on your event.
 - **Get invited from anywhere.** Invitations mailed to `you@example.com`
   land on your calendar — in any calendar app you've connected, too — and
   your RSVP flows back, whether you answer in the Fauna app or in that
@@ -99,7 +100,9 @@ themselves. If your nest has [mail enabled](own-your-mail.md):
 
 Between Fauna users, an invitation doesn't always need mail: when the nest
 of the person you invite has mail turned off, the invitation travels Fauna's
-own end-to-end encrypted channel instead, including across nests.
+own end-to-end encrypted channel instead, including across nests. An
+invitation you send from the web app goes by mail, so it doesn't reach
+someone whose nest has mail turned off.
 
 Anyone can invite you, but only an event's organizer can change or cancel
 it on your calendar. If someone else — even another invitee who holds the
@@ -121,8 +124,8 @@ If your nest serves calendars and contacts with mail turned off, you still get a
 
 Apple Calendar and Contacts (Mac + iPhone), Thunderbird, Evolution, and
 DAVx⁵ (Android) all work with your nest. Outlook and Google Calendar can't mount
-external CalDAV calendars — that's their limitation — but as invitees they
-work fully via the invitation flow above.
+external CalDAV calendars — that's their limitation — but people using them
+can still be invited and answer through the invitation flow above.
 
 ## Contacts: two different address books, on purpose
 
@@ -214,15 +217,14 @@ need you to accept it once.
 |---|---|
 | Events page: calendars, agenda/month/week/day, recurring events, `.ics` import/export | **Available** |
 | RSVPs (Going / Interested / Declined) visible to all attendees | **Available** |
-| Per-event reminder | **Available** as a setting — reminder *notifications* on your devices are still landing; don't rely on them for wake-up calls yet |
+| Per-event reminder | **Available** as a setting — don't rely on reminder *notifications* on your devices for wake-up calls |
 | Invitations to/from Gmail, Outlook/Exchange, Apple users (iMIP over mail) | **Available**, including organizers who use only a standard calendar app |
-| Fauna-to-Fauna invitations without mail (end-to-end encrypted, across nests) | **Available** |
+| Fauna-to-Fauna invitations without mail (end-to-end encrypted, across nests) | **Available** — from the web app, invitations go by mail |
 | CalDAV read-write for Apple Calendar, Thunderbird, Evolution, DAVx⁵ | **Available** |
 | CardDAV read-write for Apple Contacts, Thunderbird, DAVx⁵ | **Available** |
 | DNS-based autodiscovery on a nest in the cloud with a domain (enter address + password, done) | **Available** (Apple apps sometimes need manual `mail.<domain>`) |
 | Contacts page: requests, accept/block, contact list | **Available** |
-| Address Book view in the Fauna app (read-only) | **Available** |
-| Editing address-book cards inside the Fauna app | **Planned** — edit via the synced native apps meanwhile |
+| Address Book view in the Fauna app (read-only) | **Available** — to edit a card, use a contacts app synced with your nest |
 | Calendar/contacts on a home nest, with a domain or without (port 8443, changeable) | **Available** |
 | Refused changes to your events, checked and reported | **Available** |
 | Events and contact cards stored encrypted on every nest | **Available** |

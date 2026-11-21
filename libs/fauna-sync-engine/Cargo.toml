@@ -78,7 +78,7 @@ format_text = ["fauna-core/format_text"]
 # Escape hatch to build the `FAUNA_E2E_DEBOUNCE_MS` override (always_resident.rs)
 # into a --release profile (debug_assertions off). Never default-on; a release-
 # profile e2e build turns this on explicitly (testing.md convention 15).
-e2e-agent = ["fauna-account-plane/e2e-agent"]
+e2e-agent = ["fauna-account-plane/e2e-agent", "fauna-core/test-util"]
 # Exposes the in-memory `nest_api::FakeSyncControl` (and `SyncEngine::set_control_api`)
 # to OTHER crates' tests. The crate's own `#[cfg(test)]` modules get them without
 # this — `#[cfg(any(test, feature = "test-helpers"))]`, the same gating the six
@@ -277,8 +277,10 @@ wiremock = "0.6"
 # `reauthor_window` module uses (round 116 lift; mirrors
 # `fauna-account-store`'s own dev-dep re-declaration of
 # fauna-core/test-helpers for the same lift). The [dependencies] entry above
-# stays production-clean; this feature reaches test builds only.
-fauna-core = { workspace = true, features = ["test-helpers"] }
+# stays production-clean; this feature reaches test builds only. `test-util`
+# unlocks `PagingRule::with_thresholds`, so the custodian's paged-manifest
+# tests cut a root of a few dozen chunks (`file-sync.md` § Paged manifests).
+fauna-core = { workspace = true, features = ["test-helpers", "test-util"] }
 # The custodian pull's "the pair it stores reopens" proof
 # (`custodian_pull.rs`): a real `.dat`/`.meta` pair is written with the
 # segment store and, after a pull pass, opened again with

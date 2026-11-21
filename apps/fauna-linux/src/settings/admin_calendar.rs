@@ -44,6 +44,7 @@ struct CaldavWidgets {
     /// The admin-set CalDAV listener port (`admin-calendar-caldav-port-input`).
     /// Holds the in-progress edit; re-seeded from `caldav_port` on every render.
     port_entry: gtk::Entry,
+    port_save: gtk::Button,
 }
 
 /// Per-page context threaded through hydrate / dispatch / render.
@@ -145,14 +146,12 @@ pub fn build_admin_calendar_page() -> adw::PreferencesPage {
 
     page.add(&top_group);
 
-    wire_machine(
-        CaldavWidgets {
-            error_label,
-            enabled_toggle,
-            port_entry,
-        },
+    wire_machine(CaldavWidgets {
+        error_label,
+        enabled_toggle,
+        port_entry,
         port_save,
-    );
+    });
 
     page
 }
@@ -161,7 +160,7 @@ pub fn build_admin_calendar_page() -> adw::PreferencesPage {
 /// wire the toggle + the port save button. No-op (page stays at static
 /// placeholders) when no client is available — e.g. the unit test, which has no
 /// registered client.
-fn wire_machine(widgets: CaldavWidgets, port_save: gtk::Button) {
+fn wire_machine(widgets: CaldavWidgets) {
     let client = match crate::settings::get_client() {
         Some(c) => c,
         None => return,
@@ -175,7 +174,44 @@ fn wire_machine(widgets: CaldavWidgets, port_save: gtk::Button) {
         w: widgets,
     });
 
+    // The port save is painted from its read gate then the port draft
+    // (`port_save_answer`), on every keystroke and every render.
+    paint_port_save(&ctx);
+    paint_toggle(&ctx);
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .port_entry
+            .clone()
+            .connect_changed(move |_| paint_port_save(&ctx));
+    }
+
     hydrate_and_render(&ctx);
+
+    // Re-read whenever the page is shown again, as the mail page does: the
+    // sub-page outlives its first visit, so a read that failed while the nest
+    // was away would otherwise leave the toggle and the port save saying
+    // *failed to load* for good (`admin.md` § Errors & edge cases, *Controls
+    // wait for their read*).
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w.enabled_toggle.clone().connect_map(move |_| {
+            hydrate_and_render(&ctx);
+        });
+    }
+    // ...and again when the nest connection comes back with the page on
+    // screen, while its read has not answered (`admin.md` § Errors & edge
+    // cases, *Controls wait for their read*).
+    {
+        let answered = Rc::clone(&ctx);
+        let reread = Rc::clone(&ctx);
+        crate::admin_reread::register_widget(
+            "admin-calendar",
+            &ctx.w.enabled_toggle,
+            move || crate::admin_reread::resolved(answered.machine.read_state()),
+            move || hydrate_and_render(&reread),
+        );
+    }
 
     // CalDAV-enable toggle → SetCaldavEnabled (skip the echo from render()).
     {
@@ -185,6 +221,18 @@ fn wire_machine(widgets: CaldavWidgets, port_save: gtk::Button) {
             .clone()
             .connect_active_notify(move |sw| {
                 if ctx.syncing.get() {
+                    return;
+                }
+                // The answer asked again: a flip before the read (or while a
+                // change is on its way) is put back, its reason on
+                // `error-message`, nothing sent — never a flip of a guessed
+                // `false`.
+                if crate::possible::refused_toggle(
+                    sw,
+                    &toggle_answer(&ctx.machine),
+                    &ctx.w.error_label,
+                    &ctx.syncing,
+                ) {
                     return;
                 }
                 dispatch_action(
@@ -201,23 +249,47 @@ fn wire_machine(widgets: CaldavWidgets, port_save: gtk::Button) {
     // (mirrors web/android).
     {
         let ctx = Rc::clone(&ctx);
-        port_save.connect_clicked(move |_| {
-            match fauna_core::format::parse_port(&ctx.w.port_entry.text()) {
-                Some(port) => {
-                    dispatch_action(&ctx, CaldavPolicyAction::SetCaldavPort { port });
-                }
-                None => {
-                    // Surface the invalid-port message directly (no dispatch fires,
-                    // so render() won't clear it; a later valid save re-renders).
-                    super::render_error_label(&ctx.w.error_label, Some(S::CALDAV_PORT_INVALID));
-                }
+        ctx.w.port_save.clone().connect_clicked(move |_| {
+            // The painted answer, asked again: a refusal reads on
+            // `error-message` and nothing is sent.
+            if crate::possible::refused_at_press(&port_save_answer(&ctx), &ctx.w.error_label) {
+                return;
+            }
+            if let Some(port) = fauna_core::format::parse_port(&ctx.w.port_entry.text()) {
+                dispatch_action(&ctx, CaldavPolicyAction::SetCaldavPort { port });
             }
         });
     }
 }
 
-/// Run `machine.hydrate()` on the tokio runtime (retrying while the WS socket
-/// comes up after login), then render the snapshot on the GTK main thread.
+/// The CalDAV port save's answer (`admin.md` § Errors & edge cases, draft
+/// validity; § 8 Calendar): the machine's read-and-idle gate first, then the
+/// shared `port_draft_possibility` over the typed port. A nest serving CalDAV
+/// behind its domain keeps it saveable — the draft rule never hides it.
+fn port_save_answer(ctx: &CaldavCtx) -> fauna_core::possibility::Possibility {
+    ctx.machine
+        .toggle_possibility()
+        .and(CaldavPolicyMachine::port_draft_possibility(
+            &ctx.w.port_entry.text(),
+        ))
+}
+
+/// The CalDAV-enable toggle's answer (`admin.md` § Errors & edge cases,
+/// *Controls wait for their read*): the machine's read-and-idle gate — still
+/// loading before `get_mail_config` answers, failed to load after it failed,
+/// still saving while a change is on its way.
+fn toggle_answer(machine: &CaldavPolicyMachine) -> fauna_core::possibility::Possibility {
+    machine.toggle_possibility()
+}
+
+fn paint_toggle(ctx: &CaldavCtx) {
+    crate::possible::paint(&ctx.w.enabled_toggle, None, toggle_answer(&ctx.machine));
+}
+
+fn paint_port_save(ctx: &CaldavCtx) {
+    crate::possible::paint(&ctx.w.port_save, None, port_save_answer(ctx));
+}
+
 fn hydrate_and_render(ctx: &Rc<CaldavCtx>) {
     let machine = Arc::clone(&ctx.machine);
     let ctx_render = Rc::clone(ctx);
@@ -266,6 +338,8 @@ fn render(ctx: &Rc<CaldavCtx>, snap: &CaldavPolicySnapshot) {
     if w.port_entry.text() != port_text {
         w.port_entry.set_text(&port_text);
     }
+    paint_toggle(ctx);
+    paint_port_save(ctx);
 }
 
 #[cfg(test)]
@@ -298,6 +372,45 @@ mod tests {
                     "missing widget id {id:?}; have {names:?}",
                 );
             }
+        });
+    }
+
+    /// `admin.md` § Errors & edge cases, *Controls wait for their read*: before
+    /// `get_mail_config` answers, the CalDAV toggle paints blocked with *still
+    /// loading* and a flip is put back with the reason on `error-message`
+    /// (nothing is sent: the machine's status never leaves idle).
+    #[test]
+    fn caldav_toggle_waits_for_the_read() {
+        crate::testid::run_on_gtk_thread(|| {
+            let nest = fauna_client::NestClient::new(
+                "http://127.0.0.1:1".to_string(),
+                fauna_core::identity::ActorKeypair::generate(),
+            );
+            let machine = fauna_client_mail_settings::rpc_glue::build_caldav_policy_machine(nest);
+            let answer = toggle_answer(&machine);
+            assert_eq!(
+                answer.reason().map(|r| r.key.as_str()),
+                Some("common.still_loading")
+            );
+            let toggle = gtk::Switch::new();
+            let error = gtk::Label::new(None);
+            crate::possible::paint(&toggle, None, answer.clone());
+            assert!(!toggle.is_sensitive());
+            let syncing = Cell::new(false);
+            toggle.set_active(true);
+            assert!(crate::possible::refused_toggle(
+                &toggle, &answer, &error, &syncing
+            ));
+            assert!(!toggle.is_active());
+            assert_eq!(
+                error.text().as_str(),
+                fauna_i18n::strings::common::STILL_LOADING
+            );
+            // The port save folds the same read first.
+            let ctx_answer = machine
+                .toggle_possibility()
+                .and(CaldavPolicyMachine::port_draft_possibility("8443"));
+            assert!(!ctx_answer.is_possible());
         });
     }
 }

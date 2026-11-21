@@ -374,16 +374,24 @@ impl Op {
                         // `None` once the message aged out of the bounded store;
                         // the correction is then flag-removal only.
                         let body = session.moderation_message_body(content_id.clone());
-                        session.moderation_remove_local_detection(content_id.clone());
                         if let (Some(text), Some(machine)) = (body, machine)
                             && !text.trim().is_empty()
                         {
-                            // Fire-and-forget + silent, the mark-as-spam
-                            // convention: a degraded outcome (mail not enabled /
-                            // a nest without sealed-at-rest) is a no-op with no
-                            // server fallback, and must never blank the queue.
-                            let _ = machine.train_spam_model_client(text, false).await;
+                            // A degraded outcome (mail not enabled / a nest
+                            // without sealed-at-rest / no token) is an `Ok`
+                            // no-op with no server fallback and stays silent,
+                            // the mark-as-spam convention (`mail-spam.md`). A
+                            // dispatch that FAILED is said on `error-message`
+                            // and the flag stays, so the person can try the
+                            // correction again rather than lose it
+                            // (`moderation.md` § Errors & edge cases;
+                            // `docs/goal/ui/README.md` § Offer only what is
+                            // possible, rule 7).
+                            if let Err(e) = machine.train_spam_model_client(text, false).await {
+                                return Outcome::Failed(format!("train correction: {e}"));
+                            }
                         }
+                        session.moderation_remove_local_detection(content_id.clone());
                     }
                 } else {
                     // The shared two-half flow: the sealed model train when

@@ -10,6 +10,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.ReadState
 
 /**
  * Drives the admin `admin-web` page (`web-content-hosting.md` § Admin apex
@@ -20,7 +22,12 @@ import javax.inject.Inject
  * `fauna.web.{get,set}_apex_actor` kinds. The actor list is every account on
  * the nest (`fauna_client_admin::users_list_all`, admin.md § 2 → *Which
  * accounts a picker offers*). Per priority #2 the VM holds no web logic — the shared
- * `web_apex_url` projection builds the info URL. Non-optimistic: the picker
+ * `web_apex_info_text` answer builds the info line (where the apex serves, or
+ * why there is no address — never `https:///`), and the picker paints from the
+ * read's own answer (`read_possibility`: blocked before the read lands and after
+ * a failed apex read). A failed account or serving-domain read reaches
+ * `error-message` rather than leaving a silently empty picker (admin.md § 7
+ * Web). Non-optimistic: the picker
  * reflects only the nest-echoed designation. Linux lead:
  * apps/fauna-linux/src/settings/admin_web.rs.
  */
@@ -37,11 +44,28 @@ class AdminWebVM @Inject constructor(
     /** The pickable actors — every account on the nest (`fauna_client_admin::users_list_all`). */
     val actors = MutableStateFlow<List<ActorOption>>(emptyList())
 
-    /** The `https://<domain>/` URL the apex serves at (the info line). */
-    val apexUrl = MutableStateFlow("")
+    /** The `admin-web-apex-info` line (`web_apex_info_text`); null before the read. */
+    val apexInfo = MutableStateFlow<LocalizedText?>(null)
+
+    /** Where the apex-designation read stands — the picker's answer reads it. */
+    val readState = MutableStateFlow(ReadState.PENDING)
     val errorMessage = MutableStateFlow<String?>(null)
 
-    init { hydrate() }
+    /** A return by Back to this page reads it again (`AdminEntryReread`). */
+    val entryReread = AdminEntryReread(::hydrate)
+
+    init {
+        hydrate()
+        // A read that has not answered is read again when the nest connection
+        // comes back (`docs/goal/behavior/admin.md` § Errors & edge cases,
+        // *Controls wait for their read*; tui's `reconnect_reread_op`): only
+        // while the page's own apex read is unresolved.
+        viewModelScope.rereadOnReconnect(
+            api.reconnectTick,
+            answered = { readState.value == ReadState.RESOLVED },
+            reread = ::hydrate,
+        )
+    }
 
     /** Fetch the current designation + the actor list, then publish. */
     private fun hydrate() {
@@ -50,23 +74,44 @@ class AdminWebVM @Inject constructor(
             // Kept: two sequential RPCs (getApexActor + adminUsersListAll),
             // not a single NestClient RPC (transport.md § Request lifecycle
             // step 3's note).
+            var lastError: Exception? = null
             repeat(HYDRATE_ATTEMPTS) {
-                try {
-                    val current = w.getApexActor()
-                    val users = actorOptions(api.adminUsersListAll())
-                    // The nest's own `web_serving_domain` (admin.md § 7), never the
-                    // setup-status/handle domain.
-                    val domain = runCatching { w.servingDomain() }
-                        .onFailure { ShellLog.w("AdminWebVM", "serving-domain fetch failed: ${it.message}") }
-                        .getOrDefault("")
-                    currentActorHex.value = current?.let { HexUtil.bytesToHex(it) }
-                    actors.value = users
-                    apexUrl.value = runCatching { com.fauna.ffi.webApexUrl(domain) }.getOrDefault("")
-                    return@launch
-                } catch (_: Exception) {
+                val current = try {
+                    w.getApexActor()
+                } catch (e: Exception) {
+                    lastError = e
                     delay(HYDRATE_RETRY_MS)
+                    return@repeat
                 }
+                // The account list and the serving domain degrade rather than
+                // blank the page — the designation still shows — but neither
+                // failure is silent (`docs/goal/ui/README.md` § Offer only what
+                // is possible, rule 7).
+                val failures = mutableListOf<String>()
+                val users = try {
+                    actorOptions(api.adminUsersListAll())
+                } catch (e: Exception) {
+                    failures += "load accounts: ${e.message}"
+                    emptyList()
+                }
+                // The nest's own `web_serving_domain` (admin.md § 7), never the
+                // setup-status/handle domain.
+                val domain = try {
+                    w.servingDomain()
+                } catch (e: Exception) {
+                    ShellLog.w("AdminWebVM", "serving-domain fetch failed: ${e.message}")
+                    failures += "load web serving domain: ${e.message}"
+                    ""
+                }
+                currentActorHex.value = current?.let { HexUtil.bytesToHex(it) }
+                actors.value = users
+                apexInfo.value = runCatching { com.fauna.ffi.webApexInfoText(domain) }.getOrNull()
+                readState.value = ReadState.RESOLVED
+                if (failures.isNotEmpty()) errorMessage.value = failures.joinToString("; ")
+                return@launch
             }
+            readState.value = ReadState.FAILED
+            errorMessage.value = lastError?.message
         }
     }
 

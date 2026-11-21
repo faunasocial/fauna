@@ -64,6 +64,8 @@ import pathlib
 
 import pytest
 
+from helpers import source_scan
+
 pytestmark = [pytest.mark.tier_1]
 
 _E2E_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -162,9 +164,15 @@ def _ceremony_names(tree: ast.Module) -> set[str]:
 def _violations() -> list[str]:
     shared = _shared_identity_fixtures()
     found: list[str] = []
-    for path in sorted(_TESTS_DIR.glob("test_*.py")):
+    # A test reaching the ceremony calls it or a module helper that does, so
+    # its module spells the action (`helpers/source_scan.py`: only those
+    # modules are parsed).
+    for path, text in source_scan.spelling(
+            {_CEREMONY_ACTION}, root=_E2E_ROOT, within=("tests",), pattern="test_*.py"):
+        if path.parent != _TESTS_DIR:
+            continue
         try:
-            tree = _module(path)
+            tree = ast.parse(text)
         except SyntaxError:
             continue
         ceremonies = _ceremony_names(tree)

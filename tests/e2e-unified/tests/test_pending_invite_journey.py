@@ -41,6 +41,7 @@ from nacl.signing import SigningKey
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.launch_harness import reached_authenticated_app
+from helpers.use_case_walk import assert_use_case_walked
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -114,6 +115,64 @@ def _drive_app_to_pending_review(app, nest_url: str, handle: str) -> None:
     )
 
 
+@pytest.fixture
+def invite_only_handled_nest(request, nest_mode, tmp_path_factory):
+    """A claimed, invite-only nest a REAL handle check resolves and dials — the
+    session ``nest_instance`` is neither (no handle domain, plain HTTP), which is
+    why the walking journey below cannot use it.
+
+    The same two knobs as the smoke module's ``smoke_handled_nest``: the nest's
+    ``handle_domain`` is its own loopback authority, so a typed
+    ``<localpart>@127.0.0.1:<port>`` handle resolves here, and ``serve_tls=True``,
+    because a non-public authority resolves to ``https`` and the check dials
+    ``wss://``. Unlike that fixture, registration stays CLOSED (no
+    ``open_registration``): an unregistered identity's check then answers
+    ``NestRunningUserUnregistered`` and Continue lands on ``invite_request`` — the
+    join-a-nest path, walked by gestures."""
+    from common.nest import OWN_DIAL_AUTHORITY
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "invite-only-handled-nest",
+        handle_domain_seed=OWN_DIAL_AUTHORITY, serve_tls=True,
+    )
+    nest["authority"] = nest["handle_domain_seed"]
+    try:
+        yield nest
+    finally:
+        cleanup()
+
+
+def _walk_app_to_pending_review(app, nest: dict, localpart: str) -> None:
+    """The join-a-nest walk up to PendingReview, every step a gesture: create a
+    fresh identity and keep its recovery kit, type the handle, check it,
+    Continue, submit the request.
+
+    The nest is a dedicated one the app did not launch against, so the app is
+    relaunched trusting it first (``_relaunch_trusting_nest``, the call every
+    re-pointing seam makes before its first gesture)."""
+    from conftest import _relaunch_trusting_nest
+
+    _relaunch_trusting_nest(app.driver, nest)
+    ob = app.onboarding
+    # A new person joining has no key: they tap Create (the catalogue's
+    # `join-a-nest` steps), keep the recovery kit, and land on handle_entry.
+    ob.create_identity_to_handle_entry()
+    ob.fill_handle(f"{localpart}@{nest['authority']}")
+    # The real check: the identity is unknown to this claimed, closed nest, so it
+    # resolves NestRunningUserUnregistered and Continue routes to invite_request.
+    ob.run_handle_check(timeout=45)
+    ob.submit_handle()
+    app.driver.wait_for("invite-request-submit-button", timeout=45)
+    app.driver.click("invite-request-submit-button")
+    _wait_visible(
+        app,
+        "invite-request-recheck-button",
+        SUBMIT_BUDGET_S,
+        "the real invite_request.submit never reached PendingReview",
+    )
+
+
 def _wait_visible(app, element_id: str, budget_s: float, what: str) -> None:
     deadline = time.monotonic() + budget_s
     while time.monotonic() < deadline:
@@ -134,8 +193,11 @@ def _status_text(app) -> str:
         return f"<unreadable: {exc}>"
 
 
+@pytest.mark.use_case("join-a-nest")
 @pytest.mark.feature("join-a-nest")
-def test_admin_approval_advances_the_requester_with_no_user_action(app, nest_instance):
+def test_admin_approval_advances_the_requester_with_no_user_action(
+    app, invite_only_handled_nest
+):
     """Submit → admin approves out of band → the app advances the user off the
     pending surface **on its own**, with no click in between.
 
@@ -169,12 +231,25 @@ def test_admin_approval_advances_the_requester_with_no_user_action(app, nest_ins
     # `skip_unbuilt` gate is retired (apple was last; matches the
     # precedent of deleting rather than widening a now-vacuous guard).
 
+    nest_instance = invite_only_handled_nest
     app.driver.reset()
-    handle = f"pendapprove-{int(time.time() * 1000)}"
-    _drive_app_to_pending_review(app, nest_instance["url"], handle)
+    localpart = f"pendapprove-{int(time.time() * 1000)}"
+    _walk_app_to_pending_review(app, nest_instance, localpart)
+    # The nest stores the handle the app submitted; find it by its localpart
+    # rather than spelling the canonical form here.
+    with _admin_client(nest_instance) as admin_ws:
+        rows = admin_ws.call("fauna.admin.invite_requests.list", {})["invite_requests"]
+    candidates = [r["handle"] for r in rows if r["handle"].split("@")[0] == localpart]
+    assert len(candidates) == 1, (
+        f"expected one invite request for localpart {localpart!r}; "
+        f"handles on the nest: {sorted(r['handle'] for r in rows)!r}"
+    )
+    handle = candidates[0]
 
     # The counterparty's action, out of band — the admin is a different actor and
-    # this is the precondition, not the behavior under test (convention 8).
+    # this is the precondition, not the behavior under test (convention 8). The
+    # admin's own approve, walked by gestures through the users page, is the
+    # `invite-someone` journey in `test_use_case_admin_journeys.py`.
     with _admin_client(nest_instance) as admin_ws:
         req_id = _pending_request_id(admin_ws, handle)
         approved = admin_ws.call("fauna.admin.invite_requests.approve", {"id": req_id})
@@ -227,6 +302,7 @@ def test_admin_approval_advances_the_requester_with_no_user_action(app, nest_ins
         "the app reports an authenticated session while the invite_request page "
         "is still mounted; do not trust the flag until this is explained"
     )
+    assert_use_case_walked(app.driver, "join-a-nest")
 
 
 def _seed_invite_request(nest_url: str, handle: str, age_claim: dict | None = None) -> dict:

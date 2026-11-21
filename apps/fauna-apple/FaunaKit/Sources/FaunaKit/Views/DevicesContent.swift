@@ -410,6 +410,9 @@ private struct CustodyMintFlow: View {
             .buttonStyle(.borderless)
             .accessibilityIdentifier(Ids.custodyMintButton)
             .automationActivate(Ids.custodyMintButton) { open() }
+            // Gated at the entry (`devices.md` § Errors & edge cases).
+            .faunaPossible(vm.mintEntry)
+            FaunaPossibilityReason(vm.mintEntry)
             if let candidates {
                 Picker(L.devices.custodyMintHostLabel, selection: $chosen) {
                     Text(L.devices.custodyMintHostPlaceholder).tag(Int?.none)
@@ -431,9 +434,9 @@ private struct CustodyMintFlow: View {
                         confirm()
                     }
                     .buttonStyle(.borderless)
-                    .disabled(chosen == nil)
                     .accessibilityIdentifier(Ids.custodyMintConfirmButton)
-                    .automationActivate(Ids.custodyMintConfirmButton, isEnabled: { chosen != nil }) { confirm() }
+                    .automationActivate(Ids.custodyMintConfirmButton) { confirm() }
+                    .faunaPossible(custodyMintConfirmPossibility(hostPicked: chosen != nil))
                     Button(L.common.cancel, role: .cancel) {
                         close()
                     }
@@ -455,6 +458,8 @@ private struct CustodyMintFlow: View {
     }
 
     private func confirm() {
+        // The press asks what the paint asked (rule 7).
+        if vm.refuseForm(custodyMintConfirmPossibility(hostPicked: chosen != nil)) { return }
         guard let candidates, let chosen, candidates.indices.contains(chosen) else { return }
         let candidate = candidates[chosen]
         Task {
@@ -480,11 +485,16 @@ private struct CustodyMintFlow: View {
 /// open, the editor — input, confirm, cancel — which REPLACES that button on its
 /// own card (tui's `devices_elements` paints the same sequence). `DeviceCard`
 /// reads it to decide what paints, so the unit test of this function pins the view.
+/// `offered` is `DevicesMachineVM.renameOffered(deviceId:)` — false only for a
+/// row whose rename the shared answer calls Absent (the nest's WebDAV
+/// pseudo-device row): what this person can never do here is not shown
+/// (`ui/README.md` § Offer only what is possible), as tui's `rename_offered`.
 enum DeviceRenameAffordance {
-    static func controlIds(renaming: Bool) -> [String] {
-        renaming
-            ? [Ids.deviceRenameInput, Ids.deviceRenameConfirmButton, Ids.deviceRenameCancelButton]
-            : [Ids.deviceRenameButton]
+    static func controlIds(renaming: Bool, offered: Bool) -> [String] {
+        if renaming {
+            return [Ids.deviceRenameInput, Ids.deviceRenameConfirmButton, Ids.deviceRenameCancelButton]
+        }
+        return offered ? [Ids.deviceRenameButton] : []
     }
 }
 
@@ -568,31 +578,36 @@ private struct DeviceCard: View {
             // 2026-09-25). The machine paints it per row
             // (`DeviceSummary.p2pParticipationPaint`: own-ness, checked, label,
             // actionable) and picks the arm the click takes, painting any
-            // refusal on `error-message`; this view only draws it.
-            let paint = participationPaint
+            // refusal on `error-message`; this view only draws it, enabled
+            // from the shared answer (`vm.p2pParticipationPossibility`).
+            let paint = DevicesMachineVM.participationPaint(device)
+            let label = renderLocalizedText(paint.label)
+            let answer = vm.p2pParticipationPossibility(index: index)
             Toggle(isOn: Binding(get: { paint.checked }, set: { _ in toggleParticipation() })) {
-                Text(paint.label)
+                Text(label)
                     .font(.caption)
             }
             .toggleStyle(.switch)
             .controlSize(.small)
-            .disabled(!paint.actionable)
             .accessibilityIdentifier(Ids.deviceP2pParticipationToggle)
             // One Entry carries the click, the "on"/"off" read (→ `checked`),
             // the label text AND the enabled state; `isEnabled` mirrors the
-            // `.disabled(...)` predicate above. Env-gated no-op.
+            // `faunaPossible` answer below. Env-gated no-op.
             .automationActivate(
                 Ids.deviceP2pParticipationToggle,
-                isEnabled: { paint.actionable },
-                text: { paint.label },
+                isEnabled: { answer.isPossible },
+                text: { label },
                 value: { paint.checked ? "on" : "off" }
             ) { toggleParticipation() }
+            .faunaPossible(answer)
 
             // The rename affordance (`devices.md` § Device names): ONE editor,
             // keyed by `device_id`, never the painted index. Which of its
             // controls paint is `DeviceRenameAffordance.controlIds` — the open
-            // editor REPLACES the card's rename button, as on tui.
-            let renameControls = DeviceRenameAffordance.controlIds(renaming: renaming)
+            // editor REPLACES the card's rename button, and a row the shared
+            // answer calls Absent (the WebDAV pseudo-device) gets none, as on tui.
+            let renameControls = DeviceRenameAffordance.controlIds(
+                renaming: renaming, offered: vm.renameOffered(deviceId: device.deviceId))
             if renameControls.contains(Ids.deviceRenameInput) {
                 VStack(alignment: .leading, spacing: 4) {
                     LabeledContent(L.devices.renameLabel) {
@@ -609,12 +624,14 @@ private struct DeviceCard: View {
                             .controlSize(.small)
                             .accessibilityIdentifier(Ids.deviceRenameConfirmButton)
                             .automationActivate(Ids.deviceRenameConfirmButton) { confirmRename() }
+                            .faunaPossible(vm.renamePossibility(deviceId: device.deviceId, draft: renameDraft))
                         Button(L.common.cancel, role: .cancel) { renaming = false }
                             .buttonStyle(.borderless)
                             .controlSize(.small)
                             .accessibilityIdentifier(Ids.deviceRenameCancelButton)
                             .automationActivate(Ids.deviceRenameCancelButton) { renaming = false }
                     }
+                    FaunaPossibilityReason(vm.renamePossibility(deviceId: device.deviceId, draft: renameDraft))
                 }
             }
 
@@ -664,36 +681,19 @@ private struct DeviceCard: View {
         renaming = true
     }
 
+    /// The save asks the shared answer (inside the machine) and the editor
+    /// closes only once the save went through; a refusal or nest failure keeps
+    /// it open with the text, the reason on `error-message`.
     private func confirmRename() {
         let id = device.deviceId
         let text = renameDraft
-        renaming = false
-        Task { await vm.renameDevice(deviceId: id, label: text) }
-    }
-
-    /// The toggle's paint, drawn by the devices machine at every snapshot
-    /// (`p2p.md` § Per-device participation → *Which row is this device's*);
-    /// the app never re-derives own-ness. `nil` only on a row serialised
-    /// without it (fixtures): the sibling arm over the row's own report,
-    /// mirroring Rust's `DeviceSummary::participation_paint`.
-    private var participationPaint: (checked: Bool, label: String, actionable: Bool) {
-        if let paint = device.p2pParticipationPaint {
-            return (paint.checked, renderLocalizedText(paint.label), paint.actionable)
+        Task {
+            if await vm.renameDevice(deviceId: id, label: text) { renaming = false }
         }
-        let checked = device.p2pParticipation ?? true
-        let label: String
-        if device.p2pOffRequested {
-            label = L.devices.p2pParticipationOffRequested
-        } else if device.p2pParticipation == nil {
-            label = L.devices.p2pParticipationUnreported
-        } else {
-            label = L.devices.p2pParticipation
-        }
-        return (checked, label, checked && !device.p2pOffRequested)
     }
 
     private func toggleParticipation() {
-        let on = !participationPaint.checked
+        let on = !DevicesMachineVM.participationPaint(device).checked
         Task { await vm.setP2pParticipation(index: index, on: on) }
     }
 }

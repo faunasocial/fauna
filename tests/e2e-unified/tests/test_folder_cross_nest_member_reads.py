@@ -107,16 +107,6 @@ def _owner_listed(seats, set_name: str) -> list:
     return [item for item in items if item_in_set(item, set_name)]
 
 
-def _member_scope_names(media: MediaActions, value: str) -> list[str] | None:
-    """Re-enter Media, select the foreign scope, and return the names it lists
-    once the page says it loaded (rows, or the empty state)."""
-    media.reenter()
-    media.set_filter(value)
-    if not media.wait_for_loaded():
-        return None
-    return media.item_names()
-
-
 def _error_text(driver) -> str:
     return driver.get_text("error-message") if driver.is_visible("error-message") else ""
 
@@ -207,9 +197,7 @@ def test_a_member_on_another_nest_opens_a_metadata_only_file_and_loses_it_when_r
     # ── 4. The member opens it from the foreign scope ─────────────────────────
     media = MediaActions(member_driver)
     names = wait_until(
-        lambda: (lambda n: n if n and _FILE_NAME in n else None)(
-            _member_scope_names(media, scope)
-        ),
+        lambda: media.foreign_scope_names(scope, _FILE_NAME),
         _SCOPE_S,
         interval=2.0,
         diagnose=lambda: (
@@ -261,9 +249,10 @@ def test_a_member_on_another_nest_opens_a_metadata_only_file_and_loses_it_when_r
     removed = S.media.error_foreign_removed
 
     def _refused():
-        names = _member_scope_names(media, scope)
-        error = _error_text(member_driver)
-        return (names, error) if removed in error else None
+        names = media.foreign_scope_until(
+            scope, lambda _names: removed in _error_text(member_driver)
+        )
+        return (names, _error_text(member_driver)) if names is not None else None
 
     names, error = wait_until(
         _refused,

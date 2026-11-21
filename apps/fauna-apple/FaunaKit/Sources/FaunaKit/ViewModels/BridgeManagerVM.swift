@@ -218,11 +218,41 @@ public class BridgeManagerVM {
         }
     }
 
-    public func link(bridge: BridgeInfo) async {
-        guard let api else { return }
-        let modes = bridge.linkModes?.filter { $0.platform == nil || $0.platform == "desktop" } ?? []
-        guard let mode = modes.first(where: { $0.mode == selectedMode[bridge.id] }) ?? modes.first else { return }
+    /// This build's platform word for the shared `bridge_mode_applies` filter.
+    #if os(macOS)
+    public static let linkPlatform = "macos"
+    #else
+    public static let linkPlatform = "ios"
+    #endif
+
+    /// `bridge`'s link modes that apply on `platform` — the shared
+    /// `bridge_mode_applies` string match; the one filter the card and the
+    /// Link action both read.
+    public static func applicableModes(_ bridge: BridgeInfo, platform: String = linkPlatform) -> [BridgeLinkMode] {
+        bridge.linkModes?.filter { bridgeModeApplies(modePlatform: $0.platform, platform: platform) } ?? []
+    }
+
+    /// The card's Link control answer — the shared `bridge_link_possibility`
+    /// (`bridges.md` § Errors & edge cases, rule 4, *One answer for the
+    /// button*): possible where no block applies, else blocked by the reason
+    /// `bridge-link-blocked-reason` paints. A linked card's button is Unlink,
+    /// which this always answers possible.
+    public static func linkPossibility(_ bridge: BridgeInfo, platform: String = linkPlatform) -> Possibility {
+        bridgeLinkPossibility(
+            linked: bridge.linked,
+            error: bridge.error,
+            applicableModes: UInt32(applicableModes(bridge, platform: platform).count)
+        )
+    }
+
+    public func link(bridge: BridgeInfo, platform: String = BridgeManagerVM.linkPlatform) async {
         errorMessage = nil
+        // The press asks what the paint asked (rule 7): a blocked Link refuses
+        // with the same reason, and nothing reaches the nest.
+        if refusePress(Self.linkPossibility(bridge, platform: platform), errorMessage: &errorMessage) { return }
+        guard let api else { return }
+        let modes = Self.applicableModes(bridge, platform: platform)
+        guard let mode = modes.first(where: { $0.mode == selectedMode[bridge.id] }) ?? modes.first else { return }
         // A link ask carries an EMPTY target (approving a link approves connecting
         // that bridge; the OAuth mode is mechanism, not scope).
         let source = SourceKey(bridgeId: bridge.id, operation: .link, target: "")
@@ -270,8 +300,15 @@ public class BridgeManagerVM {
         }
     }
 
+    /// `bridge-add-follow-button`'s draft answer — the shared
+    /// `bridge_follow_possibility` (`bridges.md` § Errors & edge cases): blocked
+    /// on a blank id; the petname stays optional.
+    public var followAnswer: Possibility { bridgeFollowPossibility(id: followId) }
+
     public func addFollow(bridgeId: String) async {
-        guard let api, !followId.isEmpty else { return }
+        // The press asks what the paint asked, refusing out loud (rule 7).
+        if refusePress(followAnswer, errorMessage: &errorMessage) { return }
+        guard let api else { return }
         // Captured BEFORE the call: the ask is keyed on the refused follow's own id,
         // not on the form buffer a success clears (and a refusal can outlive).
         let source = SourceKey(bridgeId: bridgeId, operation: .follow, target: followId)

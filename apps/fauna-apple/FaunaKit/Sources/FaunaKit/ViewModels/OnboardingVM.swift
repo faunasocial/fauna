@@ -63,6 +63,11 @@ public final class OnboardingVM {
         // Identity) — the same capability-flag shape; `RecoveryKitOfferView`
         // renders it, and the handoff below registers the confirmed kit.
         machine.setRendersRecoveryKit(renders: true)
+        // The choose-providers page (onboarding-provisioning.md § 3d) — the
+        // handle check lands on `.providerChoice` instead of `.dnsConfig`, and
+        // Back from nest_provisioning returns there. One flag for macOS and iOS;
+        // `ProviderChoiceView` renders it (Fauna Kids keeps its handle-entry arm).
+        machine.setRendersProviderChoice(renders: true)
         // Re-root the machine's own store reads (the recovery floor's custody map
         // is read from the device's store, `box-recovery.md` § The plane-era
         // recovery floor) at the sandbox-shared container on iOS; `nil` on macOS.
@@ -89,7 +94,7 @@ public final class OnboardingVM {
         // Any machine transition supersedes a client-side parse error: it means
         // the user advanced (or went Back), so a stale import-parse message must
         // not outlive it. The machine owns the error surface again.
-        importError = nil
+        draftRefusal = nil
         // The sign-out residue is deliberately NOT cleared here: it is state the
         // machine does not own, and until a re-sweep says otherwise the
         // statement is still true — going Back to identity_choice still owes the
@@ -101,11 +106,13 @@ public final class OnboardingVM {
     }
     private var _observerTick: UInt64 = 0
 
-    /// Client-side parse error for the identity-import field, set when the shared
-    /// `parseIdentityImport` rejects the input *before* the machine is touched (see
-    /// `importIdentity`). Takes precedence over the machine error in `errorMessage`;
-    /// cleared on the next import attempt or any machine transition.
-    private var importError: String?
+    /// A signed-out form's refusal, set when a submit re-asks its shared draft
+    /// answer and it is not possible (`ui/README.md` § Offer only what is
+    /// possible, rule 4's form case, rule 7) — *before* the machine is touched
+    /// (see `importIdentity`, `checkOobCode`, `runHandleCheck`,
+    /// `submitClaimCode`). Takes precedence over the machine error in
+    /// `errorMessage`; cleared on the next submit or any machine transition.
+    private var draftRefusal: String?
 
     /// What a sign-out's erase could not remove, while it still owes work — the
     /// whole state of `identity_choice`'s `sign-out-residue` view
@@ -277,7 +284,7 @@ public final class OnboardingVM {
         // A client-side import-parse error (set before the machine is touched)
         // takes precedence over the machine's own error surface. The sign-out
         // residue is NOT here: it has its own view (`signOutResidue`).
-        return firstNonNil(importError, machine.errorMessage())
+        return firstNonNil(draftRefusal, machine.errorMessage())
     }
     public var isLoading: Bool {
         _ = _observerTick
@@ -302,6 +309,13 @@ public final class OnboardingVM {
     public var provisioningSnapshot: ProvisioningSnapshot {
         _ = _observerTick
         return machine.provisioningSnapshot()
+    }
+    /// The provisioning page's DNS plan (`provisioning-dns-plan`), read off
+    /// `_observerTick` so the region repaints when the machine's zone read
+    /// lands (`onboarding-provisioning.md` § 6 *The DNS plan*).
+    public var dnsPlan: DnsPlanSnapshot {
+        _ = _observerTick
+        return machine.dnsPlan()
     }
 
     // ── "Almost ready" (awaiting-manual-DNS) surface ────────────────────────
@@ -469,10 +483,15 @@ public final class OnboardingVM {
     /// - Parameter append: forwarded to `confirmImportedIdentity` verbatim — see its
     ///   doc for why this must be the caller's live `appState.isAddingAccount` read.
     public func importIdentity(_ input: String, append: Bool = false) {
-        importError = nil
+        draftRefusal = nil
+        // The submit asks what the paint asked (rule 4's form case).
+        if let refusal = importPossibility(input).refusal {
+            draftRefusal = refusal
+            return
+        }
         let parts = parseIdentityImport(input: input.trimmingCharacters(in: .whitespacesAndNewlines))
         guard parts.count == 2 else {
-            importError = L.onboarding.identityImport.invalidSecret
+            draftRefusal = L.onboarding.identityImport.invalidSecret
             return
         }
         let handle = parts[1]
@@ -480,6 +499,86 @@ public final class OnboardingVM {
             machine.setCurrentHandle(h: handle)
         }
         try? confirmImportedIdentity(secret: parts[0], append: append)
+    }
+
+    // ── The signed-out forms' draft answers (`ui/README.md` § Offer only what
+    //    is possible, rule 4's form case, rule 6). Each is the shared
+    //    `fauna_onboarding_machine` answer forwarded untouched: the view paints
+    //    its submit from it (``SwiftUI/View/faunaPossible(_:)`` plus a
+    //    ``FaunaPossibilityReason``) and the submit below re-asks it, so the
+    //    app never re-derives a draft's validity from `isEmpty`. Shared by the
+    //    macOS and iOS views.
+
+    /// `import-submit-button`: the paste is an identity secret in one of the
+    /// import grammars (`identity_import_possibility`).
+    public func importPossibility(_ pasted: String) -> Possibility {
+        identityImportPossibility(pasted: pasted.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// `handle-check-button`: a handle typed and no check in flight
+    /// (`OnboardingMachine::handle_check_possibility`) over the machine's one
+    /// handle field.
+    public var handleCheckAnswer: Possibility {
+        _ = _observerTick
+        return machine.handleCheckPossibility(handle: machine.currentHandle())
+    }
+
+    /// `handle-check-button`'s action: re-asks ``handleCheckAnswer`` and
+    /// refuses with its reason on `error-message`, else starts the check.
+    public func runHandleCheck() {
+        draftRefusal = nil
+        if let refusal = machine.handleCheckPossibility(handle: machine.currentHandle()).refusal {
+            draftRefusal = refusal
+            _observerTick &+= 1
+            return
+        }
+        let machine = self.machine
+        Task { await machine.startHandleCheck(handle: machine.currentHandle()) }
+    }
+
+    /// `invite-code-check-button`: a code typed (`invite_code_draft_possibility`).
+    public func inviteCodePossibility(_ code: String) -> Possibility {
+        inviteCodeDraftPossibility(code: code)
+    }
+
+    /// `claim-code-submit-button`: a code typed and no claim already on its
+    /// way (`OnboardingMachine::claim_code_submit_possibility`) — replaces the
+    /// snapshot's `submit_enabled` paired with an app-side emptiness check.
+    public func claimCodePossibility(_ code: String) -> Possibility {
+        _ = _observerTick
+        return machine.claimCodeSubmitPossibility(code: code)
+    }
+
+    /// `recovery-entry-submit-button`: a recovery kit pasted, then an account
+    /// named (`recovery_entry_possibility` — the same checks the machine's
+    /// `submit_recovery_entry` runs), then no restore in flight.
+    public func recoveryEntryAnswer(phrase: String, account: String, submitting: Bool) -> Possibility {
+        recoveryEntryPossibility(phrase: phrase, account: account)
+            .and(writeAfterReadPossibility(read: .resolved, idle: !submitting))
+    }
+
+    /// `sessions-lockout-button` on the signed-out door: the secret, the
+    /// account, then the confirm word (`emergency_lockout_possibility` — the
+    /// same checks the machine's `submit_emergency_lockout` runs), then no
+    /// lock in flight.
+    public func emergencyLockoutAnswer(
+        secret: String, account: String, confirm: String, submitting: Bool
+    ) -> Possibility {
+        emergencyLockoutPossibility(secret: secret, account: account, confirmWord: confirm)
+            .and(writeAfterReadPossibility(read: .resolved, idle: !submitting))
+    }
+
+    /// `claim-code-submit-button`'s action: re-asks ``claimCodePossibility(_:)``
+    /// and refuses with its reason on `error-message`, else submits the claim.
+    public func submitClaimCode(_ code: String) {
+        draftRefusal = nil
+        if let refusal = machine.claimCodeSubmitPossibility(code: code).refusal {
+            draftRefusal = refusal
+            _observerTick &+= 1
+            return
+        }
+        let machine = self.machine
+        Task { _ = await machine.wizardSubmitClaimCode(code: code) }
     }
 
     // ── Identity-recovery steps (onboarding.md § 1 Identity) — `recovery_kit`
@@ -623,17 +722,6 @@ public final class OnboardingVM {
         FaunaAccounts.launchPersistence(keychain: keychain).deletePendingInvite()
     }
 
-    /// Whether the invite-request Continue button should be enabled: an
-    /// out-of-band code that's already `.valid` always enables it (the code
-    /// itself is the gate), otherwise it falls back to the snapshot's own
-    /// `continueEnabled` (macOS + iOS, priority #2 — was duplicated
-    /// verbatim in both views before this lift).
-    public func inviteContinueEnabled() -> Bool {
-        let snap = machine.inviteRequestSnapshot()
-        if case .valid = snap.outOfBandCodeState { return true }
-        return snap.continueEnabled
-    }
-
     // ── `invite_request` view-action wrappers (macOS/iOS, priority #2 — were
     //    duplicated verbatim across `MacInviteRequestView`/`InviteRequestView`
     //    before this lift). Referenced by both a Button and its
@@ -734,7 +822,16 @@ public final class OnboardingVM {
     }
 
     /// `code` is the view's own `invite-code-input` text-field buffer.
+    /// Re-asks ``inviteCodePossibility(_:)`` first and refuses with its reason
+    /// on `error-message` (rule 4's form case).
     public func checkOobCode(_ code: String) {
+        draftRefusal = nil
+        if let refusal = inviteCodePossibility(code).refusal {
+            draftRefusal = refusal
+            _observerTick &+= 1
+            return
+        }
+        let machine = self.machine
         Task { await machine.verifyOobInviteCode(code: code) }
     }
 
@@ -759,6 +856,33 @@ public final class OnboardingVM {
     /// then pop the wizard one stage. Referenced by both the `Button` and its
     /// `automationActivate` so they never diverge (apple-e2e-automation.md §
     /// Resolved design point).
+    /// "Add account" → a fresh wizard in append mode: reset the machine, then
+    /// show as already connected every provider whose credential the signed-in
+    /// account holds in its DNS record (`onboarding-provisioning.md` § 3d *Held
+    /// credentials*). The record is read through the live account runtime (the
+    /// shared `retireHeldInputs` read, bounded in Rust) and the credentials are
+    /// passed INTO the machine, which re-runs each provider's checks before it
+    /// shows the row connected. Best-effort: a failed read leaves every row
+    /// unconnected, the state a first-nest run starts in anyway. tui's
+    /// `App::seed_held_provider_credentials` twin.
+    public func beginAddAccount() {
+        machine.reset()
+        let machine = self.machine
+        Task {
+            let held = await retireHeldInputs(waitForRuntime: true)
+            let creds: [HeldProviderCredential] = zip(
+                held.heldDnsProviderIds, held.heldDnsCredsJson
+            ).compactMap { pid, json in
+                guard let data = json.data(using: .utf8),
+                      let fields = try? JSONDecoder().decode([String: String].self, from: data)
+                else { return nil }
+                return HeldProviderCredential(providerId: pid, fields: fields)
+            }
+            guard !creds.isEmpty else { return }
+            await machine.seedHeldProviderCredentials(held: creds)
+        }
+    }
+
     public func provisioningBack() {
         machine.clearError()
         machine.back()
@@ -1060,11 +1184,13 @@ public final class OnboardingVM {
         if !append {
             do {
                 _ = try registry.persistLoggedIn(
-                    // The reach hint (onboarding.md § Reach hint) is read off
-                    // the machine at this terminal once apple's leg lands;
-                    // nil keeps today's behaviour — the account waits for DNS.
+                    // The reach hint (onboarding-provisioning.md § Reach
+                    // hint), read off the machine at this terminal as on every
+                    // app: the box this wizard provisioned, at the address its
+                    // claim used, so the launch reaches it before DNS does.
+                    // nil on every path that provisioned nothing.
                     secretHex: secretHex, nestUrl: nodeUrl, deviceId: deviceId,
-                    reachIpv4: nil)
+                    reachIpv4: machine.provisionReachIpv4())
             } catch {
                 logMessage(level: .error, target: "fauna.onboarding", message: "[OnboardingVM] persist_logged_in failed: \(error)")
             }

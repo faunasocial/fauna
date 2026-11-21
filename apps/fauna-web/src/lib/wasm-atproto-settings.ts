@@ -138,8 +138,14 @@ export function getAtprotoSettingsMachine(
   secretHex: string,
 ): Promise<AtprotoSettingsMachine> {
   if (machinePromise) return machinePromise;
-  machinePromise = createAtprotoSettingsMachine(observer, port, secretHex);
-  return machinePromise;
+  // A failed build is not cached: a later mount retries it, and the page
+  // paints `page_unavailable` meanwhile.
+  const built = createAtprotoSettingsMachine(observer, port, secretHex);
+  machinePromise = built;
+  built.catch(() => {
+    if (machinePromise === built) machinePromise = null;
+  });
+  return built;
 }
 
 /**

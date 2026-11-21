@@ -178,7 +178,11 @@ def _assert_still_predecessor_signed(nest_instance, account: dict, when: str) ->
 
 def _apps() -> list[str]:
     available = get_available_apps()
-    return [a for a in ("tui", "linux", "web", "windows", "macos", "ios") if a in available]
+    return [
+        a
+        for a in ("tui", "linux", "web", "windows", "macos", "ios", "android")
+        if a in available
+    ]
 
 
 @pytest.fixture(params=_apps())
@@ -268,7 +272,12 @@ def _credential_file(driver) -> str:
 def _registry_index(driver) -> dict:
     """The persisted ``AccountIndex`` the registry writes verbatim
     (``fauna/index``) — the file backend's on tui and linux, the origin's
-    ``localStorage`` on web. ``{}`` while it is unreadable."""
+    ``localStorage`` on web, the on-device credential file on android (read
+    over the bridge's ``GET /credentials``: no host path reaches the app's
+    filesDir). ``{}`` while it is unreadable."""
+    if driver.is_android():
+        raw = driver.credential_map().get("fauna/index")
+        return json.loads(raw) if raw else {}
     if driver.is_web():
         try:
             raw = driver.eval_js("localStorage.getItem('fauna/index')")

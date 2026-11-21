@@ -1325,10 +1325,11 @@ def test_ensure_build_runs_once_and_memoizes(monkeypatch, prebuild_memo_isolated
     mod = prebuild_memo_isolated
     calls = []
 
-    def record(cmd, *a, **k):
-        calls.append(list(cmd))
+    def record(recipe, what):
+        calls.append(recipe.split())
 
-    monkeypatch.setattr(mod.subprocess, "run", record)
+    # Every `just` prebuild runs through the one retrying runner.
+    monkeypatch.setattr(mod, "_build_via_just", record)
     path_one = mod._ensure_seal_helper_built()
     path_two = mod._ensure_seal_helper_built()
     assert path_one == path_two
@@ -1347,13 +1348,14 @@ def test_ensure_build_failure_replays_without_requeueing(
     mod = prebuild_memo_isolated
     calls = []
 
-    def run(cmd, *a, **k):
-        calls.append(list(cmd))
-        if any("seal-helper-build" in part for part in cmd):
-            raise subprocess.CalledProcessError(2, cmd)
+    def run(recipe, what):
+        calls.append(recipe.split())
+        if "seal-helper-build" in recipe:
+            raise RuntimeError(f"{what} failed on BOTH the original attempt and the retry")
 
-    monkeypatch.setattr(mod.subprocess, "run", run)
-    with pytest.raises(subprocess.CalledProcessError):
+    # The runner retries inside the build; the memo replays its final failure.
+    monkeypatch.setattr(mod, "_build_via_just", run)
+    with pytest.raises(RuntimeError, match="BOTH the original attempt"):
         mod._ensure_seal_helper_built()
     with pytest.raises(RuntimeError, match="already failed"):
         mod._ensure_seal_helper_built()
@@ -1756,6 +1758,59 @@ def test_prebuild_hoists_only_the_seat_of_the_phone_the_run_names(
         assert sorted(built) == sorted([f"app:{phone}", f"app:{seat}"])
 
 
+def test_prebuild_hoists_the_desktop_sharer_of_a_phone_ceremony_seat(
+    monkeypatch, prebuild_memo_isolated
+):
+    """`ceremony_seats` (`test_offline_share_two_seat.py`) pairs an iOS recipient
+    with a macOS sharer and an android one with tui. An `--app ios` run never
+    names macOS, so before the hoist the sharer's `just mac-debug` ran inside
+    the test's setup — and under the background tester's warm-only run every
+    `e2e:ios` verify action naming the file ended `notwarm`, five turns of
+    about forty minutes each on 2026-11-16, and answered nothing."""
+    mod = prebuild_memo_isolated
+    built = []
+    monkeypatch.setattr(
+        mod, "_ensure_app_built", lambda name: built.append(f"app:{name}")
+    )
+    monkeypatch.setattr(mod, "get_available_apps", lambda: ["android", "ios"])
+    monkeypatch.setattr(mod, "sweep_apps", lambda: ["ios", "macos", "tui", "android"])
+    for phone, seat in (("ios", "macos"), ("android", "tui")):
+        built.clear()
+        mod._prebuild_binaries(
+            _fake_session(
+                _FakeItem(
+                    fixturenames=("ceremony_seats", "offline_share_app"),
+                    params={"offline_share_app": phone},
+                )
+            )
+        )
+        assert sorted(built) == sorted([f"app:{phone}", f"app:{seat}"])
+
+
+def test_a_module_pinning_a_macos_seat_agent_hoists_the_agent_build(tmp_path):
+    """A macos seat whose agent is pinned by `pin_macos_seat_sync_agent` (or a
+    test reaching `macos_sync_agent_binary` itself) reaches the agent build at
+    launch through `getfixturevalue`, which no closure shows — the same reach
+    the `real_sync_agent` marker has, so the module scan hoists it too."""
+    import conftest as mod
+
+    pinned = tmp_path / "test_pins_row_5719.py"
+    pinned.write_text("from helpers.sync_seats import pin_macos_seat_sync_agent\n")
+    plain = tmp_path / "test_plain_row_5719.py"
+    plain.write_text("def test_x():\n    pass\n")
+
+    def _item(path):
+        item = _FakeItem()
+        item.path = path
+        return item
+
+    assert mod._macos_spawns_a_real_sync_agent([_item(pinned)])
+    assert not mod._macos_spawns_a_real_sync_agent([_item(plain)])
+    assert mod._macos_spawns_a_real_sync_agent(
+        [_FakeItem(markers=("real_sync_agent",))]
+    )
+
+
 def _fixture_sources(mod) -> list[str]:
     """Source of every module a hoisted fixture may live in: conftest.py and the
     test modules (the hoist keys on the fixture NAME in an item's closure, which
@@ -1841,6 +1896,28 @@ def test_every_cross_app_hoist_names_an_app_its_fixture_literally_launches():
             launcher_param[node.name] = params.index(arg.id)
             if params[:1] == ["self"]:
                 method_param[node.name] = params.index(arg.id) - 1
+    # A launcher of a launcher is one too: a seat builder handing its own
+    # parameter on to a launcher (`_folder_share_owner_seat(app_name, …)` →
+    # `_launch_fresh_share_driver(app_name, …)`), so a fixture naming the app
+    # to the seat builder (`cross_nest_folder_seats`' tui owner beside an iOS
+    # member) is judged by that literal. Followed to a fixed point.
+    changed = True
+    while changed:
+        changed = False
+        for node in functions:
+            if node.name in launcher_param:
+                continue
+            params = [a.arg for a in node.args.args]
+            for call in ast.walk(node):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                        and call.func.id in launcher_param):
+                    continue
+                pos = launcher_param[call.func.id]
+                if len(call.args) > pos and isinstance(call.args[pos], ast.Name) \
+                        and call.args[pos].id in params:
+                    launcher_param[node.name] = params.index(call.args[pos].id)
+                    changed = True
+                    break
 
     # A fixture may name SEVERAL literals (`alice_builder_seats`: macos for an
     # iOS phone, tui for an android one); `None` stands for a non-literal arg.

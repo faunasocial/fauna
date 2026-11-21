@@ -15,7 +15,7 @@ use super::{
     ContactInfo, DomainAvailability, Registrar, RegistrarAvailability, RegistrationResult,
 };
 use crate::error::ProvisionError;
-use crate::namecheap_api::{NamecheapApi, attr, elements};
+use crate::namecheap_api::{NamecheapApi, attr, elements, split_domain};
 use crate::proxy::BuildEnv;
 
 /// The four WHOIS contact roles Namecheap requires on `domains.create`. Every
@@ -209,49 +209,10 @@ fn tld_of(domain: &str) -> Result<&str, ProvisionError> {
 
 /// Namecheap requires WHOIS phone numbers as `+CC.NNNNNNNNNN` and rejects
 /// anything else with an opaque parameter error, so a free-text number from the
-/// wizard's contact form is normalised here rather than sent as typed.
-///
-/// A number that is already in the required shape passes through. Otherwise the
-/// country code is taken from the digits between the leading `+` and the first
-/// separator, and the remainder becomes the subscriber number. When the split
-/// can't be determined — no `+`, or no separator to split on, so the country
-/// code would have to be guessed — this returns an error telling the user the
-/// exact expected format. Guessing is the worse failure: a wrong country code
-/// registers a domain against an unreachable contact.
+/// wizard's contact form is normalised by the shared EPP rule
+/// ([`super::normalize_epp_phone`], which Spaceship's contacts use too).
 fn normalize_phone(raw: &str) -> Result<String, ProvisionError> {
-    let bad_format = || {
-        ProvisionError::Other(format!(
-            "Namecheap needs the phone number as +CountryCode.Number (for example \
-             +1.5551234567). Enter it with the country code separated from the rest, \
-             e.g. \"+1 555 123 4567\". Got: {raw:?}"
-        ))
-    };
-
-    let trimmed = raw.trim();
-    let rest = trimmed.strip_prefix('+').ok_or_else(bad_format)?;
-
-    // Already `+CC.NNNN`? Accept as-is once both halves are digits.
-    if let Some((cc, number)) = rest.split_once('.')
-        && !cc.is_empty()
-        && cc.len() <= 3
-        && cc.chars().all(|c| c.is_ascii_digit())
-        && number.len() >= 4
-        && number.chars().all(|c| c.is_ascii_digit())
-    {
-        return Ok(format!("+{cc}.{number}"));
-    }
-
-    // Otherwise split at the first non-digit: those leading digits are the
-    // country code, everything else contributes its digits to the number.
-    let split = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .ok_or_else(bad_format)?;
-    let (cc, tail) = rest.split_at(split);
-    let number: String = tail.chars().filter(char::is_ascii_digit).collect();
-    if cc.is_empty() || cc.len() > 3 || number.len() < 4 {
-        return Err(bad_format());
-    }
-    Ok(format!("+{cc}.{number}"))
+    super::normalize_epp_phone("Namecheap", raw)
 }
 
 /// The nine `domains.create` parameters for one WHOIS contact role.
@@ -277,6 +238,45 @@ impl Registrar for NamecheapRegistrar {
         self.api
             .call(client, "namecheap.users.getBalances", &[])
             .await?;
+        Ok(())
+    }
+
+    /// `namecheap.domains.dns.setCustom` (`SLD`, `TLD`, comma-separated
+    /// `Nameservers`) — registry.md § Delegation doors. The transport turns a
+    /// `Status="ERROR"` envelope into an error; an OK envelope whose
+    /// `<DomainDNSSetCustomResult>` reports the update as `false` is one too.
+    async fn set_nameservers(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), ProvisionError> {
+        let (sld, tld) = split_domain(domain)?;
+        let xml = self
+            .api
+            .call(
+                client,
+                "namecheap.domains.dns.setCustom",
+                &[
+                    ("SLD".to_string(), sld),
+                    ("TLD".to_string(), tld),
+                    ("Nameservers".to_string(), nameservers.join(",")),
+                ],
+            )
+            .await?;
+        let refused = elements(&xml, "DomainDNSSetCustomResult")
+            .into_iter()
+            .any(|el| {
+                // The published example spells the attribute `Update`; read
+                // `Updated` too until a live witness settles which it is.
+                attr(el, "Update").as_deref() == Some("false")
+                    || attr(el, "Updated").as_deref() == Some("false")
+            });
+        if refused {
+            return Err(ProvisionError::Other(format!(
+                "Namecheap did not update the nameservers of {domain}"
+            )));
+        }
         Ok(())
     }
 

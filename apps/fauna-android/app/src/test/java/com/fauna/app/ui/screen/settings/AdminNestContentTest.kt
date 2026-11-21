@@ -6,15 +6,19 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import uniffi.fauna_core.Possibility
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.R
+import org.robolectric.RuntimeEnvironment
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.viewmodel.AdminNestVM
 import com.fauna.ffi.FfiAdminRegionView
+import com.fauna.ffi.FfiAdminWebAppOriginView
+import com.fauna.ffi.FfiWebAppOrigin
 import com.fauna.ffi.FfiIssuerForcedArm
 import com.fauna.ffi.FfiIssuerForcedConfirmView
 import com.fauna.ffi.FfiIssuerKeyRow
@@ -60,8 +64,13 @@ class AdminNestContentTest {
         natMessage: LocalizedText? = null,
         natSubmitEnabled: Boolean = true,
         natSubmitting: Boolean = false,
+        natSelectAnswer: Possibility = Possibility.Possible,
+        natSaveAnswer: Possibility = Possibility.Possible,
+        nestWriteAnswer: Possibility = Possibility.Possible,
         regionView: FfiAdminRegionView? = null,
         regionWorking: Boolean = false,
+        webAppOriginView: FfiAdminWebAppOriginView? = null,
+        webAppOriginDraft: FfiWebAppOrigin? = null,
         seedRotateConfirm: AdminNestVM.SeedRotateConfirmState? = null,
         seedRotateStatus: String? = null,
         takedownArmed: AdminNestVM.TakedownArmed? = null,
@@ -92,13 +101,13 @@ class AdminNestContentTest {
             },
         onSetPairing: (Boolean) -> Unit = {},
         onSaveServingPort: (Int) -> Unit = {},
-        onInvalidServingPort: () -> Unit = {},
+        onInvalidServingPort: (String) -> Unit = {},
         onRestartNow: () -> Unit = {},
         onSelectNatMode: (NodeMode) -> Unit = {},
         onSaveNatMode: () -> Unit = {},
         onSaveRegion: (String) -> Unit = {},
         onWithdrawRegion: () -> Unit = {},
-        onInvalidRegion: () -> Unit = {},
+        onInvalidRegion: (String) -> Unit = {},
         onArmSeedRotate: () -> Unit = {},
         onCancelSeedRotate: () -> Unit = {},
         onConfirmSeedRotate: () -> Unit = {},
@@ -164,8 +173,13 @@ class AdminNestContentTest {
                 natMessage = natMessage,
                 natSubmitEnabled = natSubmitEnabled,
                 natSubmitting = natSubmitting,
+                natSelectAnswer = natSelectAnswer,
+                natSaveAnswer = natSaveAnswer,
+                nestWriteAnswer = nestWriteAnswer,
                 regionView = regionView,
                 regionWorking = regionWorking,
+                webAppOriginView = webAppOriginView,
+                webAppOriginDraft = webAppOriginDraft,
                 seedRotateConfirm = seedRotateConfirm,
                 seedRotateStatus = seedRotateStatus,
                 takedownArmed = takedownArmed,
@@ -207,6 +221,15 @@ class AdminNestContentTest {
                         code.length in 2..8 && code.all { c -> c in 'A'..'Z' || c in '0'..'9' }
                     }
                 },
+                // FFI-free stand-ins for the shared draft answers.
+                servingPortDraft = AdminDraftFakes.port,
+                regionDraft = { code ->
+                    if (code.trim().length in 2..8 && code.trim().all { c -> c in 'A'..'Z' || c in '0'..'9' }) {
+                        uniffi.fauna_core.Possibility.Possible
+                    } else {
+                        AdminDraftFakes.blocked("admin.nest_page.region_invalid")
+                    }
+                },
                 takedownFormView = takedownFormView,
                 issuerKeyRowLabel = issuerKeyRowLabel,
                 issuerKeyRotateCost = issuerKeyRotateCost,
@@ -220,6 +243,7 @@ class AdminNestContentTest {
                 onUnblock = onUnblock,
                 onCancelBlock = onCancelBlock,
                 onConfirmBlock = onConfirmBlock,
+                setAnswers = AdminDraftFakes.nestSet,
             )
         }
     }
@@ -241,6 +265,78 @@ class AdminNestContentTest {
         staleness = staleness,
         canWithdraw = canWithdraw,
     )
+
+    /** The view `fauna_client_admin::admin_web_app_origin_view` folds for each
+     *  state (`web-content-hosting.md` § While the central origin is not live,
+     *  the choice is not offered, rule 5) — hand-built so the test stays off
+     *  the native FFI; the fold itself is pinned in shared Rust. */
+    private fun originView(
+        selected: FfiWebAppOrigin?,
+        section: Possibility,
+        central: Possibility,
+    ) = FfiAdminWebAppOriginView(
+        selected = selected,
+        status = LocalizedText("admin.nest_page.web_app_origin_status_bundled", emptyMap()),
+        scope = LocalizedText("admin.nest_page.web_app_origin_scope", mapOf("origin" to "https://app.fauna.social")),
+        canSet = true,
+        centralLabel = LocalizedText("admin.nest_page.web_app_origin_central", mapOf("origin" to "https://app.fauna.social")),
+        sectionPossibility = section,
+        centralPossibility = central,
+    )
+
+    private val originIds = listOf(
+        "admin-nest-web-app-origin-section",
+        "admin-nest-web-app-origin-bundled-radio",
+        "admin-nest-web-app-origin-central-radio",
+        "admin-nest-web-app-origin-save-button",
+        "admin-nest-web-app-origin-status",
+    )
+
+    /** Before the read lands no element of the section is composed. */
+    @Test
+    fun webAppOriginUnloadedComposesNoSection() {
+        render(webAppOriginView = null)
+        originIds.forEach { composeTestRule.onNodeWithTag(it).assertDoesNotExist() }
+    }
+
+    /** Today's builds: bundled stored and the central origin not live — no
+     *  element of the section is composed. */
+    @Test
+    fun webAppOriginBundledWhileCentralIsNotLiveComposesNoSection() {
+        render(
+            webAppOriginView = originView(FfiWebAppOrigin.BUNDLED, Possibility.Absent, Possibility.Absent),
+            webAppOriginDraft = FfiWebAppOrigin.BUNDLED,
+        )
+        originIds.forEach { composeTestRule.onNodeWithTag(it).assertDoesNotExist() }
+    }
+
+    /** A stored central while not live: status, bundled radio and save as the
+     *  way back; no central radio, no radio marked; picking bundled arms the
+     *  save. */
+    @Test
+    fun webAppOriginStoredCentralWhileNotLiveOffersOnlyTheWayBack() {
+        render(
+            webAppOriginView = originView(null, Possibility.Possible, Possibility.Absent),
+            webAppOriginDraft = FfiWebAppOrigin.BUNDLED,
+        )
+        composeTestRule.onNodeWithTag("admin-nest-web-app-origin-section").assertExists()
+        composeTestRule.onNodeWithTag("admin-nest-web-app-origin-status", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("admin-nest-web-app-origin-bundled-radio").assertIsEnabled()
+        composeTestRule.onNodeWithTag("admin-nest-web-app-origin-central-radio").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("admin-nest-web-app-origin-save-button")
+            .performScrollTo().assertIsEnabled()
+    }
+
+    /** A nest whose central origin is live composes the whole section. */
+    @Test
+    fun webAppOriginLiveCentralOriginComposesTheWholeSection() {
+        render(
+            webAppOriginView = originView(FfiWebAppOrigin.BUNDLED, Possibility.Possible, Possibility.Possible),
+            webAppOriginDraft = FfiWebAppOrigin.BUNDLED,
+        )
+        originIds.forEach { composeTestRule.onNodeWithTag(it, useUnmergedTree = true).assertExists() }
+        composeTestRule.onNodeWithTag("admin-nest-web-app-origin-central-radio").assertIsEnabled()
+    }
 
     @Test
     fun rendersHeadingControlsAndNavBack() {
@@ -372,9 +468,17 @@ class AdminNestContentTest {
         render(onSaveServingPort = { saved = it }, onInvalidServingPort = { invalid = true })
         composeTestRule.onNodeWithTag("admin-nest-serving-port-input")
             .performScrollTo().performTextReplacement("70000") // > 65535 → invalid u16
-        composeTestRule.onNodeWithTag("admin-nest-serving-port-save-button").performClick()
-        assertEquals(true, invalid)
+        // Painted from the shared draft answer: disabled with its reason, and
+        // a press sends nothing (admin.md § Errors & edge cases, the form bullet).
+        composeTestRule.onNodeWithTag("admin-nest-serving-port-save-button")
+            .assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(
+            RuntimeEnvironment.getApplication().getString(R.string.admin_nest_page_serving_port_invalid),
+        ).assertExists()
+        assertEquals(false, invalid)
         assertEquals(null, saved)
+        // The input stays editable.
+        composeTestRule.onNodeWithTag("admin-nest-serving-port-input").assertIsEnabled()
     }
 
     @Test
@@ -449,8 +553,11 @@ class AdminNestContentTest {
         composeTestRule.onNodeWithTag("admin-nest-region-input")
             .performScrollTo().performTextReplacement("no") // lower-case → rejected, no case-fold
         composeTestRule.onNodeWithTag("admin-nest-region-save-button")
-            .performScrollTo().performClick()
-        assertEquals(true, invalid)
+            .performScrollTo().assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(
+            RuntimeEnvironment.getApplication().getString(R.string.admin_nest_page_region_invalid),
+        ).assertExists()
+        assertEquals(false, invalid)
         assertEquals(null, saved)
     }
 
@@ -1348,5 +1455,77 @@ class AdminNestContentTest {
         render(blocked = AdminNestVM.BlockedState(rows = emptyList(), loaded = true))
         composeTestRule.onAllNodesWithTag("admin-nest-report-block-confirm-button").assertCountEquals(0)
         composeTestRule.onAllNodesWithTag("admin-nest-report-block-confirm-summary").assertCountEquals(0)
+    }
+
+    // ── Controls wait for their read (admin.md § Errors & edge cases) ──
+
+    @Test
+    fun pairingAndServingPortWaitForTheReflectiveRead() {
+        var set: Boolean? = null
+        var saved: Int? = null
+        render(
+            pairing = false,
+            nestWriteAnswer = ReadGateFakes.stillLoading,
+            onSetPairing = { set = it },
+            onSaveServingPort = { saved = it },
+        )
+        composeTestRule.onNodeWithTag("admin-service-pairing-toggle")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+            .performClick()
+        composeTestRule.onNodeWithTag("admin-nest-serving-port-input")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+        composeTestRule.onNodeWithTag("admin-nest-serving-port-save-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+            .performClick()
+        // Never flipped from the guessed `false`, never saved over an unread port.
+        assertEquals(null, set)
+        assertEquals(null, saved)
+    }
+
+    @Test
+    fun pairingSaysStillSavingWhileItsWriteIsOnItsWay() {
+        render(nestWriteAnswer = ReadGateFakes.inFlight)
+        composeTestRule.onNodeWithTag("admin-service-pairing-toggle")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.inFlightText)
+    }
+
+    @Test
+    fun natControlsStayBlockedAfterAFailedRead() {
+        var selected: NodeMode? = null
+        var saved = false
+        render(
+            natSelectAnswer = ReadGateFakes.loadFailed,
+            natSaveAnswer = ReadGateFakes.loadFailed,
+            onSelectNatMode = { selected = it },
+            onSaveNatMode = { saved = true },
+        )
+        composeTestRule.onNodeWithTag("admin-nest-nat-mode-private-radio")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.loadFailedText)
+            .performClick()
+        // Never saves the pre-selected `public` over a mode the page never read.
+        composeTestRule.onNodeWithTag("admin-nest-nat-mode-save-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.loadFailedText)
+            .performClick()
+        assertEquals(null, selected)
+        assertEquals(false, saved)
+    }
+
+    @Test
+    fun readNestControlsAreLiveAndPublishNoReason() {
+        render()
+        composeTestRule.onNodeWithTag("admin-service-pairing-toggle").performScrollTo().assertIsEnabled().assertNoPaintedReason()
+        composeTestRule.onNodeWithTag("admin-nest-nat-mode-save-button").performScrollTo().assertIsEnabled().assertNoPaintedReason()
     }
 }

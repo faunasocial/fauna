@@ -287,6 +287,59 @@ pub fn emergency_lockout_locked_message_json(unlock_time: &str) -> String {
     serde_json::to_string(&line).unwrap_or_default()
 }
 
+// ── Signed-out forms' draft answers ─────────────────────────────────────
+//
+// `docs/goal/ui/README.md` § Offer only what is possible, rule 4's form case:
+// each submit is painted from its draft predicate and its handler asks the
+// same one, so the SPA keeps no emptiness or confirm-word gate of its own.
+// Every answer is `fauna_core::possibility::Possibility`'s serde JSON, the
+// shape `vpsContinuePossibilityJson` returns.
+
+/// `import-submit-button` — `fauna_onboarding_machine::identity_import_possibility`.
+#[wasm_bindgen(js_name = identityImportPossibilityJson)]
+pub fn identity_import_possibility_json(pasted: String) -> String {
+    serde_json::to_string(&fauna_onboarding_machine::identity_import_possibility(
+        pasted,
+    ))
+    .unwrap_or_default()
+}
+
+/// `recovery-entry-submit-button` — `fauna_onboarding_machine::recovery_entry_possibility`
+/// (the machine's `submit_recovery_entry` runs the same checks).
+#[wasm_bindgen(js_name = recoveryEntryPossibilityJson)]
+pub fn recovery_entry_possibility_json(phrase: String, account: String) -> String {
+    serde_json::to_string(&fauna_onboarding_machine::recovery_entry_possibility(
+        phrase, account,
+    ))
+    .unwrap_or_default()
+}
+
+/// `sessions-lockout-button` on the signed-out door —
+/// `fauna_onboarding_machine::emergency_lockout_possibility` (secret, then
+/// account, then the confirm word; `submit_emergency_lockout` runs the same).
+#[wasm_bindgen(js_name = emergencyLockoutPossibilityJson)]
+pub fn emergency_lockout_possibility_json(
+    secret: String,
+    account: String,
+    confirm_word: String,
+) -> String {
+    serde_json::to_string(&fauna_onboarding_machine::emergency_lockout_possibility(
+        secret,
+        account,
+        confirm_word,
+    ))
+    .unwrap_or_default()
+}
+
+/// `invite-code-check-button` — `fauna_onboarding_machine::invite_code_draft_possibility`.
+#[wasm_bindgen(js_name = inviteCodeDraftPossibilityJson)]
+pub fn invite_code_draft_possibility_json(code: String) -> String {
+    serde_json::to_string(&fauna_onboarding_machine::invite_code_draft_possibility(
+        code,
+    ))
+    .unwrap_or_default()
+}
+
 // ── Onboarding machine ──────────────────────────────────────────────────
 
 use fauna_onboarding_machine::{
@@ -491,6 +544,15 @@ impl OnboardingMachine {
         Ok(())
     }
 
+    /// `nest_provisioning`'s DNS plan (`provisioning-dns-plan`,
+    /// `onboarding-provisioning.md` § 6 *The DNS plan*) as JSON — a
+    /// `DnsPlanSnapshot`, its rows' sentences already resolved keys. The
+    /// machine fills it itself on entering the page; the app only renders.
+    #[wasm_bindgen(js_name = dnsPlanJson)]
+    pub fn dns_plan_json(&self) -> String {
+        serde_json::to_string(&self.0.dns_plan()).unwrap_or_default()
+    }
+
     #[wasm_bindgen(js_name = vpsConfigJson)]
     pub fn vps_config_json(&self) -> String {
         serde_json::to_string(&self.0.vps_config()).unwrap_or_default()
@@ -501,9 +563,12 @@ impl OnboardingMachine {
         serde_json::to_string(&self.0.visible_dns_fields()).unwrap_or_default()
     }
 
-    #[wasm_bindgen(js_name = canVerifyDns)]
-    pub fn can_verify_dns(&self) -> bool {
-        self.0.can_verify_dns()
+    /// `dns-verify-button`'s answer in the shared possibility type, the same
+    /// serde JSON as `vpsContinuePossibilityJson`. See
+    /// `fauna_onboarding_machine::OnboardingMachine::verify_dns_possibility`.
+    #[wasm_bindgen(js_name = verifyDnsPossibilityJson)]
+    pub fn verify_dns_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.verify_dns_possibility()).unwrap_or_default()
     }
 
     #[wasm_bindgen(js_name = canContinueDns)]
@@ -554,9 +619,11 @@ impl OnboardingMachine {
         self.0.should_show_no_provider_message()
     }
 
-    #[wasm_bindgen(js_name = canVerifyVps)]
-    pub fn can_verify_vps(&self) -> bool {
-        self.0.can_verify_vps()
+    /// `vps-verify-button`'s answer in the shared possibility type. See
+    /// `fauna_onboarding_machine::OnboardingMachine::verify_vps_possibility`.
+    #[wasm_bindgen(js_name = verifyVpsPossibilityJson)]
+    pub fn verify_vps_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.verify_vps_possibility()).unwrap_or_default()
     }
 
     #[wasm_bindgen(js_name = canContinueVps)]
@@ -614,6 +681,121 @@ impl OnboardingMachine {
             .provisioning_continue_blocked_reason()
             .and_then(|t| serde_json::to_string(&t).ok())
             .unwrap_or_default()
+    }
+
+    /// `vps-config-continue-button`'s answer in the shared possibility type
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6), as
+    /// `fauna_core::possibility::Possibility`'s serde JSON (`{"state":
+    /// "possible"}` / `{"state": "blocked", "reason": …}`). The SPA paints the
+    /// button and its reason line from this one value. See
+    /// `fauna_onboarding_machine::OnboardingMachine::vps_continue_possibility`.
+    #[wasm_bindgen(js_name = vpsContinuePossibilityJson)]
+    pub fn vps_continue_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.vps_continue_possibility()).unwrap_or_default()
+    }
+
+    /// `provisioning-continue-button`'s answer in the shared possibility type,
+    /// the same serde JSON as `vpsContinuePossibilityJson`. See
+    /// `fauna_onboarding_machine::OnboardingMachine::provisioning_continue_possibility`.
+    #[wasm_bindgen(js_name = provisioningContinuePossibilityJson)]
+    pub fn provisioning_continue_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.provisioning_continue_possibility()).unwrap_or_default()
+    }
+
+    /// `provider-choice-continue-button`'s answer, the same serde JSON as
+    /// `vpsContinuePossibilityJson`. See
+    /// `fauna_onboarding_machine::OnboardingMachine::providers_continue_possibility`.
+    #[wasm_bindgen(js_name = providersContinuePossibilityJson)]
+    pub fn providers_continue_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.providers_continue_possibility()).unwrap_or_default()
+    }
+
+    /// `provisioning-start-button`'s answer, the choose-providers routing
+    /// guard folded in. See
+    /// `fauna_onboarding_machine::OnboardingMachine::provisioning_start_possibility`.
+    #[wasm_bindgen(js_name = provisioningStartPossibilityJson)]
+    pub fn provisioning_start_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.provisioning_start_possibility()).unwrap_or_default()
+    }
+
+    /// `dns-config-continue-button`'s answer, blocked by the status line. See
+    /// `fauna_onboarding_machine::OnboardingMachine::dns_continue_possibility`.
+    #[wasm_bindgen(js_name = dnsContinuePossibilityJson)]
+    pub fn dns_continue_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.dns_continue_possibility()).unwrap_or_default()
+    }
+
+    /// `handle-entry-continue-button`'s answer. See
+    /// `fauna_onboarding_machine::OnboardingMachine::handle_continue_possibility`.
+    #[wasm_bindgen(js_name = handleContinuePossibilityJson)]
+    pub fn handle_continue_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.handle_continue_possibility()).unwrap_or_default()
+    }
+
+    /// `invite-request-continue-button`'s answer. See
+    /// `fauna_onboarding_machine::OnboardingMachine::invite_continue_possibility`.
+    #[wasm_bindgen(js_name = inviteContinuePossibilityJson)]
+    pub fn invite_continue_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.invite_continue_possibility()).unwrap_or_default()
+    }
+
+    /// `invite-request-submit-button`'s answer. See
+    /// `fauna_onboarding_machine::OnboardingMachine::invite_submit_possibility`.
+    #[wasm_bindgen(js_name = inviteSubmitPossibilityJson)]
+    pub fn invite_submit_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.invite_submit_possibility()).unwrap_or_default()
+    }
+
+    /// `nat-mode-confirm-button`'s answer. See
+    /// `fauna_onboarding_machine::OnboardingMachine::nat_mode_submit_possibility`.
+    #[wasm_bindgen(js_name = natModeSubmitPossibilityJson)]
+    pub fn nat_mode_submit_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.nat_mode_submit_possibility()).unwrap_or_default()
+    }
+
+    /// `awaiting-dns-recheck-button`'s answer. See
+    /// `fauna_onboarding_machine::OnboardingMachine::awaiting_dns_recheck_possibility`.
+    #[wasm_bindgen(js_name = awaitingDnsRecheckPossibilityJson)]
+    pub fn awaiting_dns_recheck_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.awaiting_dns_recheck_possibility()).unwrap_or_default()
+    }
+
+    /// `awaiting-dns-copy-button`'s answer. See
+    /// `fauna_onboarding_machine::OnboardingMachine::awaiting_dns_copy_possibility`.
+    #[wasm_bindgen(js_name = awaitingDnsCopyPossibilityJson)]
+    pub fn awaiting_dns_copy_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.awaiting_dns_copy_possibility()).unwrap_or_default()
+    }
+
+    /// `awaiting-dns-fallthrough-button`'s answer. See
+    /// `fauna_onboarding_machine::OnboardingMachine::awaiting_dns_fallthrough_possibility`.
+    #[wasm_bindgen(js_name = awaitingDnsFallthroughPossibilityJson)]
+    pub fn awaiting_dns_fallthrough_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.awaiting_dns_fallthrough_possibility()).unwrap_or_default()
+    }
+
+    /// The answer of both `nest_recovery` method buttons. See
+    /// `fauna_onboarding_machine::OnboardingMachine::recovery_method_possibility`.
+    #[wasm_bindgen(js_name = recoveryMethodPossibilityJson)]
+    pub fn recovery_method_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.recovery_method_possibility()).unwrap_or_default()
+    }
+
+    /// `claim-code-submit-button`'s answer over the typed `code`: a draft, and
+    /// no claim already on its way. Replaces the snapshot's `submit_enabled`
+    /// plus an app-side emptiness check. See
+    /// `fauna_onboarding_machine::OnboardingMachine::claim_code_submit_possibility`.
+    #[wasm_bindgen(js_name = claimCodeSubmitPossibilityJson)]
+    pub fn claim_code_submit_possibility_json(&self, code: String) -> String {
+        serde_json::to_string(&self.0.claim_code_submit_possibility(code)).unwrap_or_default()
+    }
+
+    /// `handle-check-button`'s answer over the typed `handle`: a handle
+    /// typed, and no check already running. See
+    /// `fauna_onboarding_machine::OnboardingMachine::handle_check_possibility`.
+    #[wasm_bindgen(js_name = handleCheckPossibilityJson)]
+    pub fn handle_check_possibility_json(&self, handle: String) -> String {
+        serde_json::to_string(&self.0.handle_check_possibility(handle)).unwrap_or_default()
     }
 
     #[wasm_bindgen(js_name = beginCreateIdentity)]
@@ -992,10 +1174,20 @@ impl OnboardingMachine {
         Ok(serde_json::to_string(&self.0.hosted_auth_state(form, field_id)).unwrap_or_default())
     }
 
-    #[wasm_bindgen(js_name = hostedAuthCanBegin)]
-    pub fn hosted_auth_can_begin(&self, form: String, field_id: String) -> Result<bool, JsValue> {
+    /// The field's `hosted-auth` sign-in button's answer in the shared
+    /// possibility type. See
+    /// `fauna_onboarding_machine::OnboardingMachine::hosted_auth_possibility`.
+    #[wasm_bindgen(js_name = hostedAuthPossibilityJson)]
+    pub fn hosted_auth_possibility_json(
+        &self,
+        form: String,
+        field_id: String,
+    ) -> Result<String, JsValue> {
         let form = parse_credential_form(&form)?;
-        Ok(self.0.hosted_auth_can_begin(form, field_id))
+        Ok(
+            serde_json::to_string(&self.0.hosted_auth_possibility(form, field_id))
+                .unwrap_or_default(),
+        )
     }
 
     #[wasm_bindgen(js_name = back)]
@@ -1059,11 +1251,6 @@ impl OnboardingMachine {
     #[wasm_bindgen(js_name = joiningNestRulesJson)]
     pub fn joining_nest_rules_json(&self, lang: String) -> String {
         serde_json::to_string(&self.0.joining_nest_rules(&lang)).unwrap_or_default()
-    }
-
-    #[wasm_bindgen(js_name = setControlCheckbox)]
-    pub fn set_control_checkbox(&self, checked: bool) {
-        self.0.set_control_checkbox(checked)
     }
 
     /// Per the target-state doc — this is the Continue button's wiring on
@@ -1376,6 +1563,14 @@ impl OnboardingMachine {
     #[wasm_bindgen(js_name = setRendersRecoveryKit)]
     pub fn set_renders_recovery_kit(&self, renders: bool) {
         self.0.set_renders_recovery_kit(renders)
+    }
+
+    /// App capability declaration: web renders the `provider_choice` page —
+    /// see `OnboardingMachine::set_renders_provider_choice`. Call once at
+    /// construction, beside `setRendersTrustPrompt`, when the page lands.
+    #[wasm_bindgen(js_name = setRendersProviderChoice)]
+    pub fn set_renders_provider_choice(&self, renders: bool) {
+        self.0.set_renders_provider_choice(renders)
     }
 
     /// The minted-but-unregistered kit root `recovery-kit-secret-display`
@@ -1932,6 +2127,7 @@ impl OnboardingMachine {
             "IdentityCreated" => OnboardingStep::IdentityCreated,
             "IdentityImport" => OnboardingStep::IdentityImport,
             "HandleEntry" => OnboardingStep::HandleEntry,
+            "ProviderChoice" => OnboardingStep::ProviderChoice,
             "DnsConfig" => OnboardingStep::DnsConfig,
             "VpsConfig" => OnboardingStep::VpsConfig,
             "NestProvisioning" => OnboardingStep::NestProvisioning,
@@ -2212,6 +2408,239 @@ pub fn awaiting_dns_poll_ms_wasm() -> f64 {
 // ceremony as the wizard page; dispatch-style (await an action, re-read
 // `snapshotJson`).
 
+// ── The choose-providers page (`onboarding-provisioning.md` § 3d) ──────────
+// The twins of the machine's UniFFI surface. Records come back as JSON (the
+// module's convention); an optional `LocalizedText` is an empty string for
+// `None`. `goal` is `"Domain"` | `"Dns"` | `"Vps"`; a cover is the serde form of
+// `GoalCover` (`"Manual"` or `{"Provider":{"provider_id":"…"}}`).
+#[wasm_bindgen]
+impl OnboardingMachine {
+    #[wasm_bindgen(js_name = visibleProviderFieldsJson)]
+    pub fn visible_provider_fields_json(&self, provider_id: String) -> String {
+        serde_json::to_string(&self.0.visible_provider_fields(provider_id)).unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = setProviderCred)]
+    pub fn set_provider_cred(&self, provider_id: String, field_id: String, value: String) {
+        self.0.set_provider_cred(provider_id, field_id, value)
+    }
+
+    /// `provider-connect-button`'s answer in the shared possibility type
+    /// (absent for an unknown provider). See
+    /// `fauna_onboarding_machine::OnboardingMachine::connect_provider_possibility`.
+    #[wasm_bindgen(js_name = connectProviderPossibilityJson)]
+    pub fn connect_provider_possibility_json(&self, provider_id: String) -> String {
+        serde_json::to_string(&self.0.connect_provider_possibility(provider_id)).unwrap_or_default()
+    }
+
+    /// *Connect*: every check the provider's capabilities allow, one credential.
+    #[wasm_bindgen(js_name = connectProvider)]
+    pub fn connect_provider(&self, provider_id: String) -> js_sys::Promise {
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            m.connect_provider(provider_id).await.map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = disconnectProvider)]
+    pub fn disconnect_provider(&self, provider_id: String) {
+        self.0.disconnect_provider(provider_id)
+    }
+
+    /// `held_json`: a JSON array of `{provider_id, fields}` — the credentials
+    /// signed-in accounts on this device hold; each is re-checked.
+    #[wasm_bindgen(js_name = seedHeldProviderCredentials)]
+    pub fn seed_held_provider_credentials(&self, held_json: String) -> js_sys::Promise {
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            let held: Vec<fauna_onboarding_machine::HeldProviderCredential> =
+                serde_json::from_str(&held_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+            m.seed_held_provider_credentials(held).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = selectGoalCover)]
+    pub fn select_goal_cover(&self, goal: String, cover_json: String) -> Result<(), JsValue> {
+        let goal: fauna_onboarding_machine::ProviderGoal =
+            serde_json::from_value(serde_json::Value::String(goal))
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let cover: fauna_onboarding_machine::GoalCover =
+            serde_json::from_str(&cover_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.0.select_goal_cover(goal, cover).map_err(err_to_js)
+    }
+
+    /// A pick's answer (`selectGoalCover` asks the same), as the shared
+    /// possibility type's serde JSON. See
+    /// `fauna_onboarding_machine::OnboardingMachine::goal_cover_possibility`.
+    #[wasm_bindgen(js_name = goalCoverPossibilityJson)]
+    pub fn goal_cover_possibility_json(
+        &self,
+        goal: String,
+        cover_json: String,
+    ) -> Result<String, JsValue> {
+        let goal: fauna_onboarding_machine::ProviderGoal =
+            serde_json::from_value(serde_json::Value::String(goal))
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let cover: fauna_onboarding_machine::GoalCover =
+            serde_json::from_str(&cover_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        serde_json::to_string(&self.0.goal_cover_possibility(goal, cover))
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = providerRowsJson)]
+    pub fn provider_rows_json(&self) -> String {
+        serde_json::to_string(&self.0.provider_rows()).unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = goalRowsJson)]
+    pub fn goal_rows_json(&self) -> String {
+        serde_json::to_string(&self.0.goal_rows()).unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = canContinueProviders)]
+    pub fn can_continue_providers(&self) -> bool {
+        self.0.can_continue_providers()
+    }
+
+    #[wasm_bindgen(js_name = providersContinueBlockedReasonJson)]
+    pub fn providers_continue_blocked_reason_json(&self) -> String {
+        self.0
+            .providers_continue_blocked_reason()
+            .and_then(|t| serde_json::to_string(&t).ok())
+            .unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = continueFromProviders)]
+    pub fn continue_from_providers(&self) -> Result<(), JsValue> {
+        self.0.continue_from_providers().map_err(err_to_js)
+    }
+
+    #[wasm_bindgen(js_name = canOfferBuyDomain)]
+    pub fn can_offer_buy_domain(&self) -> bool {
+        self.0.can_offer_buy_domain()
+    }
+
+    #[wasm_bindgen(js_name = providerGoalDomain)]
+    pub fn provider_goal_domain(&self) -> String {
+        self.0.provider_goal_domain()
+    }
+
+    #[wasm_bindgen(js_name = providerShowsContactForm)]
+    pub fn provider_shows_contact_form(&self, provider_id: String) -> bool {
+        self.0.provider_shows_contact_form(provider_id)
+    }
+
+    /// The registry's note key, or an empty string for `None`.
+    #[wasm_bindgen(js_name = providerRegistrarNotesKey)]
+    pub fn provider_registrar_notes_key(&self, provider_id: String) -> String {
+        self.0
+            .provider_registrar_notes_key(provider_id)
+            .unwrap_or_default()
+    }
+
+    /// The contact as JSON, or an empty string for `None`.
+    #[wasm_bindgen(js_name = providerContactJson)]
+    pub fn provider_contact_json(&self, provider_id: String) -> String {
+        self.0
+            .provider_contact(provider_id)
+            .and_then(|c| serde_json::to_string(&c).ok())
+            .unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = setProviderContact)]
+    pub fn set_provider_contact(
+        &self,
+        provider_id: String,
+        contact_json: String,
+    ) -> Result<(), JsValue> {
+        let contact: fauna_provisioning::registrar::ContactInfo =
+            serde_json::from_str(&contact_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.0.set_provider_contact(provider_id, contact);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = provisioningChoicesVisible)]
+    pub fn provisioning_choices_visible(&self) -> bool {
+        self.0.provisioning_choices_visible()
+    }
+
+    #[wasm_bindgen(js_name = provisioningPriceConfirmVisible)]
+    pub fn provisioning_price_confirm_visible(&self) -> bool {
+        self.0.provisioning_price_confirm_visible()
+    }
+
+    #[wasm_bindgen(js_name = provisioningStartBlockedReasonJson)]
+    pub fn provisioning_start_blocked_reason_json(&self) -> String {
+        self.0
+            .provisioning_start_blocked_reason()
+            .and_then(|t| serde_json::to_string(&t).ok())
+            .unwrap_or_default()
+    }
+
+    #[wasm_bindgen(js_name = provisioningBackToProviders)]
+    pub fn provisioning_back_to_providers(&self) -> bool {
+        self.0.provisioning_back_to_providers()
+    }
+
+    #[wasm_bindgen(js_name = providerHostedAuthBegin)]
+    pub fn provider_hosted_auth_begin(
+        &self,
+        provider_id: String,
+        field_id: String,
+    ) -> js_sys::Promise {
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            let prompt = m
+                .provider_hosted_auth_begin(provider_id, field_id)
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from_str(
+                &serde_json::to_string(&prompt).unwrap_or_default(),
+            ))
+        })
+    }
+
+    #[wasm_bindgen(js_name = providerHostedAuthWait)]
+    pub fn provider_hosted_auth_wait(
+        &self,
+        provider_id: String,
+        field_id: String,
+    ) -> js_sys::Promise {
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            m.provider_hosted_auth_wait(provider_id, field_id)
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = providerHostedAuthStateJson)]
+    pub fn provider_hosted_auth_state_json(&self, provider_id: String, field_id: String) -> String {
+        serde_json::to_string(&self.0.provider_hosted_auth_state(provider_id, field_id))
+            .unwrap_or_default()
+    }
+
+    /// The dialog's `hosted-auth` sign-in button's answer in the shared
+    /// possibility type. See
+    /// `fauna_onboarding_machine::OnboardingMachine::provider_hosted_auth_possibility`.
+    #[wasm_bindgen(js_name = providerHostedAuthPossibilityJson)]
+    pub fn provider_hosted_auth_possibility_json(
+        &self,
+        provider_id: String,
+        field_id: String,
+    ) -> String {
+        serde_json::to_string(
+            &self
+                .0
+                .provider_hosted_auth_possibility(provider_id, field_id),
+        )
+        .unwrap_or_default()
+    }
+}
+
 #[wasm_bindgen]
 pub struct AdminNatModeMachine(Arc<fauna_onboarding_machine::AdminNatModeMachine>);
 
@@ -2242,6 +2671,25 @@ impl AdminNatModeMachine {
             .ok_or_else(|| JsValue::from_str(&format!("unknown NodeMode: {mode}")))?;
         self.0.select(m);
         Ok(())
+    }
+
+    /// Whether the `admin-nest-nat-mode-*` radios are live:
+    /// `AdminNatModeMachine::select_possibility` — the `fauna.setup.status`
+    /// read resolved (`docs/goal/behavior/admin.md` § Errors & edge cases,
+    /// *Controls wait for their read*); a failed read leaves them blocked.
+    /// `Possibility`'s serde JSON, like `natModeSubmitPossibilityJson`.
+    #[wasm_bindgen(js_name = selectPossibilityJson)]
+    pub fn select_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.select_possibility()).unwrap_or_default()
+    }
+
+    /// Whether `admin-nest-nat-mode-save-button` is live:
+    /// `AdminNatModeMachine::save_possibility` — the read resolved and no
+    /// save is on its way, so the pre-selected default is never saved over a
+    /// mode the page did not read. `submit()` asks the same answer.
+    #[wasm_bindgen(js_name = savePossibilityJson)]
+    pub fn save_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.save_possibility()).unwrap_or_default()
     }
 
     /// Page load: read `fauna.setup.status` and pre-select the current mode.
@@ -2478,9 +2926,12 @@ impl NestRetireMachine {
         serde_json::to_string(&self.0.hosted_auth_state(field_id)).unwrap_or_default()
     }
 
-    #[wasm_bindgen(js_name = hostedAuthCanBegin)]
-    pub fn hosted_auth_can_begin(&self, field_id: String) -> bool {
-        self.0.hosted_auth_can_begin(field_id)
+    /// The field's `hosted-auth` sign-in button's answer in the shared
+    /// possibility type. See
+    /// `fauna_onboarding_machine::NestRetireMachine::hosted_auth_possibility`.
+    #[wasm_bindgen(js_name = hostedAuthPossibilityJson)]
+    pub fn hosted_auth_possibility_json(&self, field_id: String) -> String {
+        serde_json::to_string(&self.0.hosted_auth_possibility(field_id)).unwrap_or_default()
     }
 
     /// The `hosted-auth` button's label — the wizard's one mapping.
@@ -2503,10 +2954,26 @@ impl NestRetireMachine {
         serde_json::to_string(&self.0.visible_fields()).unwrap_or_default()
     }
 
-    /// Whether `vps-verify-button` is pressable.
-    #[wasm_bindgen(js_name = canVerify)]
-    pub fn can_verify(&self) -> bool {
-        self.0.can_verify()
+    /// `vps-verify-button`'s answer in the shared possibility type, its phase
+    /// check included. See
+    /// `fauna_onboarding_machine::NestRetireMachine::verify_possibility`.
+    #[wasm_bindgen(js_name = verifyPossibilityJson)]
+    pub fn verify_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.verify_possibility()).unwrap_or_default()
+    }
+
+    /// `retire-delete-button`'s answer. See
+    /// `fauna_onboarding_machine::NestRetireMachine::delete_possibility`.
+    #[wasm_bindgen(js_name = deletePossibilityJson)]
+    pub fn delete_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.delete_possibility()).unwrap_or_default()
+    }
+
+    /// `retire-confirm-button`'s answer. See
+    /// `fauna_onboarding_machine::NestRetireMachine::confirm_possibility`.
+    #[wasm_bindgen(js_name = confirmPossibilityJson)]
+    pub fn confirm_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.confirm_possibility()).unwrap_or_default()
     }
 
     // ── inputs the app reads after the page opened ──

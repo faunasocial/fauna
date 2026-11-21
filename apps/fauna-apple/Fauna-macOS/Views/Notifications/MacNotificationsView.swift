@@ -62,15 +62,17 @@ struct MacNotificationsView: View {
                     .automationActivate(Ids.notificationMarkRead) {
                         Task { await markAllRead() }
                     }
+                    // Waits on the page's first list read (`notifications.md` § Errors
+                    // & edge cases); applied outside `automation*` so the registry reads it.
+                    .faunaPossible(vm.markAllReadAnswer)
                     Button(action: { Task { await clearAll() } }) {
                         Label(L.notifications.clearAll, systemImage: "trash")
                     }
-                    .disabled(vm.notifications.isEmpty)
                     .accessibilityIdentifier(Ids.notificationClear)
-                    .automationActivate(Ids.notificationClear,
-                                        isEnabled: { !vm.notifications.isEmpty }) {
+                    .automationActivate(Ids.notificationClear) {
                         Task { await clearAll() }
                     }
+                    .faunaPossible(vm.clearAllAnswer)
                 }
             }
         }
@@ -140,6 +142,7 @@ struct MacNotificationsView: View {
                 // Button, so the row's own inner content keeps working —
                 // mirrors `MacFeedDetailView`'s whole-card open.
                 .contentShape(Rectangle())
+                .faunaActsOnClick()
                 .onTapGesture { open(destination) }
                 .automationActivate(Ids.notificationItem,
                                     text: { notif.body }) { open(destination) }

@@ -236,6 +236,18 @@ class TestStorePackagePacks:
         )
 
     @pytest.mark.parametrize("arch", ["x64", "arm64"])
+    def test_store_packages_declare_no_write_virtualization_opt_out(self, packed, arch):
+        """The Store channel packs the template as it is: the direct channel's
+        opt-out never reaches an upload."""
+        root = _packed_manifest(packed[arch])
+        names = {c.get("Name") for c in root.find(f"{{{PKG_NS}}}Capabilities")}
+        assert names == {"runFullTrust"}, names
+        with zipfile.ZipFile(packed[arch]) as z:
+            text = z.read("AppxManifest.xml").decode("utf-8")
+        assert "FileSystemWriteVirtualization" not in text
+        assert root.find(f"{{{PKG_NS}}}Properties/{{{PKG_NS}}}DisplayName").text == "Fauna Social"
+
+    @pytest.mark.parametrize("arch", ["x64", "arm64"])
     def test_package_ships_no_debug_symbols(self, packed, arch):
         """`.pdb` files are staged next to the binaries but must not be shipped.
 
@@ -250,3 +262,117 @@ class TestStorePackagePacks:
         assert pdbs == [], (
             f"{os.path.basename(packed[arch])} ships debug symbols: {pdbs}"
         )
+
+
+# ── The direct-download channel (installers/windows.md § Direct download) ────────
+#
+# One packer call packs both arch packages on the direct channel and bundles them
+# into Fauna.msixbundle. `makeappx` schema-validates what XML parsing cannot: the
+# write-virtualization block the packer inserts (two namespaces, the Windows 11
+# scoped form and the blanket switch) and the bundle over the two packages.
+
+DIRECT_IDENTITY = "FaunaSocial.FaunaDesktop"
+VIRT_NS = "http://schemas.microsoft.com/appx/manifest/virtualization/windows10"
+DESKTOP6_NS = "http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+BUNDLE_NS = "http://schemas.microsoft.com/appx/2013/bundle"
+
+
+def _run_packer(*args):
+    repo = _repo_root()
+    script = os.path.join(repo, "scripts", "build-store-package.py")
+    r = subprocess.run([sys.executable, script, *args],
+                       capture_output=True, text=True, timeout=600, cwd=repo)
+    if r.returncode != 0:
+        if "not found under the Windows SDK" in (r.stdout + r.stderr):
+            pytest.skip("Windows SDK (makeappx.exe) not installed on this box")
+        pytest.fail(f"build-store-package.py {' '.join(args)} failed (rc={r.returncode}):\n"
+                    f"stdout: {r.stdout[-4000:]}\nstderr: {r.stderr[-4000:]}")
+    return r
+
+
+@pytest.fixture(scope="module")
+def direct_out(tmp_path_factory, stub_payload_root):
+    """The direct channel packed over the stub payload: the out dir it wrote."""
+    out_dir = tmp_path_factory.mktemp("direct-out")
+    _run_packer("--channel", "direct", "--payload-root", str(stub_payload_root),
+                "--publisher", TEST_PUBLISHER, "--out-dir", str(out_dir))
+    return out_dir
+
+
+def _product_version():
+    import re
+    with open(os.path.join(_repo_root(), "apps", "fauna-windows", "installer", "Package.wxs"),
+              encoding="utf-8") as f:
+        return re.search(r'\bVersion="(\d+\.\d+\.\d+)"', f.read()).group(1) + ".0"
+
+
+def _bundle_manifest(bundle):
+    with zipfile.ZipFile(bundle) as z:
+        return ET.fromstring(z.read("AppxMetadata/AppxBundleManifest.xml"))
+
+
+def _inner(bundle, arch):
+    """The inner package of `arch`, as the bundle manifest names it: (name, zip)."""
+    import io
+    root = _bundle_manifest(bundle)
+    (fname,) = [p.get("FileName") for p in root.iter(f"{{{BUNDLE_NS}}}Package")
+                if p.get("Type") == "application" and p.get("Architecture") == arch]
+    with zipfile.ZipFile(bundle) as z:
+        return fname, zipfile.ZipFile(io.BytesIO(z.read(fname)))
+
+
+class TestDirectPackagePacks:
+    def test_produces_one_bundle_of_both_architectures(self, direct_out):
+        bundle = direct_out / "Fauna.msixbundle"
+        assert bundle.exists(), f"no Fauna.msixbundle in {sorted(p.name for p in direct_out.iterdir())}"
+        root = _bundle_manifest(bundle)
+        arches = sorted(p.get("Architecture") for p in root.iter(f"{{{BUNDLE_NS}}}Package")
+                        if p.get("Type") == "application")
+        assert arches == ["arm64", "x64"], arches
+
+    def test_the_bundle_carries_the_direct_identity_at_the_product_version(self, direct_out):
+        identity = _bundle_manifest(direct_out / "Fauna.msixbundle").find(f"{{{BUNDLE_NS}}}Identity")
+        assert identity.get("Name") == DIRECT_IDENTITY
+        assert identity.get("Publisher") == TEST_PUBLISHER
+        assert identity.get("Version") == _product_version(), (
+            "the bundle's version is the product version (§ Direct download, 2), never "
+            "makeappx's clock-derived default"
+        )
+
+    @pytest.mark.parametrize("arch", ["x64", "arm64"])
+    def test_each_inner_package_is_the_direct_channels(self, direct_out, arch):
+        _, pkg = _inner(direct_out / "Fauna.msixbundle", arch)
+        text = pkg.read("AppxManifest.xml").decode("utf-8")
+        assert "@@" not in text, "an unsubstituted token reached the package"
+        root = ET.fromstring(text.encode("utf-8"))
+        identity = root.find(f"{{{PKG_NS}}}Identity")
+        assert (identity.get("Name"), identity.get("ProcessorArchitecture")) == (DIRECT_IDENTITY, arch)
+        assert root.find(f"{{{PKG_NS}}}Properties/{{{PKG_NS}}}DisplayName").text == "Fauna"
+        names = {c.get("Name") for c in root.find(f"{{{PKG_NS}}}Capabilities")}
+        assert names == {"runFullTrust", "unvirtualizedResources"}, names
+        props = root.find(f"{{{PKG_NS}}}Properties")
+        assert (props.find(f"{{{DESKTOP6_NS}}}FileSystemWriteVirtualization").text or "").strip() == "disabled"
+        excluded = [(e.text or "").strip() for e in props.iter(f"{{{VIRT_NS}}}ExcludedDirectory")]
+        assert excluded == [r"$(KnownFolder:LocalAppData)\Fauna"], excluded
+
+    @pytest.mark.parametrize("arch", ["x64", "arm64"])
+    def test_each_inner_package_carries_its_payload_and_no_symbols(self, direct_out, arch):
+        _, pkg = _inner(direct_out / "Fauna.msixbundle", arch)
+        names = {n.replace("\\", "/") for n in pkg.namelist()}
+        for rel in STUB_PAYLOAD:
+            assert rel.replace("\\", "/") in names, f"{rel} is missing from the {arch} package"
+        assert not [n for n in names if n.lower().endswith(".pdb")]
+
+    def test_the_store_and_direct_channels_share_no_staging(self, tmp_path, stub_payload_root):
+        """Both channels packed into one out dir: the Store's staged layout still
+        describes the Store package. The 2026-08-23 clobber (a build reaching into
+        another build's loose layout) must not come back between channels."""
+        _run_packer("--arch", "arm64", "--payload-root", str(stub_payload_root),
+                    "--identity-name", TEST_IDENTITY, "--publisher", TEST_PUBLISHER,
+                    "--out-dir", str(tmp_path))
+        _run_packer("--channel", "direct", "--payload-root", str(stub_payload_root),
+                    "--publisher", TEST_PUBLISHER, "--out-dir", str(tmp_path))
+        staged = ET.parse(tmp_path / "store-stage" / "arm64" / "AppxManifest.xml").getroot()
+        assert staged.find(f"{{{PKG_NS}}}Identity").get("Name") == TEST_IDENTITY
+        assert (tmp_path / "Fauna-Store-arm64.msix").exists()
+        assert (tmp_path / "Fauna.msixbundle").exists()

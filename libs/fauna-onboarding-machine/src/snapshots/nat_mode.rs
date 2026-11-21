@@ -62,6 +62,21 @@ impl NatModeSnapshot {
     }
 }
 
+impl NatModeSnapshot {
+    /// `nat-mode-confirm-button`'s answer (`docs/goal/ui/README.md` § Offer
+    /// only what is possible, rule 6), the wizard twin of the admin page's
+    /// `AdminNatModeMachine::save_possibility`: possible while `Choosing` or
+    /// after an `Error` (resubmit is always allowed), blocked
+    /// `common.in_flight` while the commit is on its way or done.
+    pub fn submit_possibility(&self) -> fauna_core::possibility::Possibility {
+        if self.submit_enabled {
+            fauna_core::possibility::Possibility::Possible
+        } else {
+            fauna_core::possibility::Possibility::blocked(LocalizedText::key("common.in_flight"))
+        }
+    }
+}
+
 impl Default for NatModeSnapshot {
     fn default() -> Self {
         Self::idle()
@@ -98,5 +113,19 @@ mod tests {
         let raw = serde_json::to_string(&s).unwrap();
         let s2: NatModeSnapshot = serde_json::from_str(&raw).unwrap();
         assert_eq!(s, s2);
+    }
+
+    /// Rule 6: the confirm button's answer follows `submit_enabled`, and a
+    /// commit on its way names itself rather than leaving the button dead.
+    #[test]
+    fn submit_possibility_blocks_in_flight_only() {
+        let mut s = NatModeSnapshot::idle();
+        assert!(s.submit_possibility().is_possible());
+        s.state = NatModeState::Submitting;
+        s.submit_enabled = false;
+        assert_eq!(
+            s.submit_possibility().reason().map(|r| r.key.as_str()),
+            Some("common.in_flight")
+        );
     }
 }

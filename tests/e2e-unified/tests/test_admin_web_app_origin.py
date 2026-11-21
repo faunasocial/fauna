@@ -1,22 +1,25 @@
 """The web-app origin choice on admin-nest (admin.md § N Nest → *Web-app
-origin*), driven through the app UI against a real nest.
+origin*), read through the app UI against a real nest.
 
-The admin flips this nest's ``/app/`` to the central origin with the section's
-radio + save, sees the status line name the **exact** address users are sent to
-(the nest's own projection, folded by the shared
-``fauna_client_admin::admin_web_app_origin_view``), and the nest's live router
-agrees: ``GET /app/`` answers a 302 to that same address (convention 5 — the API
-leg that tells a UI-side failure from a nest-side one). Then back to bundled,
-through the UI again, and ``/app/`` stops redirecting.
+While the central origin is not live the choice is not offered
+(``web-content-hosting.md`` § Same-origin security model → *While the central
+origin is not live, the choice is not offered*): the nest's projection says
+``central_live`` false, the shared ``fauna_client_admin::admin_web_app_origin_view``
+answers ``section_possibility`` absent for a nest holding bundled, and the app
+paints no ``admin-nest-web-app-origin-*`` element at all. So on a real nest of
+today's builds the admin Nest page shows no Web app section, and the nest's live
+router keeps answering ``/app/`` with what it ships (convention 5 — the API leg
+that tells a UI-side failure from a nest-side one). The flip-to-central journey
+(radio + save, the status naming the exact ``Location``, and back) returns in the
+commit that flips ``CENTRAL_APP_ORIGIN_LIVE``, as that ruling's test paragraph
+says; until then the redirect is pinned at tier_1 with the fact passed as true.
 
-**Why a dedicated nest.** The shared session nest runs with no handle domain,
-and a domainless box keeps serving bundled whatever the choice
-(``web-content-hosting.md`` § The nest-served `/app/` and the central origin) —
-there would be no redirect to observe. ``web_hosting_nest`` claims a real
-DNS-shaped domain. A tier_3 nest ships no SPA, so its bundled ``/app/`` answers
-404 (still reserved, never user content), while an image nest answers it with its
-bundled SPA (200) — the handle's ``serves_spa`` says which; what the SPA serves
-under bundled is pinned in Rust against the real ``mount_spa``.
+**Why a dedicated nest.** ``web_hosting_nest`` claims a real DNS-shaped domain,
+so the absence observed here is the not-live rule and not the domainless one (a
+domainless box serves bundled whatever the choice). A tier_3 nest ships no SPA,
+so its bundled ``/app/`` answers 404 (still reserved, never user content), while
+an image nest answers it with its bundled SPA (200) — the handle's ``serves_spa``
+says which.
 
 tui is the lead app; the other six follow in their batched trickle-down.
 """
@@ -33,10 +36,18 @@ from i18n.strings import S
 pytestmark = pytest.mark.tier_3
 
 
-# A redirect is the assertion here, so it is handed back rather than
+# A redirect would be the failure here, so it is handed back rather than
 # followed — under the floor-cert rule a TLS-serving nest needs
 # (`common.auth.no_redirect_opener`).
 _OPENER = no_redirect_opener()
+
+_SECTION_IDS = (
+    "admin-nest-web-app-origin-section",
+    "admin-nest-web-app-origin-bundled-radio",
+    "admin-nest-web-app-origin-central-radio",
+    "admin-nest-web-app-origin-save-button",
+    "admin-nest-web-app-origin-status",
+)
 
 
 def _get_app(url: str):
@@ -71,48 +82,33 @@ def origin_admin_app(request, app, web_hosting_nest):
 
 
 @pytest.mark.feature("admin-nest")
-def test_admin_flips_app_to_the_central_origin_and_back(origin_admin_app, web_hosting_nest):
+def test_admin_nest_offers_no_web_app_origin_while_central_is_not_live(
+    origin_admin_app, web_hosting_nest
+):
     app = origin_admin_app
     nest_url = web_hosting_nest["url"]
     app.admin.navigate_nest()
 
-    bundled_text = S.admin.nest_page.web_app_origin_status_bundled
-    assert _wait_for(lambda: app.admin.web_app_origin_status_text() == bundled_text), (
-        f"a fresh nest must read bundled; status {app.admin.web_app_origin_status_text()!r}, "
-        f"error: {app.error_text()!r}"
+    # The section's existence is decided by the page's read, so first wait for
+    # that read to land: the update channel rides the same nest snapshot, and
+    # its status leaves its loading sentence once the snapshot is in.
+    loading = S.admin.nest_page.update_channel_loading
+    assert _wait_for(
+        lambda: app.admin.update_channel_status_text() not in ("", loading)
+    ), (
+        f"the Nest page's read never landed; update channel status "
+        f"{app.admin.update_channel_status_text()!r}, error: {app.error_text()!r}"
     )
+
+    shown = [i for i in _SECTION_IDS if not app.is_absent(i)]
+    assert not shown, (
+        f"the central origin is not live, so the Web app section must not be "
+        f"offered; painted: {shown}, status {app.admin.web_app_origin_status_text()!r}"
+    )
+
     bundled_status = 200 if web_hosting_nest["serves_spa"] else 404
     status, location = _get_app(nest_url)
     assert status == bundled_status and location is None, (
-        f"bundled must answer {bundled_status}, not redirect: {status} {location!r}"
-    )
-
-    app.admin.select_web_app_origin("central")
-    app.admin.save_web_app_origin()
-    try:
-        # The status line must carry the nest's exact projected target.
-        assert _wait_for(
-            lambda: app.admin.web_app_origin_status_text() != bundled_text
-        ), f"status never left bundled after saving central. error: {app.error_text()!r}"
-        status_text = app.admin.web_app_origin_status_text()
-        status, location = _get_app(nest_url)
-        assert status == 302 and location, (
-            f"central must make /app/ answer 302 (status line {status_text!r}); "
-            f"got {status} {location!r}"
-        )
-        assert location.startswith("https://app.fauna.social/app/"), location
-        assert status_text == S.admin.nest_page.web_app_origin_status_central(target=location), (
-            f"the status must name exactly where users are sent: {status_text!r} vs {location!r}"
-        )
-    finally:
-        # Back to bundled through the UI, and wait for the nest to agree, so the
-        # module-scoped nest is left as found.
-        app.admin.select_web_app_origin("bundled")
-        app.admin.save_web_app_origin()
-        assert _wait_for(lambda: app.admin.web_app_origin_status_text() == bundled_text), (
-            f"status did not return to bundled. error: {app.error_text()!r}"
-        )
-    status, location = _get_app(nest_url)
-    assert status == bundled_status and location is None, (
-        f"bundled again must stop redirecting: {status} {location!r}"
+        f"/app/ must keep answering what the nest ships ({bundled_status}), "
+        f"not redirect: {status} {location!r}"
     )

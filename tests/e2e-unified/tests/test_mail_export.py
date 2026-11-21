@@ -32,8 +32,9 @@ from pathlib import Path
 import pytest
 
 from helpers.app_surface import skip_environment, require_surface
-from helpers.budgets import MLS_HANDSHAKE_S
-from helpers.mail_client_ui import route_inbound_mail_to_app
+from helpers.budgets import MLS_HANDSHAKE_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
+from helpers.connection import wait_until_online
+from helpers.mail_client_ui import route_inbound_mail_to_app, turn_mail_on
 from helpers.mail_export_ui import (
     archive_entries,
     clear_prior_exports,
@@ -227,6 +228,8 @@ def _open_wizard(app, nest_instance, user):
     """
     from actions.mail_export import MailExportActions
 
+    # The page opens behind the mail-usable gate (`helpers.mail_client_ui.turn_mail_on`).
+    turn_mail_on(app)
     clear_prior_exports(nest_instance, user)
     export = MailExportActions(app.driver)
     export.navigate()
@@ -256,6 +259,7 @@ def test_mail_export_wizard_reachable(logged_in_app):
     """
     from actions.mail_export import MailExportActions
 
+    turn_mail_on(logged_in_app)
     export = MailExportActions(logged_in_app.driver)
     export.navigate()
     assert export.is_page_visible(), "mail-export wizard not reachable"
@@ -942,7 +946,13 @@ def test_mail_export_scope_starts_without_trash_and_junk_and_leaves_out_a_desele
 
     export = _open_wizard(app, nest_instance, test_user)
     export.next()  # Format → Scope
-    offered = export.mailbox_names()
+    # The options are the page visit's own read of the mailboxes, which can
+    # land after the Scope step paints.
+    offered = wait_until(
+        lambda: export.mailbox_names() or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the Scope step listed no mailboxes; error {export.error_text()!r}",
+    )
     listed = [m["name"] for m in _mailboxes(nest_instance, test_user)]
     assert offered == listed, f"the Scope step must offer every mailbox: {offered} vs {listed}"
     assert _DESELECTED_BY_DEFAULT <= set(offered), offered
@@ -1054,53 +1064,67 @@ def test_mail_export_date_range_takes_whole_days_by_arrival_and_discard_removes_
 
 
 @pytest.mark.feature("mailbox-export")
+@pytest.mark.requires_surface("mail-wizard-answers")
 def test_mail_export_refuses_a_date_that_is_not_a_day_or_a_range_that_runs_backwards(
     logged_in_app, nest_instance, test_user
 ):
-    """A date that is not a real day, or a start date after the end date, is
-    refused before the export starts — never quietly treated as no range at all
+    """A date that is not a real day, or a from date after the to date, never
+    reaches an export — never quietly treated as no range at all
     (`mail-export.md` § Wizard steps step 2: "refuses `Start` before any session
-    exists").
+    exists"; *Next and Start offer only an export that can start*).
 
-    For each bad range the user presses Start: the page says why, it is still
-    on the Confirm step, and the nest holds no export from it.
+    For each bad range typed on the Scope step, Next is blocked with the reason
+    painted beside it (the Confirm step never describes an export that cannot
+    start), the wizard stays on Scope, and the nest holds no export from it.
+    Clearing the range makes Next live again.
     """
     app = logged_in_app
-    _require_driving_app(app.driver)
+    driver = app.driver
+    _require_driving_app(driver)
     export = _open_wizard(app, nest_instance, test_user)
-    export.next()
+    export.next()  # Format → Scope
+    next_id = "wizard-next-button"
+
+    def _next_state() -> str:
+        return driver.diagnose(next_id, attrs=("enabled", "reason"))
+
+    driver.wait_until_enabled(next_id, timeout=UI_SETTLE_S)
     bad = [
-        ("2026-02-30", ""),            # not a real day
-        ("", "2026-13-01"),            # not a real month
-        ("21/09/2026", ""),            # not written YYYY-MM-DD
-        ("2026-10-02", "2026-10-01"),  # since after until
+        ("2026-02-30", "", S.mail_export.scope_date_from_invalid),           # not a real day
+        ("", "2026-13-01", S.mail_export.scope_date_to_invalid),             # not a real month
+        ("21/09/2026", "", S.mail_export.scope_date_from_invalid),           # not written YYYY-MM-DD
+        ("2026-10-02", "2026-10-01", S.mail_export.scope_date_range_inverted),  # from after to
     ]
     try:
-        for since, until in bad:
+        for since, until, want in bad:
             export.set_date_from(since)
             export.set_date_to(until)
-            export.next()  # Scope → Confirm
-            export.start()
-            refusal = wait_until(
-                lambda: export.error_text() or None,
-                MLS_HANDSHAKE_S,
-                diagnose=lambda: f"Start with {since!r} … {until!r} surfaced no refusal",
+            painted = wait_until(
+                lambda: (not driver.is_enabled(next_id) and driver.blocked_reason(next_id))
+                or None,
+                UI_SETTLE_S,
+                diagnose=lambda: f"Next with {since!r} … {until!r} is not blocked with a "
+                f"reason: {_next_state()}",
+            )
+            assert painted == want, (
+                f"Next with {since!r} … {until!r} names the wrong reason: {painted!r}, "
+                f"wanted {want!r}"
+            )
+            assert driver.is_absent("mail-export-start-button"), (
+                f"a blocked Next with {since!r} … {until!r} still reached the Confirm step"
             )
             sessions = [s for s in list_sessions(nest_instance, test_user["signing_key"])
                         if s.get("state") in _LIVE_STATES]
             assert sessions == [], (
-                f"Start with {since!r} … {until!r} opened an export ({refusal!r}): {sessions!r}"
+                f"{since!r} … {until!r} opened an export: {sessions!r}"
             )
-            assert app.driver.is_visible("mail-export-start-button"), (
-                f"Start with {since!r} … {until!r} left the Confirm step ({refusal!r})"
-            )
-            export.back()  # Confirm → Scope
     finally:
         # Leave no bad range behind for the next test: the machine keeps both
         # fields across a visit.
         export.set_date_from("")
         export.set_date_to("")
-        export.back()
+    driver.wait_until_enabled(next_id, timeout=UI_SETTLE_S)
+    export.back()  # Scope → Format
 
 
 @pytest.mark.feature("mailbox-export")
@@ -1481,6 +1505,9 @@ def _relaunch_onto_the_export(app):
     from actions.mail_export import MailExportActions
 
     relaunch(app.driver)
+    # Signed back in is not online yet: until it is, every app paints the
+    # page's nest-bound controls (Pause, Resume, Cancel) blocked.
+    wait_until_online(app.driver)
     export = MailExportActions(app.driver)
     export.navigate()
     return export
@@ -1765,6 +1792,8 @@ def _second_device(request, app):
 
     require_surface(app.driver, "second-device-same-user")
     device_b, _driver_b = request.getfixturevalue("alice_second_device")
+    # Signed in is not online yet (`_relaunch_onto_the_export`).
+    wait_until_online(device_b.driver)
     export_b = MailExportActions(device_b.driver)
     export_b.navigate()
     return device_b, export_b
@@ -1950,11 +1979,11 @@ def test_mail_export_another_device_can_cancel_it_and_no_partial_archive_remains
     cancels it and removes the blob. Releasing A's parked calls afterwards does
     not bring the export back.
 
-    Unlike the same-device twin, A stays alive here, and its finalize gives up
-    after its client budget, whereupon A reports the export failed. A second
-    seat takes longer than that to launch, so the report is held as well
-    (`_FAIL_KIND`): without it this test measures whether B opens inside A's
-    budget.
+    Unlike the same-device twin, A stays alive here. Its parked finalize is
+    announced, so A's client never gives it up on its own deadline; the
+    failure report is held as well (`_FAIL_KIND`), so that even a client that
+    missed the announce cannot report the export failed while B launches —
+    without it this test would measure whether B opens inside A's budget.
     """
     from actions.mail_export import MailExportActions
 

@@ -41,6 +41,9 @@ import uniffi.fauna_conversations.nextSortOrder
 import uniffi.fauna_conversations.roomInvitationText
 import uniffi.fauna_conversations.roomRoleAttrToken
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * Conversation list pane (mobile-collapsed list screen) — observer-driven
@@ -67,9 +70,13 @@ fun ConversationListScreen(
     // — keep it in the stateful Screen so the Content stays JVM/Robolectric-testable.
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // The `Archive` rail's re-read on each visit to the page (archive-import.md
+    // § What each category becomes; apple's tab-shown `refreshArchiveThreads`).
+    LaunchedEffect(Unit) { vm.refreshArchiveThreads() }
 
     ConversationsListContent(
         threads = snapshot?.threads ?: emptyList(),
+        loaded = snapshot?.loaded ?: false,
         invitations = snapshot?.roomInvitations ?: emptyList(),
         // Accept follows the manager into the room's thread — it selects it on
         // success, so the page pushes the detail screen like a tapped row.
@@ -125,6 +132,9 @@ fun ConversationListScreen(
 @Composable
 fun ConversationsListContent(
     threads: List<ThreadSummary>,
+    // The shared `ConversationsSnapshot.loaded` bit: the empty line paints only
+    // once it is true (`ui/conversations.md` § Loading is not empty).
+    loaded: Boolean = false,
     sort: SortOrder,
     searchQuery: String,
     // The community-room invitations standing for this account, atop the list
@@ -226,7 +236,7 @@ fun ConversationsListContent(
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
-                if (threads.isEmpty()) {
+                if (threads.isEmpty() && loaded) {
                     Column(
                         modifier = Modifier.align(Alignment.Center),
                         horizontalAlignment = Alignment.CenterHorizontally,

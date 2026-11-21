@@ -45,6 +45,9 @@ Stamped 2026-09-19 at 8ac16765e4.
    - `tests/e2e-unified/tests/test_profile_remote_read_cross_nest.py::test_a_remote_actors_profile_shows_their_name_only_once_they_open_it`
 11. [app] A profile's header shows its picture and banner when they are set, and nothing in their place otherwise — `docs/goal/ui/profile.md` § Layout & flow
    - `tests/e2e-unified/tests/test_profile.py::test_profile_header_paints_the_stored_avatar_and_banner`
+12. [app] On a profile you have just opened, Follow and Block are disabled and say they are still loading, or failed to load, until the app knows whether you already follow or block that person; saving your private notes on a device that holds no account of yours is disabled and says so — `docs/goal/ui/profile.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_read_pending_offer_only_possible.py::test_follow_and_block_say_still_loading_until_their_open_time_reads_answer`
+    - `tests/e2e-unified/tests/test_read_pending_offer_only_possible.py::test_private_save_says_saved_elsewhere_in_a_tab_that_holds_no_account_runtime`
 
 ## Status
 
@@ -53,7 +56,7 @@ Stamped 2026-09-19 at 8ac16765e4.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+688294a2 standalone |
 | linux | ✅ full | 0.1.5-dev+74897c5d standalone |
-| windows | ✅ full | 0.1.2-dev+068e152c.dirty standalone |
+| windows | ⚠ partial | 0.1.2-dev+068e152c.dirty standalone |
 | macos | ✅ full | |
 | ios | ✅ full | |
 | android |  no run recorded | |
@@ -78,4 +81,6 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 9 | app | `tests/e2e-unified/tests/test_profile.py::test_state_protocol_actor_nav_carries_the_home` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_profile_remote_read_cross_nest.py::test_a_remote_actors_profile_shows_their_name_only_once_they_open_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_profile.py::test_profile_header_paints_the_stored_avatar_and_banner` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_read_pending_offer_only_possible.py::test_follow_and_block_say_still_loading_until_their_open_time_reads_answer` — requires `blocked-reason-read` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_read_pending_offer_only_possible.py::test_private_save_says_saved_elsewhere_in_a_tab_that_holds_no_account_runtime` — requires `blocked-reason-read` (test harness) (not built: windows) | web (linux): passed |
 <!-- features-render:end -->

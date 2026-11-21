@@ -131,8 +131,11 @@ impl SyncDbShareStore {
     pub fn retained_manifest_bytes(&self, manifest_hash: &[u8; 32]) -> Option<Vec<u8>> {
         let db = self.db.lock().expect("share-store db mutex poisoned");
         let retained = db.retained_manifest(&hex::encode(manifest_hash)).ok()??;
-        (fauna_core::data::ContentHash::of_raw(&retained.bytes).digest() == *manifest_hash)
-            .then_some(retained.bytes)
+        if fauna_core::data::ContentHash::of_raw(&retained.bytes).digest() != *manifest_hash {
+            return None;
+        }
+        held_pages(&retained.bytes, &db)?;
+        Some(retained.bytes)
     }
 }
 
@@ -382,12 +385,62 @@ pub enum MaterializeVerdict {
     Skip(&'static str),
 }
 
-/// What the judge sees of one local path. `disk` is the CURRENT on-disk
-/// content hash (`None` = absent) — hashed at judge time, never trusted from
-/// the entry.
+/// What the judge sees of one local path. `disk` is what is on the disk NOW
+/// ([`read_local_body`]) — read at judge time, never trusted from the entry.
 pub struct LocalPathState {
     pub entry: Option<crate::db::SyncEntry>,
-    pub disk: Option<fauna_core::data::ContentHash>,
+    pub disk: LocalBody,
+}
+
+/// One path's bytes as this disk holds them, for the materialization judge
+/// ([`read_local_body`]). A cloud-only placeholder is a reading of its own:
+/// present, never read, never absent (`crate::placeholder`, whose module doc
+/// owns the two ways getting it wrong breaks the engine).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalBody {
+    /// Nothing at the path.
+    Absent,
+    /// A file whose bytes are on this disk, hashed now.
+    Local(fauna_core::data::ContentHash),
+    /// A cloud-only placeholder: the file is there, its bytes are not.
+    CloudOnly,
+}
+
+impl LocalBody {
+    /// The hash of bytes that are on this disk; `None` for absent or cloud-only.
+    pub fn hash(&self) -> Option<fauna_core::data::ContentHash> {
+        match self {
+            Self::Local(h) => Some(*h),
+            Self::Absent | Self::CloudOnly => None,
+        }
+    }
+}
+
+/// Read what is at `full_path` for the materialization judge — the one reader
+/// every peer landing over a bound root takes (`rel` names the path in a
+/// failure, redacted).
+///
+/// **A cloud-only placeholder is never opened.** On cfapi the sync service IS
+/// the provider, and the provider's own read of its own placeholder is answered
+/// by nobody: it blocks the reading thread for cfapi's 60 s request timeout
+/// (`crate::placeholder`, measured). The peer ingest runs on the thread that
+/// serves the on-demand root (the agent's engine-command arm), so one such read
+/// held every open on the root for those 60 s, and a page queued behind it
+/// held them again — the member's root that froze after its owner's identity
+/// succession, once the fold had freed its copy of the owner's earlier file
+/// (`on-demand-files.md` § On-Demand Files, *Nothing the serve loop waits on
+/// holds up the root*).
+pub async fn read_local_body(full_path: &std::path::Path, rel: &str) -> anyhow::Result<LocalBody> {
+    use anyhow::Context as _;
+    match tokio::fs::metadata(full_path).await {
+        Ok(m) if m.is_file() && crate::placeholder::is_cloud_placeholder(&m) => {
+            Ok(LocalBody::CloudOnly)
+        }
+        Ok(m) if m.is_file() => fauna_core::chunker_stream::content_hash_streaming(full_path)
+            .map(LocalBody::Local)
+            .with_context(|| format!("hashing local {}", fauna_core::log_redact::log_path(rel))),
+        _ => Ok(LocalBody::Absent),
+    }
 }
 
 /// Judge one provisional create/modify against the local path state. Pure —
@@ -409,10 +462,13 @@ pub fn judge_materialization(
         .filter(|e| e.state != SyncState::Deleted);
     match (entry, &local.disk) {
         // Fresh path: nothing local to lose.
-        (None, None) => MaterializeVerdict::Write,
+        (None, LocalBody::Absent) => MaterializeVerdict::Write,
         // Untracked bytes at the path — the scan has not accounted them, so
-        // they may be user novelty. Never overwritten.
-        (None, Some(_)) => MaterializeVerdict::Skip("untracked local file present"),
+        // they may be user novelty. Never overwritten. A cloud-only file is
+        // there too, whoever's it is: present, never absent.
+        (None, LocalBody::Local(_) | LocalBody::CloudOnly) => {
+            MaterializeVerdict::Skip("untracked local file present")
+        }
         (Some(entry), disk) => {
             // The tracked head already is this manifest: nothing to fetch.
             // (Placeholder rows included — their bytes stay absent by
@@ -431,13 +487,20 @@ pub fn judge_materialization(
             match disk {
                 // Clean at its tracked state: overwriting loses nothing this
                 // replica authored.
-                Some(d) if entry.local_hash.as_ref() == Some(d) => MaterializeVerdict::Write,
+                LocalBody::Local(d) if entry.local_hash.as_ref() == Some(d) => {
+                    MaterializeVerdict::Write
+                }
                 // Disk drifted from the tracked state (an edit the scan has
                 // not seen yet) — possible user novelty, never overwritten.
-                Some(_) => MaterializeVerdict::Skip("disk differs from tracked state"),
+                LocalBody::Local(_) => MaterializeVerdict::Skip("disk differs from tracked state"),
+                // A synced row whose bytes the platform freed behind it (its
+                // eviction notice not applied yet): nothing here to prove
+                // clean, and the platform's file is not this landing's to
+                // replace.
+                LocalBody::CloudOnly => MaterializeVerdict::Skip("tracked file is cloud-only"),
                 // Tracked-but-missing: a half-state the provisional plane has
                 // no licence to interpret.
-                None => MaterializeVerdict::Skip("tracked file missing on disk"),
+                LocalBody::Absent => MaterializeVerdict::Skip("tracked file missing on disk"),
             }
         }
     }
@@ -472,8 +535,8 @@ pub fn superseded_own_edit(
     let own = own_head?;
     let manifest = entry.manifest_hash?;
     let clean = entry.state == crate::db::SyncState::Synced
-        && local.disk.is_some()
-        && entry.local_hash == local.disk;
+        && local.disk.hash().is_some()
+        && entry.local_hash == local.disk.hash();
     let lifted_own_head = own.seq.is_some()
         && own.change_type != "delete"
         && own
@@ -661,13 +724,53 @@ pub fn memo_manifest_from(
 /// working scale.
 pub const SHARE_RESEAL_IN_MEMORY_MAX: u64 = 256 * 1024 * 1024;
 
+/// The page blobs a retained manifest names, read from the same retention —
+/// the upload sites keep each page of a paged root under its own hash beside
+/// the root (`own_manifests`), so a peer fetches a page exactly as it fetches
+/// a manifest. `Some` of no pages for anything that is not a paged root (a
+/// single manifest, or a page itself); `Some` of every page when each one is
+/// held; `None` when a page of a paged root is not — and then the root is not
+/// served at all: wherever a manifest travels its pages travel with it, or it
+/// does not travel (`file-sync.md` § Paged manifests → *Compatibility*). The
+/// pages are not verified here: the puller's walk checks each against its
+/// root, and so does [`index_share_manifest`].
+pub fn held_pages(
+    bytes: &[u8],
+    db: &SyncDb,
+) -> Option<std::collections::HashMap<fauna_core::data::ContentHash, Vec<u8>>> {
+    let Ok(manifest) =
+        fauna_core::encoding::canonical_decode::<fauna_core::chunk::ChunkManifest>(bytes)
+    else {
+        return Some(Default::default());
+    };
+    let Some(pages) = manifest.pages.as_deref() else {
+        return Some(Default::default());
+    };
+    let held = pages
+        .iter()
+        .map(|p| {
+            let retained = db.retained_manifest(&hex::encode(p.hash.digest())).ok()??;
+            Some((p.hash, retained.bytes))
+        })
+        .collect::<Option<std::collections::HashMap<_, _>>>();
+    if held.is_none() {
+        tracing::debug!(
+            pages = pages.len(),
+            "share serve: a paged root whose pages are not all retained is not served"
+        );
+    }
+    held
+}
+
 /// Decode + index one served manifest into `memo` (best-effort — an
 /// undecodable or unsealed manifest, or one no held generation of
 /// `content_stamp` opens, simply leaves its chunks unservable). The
 /// served bytes name no plaintext chunk hash (`ChunkManifest::sealed_hashes`),
 /// and re-deriving a chunk needs it, so the manifest is opened under every
-/// same-version candidate of `content_keys` first. Shared by the engine's
-/// serve methods and [`ShareServeSource`].
+/// same-version candidate of `content_keys` first — a paged root through the
+/// one walk over `pages` ([`held_pages`]), put back together as one plaintext
+/// view so its chunks index exactly as a single manifest's do. Shared by the
+/// engine's serve methods and [`ShareServeSource`].
 pub fn index_share_manifest(
     memo: &Mutex<ShareServeMemo>,
     manifest_hash: [u8; 32],
@@ -675,6 +778,7 @@ pub fn index_share_manifest(
     content_stamp: Option<SealStamp>,
     bytes: &[u8],
     content_keys: Option<&fauna_core::folder_keys::SetContentKeys>,
+    pages: &std::collections::HashMap<fauna_core::data::ContentHash, Vec<u8>>,
 ) {
     let Ok(manifest) =
         fauna_core::encoding::canonical_decode::<fauna_core::chunk::ChunkManifest>(bytes)
@@ -684,10 +788,21 @@ pub fn index_share_manifest(
     let (Some(stamp), Some(keys)) = (content_stamp, content_keys) else {
         return;
     };
+    let open = |root: &[u8; 32]| {
+        if !manifest.is_paged() {
+            return manifest.clone().unseal_hashes(root);
+        }
+        fauna_core::manifest_paging::PageWalk::open(manifest.clone(), Some(root))?.flatten(|hash| {
+            pages
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("a page of the root is not held"))
+        })
+    };
     let Some(opened) = keys
         .keys_for_stamp(stamp)
         .iter()
-        .find_map(|root| manifest.clone().unseal_hashes(root).ok())
+        .find_map(|root| open(root).ok())
     else {
         return;
     };
@@ -869,10 +984,19 @@ impl ShareStore for ShareServeSource {
         let hex_hash = hex::encode(manifest_hash);
         let retained = {
             let db = self.rows.db.lock().expect("share-store db mutex poisoned");
-            db.retained_manifest(&hex_hash)?
+            db.retained_manifest(&hex_hash)?.map(|r| {
+                let pages = held_pages(&r.bytes, &db);
+                (r, pages)
+            })
         };
-        if let Some(retained) = retained {
+        if let Some((retained, pages)) = retained {
             if fauna_core::data::ContentHash::of_raw(&retained.bytes).digest() == *manifest_hash {
+                // A paged root whose pages are not all held is not offered:
+                // the re-derive below cannot rebuild a root either (it seals
+                // one manifest, under the in-memory cap).
+                let Some(pages) = pages else {
+                    return Ok(None);
+                };
                 index_share_manifest(
                     &self.memo,
                     *manifest_hash,
@@ -880,6 +1004,7 @@ impl ShareStore for ShareServeSource {
                     retained.content_stamp,
                     &retained.bytes,
                     Some(&self.content_keys),
+                    &pages,
                 );
                 crate::share_serve_tally::record_manifest_served(&retained.path);
                 return Ok(Some(retained.bytes));
@@ -1833,7 +1958,7 @@ pub(crate) mod tests {
         };
         let clean = || LocalPathState {
             entry: Some(entry_with(SyncState::Synced, Some(h(1)), Some(own_m))),
-            disk: Some(h(1)),
+            disk: LocalBody::Local(h(1)),
         };
 
         // The head is this replica's lifted put, clean on disk: retain it.
@@ -1904,16 +2029,25 @@ pub(crate) mod tests {
         // The disk drifted from the tracked head, or the row is not settled:
         // not the version the own row names.
         let drifted = LocalPathState {
-            disk: Some(h(3)),
+            disk: LocalBody::Local(h(3)),
             ..clean()
         };
         assert_eq!(
             superseded_own_edit(&drifted, Some(&own(Some(7), "modify", &own_m)), None),
             None
         );
+        // The bytes are not on this disk: nothing here to retain.
+        let cloud_only = LocalPathState {
+            disk: LocalBody::CloudOnly,
+            ..clean()
+        };
+        assert_eq!(
+            superseded_own_edit(&cloud_only, Some(&own(Some(7), "modify", &own_m)), None),
+            None
+        );
         let uploading = LocalPathState {
             entry: Some(entry_with(SyncState::Uploading, Some(h(1)), Some(own_m))),
-            disk: Some(h(1)),
+            disk: LocalBody::Local(h(1)),
         };
         assert_eq!(
             superseded_own_edit(&uploading, Some(&own(Some(7), "modify", &own_m)), None),
@@ -1922,7 +2056,7 @@ pub(crate) mod tests {
         // Nothing tracked: nothing of this replica's at stake.
         let fresh = LocalPathState {
             entry: None,
-            disk: None,
+            disk: LocalBody::Absent,
         };
         assert_eq!(
             superseded_own_edit(&fresh, Some(&own(Some(7), "modify", &own_m)), None),
@@ -1942,7 +2076,7 @@ pub(crate) mod tests {
             judge(
                 &LocalPathState {
                     entry: None,
-                    disk: None
+                    disk: LocalBody::Absent
                 },
                 &peer_m
             ),
@@ -1953,7 +2087,7 @@ pub(crate) mod tests {
             judge(
                 &LocalPathState {
                     entry: None,
-                    disk: Some(h(1))
+                    disk: LocalBody::Local(h(1))
                 },
                 &peer_m
             ),
@@ -1964,7 +2098,7 @@ pub(crate) mod tests {
             judge(
                 &LocalPathState {
                     entry: Some(entry_with(SyncState::Synced, Some(h(1)), Some(peer_m))),
-                    disk: Some(h(1))
+                    disk: LocalBody::Local(h(1))
                 },
                 &peer_m
             ),
@@ -1975,7 +2109,7 @@ pub(crate) mod tests {
             judge(
                 &LocalPathState {
                     entry: Some(entry_with(SyncState::Placeholder, None, Some(h(2)))),
-                    disk: None
+                    disk: LocalBody::Absent
                 },
                 &peer_m
             ),
@@ -1987,7 +2121,7 @@ pub(crate) mod tests {
             judge(
                 &LocalPathState {
                     entry: Some(entry_with(SyncState::Synced, Some(h(1)), Some(h(2)))),
-                    disk: Some(h(1))
+                    disk: LocalBody::Local(h(1))
                 },
                 &peer_m
             ),
@@ -2005,7 +2139,7 @@ pub(crate) mod tests {
                     judge(
                         &LocalPathState {
                             entry: Some(entry_with(state, Some(h(1)), Some(h(2)))),
-                            disk: Some(h(1))
+                            disk: LocalBody::Local(h(1))
                         },
                         &peer_m
                     ),
@@ -2019,7 +2153,7 @@ pub(crate) mod tests {
             judge(
                 &LocalPathState {
                     entry: Some(entry_with(SyncState::Synced, Some(h(1)), Some(h(2)))),
-                    disk: Some(h(3))
+                    disk: LocalBody::Local(h(3))
                 },
                 &peer_m
             ),
@@ -2030,11 +2164,52 @@ pub(crate) mod tests {
             judge(
                 &LocalPathState {
                     entry: Some(entry_with(SyncState::Synced, Some(h(1)), Some(h(2)))),
-                    disk: None
+                    disk: LocalBody::Absent
                 },
                 &peer_m
             ),
             MaterializeVerdict::Skip("tracked file missing on disk")
+        ));
+        // A cloud-only file is present, never absent, and never read: a
+        // synced row the platform freed behind is skipped, and so is an
+        // untracked one — neither is written over, nor taken for a fresh path.
+        assert!(matches!(
+            judge(
+                &LocalPathState {
+                    entry: Some(entry_with(SyncState::Synced, Some(h(1)), Some(h(2)))),
+                    disk: LocalBody::CloudOnly
+                },
+                &peer_m
+            ),
+            MaterializeVerdict::Skip("tracked file is cloud-only")
+        ));
+        for entry in [
+            None,
+            Some(entry_with(SyncState::Deleted, Some(h(1)), Some(h(2)))),
+        ] {
+            assert!(matches!(
+                judge(
+                    &LocalPathState {
+                        entry,
+                        disk: LocalBody::CloudOnly
+                    },
+                    &peer_m
+                ),
+                MaterializeVerdict::Skip("untracked local file present")
+            ));
+        }
+        // The placeholder row the fold left when it freed a stale hydrated
+        // copy reads its own verdict off the row alone — the bytes it would
+        // have to read are not there.
+        assert!(matches!(
+            judge(
+                &LocalPathState {
+                    entry: Some(entry_with(SyncState::Placeholder, None, Some(h(2)))),
+                    disk: LocalBody::CloudOnly
+                },
+                &peer_m
+            ),
+            MaterializeVerdict::Skip("placeholder — storage policy")
         ));
         // A settled tombstone with the disk empty: a recreate by another
         // author — nothing local to lose, written; even when the peer's
@@ -2044,7 +2219,7 @@ pub(crate) mod tests {
                 judge(
                     &LocalPathState {
                         entry: Some(entry_with(SyncState::Deleted, Some(h(1)), manifest)),
-                        disk: None
+                        disk: LocalBody::Absent
                     },
                     &peer_m
                 ),
@@ -2056,7 +2231,7 @@ pub(crate) mod tests {
             judge(
                 &LocalPathState {
                     entry: Some(entry_with(SyncState::Deleted, Some(h(1)), Some(h(2)))),
-                    disk: Some(h(3))
+                    disk: LocalBody::Local(h(3))
                 },
                 &peer_m
             ),
@@ -2071,7 +2246,7 @@ pub(crate) mod tests {
                         Some(h(1)),
                         Some(h(2))
                     )),
-                    disk: None
+                    disk: LocalBody::Absent
                 },
                 &peer_m
             ),
@@ -2090,6 +2265,7 @@ pub(crate) mod tests {
             stored_hashes: sealed.then(|| vec![h(0x51), h(0x52), h(0x53)]),
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         }
     }
 
@@ -2227,6 +2403,92 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
                 .expect("chunk serves");
+            assert_eq!(&got, body);
+        }
+        drop(writer);
+    }
+
+    /// A paged root is offered only with its pages (`file-sync.md` § Paged
+    /// manifests → *Compatibility*): while a page is not retained the root
+    /// answers `None` (the puller reads `missing`), and once every page is,
+    /// the root serves, each page serves by its own address, and the chunks
+    /// of every page re-derive through the memo the walk indexed.
+    #[tokio::test]
+    async fn the_composite_source_offers_a_paged_root_only_with_its_pages() {
+        const KEY: [u8; 32] = [0x3C; 32];
+        let stamp = Some(fauna_core::blob_seal::SealStamp::Version(1));
+        let dir = tempfile::tempdir().unwrap();
+        // Past the single-chunk threshold, so it cuts into several chunks.
+        let bytes: Vec<u8> = (0..12 * 1024 * 1024u64)
+            .map(|i| ((i.wrapping_mul(37) ^ (i / 239)) % 251) as u8)
+            .collect();
+        std::fs::write(dir.path().join("big.bin"), &bytes).unwrap();
+        let sealed = crate::seal::seal_blob(&bytes, Some((KEY, stamp))).unwrap();
+        let rule = fauna_core::manifest_paging::PagingRule::with_thresholds(1, 1, 1, 1);
+        let (root, pages) = sealed
+            .manifest
+            .clone()
+            .into_wire_parts_with(&rule, Some(&KEY))
+            .unwrap();
+        assert!(pages.len() > 1, "the fixture is a paged root");
+        let root_hash = fauna_core::data::ContentHash::of_raw(&root);
+
+        let db_path = dir.path().join("fs-state.db");
+        let writer = SyncDb::open(&db_path).unwrap();
+        writer
+            .retain_manifest(&hex::encode(root_hash.digest()), &root, "big.bin", stamp)
+            .unwrap();
+        let source = ShareServeSource::new(
+            SET_A,
+            SyncDb::open(&db_path).unwrap(),
+            std::sync::Arc::new(crate::share_body::TreeBodySource::new(
+                dir.path().to_path_buf(),
+            )),
+            fauna_core::folder_keys::FolderContentKeys::genesis(KEY, 1_760_000_000),
+        );
+        assert_eq!(
+            source
+                .manifest_bytes(&SET_A, &root_hash.digest())
+                .await
+                .unwrap(),
+            None,
+            "a root without its pages is not offered"
+        );
+        // The same-account door holds the same line.
+        let rows = SyncDbShareStore::new(SET_A, SyncDb::open(&db_path).unwrap());
+        assert_eq!(rows.retained_manifest_bytes(&root_hash.digest()), None);
+
+        for page in &pages {
+            let hash = fauna_core::data::ContentHash::of_raw(page);
+            writer
+                .retain_manifest(&hex::encode(hash.digest()), page, "big.bin", stamp)
+                .unwrap();
+        }
+        assert_eq!(
+            source
+                .manifest_bytes(&SET_A, &root_hash.digest())
+                .await
+                .unwrap(),
+            Some(root.clone())
+        );
+        assert_eq!(
+            rows.retained_manifest_bytes(&root_hash.digest()),
+            Some(root)
+        );
+        for page in &pages {
+            let hash = fauna_core::data::ContentHash::of_raw(page).digest();
+            assert_eq!(
+                source.manifest_bytes(&SET_A, &hash).await.unwrap().as_ref(),
+                Some(page),
+                "each page serves by its own address"
+            );
+        }
+        for (store_key, body) in &sealed.chunks {
+            let got = source
+                .chunk_body(&SET_A, &store_key.digest())
+                .await
+                .unwrap()
+                .expect("a chunk of every page serves");
             assert_eq!(&got, body);
         }
         drop(writer);

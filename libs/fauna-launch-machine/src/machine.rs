@@ -76,6 +76,19 @@ const LOCK_LAPSE_GRACE_SECS: u64 = 5;
 /// cancels the refresh.
 const LOCK_RECHECK_SECS: u64 = 60;
 
+/// The longest one launch attempt may take — the domain dial and the
+/// reach-hint fallback together — before it ends as `Offline { transient: true }`
+/// (`onboarding.md` § Wizard exit handling → *The finished wizard holds until
+/// the session is signed in*). The launch progress view always ends in the app
+/// or the retry offer: without this bound a host that drops packets held it for
+/// the OS connect timeout. Applies to [`LaunchMachine::start`],
+/// [`LaunchMachine::retry_silent_challenge`] and
+/// [`LaunchMachine::trust_nest_identity`]; a timed-out attempt is dropped whole,
+/// so its late reply never reaches the state (the superseded-verdict rule of
+/// `onboarding.md` § App-launch routing). The web page's launch watchdog sits
+/// above it on purpose.
+pub const LAUNCH_ATTEMPT_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct LaunchMachine {
     /// This machine's own handle, for the one task it arms itself: the
@@ -778,6 +791,26 @@ async fn cross_platform_sleep_secs(secs: u64) {
     fauna_sleep::sleep(std::time::Duration::from_secs(secs)).await;
 }
 
+/// `fut`'s output if it settles within `bound`, else `None` — and `fut` is
+/// dropped unfinished. Cross-target (the shared sleep is tokio's natively, the
+/// browser's timer on wasm), and hand-rolled so the leaf crate needs no
+/// `futures` dependency for one race.
+async fn within<F: std::future::Future>(bound: std::time::Duration, fut: F) -> Option<F::Output> {
+    use std::task::Poll;
+    let mut fut = std::pin::pin!(fut);
+    let mut timer = std::pin::pin!(fauna_sleep::sleep(bound));
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Some(out));
+        }
+        if timer.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 // Private helpers — not part of the UniFFI surface. UniFFI's export
 // macro can't process generics on `transition`, and these are
 // implementation details anyway.
@@ -1153,11 +1186,39 @@ impl LaunchMachine {
         #[cfg(target_arch = "wasm32")]
         let dial_url = nest_url.to_string();
         Self::clear_session_reach_hint(&dial_url);
+        // One attempt — the domain dial and the reach-hint fallback together —
+        // is bounded at `LAUNCH_ATTEMPT_BOUND`. Past it the attempt's future is
+        // dropped whole, so its late reply can never move the state, write the
+        // store or install a reach hint.
+        let outcome = match within(
+            LAUNCH_ATTEMPT_BOUND,
+            self.dial_with_reach_hint(secret, nest_url, &dial_url),
+        )
+        .await
+        {
+            Some(outcome) => outcome,
+            None => SilentChallengeOutcome::Transient {
+                error: fauna_i18n::strings::onboarding::launch::TRANSIENT_ERROR.to_string(),
+            },
+        };
+        self.apply_silent_challenge_outcome(secret, nest_url, outcome)
+            .await;
+    }
+
+    /// The dial half of one launch attempt: the domain first, the reach hint
+    /// only on a reachability failure, the hint deleted when the domain reaches
+    /// the pinned box (the rule [`Self::run_silent_challenge_phase`] documents).
+    async fn dial_with_reach_hint(
+        &self,
+        secret: &[u8],
+        nest_url: &str,
+        dial_url: &str,
+    ) -> SilentChallengeOutcome {
         let outcome = self
             .connector
             .silent_challenge(nest_url, None, secret)
             .await;
-        let outcome = match outcome {
+        match outcome {
             SilentChallengeOutcome::Transient { .. } => match self.persistence.load_reach_ipv4() {
                 Some(hint) => {
                     let outcome = self
@@ -1165,7 +1226,7 @@ impl LaunchMachine {
                         .silent_challenge(nest_url, Some(&hint), secret)
                         .await;
                     if matches!(outcome, SilentChallengeOutcome::Success(_)) {
-                        self.install_session_reach_hint(&dial_url, &hint);
+                        self.install_session_reach_hint(dial_url, &hint);
                     }
                     outcome
                 }
@@ -1178,7 +1239,16 @@ impl LaunchMachine {
                 self.persistence.delete_reach_ipv4();
                 answered
             }
-        };
+        }
+    }
+
+    /// The verdict half of one launch attempt: route the settled outcome.
+    async fn apply_silent_challenge_outcome(
+        &self,
+        secret: &[u8],
+        nest_url: &str,
+        outcome: SilentChallengeOutcome,
+    ) {
         match outcome {
             SilentChallengeOutcome::Success(v) => {
                 self.persistence.save_authenticated(

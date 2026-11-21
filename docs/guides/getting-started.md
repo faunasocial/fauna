@@ -10,11 +10,11 @@
   not an authority: everything you publish is signed by your identity, and
   every app checks the signatures itself. Anyone can run a nest.
 - **Handle** — your name on the network, written like an e-mail address:
-  `you@somedomain.com`. The domain part is the nest you live on.
+  `you@example.com`. The domain part is the nest you live on.
 
 ## What you need
 
-1. **The Fauna app** — see [Installing the app](install.md). The quickest path is the web app, which a nest serves itself by default at `https://<the-nest's-domain>/app/`.
+1. **The Fauna app** — see [Installing the app](install.md). The quickest path is the web app, which a nest run from Fauna's container image serves itself at `https://<the-nest's-domain>/app/`.
 2. **A nest to join** — one of:
    - an **invite** from someone who runs a nest,
    - **your own nest** — see [Set up a nest on the internet](nest-internet-setup.md)
@@ -37,7 +37,7 @@ Next the app offers your **recovery kit**: a second key, kept only by you and on
 
 ## Step 2 — Enter your handle
 
-Type the handle you want, e.g. `alice@yourdomain.com`, and press **Check**.
+Type the handle you want, e.g. `alice@example.com`, and press **Check**.
 The app probes the domain and tells you exactly what it found and what happens
 next. The common cases:
 
@@ -66,11 +66,11 @@ If the nest already has an owner, its admin decides who can join, usually by inv
   your request stands, and **Check again** asks right now if you are impatient.
   Your request survives closing the app — reopen it and you are back on this
   page.
-- **Have an invite code?** If someone sent you a code out-of-band (chat, e-mail, paper), enter it in the code field and check it — a valid code lets you in immediately, no waiting for review. Press **Continue** to redeem it: the app registers your handle on the nest and signs you in. A code works only while the nest lets people sign up with one: a new nest starts set to admit nobody on their own, and until its admin changes that, a code is refused — ask them to, or press **Request invite** instead. A code for the nest's free tier is also refused once the nest has as many free accounts as its admin allows, and any code is refused while the nest accepts only sign-ups carrying an age range a store has verified, which no app can send yet.
+- **Have an invite code?** If someone sent you a code out-of-band (chat, e-mail, paper), enter it in the code field and check it — a valid code lets you in immediately, no waiting for review. Press **Continue** to redeem it: the app registers your handle on the nest and signs you in. A code works only while the nest lets people sign up with one: a new nest starts set to admit nobody on their own, and until its admin changes that, a code is refused — ask them to, or press **Request invite** instead. A code for the nest's free tier is also refused once the nest has as many free accounts as its admin allows, and any code is refused while the nest accepts only sign-ups carrying an age range a store has verified, which no app can send today.
 
 **Joining a nest accepts its rules.** If the nest's admin has published rules of their own — filters your app applies to what reaches you through the nest (see [the app tour](app-tour.md#feeds)) — the invite page lists them just above the line saying that by continuing you agree to the Fauna terms and content guidelines, under a heading that names the nest and says that continuing accepts them. Each rule shows whether it blocks or hides behind a warning, how strict it is where that applies, and the admin's reason in their own words. If none of the rules can apply on your device — because they were written by a newer version of Fauna, or contain an error — a sentence under the heading says so, whether or not any rule is listed. You can see the rules in force at any time in Settings, on the **Status** page.
 
-**On an Android phone, the app may ask Google Play for your age range.** It asks during this step, before your request or code reaches the nest. Google Play may show its own prompt, and you can decline. If a range is shared, it goes to the nest with your request or code, marked as declared — the store's verification of it is not switched on yet — and a line on the invite page tells you so. With a request, the nest's admin sees it, and it only helps them decide. With an invite code it is not kept, but it can decide for you. If the range says you are a minor, an ordinary code does not let you in; a code the nest's admin made with your guardian named on it does, and so does a join request the admin approves with your guardian picked. A nest can also be set to accept codes only together with a range the store has verified. If nothing is shared, nothing is sent and the line does not appear.
+**On an Android phone, the app may ask Google Play for your age range.** It asks during this step, before your request or code reaches the nest. Google Play may show its own prompt, and you can decline. If a range is shared, it goes to the nest with your request or code, marked as declared — the store's verification of it is not switched on — and a line on the invite page tells you so. With a request, the nest's admin sees it, and it only helps them decide. With an invite code it is not kept, but it can decide for you. If the range says you are a minor, an ordinary code does not let you in; a code the nest's admin made with your guardian named on it does, and so does a join request the admin approves with your guardian picked. A nest can also be set to accept codes only together with a range the store has verified. If nothing is shared, nothing is sent and the line does not appear.
 
 **When the admin approves, the app signs you in by itself.** There is nothing to
 press and nothing to keep an eye on — leave the page open and it moves you into
@@ -91,7 +91,7 @@ the nest printed when it was set up (the person who installed it has it; if
 that's you, see the self-host guide's claim step). Hyphens or not, upper- or
 lowercase — the code is accepted either way.
 
-If instead your handle's domain has **no nest at all yet**, the wizard offers to **build one for you** — it creates a small server in your own cloud account, installs Fauna on it, and claims it as yours automatically, no terminal required. A browser cannot trust a brand-new server the way the other apps can, so from the web app the build may not finish yet; build it from a desktop, phone or terminal app. Your cloud provider bills you directly for the server. See *[Set up a nest from the app](nest-app-setup.md)*.
+If instead your handle's domain has **no nest at all yet**, the wizard offers to **build one for you** — it creates a small server in your own cloud account, installs Fauna on it, and claims it as yours automatically, no terminal required. A browser cannot trust a brand-new server the way the other apps can, so from the web app the build may not finish; build it from a desktop, phone or terminal app. Your cloud provider bills you directly for the server. See *[Set up a nest from the app](nest-app-setup.md)*.
 
 Claiming makes you the nest's **admin** and registers your handle in one
 stroke. The wizard then asks one setup question — how it's connected to the
@@ -99,7 +99,7 @@ internet — and drops you into the app as its signed-in owner. Your content is 
 
 Right at the end — of claiming a nest, and equally of joining one in Step 3a —
 you may be offered one optional extra: **trust this box?**
-Saying yes lets the nest read your mail after it has arrived, to run its virus and spam checks on it again when those checks are updated (mail from outside your nest is checked once as it arrives, whatever you answer), and read your calendar for itself — a community labeler that reads your mail gets its own trust when you subscribe to it, and a calendar or mail app you connect works with its own password either way — and that trust renews itself while you use Fauna, so it doesn't quietly run out. Saying no changes nothing you have now: mail from outside your nest is still checked as it arrives, and only those later re-checks wait until you say yes. Either
+Saying yes lets the nest read your mail after it has arrived, to run its virus and spam checks on it again when those checks are updated (mail from outside your nest is checked once as it arrives, whatever you answer), and read your calendar for itself, and show the paid posts you publish on the web to the people who pay for them, if you already have paid tiers — a community labeler that reads your mail gets its own trust when you subscribe to it, and a calendar or mail app you connect works with its own password either way — and that trust renews itself while you use Fauna, so it doesn't quietly run out. Saying no changes nothing you have now: mail from outside your nest is still checked as it arrives, and only those later re-checks wait until you say yes. Either
 way the answer is not final. Everything you have trusted a nest with is listed
 under **Settings → Nests**, where you can withdraw it at any time or grant it
 there later, one purpose at a time.

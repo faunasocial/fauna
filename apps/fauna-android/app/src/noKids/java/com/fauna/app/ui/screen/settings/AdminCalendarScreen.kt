@@ -11,6 +11,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
@@ -20,10 +21,24 @@ import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.faunaReadGate
+import com.fauna.app.ui.util.paintedReason
+import com.fauna.app.ui.util.pressAsked
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.and
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.localized
+import uniffi.fauna_core.Possibility
 import com.fauna.app.ui.viewmodel.AdminCalendarVM
+import com.fauna.app.ui.viewmodel.AdminEntryRereadEffect
 import uniffi.fauna_client_mail_settings.CaldavPolicyStatus
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The flat admin `admin-calendar` page (`admin.md` § 8 Calendar; `caldav-server.md`
@@ -46,15 +61,13 @@ fun AdminCalendarScreen(
     navController: NavController,
     vm: AdminCalendarVM = hiltViewModel(),
 ) {
+    AdminEntryRereadEffect(vm.entryReread)
     val snapshot by vm.snapshot.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val toggleAnswer by vm.toggleAnswer.collectAsState()
     val appMessages = LocalAppMessages.current
 
     LaunchedEffect(errorMessage) { errorMessage?.let { appMessages.showError(it) } }
-
-    // The port is client-side validated via the shared `parsePort` (u16 in
-    // [1, 65535], reject 0) before dispatch; a bad value surfaces via the global banner.
-    val invalidPortMessage = stringResource(R.string.admin_calendar_page_caldav_port_invalid)
 
     AdminCalendarContent(
         caldavEnabled = snapshot.caldavEnabled,
@@ -63,7 +76,8 @@ fun AdminCalendarScreen(
         onBack = { navController.exitAdminToPrimary() },
         onSetCaldavEnabled = vm::setCaldavEnabled,
         onSavePort = vm::setCaldavPort,
-        onInvalidPort = { appMessages.showError(invalidPortMessage) },
+        onPortRefused = appMessages::showError,
+        toggleAnswer = toggleAnswer,
     )
 }
 
@@ -76,11 +90,24 @@ fun AdminCalendarContent(
     onBack: () -> Unit,
     onSetCaldavEnabled: (Boolean) -> Unit,
     onSavePort: (Int) -> Unit,
-    onInvalidPort: () -> Unit,
+    // A refused port save's reason, for the global `error-message` banner.
+    onPortRefused: (String) -> Unit,
     // The shared `parse_port` validator (u16 in [1, 65535], reject 0), injected so
     // the Robolectric content-test stays FFI-free (mirrors AttendeeRow's `view`).
     parsePort: (String) -> Int? = { com.fauna.ffi.parsePort(it)?.toInt() },
+    // The port save's draft answer — the shared
+    // `CaldavPolicyMachine::port_draft_possibility` (admin.md § Errors & edge
+    // cases, the form bullet). Painted and asked again at the press. Never
+    // blocks on a domain deployment: the port is inert there yet saveable.
+    portDraft: (String) -> Possibility = { askForm { com.fauna.ffi.caldavPortDraftPossibility(it) } },
+    // The toggle's and the port save's answer — the shared
+    // `CaldavPolicyMachine::toggle_possibility` (admin.md § Errors & edge
+    // cases, *Controls wait for their read*): blocked until `get_mail_config`
+    // resolves, after a failed read, and while a change is on its way. Painted,
+    // and asked again at the press (refused onto [onPortRefused]).
+    toggleAnswer: Possibility = Possibility.Possible,
 ) {
+    val context = LocalContext.current
     Scaffold(
         topBar = {
             TopAppBar(
@@ -117,7 +144,10 @@ fun AdminCalendarContent(
 
             // ── CalDAV enable (deployment-wide master toggle; sibling of mail enable) ──
             // A dispatch-on-change toggle IS the commit — no buffer, no save.
-            val caldavGate = faunaGate("fauna.bridges.set_caldav_enabled", enabled = !working)
+            val caldavGate = faunaReadGate(
+                toggleAnswer,
+                faunaGate("fauna.bridges.set_caldav_enabled", enabled = !working && toggleAnswer.isPossible),
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -137,9 +167,9 @@ fun AdminCalendarContent(
                 }
                 Switch(
                     checked = caldavEnabled,
-                    onCheckedChange = onSetCaldavEnabled,
+                    onCheckedChange = { on -> pressAsked(context, toggleAnswer, onPortRefused) { onSetCaldavEnabled(on) } },
                     enabled = caldavGate.enabled,
-                    modifier = Modifier.testTag(Ids.ADMIN_CALENDAR_ENABLED_TOGGLE),
+                    modifier = Modifier.testTag(Ids.ADMIN_CALENDAR_ENABLED_TOGGLE).paintedReason(caldavGate.reason),
                 )
             }
 
@@ -151,8 +181,10 @@ fun AdminCalendarContent(
                 caldavPort = caldavPort,
                 working = working,
                 onSavePort = onSavePort,
-                onInvalidPort = onInvalidPort,
+                onPortRefused = onPortRefused,
                 parsePort = parsePort,
+                portDraft = portDraft,
+                readAnswer = toggleAnswer,
             )
         }
     }
@@ -161,19 +193,23 @@ fun AdminCalendarContent(
 /**
  * The admin-set CalDAV listener port (`admin-calendar-caldav-port-input` +
  * `admin-calendar-caldav-port-save-button`). Holds the in-progress edit string
- * locally (re-seeded whenever the persisted [caldavPort] changes), validates the
- * port on save via the shared `parsePort` (u16 in `[1, 65535]`), then dispatches
- * `set_caldav_port` via [onSavePort] — or surfaces the invalid-port message via
- * [onInvalidPort] (the global error banner).
+ * locally (re-seeded whenever the persisted [caldavPort] changes). The save is
+ * painted from the shared port draft answer ([portDraft]) and asks it again at
+ * the press: a malformed port is refused with its reason via [onPortRefused]
+ * (the global error banner) and nothing is sent; otherwise it dispatches
+ * `set_caldav_port` via [onSavePort].
  */
 @Composable
 private fun CaldavPortField(
     caldavPort: Int,
     working: Boolean,
     onSavePort: (Int) -> Unit,
-    onInvalidPort: () -> Unit,
+    onPortRefused: (String) -> Unit,
     parsePort: (String) -> Int?,
+    portDraft: (String) -> Possibility,
+    readAnswer: Possibility,
 ) {
+    val context = LocalContext.current
     var edited by remember(caldavPort) { mutableStateOf(caldavPort.toString()) }
 
     // Unlike the spam page's threshold override — where the field IS the commit,
@@ -181,7 +217,15 @@ private fun CaldavPortField(
     // So the ordinary split applies: the input is a pure buffer and stays live
     // with no nest, only Save declares. Same shape as the admin-nest serving-port
     // save the admin-nest batch landed.
-    val portGate = faunaGate("fauna.bridges.set_caldav_port", enabled = !working)
+    // The read first (a page still loading says so before any draft
+    // complaint), then the draft: the port shown is the read's, so a save over
+    // an unread value would send a guess.
+    val draft = portDraft(edited)
+    val portGate = faunaReadGate(
+        readAnswer,
+        faunaGate("fauna.bridges.set_caldav_port", enabled = !working && (readAnswer and draft).isPossible),
+        draft,
+    )
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -200,22 +244,23 @@ private fun CaldavPortField(
                 },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                enabled = !working,
-                modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_CALENDAR_CALDAV_PORT_INPUT),
+                enabled = !working && readAnswer.isPossible,
+                modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_CALENDAR_CALDAV_PORT_INPUT)
+                    .paintedReason(localized(readAnswer.blockedReason)),
             )
             DisabledControlReasonText(portGate.reason)
         }
         Button(
             onClick = {
+                val refusal = formRefusal(context, readAnswer and portDraft(edited))
                 val port = parsePort(edited)
-                if (port == null) {
-                    onInvalidPort()
-                } else {
-                    onSavePort(port)
+                when {
+                    refusal != null -> refusal.reason?.let(onPortRefused)
+                    port != null -> onSavePort(port)
                 }
             },
             enabled = portGate.enabled,
-            modifier = Modifier.testTag(Ids.ADMIN_CALENDAR_CALDAV_PORT_SAVE_BUTTON),
+            modifier = Modifier.testTag(Ids.ADMIN_CALENDAR_CALDAV_PORT_SAVE_BUTTON).paintedReason(portGate.reason),
         ) { Text(stringResource(R.string.admin_calendar_page_caldav_port_save)) }
     }
 }

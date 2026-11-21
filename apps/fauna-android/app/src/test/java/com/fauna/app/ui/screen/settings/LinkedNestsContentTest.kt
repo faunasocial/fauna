@@ -218,12 +218,12 @@ class LinkedNestsContentTest {
 
     private fun render(
         snap: LinkedNestsSnapshot,
-        onLink: (String) -> Unit = {},
+        onLink: (String, (Boolean) -> Unit) -> Unit = { _, _ -> },
         onUnlink: (String) -> Unit = {},
         onSetLens: (String, TrustLens) -> Unit = { _, _ -> },
         onRenew: (ByteArray) -> Unit = {},
         onRevoke: (ByteArray) -> Unit = {},
-        onMint: (String, String, List<TrustScope>, TrustGrantDuration) -> Unit = { _, _, _, _ -> },
+        onMint: (String, String, List<TrustScope>, TrustGrantDuration, (Boolean) -> Unit) -> Unit = { _, _, _, _, _ -> },
         onSetBlessed: (String, Boolean) -> Unit = { _, _ -> },
         onRevokeBackupSeal: () -> Unit = {},
         onRevokeBackupWriter: (String) -> Unit = {},
@@ -282,7 +282,7 @@ class LinkedNestsContentTest {
     @Test
     fun addSubmitFiresLinkWithEnteredValue() {
         var linked: String? = null
-        render(snapshot(), onLink = { linked = it })
+        render(snapshot(), onLink = { raw, done -> linked = raw; done(true) })
         composeTestRule.onNodeWithTag("nests-add-button").performClick()
         composeTestRule.onNodeWithTag("nests-add-input").performTextInput("https://example.nest")
         composeTestRule.onNodeWithTag("nests-add-submit-button").performClick()
@@ -600,7 +600,7 @@ class LinkedNestsContentTest {
         var mintedScope: List<TrustScope>? = null
         render(
             snapshot(home = homeRow(mintOptions = listOf(paywalledOption(tier = "gold", holder = "web-serve")))),
-            onMint = { _, holder, scope, _ -> mintedHolder = holder; mintedScope = scope },
+            onMint = { _, holder, scope, _, done -> mintedHolder = holder; mintedScope = scope; done(true) },
         )
         // Reveal the form, open the scope select, pick the per-tier paywalled option.
         composeTestRule.onNodeWithTag("nest-trust-grant-mint-button").performScrollTo().performClick()
@@ -888,7 +888,7 @@ class LinkedNestsContentTest {
         var minted: TrustGrantDuration? = null
         render(
             snapshot(home = homeRow(mintOptions = listOf(paywalledOption(tier = "gold")))),
-            onMint = { _, _, _, d -> minted = d },
+            onMint = { _, _, _, d, done -> minted = d; done(true) },
         )
         composeTestRule.onNodeWithTag("nest-trust-grant-mint-button").performScrollTo().performClick()
         // The key text is unresolved in the harness, so it reads back verbatim.

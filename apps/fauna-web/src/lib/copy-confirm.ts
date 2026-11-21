@@ -12,6 +12,7 @@
 // failure is swallowed, so it is logged (category 3), without the value.
 import { logMessage } from './wasm';
 import { t } from './i18n/strings.ts';
+import { copyOutcome, type CopyOutcome } from './copy-outcome.ts';
 
 export async function copyAndConfirm(text: string): Promise<void> {
   try {
@@ -20,4 +21,18 @@ export async function copyAndConfirm(text: string): Promise<void> {
     logMessage('warn', 'fauna_web::notice', `clipboard write failed: ${e}`);
   }
   logMessage('info', 'fauna_web::notice', t.common.copied);
+}
+
+/** A copy whose outcome the page paints (`copy-outcome.ts`): unlike
+ *  `copyAndConfirm` a failed write is NOT confirmed — it is reported for the
+ *  page's error line (`common.copy_failed`) and logged without the value;
+ *  "Copied!" is recorded in the ring only when the clipboard took the text. */
+export async function copyAndReport(text: string): Promise<CopyOutcome> {
+  const outcome = await copyOutcome(text);
+  if (outcome.failed === null) {
+    logMessage('info', 'fauna_web::notice', t.common.copied);
+  } else {
+    logMessage('warn', 'fauna_web::notice', 'clipboard write failed');
+  }
+  return outcome;
 }

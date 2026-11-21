@@ -48,26 +48,27 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         for observer: NSFileProviderChangeObserver,
         from anchor: NSFileProviderSyncAnchor
     ) {
-        // M2 read path: no incremental delta tracking (always reports zero changes
-        // on this channel) — materialization instead goes through a fresh
-        // `enumerateItems` the OS issues off a re-signal, exactly like the
-        // extension's own periodic tick (`FileProviderExtension.startRefreshTick`).
+        // The change feed (`on-demand-files-apple.md` § Apple File Provider
+        // binding, *the change feed*): a replicated File Provider learns of a
+        // change to a container it already lists ONLY from here — a signal
+        // makes the OS ask what moved since the anchor it holds and never
+        // re-lists the container. So the working set and the root report the
+        // set's changes since `anchor` (`host.changesSince`, the shared
+        // `serve_changes_since`): what a pull, a peer's landed body or a
+        // posture flip added or changed, and what went. Each item names its
+        // own parent, so one answer covers the whole set. Other containers
+        // report nothing.
         //
-        // This is also the app-side wiring's landing point (file-sync.md § Remote-
-        // change nudge, the `fauna.sync.changed` push arm): `signalEnumerator` is
-        // the ONLY externally-reachable hook into this appex process, so
-        // `FaunaClient.swift`'s push observer calling
-        // `FileProviderCoordinator.signalChanged(folder:folderHash:)` from the MAIN app lands
-        // here. Refresh first, then — mirroring the tick's own refresh-then-signal
-        // pairing — re-signal iff something new landed, so the OS re-lists
-        // reflecting the now-updated engine rows. Self-terminating: a second
-        // refresh() with nothing new returns `false` and no further signal fires.
+        // This is also the app-side wiring's landing point (file-sync.md §
+        // Remote-change nudge, the `fauna.sync.changed` push arm):
+        // `signalEnumerator` is the ONLY externally-reachable hook into this
+        // appex process, so the MAIN app's push observer lands here. Refresh
+        // first, so the feed reports what the pull folded; a refresh that
+        // changed something re-signals, and the next ask reports nothing new.
         //
-        // The working set's feed also reports the items whose kept bit a refresh
-        // flipped (`FileProviderWorkingSetFeed`), the one signal that makes the OS
-        // re-read an item it already lists — so a folder flipped between full and
-        // metadata-only reaches each item's keep policy (`on-demand-files-apple.md`
-        // § Apple File Provider binding). Every other container reports nothing.
+        // The working set also reports the items whose kept bit a refresh
+        // flipped (`FileProviderWorkingSetFeed`), so a folder flipped between
+        // full and metadata-only reaches each item's keep policy.
         let host = self.host
         let domain = self.domain
         let container = self.container
@@ -76,19 +77,27 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             for signalled in FileProviderWorkingSetFeed.containersToSignal(changed: changed) {
                 try? await NSFileProviderManager(for: domain)?.signalEnumerator(for: signalled)
             }
-            guard container == .workingSet else {
+            guard FileProviderWorkingSetFeed.reportsTheSet(container) else {
                 observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
                 return
             }
             let readOnly = await FileProviderItemCapabilities.isReadOnly(host)
+            let takesFlips = container == .workingSet
             await FileProviderWorkingSetFeed.reportChanges(
-                to: observer, upTo: anchor,
-                takeKeptFlips: { try await host.takeKeptFlips() },
+                to: observer, from: anchor,
+                changesSince: { try await host.changesSince(anchor: $0) },
+                takeKeptFlips: { takesFlips ? try await host.takeKeptFlips() : [] },
                 item: { FileProviderItem(ffi: $0, readOnly: readOnly) })
         }
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
-        completionHandler(NSFileProviderSyncAnchor(Data("v1".utf8)))
+        // The feed's anchor for the tree as it stands; a host that cannot say
+        // hands back none, and the OS starts from a full report.
+        let host = self.host
+        Task {
+            let anchor = try? await host.currentChangeAnchor()
+            completionHandler(anchor.map { NSFileProviderSyncAnchor(Data($0)) })
+        }
     }
 }

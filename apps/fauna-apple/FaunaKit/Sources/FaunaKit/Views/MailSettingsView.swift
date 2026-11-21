@@ -116,7 +116,19 @@ public struct MailSettingsView: View {
                 if let pending = vm.snapshot?.pendingRotation {
                     pendingRotationBanner(pending)
                 }
-                if vm.credentialManagementReachable {
+                // The credential section, painted from the shared
+                // `credential_management_possibility()` (`mail-settings.md`
+                // § Errors & edge cases, *The in-page predicates*; tui's
+                // `mail_elements`): absent → nothing; blocked (mail off, nothing
+                // else reaching the credential) → Add password alone, disabled,
+                // its reason naming the enable toggle; possible → the section.
+                let credentials = vm.credentialManagementAnswer
+                if credentials.isShown && !credentials.isPossible {
+                    groupedSection {
+                        addCredentialButton(credentials)
+                    }
+                }
+                if credentials.isPossible {
                     manageSection
                     // Rotate-keys is likewise an inline reveal (same `.sheet`
                     // in-process-registration gap). Reachable only with ≥1 credential, so
@@ -151,6 +163,13 @@ public struct MailSettingsView: View {
         .onChange(of: client?.mailSettledGeneration) { _, _ in
             Task { await vm.rehydrateOnSettle() }
         }
+        // This page's machine is the one the person turns mail on with: hand
+        // every snapshot it reads to the session's mail-usable gate, so the
+        // mail sub-pages' rail rows come alive without leaving the page
+        // (`mail-settings.md` § Errors & edge cases, the mail-usable gate).
+        .onChange(of: vm.snapshot) { _, snapshot in
+            if let snapshot { client?.mailUsable.observe(snapshot) }
+        }
     }
 
     // MARK: - Enable toggle
@@ -166,16 +185,18 @@ public struct MailSettingsView: View {
                 get: { vm.enabled },
                 set: { wantOn in setEnabled(wantOn) }
             ))
-            .disabled(unavailable)
             .accessibilityIdentifier(Ids.mailSettingsEnabledToggle)
             .automationActivate(
                 Ids.mailSettingsEnabledToggle,
-                isEnabled: { !(!vm.enabled && (vm.snapshot?.mailUnavailableHere ?? false)) },
                 value: {
                     if vm.enabled { return "on" }
                     return (vm.snapshot?.mailUnavailableHere ?? false) ? "unavailable" : "off"
                 }
             ) { setEnabled(!vm.enabled) }
+            // One answer for both the never-read state and the unavailable box
+            // (mail-settings.md § Errors & edge cases, *Controls wait for their
+            // reads*): the enable form never opens on the never-read "off".
+            .faunaPossible(vm.enableAnswer)
             if unavailable {
                 Text(L.mailSettings.unavailableNotice)
                     .font(.caption)
@@ -184,6 +205,7 @@ public struct MailSettingsView: View {
                     .automationValue(Ids.mailSettingsUnavailableNotice,
                                      text: { L.mailSettings.unavailableNotice })
             } else if !vm.enabled {
+                FaunaPossibilityReason(vm.enableAnswer)
                 Text(L.settings.mail.sectionDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -285,24 +307,31 @@ public struct MailSettingsView: View {
             Text(L.mailSettings.credentialsOnConnectedApps)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Button(L.settings.mail.addCredential) { openAddCredential() }
-                .accessibilityIdentifier(Ids.mailSettingsAddCredentialButton)
-                .automationActivate(Ids.mailSettingsAddCredentialButton) {
-                    openAddCredential()
-                }
+            addCredentialButton(vm.credentialManagementAnswer)
             if !(vm.snapshot?.credentials.isEmpty ?? true) {
-                Button(L.settings.mail.rotateKeys) { showingRotate = true }
+                Button(L.settings.mail.rotateKeys) { openRotate() }
                     .accessibilityIdentifier(Ids.mailSettingsRotateKeysButton)
-                    .automationActivate(
-                        Ids.mailSettingsRotateKeysButton,
-                        isEnabled: { !isRotating }
-                    ) { showingRotate = true }
-                    .disabled(isRotating)
+                    .automationActivate(Ids.mailSettingsRotateKeysButton) { openRotate() }
+                    .faunaPossible(vm.rotateKeysAnswer)
+                FaunaPossibilityReason(vm.rotateKeysAnswer)
             }
             automationText(Ids.mailSettingsKeysInfo, L.mailSettings.keysInfo)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// `mail-settings-add-credential-button`, painted from the credential
+    /// section's shared answer, its reason beside it when blocked.
+    @ViewBuilder
+    private func addCredentialButton(_ answer: Possibility) -> some View {
+        Button(L.settings.mail.addCredential) { openAddCredential() }
+            .accessibilityIdentifier(Ids.mailSettingsAddCredentialButton)
+            .automationActivate(Ids.mailSettingsAddCredentialButton) {
+                openAddCredential()
+            }
+            .faunaPossible(answer)
+        FaunaPossibilityReason(answer)
     }
 
     // MARK: - Serve-here toggle
@@ -376,9 +405,12 @@ public struct MailSettingsView: View {
                     Ids.mailSettingsAutorespondToggle,
                     value: { (vm.autorespond?.enabled ?? false) ? "on" : "off" }
                 ) { toggleAutorespond() }
-                // No gate: the reply is a filter rule, and its create
+                // No offline gate: the reply is a filter rule, and its create
                 // (`fauna.email.filters.create`) is OfflineQueued — it never
                 // desensitizes, so neither the toggle nor the message declares.
+                // Both wait for the reply's own read (mail-settings.md § Errors
+                // & edge cases, *Controls wait for their reads*).
+                .faunaPossible(vm.autorespondAnswer)
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text(L.mailSettings.autorespondMessageLabel)
@@ -390,6 +422,10 @@ public struct MailSettingsView: View {
                         commit: { Task { await vm.commitAutorespondMessage() } }
                     )
                     .onSubmit { Task { await vm.commitAutorespondMessage() } }
+                    .faunaPossible(vm.autorespondAnswer)
+                // The input keeps its prompt as its label: the reason is a line
+                // of its own.
+                FaunaPossibilityReason(vm.autorespondAnswer)
             }
             if let quota = vm.mailboxQuotaText {
                 automationText(Ids.mailSettingsMailboxQuota, quota)
@@ -453,6 +489,10 @@ public struct MailSettingsView: View {
                     )
                     .onSubmit { Task { await vm.commitForwardAllTo() } }
                     .faunaGate("fauna.bridges.set_forward_all_to")
+                    // Waits for the forward-all read: an empty pre-read draft
+                    // never clears a forward. The reason is a line of its own.
+                    .faunaPossible(vm.forwardAllAnswer)
+                FaunaPossibilityReason(vm.forwardAllAnswer)
                 Text(L.mailSettings.forwardAllToSubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -468,6 +508,9 @@ public struct MailSettingsView: View {
                     )
                     .onSubmit { Task { await vm.commitForwardPerHour() } }
                     .faunaGate("fauna.bridges.set_forward_per_hour")
+                    // Waits for the read that brings its ceiling.
+                    .faunaPossible(vm.forwardPerHourAnswer)
+                FaunaPossibilityReason(vm.forwardPerHourAnswer)
                 Text(vm.forwardPerHourHintText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -551,13 +594,11 @@ public struct MailSettingsView: View {
         mailStatusText(enabled: vm.enabled, status: vm.snapshot?.status ?? .idle)
     }
 
-    /// A rotation is running, or one was interrupted and is waiting to be resumed:
-    /// the rotate button stays disabled for both (`mail-settings.md` § Architectural
-    /// rules 5) — the shared machine already refuses a second `StartRotation`.
-    private var isRotating: Bool {
-        if vm.snapshot?.pendingRotation != nil { return true }
-        if case .rotationInProgress = vm.snapshot?.status { return true }
-        return false
+    /// Arm the rotate confirm — the press asks the rotate answer the button
+    /// painted from (rule 7), so a blocked press says why instead of opening.
+    private func openRotate() {
+        if refusePress(vm.rotateKeysAnswer, errorMessage: &vm.errorMessage) { return }
+        showingRotate = true
     }
 
     /// Flip the enable toggle. Shared by the `Toggle`'s `set` closure and its
@@ -565,6 +606,9 @@ public struct MailSettingsView: View {
     /// inline add-credential reveal in `.enable` mode (first credential = enable
     /// mail); turning off arms the inline disable-confirm overlay.
     private func setEnabled(_ wantOn: Bool) {
+        // The press asks what the paint asked (rule 7) — once the machine
+        // exists; a never-built machine is the dispatch's own refusal.
+        if vm.machine != nil, refusePress(vm.enableAnswer, errorMessage: &vm.errorMessage) { return }
         if wantOn {
             addCredentialMode = .enable
         } else {
@@ -579,6 +623,8 @@ public struct MailSettingsView: View {
     /// `open_form(FormMode::Add)` (the add button is always Add; only the
     /// enabled-toggle on-path is Enable).
     private func openAddCredential() {
+        // The press asks what the paint asked (rule 7).
+        if refusePress(vm.credentialManagementAnswer, errorMessage: &vm.errorMessage) { return }
         addCredentialMode = .add
     }
 
@@ -854,7 +900,6 @@ struct MailRotateKeysSheet: View {
     /// old `.sheet` `@Environment(\.dismiss)` — see `MailAddCredentialSheet.onClose`.
     let onClose: () -> Void
     @State private var excluded: Set<String> = []
-    @State private var rotating = false
 
     // Mounted INLINE inside `MailSettingsView`'s eager `VStack`: a `VStack` of
     // `groupedSection` cards (NOT a `Form`), the same eager shape as the host —
@@ -884,7 +929,7 @@ struct MailRotateKeysSheet: View {
                 }
             }
             .accessibilityIdentifier(Ids.mailRotateKeysExcludeList)
-            if rotating {
+            if vm.rotationInFlight {
                 groupedSection {
                     ProgressView()
                         .accessibilityIdentifier(Ids.mailRotateKeysProgressIndicator)
@@ -897,17 +942,17 @@ struct MailRotateKeysSheet: View {
                 Button(L.settings.mail.rotateConfirm, role: .destructive) {
                     confirmRotate()
                 }
-                .disabled(rotating)
                 .accessibilityIdentifier(Ids.mailRotateKeysConfirmButton)
-                .automationActivate(
-                    Ids.mailRotateKeysConfirmButton,
-                    isEnabled: { !rotating }
-                ) { confirmRotate() }
+                .automationActivate(Ids.mailRotateKeysConfirmButton) { confirmRotate() }
                 // Rotation revokes each old blob and provisions its replacement
                 // at the nest (`rotation.rs`). Arming — `mail-settings-rotate-
                 // keys-button` — and the per-credential exclusion checkboxes are
                 // local, so only this confirm declares.
                 .faunaGate("fauna.bridges.provision_wrapped_mls_blob")
+                // Painted from the rotate button's own answer (still saving
+                // while this rotation runs, pending while one waits to resume).
+                .faunaPossible(vm.rotateKeysAnswer)
+                FaunaPossibilityReason(vm.rotateKeysAnswer)
                 Button(L.settings.mail.cancel, role: .cancel) { onClose() }
                     .accessibilityIdentifier(Ids.mailRotateKeysCancelButton)
                     .automationActivate(Ids.mailRotateKeysCancelButton) { onClose() }
@@ -923,9 +968,7 @@ struct MailRotateKeysSheet: View {
     /// `.automationActivate` (multi-statement `Task`, so extracted per convention).
     private func confirmRotate() {
         Task {
-            rotating = true
-            await vm.dispatch(.startRotation(excludedCredentials: Array(excluded)))
-            rotating = false
+            await vm.startRotation(excludedCredentials: Array(excluded))
             if vm.errorMessage == nil { onClose() }
         }
     }

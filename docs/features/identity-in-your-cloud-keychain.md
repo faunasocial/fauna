@@ -15,13 +15,12 @@ absences:
 
 ## What a user gets
 
-On iPhone you can choose to keep a copy of your identity in your iCloud Keychain
-as well as on the device. It is off until you turn it on, so by default your
-identity stays out of iCloud. With it on, a new iPhone restored from your Apple
-account, with iCloud Keychain on, finds your identity when the app first starts
-there. The Mac app shows the same switch but cannot make the copy yet: turning
-it on leaves it off and says so. Once it can, your Mac and your iPhone on one
-Apple account will share the one copy. Turning it off removes the copy from iCloud Keychain and
+On iPhone and iPad you can choose to keep a copy of your identity in your iCloud
+Keychain as well as on the device. It is off until you turn it on, so by default
+your identity stays out of iCloud. With it on, a new iPhone or iPad restored from
+your Apple account, with iCloud Keychain on, finds your identity when the app
+first starts
+there. The Mac app shows the same switch but cannot make the copy: turning it on leaves it off and says so. Turning it off removes the copy from iCloud Keychain and
 nothing more: every device that already has your identity keeps it. Adding a
 device and your recovery kit remain the main ways to have your identity in more
 than one place; the cloud copy is an extra you can opt into.

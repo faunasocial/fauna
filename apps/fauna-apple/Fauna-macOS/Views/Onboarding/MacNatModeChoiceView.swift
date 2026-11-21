@@ -68,12 +68,11 @@ struct MacNatModeChoiceView: View {
 
                 Button(L.onboarding.natMode.confirmButton) { submitMode() }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!snap.submitEnabled)
                 .accessibilityIdentifier(Ids.natModeConfirmButton)
-                .automationActivate(Ids.natModeConfirmButton,
-                                    isEnabled: { vm.machine.natModeSnapshot().submitEnabled }) {
+                .automationActivate(Ids.natModeConfirmButton) {
                     submitMode()
                 }
+                .faunaPossible(vm.machine.natModeSubmitPossibility())
             }
         }
         .padding()

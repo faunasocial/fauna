@@ -269,4 +269,93 @@ class AutomationSemanticsTest {
         val label = node(resourceName = null, stateDescription = "list", isClickable = false)
         assertFalse(AutomationSemantics.isOptionFor(label, "list", "kind-select"))
     }
+
+    // ── reason (`PlatformDriver.blocked_reason`) ────────────────────────
+
+    /** What `Modifier.paintedReason(reason)` publishes for a blocked control with no state of its own. */
+    private fun blockedNode(reason: String, state: String = "") = node(
+        isEnabled = false,
+        stateDescription = AutomationAttributePack.pack("reason" to reason, "state" to state),
+    )
+
+    @Test
+    fun aBlockedControlPublishesItsPaintedReasonUnderReason() {
+        val reason = "Turn mail on first; then this can be saved."
+        assertEquals(reason, AutomationSemantics.attrValue(blockedNode(reason), "reason"))
+    }
+
+    @Test
+    fun aReasonWithSeparatorCharactersRoundTripsThroughThePack() {
+        val reason = "Needs 50% more space; try again later"
+        assertEquals(reason, AutomationSemantics.attrValue(blockedNode(reason), "reason"))
+    }
+
+    @Test
+    fun aReasonPackedBesideAStateKeepsBothReadable() {
+        val node = blockedNode("Mail is unavailable", state = "unavailable")
+        assertEquals("Mail is unavailable", AutomationSemantics.attrValue(node, "reason"))
+        assertEquals("unavailable", AutomationSemantics.attrValue(node, "state"))
+    }
+
+    @Test
+    fun aLiveControlPublishesNoReason() {
+        assertNull(AutomationSemantics.attrValue(node(), "reason"))
+    }
+
+    // ── GET /registry ───────────────────────────────────────────────────
+
+    private fun rn(facts: NodeFacts, vararg children: RegistryNode, visible: Boolean = true) =
+        RegistryNode(facts, visible, children.toList())
+
+    @Test
+    fun registryIndexesEachIdInDocumentOrderAcrossRootsAndScopesByPublishedAncestors() {
+        val root1 = rn(
+            node(resourceName = null),
+            rn(node(resourceName = "list"),
+                rn(node(resourceName = "row", text = "a")),
+                rn(node(resourceName = null), rn(node(resourceName = "row", text = "b")))),
+        )
+        val root2 = rn(node(resourceName = "row", text = "c"))
+        val recs = AutomationSemantics.registryRecords(listOf(root1, root2))
+        assertEquals(listOf("list", "row", "row", "row"), recs.map { it.id })
+        assertEquals(listOf(0, 0, 1, 2), recs.map { it.index })
+        assertEquals(listOf("", "list[0]", "list[0]", ""), recs.map { it.scope })
+        assertEquals(listOf("", "a", "b", "c"), recs.map { it.text })
+    }
+
+    @Test
+    fun registrySkipsAnInvisibleNodeWithItsSubtree() {
+        val hidden = rn(node(resourceName = "sheet"), rn(node(resourceName = "row")), visible = false)
+        val recs = AutomationSemantics.registryRecords(listOf(rn(node(resourceName = null), hidden,
+            rn(node(resourceName = "row")))))
+        assertEquals(listOf("row" to 0), recs.map { it.id to it.index })
+    }
+
+    @Test
+    fun registryActuableAndEditableFollowTheNode() {
+        val recs = AutomationSemantics.registryRecords(listOf(
+            rn(node(resourceName = "b", isClickable = true)),
+            rn(node(resourceName = "t", className = AutomationSemantics.EDIT_TEXT_CLASS, isEditable = true)),
+            rn(node(resourceName = "l")),
+            rn(node(resourceName = "d", isClickable = true, isEnabled = false)),
+        ))
+        assertEquals(listOf(true, false, false, true), recs.map { it.actuable })
+        assertEquals(listOf(false, true, false, false), recs.map { it.editable })
+        assertEquals(listOf(true, true, true, false), recs.map { it.enabled })
+    }
+
+    @Test
+    fun registryAttrsCarryThePaintedStateTheToggleAndTheSelection() {
+        assertEquals(mapOf("state" to "pending"),
+            AutomationSemantics.registryAttrs(node(stateDescription = "pending")))
+        assertEquals(mapOf("copied" to "true", "kind" to "a;b"),
+            AutomationSemantics.registryAttrs(node(stateDescription = "copied=true;kind=a%3Bb")))
+        assertEquals(mapOf("checked" to "true", "state" to "true"),
+            AutomationSemantics.registryAttrs(node(isCheckable = true, isChecked = true)))
+        assertEquals(mapOf("state" to "on", "checked" to "false"),
+            AutomationSemantics.registryAttrs(node(stateDescription = "on", isCheckable = true)))
+        assertEquals(mapOf("selected" to "true"),
+            AutomationSemantics.registryAttrs(node().copy(isSelected = true)))
+        assertEquals(emptyMap<String, String>(), AutomationSemantics.registryAttrs(node()))
+    }
 }

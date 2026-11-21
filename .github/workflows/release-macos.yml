@@ -149,7 +149,7 @@ jobs:
       - name: Stage the archive
         run: |
           just shipped-notices terminal-archive-macos notices/terminal-archive-macos.txt --target ${{ matrix.target }}
-          bash apps/fauna-tui/packaging/assemble-archive.sh --no-tar \
+          bash installer/assemble-archive.sh --payload tui --no-tar \
             --bin-dir target/${{ matrix.target }}/release --out tui-unsigned --suffix ${{ matrix.suffix }} \
             --notices notices/terminal-archive-macos.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -167,11 +167,127 @@ jobs:
   # credential and no Environment — signing happens only in `sign`, by the
   # tree's own signer (installers/store-review.md § The store legs, *How the
   # iOS store app is signed*). The artifact's name is no publish pattern.
+  #
+  # The runner is `xcode-27`, not `macos-15`: the Apple targets need an Xcode
+  # 27.x (installers/store-review.md, the store legs' reading (3)), and `macos-15`'s only
+  # Xcode, 16.4, failed the archive at FaunaKit's Swift compile (public run
+  # 43842999669, 2026-11-16). GitHub ships Xcode 27 on its own `xcode-27`
+  # label (macOS 27, Apple Silicon); no `macos-*` label carries it. A job
+  # never trusts the label alone: its first step selects the newest Xcode 27.x
+  # by path and is red on any major below 27.
+  #
+  # Two jobs, the FFI and then the archive: on that run the store-safe FFI
+  # alone took 2 h 18 min (09:49 -> 12:07; the flavour's three slices, cold),
+  # and the archive failed 5 min after it, so the one job would sit near the
+  # hosted ceiling. `ios-store-ffi` builds the tree's xcframework and hands it
+  # over as an artifact; `ios-store-app` archives over it. The FFI's ceiling
+  # is the 180 every release job keeps (1.3x that reading); its lever, if a
+  # run nears it, is the device slice alone, which is all the archive links.
+  ios-store-ffi:
+    name: Build the App Store app's FFI (no credentials)
+    runs-on: xcode-27
+    timeout-minutes: 180
+    steps:
+      - name: Select Xcode 27
+        run: |
+          set -euo pipefail
+          XCODE="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -v -i -e beta -e release_candidate | sort -V | tail -n 1 || true)"
+          [ -n "$XCODE" ] || { echo "no /Applications/Xcode_27*.app on this runner" >&2; ls -d /Applications/Xcode*.app >&2 || true; exit 1; }
+          export DEVELOPER_DIR="$XCODE/Contents/Developer"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          xcodebuild -version
+          MAJOR="$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')"
+          [ "${MAJOR:-0}" -ge 27 ] || { echo "Xcode ${MAJOR:-unknown} selected; the Apple targets need 27.x" >&2; exit 1; }
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        if: inputs.stores_commit != ''
+        with:
+          ref: ${{ inputs.stores_commit }}
+          path: store-build
+          persist-credentials: false
+      - name: Resolve the tree and the version
+        env:
+          STORES_COMMIT: ${{ inputs.stores_commit }}
+        run: |
+          set -euo pipefail
+          if [ -n "$STORES_COMMIT" ]; then
+            [[ "$STORES_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "stores_commit is not a full 40-hex SHA" >&2; exit 1; }
+            [ "$(git -C store-build rev-parse HEAD)" = "$STORES_COMMIT" ] || { echo "the checkout is not $STORES_COMMIT" >&2; exit 1; }
+            TREE="$PWD/store-build"
+          else
+            TREE="$PWD"
+          fi
+          VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$TREE/Cargo.toml")"
+          if [ -z "$STORES_COMMIT" ] && [[ "$GITHUB_REF" == refs/tags/v* ]] && [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "the tree's version $VERSION is not the tag $GITHUB_REF_NAME" >&2; exit 1
+          fi
+          echo "TREE=$TREE" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          target: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-apple-darwin
+          rustflags: ""
+          cache: false
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # The cargo boundary (build-compile-cache.md § The boundary's scope and
+      # what OFF means, decision (6)), as in `build`: the tree's
+      # `apple-ffi-store-safe`, reached through the script, compiles with no
+      # network — a `stores_commit` tree too, whose cargo's fetch prelude reads
+      # that tree's own lockfile — and the job's last step witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
+      - name: Build the store-safe FFI
+        run: bash scripts/ios-store-upload.sh "$VERSION" ffi --tree "$TREE" --out "$RUNNER_TEMP/ios-store"
+      # The xcframework AND the generated Swift bindings: `apple-ffi` writes the
+      # UniFFI Swift into FaunaFFISwift/Sources (gitignored, beside the tracked
+      # FFICompat.swift), so a fresh checkout in the archive job has none.
+      - name: Package the xcframework and its Swift bindings
+        run: |
+          set -euo pipefail
+          mkdir -p store-ios-ffi
+          ditto -c -k --keepParent "$TREE/apps/fauna-apple/FaunaFFI.xcframework" store-ios-ffi/FaunaFFI.xcframework.zip
+          ditto -c -k --keepParent "$TREE/apps/fauna-apple/FaunaFFISwift/Sources" store-ios-ffi/FaunaFFISwift-Sources.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: store-ios-ffi
+          path: store-ios-ffi/
+          if-no-files-found: error
+      - name: Keep the build logs of a red build
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ios-store-ffi-logs
+          path: ${{ runner.temp }}/ios-store/logs/
+          if-no-files-found: warn
+
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
+
   ios-store-app:
     name: Build the App Store app (no credentials)
-    runs-on: macos-15
-    timeout-minutes: 150
+    needs: [ios-store-ffi]
+    runs-on: xcode-27
+    # The archive alone, over the FFI job's xcframework; no green reading yet
+    # (the one red run failed 5 min in, before the link). Re-derive it from
+    # the first green run.
+    timeout-minutes: 90
     steps:
+      - name: Select Xcode 27
+        run: |
+          set -euo pipefail
+          XCODE="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -v -i -e beta -e release_candidate | sort -V | tail -n 1 || true)"
+          [ -n "$XCODE" ] || { echo "no /Applications/Xcode_27*.app on this runner" >&2; ls -d /Applications/Xcode*.app >&2 || true; exit 1; }
+          export DEVELOPER_DIR="$XCODE/Contents/Developer"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          xcodebuild -version
+          MAJOR="$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')"
+          [ "${MAJOR:-0}" -ge 27 ] || { echo "Xcode ${MAJOR:-unknown} selected; the Apple targets need 27.x" >&2; exit 1; }
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false
@@ -217,8 +333,19 @@ jobs:
           mkdir -p store-ios-app
           uv run --no-project python scripts/store-legs.py text app-store what-to-test "$VERSION" \
             > store-ios-app/what-to-test.txt
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: store-ios-ffi
+          path: store-ios-ffi
+      - name: Restore the FFI job's xcframework and Swift bindings
+        run: |
+          set -euo pipefail
+          rm -rf "$TREE/apps/fauna-apple/FaunaFFI.xcframework"
+          ditto -x -k store-ios-ffi/FaunaFFI.xcframework.zip "$TREE/apps/fauna-apple"
+          test -d "$TREE/apps/fauna-apple/FaunaFFI.xcframework"
+          ditto -x -k store-ios-ffi/FaunaFFISwift-Sources.zip "$TREE/apps/fauna-apple/FaunaFFISwift"
       - name: Archive the App Store app (unsigned, store-safe)
-        run: bash scripts/ios-store-upload.sh "$VERSION" build --tree "$TREE" --out "$RUNNER_TEMP/ios-store"
+        run: bash scripts/ios-store-upload.sh "$VERSION" archive --tree "$TREE" --out "$RUNNER_TEMP/ios-store"
       - name: Package the unsigned app and its symbols
         run: |
           set -euo pipefail
@@ -230,6 +357,16 @@ jobs:
           name: store-ios-app
           path: store-ios-app/
           if-no-files-found: error
+      # A red build names its own error: the build half's logs (the FFI's, the
+      # archive's, the notices') stay on the runner otherwise, and the job's
+      # output carries only their last 40 lines.
+      - name: Keep the build logs of a red build
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ios-store-logs
+          path: ${{ runner.temp }}/ios-store/logs/
+          if-no-files-found: warn
 
   sign:
     name: Sign, notarize, attest, publish
@@ -241,7 +378,9 @@ jobs:
       && (inputs.stores_commit != ''
           || (needs.build.result == 'success' && needs.build-tui.result == 'success'))
     needs: [build, build-tui, ios-store-app]
-    runs-on: macos-15
+    # On `ios-store-app`'s toolchain: this job signs the store app and runs
+    # Apple's upload tool and `xcrun swift` over it (the label's why is there).
+    runs-on: xcode-27
     timeout-minutes: 60
     environment: release-macos
     permissions:
@@ -254,6 +393,16 @@ jobs:
       FAUNA_NOTARY_KEY_ID: ${{ secrets.FAUNA_NOTARY_KEY_ID }}
       FAUNA_NOTARY_ISSUER: ${{ secrets.FAUNA_NOTARY_ISSUER }}
     steps:
+      - name: Select Xcode 27
+        run: |
+          set -euo pipefail
+          XCODE="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -v -i -e beta -e release_candidate | sort -V | tail -n 1 || true)"
+          [ -n "$XCODE" ] || { echo "no /Applications/Xcode_27*.app on this runner" >&2; ls -d /Applications/Xcode*.app >&2 || true; exit 1; }
+          export DEVELOPER_DIR="$XCODE/Contents/Developer"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          xcodebuild -version
+          MAJOR="$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')"
+          [ "${MAJOR:-0}" -ge 27 ] || { echo "Xcode ${MAJOR:-unknown} selected; the Apple targets need 27.x" >&2; exit 1; }
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false

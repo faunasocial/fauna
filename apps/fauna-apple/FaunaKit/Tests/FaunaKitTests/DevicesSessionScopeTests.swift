@@ -102,8 +102,8 @@ private final class CountingDevicesAPI: APIClient {
 /// session it no longer dies with the view, so a visit clears it — else the
 /// last visit's refusal greets the next one, and an answer read after a new
 /// follow may be a leftover (the macOS follow witness caught exactly that).
-/// Also pins that the refusal is the boundary's own sentence, never the
-/// `General(msg: …)` debug shape.
+/// The stub's machine build fails, so the follow is refused up front by the
+/// shared `follow_possibility` (not ready) — still that visit's gesture error.
 @Test @MainActor func aRevisitClearsTheLastVisitsGestureError() async {
     let api = CountingDevicesAPI()
     let vm = DevicesMachineVM()
@@ -114,7 +114,8 @@ private final class CountingDevicesAPI: APIClient {
 
     let followed = await vm.followFolder(owner: "someone", folderName: "misspelt")
     #expect(followed == false)
-    #expect(vm.sharingError == api.followRefusal)
+    #expect(vm.sharingError != nil)
+    #expect(vm.sharingError == vm.folderFollowPossibility(handle: "someone", name: "misspelt").refusal)
 
     async let revisit: Void = vm.configure(api: api)
     await waitUntil { api.buildIsWaiting }
@@ -162,32 +163,39 @@ private final class CountingDevicesAPI: APIClient {
     #expect(refreshes?["committed_gen"] as? Int == 0)
 }
 
-/// A `folder-add-button` tap that lands while the session's machine is still
-/// being built (the page and its + button render before `devicesMachine`
-/// returns — it awaits the nest connect and the ConversationsSession) is HELD
-/// and honoured when the machine lands, never dropped: a dropped tap is a +
-/// button that does nothing, and the wizard never opens.
-@Test @MainActor func aWizardTapDuringTheBuildIsHeldUntilTheMachineLands() async {
+private func addFolderReasonKey(_ answer: Possibility) -> String? {
+    if case .blocked(let reason) = answer { return reason.key }
+    return nil
+}
+
+/// `folder-add-button` while the session's machine is still being built (the
+/// page and its + button render before `devicesMachine` returns — it awaits
+/// the nest connect and the ConversationsSession) is offered disabled with its
+/// reason — *still loading*, then *failed to load* after a failed build — and
+/// a press that reaches it anyway is refused with that reason on the page's
+/// `error-message` (`ui/README.md` § Offer only what is possible, rules 2, 5
+/// and 7): never held silently, never dropped silently.
+@Test @MainActor func theAddFolderButtonWaitsForTheMachineAndSaysWhy() async {
     let api = CountingDevicesAPI()
     let vm = DevicesMachineVM()
 
     async let configured: Void = vm.configure(api: api)
     await waitUntil { api.buildIsWaiting }
+    #expect(addFolderReasonKey(vm.addFolderAnswer) == "common.still_loading")
     vm.openWizard()
-    #expect(vm.wizardOpenHeld, "a tap before the machine exists must be held, not dropped")
+    #expect(vm.addFolderRefusal != nil, "a press before the machine exists is refused with its reason")
+    #expect(vm.errorMessage == vm.addFolderRefusal)
 
-    // The stub's build fails (no nest): the connect error answers the tap,
-    // so nothing is left held to open on a later, unrelated build.
     api.releaseBuild()
     await configured
-    #expect(!vm.wizardOpenHeld, "a failed build drops the held tap — the connect error answers it")
+    #expect(addFolderReasonKey(vm.addFolderAnswer) == "common.load_failed")
 }
 
-/// A held tap belongs to the session it was made in.
-@Test @MainActor func resetDropsAHeldWizardTap() async {
+/// A refused press belongs to the session it was made in.
+@Test @MainActor func resetDropsAnAddFolderRefusal() async {
     let vm = DevicesMachineVM()
     vm.openWizard()
-    #expect(vm.wizardOpenHeld)
+    #expect(vm.addFolderRefusal != nil)
     vm.reset()
-    #expect(!vm.wizardOpenHeld)
+    #expect(vm.addFolderRefusal == nil)
 }

@@ -49,6 +49,7 @@ use fauna_client::NestClient;
 use fauna_client_bridges::MailAccountClient;
 use fauna_client_moderation::ModerationClient;
 use fauna_client_moderation::moderation::ModerationReportShareStatusReply;
+use fauna_core::possibility::{Possibility, ReadState};
 
 use crate::i18n::strings::mail_spam as S;
 use crate::testid::{set_test_attr, set_test_id};
@@ -91,7 +92,45 @@ struct SpamCtx {
     syncing: Cell<bool>,
     /// The same echo-suppression flag for the report-share toggle.
     rs_syncing: Cell<bool>,
+    /// Whether the classifier snapshot has landed: the contribute-baseline
+    /// toggle waits on it (`mail-settings.md` § Errors & edge cases,
+    /// *Controls wait for their reads*).
+    contribute_read: Cell<bool>,
+    /// Where the report-share read stands: the share-reports toggle waits on
+    /// it, so its pre-read "off" is never written as a guess.
+    share_read: Cell<ReadState>,
+    /// Where the threshold-override read stands: the input and its commit
+    /// wait on it, so an empty pre-read draft is never committed as "clear
+    /// the override".
+    threshold_read: Cell<ReadState>,
     w: SpamWidgets,
+}
+
+impl SpamCtx {
+    /// `mail-spam-contribute-baseline-toggle` (tui's
+    /// `MailSpamState::contribute_answer`).
+    fn contribute_answer(&self) -> Possibility {
+        Possibility::once_read(self.contribute_read.get())
+    }
+
+    /// `mail-spam-share-reports-toggle` (tui's `share_answer`).
+    fn share_answer(&self) -> Possibility {
+        Possibility::from_read(self.share_read.get())
+    }
+
+    /// `mail-spam-threshold-override-input` and its commit (tui's
+    /// `threshold_answer`).
+    fn threshold_answer(&self) -> Possibility {
+        Possibility::from_read(self.threshold_read.get())
+    }
+
+    /// Paint the three read-decided controls through the possibility seam;
+    /// the reason rides each control's tooltip and `reason` attr.
+    fn paint_read_gated(&self) {
+        crate::possible::paint(&self.w.contribute_toggle, None, self.contribute_answer());
+        crate::possible::paint(&self.w.share_reports_toggle, None, self.share_answer());
+        crate::possible::paint(&self.w.threshold_input, None, self.threshold_answer());
+    }
 }
 
 /// Build the "Spam" preferences page.
@@ -272,10 +311,29 @@ type MachineHooks = (Rc<dyn Fn()>, Rc<dyn Fn()>);
 /// every interaction. No-op (page stays at static placeholders) when no client
 /// is available — e.g. the unit test, which has no registered client.
 fn wire_machine(widgets: SpamWidgets) -> Option<MachineHooks> {
-    let client = crate::settings::get_client()?;
-    // `Err` only on an unrecoverable identity fault (launch has validated the
-    // secret to reach Online); the page stays at static placeholders if so.
-    let machine = Arc::new(crate::mail_glue::build_mail_spam_machine(&client).ok()?);
+    // No machine — no client, or an `Err` build (only on an unrecoverable
+    // identity fault; launch has validated the secret to reach Online): the
+    // page's press says so on `error-message` (rule 7: never silent).
+    let Some(machine) = crate::settings::get_client().and_then(|client| {
+        let machine = crate::mail_glue::build_mail_spam_machine(&client).ok()?;
+        Some((client, machine))
+    }) else {
+        // No machine: the read-decided controls carry the unbuilt reason.
+        let unbuilt = fauna_client_mail_settings::mail_usable_unbuilt();
+        crate::possible::paint(&widgets.contribute_toggle, None, unbuilt.clone());
+        crate::possible::paint(&widgets.share_reports_toggle, None, unbuilt.clone());
+        crate::possible::paint(&widgets.threshold_input, None, unbuilt);
+        super::mail_gate::wire_unbuilt(&widgets.error_label, &[&widgets.reset_button]);
+        super::mail_gate::wire_unbuilt_controls(
+            &widgets.error_label,
+            &[&widgets.contribute_toggle, &widgets.share_reports_toggle],
+            &[],
+            &[&widgets.threshold_input],
+        );
+        return None;
+    };
+    let (client, machine) = machine;
+    let machine = Arc::new(machine);
 
     let ctx = Rc::new(SpamCtx {
         machine,
@@ -283,8 +341,13 @@ fn wire_machine(widgets: SpamWidgets) -> Option<MachineHooks> {
         rt: client.runtime_handle(),
         syncing: Cell::new(false),
         rs_syncing: Cell::new(false),
+        contribute_read: Cell::new(false),
+        share_read: Cell::new(ReadState::Pending),
+        threshold_read: Cell::new(ReadState::Pending),
         w: widgets,
     });
+    // Nothing a read decides is live before it lands.
+    ctx.paint_read_gated();
 
     hydrate_and_render(&ctx);
     hydrate_report_share(&ctx);
@@ -314,6 +377,14 @@ fn wire_machine(widgets: SpamWidgets) -> Option<MachineHooks> {
                 if ctx.syncing.get() {
                     return;
                 }
+                // Before the classifier snapshot lands the flip is refused
+                // with its reason and the switch snaps back.
+                if crate::possible::refused_at_press(&ctx.contribute_answer(), &ctx.w.error_label) {
+                    ctx.syncing.set(true);
+                    sw.set_active(!sw.is_active());
+                    ctx.syncing.set(false);
+                    return;
+                }
                 dispatch_action(
                     &ctx,
                     MailSpamAction::SetContributeBaseline {
@@ -334,6 +405,12 @@ fn wire_machine(widgets: SpamWidgets) -> Option<MachineHooks> {
             .clone()
             .connect_active_notify(move |sw| {
                 if ctx.rs_syncing.get() {
+                    return;
+                }
+                if crate::possible::refused_at_press(&ctx.share_answer(), &ctx.w.error_label) {
+                    ctx.rs_syncing.set(true);
+                    sw.set_active(!sw.is_active());
+                    ctx.rs_syncing.set(false);
                     return;
                 }
                 set_report_share(&ctx, sw.is_active());
@@ -459,6 +536,9 @@ fn hydrate_threshold_override(ctx: &Rc<SpamCtx>) {
 /// keystroke — the `set_report_share` shape. `Some(0)` is a real setting, never
 /// collapsed into "unset".
 fn commit_threshold_override(ctx: &Rc<SpamCtx>) {
+    if crate::possible::refused_at_press(&ctx.threshold_answer(), &ctx.w.error_label) {
+        return;
+    }
     let nest = Arc::clone(&ctx.nest);
     let ctx_render = Rc::clone(ctx);
     let value = fauna_core::format::parse_count(&ctx.w.threshold_input.text());
@@ -479,6 +559,9 @@ fn commit_threshold_override(ctx: &Rc<SpamCtx>) {
 /// never blank — an error surfaces via the page `error-message`.
 fn render_threshold_override(ctx: &Rc<SpamCtx>, res: Result<Option<u32>, String>) {
     let w = &ctx.w;
+    ctx.threshold_read
+        .set(ctx.threshold_read.get().after(res.is_ok()));
+    ctx.paint_read_gated();
     match res {
         Ok(value) => {
             w.threshold_input
@@ -494,6 +577,8 @@ fn render_threshold_override(ctx: &Rc<SpamCtx>, res: Result<Option<u32>, String>
 /// 195 of the shared-Rust harvest sweep).
 fn render_report_share(ctx: &Rc<SpamCtx>, res: Result<ModerationReportShareStatusReply, String>) {
     let w = &ctx.w;
+    ctx.share_read.set(ctx.share_read.get().after(res.is_ok()));
+    ctx.paint_read_gated();
     super::render_share_pane(
         super::SharePaneWidgets {
             toggle: &w.share_reports_toggle,
@@ -514,6 +599,8 @@ fn render(ctx: &Rc<SpamCtx>, snap: &MailSpamSnapshot) {
     let w = &ctx.w;
 
     super::render_error_label(&w.error_label, snap.error.as_deref());
+    ctx.contribute_read.set(true);
+    ctx.paint_read_gated();
 
     // Reflect the persisted contribution flag without echoing it back as a
     // dispatch (the active_notify handler checks ctx.syncing).
@@ -641,6 +728,29 @@ mod tests {
                     names.iter().any(|n| n == id),
                     "missing widget id {id:?}; have {names:?}",
                 );
+            }
+        });
+    }
+
+    /// Every control a read decides is painted blocked with a reason before
+    /// any read lands — never live on a guess (`mail-settings.md` § Errors &
+    /// edge cases, *Controls wait for their reads*). With no client the page
+    /// has no machine, so the reason is the unbuilt one.
+    #[test]
+    fn read_decided_controls_are_blocked_before_their_reads() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let page = build_mail_spam_page();
+            for id in [
+                "mail-spam-contribute-baseline-toggle",
+                "mail-spam-share-reports-toggle",
+                "mail-spam-threshold-override-input",
+            ] {
+                let widget = crate::testid::find_by_test_id(&page, id)
+                    .unwrap_or_else(|| panic!("{id} missing"));
+                assert!(!widget.is_sensitive(), "{id} live before its read");
+                let reason = crate::testid::test_attr_text(&widget, "reason").unwrap_or_default();
+                assert!(!reason.is_empty(), "{id} blocked without a reason");
             }
         });
     }

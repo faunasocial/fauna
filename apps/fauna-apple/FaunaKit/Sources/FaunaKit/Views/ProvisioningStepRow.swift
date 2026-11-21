@@ -5,8 +5,7 @@ import SwiftUI
 /// Renders one `StepSnapshot` from the four-step provisioning pipeline: the
 /// status glyph, the step label, an optional substep line, and an optional
 /// per-step error. Row visibility is read straight off the snapshot's
-/// display-projection fields — `showsSubstep` / `showsError` /
-/// `showsAttemptSuffix` — which are the *single source* of the per-step
+/// display-projection fields — `showsSubstep` / `showsError` — which are the *single source* of the per-step
 /// visibility rule (computed in `libs/fauna-provisioning`'s `recompute_display`
 /// and filled by the machine's `provisioningSnapshot()` getter). The client
 /// never re-derives that rule. Mirrors the Linux
@@ -17,9 +16,8 @@ import SwiftUI
 /// step_label,substep_label}`, exposed as the `provisioning{StatusGlyph,
 /// StepLabel,SubstepLabel}` UniFFI free fns); this view only resolves the
 /// returned `LocalizedText` through the apple i18n pipeline (`renderLocalizedText`
-/// → `L.lookup`). The Skipped placeholder and the `(attempt N of M)` suffix stay
-/// client-side text assembly — each concatenates two i18n strings, which one
-/// `LocalizedText` can't carry. See `docs/goal/behavior/value-formatting.md`
+/// → `L.lookup`). The Skipped placeholder stays client-side text assembly. No
+/// attempt count is ever shown (`onboarding-provisioning.md` § 6). See `docs/goal/behavior/value-formatting.md`
 /// § Provisioning step display.
 public struct ProvisioningStepRow: View {
     let snapshot: StepSnapshot
@@ -30,8 +28,7 @@ public struct ProvisioningStepRow: View {
 
     public var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            automationText(Ids.provisioningStepCheckbox, provisioningStatusGlyph(status: snapshot.status))
-                .font(.system(.body, design: .monospaced))
+            statusCheckbox
                 .frame(width: 18, alignment: .center)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -65,14 +62,36 @@ public struct ProvisioningStepRow: View {
             Ids.provisioningStepRow,
             text: { renderLocalizedText(provisioningStepLabel(kind: snapshot.kind)) })
     }
+
+    /// `provisioning-step-checkbox`'s paint. A `Running` step shows the
+    /// platform's indeterminate activity indicator (`onboarding-provisioning.md`
+    /// § 6, *A running step shows activity, never an attempt count*); every
+    /// other status shows the shared glyph. The automation read stays the
+    /// shared glyph in both cases, so a driver reads the same text whatever
+    /// the paint is (the tui `spinner.rs` shape).
+    @ViewBuilder
+    private var statusCheckbox: some View {
+        if snapshot.status == .running {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .controlSize(.small)
+                .accessibilityIdentifier(Ids.provisioningStepCheckbox)
+                .accessibilityValue(provisioningStatusGlyph(status: snapshot.status))
+                .automationValue(
+                    Ids.provisioningStepCheckbox,
+                    text: { provisioningStatusGlyph(status: snapshot.status) })
+        } else {
+            automationText(Ids.provisioningStepCheckbox, provisioningStatusGlyph(status: snapshot.status))
+                .font(.system(.body, design: .monospaced))
+        }
+    }
 }
 
 // MARK: - Sub-step line assembly (client-side concatenation; the per-key text
 // itself comes from the shared `provisioningSubstepLabel` UniFFI fn)
 
 /// Build the substep line. The caller gates rendering on `snapshot.showsSubstep`;
-/// the `(attempt N of M)` suffix is appended only when `snapshot.showsAttemptSuffix`
-/// — the shared rule, never re-derived from `attempt`/`maxAttempts` here. The
+/// no attempt count is ever shown (onboarding-provisioning.md § 6). The
 /// per-key text (and the `{cause}` substitution for `status_retrying`, filled
 /// from `lastError`) comes from shared `provisioningSubstepLabel`.
 private func provisioningSubstepText(_ snapshot: StepSnapshot) -> String {
@@ -81,11 +100,6 @@ private func provisioningSubstepText(_ snapshot: StepSnapshot) -> String {
         text = L.lookup("onboarding.provision.substep.status_skipped")
     } else if let key = snapshot.substep {
         text = renderLocalizedText(provisioningSubstepLabel(key: key, cause: snapshot.lastError))
-    }
-    if snapshot.showsAttemptSuffix {
-        text += L.lookup("onboarding.provision.step_attempt_template")
-            .replacingOccurrences(of: "{attempt}", with: String(snapshot.attempt))
-            .replacingOccurrences(of: "{max_attempts}", with: String(snapshot.maxAttempts))
     }
     return text
 }

@@ -50,8 +50,10 @@ extension, so its "nothing" says nothing about a placeholder — and the app's
 domain reconcile registers no domain in the e2e launch, so the toggle cannot
 stand one up either. The extension's seat has a witness of its own, driving a
 signed bundle's domain as the read-path platform test does:
-``tests/platform/macos/test_file_provider_relay_seat_macos.py``. The phones
-are excused on the catalog page.
+``tests/platform/macos/test_file_provider_relay_seat_macos.py``; iOS's seat,
+held under the app's foreground lease, is witnessed by
+``tests/platform/ios/test_file_provider_relay_seat_ios.py``. Android is
+excused on the catalog page.
 
 On linux the seat trees sit under ``/tmp`` whatever ``TMPDIR`` says
 (``helpers.folder_content.mountable_location``'s reason: the confined

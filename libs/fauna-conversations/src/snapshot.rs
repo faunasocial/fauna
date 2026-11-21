@@ -96,6 +96,19 @@ impl SortOrder {
         }
     }
 
+    /// The `conversation-sort` control's text: the order in force, named
+    /// (`conversations.list.sort_*`). A cycle names the value in force, so
+    /// every press changes the frame (`e2e-systematic-ui-walks.md` § The
+    /// possibility invariants, layer (c)); one owner instead of a per-app
+    /// three-case map (tui's `sort_label` before the lift).
+    pub fn label(self) -> LocalizedText {
+        LocalizedText::key(match self {
+            SortOrder::LatestActivity => "conversations.list.sort_latest_activity",
+            SortOrder::OldestFirst => "conversations.list.sort_oldest_first",
+            SortOrder::Unread => "conversations.list.sort_unread",
+        })
+    }
+
     /// Inverse of [`SortOrder::name`]; `None` for an unknown name.
     pub fn parse(name: &str) -> Option<SortOrder> {
         [
@@ -113,6 +126,13 @@ impl SortOrder {
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn sort_order_name(order: SortOrder) -> String {
     order.name().to_string()
+}
+
+/// [`SortOrder::label`] over UniFFI — the order in force, named, for the
+/// `conversation-sort` control's text or tooltip.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn sort_order_label(order: SortOrder) -> LocalizedText {
+    order.label()
 }
 
 /// The `conversation-sort` button's canonical cycle: latest activity → oldest
@@ -211,6 +231,16 @@ pub struct ConversationsSnapshot {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = []))]
     pub bridges: Vec<BridgeIdentitySnapshot>,
+    /// Whether this account's room list has **loaded** — a receive sweep has
+    /// read every rail without an error since this identity's state was set up
+    /// ([`crate::manager::ConversationsManager::rooms_loaded`]). The page's
+    /// second painting condition for its empty state: before it, an empty
+    /// `threads` means "not read yet" and the page paints no empty state
+    /// (`ui/README.md` § List pages: loading is not empty).
+    /// Monotonic within an identity; an identity change starts it over.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub loaded: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -393,6 +423,26 @@ mod tests {
         let threads = [thread("dm", 2), bridged, group];
         assert_eq!(secure_channel_count(&threads), 2);
         assert_eq!(secure_channel_count(&[]), 0);
+    }
+
+    #[test]
+    fn every_sort_order_names_itself_with_its_own_key() {
+        let keys: Vec<String> = [
+            SortOrder::LatestActivity,
+            SortOrder::OldestFirst,
+            SortOrder::Unread,
+        ]
+        .into_iter()
+        .map(|o| sort_order_label(o).key)
+        .collect();
+        assert_eq!(
+            keys,
+            [
+                "conversations.list.sort_latest_activity",
+                "conversations.list.sort_oldest_first",
+                "conversations.list.sort_unread",
+            ]
+        );
     }
 
     #[test]

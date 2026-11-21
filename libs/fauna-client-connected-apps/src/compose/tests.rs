@@ -269,6 +269,39 @@ fn card() -> ConsentCardRow {
     }
 }
 
+/// A folder card's Approve waits for a chosen folder, with the picker's own
+/// reason when none can be chosen; a card without a picker approves as is.
+#[test]
+fn approve_waits_for_a_chosen_folder() {
+    use fauna_atproto_settings_machine::snapshots::{CONSENT_FOLDER_REQUIRED_KEY, FolderPicker};
+    let key = |c: &ConsentCardRow| c.approve_possibility().reason().map(|r| r.key.clone());
+    assert!(card().approve_possibility().is_possible());
+    let mut c = card();
+    c.folder_picker = Some(FolderPicker {
+        options: vec![],
+        chosen: None,
+        none_eligible: None,
+    });
+    assert_eq!(key(&c), Some(CONSENT_FOLDER_REQUIRED_KEY.into()));
+    c.folder_picker.as_mut().unwrap().none_eligible = Some(
+        fauna_core::localized::LocalizedText::key("atproto_settings.consent_folder_none_read"),
+    );
+    assert_eq!(
+        key(&c),
+        Some("atproto_settings.consent_folder_none_read".into())
+    );
+    c.folder_picker.as_mut().unwrap().chosen = Some(7);
+    assert!(c.approve_possibility().is_possible());
+    // The connect code: a code to look up.
+    assert_eq!(
+        crate::connect_code_possibility("  ")
+            .reason()
+            .map(|r| r.key.clone()),
+        Some(crate::CONNECT_CODE_REQUIRED_KEY.into())
+    );
+    assert!(crate::connect_code_possibility("ABC-DEF").is_possible());
+}
+
 fn card_text(c: &ConsentCardRow) -> Vec<String> {
     request_card_lines(c)
         .iter()

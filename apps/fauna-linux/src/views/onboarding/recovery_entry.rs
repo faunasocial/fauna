@@ -83,18 +83,45 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
     }
     action_row.append(&back_btn);
 
-    // Enabled unconditionally: every way the input can be wrong is an answer
-    // the ceremony gives on `error-message` (an unparseable phrase and a
-    // missing account are refused locally, before anything is sent) — a
-    // disabled submit would make "why can't I click this?" the user's problem.
+    // Painted from the shared draft answer as the fields are typed
+    // (`ui/README.md` § Offer only what is possible, rule 4's form case): an
+    // unparseable phrase or no account → disabled, the line the restore
+    // itself refuses with on the tooltip. The restore runs the same checks.
     let submit_btn = gtk::Button::with_label(strings::SUBMIT);
     submit_btn.add_css_class("suggested-action");
     crate::testid::set_test_id(&submit_btn, ids::RECOVERY_ENTRY_SUBMIT_BUTTON);
+    let repaint: Rc<dyn Fn()> = {
+        let submit_btn = submit_btn.clone();
+        let phrase_entry = phrase_entry.clone();
+        let account_entry = account_entry.clone();
+        Rc::new(move || {
+            crate::possible::paint(
+                &submit_btn,
+                None,
+                submit_answer(&phrase_entry.text(), &account_entry.text()),
+            );
+        })
+    };
+    for entry in [&phrase_entry, &account_entry] {
+        let repaint = repaint.clone();
+        entry.connect_changed(move |_| repaint());
+    }
+    let error_label = gtk::Label::new(None);
+    error_label.set_visible(false);
+    error_label.set_wrap(true);
+    crate::testid::set_test_id(&error_label, ids::ERROR_MESSAGE);
     {
         let m = m.clone();
         let phrase_entry = phrase_entry.clone();
         let account_entry = account_entry.clone();
+        let error_label = error_label.clone();
+        let repaint = repaint.clone();
         submit_btn.connect_clicked(move |btn| {
+            // The press asks the answer it was painted from again (rule 6).
+            let answer = submit_answer(&phrase_entry.text(), &account_entry.text());
+            if crate::possible::refused_at_press(&answer, &error_label) {
+                return;
+            }
             // The typed account rides on the machine's one account field — the
             // one `handle_entry` asks for next. ALWAYS forwarded, empty
             // included: what the field shows is what is sent. Forwarding only a
@@ -106,11 +133,11 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
             btn.set_sensitive(false);
             let m_async = m.clone();
             let m_done = m.clone();
-            let btn = btn.clone();
+            let repaint = repaint.clone();
             async_helper::run_on_tokio(
                 async move { m_async.submit_recovery_entry(phrase).await },
                 move |outcome| {
-                    btn.set_sensitive(true);
+                    repaint();
                     settle(&m_done, &outcome, append);
                 },
             );
@@ -118,11 +145,6 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
     }
     action_row.append(&submit_btn);
     content.append(&action_row);
-
-    let error_label = gtk::Label::new(None);
-    error_label.set_visible(false);
-    error_label.set_wrap(true);
-    crate::testid::set_test_id(&error_label, ids::ERROR_MESSAGE);
     content.append(&error_label);
 
     page.append(&content);
@@ -143,10 +165,17 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
     });
 
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
+        repaint();
         let msg = m.error_message().filter(|msg| !msg.is_empty());
         crate::settings::render_error_label(&error_label, msg.as_deref());
     });
     (page, refresh)
+}
+
+/// `recovery-entry-submit-button`'s answer: the shared draft predicate over
+/// the phrase and the account as typed.
+fn submit_answer(phrase: &str, account: &str) -> fauna_core::possibility::Possibility {
+    fauna_onboarding_machine::recovery_entry_possibility(phrase.to_string(), account.to_string())
 }
 
 /// Fold a restore's outcome back into the wizard, on the GTK thread.

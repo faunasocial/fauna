@@ -26,7 +26,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -377,10 +377,28 @@ pub trait SupervisedChannel: Send + Sync + 'static {
 /// `Unreachable` run, so the idle pace and the "Cannot connect" threshold are
 /// what they were the moment nobody is waiting. Every waiter's wait is bounded
 /// by its own deadline, so the extra rate is too.
+///
+/// **A gap one request has outlasted is not waited out again.** Once a
+/// request has spent its whole deadline in the gap
+/// ([`Self::mark_outlasted`]), the gap is longer than a read, and a later
+/// request that finds no connection waits only for the next dial's answer:
+/// connected, it proceeds; refused ([`Self::refused_since`]), it fails at once.
+/// It still counts as a waiter, so that dial comes within the initial ceiling
+/// and a nest that came back is found by it. The mark lasts until a connection
+/// is proven ([`Self::note_connected`]), so a gap shorter than a read — a
+/// redeploy, a sign-in's first dial — is waited out exactly as before
+/// (`transport-connection.md` § Connection lifecycle).
 #[derive(Debug, Default)]
 pub struct DialDemand {
     waiting: AtomicUsize,
     notify: Notify,
+    /// Set when a request waited out its whole deadline with no connection;
+    /// cleared by a proven connection.
+    outlasted: AtomicBool,
+    /// Refused dials so far, a counter a waiter reads its answer off.
+    refusals: AtomicU64,
+    /// Woken at every refused dial and every proven connection.
+    answered: Notify,
 }
 
 impl DialDemand {
@@ -401,6 +419,51 @@ impl DialDemand {
 
     pub fn is_waiting(&self) -> bool {
         self.waiting.load(Ordering::SeqCst) > 0
+    }
+
+    /// A request waited out its whole deadline with no connection: the gap is
+    /// longer than a read.
+    pub fn mark_outlasted(&self) {
+        self.outlasted.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a request has outlasted the current gap — no connection has
+    /// been proven since [`Self::mark_outlasted`].
+    pub fn outlasted(&self) -> bool {
+        self.outlasted.load(Ordering::SeqCst)
+    }
+
+    /// The supervisor's refused dial, the answer a waiter in an outlasted gap
+    /// waits for.
+    pub fn note_refused(&self) {
+        self.refusals.fetch_add(1, Ordering::SeqCst);
+        self.answered.notify_waiters();
+    }
+
+    /// The supervisor's proven connection: the gap is over.
+    pub fn note_connected(&self) {
+        self.outlasted.store(false, Ordering::SeqCst);
+        self.answered.notify_waiters();
+    }
+
+    /// The refused-dial count now, the mark a later
+    /// [`Self::refused_since`] compares against.
+    pub fn refusal_count(&self) -> u64 {
+        self.refusals.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once a dial has been refused since `count`
+    /// ([`Self::refusal_count`]). Cancel-safe; the caller bounds it.
+    pub async fn refused_since(&self, count: u64) {
+        loop {
+            let answered = self.answered.notified();
+            tokio::pin!(answered);
+            answered.as_mut().enable();
+            if self.refusals.load(Ordering::SeqCst) > count {
+                return;
+            }
+            answered.await;
+        }
     }
 }
 
@@ -780,6 +843,11 @@ pub async fn run_supervisor<C: SupervisedChannel>(
                 // paces a waiter's dials, so a test pace reaches them too — but
                 // only across a gap: a nest that answered no is not a gap
                 // (`connect_error_is_answered_refusal`).
+                // Every refused dial answers a waiter in an outlasted gap
+                // (`DialDemand`'s second paragraph), whoever's dial it was.
+                if let Some(d) = cfg.channel.dial_demand() {
+                    d.note_refused();
+                }
                 let demand = if C::connect_error_is_answered_refusal(&e) {
                     None
                 } else {
@@ -860,6 +928,9 @@ pub async fn run_supervisor<C: SupervisedChannel>(
         // so the ceiling it starts from is this reset's 1 s.
         consecutive_failures = 0;
         backoff.reset();
+        if let Some(d) = cfg.channel.dial_demand() {
+            d.note_connected();
+        }
         cfg.connection_state_tx
             .send_replace(ConnectionState::Connected);
 
@@ -1950,6 +2021,44 @@ mod tests {
              within the initial ceiling — the request is left to spend its deadline on the \
              grown nap ({} dials in all)",
             gap.connects.load(Ordering::SeqCst)
+        );
+    }
+
+    /// **A gap one request outlasted answers the next waiter at the next
+    /// refused dial, and a proven connection ends it.** Twenty virtual seconds
+    /// into an outage, with the mark set, a waiter that reads the refusal count
+    /// must see a dial refused within the initial ceiling (its demand dial);
+    /// once the nest is back and a connection proven, the mark is gone.
+    #[tokio::test(start_paused = true)]
+    async fn an_outlasted_gap_is_answered_at_the_next_refused_dial_and_ends_at_a_connection() {
+        let gap = start_gap();
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        gap.demand.mark_outlasted();
+        let at = gap.demand.refusal_count();
+        let _waiter = gap.demand.begin_wait();
+        let answered = tokio::time::timeout(
+            INITIAL_BACKOFF + Duration::from_millis(50),
+            gap.demand.refused_since(at),
+        )
+        .await;
+        assert!(
+            answered.is_ok(),
+            "a waiter in an outlasted gap heard no refused dial within the initial ceiling"
+        );
+        assert!(
+            gap.demand.outlasted(),
+            "a refused dial does not end the gap"
+        );
+
+        gap.up.store(true, Ordering::SeqCst);
+        tokio::time::sleep(INITIAL_BACKOFF + Duration::from_millis(50)).await;
+        let state = *gap.state.borrow();
+        let outlasted = gap.demand.outlasted();
+        gap.sup.abort();
+        assert_eq!(state, ConnectionState::Connected);
+        assert!(
+            !outlasted,
+            "a proven connection must clear the outlasted mark"
         );
     }
 

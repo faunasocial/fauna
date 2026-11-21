@@ -75,8 +75,8 @@ pub use removed_account::{
 // there the same day.
 pub use fauna_account_seams::{
     atproto_credentials, atproto_identity, blessed_nests, contact_overlays, conversation_seams,
-    fleet_removal, folder_keys, group_reception, peer_anchors, period_keys, read_positions,
-    refused_changes, store_change,
+    fleet_removal, folder_keys, group_reception, pairing_marks, peer_anchors, period_keys,
+    read_positions, refused_changes, store_change,
 };
 
 use std::path::PathBuf;

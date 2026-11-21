@@ -33,7 +33,11 @@ import com.fauna.app.core.sourceAskRows
 import com.fauna.ffi.FfiFeedRequestState
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.blockedReason
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isShown
+import com.fauna.app.ui.util.localizedNested
+import com.fauna.app.ui.util.pressAsked
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.BridgesVM
 import com.fauna.app.ui.viewmodel.SettingsAdminGateVM
@@ -46,15 +50,21 @@ import com.fauna.ffi.FfiFollowRequestRow
 import com.fauna.ffi.FfiBridgeSetting
 import com.fauna.ffi.FfiBridgeStatus
 import com.fauna.ffi.FfiCborValue
-import com.fauna.ffi.FfiLinkBlock
 import com.fauna.ffi.FfiSettingControl
 import com.fauna.ffi.bridgeCardTitle
-import com.fauna.ffi.bridgeLinkBlock
+import com.fauna.ffi.adminEntryPossibility
+import com.fauna.ffi.bridgeLinkPossibility
 import com.fauna.ffi.bridgeModeApplies
 import com.fauna.ffi.followDisplay
 import com.fauna.ffi.isUnifiedBridgesPageBridge
 import com.fauna.ffi.settingControl
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
+import com.fauna.app.ui.controls.DropdownMenu
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,6 +75,10 @@ fun BridgesScreen(
 ) {
     val bridges by vm.bridges.collectAsState()
     val isAdmin by adminGate.isAdmin.collectAsState()
+    // The hosted-plugin section's shared answer (admin.md § Errors & edge
+    // cases, *Role and state gates answer one `Possibility` too*): absent for a
+    // non-admin, over the `am-i-admin` read (false until it answers).
+    val pluginsShown = adminEntryPossibility(isAdmin).isShown
     val plugins by vm.plugins.collectAsState()
     val pluginInstallOpened by vm.pluginInstallOpened.collectAsState()
     val pluginCards by vm.pluginCards.collectAsState()
@@ -85,7 +99,7 @@ fun BridgesScreen(
     }
 
     // The installed plugins are the admin's alone (`fauna.plugins.list`).
-    LaunchedEffect(isAdmin) { if (isAdmin) vm.refreshPlugins() }
+    LaunchedEffect(pluginsShown) { if (pluginsShown) vm.refreshPlugins() }
 
     LaunchedEffect(error) {
         appMessages.showError(error)
@@ -115,6 +129,7 @@ fun BridgesScreen(
         items(visibleBridges, key = { it.id }) { bridge ->
             BridgeCard(
                 bridge = bridge,
+                onRefuse = { appMessages.showError(it) },
                 bridgeFollows = follows[bridge.id] ?: emptyList(),
                 followRequests = followRequests[bridge.id] ?: emptyList(),
                 onLink = { mode, fields ->
@@ -152,7 +167,7 @@ fun BridgesScreen(
                 }
             }
         }
-        if (isAdmin) {
+        if (pluginsShown) {
             item(key = "plugins") {
                 PluginsSection(
                     plugins = plugins,
@@ -371,6 +386,9 @@ internal fun BridgeCard(
     // caller; empty (the default, and the common case) paints nothing.
     sourceAsks: SourceAskRows = SourceAskRows(),
     onAskSource: (FeedTriple) -> Unit = {},
+    // A refused Link press's reason, for the page's `error-message`
+    // (bridges.md § Errors & edge cases, rule 4).
+    onRefuse: (String) -> Unit = {},
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.BRIDGE_CARD)) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -396,7 +414,7 @@ internal fun BridgeCard(
                     onAddFollow, onRemoveFollow, onResolveFollowRequest,
                 )
             } else {
-                UnlinkedSection(bridge, onLink)
+                UnlinkedSection(bridge, onRefuse, onLink)
             }
 
             SourceAskSection(sourceAsks, onAskSource)
@@ -740,6 +758,7 @@ private fun AddFollowRow(onAddFollow: (String, String?) -> Unit) {
 @Composable
 private fun UnlinkedSection(
     bridge: FfiBridgeStatus,
+    onRefuse: (String) -> Unit,
     onLink: (mode: String, fields: Map<String, String>) -> Unit
 ) {
     // The platform string-match is the SHARED rule (lifted 2026-08-15 from the
@@ -748,19 +767,17 @@ private fun UnlinkedSection(
     val modes = bridge.linkModes?.filter { bridgeModeApplies(it.platform, "android") }
         ?: emptyList()
 
-    // Why linking is unavailable (null = it IS), from the shared Rust rule so
-    // android cannot drift from the other six apps. Previously a null
-    // `linkModes` — the nest's documented degraded shape when `provider.status()`
-    // errors — hit an early `?: return` that rendered NOTHING: no button, no
-    // message, and never the nest's own explanation. bridges.md § Errors & edge
-    // cases: disabled, not absent.
-    val block = bridgeLinkBlock(bridge.linked, bridge.error, modes.size.toUInt())
-    if (block != null) {
+    // The Link control's one answer, the shared `bridge_link_possibility`
+    // (bridges.md § Errors & edge cases, rule 4, *One answer for the button*):
+    // possible where no block applies, else blocked by the reason
+    // `bridge-link-blocked-reason` paints (the nest's own explanation, or the
+    // no-method sentence) — disabled, not absent. The Link press asks it again
+    // and refuses with the same reason.
+    val linkAnswer = bridgeLinkPossibility(bridge.linked, bridge.error, modes.size.toUInt())
+    val blockReason = linkAnswer.blockedReason
+    if (blockReason != null) {
         Text(
-            when (block) {
-                is FfiLinkBlock.ProviderError -> block.message
-                is FfiLinkBlock.NoApplicableMode -> stringResource(R.string.bridges_no_link_method)
-            },
+            localizedNested(blockReason).orEmpty(),
             color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.testTag(Ids.BRIDGE_LINK_BLOCKED_REASON)
         )
@@ -818,7 +835,14 @@ private fun UnlinkedSection(
     // gate, and it stays dead offline or not.)
     val linkGate = faunaGate("fauna.bridges.link")
     Spacer(Modifier.height(8.dp))
-    Button(onClick = { onLink(selectedMode.mode, fieldValues.toMap()) },
+    val context = LocalContext.current
+    Button(onClick = {
+            pressAsked(
+                context,
+                bridgeLinkPossibility(bridge.linked, bridge.error, modes.size.toUInt()),
+                onRefuse,
+            ) { onLink(selectedMode.mode, fieldValues.toMap()) }
+        },
         enabled = linkGate.enabled,
         modifier = Modifier.testTag(Ids.BRIDGE_ACTION_BUTTON)) {
         Text(stringResourceFmt(R.string.bridges_link, bridge.name))

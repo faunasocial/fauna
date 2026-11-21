@@ -44,6 +44,8 @@
 //! unseal:  decrypt_kind_chunk    →  decompress_chunk       →  TopicModel::from_bytes
 //! ```
 
+pub mod drafts;
+pub mod engagement;
 pub mod publish;
 pub mod topics;
 pub use publish::{

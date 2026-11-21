@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 
-def run_build_step(cmd, what, cwd=None):
+def run_build_step(cmd, what, cwd=None, env=None):
     """Run one build step to completion; `pytest.fail` with its tail on error,
     else return its last 400 output lines (a step whose verdict lines the
     caller checks — the MSI's notices run).
@@ -23,6 +23,13 @@ def run_build_step(cmd, what, cwd=None):
     `reap_descendants_of`: the whole tree dies with the run if pytest is reaped.
     `drain_pipes` keeps the pipe read for the child's life (convention 13) and
     holds the tail this failure quotes.
+
+    The lines come back as the step printed them. The drain tags each line it
+    keeps with its stream (`[out] `; stderr is merged into stdout here, so
+    every line carries that one tag), and a caller matching a verdict's prefix
+    would never see it under the tag: until the tag was stripped here, every
+    fixture MSI build failed its notices check over a generator that had
+    printed an OK verdict.
     """
     from drivers.port_util import (
         drain_pipes,
@@ -33,13 +40,14 @@ def run_build_step(cmd, what, cwd=None):
 
     print(f"[build-step] {what}", flush=True)
     proc = subprocess.Popen(
-        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, **popen_group_kwargs(),
     )
     reap_descendants_of(proc.pid)
     recent = drain_pipes(proc, maxlen=400)
     rc = proc.wait()
     wait_pipes_drained(proc, timeout=10.0)
+    lines = [ln.removeprefix("[out] ") for ln in recent]
     if rc != 0:
-        pytest.fail(f"{what} failed (rc={rc}):\n" + "\n".join(recent))
-    return list(recent)
+        pytest.fail(f"{what} failed (rc={rc}):\n" + "\n".join(lines))
+    return lines

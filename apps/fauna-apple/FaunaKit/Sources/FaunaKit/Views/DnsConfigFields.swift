@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The onboarding **DNS-config** step's shared field sequence
 /// (`docs/goal/behavior/onboarding.md` § dns_config): buy-domain checkbox,
-/// the no-provider-carries-TLD warning, same-provider checkbox, `ProviderRow`,
+/// the no-provider-carries-TLD warning, same-provider checkbox, `ProviderButtonRow`,
 /// "set up later" + its warning, and the provider-specific expansion
 /// (`dnsProviderSection`). macOS (`MacDnsConfigView`) and iOS (`DnsConfigView`)
 /// rendered this near-identically except for the no-provider-message's visual
@@ -30,8 +30,7 @@ public func dnsConfigFields(vm: OnboardingVM) -> some View {
     ))
         .accessibilityIdentifier(Ids.dnsBuyDomainCheckbox)
         // A toggle's "click" is a flip — invert the live checked state through
-        // the same machine setter (mirrors MacHandleEntryView's
-        // handle-control-checkbox; a bare Toggle is invisible in-process).
+        // the same machine setter (a bare Toggle is invisible in-process).
         // `value` is the toggle's on/off — the automation server's `checked`
         // read maps it to "true"/"false".
         .automationActivate(
@@ -59,7 +58,7 @@ public func dnsConfigFields(vm: OnboardingVM) -> some View {
             vm.machine.toggleSameProviderForVps(on: !vm.machine.dnsConfig().sameProviderForVps)
         }
 
-    ProviderRow(
+    ProviderButtonRow(
         providers: PROVIDERS.filter { $0.capabilities.contains(.dns) },
         selectedId: vm.machine.dnsConfig().selectedProviderId,
         kind: "dns",

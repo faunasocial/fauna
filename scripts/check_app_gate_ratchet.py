@@ -94,6 +94,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -132,6 +133,33 @@ FULL_SCAN_TRIGGERS = (
     (Path(__file__).resolve().parent / "surface_survey.py").relative_to(REPO).as_posix(),
     BASE_DRIVER_FILE.relative_to(REPO).as_posix(),
 )
+
+# `drivers/base.py` is a trigger only through the one thing the gate reads from
+# it — the capability-predicate set. A diff that edits the file but leaves that
+# set as the merge-base had it cannot move any untouched file's verdict, so the
+# whole-tree walk (~10 s) is not owed; the set is compared, and any doubt (no
+# merge-base, no git, a parse failure) keeps the full walk.
+PREDICATE_SOURCE_TRIGGER = BASE_DRIVER_FILE.relative_to(REPO).as_posix()
+
+
+def _predicates_unchanged_vs_base(repo_root: Path, scan_root: Path) -> bool:
+    base_file = scan_root / "drivers" / "base.py"
+    try:
+        rel = base_file.resolve().relative_to(repo_root.resolve()).as_posix()
+        mb = subprocess.run(
+            ["git", "-C", str(repo_root), "merge-base", "HEAD", "origin/main"],
+            capture_output=True, text=True, timeout=20, check=True,
+        ).stdout.strip()
+        old = subprocess.run(
+            ["git", "-C", str(repo_root), "show", f"{mb}:{rel}"],
+            capture_output=True, text=True, timeout=20, check=True,
+        ).stdout
+        return (
+            _predicate_names_from_source(old) == _predicate_names_from_source(
+                base_file.read_text())
+        )
+    except (OSError, ValueError, SyntaxError, subprocess.SubprocessError):
+        return False
 
 # The driver predicates that identify WHICH app is under test. A skip reached
 # under one of these is an app gate. `is_mobile()` is deliberately absent: it
@@ -339,9 +367,13 @@ def capability_predicate_names(base_path: Path = BASE_DRIVER_FILE) -> frozenset[
     family, abstract methods (fail loudly, not silently, if unimplemented),
     and bare `-> None` action hooks (side effects, not predicates)."""
     try:
-        tree = ast.parse(base_path.read_text())
+        return _predicate_names_from_source(base_path.read_text())
     except (OSError, UnicodeDecodeError, SyntaxError):
         return frozenset()
+
+
+def _predicate_names_from_source(source: str) -> frozenset[str]:
+    tree = ast.parse(source)
     names = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "PlatformDriver":
@@ -686,6 +718,15 @@ def scoped_paths(
     norm = [c.replace("\\", "/").strip().strip("/") for c in changed]
     norm = [c for c in norm if c]
     triggers = sorted(set(norm) & set(FULL_SCAN_TRIGGERS))
+    if (
+        triggers == [PREDICATE_SOURCE_TRIGGER]
+        and _predicates_unchanged_vs_base(repo_root, scan_root)
+    ):
+        print(
+            "check-app-gate-ratchet: drivers/base.py changed but its capability-"
+            "predicate set did not — scoped to the changed paths."
+        )
+        triggers = []
     if triggers:
         print(
             "check-app-gate-ratchet: the diff reaches the gate's own inputs "

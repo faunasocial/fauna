@@ -31,6 +31,28 @@ fn continue_from_provisioning_refuses_when_not_succeeded() {
     let step = m.continue_from_provisioning();
     assert_eq!(step, OnboardingStep::NestProvisioning);
     assert!(m.wizard_outcome().is_none());
+    // Never silent (ui/README.md § Offer only what is possible, rule 7).
+    assert_eq!(
+        m.error_message().as_deref(),
+        Some(fauna_i18n::strings::onboarding::nest_provisioning::CONTINUE_BLOCKED_IDLE)
+    );
+}
+
+/// A failed run's own sentence stays on the channel: the refusal does not
+/// overwrite the error that says what went wrong.
+#[test]
+fn continue_from_provisioning_keeps_a_failed_runs_own_error() {
+    let m = machine();
+    m.set_step_for_test(OnboardingStep::NestProvisioning);
+    let mut s = ProvisioningSnapshot::idle();
+    s.overall = OverallStatus::Failed;
+    m.set_provisioning_snapshot_for_test(s);
+    m.set_error_message("the server could not be created".into());
+    m.continue_from_provisioning();
+    assert_eq!(
+        m.error_message().as_deref(),
+        Some("the server could not be created")
+    );
 }
 
 /// The standard path lands on `nat_mode_choice`, exactly as a claim-code submit
@@ -69,6 +91,18 @@ fn continue_from_provisioning_normal_path_refuses_until_the_box_is_claimed() {
     let step = m.continue_from_provisioning();
     assert_eq!(step, OnboardingStep::NestProvisioning);
     assert!(m.wizard_outcome().is_none());
+    assert_eq!(
+        m.error_message().as_deref(),
+        Some(fauna_i18n::strings::onboarding::nest_provisioning::CONTINUE_BLOCKED_RUNNING),
+        "a refusal is never silent (rule 7)"
+    );
+    // Once claimed, Continue goes through and clears the reason.
+    m.set_claim_completed_for_test(true);
+    assert_eq!(
+        m.continue_from_provisioning(),
+        OnboardingStep::NatModeChoice
+    );
+    assert_eq!(m.error_message(), None);
 }
 
 /// The deferred-DNS path is untouched by that gate — and must be: it never claims

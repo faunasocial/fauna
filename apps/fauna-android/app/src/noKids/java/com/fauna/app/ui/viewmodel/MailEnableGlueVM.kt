@@ -2,6 +2,7 @@ package com.fauna.app.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.AppMessages
 import com.fauna.app.core.CriticalAlertsHost
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.ShellLog
@@ -25,7 +26,11 @@ import javax.inject.Inject
  * fires the first-setup mail provision, the three DAV toggles and the
  * one-MSEK-mint-path companion mints itself. Mirrors apple's
  * `MailEnableGlue.applyPostClaimServingEnablement` and is idempotent with the
- * mail-settings enable path, so a missed fire is recoverable.
+ * mail-settings enable path, so a missed fire is recoverable. A step the nest
+ * refuses for good is said on the page the person is on — the shell's
+ * process-wide [AppMessages] error, painted as `error-message` (`onboarding.md`
+ * § 3b *The step completes; it is not fired once*; tui's
+ * `ServingEnablementRefused`, the lead).
  *
  * Also the two other bridge legs of the same post-auth hook — the mail epoch
  * refresh and the critical-alert sweep (whose only feeder is the atproto
@@ -49,18 +54,23 @@ class MailEnableGlueVM @Inject constructor(
      * all four latches together as one boundary and hands them to the shared
      * step, which does the `am_i_admin` discrimination, the DAV toggles and the
      * companion mints (exactly one MSEK-minting path per first setup) itself.
-     * Best-effort: a failure is logged, not surfaced (the shared path is
-     * idempotent and the mail-settings / admin pages are the backstop).
+     * A step the nest refused for good comes back as the page's `error-message`
+     * text and is shown on [messages] — the shell's process-wide banner, which
+     * outlives this VM; `null` (every step succeeded) leaves whatever is shown
+     * alone. Any other failure (no connection, an undecodable secret) is logged:
+     * the shared path is idempotent and the mail-settings / admin pages are the
+     * backstop.
      */
-    suspend fun applyPostClaimServingEnablement() {
+    suspend fun applyPostClaimServingEnablement(messages: AppMessages) {
         val intents = host.consumePendingServingEnablement() ?: return
         try {
-            api.applyPostClaimServingEnablement(
+            val refused = api.applyPostClaimServingEnablement(
                 email = intents.email,
                 caldav = intents.caldav,
                 carddav = intents.carddav,
                 webdav = intents.webdav,
             )
+            if (!refused.isNullOrEmpty()) messages.showError(refused)
         } catch (e: Exception) {
             android.util.Log.w(
                 "MailEnableGlue",

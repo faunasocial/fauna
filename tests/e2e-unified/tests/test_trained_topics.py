@@ -525,6 +525,13 @@ def test_trained_factor_publishes_as_a_pruned_list_labeler(
     assert not app.personalization.publish_exemplar_included(pruned_index)
     kept = scored - 1
 
+    # Name the list first: Publish needs a public name AND a kept item
+    # (settings.md § Errors & edge cases, *Personal form submits paint
+    # from their draft*), so with the name in place the arming below
+    # turns on what is kept alone.
+    public_name = _unique("Small orange cats")
+    app.personalization.type_publish_name(public_name)
+
     # Unticking everything must disarm Publish rather than no-op a click: an
     # empty List means nothing, and a click that does nothing and says nothing
     # is indistinguishable from a broken sheet.
@@ -540,8 +547,6 @@ def test_trained_factor_publishes_as_a_pruned_list_labeler(
         "Publish must re-arm once something is kept again"
     )
 
-    public_name = _unique("Small orange cats")
-    app.personalization.type_publish_name(public_name)
     app.personalization.submit_publish()
     assert app.personalization.wait_for_publish_sheet_closed(), (
         f"publish sheet never closed; error={app.error_text()!r}"
@@ -656,6 +661,33 @@ def test_trained_factor_publishes_as_a_pruned_list_labeler(
     )
 
 
+def _arm_over_length_publish_error(app) -> None:
+    """Type a public name over the 128-character bound into the open publish
+    sheet and press the sheet's submit by the name input's Enter.
+
+    The shared draft answer (``drafts::publish_submit_possibility``) paints
+    Publish disabled with its reason while the name is over the bound, so a
+    click would press a disabled control (apple's strict actuation answers 409,
+    web's Playwright auto-wait times out). ``ui/settings.md`` § Errors & edge
+    cases names the legal press: the input's Enter, which asks the same answer
+    and refuses with that reason on ``error-message``. Where the answer is
+    painted, this first witnesses the disabled Publish and its reason."""
+    from helpers.app_surface import app_name, surface_built
+
+    app.personalization.type_publish_name("x" * 200)
+    which = app_name(app.driver)
+    if surface_built("personal-form-draft-validity", which):
+        assert not app.personalization.publish_submit_enabled(), (
+            "an over-length public name must disable Publish"
+        )
+        if surface_built("blocked-reason-read", which):
+            reason = app.personalization.publish_submit_blocked_reason()
+            assert reason == S.personalization.publish_name_too_long(max="128"), (
+                f"the disabled Publish must say why: {reason!r}"
+            )
+    app.personalization.submit_publish_via_enter()
+
+
 # Widened from windows-only 2026-08-30 (the wide-parity disposition pass): the
 # regression these two pin ORIGINATED in windows' PersonalizationPage — the
 # docstrings narrate that history — but the contract they assert is app-generic
@@ -681,11 +713,13 @@ def test_publish_name_too_long_error_survives_unrelated_rerender(logged_in_app):
     the page's other controls stay interactive while its error is showing.
 
     Reproduces the reviewer's exact "reachable through ordinary interaction"
-    sequence: (a) submit the publish sheet with a name over
-    `MAX_LABELER_LIST_NAME_LEN` (128 chars) — a PURE client-side artifact-
-    validation failure (`build_list_artifact` rejects it before ever reaching
-    the wire), so this is fully deterministic and needs no nest-side fault
-    injection; (b) an UNRELATED gesture that also triggers `RenderPage()` —
+    sequence: (a) press the publish sheet's submit — by the name input's
+    Enter, since the shared draft answer disables Publish itself
+    (`ui/settings.md` § Errors & edge cases) — with a name over
+    `MAX_LABELER_LIST_NAME_LEN` (128 chars), a PURE client-side refusal (the
+    draft answer on the lifted apps, `build_list_artifact` on windows) that
+    never reaches the wire, so this is fully deterministic and needs no
+    nest-side fault injection; (b) an UNRELATED gesture that also triggers `RenderPage()` —
     the SAME row's "Learn from my activity" engagement toggle, a plain
     registry write with no error of its own — must not clear the
     still-showing publish error out from under the still-open, still-failed
@@ -730,12 +764,12 @@ def test_publish_name_too_long_error_survives_unrelated_rerender(logged_in_app):
     app.personalization.open_publish_sheet(0)
     scored = app.personalization.wait_for_publish_exemplars(1)
     assert scored >= 1, f"publish sheet scored no exemplars; error={app.error_text()!r}"
-    app.personalization.type_publish_name("x" * 200)
-    app.personalization.submit_publish()
+    _arm_over_length_publish_error(app)
 
-    # The failed submit re-enables Submit and leaves the sheet open, writing
-    # the error DIRECTLY (PersonalizationPage.xaml.cs SubmitPublishAsync's
-    # FfiPublishListException catch → ShowPageError), never through
+    # The refused press leaves the sheet open, writing the error DIRECTLY
+    # (windows: PersonalizationPage.xaml.cs SubmitPublishAsync's
+    # FfiPublishListException catch → ShowPageError; the lifted apps: the
+    # press's refusal of the shared draft answer), never through
     # RenderPage()'s own chain.
     deadline = time.monotonic() + 10
     while not app.has_error() and time.monotonic() < deadline:
@@ -803,8 +837,8 @@ def test_publish_error_clears_on_fresh_sheet_reopen(logged_in_app):
     a still-relevant error; this one proves a FRESH, user-initiated sheet
     RE-OPEN — the start of a new attempt — MUST clear a now-stale one. Reuses
     the sibling test's exact deterministic failure trigger (an over-length
-    publish name — a pure client-side `build_list_artifact` validation
-    failure, no nest-side fault injection needed) purely to arm `_pageError`;
+    publish name pressed by the name input's Enter — a pure client-side
+    refusal, no nest-side fault injection needed) purely to arm `_pageError`;
     genuinely faulting `ScoreCorpusForFactorAsync` itself has no deterministic
     trigger without fault-injecting the nest, so this exercises the same
     `_pageError` field via `SubmitPublishAsync`'s catch instead — the fix
@@ -846,8 +880,7 @@ def test_publish_error_clears_on_fresh_sheet_reopen(logged_in_app):
     app.personalization.open_publish_sheet(0)
     scored = app.personalization.wait_for_publish_exemplars(1)
     assert scored >= 1, f"publish sheet scored no exemplars; error={app.error_text()!r}"
-    app.personalization.type_publish_name("x" * 200)
-    app.personalization.submit_publish()
+    _arm_over_length_publish_error(app)
 
     deadline = time.monotonic() + 10
     while not app.has_error() and time.monotonic() < deadline:
@@ -1148,6 +1181,13 @@ def test_trained_factor_publishes_as_a_scrubbed_text_model(
     assert not app.personalization.publish_ngram_included(pruned_index)
     kept = surviving - 1
 
+    # Name the list first: Publish needs a public name AND a kept item
+    # (settings.md § Errors & edge cases, *Personal form submits paint
+    # from their draft*), so with the name in place the arming below
+    # turns on what is kept alone.
+    public_name = _unique("Orange tabbies")
+    app.personalization.type_publish_name(public_name)
+
     # Nothing kept must DISARM Publish rather than no-op a click: an empty
     # vocabulary is a refusal the shared lifecycle enforces anyway, and a click
     # that does nothing and says nothing reads as a broken sheet.
@@ -1163,8 +1203,6 @@ def test_trained_factor_publishes_as_a_scrubbed_text_model(
         "Publish must re-arm once something is kept again"
     )
 
-    public_name = _unique("Orange tabbies")
-    app.personalization.type_publish_name(public_name)
     app.personalization.submit_publish()
     assert app.personalization.wait_for_publish_sheet_closed(), (
         f"publish sheet never closed; error={app.error_text()!r}"
@@ -1671,13 +1709,29 @@ def test_creating_a_topic_is_refused_by_name_when_blank_and_at_the_limit(logged_
     app.personalization.create_sole_topic(_unique("Cap"))
 
     # ── Outcome 13: a blank name ─────────────────────────────────────────
-    app.personalization.create_topic("   ")
-    blank_error = wait_until(
-        lambda: app.has_error() and app.error_text(),
-        budgets.UI_SETTLE_S,
-        diagnose=lambda: f"no refusal shown; rows={app.personalization.topic_names()!r}",
-    )
-    assert "name" in blank_error.lower(), (
+    # An app painting Create from the shared name answer disables it with its
+    # reason beside it (`ui/README.md` § Offer only what is possible) — the
+    # refusal is that reason, and a click would press a disabled control. An
+    # app that leaves Create armed refuses the press on `error-message`.
+    from helpers.app_surface import app_name, surface_built
+
+    app.personalization.type_topic_name("   ")
+    if app.personalization.create_enabled():
+        app.personalization.create_topic("   ")
+        blank_error = wait_until(
+            lambda: app.has_error() and app.error_text(),
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"no refusal shown; rows={app.personalization.topic_names()!r}",
+        )
+    elif surface_built("blocked-reason-read", app_name(app.driver)):
+        blank_error = wait_until(
+            app.personalization.create_blocked_reason,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: "Create is disabled for a blank name with no reason painted",
+        )
+    else:
+        blank_error = None  # disabled, and this app's painted reason is unread
+    assert blank_error is None or "name" in blank_error.lower(), (
         f"a blank create must say it needs a name; got {blank_error!r}"
     )
     assert app.personalization.topic_count() == 1, "a blank create minted a row"
@@ -1944,6 +1998,7 @@ def test_a_topics_saved_learning_that_cannot_be_opened_is_reported_and_never_res
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("trained-topics")
 def test_a_topic_trained_on_one_device_follows_you_to_your_other_device(
     request, logged_in_app, nest_instance, test_user

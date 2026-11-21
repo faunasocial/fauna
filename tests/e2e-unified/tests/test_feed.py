@@ -16,6 +16,7 @@ from helpers.png_chunks import png_with_chunk as _png_with_chunk
 from helpers.png_chunks import png_with_exif_chunk as _png_with_exif_chunk
 from tests.api import ws_api
 from tests.api.bare import media_item, sign_and_encode_post
+from helpers.use_case_walk import assert_use_case_walked
 
 pytestmark = [pytest.mark.tier1, pytest.mark.tier_3]
 
@@ -28,6 +29,7 @@ def _unique(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
+@pytest.mark.use_case("read-feed-and-post")
 @pytest.mark.feature("feed-compose")
 def test_create_post(logged_in_app):
     """Create a post and verify it appears in the feed."""
@@ -37,6 +39,7 @@ def test_create_post(logged_in_app):
         f"created post {text!r} should be first in feed; got "
         f"{logged_in_app.feed.first_post_text()!r} error={logged_in_app.error_text()!r}"
     )
+    assert_use_case_walked(logged_in_app.driver, "read-feed-and-post")
 
 
 @pytest.mark.feature("feed-interactions")

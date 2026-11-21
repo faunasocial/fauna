@@ -159,12 +159,19 @@ pub(super) fn connected_apps_elements(state: &SettingsState) -> Vec<Element> {
         )
         .labelled(t::CONNECT_PLACEHOLDER),
     );
-    els.push(Element::gesture_button(
-        ids::CONNECTED_APPS_CONNECT_SUBMIT,
-        t::CONNECT_SUBMIT,
-        !c.code_input.trim().is_empty(),
-        Gesture::Settings(Action::ConnectedAppsSubmitCode),
-    ));
+    // Live only with a code typed — the shared draft answer the press (and
+    // the input's Enter) asks again; the seam disables it with why (rule 4).
+    els.push(
+        Element::gesture_button(
+            ids::CONNECTED_APPS_CONNECT_SUBMIT,
+            t::CONNECT_SUBMIT,
+            true,
+            Gesture::Settings(Action::ConnectedAppsSubmitCode),
+        )
+        .possible(fauna_client_connected_apps::connect_code_possibility(
+            &c.code_input,
+        )),
+    );
 
     // ── 3. The external-apps switch and the roster it pauses ──
     // At every integration level: the flag is the account's, and every app
@@ -178,7 +185,10 @@ pub(super) fn connected_apps_elements(state: &SettingsState) -> Vec<Element> {
             external_apps_on,
             Gesture::Settings(Action::ConnectedAppsToggleExternalApps),
         )
-        .attr("state", if external_apps_on { "on" } else { "off" }),
+        .attr("state", if external_apps_on { "on" } else { "off" })
+        // Not live before the read: unread paints the flag's default, which
+        // the switch must never write back as a choice (rule 5).
+        .possible(fauna_client_connected_apps::external_apps_possibility(snap)),
     );
     // What OFF pauses — every connected app, principals included. Untagged:
     // ui.yaml gives the hint no id of its own.
@@ -616,8 +626,9 @@ fn consent_card_elements(consent: &ConsentCardRow, i: usize, els: &mut Vec<Eleme
     els.push(Element::label(CARD, lines.join("\n")));
     install_section_elements(consent, i, els);
     folder_picker_element(consent, i, els);
-    // A bare folder card is approvable only once a folder is chosen.
-    let approvable = picker.is_none_or(|p| p.chosen.is_some());
+    // A bare folder card is approvable only once a folder is chosen — the
+    // shared answer, whose reason the seam paints on the button (rule 2).
+    let approve = consent.approve_possibility();
     els.push(
         Element::label(
             ids::CONNECTED_APPS_REQUEST_CODE,
@@ -639,18 +650,21 @@ fn consent_card_elements(consent: &ConsentCardRow, i: usize, els: &mut Vec<Eleme
             false,
         ),
     ] {
-        els.push(
-            Element::gesture_button(
-                id,
-                label,
-                approvable || !approved,
-                Gesture::Settings(Action::ConnectedAppsResolveRequest {
-                    consent_id_hex: consent.consent_id_hex.clone(),
-                    approved,
-                }),
-            )
-            .within(CARD, i),
-        );
+        let button = Element::gesture_button(
+            id,
+            label,
+            true,
+            Gesture::Settings(Action::ConnectedAppsResolveRequest {
+                consent_id_hex: consent.consent_id_hex.clone(),
+                approved,
+            }),
+        )
+        .within(CARD, i);
+        els.push(if approved {
+            button.possible(approve.clone())
+        } else {
+            button
+        });
     }
     els.push(
         Element::gesture_button(

@@ -112,9 +112,79 @@ pub struct CalendarViewState {
     /// the separate `calendar-visibility` toggle — see
     /// [`CalendarViewState::shows_calendar`] for how the two compose.
     pub selected_calendar: Option<String>,
+    /// What decides whether an event compose may open (`ui/events.md`
+    /// § Errors & edge cases → *No calendar to hold an event*): the
+    /// four-answer calendar read and the two inputs the shared predicate
+    /// takes besides it.
+    pub create_gate: CreateGate,
+    /// How many listed calendars the page last said would not unseal
+    /// ([`CalendarViewState::unreadable_notice`]).
+    pub said_unreadable: usize,
+}
+
+/// The inputs of `fauna_client_caldav::event_create_possibility` the page
+/// holds (ruling 3). Before the first read it is *unresolved*, so a page that
+/// has not read yet answers "loading", never an empty list.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CreateGate {
+    /// The read's answer (rulings 2 and 5; a missing key is *unresolved*),
+    /// payload-free.
+    pub read: fauna_client_caldav::CalendarsReadState,
+}
+
+impl CreateGate {
+    /// Can an event compose open (and a create be sent) now? The one answer
+    /// `new-event-btn`, the day-cell double-click, the time-slot press and
+    /// `create-event` all ask.
+    pub fn possibility(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_caldav::event_create_possibility(&self.read)
+    }
+
+    /// Can a calendar be created, or an `.ics` imported, now? The shared
+    /// predicate over the same read — the one answer `new-calendar-btn`,
+    /// `create-calendar`, `calendar-import-button` and their actions ask
+    /// (`ui/events.md` § Errors & edge cases → *The other calendar writes*).
+    pub fn write_possibility(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_caldav::calendar_write_possibility(&self.read)
+    }
 }
 
 impl CalendarViewState {
+    /// What the page says of listed calendars left out because they would not
+    /// unseal (`ui/events.md` § Errors & edge cases → *The other calendar
+    /// writes*, rule 3 — never only logged): the `error-message` sentence when
+    /// a read's count differs from the one last said and is not zero, else
+    /// `None`. A steady poll re-listing the same count says nothing again, so
+    /// a dismissed banner is not put back every interval; a clean read says
+    /// nothing (the banner is app-wide, so it is not cleared on the page's
+    /// behalf).
+    pub fn unreadable_notice(&mut self, unreadable: usize) -> Option<String> {
+        if unreadable == self.said_unreadable {
+            return None;
+        }
+        self.said_unreadable = unreadable;
+        (unreadable > 0).then(|| {
+            events_strings::CALENDARS_UNREADABLE.replace("{count}", &unreadable.to_string())
+        })
+    }
+
+    /// The submit's side of the gate (ruling 3): the calendar a create goes
+    /// to — `chosen` (the compose's own calendar pick) while it still names a
+    /// listed calendar, else the page's — or the predicate's reason, in
+    /// words, so no submit can put an empty calendar id on the wire.
+    pub fn create_target(&self, chosen: Option<&str>) -> Result<String, String> {
+        let selected = chosen
+            .filter(|id| self.displayed_calendars.iter().any(|c| c.id == *id))
+            .map(str::to_owned)
+            .or_else(|| self.authoring_target());
+        fauna_client_caldav::event_create_target(
+            &self.create_gate.read,
+            selected.as_deref(),
+            self.displayed_calendars.iter().map(|c| c.id.as_str()),
+        )
+        .map_err(|reason| reason.resolve(crate::i18n::strings::lookup))
+    }
+
     /// The *live* calendar selection: `Some(id)` only while that calendar is
     /// still listed, else `None` (the union). The staleness rule is shared with
     /// tui — `fauna_client_caldav::resolve_calendar_selection` — so a calendar
@@ -215,6 +285,15 @@ pub struct CalendarViewHandles {
     /// The refused-change list's container (`refused_changes`); hidden while
     /// the list is empty, repainted by `RefusedChangesLoaded`.
     pub refused_panel: gtk::Box,
+    /// `new-event-btn`, painted from the page's [`CreateGate`] by
+    /// [`paint_create_gate`].
+    pub new_event_btn: gtk::Button,
+    /// The calendar list's empty state (`calendar-list-empty-state`),
+    /// painted by [`paint_create_gate`].
+    pub empty_state: calendar_sidebar::EmptyState,
+    /// `new-calendar-btn` and `calendar-import-button`, painted from the
+    /// page's [`CreateGate::write_possibility`] by [`paint_create_gate`].
+    pub write_doors: calendar_sidebar::WriteDoors,
     /// The page callbacks `month_grid::refresh_month_grid` requires — its day
     /// cells wire them to the month→day drill-in and the double-click compose.
     pub month_hooks: MonthGridHooks,
@@ -233,6 +312,29 @@ fn update_date_label(label: &gtk::Label, state: &CalendarViewState) {
         ViewMode::Agenda => crate::i18n::strings::common::UPCOMING.to_string(),
     };
     label.set_label(&text);
+}
+
+/// Paint `events-prev-month` / `events-next-month` from the shared
+/// `pan_possibility` for `mode` — disabled with its reason in agenda, never
+/// withdrawn (`ui/events.md` § User actions; `ui/README.md` § Offer only what
+/// is possible, rules 2 and 6). Called on every mode change.
+fn paint_pan_pair(prev: &gtk::Button, next: &gtk::Button, mode: ViewMode) {
+    for btn in [prev, next] {
+        crate::possible::paint(btn, None, fauna_core::caltime::pan_possibility(mode));
+    }
+}
+
+/// Ask the pan check again at the act (a button press or a pan key): blocked →
+/// the reason on the page's `error-message` and `false`, the date untouched.
+fn pan_allowed(client: &FaunaClient, mode: ViewMode) -> bool {
+    let answer = fauna_core::caltime::pan_possibility(mode);
+    if answer.is_possible() {
+        return true;
+    }
+    if let Some(text) = crate::possible::reason_text(&answer) {
+        client.report_on_page(text);
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +376,8 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         selected_event: None,
         displayed_calendars: Vec::new(),
         selected_calendar: None,
+        create_gate: CreateGate::default(),
+        said_unreadable: 0,
     }));
 
     // -----------------------------------------------------------------------
@@ -297,6 +401,8 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
     // parameter instead, which is where the compile-time enforcement matters.
     let month_hooks_for_sidebar = Rc::new(RefCell::new(None::<MonthGridHooks>));
     let calendar_list_box;
+    let empty_state;
+    let write_doors;
     {
         let st = Rc::clone(&state);
         let mgc = Rc::clone(&month_grid_container_for_sidebar);
@@ -306,7 +412,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         let cl = Rc::clone(client);
         let cl2 = Rc::clone(client);
         let sv = Rc::clone(&month_hooks_for_sidebar);
-        let (sidebar_widget, list_box) =
+        let (sidebar_widget, list_box, sidebar_empty_state, sidebar_write_doors) =
             calendar_sidebar::build_calendar_sidebar(&state, client, move || {
                 // Refresh all grids when visibility changes.
                 if let (Some(container), Some(hooks)) = (&*mgc.borrow(), &*sv.borrow()) {
@@ -323,6 +429,8 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
                 }
             });
         calendar_list_box = list_box;
+        empty_state = sidebar_empty_state;
+        write_doors = sidebar_write_doors;
         sidebar_box.append(&sidebar_widget);
     }
 
@@ -452,6 +560,12 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         let st = Rc::clone(&state);
         let cl = Rc::clone(client);
         new_event_btn.connect_clicked(move |btn| {
+            // The door asks the gate again (ruling 3): the paint keeps the
+            // button insensitive while blocked, and a press that races a
+            // repaint still opens nothing.
+            if !st.borrow().create_gate.possibility().is_possible() {
+                return;
+            }
             // Author into the calendar the page is currently targeting — the
             // live selection, else the first visible / first listed one
             // (events.md § Layout & flow).
@@ -479,7 +593,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
                 Some(draft) => data.with_draft(&draft),
                 None => data,
             };
-            let dialog = super::event_form::build_event_form_prefilled(&data, &cl);
+            let dialog = super::event_form::build_event_form_prefilled(&data, &st, &cl);
             if let Some(root) = btn.root()
                 && let Some(win) = root.downcast_ref::<gtk::Window>()
             {
@@ -531,6 +645,8 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         let w_btn = week_btn.clone();
         let d_btn = day_btn.clone();
         let a_btn = agenda_btn.clone();
+        let pan_prev = prev_btn.clone();
+        let pan_next = next_btn.clone();
         let mgc_slot = Rc::clone(&month_grid_container_for_sidebar);
         // The month grid is built *from* this closure, so it can only be
         // reached back through the same late-bound slot the sidebar uses; both
@@ -552,6 +668,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
                 s.view_mode = mode;
                 update_date_label(&lbl, &s);
             }
+            paint_pan_pair(&pan_prev, &pan_next, mode);
             stk.set_visible_child_name(mode.as_wire());
             // Syncing the button fires its `toggled` handler, which routes
             // straight back here — the guard above absorbs that second entry.
@@ -625,6 +742,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
     *agenda_container_for_sidebar.borrow_mut() = Some(agenda_container.clone());
 
     main_stack.set_visible_child_name(initial_view_mode.as_wire());
+    paint_pan_pair(&prev_btn, &next_btn, initial_view_mode);
 
     main_area.append(&main_stack);
 
@@ -641,7 +759,11 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
     ] {
         let st = Rc::clone(&state);
         let switch = Rc::clone(&switch_view);
+        let cl = Rc::clone(client);
         btn.connect_clicked(move |_| {
+            if !matches!(step, DateStep::Today) && !pan_allowed(&cl, st.borrow().view_mode) {
+                return;
+            }
             let (mode, date) = {
                 let mut s = st.borrow_mut();
                 match step {
@@ -680,6 +802,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
     {
         let st = Rc::clone(&state);
         let switch = Rc::clone(&switch_view);
+        let cl = Rc::clone(client);
 
         let key_controller = gtk::EventControllerKey::new();
         key_controller.connect_key_pressed(move |_, key, _, modifier| {
@@ -708,6 +831,14 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
                 Some(a) => a,
                 None => return glib::Propagation::Proceed,
             };
+
+            // Every pan key asks the pan pair's own check (rule 6): in agenda
+            // it says why on `error-message` and the date stays put.
+            if matches!(action, "prev" | "next" | "prev_month" | "next_month")
+                && !pan_allowed(&cl, st.borrow().view_mode)
+            {
+                return glib::Propagation::Stop;
+            }
 
             // Compute the target (mode, date) only; `switch_view` owns every
             // effect of getting there.
@@ -787,10 +918,40 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         agenda_container,
         detail_panel,
         refused_panel,
+        new_event_btn,
+        empty_state,
+        write_doors,
         month_hooks,
     };
+    // Before the first read the page is loading, never empty (ruling 2).
+    paint_create_gate(&handles);
 
     (outer, handles)
+}
+
+/// Paint the page's create doors from its [`CreateGate`] (`ui/events.md`
+/// § Errors & edge cases → *No calendar to hold an event*, ruling 3):
+/// `new-event-btn` through the possibility seam (insensitive with the reason
+/// while blocked), and the calendar list's empty state; and the other
+/// calendar-write doors from the write predicate (*The other calendar
+/// writes*). Called after every calendar read.
+pub fn paint_create_gate(handles: &CalendarViewHandles) {
+    let (gate, listed) = {
+        let s = handles.state.borrow();
+        (s.create_gate.clone(), !s.displayed_calendars.is_empty())
+    };
+    crate::possible::paint(&handles.new_event_btn, None, gate.possibility());
+    crate::possible::paint(
+        &handles.write_doors.new_calendar_btn,
+        None,
+        gate.write_possibility(),
+    );
+    crate::possible::paint(
+        &handles.write_doors.import_btn,
+        None,
+        gate.write_possibility(),
+    );
+    handles.empty_state.paint(&gate, listed);
 }
 
 #[cfg(test)]
@@ -835,6 +996,10 @@ mod tests {
             selected_event: None,
             displayed_calendars: calendars,
             selected_calendar: None,
+            create_gate: CreateGate {
+                read: fauna_client_caldav::CalendarsReadState::Loaded,
+            },
+            said_unreadable: 0,
         }
     }
 
@@ -960,5 +1125,306 @@ mod tests {
             .expect("the day is still indexed");
         assert_eq!(day.len(), 1);
         assert_eq!(day[0].calendar_id, "bb");
+    }
+
+    // ── No calendar to hold an event (`ui/events.md` § Errors & edge cases,
+    //    rulings 2–4) ───────────────────────────────────────────────────────
+
+    use crate::i18n::strings::events as et;
+    use crate::testid::run_on_gtk_thread;
+    use fauna_client_caldav::CalendarsReadState;
+
+    fn gate(read: CalendarsReadState) -> CreateGate {
+        CreateGate { read }
+    }
+
+    /// The submit's target goes through the shared gate: a read that is not
+    /// loaded refuses in words, so no empty calendar id is ever sent.
+    #[test]
+    fn create_target_refuses_with_the_reason_until_the_read_is_loaded() {
+        let mut s = state_with(vec![]);
+        s.create_gate = gate(CalendarsReadState::Unresolved);
+        assert_eq!(
+            s.create_target(None),
+            Err(et::create_blocked::LOADING.to_string())
+        );
+    }
+
+    /// Loaded: the compose's own pick while it is listed, else the page's
+    /// authoring target (a stale pick never reaches the wire).
+    #[test]
+    fn create_target_takes_the_listed_pick_else_the_pages_target() {
+        let s = state_with(vec![cal("aa", "Work"), cal("bb", "Home")]);
+        assert_eq!(s.create_target(Some("bb")), Ok("bb".to_string()));
+        assert_eq!(s.create_target(Some("gone")), Ok("aa".to_string()));
+        assert_eq!(s.create_target(Some("")), Ok("aa".to_string()));
+    }
+
+    /// Before the first read the page is loading: `new-event-btn` is shut
+    /// and the list paints the loading line, never the empty state.
+    #[test]
+    fn an_unread_page_paints_loading_and_shuts_new_event() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let (_root, h) = build_calendar_view(&client);
+            assert!(!h.new_event_btn.is_sensitive());
+            assert!(h.empty_state.loading.is_visible());
+            assert!(!h.empty_state.reason.is_visible());
+            assert!(!h.empty_state.none.is_visible());
+        });
+    }
+
+    /// A refused provision says why, with no jump (the next read retries).
+    #[test]
+    fn a_refused_provision_paints_its_error_without_a_jump() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let (_root, h) = build_calendar_view(&client);
+            h.state.borrow_mut().create_gate = gate(CalendarsReadState::ProvisionFailed {
+                error: "boom".into(),
+            });
+            paint_create_gate(&h);
+            assert!(h.empty_state.reason.text().contains("boom"));
+            assert!(!h.new_event_btn.is_sensitive());
+        });
+    }
+
+    /// Loaded with a calendar listed: the opener is live and no empty state
+    /// paints anything.
+    #[test]
+    fn a_loaded_read_opens_new_event() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let (_root, h) = build_calendar_view(&client);
+            {
+                let mut s = h.state.borrow_mut();
+                s.create_gate = gate(CalendarsReadState::Loaded);
+                s.displayed_calendars = vec![cal("aa", "Personal")];
+            }
+            paint_create_gate(&h);
+            assert!(h.new_event_btn.is_sensitive());
+            assert!(!h.empty_state.reason.is_visible());
+            assert!(!h.empty_state.loading.is_visible());
+        });
+    }
+
+    fn has_popover(anchor: &gtk::Button) -> bool {
+        let mut child = anchor.first_child();
+        while let Some(c) = child {
+            if c.is::<gtk::Popover>() {
+                return true;
+            }
+            child = c.next_sibling();
+        }
+        false
+    }
+
+    /// Both positional doors (the month cell's double-click and the time-slot
+    /// press) go through `show_quick_create`: blocked, it opens nothing.
+    #[test]
+    fn the_positional_doors_open_no_compose_while_blocked() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let state = Rc::new(RefCell::new(state_with(vec![])));
+            for read in [
+                CalendarsReadState::Unresolved,
+                CalendarsReadState::ProvisionFailed { error: "x".into() },
+            ] {
+                state.borrow_mut().create_gate = gate(read.clone());
+                let anchor = gtk::Button::new();
+                event_popover::show_quick_create(
+                    &anchor,
+                    (2026, 11, 16),
+                    Some((9, 0)),
+                    &state,
+                    &client,
+                );
+                assert!(!has_popover(&anchor), "{read:?} opened the compose");
+            }
+            // The possible half pops a popover up, which needs a mapped
+            // anchor — the e2e `test_month_double_click_day_cell_opens_new_
+            // event_prefilled[linux]` drives it on a real window.
+        });
+    }
+
+    /// A refused save (ruling 4): the compose stays, its own `error-message`
+    /// carries the whole sentence (no raw context prefix); a success clears it.
+    #[test]
+    fn a_failed_save_is_said_in_the_compose_which_stays_open() {
+        run_on_gtk_thread(|| {
+            let client = FaunaClient::offline_for_test();
+            let compose = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let label = crate::form_gate::dialog_error_label();
+            event_popover::finish_compose(&compose, &label, &client, Err("nest said no".into()));
+            assert!(label.is_visible());
+            let text = label.text().to_string();
+            assert_eq!(text, et::SAVE_FAILED.replace("{error}", "nest said no"));
+            assert!(!text.starts_with("event_created"));
+            assert!(compose.is_visible());
+
+            event_popover::finish_compose(&compose, &label, &client, Ok(()));
+            assert!(!label.is_visible());
+        });
+    }
+
+    // ── The other calendar writes (`ui/events.md` § Errors & edge cases,
+    //    ruled 2026-11-18) — tui's tests of the same names ──────────────────
+
+    /// Every local refusal a press sent, in order.
+    fn refusals(rx: &std::sync::mpsc::Receiver<crate::app::UiMessage>) -> Vec<String> {
+        rx.try_iter()
+            .filter_map(|m| match m {
+                crate::app::UiMessage::Action(crate::app::ActionResult::FailedLocalized {
+                    message,
+                }) => Some(message),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The pan pair is live in month/week/day and, in agenda, disabled with
+    /// the shared reason; a pan reaching the check there says the same reason
+    /// on the page and refuses (`ui/events.md` § User actions).
+    #[test]
+    fn the_pan_pair_is_disabled_with_its_reason_in_agenda_and_refuses() {
+        run_on_gtk_thread(|| {
+            let (client, rx) = FaunaClient::offline_for_test_with_rx();
+            let prev = gtk::Button::new();
+            let next = gtk::Button::new();
+            for mode in [ViewMode::Month, ViewMode::Week, ViewMode::Day] {
+                paint_pan_pair(&prev, &next, mode);
+                assert!(prev.is_sensitive() && next.is_sensitive(), "{mode:?}");
+                assert!(pan_allowed(&client, mode), "{mode:?}");
+            }
+            assert!(refusals(&rx).is_empty());
+
+            paint_pan_pair(&prev, &next, ViewMode::Agenda);
+            assert!(prev.is_visible() && next.is_visible());
+            assert!(!prev.is_sensitive() && !next.is_sensitive());
+            let reason = crate::possible::reason_text(&fauna_core::caltime::pan_possibility(
+                ViewMode::Agenda,
+            ));
+            assert!(reason.is_some());
+            assert_eq!(prev.tooltip_text().map(|t| t.to_string()), reason);
+            assert!(!pan_allowed(&client, ViewMode::Agenda));
+            assert_eq!(refusals(&rx), vec![reason.unwrap()]);
+        });
+    }
+
+    /// `new-calendar-btn` and `calendar-import-button` are shut on every
+    /// answer that is not *loaded*, and a press that reaches them anyway
+    /// opens nothing and says the predicate's reason.
+    #[test]
+    fn the_calendar_write_doors_are_shut_on_each_answer_that_is_not_loaded() {
+        run_on_gtk_thread(|| {
+            let (client, rx) = FaunaClient::offline_for_test_with_rx();
+            let client = Rc::new(client);
+            let (_root, h) = build_calendar_view(&client);
+            for (read, says) in [
+                (
+                    CalendarsReadState::Unresolved,
+                    et::create_blocked::LOADING.to_string(),
+                ),
+                (
+                    CalendarsReadState::ProvisionFailed {
+                        error: "boom".into(),
+                    },
+                    "boom".to_string(),
+                ),
+            ] {
+                {
+                    let mut s = h.state.borrow_mut();
+                    s.create_gate = gate(read.clone());
+                    s.displayed_calendars = vec![cal("aa", "Personal")];
+                }
+                paint_create_gate(&h);
+                assert!(!h.write_doors.new_calendar_btn.is_sensitive(), "{read:?}");
+                assert!(!h.write_doors.import_btn.is_sensitive(), "{read:?}");
+                let refusal = calendar_sidebar::write_refusal(&h.state.borrow())
+                    .expect("a read that is not loaded refuses");
+                assert!(refusal.contains(&says), "{read:?}: {refusal}");
+
+                let _ = refusals(&rx);
+                h.write_doors.new_calendar_btn.emit_clicked();
+                h.write_doors.import_btn.emit_clicked();
+                let said = refusals(&rx);
+                assert_eq!(said.len(), 2, "{read:?}: {said:?}");
+                assert!(said.iter().all(|m| m.contains(&says)), "{read:?}: {said:?}");
+                assert!(
+                    said.iter()
+                        .all(|m| m != crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL),
+                    "never 'calendar requires mail': {said:?}"
+                );
+            }
+        });
+    }
+
+    /// Loaded: both doors are live and the predicate refuses nothing.
+    #[test]
+    fn a_loaded_read_opens_the_calendar_write_doors() {
+        run_on_gtk_thread(|| {
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let (_root, h) = build_calendar_view(&client);
+            {
+                let mut s = h.state.borrow_mut();
+                s.create_gate = gate(CalendarsReadState::Loaded);
+                s.displayed_calendars = vec![cal("aa", "Personal")];
+            }
+            paint_create_gate(&h);
+            assert!(h.write_doors.new_calendar_btn.is_sensitive());
+            assert!(h.write_doors.import_btn.is_sensitive());
+            assert_eq!(calendar_sidebar::write_refusal(&h.state.borrow()), None);
+        });
+    }
+
+    /// The import's no-file refusal stays at the press (rule 2): loaded, with
+    /// no path chosen, it still says so.
+    #[test]
+    fn a_loaded_import_with_no_path_still_says_so() {
+        run_on_gtk_thread(|| {
+            let (client, rx) = FaunaClient::offline_for_test_with_rx();
+            let client = Rc::new(client);
+            let (_root, h) = build_calendar_view(&client);
+            {
+                let mut s = h.state.borrow_mut();
+                s.create_gate = gate(CalendarsReadState::Loaded);
+                s.displayed_calendars = vec![cal("aa", "Personal")];
+            }
+            paint_create_gate(&h);
+            let _ = refusals(&rx);
+            h.write_doors.import_btn.emit_clicked();
+            assert_eq!(refusals(&rx), vec![et::ICS_FILE_REQUIRED.to_string()]);
+        });
+    }
+
+    /// A calendar that would not unseal is said with its count (rule 3), once
+    /// per change of the count — a steady poll does not say it again.
+    #[test]
+    fn unreadable_calendars_are_said_on_the_page() {
+        let mut s = state_with(vec![cal("aa", "Personal")]);
+        assert_eq!(s.unreadable_notice(0), None);
+        let said = s.unreadable_notice(2).expect("two unreadable are said");
+        assert_eq!(said, et::CALENDARS_UNREADABLE.replace("{count}", "2"));
+        assert_eq!(s.unreadable_notice(2), None);
+        assert_eq!(s.unreadable_notice(0), None);
+        assert!(s.unreadable_notice(1).is_some_and(|m| m.contains('1')));
+    }
+
+    /// A key lost between the paint and the act refuses as "loading", never
+    /// as "calendar requires mail"; a read with no calendar after a create
+    /// says the provision-failed sentence.
+    #[test]
+    fn a_refused_write_says_the_predicates_sentence() {
+        assert_eq!(
+            crate::client::calendar_key_not_ready(),
+            et::create_blocked::LOADING
+        );
+        let failed = crate::client::calendar_write_refusal(&CalendarsReadState::ProvisionFailed {
+            error: "the Personal calendar was not listed".into(),
+        });
+        assert!(
+            failed.contains("the Personal calendar was not listed"),
+            "{failed}"
+        );
     }
 }

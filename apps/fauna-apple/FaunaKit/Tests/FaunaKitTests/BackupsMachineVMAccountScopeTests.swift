@@ -162,7 +162,9 @@ struct BackupsMachineVMAccountScopeTests {
         let vm = BackupsMachineVM()
         await configure(vm, apiA)
         let machine = vm.machine
-        vm.openImmediateDelete(snapshotId: 7)
+        // The offline machine lists no row, so the gated gesture would refuse to
+        // open on one: put the modal's state in place directly.
+        vm.immediateDeleteSnapshotId = 7
         vm.immediateDeleteConfirmId = "7"
 
         apiA.build = .fails("account A")  // an (incorrect) rebuild here would throw and lose the machine
@@ -244,7 +246,11 @@ struct BackupsMachineVMAccountScopeTests {
         await configure(vm, apiA)
         await vm.loadDevices(folder: "account A's folder")
         await vm.loadStats(folder: "account A's folder")
+        // The offline machine lists no row 7, so this press is refused (an
+        // absent answer) onto `error-message` — a refusal the reset must drop.
         vm.openImmediateDelete(snapshotId: 7)
+        try #require(vm.errorMessage != nil, "precondition: the press was refused")
+        vm.immediateDeleteSnapshotId = 7
         try #require(vm.machine != nil && !vm.devices.isEmpty && vm.stats != nil)
 
         vm.reset()

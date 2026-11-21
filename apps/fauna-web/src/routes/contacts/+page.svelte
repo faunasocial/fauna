@@ -20,8 +20,10 @@
   import { relativeTime } from '#lib/value-format';
   import { contactRosterGroupOrder, contactStatusLabel, wardAskRules } from '#lib/wasm';
   import { contactOverlays, contactsRevision } from '#lib/conversations';
-  import { carddavListAddressbooks, carddavQueryCardsDecoded, carddavLocateCardByUidHash, onPushEvent, staleSurfacesForPushKind } from '#lib/rpc';
+  import { carddavReadAddressbooks, carddavQueryCardsDecoded, carddavLocateCardByUidHash, onPushEvent, staleSurfacesForPushKind } from '#lib/rpc';
   import { resolveLocalized } from '#lib/i18n/localized';
+  import { onStoreChange } from '#lib/store-change';
+  import { addressBookPlaceholder, addressBooksOf, type AddressbooksRead } from '#lib/address-book';
   import { consumePendingSearchNav } from '#lib/search';
   import { IDS } from '#lib/generated/uiIds';
   import {
@@ -38,9 +40,13 @@
   import { hexToBytes } from '#lib/hex';
   import { refusalText } from '#lib/guardian-refusal';
   import {
+    acceptAnswer,
     classifyKnockFailure,
     contactAskRender,
+    guardianDecides,
+    knockAnswer,
     knocksAwaitGuardian,
+    rosterStatus,
     foldContactAsked,
     foldKnockReply,
     KNOCK_SENT,
@@ -50,9 +56,11 @@
     type KnockSendResult,
   } from '#lib/ward-asks';
   import { wardAsks, refreshWardAsks, rereadAfterAsk } from '#lib/wardAsks.svelte';
+  import { paintPossibility } from '#lib/possibility';
 
   let unsubPush: (() => void) | null = null;
   let unsubReconnect: (() => void) | null = null;
+  let unsubStore: (() => void) | null = null;
   let loading = $state(true);
   let error = $state('');
   let localKnocks = $state<Knock[]>([]);
@@ -76,6 +84,10 @@
   // social contact graph above). Read-only master-detail over the carddav wasm
   // exports (carddav-server.md § Independent enablement, contacts.md § Layout).
   let segment = $state<'people' | 'addressbook'>('people');
+  // The book read in the shared `AddressbooksRead` states (contacts.md § Errors
+  // & edge cases): while unresolved — a missing key included, the mint in
+  // flight — the sidebar paints loading, never an empty address book.
+  let abRead = $state<AddressbooksRead>({ state: 'unresolved' });
   let addressbooks = $state<any[]>([]);
   let selectedBookId = $state<string | null>(null);
   let cards = $state<any[]>([]);
@@ -93,7 +105,8 @@
     abLoading = true;
     abError = '';
     try {
-      const { addressbooks: books } = await carddavListAddressbooks(secretHex);
+      abRead = await carddavReadAddressbooks(secretHex);
+      const books = addressBooksOf(abRead);
       addressbooks = books;
       // Auto-open the first book so the card list isn't empty on entry.
       if (books.length > 0 && !selectedBookId) await selectBook(books[0].id);
@@ -131,7 +144,8 @@
    *  cards land only if that book is still the open one when they arrive. */
   async function refreshAddressBook(secretHex: string) {
     try {
-      const { addressbooks: books } = await carddavListAddressbooks(secretHex);
+      abRead = await carddavReadAddressbooks(secretHex);
+      const books = addressBooksOf(abRead);
       addressbooks = books;
       const open = selectedBookId;
       if (!open || !books.some((b: any) => b.id === open)) {
@@ -163,6 +177,7 @@
     try {
       const result = await carddavLocateCardByUidHash(secretHex, uidHash);
       addressbooks = result.addressbooks;
+      abRead = { state: 'loaded', addressbooks: result.addressbooks };
       if (result.addressbook_id && result.card_id) {
         selectedBookId = result.addressbook_id;
         cards = result.cards;
@@ -231,6 +246,15 @@
     // sweeps knocks + contacts on both `Reconnected` and `ResyncRequired` for
     // exactly this reason. `reconnectTick` is a `writable(0)` — it fires once on
     // subscribe, so skip that seed value (the feed page's idiom).
+    // The store-change notice (`#lib/store-change`): an unresolved book read
+    // waits on custody (the account store not up yet, or the key mint in
+    // flight) — re-run it when the store moves, until it answers. The Events
+    // page's unresolved calendar re-run is the same shape.
+    unsubStore = onStoreChange(() => {
+      const id4 = $identity;
+      if (id4 && segment === 'addressbook' && abRead.state === 'unresolved') void refreshAddressBook(id4.secretHex);
+    });
+
     let firstTick = true;
     unsubReconnect = reconnectTick.subscribe(() => {
       if (firstTick) { firstTick = false; return; }
@@ -242,6 +266,7 @@
   onDestroy(() => {
     unsubPush?.();
     unsubReconnect?.();
+    unsubStore?.();
   });
 
   /** The page's one fetch path (knocks + contacts). `silent` skips the loading
@@ -271,6 +296,14 @@
   async function handleAccept(peerId: string) {
     const id = $identity;
     if (!id) return;
+    // The accept asks the predicate its button paints from first, and a
+    // refusal is never silent (ui/README.md § Offer only what is possible,
+    // rules 6 and 7).
+    const answer = acceptAnswer(wardAskRules, wardAsks());
+    if (answer.state !== 'possible') {
+      error = answer.state === 'blocked' ? resolveLocalized(answer.reason) : t.common.error;
+      return;
+    }
     try {
       const settled = await acceptKnock({
         acceptOrQueue: () => acceptKnockOrQueue(id.secretHex, peerId),
@@ -374,6 +407,13 @@
     const id = $identity;
     if (!id || !findResult || knockAsk.knockSent) return;
     const peer = findResult.actorId;
+    // The knock asks the predicate its button paints from before it sends
+    // (rules 6 and 7) — the ward's entry gate, contacts.md § Errors & edge cases.
+    const answer = knockAnswer(wardAskRules, wardAsks(), rosterStatus(localContacts, peer));
+    if (answer.state !== 'possible') {
+      error = answer.state === 'blocked' ? resolveLocalized(answer.reason) : t.common.error;
+      return;
+    }
     sendingKnock = true;
     let result: KnockSendResult;
     try {
@@ -505,11 +545,14 @@
     </button>
   </div>
   {#if findStatus === 'found' && findResult}
+    {@const peerStatus = rosterStatus(localContacts, findResult.actorId)}
+    {@const knockPaint = paintPossibility(knockAnswer(wardAskRules, wardAsks(), peerStatus))}
     {@const askRender = contactAskRender(
       wardAskRules,
       wardAsks().contact,
       findResult.actorId,
-      knockAsk.peer === findResult.actorId && knockAsk.guardianRefused,
+      guardianDecides(wardAskRules, wardAsks(), peerStatus) ||
+        (knockAsk.peer === findResult.actorId && knockAsk.guardianRefused),
       knockAsk.peer === findResult.actorId && knockAsk.askSent,
     )}
     <div class="find-result">
@@ -527,13 +570,16 @@
       <button
         data-testid={IDS.CONTACTS_ADD_BUTTON}
         class="btn primary small"
-        disabled={sendingKnock || knockAsk.knockSent}
+        disabled={sendingKnock || knockAsk.knockSent || knockPaint.disabled}
+        title={!knockAsk.knockSent && knockPaint.reason ? resolveLocalized(knockPaint.reason) : undefined}
         onclick={handleAddContact}
       >{knockAsk.knockSent ? t.contacts.sent : t.contacts.knock}</button>
       <!-- The ward's in-app ask (family-safety.md § Child-initiated contact
            requests → App affordance): the durable pending state first (the
-           ward's own status.contact_requests), else the ask — offered only
-           after the TYPED guardian refusal of a knock to this very peer. -->
+           ward's own status.contact_requests), else the ask — offered at the
+           entry when the guardian decides this peer (contacts.md § Errors &
+           edge cases), and still after the TYPED guardian refusal of a knock
+           to this very peer. -->
       {#if askRender === 'pending'}
         <span data-testid={IDS.CONTACT_REQUEST_PENDING} class="muted small">{t.contacts.contact_request_pending}</span>
       {:else if askRender === 'ask'}
@@ -575,6 +621,7 @@
     {:else}
       <div class="knock-list">
         {#each localKnocks as knock (knock.id)}
+          {@const acceptPaint = paintPossibility(acceptAnswer(wardAskRules, wardAsks()))}
           <div data-testid={IDS.KNOCK_CARD} class="knock-card">
             <div class="knock-info">
               <span data-testid={IDS.KNOCK_SENDER} class="peer-id mono">{knockNames.get(knock.sender) ?? ''}</span>
@@ -593,7 +640,16 @@
               <span class="muted small">{relativeTime(knock.created_at)}</span>
             </div>
             <div class="knock-actions">
-              <button data-testid={IDS.CONTACTS_ACCEPT_BUTTON} class="btn primary small" onclick={() => handleAccept(knock.sender)}>{t.common.accept}</button>
+              <!-- Blocked while the guardian decides knocks (or the status
+                   read is unresolved), from the shared accept_possibility;
+                   block and dismiss stay the ward's. -->
+              <button
+                data-testid={IDS.CONTACTS_ACCEPT_BUTTON}
+                class="btn primary small"
+                disabled={acceptPaint.disabled}
+                title={acceptPaint.reason ? resolveLocalized(acceptPaint.reason) : undefined}
+                onclick={() => handleAccept(knock.sender)}
+              >{t.common.accept}</button>
               <button data-testid={IDS.KNOCK_DISMISS} class="btn small" onclick={() => handleDismiss(knock.sender)}>{t.common.dismiss}</button>
               <button data-testid={IDS.CONTACTS_BLOCK_BUTTON} class="btn danger small" onclick={() => handleBlock(knock.sender)}>{t.common.block}</button>
             </div>
@@ -692,10 +748,12 @@
 <!-- Address Book (CardDAV vCards — read-only master-detail, slice 4b) -->
 <div class="addressbook">
   <div class="ab-sidebar">
-    {#if abLoading && addressbooks.length === 0}
-      <p class="muted">{t.common.loading}</p>
-    {:else if addressbooks.length === 0}
-      <p class="muted">{t.contacts.address_book.no_addressbooks}</p>
+    {#if addressbooks.length === 0}
+      {#if addressBookPlaceholder(abRead) === 'loading'}
+        <p class="muted">{t.contacts.address_book.loading}</p>
+      {:else}
+        <p class="muted">{t.contacts.address_book.no_addressbooks}</p>
+      {/if}
     {:else}
       {#each addressbooks as book (book.id)}
         <button

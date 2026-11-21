@@ -569,7 +569,12 @@ impl Harness {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<HydrationCommand>();
         let connect = {
             let cmd_tx = cmd_tx.clone();
-            move || mount_over(reach, FOLDER, cmd_tx).expect("mount over the bound directory")
+            move || {
+                crate::bridge::Connected::Up(
+                    mount_over(reach, FOLDER, cmd_tx.clone())
+                        .expect("mount over the bound directory"),
+                )
+            }
         };
         // The product's invalidator for this binding (`engine_driver::run_on_demand_root`).
         let invalidator = FuseInvalidator::new(reach.path(), cmd_tx.clone());

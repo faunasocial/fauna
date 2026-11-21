@@ -54,6 +54,7 @@ from helpers.connection import wait_until_online
 from helpers.launch_token import own_session_ids, renew_own_sign_in
 from helpers.waiting import wait_until
 from i18n.strings import S
+from helpers.use_case_walk import assert_use_case_walked
 
 pytestmark = pytest.mark.tier_3
 
@@ -122,6 +123,7 @@ def _parse_detail(text: str) -> dict:
     return parsed
 
 
+@pytest.mark.use_case("sign-out-other-devices")
 @pytest.mark.feature("sessions")
 def test_list_revoke_one_then_sign_out_everywhere_else(app, request, nest_instance, test_user):
     from conftest import _login_app_as, _make_user
@@ -293,6 +295,13 @@ def test_list_revoke_one_then_sign_out_everywhere_else(app, request, nest_instan
     # app holding two own ids paints the newer (`devices.md` § The client's own
     # session), so the painted `own_id` is not the kept id. Every own id is
     # outside "the others"; exactly what must survive is one of them.
+    #
+    # The act itself is the sign-out-other-devices use case: a person comes to
+    # it from the feed by the settings tab and the Sessions rail row, so the
+    # page is re-entered that way for its walk (main-use-cases.md § The journeys).
+    app.feed.navigate()
+    app.settings.open_rail_row_by_click("settings-nav-row[sessions]",
+                                        "sessions-revoke-others-button")
     own_ids = own_session_ids(app.driver)
     before = _listed(nest_url, user, harness_ids)
     app.sessions.sign_out_everywhere_else()
@@ -326,6 +335,7 @@ def test_list_revoke_one_then_sign_out_everywhere_else(app, request, nest_instan
     )
     assert app.sessions.mark(0) == S.sessions.mark_this_app
     assert not app.sessions.has_revoke_button(0)
+    assert_use_case_walked(app.driver, "sign-out-other-devices")
 
 
 @pytest.mark.feature("sessions")

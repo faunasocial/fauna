@@ -120,12 +120,17 @@ pub(super) fn muted_words_elements(state: &SettingsState) -> Vec<Element> {
             Field::Settings(SettingsField::MutedWordInput),
         )
         .labelled(t::INPUT_PLACEHOLDER),
+        // Live only with a term typed and no change in flight — the shared
+        // draft answer; the seam disables it with why (rule 4).
         Element::gesture_button(
             ids::MUTED_WORD_ADD_BUTTON,
             t::ADD,
-            !mw.busy,
+            true,
             Gesture::Settings(Action::AddMutedWord),
-        ),
+        )
+        .possible(fauna_client_config::muted_word_add_possibility(
+            &mw.input, mw.busy,
+        )),
         // The row container. Flat (see the doc comment) — it is the landmark the
         // rows belong to conceptually, not their registry ancestor.
         Element::label(ids::MUTED_WORD_LIST, String::new()),
@@ -405,17 +410,18 @@ mod tests {
             "muted-word-level-select",
         ] {
             let el = els.iter().find(|e| e.id == id).unwrap();
-            assert!(!el.enabled, "{id} must be disabled while busy");
+            assert!(!el.offered(), "{id} must be disabled while busy");
         }
-        // …and re-enabled once it settles.
+        // …and re-enabled once it settles (Add with a term typed).
         state.muted_words.busy = false;
+        state.muted_words.input = "spoiler".into();
         let els = muted_words_elements(&state);
         for id in [
             "muted-word-add-button",
             "muted-word-remove-button",
             "muted-word-level-select",
         ] {
-            assert!(els.iter().find(|e| e.id == id).unwrap().enabled);
+            assert!(els.iter().find(|e| e.id == id).unwrap().offered());
         }
     }
 

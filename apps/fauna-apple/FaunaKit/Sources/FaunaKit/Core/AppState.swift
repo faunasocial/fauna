@@ -81,9 +81,8 @@ public class AppState {
     /// Whether the search bar overlay is shown above the main tabs
     /// (`search-query-field` etc., `ContentView.MainTabView`). Owned here
     /// (rather than `MainTabView`'s own `@State`) so a `{"view":"search"}` nav
-    /// patch (`applyNavPatch`'s `"search"` case) can reveal it — mirrors macOS,
-    /// where `.searchable(placement: .sidebar)` is unconditionally present so no
-    /// nav-driven toggle is needed there.
+    /// patch (`applyNavPatch`'s `"search"` case) can reveal it — the twin of
+    /// macOS's `MacAppState.showSearchBar`, which starts open there.
     public var showSearchBar: Bool = false
 
     // MARK: - Admin shell (admin.md § Navigation model)
@@ -107,6 +106,12 @@ public class AppState {
     /// reconnect. Mirrors web's `userIsAdmin` (`routes/+layout.svelte`) and
     /// `MacAppState.isAdmin`.
     public var isAdmin: Bool = false
+    /// The admin entry points' answer (`admin-tab`, the Bridges page's
+    /// hosted-plugin section): the shared `admin_entry_possibility` over
+    /// ``isAdmin`` — possible for an admin, absent otherwise (`admin.md`
+    /// § Errors & edge cases, *Role and state gates answer one `Possibility`
+    /// too*). Painted with `faunaPossible`; no view tests `isAdmin` itself.
+    public var adminEntry: Possibility { adminEntryPossibility(isAdmin: isAdmin) }
     /// The caller's `fauna.family.status` projection — gates the two global family
     /// surfaces (family-safety.md § App surface): the gated `family-tab`
     /// in-Settings entry on any relationship (guardian OR supervised), and the

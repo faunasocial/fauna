@@ -172,7 +172,8 @@ public struct ArchiveImportView: View {
                 .accessibilityIdentifier(Ids.archiveImportSourceExportLink)
                 .automationActivate(Ids.archiveImportSourceExportLink,
                                     text: { exportLinkText }) { openExportPage() }
-            nextButton { Task { await vm.dispatch(.next) } }
+            nextButton { advance([.next]) }
+            nextReason
         }
     }
 
@@ -212,8 +213,9 @@ public struct ArchiveImportView: View {
             }
             HStack {
                 backButton
-                nextButton { Task { await vm.dispatch(.next) } }
+                nextButton { advance([.next]) }
             }
+            nextReason
         }
     }
 
@@ -296,6 +298,7 @@ public struct ArchiveImportView: View {
                 backButton
                 nextButton { scopeNext() }
             }
+            nextReason
         }
     }
 
@@ -344,12 +347,21 @@ public struct ArchiveImportView: View {
             summary: snap?.summary, mode: snap?.audienceMode ?? .original))
     }
 
-    /// Scope → Confirm: both date drafts committed, then the advance — the
-    /// machine refuses a malformed date or a reversed range here.
+    /// Scope → Confirm: both date drafts committed, then the advance — offered
+    /// only while the drafts resolve (the painted answer), and the machine
+    /// still refuses a malformed date or a reversed range here.
     private func scopeNext() {
         let from = draftDateFrom.trimmingCharacters(in: .whitespaces)
         let to = draftDateTo.trimmingCharacters(in: .whitespaces)
-        Task { await vm.dispatchSequence([.setDateFrom(value: from), .setDateTo(value: to), .next]) }
+        advance([.setDateFrom(value: from), .setDateTo(value: to), .next])
+    }
+
+    /// Every Next press: the VM asks the answer the button was painted from
+    /// (over the same drafts) and refuses with its reason, else runs `actions`.
+    private func advance(_ actions: [ArchiveImportAction]) {
+        let from = draftDateFrom
+        let to = draftDateTo
+        Task { await vm.pressNext(actions, dateFrom: from, dateTo: to) }
     }
 
     // MARK: - Step 4 — Confirm
@@ -363,11 +375,14 @@ public struct ArchiveImportView: View {
                 Button(L.archiveImport.startButton) { start() }
                     .accessibilityIdentifier(Ids.archiveImportStartButton)
                     .automationActivate(Ids.archiveImportStartButton) { start() }
+                    // An opened archive and a scope that resolves.
+                    .faunaPossible(vm.startAnswer)
             }
+            FaunaPossibilityReason(vm.startAnswer)
         }
     }
 
-    private func start() { Task { await vm.dispatch(.start) } }
+    private func start() { Task { await vm.pressStart() } }
 
     // MARK: - Step 5 — Progress
 
@@ -493,10 +508,13 @@ public struct ArchiveImportView: View {
                     .font(.caption.monospaced())
             }
             Button(L.archiveImport.profilePrefillButton) { applyProfile() }
-                .disabled(!profileOffered)
                 .accessibilityIdentifier(Ids.archiveImportProfilePrefillButton)
-                .automationActivate(Ids.archiveImportProfilePrefillButton,
-                                    isEnabled: { profileOffered }) { applyProfile() }
+                .automationActivate(Ids.archiveImportProfilePrefillButton) { applyProfile() }
+                // Blocked, saying so, with no profile in the archive or once
+                // applied — the registry reads the same enabled-ness through
+                // `\.isEnabled`, so no hand-mirrored `isEnabled:` closure.
+                .faunaPossible(vm.profilePrefillAnswer)
+            FaunaPossibilityReason(vm.profilePrefillAnswer)
             Button(folderLinkText) { onNavigateToFolders() }
                 .accessibilityIdentifier(Ids.archiveImportFolderLink)
                 .automationActivate(Ids.archiveImportFolderLink,
@@ -507,13 +525,7 @@ public struct ArchiveImportView: View {
         }
     }
 
-    /// Enabled while the run's end found a profile in the archive and the tap
-    /// has not applied it yet — a second tap never re-publishes it.
-    private var profileOffered: Bool {
-        snap?.archiveProfile != nil && !(snap?.profileApplied ?? false)
-    }
-
-    private func applyProfile() { Task { await vm.dispatch(.applyArchiveProfile) } }
+    private func applyProfile() { Task { await vm.pressApplyProfile() } }
 
     private var doneSummary: String {
         pageText.map { resolveComposedText($0.doneSummary) } ?? ""
@@ -532,10 +544,21 @@ public struct ArchiveImportView: View {
             .automationActivate(Ids.wizardBackButton) { Task { await vm.dispatch(.back) } }
     }
 
+    /// The reused wizard Next, painted from the shared answer over the Scope
+    /// drafts (ignored off Scope); each paint site places ``nextReason``
+    /// beside it.
     private func nextButton(_ action: @escaping () -> Void) -> some View {
         Button(L.archiveImport.next, action: action)
             .accessibilityIdentifier(Ids.wizardNextButton)
             .automationActivate(Ids.wizardNextButton, perform: action)
+            .faunaPossible(nextAnswer)
     }
+
+    private var nextAnswer: Possibility {
+        vm.nextAnswer(dateFrom: draftDateFrom, dateTo: draftDateTo)
+    }
+
+    /// Next's blocked reason, visible — un-id'd chrome, empty unless blocked.
+    private var nextReason: some View { FaunaPossibilityReason(nextAnswer) }
 }
 #endif // !FAUNA_KIDS

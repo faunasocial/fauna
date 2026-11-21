@@ -223,6 +223,10 @@ impl<A: CustodianAccount> ConversationsCustodian<A> {
             )
             .await;
         match op {
+            // Before the page's first read an empty list would say "no
+            // conversations" about rooms nobody has read yet (`apps/cli.md`
+            // § A tool that cannot run, rule 4).
+            OracleOp::ListRooms if !self.manager.rooms_loaded() => Err(OracleRefusal::NotLoaded),
             OracleOp::ListRooms => Ok(OracleReply::Rooms(self.rooms())),
             OracleOp::ReadRoom { room_id, before } => {
                 let detail = self.detail(&room_id)?;

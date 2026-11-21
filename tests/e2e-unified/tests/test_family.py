@@ -712,6 +712,7 @@ def test_family_admin_takes_over_guardianship(admin_app, request, nest_instance)
     the row re-reads supervised by the admin with no offer, the admin's own
     Family page lists the ward, and the old guardian no longer does."""
     app = admin_app
+    require_surface(app.driver, "admin-take-over")
 
     # Its OWN pair (one anonymous submit), not `family_pair`: the take-over
     # re-points the link to the admin, so the pairing does not survive the test.
@@ -1284,18 +1285,39 @@ def test_family_ward_asks_guardian_for_a_contact(admin_app, request, nest_instan
     assert app.contacts.actor_id_result_text() == guardian_actor_id, (
         f"lookup did not resolve: {app.contacts.actor_id_result_text()!r}"
     )
-    assert not app.contacts.guardian_ask_offered(), (
-        "the ask must not be offered before anything was refused"
-    )
+    from helpers.app_surface import app_name, surface_built
 
-    app.contacts.add_contact()
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline and not app.contacts.guardian_ask_offered():
-        time.sleep(0.5)
-    assert app.contacts.guardian_ask_offered(), (
-        "the refused send offered no ask — is the typed refusal being recognised? "
-        f"error: {app.error_text()!r}"
-    )
+    if surface_built("ward-contact-entry-gate", app_name(app.driver)):
+        # ui/README.md § Offer only what is possible, rules 3-4 (contacts.md
+        # § Errors & edge cases): the ward already holds the policy, so the ask
+        # is offered at the entry and the knock it stands in for is never
+        # enabled — the ward cannot spend a send on something that is refused.
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and not app.contacts.guardian_ask_offered():
+            time.sleep(0.5)
+        assert app.contacts.guardian_ask_offered(), (
+            "the ask was not offered at the entry — is the ward's status read "
+            f"folded into the knock's predicate? error: {app.error_text()!r} "
+            f"{app.driver.diagnose('contact-request-guardian-button')}"
+        )
+        assert app.driver.count("contacts-add-button") == 1 and app.driver.is_disabled(
+            "contacts-add-button"
+        ), (
+            "the knock is enabled toward a stranger while the guardian decides "
+            f"new contacts. {app.driver.diagnose('contacts-add-button')}"
+        )
+    else:
+        assert not app.contacts.guardian_ask_offered(), (
+            "the ask must not be offered before anything was refused"
+        )
+        app.contacts.add_contact()
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and not app.contacts.guardian_ask_offered():
+            time.sleep(0.5)
+        assert app.contacts.guardian_ask_offered(), (
+            "the refused send offered no ask — is the typed refusal being recognised? "
+            f"error: {app.error_text()!r}"
+        )
 
     app.contacts.ask_guardian()
     deadline = time.monotonic() + 15.0
@@ -3245,6 +3267,21 @@ def test_family_ward_sees_a_strangers_request_waiting_for_the_guardian(
         f"the stranger's row must say it waits for the guardian, read {marks[row]!r}"
     )
     assert set(marks) == {S.contacts.knock_guardian_pending}, f"every mark the same text: {marks!r}"
+    from helpers.app_surface import app_name, surface_built
+
+    if surface_built("ward-contact-entry-gate", app_name(app.driver)):
+        # Acceptance is the guardian's while approval is on, so the row's
+        # accept is blocked by the line it carries (ui/README.md § Offer only
+        # what is possible, rule 2); block and dismiss stay the child's.
+        # Read beside a live control of the same row, so a bridge that cannot
+        # read enabledness fails here instead of passing vacuously.
+        assert app.driver.is_enabled("contacts-block-button"), (
+            f"block must stay the child's. {app.driver.diagnose('contacts-block-button')}"
+        )
+        assert app.driver.is_disabled("contacts-accept-button"), (
+            "accept is enabled while the guardian decides. "
+            f"{app.driver.diagnose('contacts-accept-button')}"
+        )
 
     # The guardian turns approval off: the child decides again, and the mark goes.
     reset_ward_policy(nest_instance, guardian_identity, ward_identity)
@@ -3443,22 +3480,47 @@ def test_family_screen_time_editor_refuses_half_or_empty_window(
         "precondition: the reset pair carries no window"
     )
 
+    from helpers.app_surface import app_name, surface_built
+
+    # An app that paints Save from the shared draft predicate never offers it on
+    # such a window (family-safety.md § Errors & edge cases, the guardian's
+    # forms; the strict witness is test_guardian_forms_offer_only_possible.py),
+    # so the reason is read beside the blocked Save; an app still refusing only
+    # at the press takes the press and reads error-message.
+    painted = surface_built("guardian-form-draft-validity", app_name(app.driver))
+    reads_reason = surface_built("blocked-reason-read", app_name(app.driver))
+    d = app.driver
     for start, end, reason in (
         ("08:00", "", "pairs"),
         ("", "20:00", "pairs"),
         ("09:30", "09:30", "start == end"),
     ):
         app.family.set_screen_window(start, end)
-        app.family.save_policy()
-        error = wait_until(
-            lambda: app.error_text(),
-            UI_SETTLE_S,
-            diagnose=lambda: f"no refusal on error-message for window {start!r}..{end!r}",
-        )
-        assert reason in error, (
-            f"the refusal of window {start!r}..{end!r} must give its reason "
-            f"(expected {reason!r} in it), got {error!r}"
-        )
+        if painted:
+            wait_until(
+                lambda: not d.is_enabled("family-policy-save-button"),
+                UI_SETTLE_S,
+                diagnose=lambda: f"Save stayed live for window {start!r}..{end!r}: "
+                f"{d.diagnose('family-policy-save-button', attrs=('enabled', 'reason'))}",
+            )
+            if reads_reason:
+                shown = d.blocked_reason("family-policy-save-button") or ""
+                assert reason in shown, (
+                    f"the blocked Save for window {start!r}..{end!r} must give its reason "
+                    f"(expected {reason!r} in it), painted {shown!r}"
+                )
+            app.family.set_screen_window("", "")
+        else:
+            app.family.save_policy()
+            error = wait_until(
+                lambda: app.error_text(),
+                UI_SETTLE_S,
+                diagnose=lambda: f"no refusal on error-message for window {start!r}..{end!r}",
+            )
+            assert reason in error, (
+                f"the refusal of window {start!r}..{end!r} must give its reason "
+                f"(expected {reason!r} in it), got {error!r}"
+            )
         _reload_editor(app, ward_handle)
         assert (app.family.screen_window_start(), app.family.screen_window_end()) == ("", ""), (
             f"a refused window {start!r}..{end!r} must store nothing, but the editor refilled "

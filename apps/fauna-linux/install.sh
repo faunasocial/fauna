@@ -9,17 +9,38 @@ set -e
 #   ./install.sh --uninstall       — remove installed files
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-# The app's notices file, written by `just linux-release` (its dependency
-# `linux-desktop-notices`) at the one path every Linux packaging copies from.
-# SHIPPED_NOTICES names another copy of that same file (the tier_1 test's).
-NOTICES="${SHIPPED_NOTICES:-$REPO_ROOT/build/shipped-notices/linux-desktop/THIRD-PARTY-NOTICES}"
-if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-    BINARY="$CARGO_TARGET_DIR/release/fauna-desktop"
-    AGENT_BINARY="$CARGO_TARGET_DIR/release/fauna-sync-agent"
+# Two layouts, one script (installers/linux-desktop.md § What the release
+# publishes): the unpacked release archive `fauna-desktop-<suffix>`, which
+# holds every file this script installs BESIDE it (staged by
+# installer/assemble-archive.sh --payload linux-desktop), or a built source
+# tree, where the binaries come from the cargo target and the rest from the
+# repository.
+if [ -f "$SCRIPT_DIR/fauna-desktop" ]; then
+    BINARY="$SCRIPT_DIR/fauna-desktop"
+    AGENT_BINARY="$SCRIPT_DIR/fauna-sync-agent"
+    LICENCE_DIR="$SCRIPT_DIR"
+    NOTICES="$SCRIPT_DIR/THIRD-PARTY-NOTICES"
+    DESKTOP_SRC="$SCRIPT_DIR/social.fauna.fauna.desktop"
+    ICON_SRC="$SCRIPT_DIR/fauna.svg"
+    NOT_FOUND_HINT="The archive is incomplete — download it again."
 else
-    BINARY="target/release/fauna-desktop"
-    AGENT_BINARY="target/release/fauna-sync-agent"
+    REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+    LICENCE_DIR="$REPO_ROOT"
+    # The app's notices file, written by `just linux-release` (its dependency
+    # `linux-desktop-notices`) at the one path every Linux packaging copies
+    # from. SHIPPED_NOTICES names another copy of that same file (the tier_1
+    # test's).
+    NOTICES="${SHIPPED_NOTICES:-$REPO_ROOT/build/shipped-notices/linux-desktop/THIRD-PARTY-NOTICES}"
+    if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+        BINARY="$CARGO_TARGET_DIR/release/fauna-desktop"
+        AGENT_BINARY="$CARGO_TARGET_DIR/release/fauna-sync-agent"
+    else
+        BINARY="target/release/fauna-desktop"
+        AGENT_BINARY="target/release/fauna-sync-agent"
+    fi
+    DESKTOP_SRC="$SCRIPT_DIR/packaging/social.fauna.fauna.desktop"
+    ICON_SRC="$SCRIPT_DIR/fauna.svg"
+    NOT_FOUND_HINT="Run: just linux-release"
 fi
 
 # Determine prefix: sudo → /usr/local, else honour $PREFIX or default to ~/.local
@@ -129,17 +150,62 @@ uninstall() {
     echo "Done. Fauna uninstalled from $PREFIX."
 }
 
+# The installed menu entry starts THIS prefix's binary by its absolute path
+# (installers/linux-desktop.md § 1. Shell Script): a per-user install into
+# ~/.local must start from the menu whether or not ~/.local/bin was on the
+# graphical session's PATH at login. The shared source entry keeps the bare
+# name for the deb and the Flatpak, which install onto every PATH; only its
+# `Exec=fauna-desktop` line is rewritten here, for every prefix alike. The path
+# is double-quoted and `%` doubled (Desktop Entry Specification § The Exec
+# key); a prefix holding a character that would need backslash escaping is
+# refused before anything is installed, never rewritten.
+check_menu_entry_prefix() {
+    case "$INSTALL_BIN" in
+        *[\"\`\$\\]*|*$'\n'*)
+            echo "Error: the prefix $PREFIX cannot be named in a menu entry"
+            echo "(it holds a quote, a backtick, a dollar sign, a backslash or a newline)."
+            echo "Choose another prefix: PREFIX=/path $0"
+            exit 1
+            ;;
+    esac
+}
+
+menu_entry_for_prefix() {
+    local exec_path="${INSTALL_BIN//%/%%}" line rewritten=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "Exec=fauna-desktop"|"Exec=fauna-desktop "*)
+                printf 'Exec="%s"%s\n' "$exec_path" "${line#Exec=fauna-desktop}"
+                rewritten=$((rewritten + 1))
+                ;;
+            *)
+                printf '%s\n' "$line"
+                ;;
+        esac
+    done < "$DESKTOP_SRC"
+    if [ "$rewritten" -ne 1 ]; then
+        echo "Error: $DESKTOP_SRC has no single 'Exec=fauna-desktop' line to point at $INSTALL_BIN" >&2
+        return 1
+    fi
+}
+
 install_fauna() {
     if [ ! -f "$BINARY" ] || [ ! -f "$AGENT_BINARY" ]; then
-        echo "Error: release binaries not found at $BINARY / $AGENT_BINARY"
-        echo "Run: just linux-release"
+        echo "Error: the binaries were not found at $BINARY / $AGENT_BINARY"
+        echo "$NOT_FOUND_HINT"
         exit 1
     fi
     if [ ! -s "$NOTICES" ]; then
         echo "Error: the app's notices file was not found at $NOTICES"
-        echo "Run: just linux-release"
+        echo "$NOT_FOUND_HINT"
         exit 1
     fi
+
+    check_menu_entry_prefix
+    # Global, not local: the EXIT trap runs after install_fauna returns.
+    MENU_ENTRY_TMP="$(mktemp)"
+    trap 'rm -f "$MENU_ENTRY_TMP"' EXIT
+    menu_entry_for_prefix > "$MENU_ENTRY_TMP"
 
     echo "Installing Fauna to $PREFIX..."
 
@@ -152,18 +218,18 @@ install_fauna() {
 
     # The licence texts and the notices file (copied, never read: the notices
     # file is dependency-authored text)
-    install -Dm644 "$REPO_ROOT/LICENSE-MIT" "$INSTALL_DOC/LICENSE-MIT"
-    install -Dm644 "$REPO_ROOT/LICENSE-APACHE" "$INSTALL_DOC/LICENSE-APACHE"
+    install -Dm644 "$LICENCE_DIR/LICENSE-MIT" "$INSTALL_DOC/LICENSE-MIT"
+    install -Dm644 "$LICENCE_DIR/LICENSE-APACHE" "$INSTALL_DOC/LICENSE-APACHE"
     install -Dm644 "$NOTICES" "$INSTALL_DOC/THIRD-PARTY-NOTICES"
     echo "  Installed $INSTALL_DOC/ ($DOC_FILES)"
 
-    # Desktop file
-    install -Dm644 "$SCRIPT_DIR/packaging/$APP_ID.desktop" "$INSTALL_DESKTOP"
+    # Desktop file, its Exec naming this prefix's binary
+    install -Dm644 "$MENU_ENTRY_TMP" "$INSTALL_DESKTOP"
     echo "  Installed $INSTALL_DESKTOP"
 
     # SVG icon
-    if [ -f "$SCRIPT_DIR/fauna.svg" ]; then
-        install -Dm644 "$SCRIPT_DIR/fauna.svg" "$INSTALL_ICON"
+    if [ -f "$ICON_SRC" ]; then
+        install -Dm644 "$ICON_SRC" "$INSTALL_ICON"
         echo "  Installed $INSTALL_ICON"
     else
         echo "  Warning: fauna.svg not found — skipping icon install"
@@ -178,8 +244,10 @@ install_fauna() {
     fi
 
     echo "Done. Fauna installed to $PREFIX."
+    # The menu entry needs no PATH (above); only starting Fauna by name from a
+    # terminal does.
     if [ "$PREFIX" = "$HOME/.local" ]; then
-        echo "Make sure $PREFIX/bin is in your PATH."
+        echo "To start Fauna from a terminal by name, make sure $PREFIX/bin is in your PATH."
     fi
 
     # An on-demand folder is a FUSE mount the sync agent makes through the

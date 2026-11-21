@@ -52,7 +52,7 @@ use fauna_protocol::offline_intent::{Composed, OfflineIntentQueue};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::address_book::{AddressbookRow, Segment, VCardRow};
+use crate::address_book::{AddressbookRow, AddressbooksReadState, Segment, VCardRow};
 use crate::app::{App, UiMessage};
 use crate::element::{Element, Field, Gesture};
 use fauna_archive_import_machine::link::{ArchiveLinkState, ArchiveLinkView, ArchiveLinks};
@@ -72,9 +72,10 @@ pub enum Action {
     /// (`build_knock_payload` → `fauna.inbox.send`, same-nest). Async.
     AddContact,
     /// `contact-request-guardian-button` — the supervised ward's in-app ask,
-    /// offered ONLY after the nest refused the knock with the typed
-    /// guardian-approval error (`family-safety.md` § Child-initiated contact
-    /// requests). `fauna.family.contact.request`; async.
+    /// offered at the entry when the ward's own policy says the guardian
+    /// decides the resolved peer, and after the nest refused the knock with the
+    /// typed guardian-approval error (`family-safety.md` § Child-initiated
+    /// contact requests). `fauna.family.contact.request`; async.
     ///
     /// The ask carries **who, never why** — no message text, deliberately: a
     /// ward-authored free-text field is a disclosure surface the guardian's
@@ -161,6 +162,12 @@ pub struct FindResult {
 /// per-app, and tui mirrors linux's fields rather than inventing a shape).
 #[derive(Default)]
 pub struct ContactsState {
+    /// The Address Book's gesture generation — bumped by every book gesture's
+    /// fold (a book opened, a deep link walked); the spawned book re-reads (the
+    /// push's [`address_book_resync_op`], the store notice's and a reconnect's
+    /// [`nav_enter_op`]) carry it, and a late one never repaints the books or
+    /// the cards a newer gesture folded (the late-fold rule's generation half).
+    pub(crate) book_gen: crate::settings::GestureGen,
     /// The live WS-RPC channel + the knock-sender identity, installed at the
     /// post-auth hook. `None` pre-auth — every reader degrades gracefully.
     pub nest: Option<Arc<NestClient>>,
@@ -199,7 +206,9 @@ pub struct ContactsState {
     /// The nest refused the last knock to `find_result` with the typed
     /// guardian-approval error — a supervised ward whose `contact_approval`
     /// knob is on. Reveals `contact-request-guardian-button` in place of a dead
-    /// error banner (`family-safety.md` § Child-initiated contact requests).
+    /// error banner (`family-safety.md` § Child-initiated contact requests) —
+    /// the fallback for a policy that changed between the paint and the act;
+    /// the entry offers the ask from the held policy first.
     ///
     /// Reset by every new lookup, alongside `knock_sent`: the refusal belongs to
     /// the peer it was refused for, and offering the ask against a *different*
@@ -218,6 +227,11 @@ pub struct ContactsState {
     pub segment: Segment,
     /// The actor's decoded address books, loaded when the segment opens.
     pub addressbooks: Vec<AddressbookRow>,
+    /// The book read's answer (`fauna_client_carddav::AddressbooksRead`,
+    /// payload-free): *unresolved* before the first answer and while custody
+    /// holds no key yet (the mint in flight) — the segment paints loading,
+    /// never an empty address book (`contacts.md` § Errors & edge cases).
+    pub addressbooks_read: AddressbooksReadState,
     /// The open book's hex id, once one has been picked.
     pub selected_book: Option<String>,
     /// The open book's decoded cards.
@@ -276,6 +290,7 @@ pub fn nav_enter_op(state: &ContactsState) -> Option<Op> {
             nest,
             secret: state.secret?,
             mail: state.mail.clone()?,
+            resync_of: state.book_gen,
         }),
     }
 }
@@ -297,7 +312,23 @@ pub fn address_book_resync_op(state: &ContactsState) -> Option<Op> {
         secret: state.secret?,
         mail: state.mail.clone()?,
         open_book: state.selected_book.clone(),
+        resync_of: state.book_gen,
     })
+}
+
+/// The store-change notice's leg on this page: an *unresolved* book read
+/// re-runs whole, because custody's first listing — and the key the mint at
+/// first connect writes — land as a store walk, which is this notice
+/// (`contacts.md` § Errors & edge cases; the events page's `store_resync_op`
+/// is the twin). A settled read is re-read at the next page entry or push, so
+/// only the wait re-runs here; `None` while the People half shows.
+pub fn store_resync_op(state: &ContactsState) -> Option<Op> {
+    if state.segment != Segment::AddressBook
+        || state.addressbooks_read != AddressbooksReadState::Unresolved
+    {
+        return None;
+    }
+    nav_enter_op(state)
 }
 
 /// Fire-and-forget the roster refetch — the **post-auth** path only, where
@@ -397,6 +428,29 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         .account_outbox
         .clone()
         .map(|outbox| outbox as Arc<dyn OfflineIntentQueue>);
+    // The knock and the accept ask the predicates their buttons paint from
+    // before anything is sent (`ui/README.md` § Offer only what is possible,
+    // rule 6). The buttons are already disabled when the answer is not
+    // possible; this is the same answer guarding the action, for a gesture
+    // that arrives anyway (an agent's click, a policy read landing between the
+    // paint and the act).
+    match &action {
+        Action::AddContact if !app.contacts.knock_sent => {
+            if let Some(found) = app.contacts.find_result.as_ref() {
+                let answer = knock_answer(app, &found.actor_id.clone());
+                if !admit(app, answer) {
+                    return None;
+                }
+            }
+        }
+        Action::AcceptKnock { .. } => {
+            let answer = fauna_client_family::accept_possibility(app.family.own_supervision());
+            if !admit(app, answer) {
+                return None;
+            }
+        }
+        _ => {}
+    }
     let st = &mut app.contacts;
     match action {
         Action::Lookup => {
@@ -501,6 +555,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 nest: st.nest.clone()?,
                 secret: st.secret?,
                 mail: st.mail.clone()?,
+                resync_of: st.book_gen,
             })
         }
         Action::SelectAddressbook(id) => {
@@ -553,6 +608,54 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 mail: st.mail.clone()?,
                 uid_hash,
             })
+        }
+    }
+}
+
+/// The caller's contact edge to `peer_actor_id_hex` as the roster holds it
+/// (`ContactItem::status`), `None` with no edge — the peer half of
+/// [`fauna_client_family::knock_possibility`]. Case-insensitive, because the
+/// Find User form's id is whatever was typed and the roster's is canonical.
+fn roster_status<'a>(st: &'a ContactsState, peer_actor_id_hex: &str) -> Option<&'a str> {
+    st.contacts
+        .iter()
+        .find(|c| c.peer_id.eq_ignore_ascii_case(peer_actor_id_hex))
+        .map(|c| c.status.as_str())
+}
+
+/// The knock's answer for the peer the Find User form resolved — the one
+/// predicate the paint and [`Action::AddContact`] both ask.
+fn knock_answer(app: &App, peer_actor_id_hex: &str) -> fauna_core::possibility::Possibility {
+    fauna_client_family::knock_possibility(
+        app.family.own_supervision(),
+        roster_status(&app.contacts, peer_actor_id_hex),
+    )
+}
+
+/// Whether the guardian decides contact with this peer — the ward's policy
+/// has `contact_approval` on and the peer is not already a contact — which is
+/// when the ask (`contact-request-guardian-button`) is the result's one step
+/// (`ui/README.md` § Offer only what is possible, rule 3).
+fn guardian_decides(app: &App, peer_actor_id_hex: &str) -> bool {
+    fauna_client_family::guardian_decides_contact(
+        app.family.own_supervision(),
+        roster_status(&app.contacts, peer_actor_id_hex),
+    )
+}
+
+/// Refuse a gesture whose predicate is not possible, with the predicate's own
+/// reason on the page's `error-message` (rule 6: the action asks the same
+/// predicate the paint does; rule 7: a refusal is never silent). `true` when
+/// the gesture may go ahead.
+fn admit(app: &mut App, answer: fauna_core::possibility::Possibility) -> bool {
+    match answer.reason() {
+        None => true,
+        Some(reason) => {
+            app.errors.insert(
+                crate::pages::Page::Contacts,
+                reason.resolve(fauna_i18n::strings::lookup),
+            );
+            false
         }
     }
 }
@@ -645,6 +748,8 @@ pub enum Op {
         nest: Arc<NestClient>,
         secret: [u8; 32],
         mail: Arc<dyn fauna_client_config::MailStore>,
+        /// [`ContactsState::book_gen`] as the op was built.
+        resync_of: crate::settings::GestureGen,
     },
     /// `fauna.bridges.query_cards` + unseal/parse — one book's card list.
     LoadCards {
@@ -660,6 +765,8 @@ pub enum Op {
         secret: [u8; 32],
         mail: Arc<dyn fauna_client_config::MailStore>,
         open_book: Option<String>,
+        /// [`ContactsState::book_gen`] as the op was built.
+        resync_of: crate::settings::GestureGen,
     },
     /// The `SearchNav::Contact` deep link's read: books + the book holding
     /// `uid_hash` + that card's `card_id`, in one walk
@@ -763,8 +870,14 @@ pub enum Outcome {
     /// The ask itself failed (cap reached, peer already blocked, knob off — all
     /// typed refusals the ward should read verbatim, not a generic banner).
     ContactRequestFailed(String),
-    /// The actor's address books, decoded (`addressbook-item` rows).
-    AddressbooksLoaded(Vec<AddressbookRow>),
+    /// The book read's answer and the actor's address books, decoded
+    /// (`addressbook-item` rows; none while the read is unresolved).
+    AddressbooksLoaded {
+        read: AddressbooksReadState,
+        books: Vec<AddressbookRow>,
+        /// [`Op::LoadAddressbooks`]'s `resync_of`.
+        resync_of: crate::settings::GestureGen,
+    },
     /// One book's cards, decoded. Carries the `book_id` it was fetched for so a
     /// late reply for a book the user has since left cannot overwrite the list
     /// they are actually looking at.
@@ -778,8 +891,11 @@ pub enum Outcome {
     /// [`Op::RefreshAddressBook`] landed: the books, and the cards of the book
     /// that was open when it was issued (`None` when none was).
     AddressBookRefreshed {
+        read: AddressbooksReadState,
         books: Vec<AddressbookRow>,
         open: Option<(String, Vec<VCardRow>)>,
+        /// [`Op::RefreshAddressBook`]'s `resync_of`.
+        resync_of: crate::settings::GestureGen,
     },
 }
 
@@ -930,12 +1046,19 @@ impl Op {
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::LoadAddressbooks { nest, secret, mail } => {
-                match crate::address_book::load_addressbooks(nest, secret, mail).await {
-                    Ok(books) => Outcome::AddressbooksLoaded(books),
-                    Err(e) => Outcome::Failed(e),
-                }
-            }
+            Op::LoadAddressbooks {
+                nest,
+                secret,
+                mail,
+                resync_of,
+            } => match crate::address_book::load_addressbooks(nest, secret, mail).await {
+                Ok((read, books)) => Outcome::AddressbooksLoaded {
+                    read,
+                    books,
+                    resync_of,
+                },
+                Err(e) => Outcome::Failed(e),
+            },
             Op::LoadCards {
                 nest,
                 secret,
@@ -959,15 +1082,16 @@ impl Op {
                 secret,
                 mail,
                 open_book,
+                resync_of,
             } => {
-                let books = match crate::address_book::load_addressbooks(
+                let (read, books) = match crate::address_book::load_addressbooks(
                     Arc::clone(&nest),
                     secret,
                     Arc::clone(&mail),
                 )
                 .await
                 {
-                    Ok(books) => books,
+                    Ok(answer) => answer,
                     Err(e) => return Outcome::Failed(e),
                 };
                 let open = match open_book {
@@ -981,7 +1105,12 @@ impl Op {
                     }
                     None => None,
                 };
-                Outcome::AddressBookRefreshed { books, open }
+                Outcome::AddressBookRefreshed {
+                    read,
+                    books,
+                    open,
+                    resync_of,
+                }
             }
         }
     }
@@ -1099,11 +1228,30 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // guardian gate's own error would be actively misleading.
             app.errors.insert(crate::pages::Page::Contacts, e);
         }
-        Outcome::AddressbooksLoaded(books) => {
+        Outcome::AddressbooksLoaded {
+            read,
+            books,
+            resync_of,
+        } => {
+            // Spawned on a push, a store notice or a reconnect: a read a book
+            // gesture has outlived is dropped whole, its error slot included.
+            if st.book_gen.outlived(resync_of) {
+                return;
+            }
+            st.addressbooks_read = read;
             st.addressbooks = books;
             app.errors.remove(&crate::pages::Page::Contacts);
         }
-        Outcome::AddressBookRefreshed { books, open } => {
+        Outcome::AddressBookRefreshed {
+            read,
+            books,
+            open,
+            resync_of,
+        } => {
+            if st.book_gen.outlived(resync_of) {
+                return;
+            }
+            st.addressbooks_read = read;
             st.addressbooks = books;
             // The same guard as `CardsLoaded`: the refresh is spawned, so the
             // user may have opened another book while it was in flight, and a
@@ -1117,6 +1265,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.errors.remove(&crate::pages::Page::Contacts);
         }
         Outcome::CardsLoaded { book_id, cards } => {
+            st.book_gen.bump();
             // Only apply if this reply is for the book still open — a slow read
             // for a book the user has since left must not repopulate the list
             // under them (the awaited-op path cannot race, but the keyboard
@@ -1127,6 +1276,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.errors.remove(&crate::pages::Page::Contacts);
         }
         Outcome::CardLocated(located) => {
+            st.book_gen.bump();
             // The picker's rows land either way — the walk read them, and a
             // deep link arrives on a page the user may never have opened, so
             // leaving `addressbooks` empty would strand them on a blank picker
@@ -1196,26 +1346,34 @@ fn contact_under_review(app: &App, c: &ContactItem) -> bool {
 
 pub fn elements(app: &App) -> Vec<Element> {
     let st = &app.contacts;
+    let people = st.segment == Segment::People;
     let mut out = vec![
         Element::label(ids::PAGE_HEADING, t::TITLE),
         // The page container marker (ui.yaml `contacts-view`) — same
         // empty-text convention as `conversations-view`.
         Element::label(ids::CONTACTS_VIEW, " "),
-        // The `contacts-view-segment` toggle. Painted in BOTH segments: it is
-        // the only way back out of the Address Book half, and clicking the
-        // already-active side is a harmless refetch rather than a dead control.
-        Element::gesture_button(
+        // The `contacts-view-segment` toggle, a one-of-two `Radio` pair
+        // (`apps/tui.md` § Rendering → *Control vocabulary*). Painted in BOTH
+        // segments: it is the only way back out of the Address Book half. The
+        // `(*)` marks the side in force and `state` on/off publishes it, so a
+        // re-chosen current side reads as the current choice
+        // (`e2e-systematic-ui-walks.md` § The possibility invariants, layer (c)).
+        Element::radio_gesture(
             ids::CONTACTS_SEGMENT_PEOPLE,
             t::TITLE,
-            true,
+            people,
             Gesture::Contacts(Action::ShowPeople),
-        ),
-        Element::gesture_button(
+        )
+        .attr("group", "contacts-segment")
+        .attr("state", if people { "on" } else { "off" }),
+        Element::radio_gesture(
             ids::CONTACTS_SEGMENT_ADDRESSBOOK,
             t::address_book::TITLE,
-            true,
+            !people,
             Gesture::Contacts(Action::ShowAddressBook),
-        ),
+        )
+        .attr("group", "contacts-segment")
+        .attr("state", if people { "off" } else { "on" }),
     ];
 
     // The Address Book is a separate store with its own master-detail, so the
@@ -1257,12 +1415,49 @@ pub fn elements(app: &App) -> Vec<Element> {
             ids::CONTACT_ACTOR_ID_RESULT,
             r.actor_id.clone(),
         ));
-        out.push(Element::gesture_button(
+        // The ward's in-app ask (`family-safety.md` § Child-initiated contact
+        // requests). Offered at the ENTRY when the ward's own policy says the
+        // guardian decides this peer (`ui/README.md` § Offer only what is
+        // possible, rules 3–4: the knock it stands in for is blocked, so the
+        // ask is the result's one step — painted first, the only live control
+        // of the knock pair), and still after a typed refusal: the policy can
+        // change between the paint and the act (rule 7). With the knob off the
+        // ward contacts freely and the ask is never offered (it would be
+        // refused as moot). Rendered as the *pending* state instead once one is
+        // outstanding.
+        //
+        // `pending` reads the durable `status.contact_requests` FIRST and the
+        // just-asked flag second: the durable list is what survives navigation
+        // and a restart, and it is also what makes the state honest on a fresh
+        // session.
+        let pending = app.family.contact_ask_pending(&r.actor_id) || st.contact_ask_sent;
+        if pending {
+            out.push(Element::label(
+                ids::CONTACT_REQUEST_PENDING,
+                t::CONTACT_REQUEST_PENDING.to_string(),
+            ));
+        } else if st.guardian_refused || guardian_decides(app, &r.actor_id) {
+            out.push(Element::gesture_button(
+                ids::CONTACT_REQUEST_GUARDIAN_BUTTON,
+                t::ASK_GUARDIAN,
+                true,
+                Gesture::Contacts(Action::RequestContact),
+            ));
+        }
+        // The knock, from the one predicate the send asks too: blocked with
+        // its reason while the status read is unresolved (rule 5) or the
+        // guardian decides this peer; a knock already sent reads "Sent".
+        let knock = Element::gesture_button(
             ids::CONTACTS_ADD_BUTTON,
             if st.knock_sent { t::SENT } else { t::KNOCK },
             !st.knock_sent,
             Gesture::Contacts(Action::AddContact),
-        ));
+        );
+        out.push(if st.knock_sent {
+            knock
+        } else {
+            knock.possible(knock_answer(app, &r.actor_id))
+        });
         out.push(Element::gesture_button(
             ids::CONTACT_ACTOR_ID_COPY_BTN,
             common::COPY,
@@ -1281,30 +1476,6 @@ pub fn elements(app: &App) -> Vec<Element> {
                 home: r.nest_url.clone(),
             },
         ));
-        // The ward's in-app ask (`family-safety.md` § Child-initiated contact
-        // requests). Offered only after the nest actually refused — the knob
-        // may be off, in which case the ward contacts freely and an ask would be
-        // refused as moot — and rendered as the *pending* state instead once one
-        // is outstanding.
-        //
-        // `pending` reads the durable `status.contact_requests` FIRST and the
-        // just-asked flag second: the durable list is what survives navigation
-        // and a restart, and it is also what makes the state honest on a fresh
-        // session where this page never saw the refusal at all.
-        let pending = app.family.contact_ask_pending(&r.actor_id) || st.contact_ask_sent;
-        if pending {
-            out.push(Element::label(
-                ids::CONTACT_REQUEST_PENDING,
-                t::CONTACT_REQUEST_PENDING.to_string(),
-            ));
-        } else if st.guardian_refused {
-            out.push(Element::gesture_button(
-                ids::CONTACT_REQUEST_GUARDIAN_BUTTON,
-                t::ASK_GUARDIAN,
-                true,
-                Gesture::Contacts(Action::RequestContact),
-            ));
-        }
     }
     if let Some(e) = &st.find_error {
         out.push(Element::label(ids::CONTACT_FIND_ERROR, e.clone()));
@@ -1317,6 +1488,7 @@ pub fn elements(app: &App) -> Vec<Element> {
     // derivation over the caller's own status policy, no per-knock wire field.
     let awaits_guardian =
         fauna_client_family::knocks_await_guardian(app.family.own_policy.as_ref());
+    let accept = fauna_client_family::accept_possibility(app.family.own_supervision());
     for k in &st.knocks {
         out.push(Element::label(ids::KNOCK_CARD, k.summary.clone()));
         // Through the one resolver with no handle: the viewer's nickname for
@@ -1335,14 +1507,20 @@ pub fn elements(app: &App) -> Vec<Element> {
                 t::KNOCK_GUARDIAN_PENDING,
             ));
         }
-        out.push(Element::gesture_button(
-            ids::CONTACTS_ACCEPT_BUTTON,
-            common::ACCEPT,
-            true,
-            Gesture::Contacts(Action::AcceptKnock {
-                peer_id: k.sender.clone(),
-            }),
-        ));
+        // Accept is the guardian's while contact approval is on (the nest
+        // refuses the ward's own), so it is blocked with the reason the row
+        // already shows; block and dismiss stay the ward's.
+        out.push(
+            Element::gesture_button(
+                ids::CONTACTS_ACCEPT_BUTTON,
+                common::ACCEPT,
+                true,
+                Gesture::Contacts(Action::AcceptKnock {
+                    peer_id: k.sender.clone(),
+                }),
+            )
+            .possible(accept.clone()),
+        );
         out.push(Element::gesture_button(
             ids::CONTACTS_BLOCK_BUTTON,
             common::BLOCK,
@@ -1639,6 +1817,10 @@ mod tests {
     fn contacts_app() -> crate::app::App {
         let mut app = authed_app();
         app.page = Page::Contacts;
+        // This run's family status read has resolved, for an account it found
+        // unsupervised — the state every page test below starts from (a ward
+        // sets `own_policy` on top; the unread state is tested on its own).
+        app.family.status_read = true;
         // The Address Book ops read the account's mail custody since
         // `fauna.state.mail` went plane-only; without a store they build no op.
         app.contacts.mail = Some(Arc::new(
@@ -1665,6 +1847,35 @@ mod tests {
 
     fn count_id(app: &crate::app::App, id: &str) -> usize {
         elements(app).iter().filter(|e| e.id == id).count()
+    }
+
+    /// The People / Address Book segment is a radio pair that publishes the side
+    /// in force: `(*)` and `state=on` on the current side, `state=off` on the
+    /// other — so re-choosing the current side reads as the current choice
+    /// (`e2e-systematic-ui-walks.md` § The possibility invariants, layer (c)).
+    #[test]
+    fn segment_publishes_the_side_in_force() {
+        for (segment, people_on) in [(Segment::People, true), (Segment::AddressBook, false)] {
+            let mut app = contacts_app();
+            app.contacts.segment = segment;
+            let els = elements(&app);
+            for (id, on) in [
+                (ids::CONTACTS_SEGMENT_PEOPLE, people_on),
+                (ids::CONTACTS_SEGMENT_ADDRESSBOOK, !people_on),
+            ] {
+                let e = els.iter().find(|e| e.id == id).expect("segment painted");
+                assert!(
+                    matches!(e.role, crate::element::Role::Radio { selected, .. } if selected == on),
+                    "{id} marked {on}"
+                );
+                let state = e
+                    .attrs
+                    .iter()
+                    .find(|(k, _)| k == "state")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(state, Some(if on { "on" } else { "off" }), "{id}");
+            }
+        }
     }
 
     /// `contact-confirm` renders on `accepted` rows only (user ruling IN-PERSON
@@ -2144,6 +2355,95 @@ mod tests {
         ));
     }
 
+    /// The store-change notice re-runs the book read only while it waits (a
+    /// custody with no key yet: the mint in flight) and only on the Address
+    /// Book half; a settled read is left alone. Its unresolved answer lands as
+    /// the loading state, never as an empty address book.
+    #[test]
+    fn the_store_notice_reruns_only_an_unresolved_book_read() {
+        let mut app = contacts_app();
+        app.contacts.nest = Some(fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+        ));
+        app.contacts.secret = Some([7u8; 32]);
+        app.contacts.mail = Some(Arc::new(
+            fauna_client_config::test_helpers::FakeMailStore::empty(),
+        ));
+
+        app.contacts.segment = Segment::People;
+        assert!(store_resync_op(&app.contacts).is_none());
+
+        app.contacts.segment = Segment::AddressBook;
+        apply_outcome(
+            &mut app,
+            Outcome::AddressbooksLoaded {
+                resync_of: Default::default(),
+                read: AddressbooksReadState::Unresolved,
+                books: vec![],
+            },
+        );
+        assert_eq!(
+            app.contacts.addressbooks_read,
+            AddressbooksReadState::Unresolved
+        );
+        assert!(matches!(
+            store_resync_op(&app.contacts),
+            Some(Op::LoadAddressbooks { .. })
+        ));
+
+        apply_outcome(
+            &mut app,
+            Outcome::AddressbooksLoaded {
+                resync_of: Default::default(),
+                read: AddressbooksReadState::Loaded,
+                books: vec![],
+            },
+        );
+        assert!(
+            store_resync_op(&app.contacts).is_none(),
+            "a settled read is not re-run on every notice"
+        );
+    }
+
+    /// The push re-read (`address_book_resync_op`) carries the book gesture
+    /// generation: the cards a book opened after it was built stand against
+    /// its older read of the same book.
+    #[test]
+    fn a_late_address_book_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = contacts_app();
+        let card = |id: &str, name: &str| crate::address_book::VCardRow {
+            id: id.into(),
+            formatted_name: name.into(),
+            ..Default::default()
+        };
+        app.contacts.selected_book = Some("aa".into());
+        let carried = app.contacts.book_gen;
+
+        apply_outcome(
+            &mut app,
+            Outcome::CardsLoaded {
+                book_id: "aa".into(),
+                cards: vec![card("c1", "Ada"), card("c2", "Grace")],
+            },
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::AddressBookRefreshed {
+                read: AddressbooksReadState::Loaded,
+                books: Vec::new(),
+                open: Some(("aa".into(), vec![card("c1", "Ada")])),
+                resync_of: carried,
+            },
+        );
+
+        assert_eq!(
+            app.contacts.cards.len(),
+            2,
+            "a re-read older than the book's opening painted over it"
+        );
+    }
+
     /// The refresh lands the books whatever happened meanwhile, but its cards
     /// only onto the book still open — the refresh is spawned, so the user may
     /// have picked another book while it was in flight.
@@ -2166,6 +2466,8 @@ mod tests {
         apply_outcome(
             &mut app,
             Outcome::AddressBookRefreshed {
+                resync_of: Default::default(),
+                read: AddressbooksReadState::Loaded,
                 books: vec![book("aa"), book("bb")],
                 open: Some(("aa".into(), vec![card("c1", "Ada")])),
             },
@@ -2179,6 +2481,8 @@ mod tests {
         apply_outcome(
             &mut app,
             Outcome::AddressBookRefreshed {
+                resync_of: Default::default(),
+                read: AddressbooksReadState::Loaded,
                 books: vec![book("bb")],
                 open: Some(("bb".into(), vec![card("c1", "Ada"), card("c2", "Grace")])),
             },
@@ -2850,6 +3154,135 @@ mod tests {
             .expect("button still registers");
         assert!(!add.enabled, "a sent knock disables the button");
         assert_eq!(add.text, t::SENT);
+    }
+
+    /// A ward whose guardian decides new contacts, after a status read.
+    fn ward_app() -> crate::app::App {
+        let mut app = contacts_app();
+        app.family.supervised_by = Some("mum".into());
+        app.family.own_policy = Some(fauna_protocol::family::ReachPolicy {
+            contact_approval: true,
+            ..Default::default()
+        });
+        app
+    }
+
+    fn resolve(app: &mut crate::app::App, peer: &str) {
+        apply_outcome(
+            app,
+            Outcome::Resolved {
+                actor_id: peer.to_string(),
+                nest_url: None,
+            },
+        );
+    }
+
+    /// The painted (post-seam) elements with `id`: `(enabled, label)` each.
+    fn painted(app: &crate::app::App, id: &str) -> Vec<(bool, Option<String>)> {
+        app.page_elements()
+            .into_iter()
+            .filter(|e| e.id == id)
+            .map(|e| (e.enabled, e.label))
+            .collect()
+    }
+
+    /// `ui/README.md` § Offer only what is possible, rules 3–4, on the ward's
+    /// Find User result (`contacts.md` § Errors & edge cases): with contact
+    /// approval on, the knock is never enabled toward a stranger — it is
+    /// blocked with the refusal's own words — and the ask is offered at the
+    /// entry, painted first, before anything was refused.
+    #[test]
+    fn a_ward_is_offered_the_ask_at_the_entry_in_place_of_an_enabled_knock() {
+        let mut app = ward_app();
+        let peer = "cd".repeat(32);
+        resolve(&mut app, &peer);
+        assert_eq!(
+            painted(&app, "contacts-add-button"),
+            vec![(false, Some(t::GUARDIAN_APPROVAL_REQUIRED.to_string()))],
+            "the knock is blocked with its reason, never enabled"
+        );
+        assert_eq!(
+            painted(&app, "contact-request-guardian-button"),
+            vec![(true, None)]
+        );
+        let order = ids(&app);
+        let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
+        assert!(
+            pos("contact-request-guardian-button") < pos("contacts-add-button"),
+            "the ask is the result's first step: {order:?}"
+        );
+
+        // The send asks the same predicate and refuses with the same reason.
+        assert!(apply_local(&mut app, Action::AddContact).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Contacts).map(String::as_str),
+            Some(t::GUARDIAN_APPROVAL_REQUIRED)
+        );
+
+        // A pending ask replaces the ask button; the knock stays blocked.
+        app.family.own_contact_requests = vec![an_ask(0xcd)];
+        assert_eq!(count_id(&app, "contact-request-guardian-button"), 0);
+        assert_eq!(count_id(&app, "contact-request-pending"), 1);
+        assert!(!painted(&app, "contacts-add-button")[0].0);
+    }
+
+    /// The nest's outbound gate passes a peer the ward already has as an
+    /// accepted or confirmed contact, so the knock does too — and no ask.
+    #[test]
+    fn a_ward_may_knock_a_peer_who_is_already_a_contact() {
+        let mut app = ward_app();
+        let peer = "cd".repeat(32);
+        app.contacts.contacts = vec![a_contact(&peer.to_uppercase(), Some("ada"), "accepted")];
+        resolve(&mut app, &peer);
+        assert_eq!(painted(&app, "contacts-add-button"), vec![(true, None)]);
+        assert_eq!(count_id(&app, "contact-request-guardian-button"), 0);
+    }
+
+    /// Rule 5: before this run's status read resolves, neither the knock nor
+    /// an accept is enabled on a guess — and no ask is offered on one either.
+    #[test]
+    fn nothing_is_enabled_on_a_guess_before_the_status_read() {
+        let mut app = contacts_app();
+        app.family.status_read = false;
+        app.contacts.knocks = vec![knock(&"aa".repeat(32))];
+        resolve(&mut app, &"cd".repeat(32));
+        assert_eq!(
+            painted(&app, "contacts-add-button"),
+            vec![(false, Some(common::LOADING.to_string()))]
+        );
+        assert_eq!(count_id(&app, "contact-request-guardian-button"), 0);
+        assert!(!painted(&app, "contacts-accept-button")[0].0);
+    }
+
+    /// With contact approval on, acceptance is the guardian's: each knock row
+    /// keeps its `knock-guardian-pending` line, and its accept is blocked by
+    /// it (the reason already painted on the row); block and dismiss stay
+    /// live. The accept asks the same predicate.
+    #[test]
+    fn a_wards_accept_is_blocked_while_the_guardian_decides() {
+        let mut app = ward_app();
+        app.contacts.knocks = vec![knock(&"aa".repeat(32))];
+        assert_eq!(painted(&app, "contacts-accept-button"), vec![(false, None)]);
+        assert_eq!(count_id(&app, "knock-guardian-pending"), 1);
+        assert!(painted(&app, "contacts-block-button")[0].0);
+        assert!(painted(&app, "knock-dismiss")[0].0);
+        assert!(
+            apply_local(
+                &mut app,
+                Action::AcceptKnock {
+                    peer_id: "aa".repeat(32)
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(
+            app.errors.get(&Page::Contacts).map(String::as_str),
+            Some(t::KNOCK_GUARDIAN_PENDING)
+        );
+
+        // The guardian turns approval off: the ward decides again.
+        app.family.own_policy = Some(Default::default());
+        assert_eq!(painted(&app, "contacts-accept-button"), vec![(true, None)]);
     }
 
     /// `family-safety.md` § Child-initiated contact requests: a supervised

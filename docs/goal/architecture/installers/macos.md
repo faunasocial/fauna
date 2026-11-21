@@ -224,6 +224,8 @@ registers it and it therefore persists on a user's machine.** Internal source na
 not — which is why android's `com.fauna.app` Java package and the UniFFI Kotlin `package_name`
 `com.fauna.ffi` are ratified to stay, and are not drift to fix.
 
+**The sync agent's signing identifier is its LaunchAgent label, `social.fauna.sync-agent` (since 2026-11-15).** The agent binary embeds a property list (`bins/fauna-sync-agent/macos/Info.plist`, its `__TEXT,__info_plist` section — [`../account-sync-plane.md`](../account-sync-plane.md) § Implementation status today) whose `CFBundleIdentifier` codesign takes as the binary's identifier, so its designated requirement reads `identifier "social.fauna.sync-agent"` plus the team, where it read `identifier "fauna-sync-agent"` before. A keychain ACL trusts an application by that requirement, so a grant made to an agent signed before the change does not match one signed after it; nothing signed under the old identifier was ever released (the 0.1.x window), so no migration is owed. The identifier is pinned equal to the label by `test_apple_identifier_pins.py`.
+
 **How the LEAF is spelled — ratified 2026-08-22** (user-directed, after an independent
 review; supersedes the platform-suffix habit that produced `social.fauna.ios` and
 `social.fauna.desktop`):

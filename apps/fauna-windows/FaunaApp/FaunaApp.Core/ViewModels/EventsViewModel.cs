@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Logs;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
@@ -358,6 +359,16 @@ public partial class EventsViewModel : ViewModelBase
         }
     }
 
+    /// <summary>The pan pair's one answer (<c>events-prev-month</c> /
+    /// <c>events-next-month</c>): the shared <c>calendar_pan_possibility</c> for the
+    /// active view — possible wherever the pan moves, blocked in agenda with
+    /// <c>events.pan_none_in_agenda</c> (<c>events.md</c> § User actions,
+    /// <c>ui/README.md</c> § Offer only what is possible, rules 2 and 6). The page
+    /// paints both buttons from it on every <see cref="ViewMode"/> change, and
+    /// <see cref="NavigateAsync"/> asks it again before it moves anything.</summary>
+    internal PossibilityPaint PanPossibility() =>
+        PossibilityPaint.Of(FaunaFfiMethods.CalendarPanPossibility(_viewMode));
+
     /// <summary><c>events-prev-month</c> / <c>events-next-month</c> — move
     /// <b>one visible range</b> per click, in whatever mode is showing
     /// (<c>events.md</c> § Where logic lives → *View mode + visible range*).
@@ -385,6 +396,18 @@ public partial class EventsViewModel : ViewModelBase
     [RelayCommand]
     private async Task NavigateAsync(int direction)
     {
+        // Rule 6 (ui/README.md § Offer only what is possible): the action asks the
+        // same predicate the pair is painted from, and refuses with its reason on
+        // the page's error-message — never a silent return of the same date
+        // (events.md § User actions). The pair is disabled in agenda, so only a
+        // press that slipped past the paint reaches this.
+        var pan = PanPossibility();
+        if (!pan.IsPossible)
+        {
+            ErrorMessage = pan.Reason;
+            return;
+        }
+
         var step = FaunaFfiMethods.CalendarPanStep(_viewMode);
         DateTimeOffset moved;
         switch (step)
@@ -396,7 +419,10 @@ public partial class EventsViewModel : ViewModelBase
                 moved = CurrentDay.AddDays(direction * d.@count);
                 break;
             default:
-                return;   // FfiPanStep.None — do nothing at all.
+                // FfiPanStep.None — do nothing at all. Unreachable behind the
+                // possibility above (it is blocked exactly where the step is None);
+                // kept so the anchor can never move by a step the policy lacks.
+                return;
         }
 
         // Lockstep, not two independent anchors: the month grid reads

@@ -11,6 +11,7 @@ struct MacSnapshotFileListView: View {
     /// The SAME already-`configure`d instance the page holds.
     var vm: BackupsMachineVM
     @State private var searchText = ""
+    @Environment(FaunaClient.self) private var client: FaunaClient?
 
     var body: some View {
         let filtered = searchText.isEmpty ? vm.detailFiles : vm.detailFiles.filter {
@@ -78,6 +79,9 @@ struct MacSnapshotFileListView: View {
                 .automationActivate(Ids.snapshotFileDownloadButton) {
                     Task { await downloadFile(file) }
                 }
+                // The carve-out has no wire kind: its offline gate is the
+                // shared carve-out answer, asked again by the press.
+                .faunaPossible(carveOutAnswer(client))
             }
         }
     }
@@ -91,7 +95,7 @@ struct MacSnapshotFileListView: View {
         // apple targets share one refusal instead of each dropping the command
         // silently — convention 11, see the VM's doc comment.
         guard let data = await vm.downloadSnapshotFile(
-            snapshotId: snapshot.id, path: file.path)
+            snapshotId: snapshot.id, path: file.path, carveOut: carveOutAnswer(client))
         else { return }
         let name = (file.path as NSString).lastPathComponent
         try? SnapshotFileSaver.save(suggestedFileName: name, data: data)

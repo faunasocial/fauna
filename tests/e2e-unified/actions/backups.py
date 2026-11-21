@@ -1580,7 +1580,7 @@ class BackupsActions:
         else:
             self.driver.navigate_to("devices")
 
-    def navigate_folders(self) -> None:
+    def navigate_folders(self, *, by_click: bool = False) -> None:
         """Navigate to the folder control plane — list + create wizard +
         conflict resolution (the ``folder-*`` / ``wizard-*`` / ``conflict-*`` IDs).
 
@@ -1597,9 +1597,20 @@ class BackupsActions:
         local-folder binding / sharing / webdav / paywall / the page-level
         default-conflict-policy select carry their own narrow tui skip instead
         (those aren't built yet).
+
+        ``by_click=True`` reaches Settings → Folders the way a person does — the
+        settings tab, then its rail row (``SettingsActions.open_rail_row_by_click``)
+        — for a journey that must record those gestures (main-use-cases.md
+        § The journeys); the default state write records none.
         """
         if self._folders_in_settings():
-            navigate_settings_subpage(self.driver, "folders")
+            if by_click:
+                from actions.settings import SettingsActions
+
+                SettingsActions(self.driver).open_rail_row_by_click(
+                    "settings-nav-row[folders]", "folder-add-button")
+            else:
+                navigate_settings_subpage(self.driver, "folders")
         else:
             self.driver.navigate_to("devices")
 
@@ -1630,7 +1641,11 @@ class BackupsActions:
         return self.driver.count("folder-row")
 
     def add_folder(self) -> None:
-        """Open the new folder wizard."""
+        """Open the new folder wizard. Waits for the button to be enabled: an
+        app holds it disabled with its reason until the page's devices machine
+        is built (``ui/folders.md`` § Element IDs; ``ui/README.md`` § Offer only
+        what is possible), as a person waits for a disabled button."""
+        self.driver.wait_until_enabled("folder-add-button", timeout=30.0)
         self.driver.click("folder-add-button")
 
     def folder_title(self, index: int = 0) -> str:
@@ -1804,31 +1819,87 @@ class BackupsActions:
         ``test_filesync_multiseat_live._bind_folder``). Polled on the observed
         form, never on elapsed time (convention 14)."""
         self.navigate_folders()
+        return self.bind_location_here(name, path, timeout)
+
+    def bind_location_here(self, name: str, path: str, timeout: float = 60.0) -> int:
+        """The folder-bind gesture with NO navigation: the person is already on
+        Folders. Open the row whose title contains ``name``, type ``path`` into
+        its nested binding form, click add, and return the row's index once the
+        bound folder renders as a ``folder-location-row`` under it.
+
+        The one implementation of the gesture (:meth:`bind_location` and
+        ``helpers.folder_content.bind_location_under_set`` navigate, then call
+        this; a journey already on Folders calls it directly). The open, the
+        type and the click are retried together while the form is rebuilt
+        under them: the page mounts its rows before each row's member roster
+        loads, and that load (or linux's list rebuild on every devices
+        snapshot) discards an open that came first, so a single
+        open-then-type loses the form (``LookupError`` on the path input;
+        measured live 2026-07-24 and on a 54-set account, row 3688). Every
+        retry repeats the step just walked, so a journey's walk stays in
+        order. The wait for the bound row re-opens a row a rebuild shut after
+        the add. Polled on the observed form, never on elapsed time
+        (convention 14)."""
         deadline = time.monotonic() + timeout
         while True:
-            idx = self.find_and_expand_folder(name)
-            settle = time.monotonic() + 5.0
-            while time.monotonic() < settle:
-                if self.driver.count("folder-location-path-input") >= 1:
-                    break
-                time.sleep(0.25)
-            if self.driver.count("folder-location-path-input") >= 1:
+            idx = self.open_folder(name)
+            try:
+                self.driver.type_text("folder-location-path-input", path)
+                self.driver.click("folder-location-add-button")
                 break
-            if time.monotonic() >= deadline:
-                raise AssertionError(
-                    f"the {name!r} row never opened its binding form "
-                    f"(folder-location-path-input count=0 after {timeout:.0f}s of "
-                    "expand clicks) — the row is present, so this is the "
-                    "mount-vs-member-load rebuild, not a missing set"
-                )
-        self.driver.type_text("folder-location-path-input", path)
-        self.driver.click("folder-location-add-button")
+            except LookupError:
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"the {name!r} row's binding form never held still long "
+                        f"enough to take the path ({timeout:.0f}s of re-opens) — "
+                        "the row is present, so this is the mount-vs-member-load "
+                        f"rebuild, not a missing set; error={self._error_text()!r}"
+                    )
+                time.sleep(0.3)  # sleep-ok: bounded poll cadence inside the deadline
+
+        def _bound() -> bool:
+            nonlocal idx
+            if self.driver.count("folder-location-row", scope=f"folder-row[{idx}]") >= 1:
+                return True
+            if not self.driver.is_visible("folder-location-path-input"):
+                # A rebuild shut the row after the add: open it again to read it.
+                idx = self.open_folder(name)
+            return False
+
         wait_until(
-            lambda: self.driver.count("folder-location-row", scope=f"folder-row[{idx}]") >= 1,
+            _bound,
             timeout,
-            diagnose=lambda: f"the bound folder {path!r} never rendered under {name!r}",
+            diagnose=lambda: (
+                f"the bound folder {path!r} never rendered under {name!r}: "
+                f"{self.driver.diagnose('folder-location-row')}; "
+                f"error={self._error_text()!r}"
+            ),
         )
         return idx
+
+    def _error_text(self) -> str:
+        """The page's ``error-message`` text, or '' when none is painted."""
+        try:
+            if self.driver.is_visible("error-message"):
+                return self.driver.get_text("error-message")
+        except Exception:
+            pass
+        return ""
+
+    def hold_custody_reads(self) -> None:
+        """Hold this app's mail-custody reads — the read behind each row's
+        ``folder-webdav-toggle`` — until :meth:`release_custody_reads`: the one
+        way to read the toggle while that read is out (``folders.md`` § Errors &
+        edge cases, *Own-tier and mail gates*). An account-store read, so no
+        nest reply hold reaches it. A test-agent command, never user-facing;
+        gate the caller on the ``custody-read-hold`` surface."""
+        reply = self.driver.call_command("folders_hold_custody_reads", {})
+        assert not (isinstance(reply, dict) and reply.get("error")), reply
+
+    def release_custody_reads(self) -> None:
+        """Release :meth:`hold_custody_reads`; parked and later reads answer.
+        A no-op when nothing is held."""
+        self.driver.call_command("folders_release_custody_reads", {})
 
     def find_and_expand_folder_until(
         self, name: str, element_id: str, timeout: float = 15.0
@@ -2411,10 +2482,11 @@ class BackupsActions:
         (``fauna.folders.list``).
 
         Waits for the toggle to be ENABLED first: it is gated on the owner's
-        serve capability (the MSEK the first mail enable mints), which the page
-        reads asynchronously on every nav — so right after a mail enable the
-        toggle renders disabled for a moment, and a click then is one no user
-        could make (the 2026-10-12 grading run's 409 on linux)."""
+        serve capability (the MSEK every account mints at its first connect),
+        which the page reads asynchronously on every nav — so right after
+        sign-in the toggle renders disabled "still loading" for a moment, and a
+        click then is one no user could make (the 2026-10-12 grading run's 409
+        on linux)."""
         self.driver.wait_until_enabled("folder-webdav-toggle", timeout=30.0)
         self.driver.click("folder-webdav-toggle")
         time.sleep(1)
@@ -2441,9 +2513,9 @@ class BackupsActions:
         """Whether the expanded row's ``folder-webdav-toggle`` is *interactive*.
 
         Serving a set over WebDAV seals the ``WebdavKeysBlob`` under the actor's
-        MSEK, which is minted when mail is first enabled — so an actor with no
-        mail sees the toggle **disabled with a "set up mail first" hint** rather
-        than clicking into a ``NoMsek`` failure (webdav-server.md § Independent
+        MSEK, which every account mints at its first connect — so until that
+        mint lands the toggle reads **disabled "still loading"** rather than
+        clicking into a ``NoMsek`` failure (webdav-server.md § Independent
         enablement point 2). Reads the uniform ``/element/enabled`` contract (web
         ``disabled`` attr, GTK ``!SENSITIVE``, WinUI ``!IsEnabled``, …).
 

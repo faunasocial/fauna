@@ -24,6 +24,9 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.viewmodel.SubscriptionSettingsVM
 import com.fauna.ffi.FfiMineSubscription
 import social.fauna.generated.Ids
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * The consumer-side **`subscription-settings`** page (subscriptions Slice B —
@@ -52,6 +55,8 @@ fun SubscriptionSettingsScreen(
     val working by vm.working.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val claimRedeemed by vm.claimRedeemed.collectAsState()
+    val redeemAnswer by vm.redeemAnswer.collectAsState()
+    val mineRead by vm.mineRead.collectAsState()
     val appMessages = LocalAppMessages.current
 
     LaunchedEffect(errorMessage) { errorMessage?.let { appMessages.showError(it) } }
@@ -75,6 +80,9 @@ fun SubscriptionSettingsScreen(
         onBack = { navController.popBackStack() },
         onUnsubscribe = vm::unsubscribe,
         onRedeemClaim = vm::redeemClaim,
+        onRedeemRefused = { vm.errorMessage.value = it },
+        redeemAnswer = redeemAnswer,
+        mineRead = mineRead,
     )
 }
 
@@ -88,9 +96,17 @@ fun SubscriptionSettingsContent(
     onBack: () -> Unit,
     onUnsubscribe: (FfiMineSubscription) -> Unit,
     onRedeemClaim: (String) -> Unit = {},
+    /** The redeem's refusal reason (shared `redeem_code_possibility`), for the page's `error-message`. */
+    onRedeemRefused: (String) -> Unit = {},
     // The `subscription-mine-author` text; the stateful caller resolves it
     // through the overlay projection, so this Content stays FFI-free.
     authorLabel: (FfiMineSubscription) -> String = { it.authorDisplay },
+    // The redeem button's answer, the VM's (`SubscriptionSettingsVM.redeemAnswer`);
+    // the default is for the stateless harness only.
+    redeemAnswer: Possibility = Possibility.Possible,
+    // Where the `mine.list` read stands (`SubscriptionSettingsVM.mineRead`);
+    // the default is for the stateless harness only.
+    mineRead: ReadState = ReadState.RESOLVED,
 ) {
     Scaffold(
         topBar = {
@@ -125,12 +141,24 @@ fun SubscriptionSettingsContent(
                 stringResource(R.string.subscriptions_my_subscriptions),
                 style = MaterialTheme.typography.titleMedium,
             )
+            // Three states, never two (`subscriptions.md` § Consumer side):
+            // loading before the `mine.list` read answers, the empty text only
+            // once a read answered with none, and neither after a failed first
+            // read — `error-message` carries why.
             if (subscriptions.isEmpty()) {
-                Text(
-                    stringResource(R.string.subscriptions_no_subscriptions),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                when (mineRead) {
+                    ReadState.PENDING -> Text(
+                        stringResource(R.string.common_loading),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ReadState.RESOLVED -> Text(
+                        stringResource(R.string.subscriptions_no_subscriptions),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ReadState.FAILED -> {}
+                }
             } else {
                 subscriptions.forEach { sub ->
                     MineRow(
@@ -168,6 +196,8 @@ fun SubscriptionSettingsContent(
                     onCodeChange = { claimCode = it },
                     working = working,
                     onRedeem = { onRedeemClaim(claimCode) },
+                    onRefuse = onRedeemRefused,
+                    answer = redeemAnswer,
                 )
             }
         }

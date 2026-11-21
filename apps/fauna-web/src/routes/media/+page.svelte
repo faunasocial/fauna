@@ -3,15 +3,17 @@
   import { connectionStatus, identity, onActorChange } from "#lib/store";
   import { registerActorScopedReset } from "#lib/actorScope";
   import { sharedRpcPort } from "#lib/rpc";
-  import { ensureWasm, mediaSortLabel, mediaSortDirectionLabel, offlineAffordance } from "#lib/wasm";
+  import { ensureWasm, mediaSortLabel, mediaSortDirectionLabel, offlinePossibility } from "#lib/wasm";
   import {
     createMediaMachine,
     shareLinkExpiryLabel,
+    shareLinkPossibility,
     shareLinkStateLabel,
     syncedStateBadgeLabel,
     type MediaMachine,
   } from "#lib/wasm-media";
   import { makeOfflineGate } from "#lib/offline-gate";
+  import { shareLinkPaint, uploadPaint, writePaint } from "#lib/media-possibility";
   import type { MediaPageSnapshot, MediaItemSummary, FileVersionSummary } from "#lib/media-machine";
   import { resolveLocalized } from "#lib/i18n/localized";
   import type { LocalizedText } from "#lib/i18n/localized";
@@ -23,6 +25,7 @@
   import { toArrayBufferView } from "#lib/bytes";
   import { consumePendingSearchNav } from "#lib/search";
   import { IDS } from '#lib/generated/uiIds';
+  import { endsTextSelection } from '#lib/selection-click';
 
   // The all-media sentinel — the `media-folder-filter` value for "every readable
   // set" (the default view). Mirrors linux's `FILTER_ALL_VALUE` (mod.rs).
@@ -41,7 +44,7 @@
   // `fauna.share.create` / `fauna.share.revoke` are OnlineOnly
   // (`fauna_protocol::offline_class`): the shared verdict greys their controls
   // while the nest is unreachable.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // Upload glue (the only app-specific bit — the browser file picker).
   let uploadFiles: FileList | null = $state(null);
@@ -262,8 +265,8 @@
       for (let i = 0; i < uploadFiles.length; i++) {
         const file = uploadFiles[i];
         const bytes = new Uint8Array(await file.arrayBuffer());
-        // The shared machine resolves the target set + applies the no-set policy
-        // (media.error_no_set) and refuses a metadata-only folder; the owner
+        // The shared machine resolves the target set (making a folderless
+        // account's first folder) and refuses a metadata-only folder; the owner
         // BackupKey is derived from the seed in the wasm binding.
         await machine.uploadSelected(deviceId, file.name, bytes, id.secretHex);
       }
@@ -284,6 +287,31 @@
   // Mirrors the linux reference (`views/media/detail.rs`): all semantics live in
   // shared Rust, this is pure renderer + the device-id glue.
   let detailItem = $state<MediaItemSummary | null>(null); // null = modal closed
+
+  // The write affordances paint from the media machine's answers
+  // (`ui/media.md` § Errors & edge cases → *What this person may write*;
+  // `ui/README.md` § Offer only what is possible, rule 6): the upload from
+  // `upload_possibility`, delete and restore from `write_possibility` over the
+  // opened item's own set. Re-read on every snapshot tick; the page derives
+  // none of it, and the machine's gestures refuse on the same readings.
+  const upload = $derived.by(() => {
+    void snap;
+    return uploadPaint(machine);
+  });
+  const write = $derived.by(() => {
+    void snap;
+    return detailItem
+      ? writePaint(machine, detailItem.filter_value, !!snap?.followed_scope)
+      : writePaint(null, "", false);
+  });
+  // `share-link-button`: the shared `share_link_possibility` over the opened
+  // item's `share_link_eligible` — absent on an ineligible file, never inert.
+  const shareLink = $derived.by(() => {
+    void snap;
+    return detailItem
+      ? shareLinkPaint(shareLinkPossibility, detailItem.share_link_eligible, !!snap?.followed_scope)
+      : shareLinkPaint(shareLinkPossibility, false, false);
+  });
   let detailVersions = $state<FileVersionSummary[]>([]);
   let detailLoading = $state(false);
   // Per-item load error — the wasm `fileVersions` rejection is a plain string,
@@ -580,6 +608,7 @@
   // `error-message` and the surface stays open. Mirrors tui's
   // `share_create_elements` / `share_list_elements`.
   function openShareCreate(item: MediaItemSummary): void {
+    if (!shareLinkPaint(shareLinkPossibility, item.share_link_eligible, !!snap?.followed_scope).shown) return;
     machine?.openShareCreate(item.folder, item.path);
   }
 
@@ -692,24 +721,26 @@
       onclick={() => machine?.openShareLinks()}
     >{t.share_link.list_button}</button>
 
-    <!-- A followed browse scope is READ-ONLY, structurally: the upload
-         affordance is ABSENT entirely rather than painted-but-inert, because a
-         follow never enters `known_folders` and so can never be an upload
-         target (`ui/media.md` § Followed public folders; tui gates its own
-         upload gesture on the same `followed_scope.is_none()`). -->
-    {#if !snap?.followed_scope}
+    <!-- The upload paints from the machine's one answer: ABSENT inside a
+         followed browse scope (structurally read-only — `ui/media.md`
+         § Followed public folders), disabled with its reason before the first
+         read and on a reader's or metadata-only target. -->
+    {#if upload.shown}
       <div class="upload-form">
         <input
           data-testid={IDS.FILE_UPLOAD}
           type="file"
           multiple
+          disabled={upload.disabled}
+          title={upload.reason ? resolveLocalized(upload.reason) : undefined}
           onchange={(e) => { uploadFiles = (e.target as HTMLInputElement).files; }}
         />
         <button
           data-testid={IDS.UPLOAD_BUTTON}
           class="btn primary"
           onclick={handleUpload}
-          disabled={uploading}
+          disabled={uploading || upload.disabled}
+          title={upload.reason ? resolveLocalized(upload.reason) : undefined}
         >
           {uploading ? t.media.uploading({ progress: "0" }) : t.media.upload}
         </button>
@@ -728,7 +759,7 @@
           data-testid={IDS.MEDIA_ITEM}
           role="button"
           tabindex="0"
-          onclick={() => openDetail(item)}
+          onclick={(e) => { if (!endsTextSelection(e.currentTarget)) openDetail(item); }}
           onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(item); } }}
         >
           <div class="thumb" data-testid={IDS.MEDIA_THUMBNAIL} aria-hidden="true" use:thumbnailLoader={item}>
@@ -828,11 +859,14 @@
                     onclick={() => undeleteVersion(version)}
                   >{t.media.version_undelete}</button>
                 {/if}
-                <button
-                  data-testid={IDS.FILE_VERSION_RESTORE_BUTTON}
-                  class="btn"
-                  onclick={() => openRestoreConfirm(version)}
-                >{t.media.version_restore}</button>
+                {#if write.shown}
+                  <button
+                    data-testid={IDS.FILE_VERSION_RESTORE_BUTTON}
+                    class="btn"
+                    disabled={write.disabled}
+                    onclick={() => openRestoreConfirm(version)}
+                  >{t.media.version_restore}</button>
+                {/if}
               </div>
             {/each}
           </div>
@@ -908,17 +942,20 @@
         <!-- Present ONLY on an eligible file (a public-audience folder) —
              absent otherwise, never inert (`share-links.md` § Which files can
              be linked); the verdict is the machine's. -->
-        {#if !snap?.followed_scope && detailItem.share_link_eligible && !snap?.share_create}
+        {#if shareLink.shown && !snap?.share_create}
           <button
             data-testid={IDS.SHARE_LINK_BUTTON}
             class="btn"
             onclick={() => detailItem && openShareCreate(detailItem)}
           >{t.share_link.button}</button>
         {/if}
-        {#if !snap?.followed_scope}
+        <!-- Absent in a followed scope and in a set this person may only
+             read: the machine's `write_possibility` over the item's own set. -->
+        {#if write.shown}
           <button
             data-testid={IDS.MEDIA_DELETE_BUTTON}
             class="btn"
+            disabled={write.disabled}
             onclick={openDeleteConfirm}
           >{t.media.file_detail.delete_file}</button>
         {/if}

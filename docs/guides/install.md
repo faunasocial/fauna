@@ -4,7 +4,7 @@
 
 ## The no-install option: the web app
 
-Every Fauna server (nest) serves the full web app itself at the address below, unless its admin has chosen to send that address to the project's own web address for the app instead (a nest without a domain yet keeps serving it itself). That address is not live yet; once it is, you land there on the same app, already pointed at that nest.
+A Fauna server (nest) run from Fauna's container image serves the full web app itself at the address below:
 
 ```
 https://<the-nest's-domain-or-ip>/app/
@@ -17,13 +17,13 @@ to install, and it's the same app as the native apps.
 One thing to know before you use it for a nest you don't run yourself: the
 app at that address comes from the nest, so you are trusting whoever runs the
 nest with the code you run, not only with your data. For your own nest that
-is exactly right. For someone else's nest, the safer choice is a native app (below), which you download from the project's releases page or build from its source rather than load from the nest. The Fauna project will also serve the web app from its own address, `https://app.fauna.social`, for exactly this reason: that address serves the app's code and holds nothing of yours. It is not live yet; when it is, bookmark it and open your nest from there.
+is exactly right. For someone else's nest, the safer choice is a native app (below), which you download from the project's releases page or build from its source rather than load from the nest.
 
 ## Building the native apps
 
 All apps share one repository and one Rust core. Clone it, and the pinned
 Rust toolchain installs itself on the first `cargo` run. Builds are
-orchestrated with [`just`](https://github.com/casey/just). Each app directory
+orchestrated with [`just`](https://github.com/casey/just). Each app below
 has a `README.md` with the details; the short version:
 
 ### Linux (GTK4)
@@ -51,12 +51,20 @@ Details: [`apps/fauna-apple/README.md`](../../apps/fauna-apple/README.md).
 
 ### iOS (SwiftUI)
 
-Needs a Mac with Xcode; runs in the simulator or on your own device with your
-developer signing.
+Needs a Mac with Apple silicon and Xcode, and runs in the iOS simulator: the
+shared core is built for the simulator on Apple silicon only, not for the
+simulator on an Intel Mac. Building for your own iPhone is not covered here: the
+project signs device builds only for the App Store, with the project's own
+developer team, and the app's bundle identifiers and the app group it shares
+with its extensions are registered to that team, so a build under your own team
+first needs those identifiers and the signing changed in the project and in the
+source. From the repository root, build the shared core in the form a Debug
+build needs, then open the Xcode project and build and run its `Fauna-iOS`
+scheme on a simulator:
 
 ```sh
-just apple-ffi          # the shared-core XCFramework
-xcodebuild -scheme FaunaiOS   # then build/run from Xcode
+just apple-ffi-test                     # the shared core a Debug build links
+open apps/fauna-apple/Fauna.xcodeproj   # then build and run Fauna-iOS
 ```
 
 Details: [`apps/fauna-apple/README.md`](../../apps/fauna-apple/README.md).
@@ -88,7 +96,7 @@ crossterm), runs on Linux, macOS and Windows alike — full-screen, keyboard
 and mouse driven, no display server needed. Handy over SSH or on a headless
 box.
 
-**Installing a release.** Each pre-release and release publishes one archive per processor for Linux and for Windows, and since 0.1.6 for macOS too (`fauna-tui-<arch>-linux.tar.gz`, `fauna-tui-<arch>-darwin.tar.gz`, `fauna-tui-<arch>-windows.zip`), each carrying the terminal app together with the sync agent it drives and `fauna-cli`, the program an AI assistant runs to work in Fauna. Verify the download as the project's [code signing policy](https://fauna.social/code-signing-policy#how-to-check-a-signature) describes (see also *Checking you have the official app* below), unpack it, and on Linux or macOS run the `install.sh` inside it — it copies the programs into `~/.local/bin` (or `/usr/local/bin` when run with `sudo`), and `./install.sh --uninstall` removes them again. On Windows, unpack the zip into a folder on your `PATH`. The Windows installer also installs the terminal app, with `fauna-cli`, alongside the desktop app (the "Fauna Terminal App" choice, on by default), so with it you have both already; the macOS package, once published, does the same.
+**Installing a release.** Each pre-release and release publishes one archive per processor for Linux and for Windows, and since 0.1.6 for macOS too (`fauna-tui-x86_64-linux.tar.gz` and `fauna-tui-aarch64-linux.tar.gz` for Linux, the same names with `darwin` in place of `linux` for macOS, and `fauna-tui-x64-windows.zip` and `fauna-tui-arm64-windows.zip` for Windows, which names the processors differently: `x86_64` and `x64` are for Intel and AMD processors, `aarch64` and `arm64` for ARM ones, Apple silicon included), each carrying the terminal app together with the sync agent it drives and `fauna-cli`, the program an AI assistant runs to work in Fauna. Verify the download as the project's [code signing policy](https://fauna.social/code-signing-policy#how-to-check-a-signature) describes (see also *Checking you have the official app* below), unpack it, and on Linux or macOS run the `install.sh` inside it — it copies the programs into `~/.local/bin` (or `/usr/local/bin` when run with `sudo`), and `./install.sh --uninstall` removes them again. On Windows, unpack the zip into a folder on your `PATH`. The Windows installer also installs the terminal app, with `fauna-cli`, alongside the desktop app (the "Fauna Terminal App" choice, on by default), so with it you have both already.
 
 **Building from source** instead:
 
@@ -122,10 +130,10 @@ The nest server is its own guide: [on the internet](nest-internet-setup.md) or [
 
 ### From the Windows installer
 
-The Windows installer can also set up a nest on the computer it installs on: tick its "Nest Service" choice, which is off by default. The macOS package, once published, does the same. The nest then runs as a service that starts with the computer and keeps running with nobody signed in, and your other devices reach it at the computer's address on your network. On its first start it writes a one-time claim code to the file `C:\ProgramData\Fauna\nest\claim-code` on that computer. To claim the nest, set up the Fauna app on one of your devices with a handle at that address — `you@192.168.1.50`, with the computer's real address after the `@`, as [Claim it from the app](nest-home-setup.md#step-7--claim-it-from-the-app) explains — and enter the claim code when asked.
+The Windows installer can also set up a nest on the computer it installs on: tick its "Nest Service" choice, which is off by default. The nest then runs as a service that starts with the computer and keeps running with nobody signed in, and your other devices reach it at the computer's address on your network. On its first start it writes a one-time claim code to the file `C:\ProgramData\Fauna\nest\claim-code` on that computer. To claim the nest, set up the Fauna app on one of your devices with a handle at that address — `you@192.168.1.50`, with the computer's real address after the `@`, as [Claim it from the app](nest-home-setup.md#step-7--claim-it-from-the-app) explains — and enter the claim code when asked. If another device cannot reach the nest, check that it is on the same network as that computer and that you typed the computer's current address. The installer adds a Windows Firewall rule named "Fauna Nest (HTTPS)" that lets other devices connect to the nest on port 443: check that the rule is still there and turned on, that no other firewall program on that computer blocks the connection, and that no other program on that computer already uses port 443.
 
 ## What "alpha" means for you
 
 - Expect rough edges, and expect to update often (the apps and server evolve together; during the 0.1 versions an update may need a fresh install of the app or the nest, and from 0.2.0 on, apps and servers within a major version stay compatible in both directions).
 - During the 0.1 versions an update may need a fresh start, so export anything you want to keep first; from 0.2.0 on, updates never require wiping the nest. Your data stays exportable from your own app: **Settings → Account → Export My Data** downloads what your nest holds for you, your mail included, and **Export mailbox**, among the mail pages in Settings, takes your mailbox out in standard formats to move it to another mail service.
-- Public releases arrive once a version passes acceptance, the first of them 0.1.6; until then a version's downloads are pre-releases.
+- A version becomes a public release once it passes acceptance, or once the project accepts what it did not pass as known issues of the release, as it did for the first of them, 0.1.6; until then a version's downloads are pre-releases.

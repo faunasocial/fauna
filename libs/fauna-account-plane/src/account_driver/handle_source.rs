@@ -435,6 +435,13 @@ impl MailStore for AccountMailStore {
         self.handle(false).await?.write_state(state).await
     }
 
+    async fn write_state_background(&self, state: MailStateRow) -> Result<bool, StoreError> {
+        self.handle(false)
+            .await?
+            .write_state_background(state)
+            .await
+    }
+
     async fn clear_rotation(&self, new_msek: SecretArray32) -> Result<bool, StoreError> {
         self.handle(false).await?.clear_rotation(new_msek).await
     }

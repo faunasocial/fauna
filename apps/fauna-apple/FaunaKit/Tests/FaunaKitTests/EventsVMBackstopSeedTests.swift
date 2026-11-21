@@ -81,7 +81,7 @@ func singleCalendarUnchangedSkipsFullRead() async {
     api.fullAnswers["cal-1"] = [event("ev-a", calendarId: "cal-1")]
     let vm = EventsVM()
     vm.configure(api: api)
-    vm.calendars = [cal1]
+    vm.seedLoadedCalendars([cal1])
     // The initial select pays one full read (mirrors production: a page
     // always shows a real list before any poll tick can run).
     await vm.selectCalendar(cal1)
@@ -105,7 +105,7 @@ func singleCalendarChangedUsesSeededPayload() async {
     api.fullAnswers["cal-1"] = [event("ev-a", calendarId: "cal-1")]
     let vm = EventsVM()
     vm.configure(api: api)
-    vm.calendars = [cal1]
+    vm.seedLoadedCalendars([cal1])
     await vm.selectCalendar(cal1)
     #expect(api.fullReadCallCount == 1)
 
@@ -128,7 +128,7 @@ func unionAllUnchangedSkipsFullRead() async {
     api.fullAnswers["cal-2"] = [event("ev-b", calendarId: "cal-2")]
     let vm = EventsVM()
     vm.configure(api: api)
-    vm.calendars = [cal1, cal2]
+    vm.seedLoadedCalendars([cal1, cal2])
     // No selection — force the initial load through the same union path the
     // poll will use, so `fullReadCallCount` starts from a known baseline.
     await vm.loadCalendars()
@@ -154,7 +154,7 @@ func unionOneChangedFallsThroughToFullRead() async {
     api.fullAnswers["cal-2"] = [event("ev-b", calendarId: "cal-2")]
     let vm = EventsVM()
     vm.configure(api: api)
-    vm.calendars = [cal1, cal2]
+    vm.seedLoadedCalendars([cal1, cal2])
     await vm.loadCalendars()
     let baselineFullReads = api.fullReadCallCount
 

@@ -33,6 +33,9 @@
   import { ensureWebPageHydrated } from '#lib/web-publish';
   import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import { postOffersThreadView, threadPostAuthorLabel } from '#lib/wasm';
+  import { feedPostSubmitPossibility, feedCreatePossibility, feedBridgeSubscribePossibility, feedRefusalI18nKey } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import { verbErrorCopy } from '#lib/feed-verb-error';
   import { byteSize } from '#lib/value-format';
   import { createLabelerCatalogMachine } from '#lib/wasm-labeler-catalog';
   import FeedComposeBar from '#lib/components/FeedComposeBar.svelte';
@@ -312,6 +315,23 @@
 
   // Compose (local; uploaded blob staged into the manager at submit)
   let composeBody = $state('');
+  // The feed forms' submits, painted from their shared draft-validity answers
+  // (`fauna_feed::forms`, `feed.md` § Errors & edge cases): disabled with the
+  // reason on `title`, re-asked as the user types. Read once `feedReady` (the
+  // manager is built, so the wasm core is up); before that, disabled.
+  const postGate = $derived(
+    formGate(feedReady ? askPossibility(() => feedPostSubmitPossibility(composeBody)) : null),
+  );
+  const createFeedGate = $derived(
+    formGate(feedReady ? askPossibility(() => feedCreatePossibility(newFeedName)) : null),
+  );
+  const bridgeSubscribeGate = $derived(
+    formGate(
+      feedReady
+        ? askPossibility(() => feedBridgeSubscribePossibility(bridgeFormBridge, bridgeFormUri))
+        : null,
+    ),
+  );
   let composeTags = $state('');
   let composing = $state(false);
   let composeFile: File | null = $state(null);
@@ -415,6 +435,23 @@
     stickyKeys: ['gateTier', 'gateRoom', 'gatePreview', 'sellSelected', 'sellPrice', 'sellAskingPrice', 'sellSubscribersFree'] as (keyof ComposeFields)[],
   };
   let showComposeDialog = $state(false);
+  // The compose dialog's own `error-message` (`ui/README.md` § Offer only what
+  // is possible, rule 7: the form's while it is open, else the page's). A
+  // refusal or a failure the manager did not stamp on `compose-error` lands
+  // here while the modal is up — never on the page's surface behind it.
+  let composeDialogError = $state('');
+  $effect(() => { if (!showComposeDialog) composeDialogError = ''; });
+  // An open modal form's own failure line (compose dialog, reply dialog):
+  // while one shows, it is the surface's `error-message` and the page's yields.
+  let modalFormError = $derived(
+    (showComposeDialog && composeDialogError) || host.reply.error,
+  );
+  /** Where a compose refusal or failure goes: the open dialog's own
+   *  `error-message`, else the page's (the inline bar is on the page). */
+  function composeFailure(message: string): void {
+    if (showComposeDialog) composeDialogError = message;
+    else loadError = message;
+  }
   let dialogTextarea: HTMLTextAreaElement | undefined = $state();
   let dialogDragging = $state(false);
 
@@ -904,7 +941,10 @@
     scheduleDraftSave();
   }
 
-  async function handleCompose(): Promise<void> {
+  /** Resolves `true` only when the post was saved — the compose dialog
+   *  closes on that alone (`feed.md` § Errors & edge cases); a refused or
+   *  failed post keeps it open with what was typed. */
+  async function handleCompose(): Promise<boolean> {
     const id = $identity;
     // Split deliberately: the submit button gates on `feedReady` (the manager
     // half) but on NOTHING that tracks the identity, so `!id` reaches an
@@ -912,10 +952,14 @@
     // `compose-error` ever appears, since that surface is derived from the
     // manager's snapshot and the manager was never asked to do anything. That
     // is the silent drop convention 11 forbids; both readiness faults now
-    // surface on the page's own error element. An empty body stays a plain
-    // no-op — it is the one condition the button really does disable on.
-    if (!manager || !id) { loadError = t.common.still_loading; return; }
-    if (!composeBody.trim()) return;
+    // surface on the page's own error element. The painted predicate
+    // (`fauna_feed::forms::post_submit_possibility`) is asked again first: a
+    // blocked draft refuses with its reason on `error-message`, never a
+    // silent return.
+    if (!manager || !id) { composeFailure(t.common.still_loading); return false; }
+    const refusal = formRefusal(askPossibility(() => feedPostSubmitPossibility(composeBody)));
+    if (refusal !== null) { composeFailure(refusal); return false; }
+    composeFailure('');
     // READ ONCE, HERE — everything below sends `sent`, never the live fields.
     // The awaits ahead (provenance, thumbnail, uploads, the create, the reload)
     // leave the composer editable for seconds, and a read after any of them
@@ -1129,7 +1173,7 @@
       } catch {
         /* snapshot itself is unreadable — then it certainly did not stamp */
       }
-      if (!stamped) loadError = t.feed.error_submit({ message: String(e) });
+      if (!stamped) composeFailure(t.feed.error_submit({ message: String(e) }));
     } finally {
       if (succeeded) {
         // Clear what was SENT, not the composer as it stands now (a gated
@@ -1162,6 +1206,7 @@
       refreshFeed();
       composing = false;
     }
+    return succeeded;
   }
 
   async function handleDialogDrop(e: DragEvent): Promise<void> {
@@ -1210,7 +1255,11 @@
 
   async function handleCreateFeed(): Promise<void> {
     if (!manager) { loadError = t.common.still_loading; return; }
-    if (!newFeedName.trim()) return;
+    // Ask the painted predicate again first (`feed.md` § Errors & edge cases):
+    // a blocked draft refuses with its reason on `error-message`.
+    const refusal = formRefusal(askPossibility(() => feedCreatePossibility(newFeedName)));
+    if (refusal !== null) { loadError = refusal; return; }
+    loadError = '';
     creatingFeed = true;
     try {
       await manager.createFeed(
@@ -1221,9 +1270,12 @@
       newFeedRules = [];
       newFeedFactors = [];
       newFeedCombination = 'all';
+      // The sub-page closes only here, on the save's success; a failure keeps
+      // it open with the name and rules typed, the error on `error-message`.
       showCreateForm = false;
     } catch (e) {
       logMessage('warn', 'fauna_web::feed', `create feed failed: ${e}`);
+      loadError = verbErrorCopy(e, feedRefusalI18nKey);
     } finally {
       refreshFeed();
       creatingFeed = false;
@@ -1252,16 +1304,28 @@
     // the form's own error paragraph, which is already rendered right above
     // the button, rather than the page-level surface.
     if (!manager) { bridgeFormError = t.common.still_loading; return; }
-    if (!bridgeFormUri.trim() || !bridgeFormName.trim()) return;
+    // Ask the painted predicate again first (`feed.md` § Errors & edge cases):
+    // a blocked draft refuses with its reason on `error-message`.
+    const refusal = formRefusal(
+      askPossibility(() => feedBridgeSubscribePossibility(bridgeFormBridge, bridgeFormUri)),
+    );
+    if (refusal !== null) { loadError = refusal; return; }
+    loadError = '';
     bridgeFormSaving = true;
     try {
-      await manager.subscribeBridge(bridgeFormBridge, bridgeFormUri.trim(), bridgeFormName.trim());
+      // The display name is optional and defaults to the URI
+      // (`fauna_feed::forms::bridge_subscribe_possibility`).
+      const uri = bridgeFormUri.trim();
+      await manager.subscribeBridge(bridgeFormBridge, uri, bridgeFormName.trim() || uri);
+      // The form closes only here, on the save's success; a failure keeps it
+      // open with what was typed, the error on `error-message`.
       bridgeFormUri = '';
       bridgeFormName = '';
       showBridgeSubscribeForm = false;
     } catch (e) {
-      // bridge_form.error (→ the inline error) is set in the snapshot.
+      // bridge_form.error (→ the inline error) is set in the snapshot too.
       logMessage('warn', 'fauna_web::feed', `subscribe bridge failed: ${e}`);
+      loadError = verbErrorCopy(e, feedRefusalI18nKey);
     } finally {
       refreshFeed();
       bridgeFormSaving = false;
@@ -1507,7 +1571,10 @@
   });
 </script>
 
-{#if pageError}
+<!-- The page's `error-message` stands down while an open modal form shows its
+     own (`ui/README.md` § Offer only what is possible, rule 7; e2e convention
+     2's rider: at most one `error-message` showing at a time). -->
+{#if pageError && !modalFormError}
   <p class="error-text page-error" data-testid={IDS.ERROR_MESSAGE}>{pageError}</p>
 {/if}
 
@@ -1596,7 +1663,7 @@
         </div>
 
         <div class="form-actions">
-          <button data-testid={IDS.CREATE_FEED} class="btn-primary" disabled={creatingFeed || !newFeedName.trim() || !feedReady} onclick={handleCreateFeed}>
+          <button data-testid={IDS.CREATE_FEED} class="btn-primary" disabled={creatingFeed || createFeedGate.disabled || !feedReady} title={createFeedGate.reason || undefined} onclick={handleCreateFeed}>
             {creatingFeed ? t.common.saving : t.common.save}
           </button>
           <button class="btn-secondary" data-testid={IDS.FEED_CREATE_CANCEL} onclick={() => { showCreateForm = false; newFeedName = ''; newFeedRules = []; newFeedFactors = []; }}>
@@ -1613,6 +1680,7 @@
       data-testid={IDS.FEED_TRENDING_ITEM}
       class="feed-entry"
       class:active={trendingSelected}
+      data-state={trendingSelected ? 'on' : 'off'}
       onclick={selectTrendingFeed}
     >
       📈 {t.feed.list.trending}
@@ -1624,13 +1692,14 @@
       data-testid={IDS.FEED_LOCAL_ITEM}
       class="feed-entry"
       class:active={selectedFeed === null && !trendingSelected}
+      data-state={selectedFeed === null && !trendingSelected ? 'on' : 'off'}
       onclick={() => selectFeed(null)}
     >
       🌿 {t.feed.list.local}
     </button>
 
     {#each feeds as feed}
-      <div data-testid={IDS.FEED_ITEM} class="feed-entry-row" class:active={selectedFeed === feed.feed_id}>
+      <div data-testid={IDS.FEED_ITEM} class="feed-entry-row" class:active={selectedFeed === feed.feed_id} data-state={selectedFeed === feed.feed_id ? 'on' : 'off'}>
         <button
           class="feed-entry-label"
           onclick={() => selectFeed(feed.feed_id)}
@@ -1679,7 +1748,8 @@
           <button
             class="btn-primary"
             data-testid={IDS.BRIDGE_FORM_SUBSCRIBE_BUTTON}
-            disabled={bridgeFormSaving || !bridgeFormUri.trim() || !bridgeFormName.trim()}
+            disabled={bridgeFormSaving || bridgeSubscribeGate.disabled}
+            title={bridgeSubscribeGate.reason || undefined}
             onclick={handleSubscribeBridgeFeed}
           >
             {bridgeFormSaving ? t.common.saving : t.feed.list.subscribe_bridge}
@@ -1873,13 +1943,17 @@
       {#if composeError}
         <p class="compose-dialog-error" data-testid={IDS.COMPOSE_ERROR}>{composeError}</p>
       {/if}
+      {#if composeDialogError}
+        <p class="compose-dialog-error" data-testid={IDS.ERROR_MESSAGE}>{composeDialogError}</p>
+      {/if}
       <div class="compose-dialog-actions">
         <button class="btn-secondary" onclick={() => { showComposeDialog = false; }}>{t.common.cancel}</button>
         <button
           class="btn-primary"
           data-testid={IDS.POST_SUBMIT_BUTTON}
-          disabled={composing || !composeBody.trim() || !feedReady}
-          onclick={async () => { await handleCompose(); showComposeDialog = false; }}
+          disabled={composing || postGate.disabled || !feedReady}
+          title={postGate.reason || undefined}
+          onclick={async () => { if (await handleCompose()) showComposeDialog = false; }}
         >
           {composing ? t.feed.post.posting : t.common.post}
         </button>

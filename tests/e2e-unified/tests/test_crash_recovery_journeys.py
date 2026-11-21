@@ -2071,6 +2071,12 @@ def _removals_resumed_at_launch(driver) -> int:
     # the same factory resume; its kill is the FlaUI bridge's hard
     # `DELETE /session` (`WindowsDriver.kill_uncleanly`) and its app log is
     # append-shared across relaunches, which the `>= 1` count below tolerates.
+    # android takes the same `fauna-ffi` factory resume; its kill is
+    # `run-as <package> kill -9` of the launch's own pid
+    # (`AndroidDriver.kill_uncleanly`), the relaunch starts a new
+    # instrumentation bridge over the same filesDir, and the launch line is read
+    # from the on-device `fauna.log.*` files `app_stderr_text` fetches — every
+    # file from the start, which the same `>= 1` count tolerates.
     [
         pytest.param("tui", marks=pytest.mark.tui),
         pytest.param("web", marks=pytest.mark.web),
@@ -2078,6 +2084,7 @@ def _removals_resumed_at_launch(driver) -> int:
         pytest.param("macos", marks=pytest.mark.macos),
         pytest.param("ios", marks=pytest.mark.ios),
         pytest.param("windows", marks=pytest.mark.windows),
+        pytest.param("android", marks=pytest.mark.android),
     ],
     indirect=True,
 )

@@ -72,6 +72,14 @@ struct ContactSplitView: View {
             appState.lastContacts = vm.contacts
             appState.lastKnocks = vm.knocks
         }
+        // Keep the state-protocol roster mirror on the page's own roster: an
+        // accept, a confirm or a block re-reads `vm.contacts` without passing the
+        // hooks here, and a stale `data.contacts` hides which home a row carried
+        // when its tap opened the profile (e2e convention 6).
+        .onChange(of: vm.contacts.map { "\($0.peerId)|\($0.status)|\($0.homeNestUrl ?? "")" }) {
+            appState.lastContacts = vm.contacts
+            appState.lastKnocks = vm.knocks
+        }
         // Re-pull knocks + contacts on WS-RPC reconnect (mirrors linux).
         .onReconnect {
             await vm.refresh()

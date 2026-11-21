@@ -21,11 +21,21 @@
   // `admin-aliases-forwarder-list` component.
   import { identity } from '#lib/store';
   import { forwarderMachine } from '#lib/rpc';
-  import { ensureWasm } from '#lib/wasm';
-  import { onMount } from 'svelte';
+  import { ensureWasm, forwarderCreateDraftPossibility, readPossibility } from '#lib/wasm';
+  import { readOnEntryAndReconnect } from '#lib/admin-reread';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
+  import { goto } from '$app/navigation';
+  import type { Possibility } from '#lib/possibility';
+  import { afterGate, formGate, formRefusal } from '#lib/form-gate';
+  import {
+    dispatchPainted,
+    listReadReason,
+    machineAnswer,
+    reasonAttr,
+    type ReadWord,
+  } from '#lib/admin-read-gate';
 
   // Shapes mirror the shared serde JSON (snake_case across the serde_wasm_bindgen
   // boundary; the status enum serializes as its variant-name string).
@@ -57,10 +67,72 @@
   let targetInput = $state('');
 
   const busy = $derived(snap?.status === 'Working');
-  const hasDomain = $derived((snap?.local_domains.length ?? 0) > 0);
+
+  // The add form's gate (admin.md § 4, *A forwarder needs a hosted domain*):
+  // the machine's shared `formPossibility` paints the picker and the two
+  // fields, its `createPossibility` over the picked domain the submit — with no
+  // hosted domain both are blocked naming DNS, and the step that opens it
+  // (`admin-aliases-forwarder-add-domains-step`) is offered. Each reads `snap`
+  // so a new snapshot repaints it; unreadable before the machine exists.
+  //
+  // Both fold AFTER the machine's read gate, `ForwarderMachine::add_possibility`
+  // (admin.md § Errors & edge cases, *Controls wait for their read*): still
+  // loading before the forwarder and local-domain read, failed to load after
+  // a failed one, still saving while a change is on its way.
+  // `readTick` moves on every repaint, so a failed read (no new snapshot)
+  // still repaints.
+  let readTick = $state(0);
+  let listRead = $state<ReadWord>('pending');
+  function repaint(): void {
+    readTick += 1;
+    listRead = machine ? (machine.readState() as ReadWord) : machineBuild;
+  }
+  function addAnswer(): Possibility | null {
+    void readTick;
+    void snap;
+    return machineAnswer(
+      machine,
+      (m) => m.addPossibility() as Possibility,
+      machineBuild,
+      readPossibility,
+    );
+  }
+  /** The read that builds the machine: failed once its connect or first
+   *  read threw, so the form says failed to load, never nothing. */
+  let machineBuild = $state<ReadWord>('pending');
+  function formAnswer(): Possibility | null {
+    const m = machine;
+    return afterGate(addAnswer(), () => m!.formPossibility() as Possibility);
+  }
+  function createAnswer(): Possibility | null {
+    const m = machine;
+    const domain = domainInput;
+    return afterGate(addAnswer(), () => m!.createPossibility(domain) as Possibility);
+  }
+  /** The forwarder list's read line: loading or failed until the list was
+   *  read, and only then the empty text. */
+  const listReason = $derived(listReadReason(readPossibility, listRead));
+  /** The submit's answer: the machine's gate first, then the draft's own
+   *  validity — the shared `ForwarderMachine::create_draft_possibility` (a
+   *  domain picked, a non-blank local part and destination; admin.md § Errors
+   *  & edge cases). A reserved local part, a collision or a hosted target stays
+   *  the nest's refusal on `admin-aliases-action-error`. */
+  const submitAnswer = $derived(
+    afterGate(createAnswer(), () =>
+      forwarderCreateDraftPossibility(domainInput, patternInput, targetInput),
+    ),
+  );
+
+  /** The Domains step: offered exactly when the form is blocked for want of a
+   *  hosted domain (a pending read gives another reason). */
+  function offerDomainsStep(): boolean {
+    const answer = formAnswer();
+    return answer?.state === 'blocked' && answer.reason.key === 'admin.aliases_page.no_hosted_domain';
+  }
 
   function applySnapshot(): void {
     if (!machine) return;
+    repaint();
     snap = machine.snapshot() as unknown as ForwardersSnapshot;
     // The snapshot error is the last action's error → the action-error surface.
     if (snap?.error) actionError = snap.error;
@@ -70,28 +142,52 @@
     }
   }
 
-  onMount(async () => {
+  /** The read: build the machine (once) and hydrate it — painted from the
+   *  moment the wasm core is up: still loading while the machine is built
+   *  and hydrated, failed to load after, never disabled with nothing beside
+   *  it. */
+  async function readMachine(): Promise<void> {
     const id = $identity;
     if (!id?.secretHex) return;
     try {
       await ensureWasm();
-      machine = await forwarderMachine(id.secretHex);
+      repaint();
+      if (!machine) machine = await forwarderMachine(id.secretHex);
+      repaint();
       await machine.hydrate();
       applySnapshot();
     } catch (e) {
+      if (!machine) machineBuild = 'failed';
+      repaint();
       error = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  // Read on every entry (a `goto()` of this route does not remount it) and,
+  // while the read is unanswered, again when the nest comes back.
+  readOnEntryAndReconnect(readMachine, async () => {
+    if (!machine || (machine.readState() as ReadWord) !== 'resolved') await readMachine();
   });
 
   async function handleCreate(): Promise<void> {
-    if (!machine) return;
+    repaint();
+    // The painted answer, asked again: never a create on an empty or unhosted
+    // `local_domain` or a blank draft — refused on the page's `error-message`
+    // with the painted reason (admin.md § Errors & edge cases, tui's
+    // `Errors::refuse`), the typed draft kept.
+    const refusal = formRefusal(submitAnswer);
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
+    const m = machine;
+    if (!m) return;
     const local_domain = domainInput;
     const pattern = patternInput.trim();
     const forward_target = targetInput.trim();
-    if (!local_domain || !pattern || !forward_target) return;
     actionError = '';
     try {
-      await machine.dispatch({ Create: { local_domain, pattern, forward_target } });
+      await dispatchPainted(() => m.dispatch({ Create: { local_domain, pattern, forward_target } }), repaint);
       applySnapshot();
       if (snap?.error) return; // rejected — keep the form populated for a retry
       patternInput = '';
@@ -134,6 +230,9 @@
       <select
         class="input"
         data-testid={IDS.ADMIN_ALIASES_FORWARDER_ADD_DOMAIN_SELECT}
+        disabled={formGate(formAnswer()).disabled}
+        title={formGate(formAnswer()).reason}
+        data-reason={reasonAttr(formGate(formAnswer()))}
         bind:value={domainInput}
       >
         {#each snap?.local_domains ?? [] as d (d)}
@@ -147,6 +246,9 @@
         class="input"
         type="text"
         data-testid={IDS.ADMIN_ALIASES_FORWARDER_ADD_PATTERN_INPUT}
+        disabled={formGate(formAnswer()).disabled}
+        title={formGate(formAnswer()).reason}
+        data-reason={reasonAttr(formGate(formAnswer()))}
         placeholder={t.admin.aliases_page.forwarder_local_part_placeholder}
         bind:value={patternInput}
       />
@@ -157,6 +259,9 @@
         class="input"
         type="email"
         data-testid={IDS.ADMIN_ALIASES_FORWARDER_ADD_TARGET_INPUT}
+        disabled={formGate(formAnswer()).disabled}
+        title={formGate(formAnswer()).reason}
+        data-reason={reasonAttr(formGate(formAnswer()))}
         placeholder={t.admin.aliases_page.forwarder_target_placeholder}
         bind:value={targetInput}
       />
@@ -164,16 +269,30 @@
     <button
       class="btn primary"
       data-testid={IDS.ADMIN_ALIASES_FORWARDER_ADD_SUBMIT_BUTTON}
-      disabled={busy || !hasDomain || !patternInput.trim() || !targetInput.trim()}
+      disabled={formGate(submitAnswer).disabled}
+      title={formGate(submitAnswer).reason}
+      data-reason={reasonAttr(formGate(submitAnswer))}
       onclick={handleCreate}
     >
       {t.admin.aliases_page.create_forwarder}
     </button>
   </div>
+  {#if offerDomainsStep()}
+    <p class="muted small">{formGate(formAnswer()).reason}</p>
+    <button
+      class="btn"
+      data-testid={IDS.ADMIN_ALIASES_FORWARDER_ADD_DOMAINS_STEP}
+      onclick={() => void goto('/app/admin/dns')}
+    >
+      {t.admin.aliases_page.open_domains}
+    </button>
+  {/if}
 
   <!-- Forwarder rows (admin-aliases-forwarder-list component). -->
   <div class="rows" data-testid={IDS.ADMIN_ALIASES_FORWARDER_LIST}>
-    {#if (snap?.forwarders.length ?? 0) === 0}
+    {#if listReason !== null}
+      <p class="muted small">{listReason}</p>
+    {:else if (snap?.forwarders.length ?? 0) === 0}
       <p class="muted small">{t.admin.aliases_page.no_forwarders}</p>
     {/if}
     {#each snap?.forwarders ?? [] as v (v.alias_id_hex)}

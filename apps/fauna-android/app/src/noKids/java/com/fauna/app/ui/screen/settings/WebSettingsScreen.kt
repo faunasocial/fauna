@@ -18,15 +18,23 @@ import com.fauna.app.R
 import com.fauna.app.core.HexUtil
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.WebSettingsVM
 import com.fauna.ffi.FfiPublishedPost
 import uniffi.fauna_client_web.SiteLinkDisabledReason
+import uniffi.fauna_client_web.SiteLinkView
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import uniffi.fauna_client_web.SubdomainDisabledReason
 import uniffi.fauna_client_web.SubdomainView
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The user `web-settings` page (`web-content-hosting.md` § Published-post
@@ -53,6 +61,7 @@ fun WebSettingsScreen(
     val errorMessage by vm.errorMessage.collectAsState()
     val posts by vm.posts.collectAsState()
     val hydrated by vm.hydrated.collectAsState()
+    val readFailed by vm.readFailed.collectAsState()
     val renderedPagesDown by vm.renderedPagesDown.collectAsState()
     val origin by vm.origin.collectAsState()
     val disabledReason by vm.disabledReason.collectAsState()
@@ -77,6 +86,7 @@ fun WebSettingsScreen(
         onSetEnabled = vm::setEnabled,
         posts = posts,
         hydrated = hydrated,
+        readFailed = readFailed,
         renderedPagesDown = renderedPagesDown,
         origin = origin,
         disabledReason = disabledReason,
@@ -95,6 +105,7 @@ fun WebSettingsContent(
     onSetEnabled: (Boolean) -> Unit,
     posts: List<FfiPublishedPost> = emptyList(),
     hydrated: Boolean = false,
+    readFailed: Boolean = false,
     renderedPagesDown: Boolean = false,
     origin: String? = null,
     disabledReason: SiteLinkDisabledReason? = null,
@@ -134,8 +145,24 @@ fun WebSettingsContent(
             // ── Subdomain opt-in toggle (default OFF) ──
             // The toggle below is the commit; hoisted here so the reason can
             // render under the whole row.
-            val subdomainGate = faunaGate("fauna.web.set_subdomain_enabled")
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            // The toggle's shared answer (`web_subdomain_toggle_possibility`):
+            // not enabled before the read resolves, absent on a nest with no
+            // serving domain, blocked with the step on no or a reserved handle;
+            // switching off is always possible (web-content-hosting.md
+            // § Published-post management).
+            val readState = when {
+                hydrated -> ReadState.RESOLVED
+                readFailed -> ReadState.FAILED
+                else -> ReadState.PENDING
+            }
+            val toggleAnswer = askForm {
+                com.fauna.ffi.webSubdomainTogglePossibility(readState, view.takeIf { hydrated })
+            }
+            val subdomainGate = faunaGate(
+                "fauna.web.set_subdomain_enabled",
+                enabled = toggleAnswer.isPossible,
+            )
+            if (toggleAnswer.isShown) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(stringResource(R.string.web_settings_subdomain_toggle_label), style = MaterialTheme.typography.bodyLarge)
                     Text(
@@ -149,15 +176,18 @@ fun WebSettingsContent(
                 // `admin-service-pairing-toggle`).
                 Switch(
                     checked = view.enabled,
-                    onCheckedChange = onSetEnabled,
-                    // Painted disabled until the nest-confirmed view is in: an
-                    // early flip would be dropped without a word (parity with
-                    // tui `.enabled(view.is_some())` and Apple).
+                    onCheckedChange = { if (toggleAnswer.isPossible) onSetEnabled(it) },
+                    // Painted from the shared answer; `hydrated` is the
+                    // backstop for a host with no native face, where
+                    // `askForm` fails open (parity with tui and Apple).
                     enabled = subdomainGate.enabled && hydrated,
                     modifier = Modifier.testTag(Ids.WEB_SETTINGS_SUBDOMAIN_TOGGLE),
                 )
             }
-            DisabledControlReasonText(subdomainGate.reason)
+            // The answer's own reason is the more specific one, so it wins.
+            DisabledControlReasonText(
+                toggleAnswer.blockedReason?.let { localized(it) } ?: subdomainGate.reason,
+            )
 
             // ── Live URL / disabled-reason row ──
             // The live URL renders whether the toggle is on or off — it's where the
@@ -234,10 +264,16 @@ fun WebSettingsContent(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        // Both copy buttons' shared answer over the resolved
+                        // origin (`web_site_link_copy_possibility`).
+                        val copyAnswer = askForm {
+                            com.fauna.ffi.webSiteLinkCopyPossibility(SiteLinkView(origin, disabledReason))
+                        }
                         posts.forEach { post ->
                             PublishedPostRow(
                                 post = post,
                                 origin = origin,
+                                copyAnswer = copyAnswer,
                                 copied = copied,
                                 onCopyWebLink = { onCopyWebLink(post) },
                                 onCopyPaywallLink = { onCopyPaywallLink(post) },
@@ -273,6 +309,7 @@ private fun linkDisabledText(reason: SiteLinkDisabledReason?): String =
 private fun PublishedPostRow(
     post: FfiPublishedPost,
     origin: String?,
+    copyAnswer: Possibility,
     copied: Triple<String, String, String>?,
     onCopyWebLink: () -> Unit,
     onCopyPaywallLink: () -> Unit,
@@ -294,7 +331,7 @@ private fun PublishedPostRow(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = onCopyWebLink, enabled = origin != null, modifier = Modifier.testTag(Ids.WEB_PUBLISHED_POST_COPY_LINK_BUTTON)) {
+            TextButton(onClick = onCopyWebLink, enabled = copyAnswer.isPossible && origin != null, modifier = Modifier.testTag(Ids.WEB_PUBLISHED_POST_COPY_LINK_BUTTON)) {
                 Text(stringResource(R.string.web_publish_copy_web_link))
             }
             if (post.gatedTier != null) {
@@ -305,7 +342,7 @@ private fun PublishedPostRow(
                 // mirror — the CONTROL's name understates what it does. Its
                 // plain copy-link sibling beside it is genuinely local (it
                 // formats an already-known origin) and stays live.
-                val paywallGate = faunaGate("fauna.web.paywall.mint_token", enabled = origin != null)
+                val paywallGate = faunaGate("fauna.web.paywall.mint_token", enabled = copyAnswer.isPossible && origin != null)
                 TextButton(onClick = onCopyPaywallLink, enabled = paywallGate.enabled, modifier = Modifier.testTag(Ids.WEB_PUBLISHED_POST_COPY_PAYWALL_LINK_BUTTON)) {
                     Text(stringResource(R.string.web_publish_copy_paywall_link))
                 }

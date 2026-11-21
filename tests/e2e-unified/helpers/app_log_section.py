@@ -154,7 +154,10 @@ def paired_seat_drivers(funcargs):
     for name, value in sorted(funcargs.items()):
         if not isinstance(value, (tuple, list)):
             continue
-        for element in value:
+        # A seat a two-seat value carries beside its elements
+        # (`succession_member_app`'s `owner_app`: alice's own seat on android).
+        extra = getattr(value, "owner_app", None)
+        for element in (*value, *((extra,) if extra is not None else ())):
             try:
                 driver = frame_invariants._as_driver(element)
             except Exception:  # diagnostics must never mask the failure they explain

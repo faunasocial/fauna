@@ -320,6 +320,17 @@ fn not_soft_deleted() -> RpcError {
     e
 }
 
+fn already_deleted() -> RpcError {
+    let mut e = RpcError::new(
+        "fauna.filesync.snapshot.already_deleted",
+        "error.filesync.snapshot.already_deleted",
+    );
+    e.details = Some(Box::new(Value::String(
+        "snapshot is already soft-deleted".into(),
+    )));
+    e
+}
+
 fn backup_unavailable() -> RpcError {
     let mut e = RpcError::new(
         "fauna.filesync.snapshot.backup_unavailable",
@@ -1356,6 +1367,34 @@ fn delete_handler() -> RpcHandler {
             let (snap, _fs, _grant) =
                 authorize_snapshot(&state, req.snapshot_id, &actor, SnapshotAccess::Write).await?;
 
+            let target = req.snapshot_id.to_string();
+
+            // A repeat delete is folded or refused, never duplicated
+            // (backup-restore.md § 7) — and before the floor check, so a
+            // repeat on a folder at the floor still folds.
+            if snap.soft_deleted {
+                return Err(already_deleted());
+            }
+            if snap.deletion_pending {
+                let live = state
+                    .db
+                    .find_pending_actions_for_target(
+                        crate::pending_actions::ActionType::SnapshotDelete.as_str(),
+                        &target,
+                    )
+                    .await
+                    .map_err(internal)?;
+                if let Some(row) = live.into_iter().next() {
+                    return encode_reply(&SnapshotDeleteReply {
+                        pending_action_id: row.id,
+                        execute_after: row.execute_after,
+                        status: "pending".into(),
+                        extra: std::collections::BTreeMap::new(),
+                    });
+                }
+                // A stale mark with no live action behind it: schedule fresh.
+            }
+
             // Hard floor of 3 active snapshots (Layer 1).
             if !state
                 .db
@@ -1366,7 +1405,6 @@ fn delete_handler() -> RpcHandler {
                 return Err(hard_floor_breach());
             }
 
-            let target = req.snapshot_id.to_string();
             let row = crate::pending_actions::schedule(
                 &state,
                 &crate::pending_actions::ActionType::SnapshotDelete,

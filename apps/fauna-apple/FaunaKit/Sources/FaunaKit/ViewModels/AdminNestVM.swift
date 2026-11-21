@@ -298,14 +298,25 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// (idle/saved texts carry the live-vs-restart-applied caveat; submit/error states
     /// render their own `admin.nest_page.nat_mode_*` strings).
     public private(set) var natStatusText = ""
-    /// Whether `admin-nest-nat-mode-save-button` should be enabled: true while choosing/
-    /// erroring (resubmit always allowed), false only mid-submit. Stays true after a
-    /// successful save too — the set is mutable, an immediate re-flip is allowed — so this
-    /// is NOT folded into the page-level `isBusy` disable.
-    public private(set) var natSaveEnabled = false
-    /// Whether the NAT-mode radios should be disabled — true only mid-submit
-    /// (mirrors the onboarding wizard's own `inFlight` gate on its sibling radios).
-    public private(set) var natInFlight = false
+    /// `admin-nest-nat-mode-save-button`'s answer — the shared
+    /// `AdminNatModeMachine::save_possibility` (admin.md § Errors & edge cases,
+    /// *Controls wait for their read*): blocked until `fauna.setup.status`
+    /// resolves, blocked after a failed read (saving the pre-selected default
+    /// over a mode the page never read would be a guess), blocked mid-submit; a
+    /// re-read failing after one succeeded keeps the earlier answer. Stays
+    /// possible after a successful save — the set is mutable — so it is NOT
+    /// folded into the page-level `isBusy` disable.
+    public private(set) var natSaveAnswer: Possibility = readPossibility(read: .pending)
+    /// The NAT-mode radios' answer — `AdminNatModeMachine::select_possibility`.
+    public private(set) var natSelectAnswer: Possibility = readPossibility(read: .pending)
+    /// Where the page's own reflective read (`fauna.setup.status` +
+    /// `services.list`) stands — the pairing toggle and the serving-port input
+    /// and save wait for it (`Possibility::once_read`'s Swift twin).
+    public private(set) var nestRead = PageRead()
+    /// Whether the read this page's read-gated controls wait for has resolved
+    /// (``AdminPageReading``): the reflective read, and the NAT machine's `fauna.setup.status` read with its radios live (tui's `read_answered`). An unanswered one is asked again when the
+    /// nest connection comes back.
+    public var readAnswered: Bool { nestRead.state == .resolved && natSelectAnswer.isPossible }
     /// Whether the nest read a host-status file (`fauna.setup.status` `os_host_status_present`);
     /// `false` (a hand-built box, dev, desktop) → "OS status not reported by this host",
     /// never "OS up to date" (installers/vps.md § Host OS Maintenance § 4).
@@ -360,11 +371,13 @@ public final class AdminNestVM: BusyAdminCommandVM {
     public private(set) var regionView: FfiAdminRegionView?
 
     /// Web-app origin (`admin-nest-web-app-origin-*`; admin.md § N Nest →
-    /// *Web-app origin*). Every sentence, the central radio's label and the
-    /// `canSet` verdict are the shared `FfiAdminWebAppOriginView` fold (tui's
-    /// `admin/nest.rs`, the reference leg) — this VM decides nothing. `nil`
-    /// until the read lands: the radios stay unmarked and disabled meanwhile,
-    /// since pre-marking bundled would state a choice the nest may not hold.
+    /// *Web-app origin*). Every sentence, the central radio's label, the
+    /// `canSet` verdict and whether the section and its central radio exist
+    /// are the shared `FfiAdminWebAppOriginView` fold (tui's `admin/nest.rs`,
+    /// the reference leg; `web-content-hosting.md` § Same-origin security
+    /// model → *While the central origin is not live, the choice is not
+    /// offered*, rule 5) — this VM decides nothing. `nil` until the read
+    /// lands: the section is not painted meanwhile.
     public private(set) var webAppOriginView: FfiAdminWebAppOriginView?
     /// The marked radio — the local selection the save commits.
     public private(set) var webAppOriginDraft: FfiWebAppOrigin?
@@ -414,6 +427,9 @@ public final class AdminNestVM: BusyAdminCommandVM {
     private var admin: FfiAdminClient?
     private var api: APIClient?
     private var natMachine: AdminNatModeMachine?
+    /// The NAT machine could not be built (no primed secret): its controls
+    /// answer *failed to load*, never the pre-selected default.
+    private var natBuildFailed = false
 
     /// The admin host of the shared `feature-policy-editor` (admin.md § N Nest →
     /// *Feature limits*): built at `configure(api:)`, nil before it.
@@ -435,6 +451,13 @@ public final class AdminNestVM: BusyAdminCommandVM {
             // NAT-mode control at its default idle render rather than blocking
             // the rest of the page (pairing/serving-port/OS-maintenance).
             natMachine = try? api.adminNatModeMachine()
+            // A machine that cannot be built (no primed secret) will never
+            // read: its controls say so instead of guessing.
+            natBuildFailed = natMachine == nil
+            if natMachine == nil {
+                natSaveAnswer = readPossibility(read: .failed)
+                natSelectAnswer = readPossibility(read: .failed)
+            }
         }
         await hydrate()
         // Its own read, outside `hydrate()`'s one `do` (a failed read leaves
@@ -618,16 +641,31 @@ public final class AdminNestVM: BusyAdminCommandVM {
             // same nav-edge read as serving-port/pairing above (admin.md § N
             // Nest → Declared region).
             regionView = try await api.adminRegionStatus()
+            nestRead.resolved()
             errorMessage = nil
         } catch {
+            nestRead.failed()
             errorMessage = DisplayError.message(error)
         }
     }
+
+    /// The pairing toggle's answer: the reflective read resolved (a toggle
+    /// flipped before it would write over a value the page never showed) and
+    /// no request is on its way.
+    public var pairingPossibility: Possibility {
+        writeAfterReadPossibility(read: nestRead.state, idle: !isBusy)
+    }
+
+    /// The serving-port input's and save's answer: the same read and the same
+    /// in-flight rule as the pairing toggle. A router-fronted nest keeps
+    /// ``servingPortEditable``'s read-only render with its hint on top.
+    public var servingPortPossibility: Possibility { pairingPossibility }
 
     /// Flip the admin pairing flag via `fauna.admin.services.update` name
     /// "pairing", then refetch so the toggle + status badge reflect persisted
     /// state (non-optimistic, mirroring linux `set_service` + `update_services`).
     public func setPairing(_ enabled: Bool) async {
+        if refusePress(pairingPossibility, errorMessage: &errorMessage) { return }
         guard let admin else { return }
         await runAdminCommand { try await admin.servicesUpdate(name: "pairing", enabled: enabled) }
     }
@@ -637,6 +675,8 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// `selectNatMode`). Recovers from `Error`/`Done` back to `Choosing`; save
     /// stays enabled.
     public func selectNatMode(_ mode: NodeMode) {
+        if refusePress(machinePossibility(natMachine, buildFailed: natBuildFailed, { $0.selectPossibility() }),
+                       errorMessage: &errorMessage) { return }
         guard let natMachine else { return }
         natMachine.select(mode: mode)
         applyNatSnapshot(natMachine.snapshot())
@@ -648,6 +688,10 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// would just re-fetch the same machine's own snapshot, and the machine
     /// already tracks its own in-flight state via `natInFlight`/`natSaveEnabled`.
     public func saveNatMode() async {
+        // The press asks the machine live, so a second press mid-submit is
+        // refused with *still saving* before the re-paint lands.
+        if refusePress(machinePossibility(natMachine, buildFailed: natBuildFailed, { $0.savePossibility() }),
+                       errorMessage: &errorMessage) { return }
         guard let natMachine else { return }
         await natMachine.submit()
         applyNatSnapshot(natMachine.snapshot())
@@ -658,31 +702,69 @@ public final class AdminNestVM: BusyAdminCommandVM {
     private func applyNatSnapshot(_ snap: NatModeSnapshot) {
         natMode = snap.selectedMode
         natStatusText = renderLocalizedText(snap.message)
-        natSaveEnabled = snap.submitEnabled
-        natInFlight = snap.state == .submitting
+        if let natMachine {
+            natSaveAnswer = natMachine.savePossibility()
+            natSelectAnswer = natMachine.selectPossibility()
+        }
     }
 
-    private func paintWebAppOrigin(_ view: FfiAdminWebAppOriginView) {
+    /// Internal, not private: the possibility tests paint a read through it.
+    func paintWebAppOrigin(_ view: FfiAdminWebAppOriginView) {
         webAppOriginView = view
         webAppOriginDraft = view.selected
     }
 
-    /// Whether the web-app origin radios + save are live: the read landed, the
-    /// fold says `canSet`, and no dispatch is out.
+    /// Whether the Web app section is painted at all — the shared
+    /// `section_possibility` (absent on a nest that predates the choice, and
+    /// while the central origin is not live and the stored mode is bundled).
+    /// Absent until the read lands: whether the section exists is the read's
+    /// answer (`docs/goal/ui/README.md` § Offer only what is possible, rule 5).
+    public var webAppOriginSectionPossibility: Possibility {
+        webAppOriginView?.sectionPossibility ?? .absent
+    }
+
+    /// Whether `admin-nest-web-app-origin-central-radio` is offered — the
+    /// shared `central_possibility` (possible only when the nest says the
+    /// central origin is live).
+    public var webAppOriginCentralPossibility: Possibility {
+        webAppOriginView?.centralPossibility ?? .absent
+    }
+
+    /// The save's answer — the shared `web_app_origin_set_possibility` asked
+    /// with the marked draft (`admin.md` § Errors & edge cases, *Role and
+    /// state gates answer one `Possibility` too*): blocked *still loading*
+    /// until the read lands, blocked by the status sentence where the choice
+    /// cannot be set, and a `central` draft refused with the nest's own reason
+    /// while the central origin is not live. The view paints from it; the save
+    /// asks it again.
+    public var webAppOriginSetPossibility: Possibility {
+        adminWebAppOriginSetPossibility(view: webAppOriginView, draft: webAppOriginDraft)
+    }
+
+    /// One radio's answer — the same shared predicate asked with that radio's
+    /// own mode, so a press the save would refuse is never taken.
+    public func webAppOriginSelectPossibility(_ mode: FfiWebAppOrigin) -> Possibility {
+        adminWebAppOriginSetPossibility(view: webAppOriginView, draft: mode)
+    }
+
+    /// Whether the save is live: its shared answer is possible and no dispatch
+    /// is out (the re-tap guard).
     public var webAppOriginEditable: Bool {
-        webAppOriginView?.canSet == true && !webAppOriginWorking
+        webAppOriginSetPossibility.isPossible && !webAppOriginWorking
     }
 
     /// Radio pick (`admin-nest-web-app-origin-{bundled,central}-radio`) — local,
-    /// it only arms the save.
+    /// it only arms the save; a pick its own answer refuses is not taken.
     public func selectWebAppOrigin(_ mode: FfiWebAppOrigin) {
-        if webAppOriginEditable { webAppOriginDraft = mode }
+        guard webAppOriginSelectPossibility(mode).isPossible, !webAppOriginWorking else { return }
+        webAppOriginDraft = mode
     }
 
     /// `admin-nest-web-app-origin-save-button` — `fauna.admin.web_app_origin.set`
     /// with the marked radio's mode; the section repaints from the set's own
     /// reply (no second read).
     public func saveWebAppOrigin() async {
+        if refusePress(webAppOriginSetPossibility, errorMessage: &errorMessage) { return }
         guard let api, webAppOriginEditable, let mode = webAppOriginDraft else { return }
         webAppOriginWorking = true
         defer { webAppOriginWorking = false }
@@ -699,10 +781,18 @@ public final class AdminNestVM: BusyAdminCommandVM {
         updateChannelDraft = view.selected
     }
 
-    /// Whether the update-channel radios + save are live: the read landed, the
-    /// fold says `canSet`, and no dispatch is out.
+    /// The update-channel radios' and save's answer — the shared
+    /// `update_channel_set_possibility`: blocked *still loading* until the read
+    /// lands, blocked by the status sentence where the channel cannot be set.
+    /// The view paints from it; the save asks it again.
+    public var updateChannelSetPossibility: Possibility {
+        adminUpdateChannelSetPossibility(view: updateChannelView)
+    }
+
+    /// Whether the update-channel radios + save are live: the shared answer is
+    /// possible and no dispatch is out.
     public var updateChannelEditable: Bool {
-        updateChannelView?.canSet == true && !updateChannelWorking
+        updateChannelSetPossibility.isPossible && !updateChannelWorking
     }
 
     /// Radio pick (`admin-nest-update-channel-{stable,test,dev}-radio`) — local,
@@ -714,6 +804,7 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// `admin-nest-update-channel-save-button` — `fauna.admin.update_channel.set`
     /// with the marked radio; the section repaints from the set's own reply.
     public func saveUpdateChannel() async {
+        if refusePress(updateChannelSetPossibility, errorMessage: &errorMessage) { return }
         guard let api, updateChannelEditable, let channel = updateChannelDraft else { return }
         updateChannelWorking = true
         defer { updateChannelWorking = false }
@@ -730,7 +821,23 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// (non-optimistic, mirroring `setPairing`). Applies on the next nest restart,
     /// but `fauna.setup.status` reports the chosen value immediately. The View
     /// validates the u16 range before calling this (invalid → `error-message`).
+    /// `admin-nest-serving-port-save-button`'s answer over the typed port: the
+    /// page's read gate first, then the shared `serving_port_possibility` (a
+    /// port in `[1, 65535]`). The Save is painted from it and the press asks it
+    /// again (admin.md § Errors & edge cases, *A form's submit is live only for
+    /// a draft the nest would accept*).
+    public func servingPortSaveAnswer(_ draft: String) -> Possibility {
+        servingPortPossibility.and(adminServingPortPossibility(raw: draft))
+    }
+
+    /// `admin-nest-region-save-button`'s answer over the typed code: the shared
+    /// `region_possibility` (`parse_region_code`).
+    public func regionSaveAnswer(_ draft: String) -> Possibility {
+        adminRegionPossibility(raw: draft)
+    }
+
     public func setServingPort(_ port: UInt16) async {
+        if refusePress(servingPortPossibility, errorMessage: &errorMessage) { return }
         guard let admin else { return }
         await runAdminCommand { try await admin.setServingPort(port: port) }
     }

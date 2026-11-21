@@ -51,6 +51,10 @@ Stamped 2026-10-01 at 308c995169.
     - `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_non_admin_denied_on_create_forwarder`
 14. [nest] Mail sent to a forwarder is delivered to the outside address's mail server — `docs/goal/behavior/mail-forwarding.md` § Admin external forwarders
     - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_admin_forwarder_delivers_to_external_mx_under_srs`
+15. [app] Until the forwarder list and the nest's domains have loaded, the add-forwarder form is disabled and says it is still loading, or failed to load; pressing it says the same and creates nothing — `docs/goal/behavior/admin.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_add_forwarder_form_waits_for_the_forwarders_and_domains`
+16. [app] On a nest hosting no domain, the add-forwarder form is disabled with the reason that a domain must first be added on the DNS page, and the page offers the way there — `docs/goal/behavior/admin.md` § 4. Aliases
+    - `tests/e2e-unified/tests/test_admin_offer_only_possible.py::test_a_forwarder_waits_for_a_hosted_domain_and_offers_the_dns_page`
 
 ## Status
 
@@ -59,9 +63,9 @@ Stamped 2026-10-01 at 308c995169.
 |---|---|---|
 | web | ✅ full | 0.1.5 docker |
 | linux | ✅ full | 0.1.5-dev+0daa3736 docker |
-| windows | ✅ full | 0.1.5-dev+0daa3736 docker |
+| windows | ⚠ partial | 0.1.5-dev+0daa3736 docker |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+0daa3736 docker |
+| ios | ⚠ partial | 0.1.5-dev+0daa3736 docker |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+0daa3736 docker |
 | android-kids | — absent | |
@@ -87,4 +91,6 @@ Stamped 2026-10-01 at 308c995169.
 | 12 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_forwarders_never_list_among_the_admins_own_addresses` | nest (linux): passed, nest (macos): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_non_admin_denied_on_create_forwarder` | nest (linux): passed, nest (macos): passed |
 | 14 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_admin_forwarder_delivers_to_external_mx_under_srs` | nest (linux): passed, nest (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_add_forwarder_form_waits_for_the_forwarders_and_domains` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_admin_offer_only_possible.py::test_a_forwarder_waits_for_a_hosted_domain_and_offers_the_dns_page` — requires `blocked-reason-read` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

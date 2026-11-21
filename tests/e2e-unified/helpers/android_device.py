@@ -284,16 +284,25 @@ def adb_server() -> str | None:
 #: `app_path` APK's sibling, built by the same `just android-debug`.
 TEST_APK = "apps/fauna-android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
 
+#: Each android app-axis value's bridge APK: `android-kids`'s is instrumented
+#: against the drivable `kidsDebug` build type (`just android-kids-debug`), so it
+#: is built under that build type's name and installs as the kids test package.
+TEST_APKS = {
+    "android": TEST_APK,
+    "android-kids": "apps/fauna-android/app/build/outputs/apk/androidTest/kidsDebug/app-kidsDebug-androidTest.apk",
+}
 
-def run_launch_facts(repo_root) -> dict:
+
+def run_launch_facts(repo_root, app_name: str = "android") -> dict:
     """The run facts every android launch config carries beside its `app_path`:
-    the bridge APK to install, this run's device and this run's adb server. One
-    home for both launchers -- conftest's `app` config and the launch harness
-    (`common.launch_harness`) -- so neither can drop one."""
+    the bridge APK to install (``app_name``'s: `android` or `android-kids`), this
+    run's device and this run's adb server. One home for both launchers --
+    conftest's `app` config and the launch harness (`common.launch_harness`) --
+    so neither can drop one."""
     from pathlib import Path
 
     return {
-        "test_apk": str(Path(repo_root) / TEST_APK),
+        "test_apk": str(Path(repo_root) / TEST_APKS[app_name]),
         "device_serial": device_serial(),
         "adb_server": adb_server(),
     }

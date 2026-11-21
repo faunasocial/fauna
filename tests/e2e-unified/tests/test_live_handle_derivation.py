@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers import source_scan
 from helpers.live_box_door import marks_live_box
 from helpers.live_handle import (
     PROBE_LOCALPART,
@@ -305,13 +306,13 @@ def test_every_handle_env_consumer_is_classified():
     rather than one test's local fix."""
     root = Path(__file__).parent.parent
     found = set()
-    for path in sorted(root.rglob("test_*.py")):
-        text = path.read_text()
+    # The text test first, then the parse — of the few files that pass it
+    # (`helpers/source_scan.py`; a whole-tree parse is about a minute on Windows).
+    for path, text in source_scan.spelling(
+            {"FAUNA_LIVE_HANDLE", "FAUNA_LIVE_MAIL_ADDRESS"}, root=root, pattern="test_*.py"):
         # Only `live_box` modules: a tier_1 pin naming the vars (this file,
         # `test_live_seed_resolution.py`) is not a consumer of them.
-        if not marks_live_box(ast.parse(text)):
-            continue
-        if "FAUNA_LIVE_HANDLE" in text or "FAUNA_LIVE_MAIL_ADDRESS" in text:
+        if marks_live_box(ast.parse(text)):
             found.add(path.relative_to(root).as_posix())
 
     undeclared = found - set(_HANDLE_ENV_MODULES)

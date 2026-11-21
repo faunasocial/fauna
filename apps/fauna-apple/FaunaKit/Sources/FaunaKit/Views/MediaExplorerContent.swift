@@ -168,33 +168,43 @@ public struct MediaExplorerContent: View {
                 filterPicker(snap)
                 Spacer(minLength: 0)
             }
-            // A followed browse scope is READ-ONLY, structurally: the upload
-            // affordance is ABSENT entirely rather than painted-but-inert,
-            // because a follow never enters `known_folders` and so can never be
-            // an upload target (`ui/media.md` § Followed public folders; tui
-            // gates its own upload gesture on the same `followed_scope.is_none()`
-            // and linux hides the whole row). ⚠ Withdrawing it means REMOVING
-            // it from the tree, not disabling it — the e2e counts
-            // `upload-button == 0`, and a disabled control still counts.
+            // The upload affordance paints from the shared upload answer
+            // (`ui/media.md` § Errors & edge cases → *What this person may
+            // write*): absent in a followed scope — REMOVED from the tree, so
+            // the e2e's `upload-button == 0` holds — blocked with its reason
+            // before the first read or on a reader's / metadata-only target,
+            // else enabled. Nothing here re-derives it (`ui/README.md` § Offer
+            // only what is possible, rule 6).
+            let upload = vm.uploadPossibility
             HStack(spacing: 12) {
-                if snap?.followedScope == nil {
-                    TextField(L.media.chooseFile, text: $filePath)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(minWidth: 140)
-                        .accessibilityIdentifier(Ids.fileUpload)
-                        .automationField(Ids.fileUpload, text: $filePath)
-                    Button(L.media.upload) { submitUpload() }
-                        .accessibilityIdentifier(Ids.uploadButton)
-                        // In-process e2e actuation: fires the same `submitUpload()` the
-                        // Button does, exercising the real upload path. No-op in production.
-                        .automationActivate(Ids.uploadButton) { submitUpload() }
-                }
+                TextField(L.media.chooseFile, text: $filePath)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 140)
+                    .accessibilityIdentifier(Ids.fileUpload)
+                    .automationField(Ids.fileUpload, text: $filePath)
+                    .faunaPossible(upload)
+                Button(L.media.upload) { submitUpload() }
+                    .accessibilityIdentifier(Ids.uploadButton)
+                    // In-process e2e actuation: fires the same `submitUpload()` the
+                    // Button does, exercising the real upload path. No-op in production.
+                    .automationActivate(Ids.uploadButton) { submitUpload() }
+                    .faunaPossible(upload)
                 // "Shared links" — the page-level entry to the caller's share
                 // links (`share-links.md` § Flows → List), after the upload
                 // affordance in the ui.yaml page order. A page control, not an
                 // upload one, so a followed scope keeps it.
                 ShareLinkListButton(vm: vm)
                 Spacer(minLength: 0)
+            }
+            // The blocked upload's reason on a line of its own, under the
+            // controls it explains: inline it was a fourth piece of the upload
+            // row and, beside the 140pt field and the two buttons, pushed that
+            // row past an iPhone's width whenever upload was blocked (a member's
+            // foreign scope), centering the page off-screen like the header
+            // above. Here it wraps within the page width.
+            if upload.reasonText != nil {
+                FaunaPossibilityReason(upload)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(.horizontal)
@@ -261,33 +271,56 @@ public struct MediaExplorerContent: View {
     /// sets that have media (rebuilt from the snapshot), then the **followed
     /// public folders** as browse scopes. A real set shows its own name (the
     /// stable e2e key); a followed scope shows the machine-minted label.
+    ///
+    /// A `Menu` around an inline `Picker`, not a bare `.menu` picker: a menu
+    /// picker's button is as wide as the selected option's whole label and never
+    /// compresses, and a set's label is user-chosen and, for a shared or foreign
+    /// set, owner-disambiguated (`<name> (<owner>)`). One long label made the
+    /// browse row wider than an iPhone, and SwiftUI then centered the whole page
+    /// off-screen, so every `media-item` lay at negative x and read as absent
+    /// (the foreign scope's one-row page, which `/tree` showed parked at
+    /// `x=-35` in a 393pt window). This label truncates in the middle instead,
+    /// so the row stays inside the proposed width whatever the set is called.
     private func filterPicker(_ snap: MediaPageSnapshot?) -> some View {
-        Picker("", selection: filterBinding) {
-            Text(L.media.filterAll).tag(Self.filterAllValue)
-            // One option per set ROW, minted in shared Rust: `value` goes back to
-            // `set_filter` verbatim (an own set's name, a shared set's
-            // `local:<id>`), `label` is the owner-disambiguated display text
-            // (`media.md` § Encryption at rest → *The filter and the upload
-            // target address the row*, (a)/(b)).
-            ForEach(Self.filterEntries(snap?.folderOptions ?? []), id: \.value) { entry in
-                Text(entry.label).tag(entry.value)
+        Menu {
+            Picker("", selection: filterBinding) {
+                Text(L.media.filterAll).tag(Self.filterAllValue)
+                // One option per set ROW, minted in shared Rust: `value` goes back to
+                // `set_filter` verbatim (an own set's name, a shared set's
+                // `local:<id>`), `label` is the owner-disambiguated display text
+                // (`media.md` § Encryption at rest → *The filter and the upload
+                // target address the row*, (a)/(b)).
+                ForEach(Self.filterEntries(snap?.folderOptions ?? []), id: \.value) { entry in
+                    Text(entry.label).tag(entry.value)
+                }
+                // The followed browse scopes, AFTER the own-set options
+                // (`ui/media.md` § Followed public folders). Both halves are
+                // shared-Rust-minted: `value` is an opaque stable string guaranteed
+                // disjoint from every set name, and `label` already carries the
+                // owner disambiguator that tells a follow apart from a same-named
+                // set of the user's own. Render them; never compose or parse
+                // either. SwiftUI's `Text(label).tag(value)` carries both halves on
+                // the option itself, so apple needs no value→label side map — the
+                // shape GTK/Compose/WinUI legs do need, because their pickers' model
+                // holds the values alone.
+                ForEach(snap?.followed ?? [], id: \.value) { scope in
+                    Text(scope.label).tag(scope.value)
+                }
             }
-            // The followed browse scopes, AFTER the own-set options
-            // (`ui/media.md` § Followed public folders). Both halves are
-            // shared-Rust-minted: `value` is an opaque stable string guaranteed
-            // disjoint from every set name, and `label` already carries the
-            // owner disambiguator that tells a follow apart from a same-named
-            // set of the user's own. Render them; never compose or parse
-            // either. SwiftUI's `Text(label).tag(value)` carries both halves on
-            // the option itself, so apple needs no value→label side map — the
-            // shape GTK/Compose/WinUI legs do need, because their pickers' model
-            // holds the values alone.
-            ForEach(snap?.followed ?? [], id: \.value) { scope in
-                Text(scope.label).tag(scope.value)
-            }
+            .labelsHidden()
+            .pickerStyle(.inline)
+        } label: {
+            // The active option's machine-minted label (`filter_label`), never
+            // re-derived here; the all-media default has none.
+            Label(snap?.filterLabel ?? L.media.filterAll,
+                  systemImage: "line.3.horizontal.decrease.circle")
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
+        // A menu's button reports its label's whole width as well, so the
+        // truncation above only bites under a frame that takes the width the
+        // row has left rather than the width the label asks for.
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier(Ids.mediaFolderFilter)
         .automationSelect(Ids.mediaFolderFilter,
                           value: { vm.snapshot?.filter ?? Self.filterAllValue },

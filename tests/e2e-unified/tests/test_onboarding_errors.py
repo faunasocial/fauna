@@ -68,6 +68,12 @@ def test_invalid_secret_shows_i18n_error(app, nest_instance):
     if not _ensure_secret_field(app):
         pytest.skip("Could not reach import identity screen")
     app.driver.clear_and_type("paste-secret-field", "too-short")
+    # An app that paints the submit from the shared draft answer
+    # (`identity_import_possibility`; `docs/goal/ui/README.md` § Offer only what
+    # is possible, rule 4's form case) offers it disabled, its reason within
+    # eyeshot: that IS the refusal, and a disabled control is never driven.
+    if not app.is_enabled("import-submit-button"):
+        return
     app.driver.click("import-submit-button")
 
     error = _read_error(app)

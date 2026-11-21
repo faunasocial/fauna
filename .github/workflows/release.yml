@@ -1,6 +1,8 @@
 name: Release
 
-# Server/CLI binaries (four Rust targets), the terminal app's Linux and
+# Server/CLI binaries (four Rust targets), the Linux desktop app's install
+# archive (fauna-desktop + fauna-sync-agent + install.sh, smoke-installed on
+# its runner before upload), the terminal app's Linux and
 # Windows archives (fauna-tui + fauna-sync-agent; the macOS ones are
 # release-macos.yml's, which holds the signing credentials) and the Windows MSI
 # installer (x64 + ARM64) are built HERE -- from this repository's tag, on
@@ -101,7 +103,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            # Pinned, never `ubuntu-latest`: this runner's glibc is the floor of
+            # the shipped x64 binaries (linux-desktop.md § Platform Support).
+            os: ubuntu-24.04
           # Native, not cross-compiled: the linux desktop app links GTK4 and
           # libadwaita, which an x64 runner cannot supply for arm64 simply.
           - target: aarch64-unknown-linux-gnu
@@ -212,9 +216,14 @@ jobs:
             collect "$crate" "$crate" "release-${crate#fauna-}"
           done
 
-          # The linux desktop app: package fauna-linux, binary fauna-desktop.
+          # The linux desktop app (package fauna-linux, binary fauna-desktop)
+          # ships as its install archive, fauna-desktop-<suffix>.tar.gz: the
+          # app, fauna-sync-agent, install.sh, the desktop entry, the icon and
+          # the three licence files (installers/linux-desktop.md § What the
+          # release publishes). Never a bare executable: one that cannot run
+          # its sync agent is not offered. Its notices file ships inside it.
           if [[ "$target" == *linux* ]]; then
-            collect fauna-desktop fauna-linux release-linux-desktop
+            just linux-archive "$target" artifacts
           fi
 
           # Fauna's two licence texts, once per release: one leg's artifact
@@ -228,11 +237,43 @@ jobs:
           # inside the archive, never as an asset of its own.
           if [[ "$target" == *linux* ]]; then
             just shipped-notices terminal-archive-linux notices/terminal-archive-linux.txt --target "$target"
-            bash apps/fauna-tui/packaging/assemble-archive.sh \
+            bash installer/assemble-archive.sh --payload tui \
               --bin-dir "target/${target}/release" --out artifacts --suffix "$suffix" \
               --notices notices/terminal-archive-linux.txt
             rm -rf "artifacts/fauna-tui-${suffix}"
           fi
+
+      # The Linux desktop archive's smoke install (installers/linux-desktop.md
+      # § What the release publishes, the witness's runner half): the very file
+      # about to be published is unpacked on this disposable runner, its own
+      # install.sh installs it into a private prefix, every file lands where
+      # § Installation Files puts it, the installed app prints its version, and
+      # the archive's uninstall removes it. A file a release run built is never
+      # installed on a dev machine. Plain shell and the runner's own tools: no
+      # action and no OS package is added.
+      - name: Smoke-install the Linux desktop archive
+        if: contains(matrix.target, 'linux')
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu)  suffix="x86_64-linux" ;;
+            aarch64-unknown-linux-gnu) suffix="aarch64-linux" ;;
+          esac
+          smoke="$RUNNER_TEMP/desktop-smoke"
+          rm -rf "$smoke" && mkdir -p "$smoke"
+          tar -C "$smoke" -xzf "artifacts/fauna-desktop-${suffix}.tar.gz"
+          cd "$smoke/fauna-desktop-${suffix}"
+          export PREFIX="$smoke/prefix" XDG_CONFIG_HOME="$smoke/xdg-config" XDG_DATA_HOME="$smoke/xdg-data"
+          ./install.sh
+          for f in bin/fauna-desktop bin/fauna-sync-agent \
+                   share/applications/social.fauna.fauna.desktop \
+                   share/icons/hicolor/scalable/apps/fauna.svg \
+                   share/doc/fauna-desktop/LICENSE-MIT share/doc/fauna-desktop/LICENSE-APACHE \
+                   share/doc/fauna-desktop/THIRD-PARTY-NOTICES; do
+            [ -f "$PREFIX/$f" ] || { echo "::error::the archive's install.sh did not install $f"; exit 1; }
+          done
+          "$PREFIX/bin/fauna-desktop" --version
+          ./install.sh --uninstall
+          [ ! -e "$PREFIX/bin/fauna-desktop" ] || { echo "::error::the uninstall left fauna-desktop"; exit 1; }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -545,8 +586,9 @@ jobs:
     # (6-10 min), before the notices step: a toolchain install, the locked crate
     # set fetched and the closure resolved (6.5 min on a loaded Windows dev VM with
     # a warm cache, 2026-11-13; not yet measured on a hosted runner); about 1.5x
-    # the sum.
-    timeout-minutes: 30
+    # the sum. The nest MSI's second notices resolve, its WiX link and (x64) its
+    # install smoke add an estimated 8-12 min, not yet measured: 45.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
@@ -671,9 +713,9 @@ jobs:
       # relative AppDir silently harvests ZERO app files and ships an app-less MSI
       # that still "builds successfully". ${{ github.workspace }} is the checkout
       # root (= the cwd staging wrote into), so it anchors all vars absolutely.
-      # NoSparsePackage: the shell extension's sparse package needs a signer to
-      # register on a user's machine, and this MSI has none yet, so it is left out
-      # (ShellExt.wxs) rather than shipped inert.
+      # NoSparsePackage: the shell extension's sparse identity package is retired
+      # (the app's identity is the full MSIX's), so no MSI ships one; the define
+      # leaves ShellExt.wxs's package component out.
       - name: Build MSI
         run: >
           wix build -arch ${{ matrix.arch }}
@@ -705,7 +747,7 @@ jobs:
       - name: Assemble the fauna-tui archive
         shell: bash
         run: |
-          bash apps/fauna-tui/packaging/assemble-archive.sh \
+          bash installer/assemble-archive.sh --payload tui \
             --bin-dir "stage/${{ matrix.arch }}" \
             --out tui-archive --suffix "${{ matrix.arch }}-windows" --exe \
             --notices parts/terminal/THIRD-PARTY-NOTICES.txt
@@ -720,6 +762,56 @@ jobs:
           path: |
             Fauna-Setup-${{ matrix.arch }}.msi
             fauna-tui-${{ matrix.arch }}-windows.zip
+
+      # The NEST MSI (installers/windows.md § Direct download (MSIX app + nest
+      # MSI), 1): the Nest and Bridge services and the terminal app, no app, no
+      # sync agent, no shell extension -- built here from the binaries staged
+      # above, UNSIGNED, and kept as a workflow artifact only. Nothing ships it
+      # yet: its artifact name matches no pattern the `release` job publishes,
+      # and the switch from the full-feature MSI to this one and the direct
+      # download's bundle, signed, is one later change. Its licence files are
+      # its own manifest artifact's (windows-nest-msi: no app, so no NuGet leg).
+      - name: Stage the nest MSI's licence and notices files
+        shell: bash
+        run: just windows-nest-msi-notices stage/${{ matrix.arch }}/nest-notices ${{ matrix.arch }} parts/mail-bridge/fauna-mail-bridge.exe
+
+      # The fragments are named one by one, never a glob of the directory: the
+      # full-feature package's client fragments (App, ServiceSync, ShellExt,
+      # Protocol) sit beside them and must never link into this package. The
+      # list is tests/e2e-unified/helpers/windows_installer.py::NEST_WXS, the
+      # test MSI's own; the shape test holds the two equal.
+      - name: Build the nest MSI
+        run: >
+          wix build -arch ${{ matrix.arch }}
+          -ext WixToolset.Util.wixext
+          -ext WixToolset.UI.wixext
+          -ext WixToolset.Firewall.wixext
+          -o Fauna-Nest-Setup-${{ matrix.arch }}.msi
+          apps/fauna-windows/installer/nest/Package.wxs
+          apps/fauna-windows/installer/Directories.wxs
+          apps/fauna-windows/installer/ServiceNest.wxs
+          apps/fauna-windows/installer/ServiceBridge.wxs
+          apps/fauna-windows/installer/TerminalApp.wxs
+          apps/fauna-windows/installer/Notices.wxs
+          apps/fauna-windows/installer/UI.wxs
+          -loc apps/fauna-windows/installer/Strings.wxl
+          -d NestBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-nest-svc.exe
+          -d BridgeBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-bridge-svc.exe
+          -d MailBridgeBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-mail-bridge.exe
+          -d MailBridgeFfiDll=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna_ffi.dll
+          -d MailBridgeLibunwindDll=${{ github.workspace }}/stage/${{ matrix.arch }}/libunwind.dll
+          -d TuiBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-tui.exe
+          -d CliBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-cli.exe
+          -d IconDir=${{ github.workspace }}/stage/${{ matrix.arch }}/icons/
+          -d NoticesDir=${{ github.workspace }}/stage/${{ matrix.arch }}/nest-notices/
+
+      # `direct-windows-*`: a workflow artifact the `release` job never
+      # downloads (it takes `rust-*` and `windows-*` alone), pinned by the shape
+      # tests, so the unsigned nest MSI is never a release asset.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: direct-windows-nest-msi-${{ matrix.arch }}
+          path: Fauna-Nest-Setup-${{ matrix.arch }}.msi
 
       # Real msiexec install/uninstall smoke of the x64 MSI. The asserts live in
       # apps/fauna-windows/installer/ci-smoke.ps1, which the arm64 leg's smoke
@@ -736,6 +828,15 @@ jobs:
         if: matrix.arch == 'x64'
         shell: pwsh
         run: ./apps/fauna-windows/installer/ci-smoke.ps1 -Msi Fauna-Setup-x64.msi -Arch x64
+
+      # The same script's nest mode on the x64 nest MSI, after the full-feature
+      # smoke has uninstalled everything it installed: the services and the
+      # terminal app installed and running, no app, no sync agent, no
+      # shell-extension CLSID.
+      - name: Smoke-test the nest MSI install/uninstall (x64)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: ./apps/fauna-windows/installer/ci-smoke.ps1 -Msi Fauna-Nest-Setup-x64.msi -Arch x64 -Package nest
 
       # Logs on failure ONLY: the `release` job downloads every `windows-*`
       # artifact of the run and signs and publishes each file, so a log
@@ -770,10 +871,17 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: windows-arm64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: direct-windows-nest-msi-arm64
 
       - name: Smoke-test install/uninstall (arm64)
         shell: pwsh
         run: ./apps/fauna-windows/installer/ci-smoke.ps1 -Msi Fauna-Setup-arm64.msi -Arch arm64
+
+      - name: Smoke-test the nest MSI install/uninstall (arm64)
+        shell: pwsh
+        run: ./apps/fauna-windows/installer/ci-smoke.ps1 -Msi Fauna-Nest-Setup-arm64.msi -Arch arm64 -Package nest
 
       - name: Upload installer smoke logs
         if: ${{ failure() }}
@@ -782,6 +890,119 @@ jobs:
           name: windows-installer-smoke-logs-arm64
           path: '*.log'
           if-no-files-found: ignore
+
+  # The DIRECT-DOWNLOAD app package (installers/windows.md § Direct download
+  # (MSIX app + nest MSI)): `Fauna.msixbundle`, both arches' MSIX of the `full`
+  # flavour on the direct channel's identity, built with no release
+  # signer -- packed with the dev publisher and the packer's self-signature, no
+  # credential and no production publisher (`--production` refuses while
+  # FaunaDirectProductionPublisher is empty) -- and graded here. A workflow
+  # artifact only: `direct-windows-bundle` matches no pattern the `release` job
+  # publishes, and the signed bundle's asset switch is one later change.
+  #
+  # Two jobs, as the Store package's: each arch's payload is
+  # `just windows-store-package <arch> full "" "" direct` -- the recipe
+  # `just windows-direct-package` runs for each arch on a machine, its FFI,
+  # agent, shell extension and publish built from this tree, the arch named by
+  # its triple from the x64 runner -- in a matrix job of its own (the Store
+  # build's per-arch budget), handed on as an intermediate; then one job packs
+  # both into the bundle in one packer call, the recipe's own second half,
+  # because a bundle is one `makeappx bundle` over both arch packages.
+  windows-direct-payload:
+    if: inputs.stores_commit == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            rust_target: x86_64-pc-windows-msvc
+          - arch: arm64
+            rust_target: aarch64-pc-windows-msvc
+    runs-on: windows-latest
+    # The Store package's per-arch build is the same chain (FFI, two cargo
+    # builds, the publish, the notices) in another flavour; its job's 180.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          target: ${{ matrix.rust_target }}
+          rustflags: ""
+          cache: false
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
+        with:
+          dotnet-version: '10.0.204'  # = global.json; moves only in a bump round
+
+      - name: Install uv
+        shell: bash
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+
+      # The PRODUCTION FFI (no `test-helpers`: the automation surface is
+      # compiled out of a shipped package, convention 15) and the full app;
+      # the payload lands in build/installer/store-payload/<arch>/.
+      - name: Build and stage the direct payload
+        shell: bash
+        run: just windows-store-package ${{ matrix.arch }} full "" "" direct
+
+      - name: Keep the publish log
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: direct-publish-binlog-${{ matrix.arch }}
+          path: build/installer/app-publish-${{ matrix.arch }}.binlog
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: part-windows-direct-payload-${{ matrix.arch }}
+          path: build/installer/store-payload/${{ matrix.arch }}/
+          if-no-files-found: error
+
+  build-windows-direct:
+    needs: windows-direct-payload
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: part-windows-direct-payload-x64
+          path: build/installer/store-payload/x64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: part-windows-direct-payload-arm64
+          path: build/installer/store-payload/arm64
+
+      - name: Install uv
+        shell: bash
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+
+      # `just windows-direct-bundle` -- the second half of
+      # `just windows-direct-package`: one packer call packs both arch packages
+      # on the direct channel's identity (FaunaSocial.FaunaDesktop, `Fauna`,
+      # the write-virtualization opt-out), bundles them at the product version
+      # and self-signs the bundle with the dev publisher; then the grade reads
+      # the bundle back.
+      - name: Pack, bundle and grade the direct packages (dev publisher, self-signed)
+        shell: bash
+        run: just windows-direct-bundle dev
+
+      # `direct-windows-*`: never downloaded by the `release` job, so the
+      # unsigned bundle is never a release asset (pinned by the shape tests).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: direct-windows-bundle
+          path: build/installer/Fauna.msixbundle
+          if-no-files-found: error
 
   # NOTE: there is no standalone Go release artifact. The Go mail-bridge
   # (bins/fauna-bridges) is cgo — it links libfauna_ffi.so — so it cannot be
@@ -926,14 +1147,19 @@ jobs:
       && (inputs.stores_commit != ''
           || (needs.build-rust.result == 'success'
               && needs.build-windows.result == 'success'
-              && needs.smoke-windows-arm64.result == 'success'))
-    needs: [build-rust, build-windows, smoke-windows-arm64, android-store-bundle, store-windows]
+              && needs.smoke-windows-arm64.result == 'success'
+              && needs.build-windows-direct.result == 'success'))
+    # build-windows-direct publishes nothing (its bundle and the nest MSI are
+    # workflow artifacts until the signed asset switch); it gates the release
+    # so a red direct-download build is seen on the version's run, never first
+    # on the run that switches the assets.
+    needs: [build-rust, build-windows, smoke-windows-arm64, build-windows-direct, android-store-bundle, store-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: release
     permissions:
       contents: write        # upload the release assets
-      id-token: write        # the Sigstore keyless identity behind the signatures
+      id-token: write        # the Sigstore keyless identity behind the signatures, and the identity token the Microsoft Store leg trades for its Partner Center token (with `environment: release`, the subject Entra's federated credential trusts)
     steps:
       # The tree, for the downloads table's check below. First: a checkout
       # cleans its directory, so it must not run after the downloads.
@@ -1004,6 +1230,8 @@ jobs:
             Fauna is free and open-source software for your feed, messages,
             mail, photos, files and calendar, served from a small server you
             control. This release carries the server binaries (`fauna-nest` and its companions), the Linux desktop app, the terminal app for Linux and Windows (its archives also carry `fauna-cli`, the program an AI assistant runs to work in Fauna), and the Windows installer (`Fauna-Setup-x64.msi`, `Fauna-Setup-arm64.msi`), each built by this workflow from the tagged source.
+
+            Licences: Fauna is provided under your choice of the MIT licence or the Apache License, Version 2.0, whose full texts are this release's `LICENSE-MIT` and `LICENSE-APACHE` files. Each server binary has a notices file beside it, `<file>.NOTICES.txt`, listing the third-party components built into that binary with their versions and licences. Each archive carries both licence texts and its own notices file inside it.
 
             Code signing policy: https://fauna.social/code-signing-policy/
 

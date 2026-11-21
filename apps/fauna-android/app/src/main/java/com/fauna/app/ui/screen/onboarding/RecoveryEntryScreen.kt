@@ -18,15 +18,25 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.FfiAccountRegistry
 import com.fauna.ffi.onboarding.OnboardingStep
 import com.fauna.ffi.onboarding.RecoveryEntryOutcome
 import com.fauna.ffi.onboarding.recoveryEntryOutcomeMessage
+import com.fauna.ffi.onboarding.recoveryEntryPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.launch
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 @HiltViewModel
 class RecoveryEntryVM @Inject constructor(
@@ -113,8 +123,10 @@ class RecoveryEntryVM @Inject constructor(
  * The account field asks for a handle (the ceremony has no session to ask
  * where the account lives). `qr-camera-view` is optional here and android's
  * import page has no camera capture yet either, so a paste is the path.
- * Submit is enabled unconditionally: every way the input can be wrong is an
- * answer the ceremony gives on `error-message`.
+ * Submit is painted from the shared draft answer
+ * (`fauna_onboarding_machine::recovery_entry_possibility`, `ui/README.md`
+ * § Offer only what is possible, rule 4's form case) — the same local checks
+ * the ceremony's `submit_recovery_entry` runs — and asks it again at the press.
  */
 @Composable
 fun RecoveryEntryScreen(
@@ -129,6 +141,9 @@ fun RecoveryEntryScreen(
     // field is forwarded as shown.
     var phrase by remember { mutableStateOf("") }
     var account by remember { mutableStateOf("") }
+    val submitAnswer = remember(phrase, account) {
+        askForm { recoveryEntryPossibility(phrase, account) }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
@@ -193,20 +208,30 @@ fun RecoveryEntryScreen(
                 modifier = Modifier.testTag(Ids.RECOVERY_ENTRY_BACK_BUTTON),
             ) { Text(stringResource(R.string.common_back)) }
 
-            Button(
-                onClick = {
-                    vm.launchSubmit(phrase, account, context) {
-                        // Restored → handle_entry; Superseded → identity_import;
-                        // a refusal stays here, speaking.
-                        val step = machine.step()
-                        if (step != OnboardingStep.RECOVERY_ENTRY) {
-                            navController.navigate(routeForStep(step))
+            Column(horizontalAlignment = Alignment.End) {
+                Button(
+                    onClick = {
+                        // The press asks the answer it was painted from again
+                        // (rule 6); a blocked draft's line goes on `error-message`.
+                        val refusal = formRefusal(context, submitAnswer)
+                        if (refusal != null) {
+                            refusal.reason?.let(machine::setErrorMessage)
+                        } else {
+                            vm.launchSubmit(phrase, account, context) {
+                                // Restored → handle_entry; Superseded →
+                                // identity_import; a refusal stays here, speaking.
+                                val step = machine.step()
+                                if (step != OnboardingStep.RECOVERY_ENTRY) {
+                                    navController.navigate(routeForStep(step))
+                                }
+                            }
                         }
-                    }
-                },
-                enabled = !vm.submitting,
-                modifier = Modifier.testTag(Ids.RECOVERY_ENTRY_SUBMIT_BUTTON),
-            ) { Text(stringResource(R.string.onboarding_recovery_entry_submit)) }
+                    },
+                    enabled = !vm.submitting && submitAnswer.isPossible,
+                    modifier = Modifier.testTag(Ids.RECOVERY_ENTRY_SUBMIT_BUTTON),
+                ) { Text(stringResource(R.string.onboarding_recovery_entry_submit)) }
+                DisabledControlReasonText(localized(submitAnswer.blockedReason))
+            }
         }
     }
 }

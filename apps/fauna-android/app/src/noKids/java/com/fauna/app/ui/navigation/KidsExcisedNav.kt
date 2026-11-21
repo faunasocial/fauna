@@ -27,7 +27,10 @@ import com.fauna.app.ui.screen.feed.PostDetailScreen
 import com.fauna.app.ui.screen.feed.ThreadScreen
 import com.fauna.app.ui.screen.personalization.LabelerCatalogScreen
 import com.fauna.app.ui.screen.personalization.PersonalizationScreen
+import androidx.compose.ui.res.stringResource
+import com.fauna.app.R
 import com.fauna.app.ui.screen.search.SearchResultsScreen
+import com.fauna.app.ui.screen.settings.MailSubpageGate
 import com.fauna.app.ui.util.localized
 import social.fauna.generated.Ids
 
@@ -82,26 +85,53 @@ fun NavGraphBuilder.kidsExcisedDestinations(navController: NavHostController) {
     composable("settings/subscriptions") {
         com.fauna.app.ui.screen.settings.SubscriptionSettingsScreen(navController)
     }
+    // The six mail sub-pages open behind the shared mail-usable gate
+    // (mail-settings.md § Errors & edge cases): while it is not possible only
+    // the heading, the reason and Back — the page's view-model is never built.
     composable("settings/mail-aliases") {
-        com.fauna.app.ui.screen.settings.MailAliasesScreen(navController)
+        MailSubpageGate(stringResource(R.string.mail_aliases_title), navController) {
+            com.fauna.app.ui.screen.settings.MailAliasesScreen(navController)
+        }
     }
     composable("settings/mail-lists") {
-        com.fauna.app.ui.screen.settings.MailListsScreen(navController)
+        MailSubpageGate(stringResource(R.string.mail_lists_title), navController) {
+            com.fauna.app.ui.screen.settings.MailListsScreen(navController)
+        }
     }
     composable("settings/mail-list-members/{listIdHex}/{listName}") { entry ->
         val listIdHex = entry.arguments?.getString("listIdHex") ?: ""
         val listName = java.net.URLDecoder.decode(
             entry.arguments?.getString("listName") ?: "", "UTF-8",
         )
-        com.fauna.app.ui.screen.settings.MailListMembersScreen(
-            navController, listIdHex, listName,
-        )
+        MailSubpageGate(
+            listName.ifEmpty { stringResource(R.string.mail_lists_members_title) },
+            navController,
+        ) {
+            com.fauna.app.ui.screen.settings.MailListMembersScreen(
+                navController, listIdHex, listName,
+            )
+        }
+    }
+    // The Settings landing's Mail list members row (and the e2e nav patch,
+    // which carries no list): the members page on the placeholder list id —
+    // the honest empty state linux's rail visit shows (apple and windows
+    // resolve it to the first owned list first).
+    composable("settings/mail-list-members") {
+        MailSubpageGate(stringResource(R.string.mail_lists_members_title), navController) {
+            com.fauna.app.ui.screen.settings.MailListMembersScreen(
+                navController, MAIL_LIST_PLACEHOLDER_ID, "",
+            )
+        }
     }
     composable("settings/mail-export") {
-        com.fauna.app.ui.screen.settings.MailExportScreen(navController)
+        MailSubpageGate(stringResource(R.string.mail_export_title), navController) {
+            com.fauna.app.ui.screen.settings.MailExportScreen(navController)
+        }
     }
     composable("settings/mail-import") {
-        com.fauna.app.ui.screen.settings.MailImportScreen(navController)
+        MailSubpageGate(stringResource(R.string.mail_import_title), navController) {
+            com.fauna.app.ui.screen.settings.MailImportScreen(navController)
+        }
     }
     // Import from other services — the archive-import wizard
     // (archive-import.md § The wizard and its machine), outside the kids
@@ -110,7 +140,9 @@ fun NavGraphBuilder.kidsExcisedDestinations(navController: NavHostController) {
         com.fauna.app.ui.screen.settings.ArchiveImportScreen(navController)
     }
     composable("settings/mail-spam") {
-        com.fauna.app.ui.screen.settings.MailSpamScreen(navController)
+        MailSubpageGate(stringResource(R.string.mail_spam_title), navController) {
+            com.fauna.app.ui.screen.settings.MailSpamScreen(navController)
+        }
     }
     // Settings → Personalization (content-moderation-and-ranking.md §
     // Composition, ratified 2026-07-06) + its Community-labelers catalog
@@ -213,12 +245,13 @@ fun NavGraphBuilder.kidsExcisedDestinations(navController: NavHostController) {
  * which resolves `am_i_admin` and fires the first-setup mail provision, the
  * three Admin-class DAV toggles and the one-MSEK-mint-path companion mints
  * itself (`MailEnableGlueVM.applyPostClaimServingEnablement`). No-op on every
- * ordinary authed launch (the latch is null).
+ * ordinary authed launch (the latch is null). A step the nest refuses for good
+ * is painted on [messages], the shell's `error-message` banner.
  */
 @Composable
-fun KidsExcisedPostAuthEffects() {
+fun KidsExcisedPostAuthEffects(messages: com.fauna.app.core.AppMessages) {
     val mailGlue: com.fauna.app.ui.viewmodel.MailEnableGlueVM = hiltViewModel()
-    LaunchedEffect(Unit) { mailGlue.applyPostClaimServingEnablement() }
+    LaunchedEffect(Unit) { mailGlue.applyPostClaimServingEnablement(messages) }
     // post-quantum.md § surface B: publish the subscriber encapsulation-key
     // registry entry at the same hook. Idempotent, best-effort, logged only.
     LaunchedEffect(Unit) { mailGlue.publishSubscriberEncapsKey() }
@@ -281,3 +314,28 @@ fun CriticalAlertsBannerContent(alerts: List<uniffi.fauna_client_alerts.Critical
         }
     }
 }
+
+/**
+ * `search-submit-button`'s draft answer — the shared
+ * `fauna_client_search::query_possibility` (blank -> `search_page.query_required`;
+ * `docs/goal/ui/search.md` § Errors & edge cases). Here, not in the shell,
+ * because the kids `fauna-ffi` flavor drops the `search` face with the page.
+ */
+fun searchSubmitPossibility(query: String): uniffi.fauna_core.Possibility =
+    com.fauna.ffi.searchQueryPossibility(query)
+
+/**
+ * The session's shared mail-usable answer (`mail-settings.md` § Errors & edge
+ * cases, the mail-usable gate) for the Settings landing's six mail sub-page
+ * rows — read off [com.fauna.app.ui.viewmodel.MailUsableVM], the one the Mail
+ * & Calendar page and every sub-page gate read, so an enable there lights the
+ * rows at once. The kids twin answers absent.
+ */
+@Composable
+fun mailUsableAnswer(): uniffi.fauna_core.Possibility {
+    val vm: com.fauna.app.ui.viewmodel.MailUsableVM = hiltViewModel()
+    return vm.answer.collectAsState().value
+}
+
+/** The list id a members visit with no list selected opens on (FaunaKit's `MailListMembersView.placeholderListId`). */
+private const val MAIL_LIST_PLACEHOLDER_ID = "00000000000000000000000000000000"

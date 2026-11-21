@@ -14,6 +14,8 @@ import uniffi.fauna_client_mail_settings.AliasView
 import uniffi.fauna_client_mail_settings.ImportAliasOutcomeView
 import uniffi.fauna_client_mail_settings.ImportAliasStatusView
 import uniffi.fauna_client_mail_settings.ImportResultView
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [MailAliasesContent] (the
@@ -58,7 +60,9 @@ class MailAliasesContentTest {
 
     private fun render(
         aliases: List<AliasView> = emptyList(),
-        defaultDomain: String? = "example.com",
+        // The shared `MailAliasesSnapshot::create_possibility` answer the
+        // wrapper computes; possible by default (a domain to create on).
+        createAnswer: Possibility = Possibility.Possible,
         hydrated: Boolean = true,
         working: Boolean = false,
         // Pure stub for the FFI-backed kind badge (shared `alias_kind_badge`).
@@ -89,7 +93,7 @@ class MailAliasesContentTest {
         composeTestRule.setContent {
             MailAliasesContent(
                 aliases = aliases,
-                defaultDomain = defaultDomain,
+                createAnswer = createAnswer,
                 hydrated = hydrated,
                 working = working,
                 lastImportResult = lastImportResult,
@@ -155,11 +159,44 @@ class MailAliasesContentTest {
         composeTestRule.onNodeWithTag("mail-aliases-generate-disposable-button").assertExists()
     }
 
+    // ── The create answer (mail-settings.md § Errors & edge cases, *The
+    // in-page predicates*; ui/README.md § Offer only what is possible, rules
+    // 2, 5 and 6): add, import and the mint all paint from it ──
+
+    private val noDomain = Possibility.Blocked(LocalizedText("mail_aliases.no_default_domain", emptyMap()))
+
     @Test
-    fun addControlsDisabledWithoutDefaultDomain() {
-        render(defaultDomain = null)
+    fun addControlsDisabledWithTheReasonWhileTheCreateAnswerIsBlocked() {
+        render(createAnswer = noDomain)
         composeTestRule.onNodeWithTag("mail-aliases-add-button").assertIsNotEnabled()
         composeTestRule.onNodeWithTag("mail-aliases-generate-disposable-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("mail-aliases-import-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(
+            androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+                .getString(com.fauna.app.R.string.mail_aliases_no_default_domain),
+        ).assertExists()
+    }
+
+    @Test
+    fun addControlsWaitBeforeTheFirstRead() {
+        render(
+            hydrated = false,
+            createAnswer = Possibility.Blocked(LocalizedText("common.still_loading", emptyMap())),
+        )
+        composeTestRule.onNodeWithTag("mail-aliases-add-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("mail-aliases-generate-disposable-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("mail-aliases-import-button").assertIsNotEnabled()
+    }
+
+    @Test
+    fun addControlsLiveWhenTheCreateAnswerIsPossible() {
+        render(createAnswer = Possibility.Possible)
+        composeTestRule.onNodeWithTag("mail-aliases-add-button").assertIsEnabled()
+        composeTestRule.onNodeWithTag("mail-aliases-import-button").assertIsEnabled()
+        composeTestRule.onAllNodesWithText(
+            androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+                .getString(com.fauna.app.R.string.mail_aliases_no_default_domain),
+        ).assertCountEquals(0)
     }
 
     @Test

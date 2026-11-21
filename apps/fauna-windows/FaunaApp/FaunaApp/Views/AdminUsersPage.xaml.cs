@@ -140,6 +140,17 @@ public sealed partial class AdminUsersPage : Page
             case nameof(AdminUsersViewModel.ShowMintedCode):
                 CopyCodeButton.Visibility = _vm.ShowMintedCode ? Visibility.Visible : Visibility.Collapsed;
                 break;
+            case nameof(AdminUsersViewModel.MintedCodeCopied):
+                // A confirmed copy: "Copied!" after the button's own label, and the
+                // copied code as its `copied` attr (windows get_attr maps a
+                // non-`disabled` name to HelpText — the account-actor-id-copy-btn
+                // contract the profile and status copy buttons keep).
+                CopyCodeButton.Content = _vm.MintedCodeCopied is null
+                    ? S.Get("admin/users_page/copy_code")
+                    : S.Get("admin/users_page/copy_code") + " · " + S.Get("common/copied");
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+                    CopyCodeButton, _vm.MintedCodeCopied ?? string.Empty);
+                break;
             case nameof(AdminUsersViewModel.RegistrationMode):
             case nameof(AdminUsersViewModel.RegistrationModeDraft):
                 UpdateRegistrationDisplay();
@@ -663,14 +674,18 @@ public sealed partial class AdminUsersPage : Page
     private void CopyCodeButton_Click(object sender, RoutedEventArgs e)
     {
         if (_vm?.MintedCode is not { Length: > 0 } code) return;
+        Exception? failure = null;
         try
         {
             FaunaApp.Helpers.ClipboardHelper.CopyText(code);
         }
-        catch
+        catch (Exception ex)
         {
-            // Clipboard contention is non-fatal; the code remains visible to copy manually.
+            // Never silent: the failure is said on admin-users-action-error; the code
+            // stays listed below to copy by hand.
+            failure = ex;
         }
+        _vm.RecordInviteCopy(code, failure);
     }
 
     private async void DeleteInviteCode_Click(object sender, RoutedEventArgs e)

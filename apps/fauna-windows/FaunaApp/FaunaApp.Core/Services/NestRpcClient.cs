@@ -2613,11 +2613,11 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task ApplyPostClaimServingEnablementAsync(
+    public async Task<string?> ApplyPostClaimServingEnablementAsync(
         string nodeUrl, bool email, bool caldav, bool carddav, bool webdav)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
-        await FaunaFfiMethods.ApplyPostClaimServingEnablement(
+        return await FaunaFfiMethods.ApplyPostClaimServingEnablement(
             nest, _crypto.SecretBytes, nodeUrl, email, caldav, carddav, webdav).ConfigureAwait(false);
     }
 
@@ -3586,6 +3586,13 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<FfiSalePriceSave> SubscriptionSalePriceSaveAsync(FfiTierItem tier, string priceHint, string askingPrice)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Subscriptions().SalePriceSave(tier, priceHint, askingPrice).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<bool> SubscriptionTierCreateAsync(
         string name, uint rank, string? description, string? priceHint, string? paymentUrl, bool autoApprove,
         ulong? askingPriceSats)
@@ -4471,6 +4478,13 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await nest.Carddav().ListAddressbooks().ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<FfiAddressbooksRead> CarddavReadAddressbooksAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Carddav().ReadAddressbooks().ConfigureAwait(false);
     }
 
     /// <inheritdoc />

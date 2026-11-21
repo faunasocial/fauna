@@ -1601,3 +1601,20 @@ where
         carries_the_only_seed: false,
     })
 }
+
+/// `identity-stolen-button`'s answer over the typed kit phrase and confirm
+/// word — `fauna_client_recovery::ceremony::stolen_entry_possibility` (the kit
+/// first, then the word; `docs/goal/ui/README.md` § Offer only what is
+/// possible, rule 4's form case), in `Possibility`'s serde form for
+/// `#lib/possibility`'s `paintPossibility`. The stolen entry paints from it and
+/// asks it again; it keeps no confirm-word comparison of its own.
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = stolenEntryPossibility)]
+pub fn stolen_entry_possibility(
+    phrase: &str,
+    confirm_word: &str,
+) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
+    crate::rpc::to_js(&fauna_client_recovery::ceremony::stolen_entry_possibility(
+        phrase,
+        confirm_word,
+    ))
+}

@@ -21,7 +21,9 @@
 //! queue — a success re-reads the mine list, where the queued grant renders
 //! exactly like a queued subscribe (a "pending" row). Typed errors
 //! (`fauna.payments.claim_{not_found,already_redeemed,voided}`) surface via
-//! the page `error-message`.
+//! the page `error-message`. The redeem block is painted from the `payments`
+//! features gate (`settings/claim_redeem.rs`), read by this page itself on
+//! every show; its press asks the same answer and refuses on `error-message`.
 //!
 //! Observer-free, like the profile Tiers tab: a manual re-read on mount and
 //! whenever the page becomes visible (the refresh closure the settings shell
@@ -56,12 +58,17 @@ struct Widgets {
     mine_list: gtk::Box,
     mine_placeholder: gtk::Label,
     mine_rows: RefCell<Vec<gtk::Box>>,
+    /// Where the `mine.list` read stands: before it answers the list is not
+    /// claimed empty (`docs/goal/ui/README.md` § List pages: loading is not
+    /// empty); a failed first read paints neither text — `error-message`
+    /// carries why.
+    mine_read: std::cell::Cell<fauna_core::possibility::ReadState>,
     /// The Pillar-3 claim-code input. Excises with the `payments` plane
     /// (`dynamic-features.md` § Platform-family surface excision): a store-safe
     /// build has no claim to redeem, so the field, its section and the
     /// `redeem_claim` handler all compile away together.
     #[cfg(feature = "payments")]
-    claim_input: gtk::Entry,
+    claim: super::claim_redeem::RedeemPair,
     error_label: gtk::Label,
 }
 
@@ -120,7 +127,9 @@ pub fn build_subscriptions_page() -> (gtk::Box, Rc<dyn Fn()>) {
         .spacing(6)
         .accessible_role(gtk::AccessibleRole::Group)
         .build();
-    let mine_placeholder = gtk::Label::new(Some(s::NO_SUBSCRIPTIONS));
+    // The list's one text line: loading until the read answers, the empty
+    // state only once a read answered empty (`paint_mine_placeholder`).
+    let mine_placeholder = gtk::Label::new(Some(crate::i18n::strings::common::LOADING));
     mine_placeholder.set_halign(gtk::Align::Start);
     mine_placeholder.add_css_class("dim-label");
     mine_list.append(&mine_placeholder);
@@ -135,43 +144,24 @@ pub fn build_subscriptions_page() -> (gtk::Box, Rc<dyn Fn()>) {
     // `dynamic-features.md` § What "completely compiled away" means is a
     // `strings`-grep for ELEMENT IDS, so a section that merely never fires
     // would still ship `subscription-claim-redeem-input`/`-button`.
+    //
+    // The block is painted from the `payments` gate (`claim_redeem.rs`):
+    // blocked still loading until this page's own features read answers, left
+    // out whole on a nest without the plane.
     #[cfg(feature = "payments")]
-    let (claim_input, claim_button) = {
-        let claim_section = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(8)
-            .accessible_role(gtk::AccessibleRole::Group)
-            .build();
-        let claim_title = gtk::Label::new(Some(s::REDEEM_CLAIM_TITLE));
-        claim_title.set_halign(gtk::Align::Start);
-        claim_title.add_css_class("title-4");
-        claim_section.append(&claim_title);
-        let claim_row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .build();
-        let claim_input = gtk::Entry::builder()
-            .placeholder_text(s::CLAIM_CODE)
-            .hexpand(true)
-            .build();
-        set_test_id(&claim_input, ids::SUBSCRIPTION_CLAIM_REDEEM_INPUT);
-        claim_row.append(&claim_input);
-        let claim_button = gtk::Button::with_label(s::REDEEM);
-        claim_button.add_css_class("suggested-action");
-        set_test_id(&claim_button, ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON);
-        crate::offline_gate::declare_wire_kind(&claim_button, "fauna.payments.claims.redeem");
-        claim_row.append(&claim_button);
-        claim_section.append(&claim_row);
-        outer.append(&claim_section);
-        (claim_input, claim_button)
+    let claim = {
+        let pair = super::claim_redeem::RedeemPair::build();
+        outer.append(&pair.section);
+        pair
     };
 
     let widgets = Widgets {
         mine_list,
         mine_placeholder,
         mine_rows: RefCell::new(Vec::new()),
+        mine_read: std::cell::Cell::new(fauna_core::possibility::ReadState::Pending),
         #[cfg(feature = "payments")]
-        claim_input,
+        claim,
         error_label,
     };
 
@@ -182,20 +172,32 @@ pub fn build_subscriptions_page() -> (gtk::Box, Rc<dyn Fn()>) {
                 rt: client.runtime_handle(),
                 w: widgets,
             });
-            refresh_mine(&ctx);
+            refresh(&ctx);
             #[cfg(feature = "payments")]
             {
-                let ctx = Rc::clone(&ctx);
-                claim_button.connect_clicked(move |_| redeem_claim(&ctx));
+                let ctx2 = Rc::clone(&ctx);
+                ctx.w
+                    .claim
+                    .button
+                    .connect_clicked(move |_| redeem_claim(&ctx2));
             }
             let ctx = Rc::clone(&ctx);
-            Rc::new(move || refresh_mine(&ctx))
+            Rc::new(move || refresh(&ctx))
         }
         // No client (unit test / pre-auth): the page stays at its placeholder.
         None => Rc::new(|| {}),
     };
 
     (outer, refresh)
+}
+
+/// The page's reads, on mount and on every show: the mine list, and the
+/// features courtesy read the redeem block is gated on (so a policy flip
+/// lands on the next visit).
+fn refresh(ctx: &Rc<Ctx>) {
+    refresh_mine(ctx);
+    #[cfg(feature = "payments")]
+    ctx.w.claim.read_gate(&ctx.client);
 }
 
 /// Read the caller's subscriptions (`mine.list`) on the tokio runtime, then
@@ -211,14 +213,52 @@ fn refresh_mine(ctx: &Rc<Ctx>) {
             let subs = SubscriptionsClient::new(nest);
             subs.mine_list().await.map_err(|e| e.to_string())
         },
-        move |res| match res {
-            Ok(subs) => {
-                clear_error(&ctx_render.w);
-                render_rows(&ctx_render, &subs);
-            }
-            Err(msg) => show_error(&ctx_render.w, &msg),
-        },
+        move |res| apply_mine_read(&ctx_render, res),
     );
+}
+
+/// Fold one `mine.list` answer onto the page. A success paints the rows; a
+/// failure leaves an earlier success's rows standing and says why on
+/// `error-message`.
+fn apply_mine_read(ctx: &Rc<Ctx>, res: Result<Vec<MineSubscription>, String>) {
+    let w = &ctx.w;
+    w.mine_read.set(w.mine_read.get().after(res.is_ok()));
+    match res {
+        Ok(subs) => {
+            clear_error(w);
+            render_rows(ctx, &subs);
+        }
+        Err(msg) => {
+            show_error(w, &msg);
+            paint_mine_placeholder(w);
+        }
+    }
+}
+
+/// The list's text line for where its read stands — three states, never two:
+/// loading before the read answers, "No subscriptions" only after a read
+/// answered empty, nothing after a failed first read (or beside rows).
+fn mine_placeholder_text(
+    read: fauna_core::possibility::ReadState,
+    empty: bool,
+) -> Option<&'static str> {
+    use fauna_core::possibility::ReadState;
+    match read {
+        ReadState::Pending => Some(crate::i18n::strings::common::LOADING),
+        ReadState::Resolved if empty => Some(s::NO_SUBSCRIPTIONS),
+        _ => None,
+    }
+}
+
+fn paint_mine_placeholder(w: &Widgets) {
+    let empty = w.mine_rows.borrow().is_empty();
+    match mine_placeholder_text(w.mine_read.get(), empty) {
+        Some(text) => {
+            w.mine_placeholder.set_text(text);
+            w.mine_placeholder.set_visible(true);
+        }
+        None => w.mine_placeholder.set_visible(false),
+    }
 }
 
 /// Redeem the pasted claim code (`fauna.payments.claims.redeem`) — binds the
@@ -228,7 +268,11 @@ fn refresh_mine(ctx: &Rc<Ctx>) {
 /// page error label.
 #[cfg(feature = "payments")]
 fn redeem_claim(ctx: &Rc<Ctx>) {
-    let code = ctx.w.claim_input.text().trim().to_string();
+    // The answer the button is painted from, asked again (rule 6).
+    if ctx.w.claim.refuse(&ctx.w.error_label) {
+        return;
+    }
+    let code = ctx.w.claim.input.text().trim().to_string();
     if code.is_empty() {
         return;
     }
@@ -250,7 +294,7 @@ fn redeem_claim(ctx: &Rc<Ctx>) {
         move |res| match res {
             Ok(()) => {
                 clear_error(&ctx_render.w);
-                ctx_render.w.claim_input.set_text("");
+                ctx_render.w.claim.input.set_text("");
                 refresh_mine(&ctx_render);
             }
             Err(msg) => show_error(&ctx_render.w, &msg),
@@ -290,16 +334,18 @@ fn unsubscribe(ctx: &Rc<Ctx>, author_id: ActorId, tier: String, home_nest_url: O
 }
 
 fn render_rows(ctx: &Rc<Ctx>, subs: &[MineSubscription]) {
-    let mut rows = ctx.w.mine_rows.borrow_mut();
-    for row in rows.drain(..) {
-        ctx.w.mine_list.remove(&row);
+    {
+        let mut rows = ctx.w.mine_rows.borrow_mut();
+        for row in rows.drain(..) {
+            ctx.w.mine_list.remove(&row);
+        }
+        for sub in subs {
+            let row = build_row(ctx, sub);
+            ctx.w.mine_list.append(&row);
+            rows.push(row);
+        }
     }
-    for sub in subs {
-        let row = build_row(ctx, sub);
-        ctx.w.mine_list.append(&row);
-        rows.push(row);
-    }
-    ctx.w.mine_placeholder.set_visible(subs.is_empty());
+    paint_mine_placeholder(&ctx.w);
 }
 
 fn build_row(ctx: &Rc<Ctx>, sub: &MineSubscription) -> gtk::Box {
@@ -368,7 +414,57 @@ mod tests {
         crate::testid::run_on_gtk_thread(|| {
             // No registered client → the page stays at its static placeholder, but
             // it must still build with every ui.yaml ID present.
-            let (_page, _refresh) = build_subscriptions_page();
+            let (page, _refresh) = build_subscriptions_page();
+            // No features read has answered: the redeem is shown but blocked
+            // still loading (`ui/README.md` § Offer only what is possible,
+            // rule 5), never live on a guess.
+            #[cfg(feature = "payments")]
+            {
+                let button =
+                    crate::testid::find_by_test_id(&page, ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON)
+                        .expect("the redeem button is built");
+                assert!(button.is_visible() && !button.is_sensitive());
+            }
+            let _ = page;
+        });
+    }
+
+    /// Loading is not empty (`ui/README.md` § List pages): before the
+    /// `mine.list` read answers the list says it is loading, never "No
+    /// subscriptions"; the empty text needs a read that answered empty; a
+    /// failed first read paints neither.
+    #[test]
+    fn the_list_is_not_claimed_empty_before_its_read() {
+        use crate::i18n::strings::common::LOADING;
+        use fauna_core::possibility::ReadState;
+        assert_eq!(
+            mine_placeholder_text(ReadState::Pending, true),
+            Some(LOADING)
+        );
+        assert_eq!(
+            mine_placeholder_text(ReadState::Resolved, true),
+            Some(s::NO_SUBSCRIPTIONS)
+        );
+        assert_eq!(mine_placeholder_text(ReadState::Resolved, false), None);
+        assert_eq!(mine_placeholder_text(ReadState::Failed, true), None);
+        crate::testid::run_on_gtk_thread(|| {
+            let (page, _refresh) = build_subscriptions_page();
+            let mut texts = Vec::new();
+            let mut stack = vec![page.upcast::<gtk::Widget>()];
+            while let Some(w) = stack.pop() {
+                if let Ok(label) = w.clone().downcast::<gtk::Label>()
+                    && label.is_visible()
+                {
+                    texts.push(label.text().to_string());
+                }
+                let mut child = w.first_child();
+                while let Some(c) = child {
+                    child = c.next_sibling();
+                    stack.push(c);
+                }
+            }
+            assert!(texts.iter().any(|t| t == LOADING), "{texts:?}");
+            assert!(!texts.iter().any(|t| t == s::NO_SUBSCRIPTIONS), "{texts:?}");
         });
     }
 }

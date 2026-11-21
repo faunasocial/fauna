@@ -2368,13 +2368,18 @@ impl ConversationsSession {
             }
 
             // One read of the bridged rooms and inbox. A failure is logged and
-            // retried at the next wake, like every other rail's.
+            // retried at the next wake, like every other rail's. Each sweep
+            // macro answers whether its rail's read came back without an
+            // error — `full_sweep!` marks the room list loaded only when every
+            // one did (`ConversationsManager::mark_rooms_loaded`).
             macro_rules! bridged_sweep {
                 () => {{
-                    if let Err(e) =
-                        poll_bridged_feed(bridged.as_ref(), &manager, &bridged_cursor).await
-                    {
-                        tracing::error!("poll bridged inbox: {e}");
+                    match poll_bridged_feed(bridged.as_ref(), &manager, &bridged_cursor).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            tracing::error!("poll bridged inbox: {e}");
+                            false
+                        }
                     }
                 }};
             }
@@ -2414,6 +2419,7 @@ impl ConversationsSession {
                             observer.observe_catch_up_complete(IndexableKind::Mail);
                         }
                     }
+                    swept
                 }};
             }
 
@@ -2481,6 +2487,7 @@ impl ConversationsSession {
                         let again =
                             refold_channels(&backend, &manager, &mut cursors, &fold.keyed_in).await;
                         fold.complete &= again.complete;
+                        fold.read &= again.read;
                     }
                     let folded = fold.complete;
                     if folded && conv_catch_up_open {
@@ -2489,6 +2496,7 @@ impl ConversationsSession {
                             observer.observe_catch_up_complete(IndexableKind::Conversation);
                         }
                     }
+                    fold.read
                 }};
             }
 
@@ -2500,11 +2508,20 @@ impl ConversationsSession {
                     // expands this, so no arm can acquire a half-counted cycle,
                     // and the push arms' single-rail sweeps stay deliberately
                     // uncounted (`ReceiveCycles` states why).
+                    // The identity this sweep reads for, taken before its
+                    // first rail: a sweep that ends after a switch marks
+                    // nothing loaded for the incoming account.
+                    let sweep_epoch = manager.identity_epoch();
                     receive_cycles.begin();
+                    // Whether every rail this sweep reads came back without an
+                    // error — the drain (a queued Welcome is a room the list
+                    // does not hold yet) and the three message rails.
+                    let mut rails_read = true;
                     if let Some(drain) = &inbox_drain
                         && let Err(e) = drain.drain_once().await
                     {
                         tracing::error!("inbox drain: {e}");
+                        rails_read = false;
                     }
                     // The standing room invitations — an inbox kind the drain
                     // above deliberately leaves un-acked, because accepting is
@@ -2516,11 +2533,23 @@ impl ConversationsSession {
                     // suggestions*) — re-read at start, on reconnect and on
                     // every tick; a no-op with no source registered.
                     manager.refresh_contact_roster().await;
-                    conv_sweep!();
-                    mail_sweep!();
-                    bridged_sweep!();
+                    // Each rail runs whatever an earlier one answered: a failing
+                    // rail never starves the others.
+                    rails_read &= conv_sweep!();
+                    rails_read &= mail_sweep!();
+                    rails_read &= bridged_sweep!();
                     poll_scheduling_feed(&backend, &scheduling_sink, &mut sched_cursors).await;
                     poll_folder_feed(&backend, &mut fs_cursors).await;
+                    // Every rail has been read once without an error: an empty
+                    // list from here on is an empty list
+                    // (`ConversationsManager::rooms_loaded`). A sweep with a
+                    // failed read marks nothing — the page stays "not read
+                    // yet", `error-message` does the talking, and the next
+                    // sweep tries again (`ui/README.md` § List pages: loading
+                    // is not empty, rule 2).
+                    if rails_read {
+                        manager.mark_rooms_loaded(sweep_epoch);
+                    }
                     receive_cycles.finish();
                 }};
             }
@@ -2937,6 +2966,15 @@ struct BoundFold {
     /// → *The Conversation kind's catch-up*: only a refold that completed
     /// **without error** closes the boundary).
     complete: bool,
+    /// **Every** bound channel's read came back — no channel's poll answered
+    /// an error. Looser than [`Self::complete`] on purpose: a stalled walk
+    /// (behind an unincorporated commit, or a room waiting for its key-in)
+    /// did read its channel, and a strand that waits on a resync must not hold
+    /// the page's room list "not read yet" for as long as it lasts. What the
+    /// page's `loaded` bit asks ([`ConversationsManager::mark_rooms_loaded`];
+    /// `ui/README.md` § List pages: loading is not empty, rule 2 — a failed
+    /// first read keeps the page unloaded).
+    read: bool,
     /// The community rooms whose wait for a key-in **ended this sweep**: the
     /// walk met the first key it can open and stopped before that record
     /// ([`ConvPollOutcome::keyed_in`]). Everything behind that stop is the
@@ -2950,12 +2988,14 @@ impl BoundFold {
     fn clean() -> Self {
         Self {
             complete: true,
+            read: true,
             keyed_in: Vec::new(),
         }
     }
 
     fn absorb(&mut self, channel: ChannelId, fold: ChannelFold) {
         self.complete &= fold.complete;
+        self.read &= fold.read;
         if fold.keyed_in {
             self.keyed_in.push(channel);
         }
@@ -2966,6 +3006,8 @@ impl BoundFold {
 #[cfg(not(target_arch = "wasm32"))]
 struct ChannelFold {
     complete: bool,
+    /// The channel's poll answered without an error ([`BoundFold::read`]).
+    read: bool,
     keyed_in: bool,
 }
 
@@ -3023,6 +3065,7 @@ async fn fold_channel(
 ) -> ChannelFold {
     let mut fold = ChannelFold {
         complete: true,
+        read: true,
         keyed_in: false,
     };
     {
@@ -3098,6 +3141,7 @@ async fn fold_channel(
             Err(e) => {
                 tracing::error!("poll {channel}: {e}");
                 fold.complete = false;
+                fold.read = false;
             }
         }
         // Name any member the walk seated that this device has never met

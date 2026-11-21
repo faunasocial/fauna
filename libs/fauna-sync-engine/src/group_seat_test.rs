@@ -131,6 +131,18 @@ async fn serve_of(seat: &SyncEngine, reader: &SyncEngine, manifest: ContentHash)
         .await
         .unwrap()
         .expect("the write's manifest is retained");
+    // A paged root's pages are asked for by their own addresses, as a peer
+    // asks for them (`file-sync.md` § Paged manifests).
+    let decoded: fauna_core::chunk::ChunkManifest =
+        fauna_core::encoding::canonical_decode(&bytes).unwrap();
+    for page in decoded.pages.iter().flatten() {
+        let page_bytes = seat
+            .share_manifest_bytes(&page.hash.digest())
+            .await
+            .unwrap()
+            .expect("a paged write's pages are retained and served");
+        served.manifests.insert(page.hash, page_bytes);
+    }
     served.manifests.insert(manifest, bytes);
     // Ask the reader's open which store keys the manifest names; each miss is
     // the next chunk to ask the seat's serve for.
@@ -244,6 +256,105 @@ async fn a_group_seat_mints_its_write_and_records_nothing_on_any_nest() {
     assert!(row.manifest_hash.is_none());
 
     // Let any stray dial land before the verdict.
+    tokio::task::yield_now().await;
+    assert!(
+        !dialled.load(Ordering::SeqCst),
+        "a group seat dialled a nest"
+    );
+}
+
+/// A write the host takes in again with no change — a File Provider extension
+/// handed the same item twice, a re-drive re-sealing the same bytes — is not
+/// a new edit: the pending row keeps the instant its edit was first taken in,
+/// so the plane's `LatestWins` ranks it by when the save was made and not by
+/// how often it was re-ingested (`group-set.md` decision 7, "the pending row's
+/// `created_at`"). A real edit after it is a new instant.
+#[tokio::test]
+async fn a_re_ingest_of_unchanged_bytes_keeps_the_pending_rows_instant() {
+    let (nest, _dialled) = nest_tripwire().await;
+    let watch = tempfile::tempdir().unwrap();
+    let seat = group_seat(&nest, watch.path());
+
+    std::fs::write(watch.path().join("a.txt"), b"the phone's save").unwrap();
+    seat.upload_file("a.txt").await.unwrap();
+    let first = pending_row(&seat, "a.txt");
+
+    // Past the clock's millisecond, so a fresh mint could not tie by luck.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    seat.upload_file("a.txt").await.unwrap();
+    let again = pending_row(&seat, "a.txt");
+    assert_eq!(again.manifest_hash, first.manifest_hash);
+    assert_eq!(
+        again.created_at, first.created_at,
+        "re-ingesting unchanged bytes moved the edit's instant later"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    std::fs::write(watch.path().join("a.txt"), b"a later, real edit").unwrap();
+    seat.upload_file("a.txt").await.unwrap();
+    let edited = pending_row(&seat, "a.txt");
+    assert_ne!(edited.manifest_hash, first.manifest_hash);
+    assert!(
+        edited.created_at > first.created_at,
+        "a new edit takes its own instant"
+    );
+}
+
+/// A paged write travels with its pages (`file-sync.md` § Paged manifests →
+/// *Compatibility*, the share clause): the writing seat retains the root and
+/// every page beside it, its serve answers each page by its own address and
+/// re-derives the chunks of every page, and the other seat lands the file
+/// byte-identical through the peer ingest.
+#[tokio::test]
+async fn a_paged_write_is_served_with_its_pages_and_lands_at_the_other_seat() {
+    let (nest, dialled) = nest_tripwire().await;
+    let (watch_a, watch_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = group_seat(&nest, watch_a.path());
+    let b = group_seat(&nest, watch_b.path());
+    // Every multi-chunk file is paged, one entry a page.
+    a.set_paging_rule(fauna_core::manifest_paging::PagingRule::with_thresholds(
+        1, 1, 1, 1,
+    ));
+
+    // Past the single-chunk threshold, so the file cuts into several chunks.
+    let bytes: Vec<u8> = (0..12 * 1024 * 1024u64)
+        .map(|i| ((i.wrapping_mul(37) ^ (i / 239)) % 251) as u8)
+        .collect();
+    std::fs::write(watch_a.path().join("big.bin"), &bytes).unwrap();
+    a.upload_file("big.bin").await.unwrap();
+    let row = pending_row(&a, "big.bin");
+    let manifest = ContentHash::from_digest_raw(
+        fauna_core::hex32::decode(row.manifest_hash.as_deref().unwrap()).unwrap(),
+    );
+    let root: fauna_core::chunk::ChunkManifest = fauna_core::encoding::canonical_decode(
+        &a.db()
+            .retained_manifest(row.manifest_hash.as_deref().unwrap())
+            .unwrap()
+            .expect("the root is retained")
+            .bytes,
+    )
+    .unwrap();
+    let pages = root.pages.clone().expect("the write is a paged root");
+    assert!(pages.len() > 1);
+
+    let served = serve_of(&a, &b, manifest).await;
+    assert_eq!(
+        served.manifests.len(),
+        pages.len() + 1,
+        "the root and every page"
+    );
+
+    let origin = PeerPageOrigin::Group { scope: SCOPE };
+    let (report, _) = ingest_peer_page_landing(&b, &origin, vec![folded(&row)], &served, None)
+        .await
+        .unwrap();
+    assert_eq!(report.materialized, 1, "{report:?}");
+    assert_eq!(
+        std::fs::read(watch_b.path().join("big.bin")).unwrap(),
+        bytes,
+        "byte-identical"
+    );
+
     tokio::task::yield_now().await;
     assert!(
         !dialled.load(Ordering::SeqCst),

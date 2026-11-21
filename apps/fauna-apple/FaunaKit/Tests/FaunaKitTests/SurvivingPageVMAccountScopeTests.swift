@@ -587,7 +587,7 @@ struct EventsVMAccountScopeTests {
     func aSwitchDropsTheCalendars() async throws {
         let vm = EventsVM()
         vm.configure(api: ScriptedCalendarAPI("account A"))
-        vm.calendars = [calendarA]
+        vm.seedLoadedCalendars([calendarA])
         vm.selectedCalendar = calendarA
         vm.visibleCalendarIds = ["account-a-calendar"]
         vm.errorMessage = "account A's error"
@@ -609,7 +609,7 @@ struct EventsVMAccountScopeTests {
         let apiA = ScriptedCalendarAPI("account A")
         let vm = EventsVM()
         vm.configure(api: apiA)
-        vm.calendars = [calendarA]
+        vm.seedLoadedCalendars([calendarA])
 
         vm.configure(api: apiA)
 
@@ -635,7 +635,7 @@ struct EventsVMAccountScopeTests {
     func resetDropsTheCalendars() async throws {
         let vm = EventsVM()
         vm.configure(api: ScriptedCalendarAPI("account A"))
-        vm.calendars = [calendarA]
+        vm.seedLoadedCalendars([calendarA])
         vm.showNewEvent = true
 
         vm.reset()

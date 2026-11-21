@@ -222,8 +222,8 @@ async fn four_rotations_keep_every_generation_in_custody_and_snapshot() {
 
 /// **The snapshot carries the instant finalize RECORDED, not step (d)'s
 /// clock read.** Step (d) provisions the snapshot with a fresh clock read for
-/// the outgoing generation; finalize then records its own instant — or keeps
-/// one already recorded (a re-drive or a resume after a crash between the
+/// the outgoing generation; finalize then records its own instant — or keeps a
+/// later one already recorded (a re-drive or a resume after a crash between the
 /// generation row's write and the swap). The re-wrap loop between the two
 /// takes seconds to minutes, so the snapshot must be re-provisioned after
 /// finalize or the MDA's seal-time trial order reads a different instant than
@@ -233,14 +233,17 @@ async fn four_rotations_keep_every_generation_in_custody_and_snapshot() {
 #[tokio::test]
 async fn the_snapshot_carries_the_instant_finalize_recorded() {
     let (machine, nest, mail) = build();
+    let machine = machine.with_retirement_clock(pinned(PINNED_AT));
     enable(&machine).await;
     let old = mail.current().msek.unwrap();
+    // An instant an earlier attempt of this finalize recorded, later than
+    // the clock now reads: finalize keeps the later of the two.
     mail.mutate(|rows| {
         rows.generations.insert(
             MsekFingerprint::of(&old),
             fauna_core::data::PriorMsekRetirement {
                 msek: old.clone(),
-                retired_at_unix: 7,
+                retired_at_unix: PINNED_AT + 7,
             },
         );
     });
@@ -254,8 +257,8 @@ async fn the_snapshot_carries_the_instant_finalize_recorded() {
     let stored = mail.current();
     assert_eq!(
         stored.prior_msek_retired_at(&old),
-        Some(7),
-        "finalize kept the recorded instant"
+        Some(PINNED_AT + 7),
+        "finalize kept the later, recorded instant"
     );
     assert_eq!(
         nest.state().provision_mls_snapshot.len(),

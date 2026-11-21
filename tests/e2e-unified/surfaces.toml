@@ -32,11 +32,41 @@ built = ["android", "ios", "linux", "macos", "tui", "windows"]
 detail = "linux + macOS + iOS + tui + windows + android have it (android paints ClaimCodeScreen / NatModeChoiceScreen and the shared claim drive reaches them through the test agent; not yet run on a device). web is witnessed for this outcome by test_web_claim_pin_wasm_witness.py instead — its e2e origin is never TLS, so a native channel-binding pin has nothing to check against there. web's wizard reaches a nest only when that nest serves the SPA itself (test_onboarding_localhost.py), so its witness of encryption-settings outcome 10 is a nest-served twin too"
 tracked = "onboarding.md"
 
+[painted-reason]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the driver read of the reason painted beside a blocked control or under a list section's heading (drivers/base.py::painted_reason, the element's reason attribute). tui publishes it from its possibility seam; macos and ios publish it from FaunaKit's one painter `.faunaPossible` (folded into every registration beneath it) and, for the Bridges list headings, from the heading's own registration while the list read has not answered (`AdminBridgesPendingView.sectionHeader`); linux from `possible::paint`'s `reason` test attr and, for the Bridges headings, the page's `BridgesReadGate`; web from the `data-reason` attribute `admin-read-gate.ts::reasonAttr` sets on every gated control and both Bridges headings; android from `ReadGate.kt::paintedReason`, packing `reason=` into the node's state description the debug bridge unpacks; windows from its one painter `PossibilityPaintExtensions.ApplyPossibility`, which writes the reason to the control's UIA FullDescription that the flaui-bridge answers as `reason` — every control painted through it, the Events pan pair first; the admin read gates and the Bridges headings publish it with their lift"
+tracked = "admin.md § Errors & edge cases"
+
+[ward-contact-entry-gate]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "a supervised ward whose guardian decides new contacts is offered contact-request-guardian-button at the Find User result, with contacts-add-button blocked by the refusal's reason, and each contacts-accept-button blocked while knock-guardian-pending holds (fauna_client_family::knock_possibility / accept_possibility / guardian_decides_contact). tui leads; linux, web, android, macos and ios paint it from the same predicates; windows still offers the ask only after the typed refusal and keeps accept enabled, lifted in its trickle-down row"
+tracked = "contacts.md § Errors & edge cases"
+
 [feed-post-advertise-nostr]
 kind = "product"
 built = ["android", "ios", "linux", "macos", "tui", "web"]
 detail = "the Advertise on Nostr / Stop advertising verb pair on the feed post overflow leads on tui and is painted on linux, web, android, macos and ios; windows follows in the batched trickle-down"
 tracked = "monetization.md § Implementation status today"
+
+[guardian-form-draft-validity]
+kind = "product"
+built = ["android", "linux", "tui", "web"]
+detail = "the guardian's family-contact-add-button, family-transfer-button and family-policy-save-button are painted blocked with the shared draft reason (fauna_client_family::forms::contact_add_possibility / transfer_possibility / policy_save_possibility) while the box is blank or not an actor id, or a screen-time cell does not validate; windows, macos and ios still refuse only at the press until their trickle-down lift"
+tracked = "family-safety.md § Errors & edge cases"
+
+[admin-form-draft-validity]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "an admin form's submit is painted blocked with the shared draft reason while a draft is malformed (registration ceiling, admit key, tier caps and name, serving port, region, CalDAV port, forwarder add, every mail group's numbers) and a mail group never keeps the stored value for a number it cannot parse; tui leads, linux, web, android, macos and ios follow, windows still validates only at the press until its trickle-down lift"
+tracked = "admin.md § Errors & edge cases"
+
+[personal-form-draft-validity]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the personal settings forms' submits (Mute word, a trained topic's create / save-name and Publish…, the publish sheet's Publish, a catalog labeler's Subscribe) are painted blocked with the shared draft reason while the draft cannot succeed (fauna_client_personalization::drafts, fauna_client_config::muted_word_add_possibility); tui leads, linux, web, android, macos and ios follow, windows still refuses only at the press until its trickle-down lift"
+tracked = "ui/settings.md § Errors & edge cases"
 
 [admin-mail-microsoft-registration]
 kind = "product"
@@ -58,7 +88,7 @@ tracked = "docs/goal/architecture/e2e-self-diagnosing-failures.md § The convent
 
 [author-drain-hold]
 kind = "harness"
-built = ["android", "ios", "linux", "macos", "tui", "web"]
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
 detail = "the `subscriptions_hold_author_drain` / `subscriptions_release_author_drain` agent commands over shared Rust's `hold_author_drain_for_test`, which keep a paid subscribe request standing in the author's requests while its badge is read; tui (lead) has them, the other apps' agents call the same shared seam through their FFI/wasm test flavor (the kids builds excise the author-side subscriptions plane, so they have none)"
 tracked = "monetization.md § Pillar 3"
 
@@ -82,8 +112,8 @@ tracked = "nests.md § Trust facet"
 
 [nest-trust-mint-materialize-note]
 kind = "product"
-built = ["android", "linux", "tui", "web"]
-detail = "the materialization option's mint-time note (nest-trust-mint-materialize-note) and the grant row's third honest-bound regime render on tui (the lead app), web, linux and android, each through the shared mint_option_note / grant_bound_note / mint_option_default_duration; macos, ios and windows receive the option label through shared Rust but render no note yet — their batched trickle-down lifts close it"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the materialization option's mint-time note (nest-trust-mint-materialize-note) and the grant row's third honest-bound regime render on tui (the lead app), web, linux, android, macos and ios (the shared FaunaKit mint flow), each through the shared mint_option_note / grant_bound_note / mint_option_default_duration; windows receives the option label through shared Rust but renders no note yet — its batched trickle-down lift closes it"
 tracked = "nests.md § Implementation status today, the materialization option"
 
 [bound-location-upload-witness]
@@ -113,8 +143,8 @@ tracked = "caldav-server.md"
 [calendar-after-reclaim-docker-drive]
 kind = "harness"
 built = ["linux", "tui", "web"]
-detail = "wired on linux, then tui (the lead app: the same shared HttpBridgeDriver set_state / reset / connection-status read the linux leg drives), then web (the same calls, its session pointed at the image through the CORS-adding SPA proxy whose two hops speak TLS to the image's listener); each app's Events page is the observation surface for this docker tier_4 factory-reset, re-claim, create-event cycle, and the other apps are the cross-app follow-on. What actually gates a leg is a FRESH keyed test image on a docker-capable box (only the primary Linux dev VM has a daemon), not the app surface"
-tracked = "nest/common.md § Factory reset (outcome 13's docker witness)"
+detail = "wired on linux, then tui (the lead app: the same shared HttpBridgeDriver set_state / reset / connection-status read the linux leg drives), then web (the same calls, its session pointed at the image through the CORS-adding SPA proxy whose two hops speak TLS to the image's listener); each app's Events page is the observation surface for this docker tier_4 factory-reset, re-claim, create-event cycle. The test is a tier_4 guard with no catalog marker: the image's half of the promise is factory-reset.md's [nest] outcome, witnessed app-less through the shared calendar code every app runs (test_factory_reset_calendar_reclaim_app_less_docker.py), so no other app owes this drive. What actually gates a leg is a FRESH keyed test image on a docker-capable box (only the primary Linux dev VM has a daemon), not the app surface"
+tracked = "nest/common.md § Factory reset (the tier_4 guard beside factory-reset.md's [nest] image outcome)"
 
 [community-room-relaunch-restore]
 kind = "product"
@@ -176,12 +206,6 @@ built = ["ios", "linux", "macos", "tui", "web", "windows"]
 detail = "this app publishes no connection state, so the shared connection barrier is a no-op on it and every OnlineOnly affordance it drives after launch is still racing the handshake"
 tracked = ""
 
-[conversations-archive-rail]
-kind = "product"
-built = ["ios", "linux", "macos", "tui", "web", "windows"]
-detail = "the Archive rail: the archive-import machine's thread source is registered with the conversations manager (threads::register_archive_threads over ConversationsManager::set_archive_thread_source — tui and linux in their own conv_backend, the FFI legs in the shared conversations factory, web through WsRpcClient::registerArchiveThreads) and re-read on each conversations-page visit, so an import's message threads list read-only on the Archive rail; an app that does not re-read it lists nothing; ios-kids is unlisted: the kids build excises archive import (not in D-K5's *Kept* — `ArchiveImportVM.swift` and `ArchiveLinksStore.swift` are behind `#if !FAUNA_KIDS`, and so is `ConversationsVM.refreshArchiveThreads`'s read), so its Archive rail lists nothing"
-tracked = "archive-import.md § Implementation status today (slice 6's threads half); the batched per-app trickle-down"
-
 [cross-nest-mls-receive-seam]
 kind = "harness"
 built = ["ios", "linux", "macos", "tui", "web"]
@@ -193,6 +217,12 @@ kind = "harness"
 built = ["android", "ios", "linux", "macos", "tui", "windows"]
 detail = "the app's test agent publishes the host's custody ceremony-ingest tally (`custody_ceremony_ingest`) and takes the owner's send-again poke (`custody_owner_resend_now`): wired on tui, linux, the two Apple apps, android and windows; web's agent carries neither"
 tracked = "docs/goal/behavior/identity-succession.md § Implementation status today"
+
+[custody-read-hold]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the `folders_hold_custody_reads` / `folders_release_custody_reads` agent commands over shared Rust's `fauna_client_folders::webdav_provision::hold_custody_reads_for_test`, which park the Folders page's mail-custody read (an account-store read no nest reply hold reaches) so `folder-webdav-toggle` is read while that read is out; tui (lead), linux (in-process), web (the wasm `foldersSetCustodyReadsHeldForTest`) and android and the two Apple apps (the FFI `folders{Hold,Release}CustodyReadsForTest`, one shared FaunaKit handler) have them; windows reaches the same shared FFI seam once its agent is lifted"
+tracked = "folders.md § Errors & edge cases"
 
 [discarded-machine-teardown]
 kind = "harness"
@@ -248,12 +278,6 @@ built = ["linux", "tui"]
 detail = "proven on linux and tui; the remaining NATIVE apps (windows, macos, ios) are ordinary cross-app trickle-down — they share trust.rs's TOFU model, so each one's leg is a driver swap, not new trust work. Every leg needs a fresh nest image on a docker-capable box, which is the actual gate here (web declares its absence in the test)"
 tracked = ""
 
-[folder-create-public]
-kind = "product"
-built = ["tui", "web", "linux", "android", "macos", "ios"]
-detail = "tui, web, linux and android (2026-11-08), macos and ios (2026-11-09, the shared FaunaKit sheet) create a folder born public through the wizard: wizard-audience-select / wizard-audience-hint on the Name step, Create arming the owner row's folder-audience-public-confirm, the confirm creating it public and attested (docs/goal/ui/folders.md § Audience and website serving → Born public). windows trails on the shared FolderWizardMachine and widens this list when it lands"
-tracked = ""
-
 [folder-location-free-space-button]
 kind = "product"
 built = ["linux", "tui", "windows"]
@@ -280,8 +304,8 @@ tracked = "onboarding.md § handle entry"
 
 [group-set-feed]
 kind = "product"
-built = ["linux", "macos", "tui", "windows"]
-detail = "the shared share-plane driver wires the group plane's feed on every native host's bound seat (`share_glue::GroupFeedWiring` over the facts the account runtime seats on its handle), so a member's group `fauna.sync.changes.list` is answered and a file in a set shared in person moves; witnessed end to end on tui, linux, windows and macos. Widen an app when its two-seat witness runs green"
+built = ["ios", "linux", "macos", "tui", "windows"]
+detail = "the shared share-plane driver wires the group plane's feed on every native host's bound seat (`share_glue::GroupFeedWiring` over the facts the account runtime seats on its handle), so a member's group `fauna.sync.changes.list` is answered and a file in a set shared in person moves; witnessed end to end on tui, linux, windows, macos and ios. Widen an app when its two-seat witness runs green"
 tracked = "group-set.md § Build design — the group set"
 
 [handover-agent-seam]
@@ -317,8 +341,8 @@ tracked = "docs/goal/behavior/account-age-band.md § Implementation status today
 [mail-client-ui-enable-docker-drive]
 kind = "harness"
 built = ["linux", "tui", "web"]
-detail = "wired on linux, then tui, then web (through the CORS-adding SPA proxy, whose two hops speak TLS to the image's listener); the other apps are the cross-app follow-on (same scope as test_mail_client_full_roundtrip.py). Every app here has the mail-settings enable toggle already, so the leg is a driver swap — what actually gates it is a FRESH nest image on a docker-capable box, and only the primary Linux dev VM has a docker daemon at all"
-tracked = "mail-settings.md"
+detail = "wired on linux, then tui, then web (through the CORS-adding SPA proxy, whose two hops speak TLS to the image's listener) — the apps that run beside a docker daemon, which only the primary Linux dev VM has. The test is the tier_4 guard of the app UI and the image joined, not a catalog witness: turn-on-mail.md outcome 6 is a [nest] outcome witnessed app-less by test_mail_deploy_lifecycle.py, and the enable firing set_mail_enabled is shared Rust every app runs, so no other app owes this drive"
+tracked = "mail-settings.md; turn-on-mail.md outcome 6"
 
 [mail-enable-ui-docker-drive]
 kind = "harness"
@@ -331,6 +355,12 @@ kind = "harness"
 built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
 detail = "the app builds the seam-only MailExportMachine (build_mail_export_machine_without_key_custody), so Start refuses honestly rather than opening a session nothing drives"
 tracked = "mail-export.md § Implementation status today"
+
+[mail-wizard-answers]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the mail-export, mail-import and archive-import wizards paint Next and Start blocked, with the reason painted, while the scope cannot start (no mailbox chosen, a date that is not a real YYYY-MM-DD day, a from date after the to date), from the shared MailExportSnapshot::next_possibility / start_possibility and their import twins; windows still refuses only at Start until its trickle-down lift"
+tracked = "mail-export.md § Next and Start offer only an export that can start"
 
 [mail-import-failed-record]
 kind = "product"
@@ -394,8 +424,8 @@ tracked = ""
 
 [moderation-queue-second-real-engine]
 kind = "harness"
-built = ["linux", "tui", "macos", "ios", "windows"]
-detail = "drives {…} through two real GUI engines — only linux, tui, macos, ios and windows support the second-real-engine fixture today"
+built = ["linux", "tui", "macos", "ios", "windows", "android"]
+detail = "drives {…} through two real GUI engines — only linux, tui, macos, ios, windows and android support the second-real-engine fixture today (android by a role swap: the phone plays bob, alice signs in on a tui seat)"
 tracked = "second_real_faunamls_app fixture (conftest.py)"
 
 [native-relaunch-sent-copy-proof]
@@ -418,8 +448,8 @@ tracked = "docs/features/app-log.md outcome 6"
 
 [on-demand-replica-serve-seat]
 kind = "product"
-built = ["linux", "tui", "windows"]
-detail = "an on-demand replica that is itself a serving seat, so a sibling's ask reaches it and its placeholder declines: the agent-hosted roots (the FUSE root on linux, cfapi on windows) are; apple's on-demand replica is the File Provider extension, another process, whose macOS host runs its own seat over its own connection and serves from its staging root (relay-serving.md § Relay serving → *Apple's File Provider replica*; built 2026-11-13, tier_1-pinned). No live witness drives it yet: the app's domain reconcile is a no-op in the e2e launch, so macos joins `built` with a witness of its own that drives a signed bundle's domain"
+built = ["ios", "linux", "tui", "windows"]
+detail = "an on-demand replica that is itself a serving seat, so a sibling's ask reaches it and its placeholder declines: the agent-hosted roots (the FUSE root on linux, cfapi on windows) are; apple's on-demand replica is the File Provider extension, another process, whose macOS host runs its own seat over its own connection and serves from its staging root (relay-serving.md § Relay serving → *Apple's File Provider replica*; built 2026-11-13, tier_1-pinned). iOS's extension seat, held under the app's foreground lease, is witnessed live by `tests/platform/ios/test_file_provider_relay_seat_ios.py` (a kept body served by relay, a placeholder declining, a backgrounded app withdrawing). macOS has no live witness yet: the app's domain reconcile is a no-op in the e2e launch, so macos joins `built` with a witness of its own that drives a signed bundle's domain"
 tracked = "relay-serving.md § Relay serving → *Which seats hold*"
 
 [picker-options-attr]
@@ -427,12 +457,6 @@ kind = "harness"
 built = ["android", "ios", "linux", "macos", "tui", "web"]
 detail = "the bridge reports every option a picker paints (the `options` attr, `drivers/base.py::option_texts`), without which an option's absence cannot be observed; android's androidTest bridge opens the anchor's menu and lists its painted items (`ElementOps.kt`, rules pinned in `AutomationSemanticsTest`); windows does not serve it yet"
 tracked = "docs/goal/behavior/task-delegation.md § Implementation status today"
-
-[post-archive-comments]
-kind = "product"
-built = ["ios", "linux", "macos", "tui", "web", "windows"]
-detail = "the folded archive comments under the owner's imported post: the app registers the archive machine's comment source on its feed manager and paints post-archive-comments / post-archive-comment-item from PostSummary.archive_comments"
-tracked = "docs/goal/behavior/archive-import.md § Implementation status today, the slice-6 comments paragraph"
 
 [post-image-paint-state]
 kind = "harness"
@@ -524,16 +548,10 @@ built = ["ios", "linux", "macos", "tui", "web", "windows"]
 detail = "not built yet on android (settings.md § Sub-page heading conformance table)"
 tracked = "settings.md § Sub-page heading conformance"
 
-[share-cap-nest-hold]
-kind = "harness"
-built = ["android", "linux", "macos", "tui", "windows"]
-detail = "the per-file-cap journey holds every fauna.sync.changes.list so the nest path cannot race the peer pull; on an iOS member that hold also parks the File Provider extension's own cold engine build, so the ingest door times out and the pass reads a cut transfer before any cap is put to a file"
-tracked = "p2p-shared-set-build.md § Phone peers — design, decision 5"
-
 [share-offline-landing]
 kind = "product"
 built = ["android", "ios", "linux", "macos", "tui", "windows"]
-detail = "a member device lands a peer body with the nest unreachable; on iOS the File Provider extension the OS relaunched cold builds on the set's binding record (decision 2″) and lands the owner's offline row by the writer roster its host cached while the nest answered — the interrupted-transfer case passes; the offline-pull case is still red on iOS, Files not listing the landed item through the domain with the nest down; web has no share-plane leg"
+detail = "a member device lands a peer body with the nest unreachable; web has no share-plane leg"
 tracked = "p2p-shared-set-build.md § Built — iOS's leg → The live witness"
 
 [share-serve-tally]
@@ -575,7 +593,7 @@ tracked = "monetization.md § Implementation status today"
 [succession-witness-member-seat]
 kind = "harness"
 built = ["ios", "linux", "macos", "tui", "web", "windows"]
-detail = "the witness itself is no longer the gap on the native apps: linux and the four FFI apps (macOS, iOS, windows, android) all register one as of 2026-09-03, off the shared ChainWitness + NativeSuccessionChainSource + peer-anchor sweep in fauna-client-recovery. What is unbuilt here is a member seat this fixture can drive — only linux, tui, web, macOS, iOS and windows have one"
+detail = "the witness itself is no longer the gap on the native apps: linux and the four FFI apps (macOS, iOS, windows, android) all register one as of 2026-09-03, off the shared ChainWitness + NativeSuccessionChainSource + peer-anchor sweep in fauna-client-recovery. What is unbuilt here is a member seat this fixture can drive — linux, tui, web, macOS, iOS and windows have one; android's arm (the roles swap: the phone plays the member, alice signs in on a tui seat) has landed and joins built on its own green device run"
 tracked = "succession-propagation.md § Implementation status today — the witness/anchor entries"
 
 [trust-differential-drive]
@@ -619,3 +637,63 @@ kind = "harness"
 built = ["tui", "linux", "web", "android", "macos", "ios"]
 detail = "the pull-back confirm's per-set preflight lines are the modal's body (ui/backups.md § Restore after losing the nest, no id of their own); a driver reads them as backup-destination-reseed-confirm-modal's text, title and consequence first, one line each. tui registers them so (2026-11-11); linux, web and android declare the same text on the modal (2026-11-11: linux `testid::set_test_text`, web `data-test-text`, which the web bridge's text read honours first, android the Card's semantics text, macos and ios the shared FaunaKit modal's automation value, 2026-11-11), their witness runs being that lift's verify requests; windows draws the lines but no run has read them through the modal's text yet — it joins when its driver's get_text of the modal returns them"
 tracked = ""
+
+[provider-choice]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the choose-providers page (onboarding-provisioning.md § 3d): the handle check's Continue lands on provider_choice and Continue goes straight to nest_provisioning with its choices region, on an app that declares set_renders_provider_choice. tui leads; macos and ios joined 2026-11-16 together (one flag in the shared OnboardingVM, one FaunaKit ProviderChoiceView, their witness runs that lift's verify requests); web joined 2026-11-16 (the page, its dialog, the choices region and the add-account seeding of held credentials, all from the shared machine's wasm getters); linux joined 2026-11-16 (the GTK page with its dialog under the open row, the server choices split out of vps_config into one widget set both pages show, the add-account seeding); android joined 2026-11-17 (the Compose page with its dialog painted inline under the open row, the choices region lifted into one composable vps_config and nest_provisioning share, the add-account seeding through seed_held_provider_credentials_json); windows still walks dns_config → vps_config until its trickle-down"
+tracked = "onboarding-provisioning.md § 3d"
+
+[blocked-reason-read]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the reason painted beside a blocked control, read through `PlatformDriver.blocked_reason` (`ui/README.md` § Offer only what is possible, rule 2): tui publishes the `reason` attr once its possibility seam has painted the reason, linux's `possible::paint` sets the `reason` test attr beside the tooltip or reason line it writes, web reads the control's `title` that `formGate` fills, macos and ios publish the `reason` attr from FaunaKit's one painter `.faunaPossible` (`FaunaKit/Core/Possibility.swift`), the same text it paints as the control's `.help`/`.accessibilityHint` and sibling caption, folded into every registration beneath it. android publishes the `reason` attr through `Modifier.paintedReason` (`ui/util/ReadGate.kt`) on the gated control's `stateDescription`, which the bridge's `GET /element/attr` reads back; windows publishes the `reason` attr from its one painter `ApplyPossibility` (the control's UIA FullDescription), but has not lifted the admin pages' gates nor painted every form gate through it"
+tracked = "ui/README.md § Offer only what is possible"
+
+[room-settings-plain-line-read]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the room editor's plain lines a member reads where the policy controls would sit, under the ids room-join-rule-line, room-history-policy-line, room-nest-read-line and room-labeler-line[i] (ui/conversations.md § Errors & edge cases → Controls this person can never use). tui paints them with the ids, macos and ios from the shared FaunaKit RoomSettingsSheet, linux in the room settings overlay, web in the conversations page and RoomLabelerRows (`value`/`checked` as data attributes), android in ConversationDetailScreen and RoomLabelerRows (on stateDescription); windows paints the lines untagged until its lift lands"
+tracked = "ui/conversations.md § Errors & edge cases"
+
+[admin-tier-add-read-gate]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the admin settings page's tier add form waits for the tier list read, blocked with still loading, or failed to load after a failed read (`admin.md` § Errors & edge cases → *Controls wait for their read*); macos and ios gate it in FaunaKit (`AdminTiersVM.addTierPossibility` over the `tiers.list` read, painted with `.faunaPossible`); linux, web and android gate it over the page's own `tiers.list` read (linux `TierAddForm`, web `writeAfterReadPossibility`, android `AdminSettingsVM`); windows still paints it from its bool getters until its trickle-down lift"
+tracked = "admin.md § Errors & edge cases"
+
+[wizard-first-run-held-launch]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "a first-run wizard's LoggedIn runs the launch and paints launch_progress, then launch_retry on failure, and shows the app only on Online (onboarding.md § Wizard exit handling → The finished wizard holds). linux runs it in the wizard's own window through the cold launch's verdict routing and journals the root from each window's frame clock. windows holds but on the wizard's own signing-in view, and its agent publishes no root_surface journal — lifted in its trickle-down row"
+tracked = "onboarding.md § Wizard exit handling"
+
+[launch-retry-account-switcher]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "launch_retry carries the account switcher (account-switcher-list / account-switcher-item, and the in-app re-auth prompt for a flagged target) when the device holds more than one account — the way back from a failed append finish to the previous account (onboarding.md § Wizard exit handling → The finished wizard holds). tui leads; linux, web and android followed 2026-11-18; macos and ios paint it from shared FaunaKit (LaunchRetryAccountSwitcher, the native re-auth prompt in place of the in-app trio), 2026-11-18; windows follows in its batched trickle-down row"
+tracked = "onboarding.md § Wizard exit handling"
+
+[wizard-append-held-launch]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "an append-mode wizard's LoggedIn switches to the new account's launch, which holds on launch_progress / launch_retry until Online. linux runs that launch in the append wizard's own window. windows holds but its agent publishes no root_surface journal — lifted in its trickle-down row"
+tracked = "onboarding.md § Wizard exit handling"
+
+[text-selectable-read]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "web"]
+detail = "the driver read of whether an element's text can be selected with the platform's own gesture (drivers/base.py::is_text_selectable): web makes a real mouse drag and reads the page's selection, linux answers the element's gtk label's selectable property through its agent's selectable attr, macos makes the platform's Select All on the element's own SwiftUI text view and reads whether the selection holds the element's text (agent /element/select-text; an element published selectable=false, or showing no selectable text view, answers no selection without a gesture), ios makes the person's long-press in the app's own process (agent /element/select-text; FaunaKit Testing/TextSelectionRead.swift) and answers True when the press selected part of the element's text in place or raised the platform's Copy action — the edit menu SwiftUI gives a selectable Text inside the app's layout, recognised by UIKit's own Copy label counted over every window's showing labels before and after the press — the route taking that menu down before it replies (an element published selectable=false answers without a gesture), android's bridge answers it by making the person's long-press on the element and reading what the selection it made holds with the selection's own Ctrl+C copy, or, when the copy wrote nothing, whether the platform's text-selection toolbar came up with its Copy action (ElementOps.selectText behind /element/select-text). tui and windows agents do not answer the selectable attr yet; each joins with its leg of the selectable-text rule"
+tracked = "ui/README.md § Text the person reads can be copied"
+
+[text-selection-read]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "web"]
+detail = "the driver read of the text the current selection holds (drivers/base.py::selected_text), the observable of a drag that selects text inside a clickable row and of a selection surviving a repaint. web reads window.getSelection(); android's bridge long-presses the element and reads the selection it made with the keyboard's Ctrl+C, which SelectionContainer handles without ending the selection, into a clipboard primed with a sentinel (ElementOps.selectText behind /element/select-text, ElementOps.selectedText behind /page/selection) — never the toolbar's Copy, which ends the selection; unmeasured on a device until the witness's first e2e:android run; macos selects with the platform's Select All on the element's own SwiftUI text view (agent /element/select-text — a pointer drag selects nothing while the app is not the active app, which an e2e app cannot count on being) and reads the selection back through the first responder's own Services write into a private pasteboard (agent /page/selection; FaunaKit Testing/TextSelectionRead.swift). linux selects with the gtk label's own Select All (selection.select-all, its context menu's item, after the focus a click gives — a gtk::GestureDrag signal emitted in-process with no input event behind it selects nothing, measured 2026-11-19) on the agent's /element/select-text and reads the selection the showing label holds on /page/selection (automation/agent.rs select_text / current_selection); its rule-3 pin stays read_text.rs's unit tests, since every linux row that opens something keeps its text unselectable. ios reads the window's first-responder text input (agent /page/selection; FaunaKit Testing/TextSelectionRead.swift) after the long-press of /element/select-text: in the app's own layout the press raises the whole-text edit menu (Copy, Share…) and selects nothing in place (measured 2026-11-19), so the read answers an empty selection there — ios owes no outcome 4 where the platform offers whole-text copy (declared by design, ui/README.md § Text the person reads can be copied)"
+tracked = "ui/README.md § Text the person reads can be copied"
+
+[admin-take-over]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the ward's admin-users row names its guardian (admin-users-supervised-by) and offers the admin's take-over with its armed confirm triple, over the shared admin_user_row_controls(user, viewer).take_over and admin_user_guardian_label. tui leads; linux, web and android paint it since 2026-11-14, macos and ios since 2026-11-15 (one FaunaKit view); windows passes no viewer yet, so its FFI face offers no take-over and the row renders neither element until its leg lands"
+tracked = "family-safety.md § App surface → Admin take-over"

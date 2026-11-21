@@ -10,6 +10,7 @@ from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import create_actor_and_register, ensure_tier, register_user, set_user_tier
 from helpers import budgets
 from helpers.app_surface import skip_environment
+from helpers.draft_validity import draft_validity_built, refused_before_or_at_the_press
 from helpers.rpc_hold import refuse_rpc, release_rpc_hold
 from helpers.waiting import wait_until
 from i18n.strings import S
@@ -144,17 +145,27 @@ def test_settings_tier_define_refuses_empty_and_duplicate_names(admin_app):
         admin_app.admin.edit_new_tier_cap(cap, value)
 
     admin_app.admin.edit_new_tier_name("")
-    admin_app.admin.add_tier()
+    # The empty name is the DRAFT's refusal: painted blocked on an app that
+    # has built the form case (never pressed), refused at the press elsewhere
+    # (`admin.md` § Errors & edge cases → *A form's submit is live only for a
+    # draft the nest would accept*).
+    refused_before_or_at_the_press(
+        admin_app,
+        submit_id="admin-settings-tier-add-button",
+        scope="admin-settings-tier-add-section",
+        press=admin_app.admin.add_tier,
+        reason=S.admin.settings_page.add_tier_error_empty_name,
+    )
     empty_refusal = admin_app.error_text().strip()
-    assert empty_refusal, "an empty tier name was refused silently"
 
     admin_app.admin.edit_new_tier_name(existing)
     admin_app.admin.add_tier()
-    # The nest's refusal replaces the local one: wait for the text to change.
+    # A taken name is the NEST's refusal (the draft is well-formed, so the
+    # button is live): wait for a refusal other than the empty-name one.
     deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline and admin_app.error_text().strip() == empty_refusal:
+    while time.monotonic() < deadline and admin_app.error_text().strip() in ("", empty_refusal):
         time.sleep(0.3)
-    assert admin_app.error_text().strip() != empty_refusal, (
+    assert admin_app.error_text().strip() not in ("", empty_refusal), (
         "a taken tier name was refused silently (or with the empty-name text)"
     )
     assert admin_app.admin.tier_definition_count() == before
@@ -260,11 +271,24 @@ def test_settings_tier_negative_cap_saves_as_zero_and_garbage_is_refused(
         f"{feeds_cap()!r}; error: {admin_app.error_text()!r}",
     )
 
-    # Words do not parse: whichever sanctioned shape the app takes (tui refuses
-    # the save and says why; the others revert to the persisted value), the
-    # nest keeps the 0 — an unparseable edit never zeroes or changes a cap.
+    # Words do not parse: an app that has built the form case paints the save
+    # blocked (never pressed — `admin.md` § Errors & edge cases → *A form's
+    # submit is live only for a draft the nest would accept*); the others
+    # still press and revert to the persisted value. Either way the nest
+    # keeps the 0 — an unparseable edit never zeroes or changes a cap.
     admin_app.admin.edit_tier_cap("feeds", "lots", index=row())
-    admin_app.admin.save_tier(index=row())
+    if draft_validity_built(admin_app):
+        wait_until(
+            lambda: not admin_app.driver.is_enabled(
+                "admin-settings-tier-save-button",
+                scope=f"admin-settings-tier-item[{row()}]",
+            ),
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"the tier save is live on an unparseable cap; "
+            f"error: {admin_app.error_text()!r}",
+        )
+    else:
+        admin_app.admin.save_tier(index=row())
     with WsRpcAdminClient(
         url, actor_id=nest_instance["admin"]["actor_id_bytes"], signing_key=bytes(sk)
     ) as ws:

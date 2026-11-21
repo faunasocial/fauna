@@ -2885,7 +2885,9 @@ pub(crate) struct RootBoot<C> {
     /// its marks, and the sweep reads their absence as the deletes they are.
     pub fresh_registration: bool,
     /// Connect the root to the OS — called AFTER the boot sweep, never before
-    /// (decision (c)); the returned guard lives as long as the loop.
+    /// (decision (c)); the guard of a [`Connected::Up`] lives as long as the
+    /// loop. A [`Connected::Retry`] is called again at the loop's
+    /// connect-retry edge ([`CONNECT_RETRY_FIRST`]) until it connects.
     pub connect: C,
     /// The root is a **reader's** presence root, its engine built read-only
     /// (`BuiltEngine::read_only`; `on-demand-files-shared-sets.md` § Shared sets
@@ -2895,12 +2897,79 @@ pub(crate) struct RootBoot<C> {
     pub read_only: bool,
 }
 
+/// What a root's [`RootBoot::connect`] answered.
+pub(crate) enum Connected<G> {
+    /// The root is connected to the OS; the guard lives as long as the loop.
+    Up(G),
+    /// Not connected, and another try may connect it: the loop calls `connect`
+    /// again at its connect-retry edge, until it connects or the root ends. A
+    /// cfapi registration answers this for any failure — the OS refuses a
+    /// freshly deployed package's `Register` for a while
+    /// (`installers/windows.md` § Direct download, 5, *Removal*), and a
+    /// failure that persists costs one logged try per edge.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Retry,
+    /// Not connected, and no later try in this root's life would change that:
+    /// never called again. A FUSE mount answers this — its failures are the
+    /// box's (no `fusermount3`, no `/dev/fuse`, a directory not opened), and a
+    /// mount made late, under a running watcher, is not measured.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Down,
+}
+
+/// The connect-retry edge's first wait after a [`Connected::Retry`]; it
+/// doubles after each refused try, up to the root's rescan interval, and
+/// starts over at the next root. A refused root serves nothing between tries,
+/// so the first ones come soon: the measured refusal of a freshly deployed
+/// package lasted three `Register` calls.
+pub(crate) const CONNECT_RETRY_FIRST: Duration = Duration::from_secs(5);
+
+/// The connect-retry edge of a root whose connect answered
+/// [`Connected::Retry`]: when its next try is due, and the wait before it.
+struct ConnectRetry {
+    at: tokio::time::Instant,
+    wait: Duration,
+}
+
+impl ConnectRetry {
+    /// Take one connect's answer: an `Up` puts its guard in `connection` and
+    /// ends the tries, a `Down` ends them, and a `Retry` is due `wait` from now.
+    fn after<G>(answer: Connected<G>, connection: &mut Option<G>, wait: Duration) -> Option<Self> {
+        match answer {
+            Connected::Up(guard) => {
+                *connection = Some(guard);
+                None
+            }
+            Connected::Retry => Some(Self {
+                at: tokio::time::Instant::now() + wait,
+                wait,
+            }),
+            Connected::Down => None,
+        }
+    }
+
+    /// The wait before the try after this one: doubled, at most `cap`.
+    fn next_wait(&self, cap: Duration) -> Duration {
+        self.wait.saturating_mul(2).min(cap)
+    }
+}
+
+/// Wait for the connect-retry edge — for ever while no try is owed.
+async fn connect_retry_due(retry: Option<&ConnectRetry>) {
+    match retry {
+        Some(retry) => tokio::time::sleep_until(retry.at).await,
+        None => std::future::pending().await,
+    }
+}
+
 #[cfg(test)]
-impl RootBoot<fn()> {
+impl RootBoot<fn() -> Connected<()>> {
     /// The root is already connected by the caller (the loop-level tests and the
     /// live harness's pre-connected roots): no hygiene, a no-op connect.
     pub(crate) fn already_connected() -> Self {
-        fn connected() {}
+        fn connected() -> Connected<()> {
+            Connected::Up(())
+        }
         RootBoot {
             fresh_registration: false,
             connect: connected,
@@ -2918,8 +2987,11 @@ impl RootBoot<fn()> {
 /// 2. the mark hygiene of decision (e) ([`RootBoot::fresh_registration`]);
 /// 3. the boot sweep — the startup `converge` (drain → `reconcile` → upload),
 ///    whose delete detection needs the DB and the disk and nothing else; with no
-///    provider connected nothing can re-populate under it;
-/// 4. **then** [`RootBoot::connect`] — the re-registration re-arms the root's
+///    provider connected nothing can re-populate under it. A pass held for the
+///    folder row (the nest down at boot, the commonest restart) still runs it
+///    (`SyncEngine::reconcile_deletes`) and holds only the take-up;
+/// 4. **then** [`RootBoot::connect`] (a refused one tried again at the serve
+///    loop's connect-retry edge, so later still) — the re-registration re-arms the root's
 ///    population, and the first browse lists every tracked `Placeholder` row back,
 ///    which is why the sweep must already have seen what the downtime deleted;
 /// 5. everything else where it always was: the fold's stale-hydrated invalidation
@@ -2948,7 +3020,7 @@ pub(crate) async fn serve_hydration_root<H, I, C, G>(
 ) where
     H: HydrationHost,
     I: PlaceholderInvalidator,
-    C: FnOnce() -> G,
+    C: FnMut() -> Connected<G>,
 {
     let serving = async {
         match serve {
@@ -2989,7 +3061,7 @@ async fn drive_hydration_root<H, I, C, G>(
 ) where
     H: HydrationHost,
     I: PlaceholderInvalidator,
-    C: FnOnce() -> G,
+    C: FnMut() -> Connected<G>,
 {
     let read_only = boot.read_only;
     // The off-disk posture comes before anything reads the rows: the fold, the
@@ -3063,7 +3135,13 @@ async fn drive_hydration_root<H, I, C, G>(
     // (the FUSE unmount, the cfapi disconnect) before the engine and its state
     // DB do, and no request through the binding ever finds the engine gone
     // (`on-demand-files-linux.md` § Linux FUSE binding, the flips rule). Keep it here.
-    let _connection = (boot.connect)();
+    //
+    // A connect the OS refused is not the root's end: the loop's connect-retry
+    // edge calls it again until it connects ([`Connected::Retry`]) — every try
+    // after the boot sweep, as decision (c) wants.
+    let mut connect = boot.connect;
+    let mut connection = None;
+    let mut connect_retry = ConnectRetry::after(connect(), &mut connection, CONNECT_RETRY_FIRST);
 
     // From the connection on the platform may ask, and nothing the loop waits on may hold its
     // answer up (`on-demand-files.md` § *A placeholder describes the version its row
@@ -3228,6 +3306,24 @@ async fn drive_hydration_root<H, I, C, G>(
             // Engine cancelled (folder removed / switched to always, or the whole
             // host dropped). Return so the owning future tears its root down.
             _ = cancel.cancelled() => break,
+
+            // The connect-retry edge: a root the OS refused at its connect is
+            // connected at a later try, never left serving nothing until the next
+            // engine start (`file-sync.md` § the registration lifecycle). The try
+            // is the same synchronous call the boot made; its listings come as the
+            // platform asks for them, from the rows the boot already folded.
+            () = connect_retry_due(connect_retry.as_ref()) => {
+                if let Some(tried) = connect_retry.take() {
+                    let wait = tried.next_wait(rescan_interval.max(CONNECT_RETRY_FIRST));
+                    connect_retry = ConnectRetry::after(connect(), &mut connection, wait);
+                    if connection.is_some() {
+                        tracing::info!(
+                            folder = %fauna_core::log_redact::log_folder_name(&folder),
+                            "the on-demand root connected at a later try"
+                        );
+                    }
+                }
+            }
 
             // The local-write half. Cancel-safe (`LocalWrites::next` only awaits an mpsc
             // recv + an interval tick), so racing it here can never drop an event it had
@@ -6718,7 +6814,10 @@ mod tests {
             FakeInvalidator::default(),
             RootBoot {
                 fresh_registration,
-                connect: move || connect_log.lock().unwrap().push("connect"),
+                connect: move || {
+                    connect_log.lock().unwrap().push("connect");
+                    Connected::Up(())
+                },
                 read_only,
             },
             rx,
@@ -6731,6 +6830,99 @@ mod tests {
             None,
         ));
         log.lock().unwrap().clone()
+    }
+
+    /// What a scripted connect answers, one per call ([`connect_retry_run`]).
+    #[derive(Clone, Copy)]
+    enum ConnectAnswer {
+        Retry,
+        Up,
+        Down,
+    }
+
+    /// The guard a scripted connect hands over: its drop is the disconnect.
+    struct ScriptedGuard(Arc<std::sync::Mutex<Vec<&'static str>>>);
+
+    impl Drop for ScriptedGuard {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("disconnect");
+        }
+    }
+
+    /// Run one root whose connect answers `script` in turn, in virtual time,
+    /// until its first rescan tick (300 s) ends it, and return what the
+    /// connect and its guard did: `connect` per call, `disconnect` at the
+    /// guard's drop. A call past the script panics.
+    fn connect_retry_run(script: Vec<ConnectAnswer>) -> Vec<&'static str> {
+        let (_cmd_tx, rx) = mpsc::unbounded_channel::<HydrationCommand>();
+        let cancel = CancellationToken::new();
+        let hydrator = FakeHydrator {
+            interval: Some(Duration::from_secs(300)),
+            stop_after_repulls: Some((1, cancel.clone())),
+            ..Default::default()
+        };
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connect_log = log.clone();
+        let mut script = script.into_iter();
+        loop_runtime().block_on(async move {
+            tokio::time::pause();
+            serve_hydration_root(
+                hydrator,
+                FakeInvalidator::default(),
+                RootBoot {
+                    fresh_registration: false,
+                    connect: move || {
+                        connect_log.lock().unwrap().push("connect");
+                        match script.next().expect("a connect past the script") {
+                            ConnectAnswer::Retry => Connected::Retry,
+                            ConnectAnswer::Down => Connected::Down,
+                            ConnectAnswer::Up => Connected::Up(ScriptedGuard(connect_log.clone())),
+                        }
+                    },
+                    read_only: false,
+                },
+                rx,
+                None,
+                PathBuf::from(r"C:\Root"),
+                "docs".into(),
+                cancel,
+                None,
+                None,
+                None,
+            )
+            .await;
+        });
+        log.lock().unwrap().clone()
+    }
+
+    /// A root the OS refused at boot is not left serving nothing until the next
+    /// engine start: a connect answering `Retry` is called again at the loop's
+    /// connect-retry edge until it connects, the guard it then hands over is
+    /// held for the rest of the loop, and nothing calls it after that
+    /// (`installers/windows.md` § Direct download, 5, *Removal*: a freshly
+    /// deployed package's `Register` is refused `0x80070490` at first). The
+    /// tries come long before the 300 s tick; nothing here is timed.
+    #[test]
+    fn a_refused_connect_is_tried_again_until_the_root_connects() {
+        use ConnectAnswer::{Retry, Up};
+        assert_eq!(
+            connect_retry_run(vec![Retry, Retry, Up]),
+            vec!["connect", "connect", "connect", "disconnect"]
+        );
+    }
+
+    /// A connect that answers `Down` is never called again, and one that
+    /// connects at boot is called once.
+    #[test]
+    fn a_connect_that_stays_down_or_connects_is_called_once() {
+        assert_eq!(
+            connect_retry_run(vec![ConnectAnswer::Down]),
+            vec!["connect"]
+        );
+        assert_eq!(
+            connect_retry_run(vec![ConnectAnswer::Up]),
+            vec!["connect", "disconnect"]
+        );
     }
 
     /// Decision (c) — **evidence before re-population**: the boot sweep (the startup

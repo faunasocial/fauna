@@ -18,6 +18,8 @@ import com.fauna.app.ui.components.CopyButton
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
 
 @HiltViewModel
 class IdentityCreatedVM @Inject constructor(

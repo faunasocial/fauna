@@ -1558,12 +1558,19 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
         Action::ClearSearch => Some(Op::ClearSearch { manager }),
         Action::LoadMore => Some(Op::LoadMore { manager }),
         Action::SubmitPost => {
-            // Posting closes the rich dialog, exactly as linux's `d.close()` on
-            // its dialog's Post. Nothing is lost if the submit is rejected: the
-            // compose text and `compose-error` are manager-owned snapshot state,
-            // so a validation failure re-appears on the inline bar the dialog
-            // was covering.
-            app.feed.compose_dialog_open = false;
+            // The shared predicate `post-submit-button` is painted from; the
+            // manager's own empty guard stays the backstop. The rich dialog is
+            // NOT closed here: it closes on the save's success
+            // ([`Outcome::Form`]), and a refused or failed post keeps it open
+            // with what was typed (`ui/README.md` § Offer only what is
+            // possible, rule 7).
+            let text = manager.snapshot().compose.text;
+            if app.errors.refuse(
+                crate::pages::Page::Feed,
+                &fauna_feed::forms::post_submit_possibility(&text),
+            ) {
+                return None;
+            }
             Some(Op::SubmitPost {
                 manager,
                 content: app.feed.content.clone(),
@@ -1618,20 +1625,19 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
             None
         }
         Action::SubmitReply => {
-            let draft = app.feed.reply_draft.take()?;
-            // The button paints disabled on empty text (mirrors linux's
-            // `build_reply_dialog` guard); this refuses independently rather
-            // than trusting the paint — an empty reply is meaningless, and
-            // `FeedManager::reply` itself would refuse it, but restoring the
-            // draft here keeps a stray Enter from silently dropping typed text.
-            if draft.text.trim().is_empty() {
-                app.feed.reply_draft = Some(draft);
+            let draft = app.feed.reply_draft.clone()?;
+            // The shared predicate the submit button is painted from, asked
+            // again so a stray Enter refuses with the painted reason.
+            if app.errors.refuse(
+                crate::pages::Page::Feed,
+                &fauna_feed::forms::reply_submit_possibility(&draft.text),
+            ) {
                 return None;
             }
-            // Closes optimistically, exactly like `SubmitPost` above: a
-            // failure lands on the page's `error-message`, not a slot inside
-            // the (now-closed) dialog — the same tradeoff linux's `d.close()`
-            // and web's `closeReplyDialog()` both make.
+            // The dialog stays open until the reply is saved
+            // ([`Outcome::Form`]): a failure lands on `error-message` with the
+            // typed text still in the dialog (`ui/README.md` § Offer only what
+            // is possible, rule 7).
             Some(Op::Reply {
                 manager,
                 content: app.feed.content.clone(),
@@ -1642,11 +1648,16 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
         }
         Action::CreateFeed => {
             let form = app.feed.form.clone();
-            // Close the sub-page optimistically: `create_feed` refreshes the feed
-            // list itself, so a success needs no further local step, and a
-            // failure surfaces on `error-message` over the list.
-            app.feed.mode = Mode::List;
-            app.feed.form = CreateFeedForm::fresh();
+            if app.errors.refuse(
+                crate::pages::Page::Feed,
+                &fauna_feed::forms::create_feed_possibility(&form.name),
+            ) {
+                return None;
+            }
+            // The sub-page closes on the save's success ([`Outcome::Form`]);
+            // a failure keeps it open with the rules typed, the error on
+            // `error-message` (`ui/README.md` § Offer only what is possible,
+            // rule 7).
             Some(Op::CreateFeed { manager, form })
         }
         Action::DeleteFeed(feed_id) => Some(Op::DeleteFeed { manager, feed_id }),
@@ -2024,6 +2035,12 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
         }
         Action::SubscribeBridge => {
             let form = app.feed.bridge_form.clone();
+            if app.errors.refuse(
+                crate::pages::Page::Feed,
+                &fauna_feed::forms::bridge_subscribe_possibility(&form.kind, &form.uri),
+            ) {
+                return None;
+            }
             // Empty-name-defaults-to-URI — linux's client-glue fallback
             // (`feed_list.rs:799`); the shared manager takes `name` as a plain
             // arg with no default of its own.
@@ -2032,11 +2049,9 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
             } else {
                 form.name
             };
-            // Close optimistically, the `Action::CreateFeed` precedent: a
-            // failure surfaces on `error-message` over the list, ui.yaml
-            // defines no form-scoped error slot here.
-            app.feed.bridge_form_open = false;
-            app.feed.bridge_form = BridgeSubscribeForm::default();
+            // The form closes on the save's success ([`Outcome::Form`]); a
+            // failure keeps it open on `error-message` (ui.yaml defines no
+            // form-scoped error slot here).
             Some(Op::SubscribeBridge {
                 manager,
                 kind: form.kind,
@@ -2415,6 +2430,14 @@ pub enum Outcome {
     /// The op completed. The manager's own snapshot tick drives the redraw,
     /// so there is nothing to fold back here.
     Done,
+    /// A form's save finished: `error` is `None` on success, which is the one
+    /// point the form closes; a failure lands on `error-message` and leaves
+    /// the form open with what was typed (`ui/README.md` § Offer only what is
+    /// possible, rule 7).
+    Form {
+        form: FeedForm,
+        error: Option<String>,
+    },
     /// A transport/validation failure — lands on `error-message` /
     /// `compose-error` via [`apply_outcome`].
     Error(String),
@@ -2766,9 +2789,13 @@ impl Op {
                 post_id,
                 body,
                 public_confirmed,
-            } => match send_reply(&manager, content, post_id, body, public_confirmed).await {
-                None => Outcome::Done,
-                Some(e) => Outcome::Error(refusal_copy(e)),
+            } => Outcome::Form {
+                form: FeedForm::Reply {
+                    post_id: post_id.clone(),
+                },
+                error: send_reply(&manager, content, post_id, body, public_confirmed)
+                    .await
+                    .map(refusal_copy),
             },
             Op::OpenPostDetail {
                 manager,
@@ -2856,20 +2883,19 @@ impl Op {
                     Some(Err(e)) => Outcome::Error(feed::error_buy_unlock(&e)),
                 }
             }
-            Op::CreateFeed { manager, form } => match manager
-                .create_feed(
-                    form.name,
-                    form.rules,
-                    form.combination,
-                    None,
-                    None,
-                    form.factors,
-                )
-                .await
-                .err()
-            {
-                Some(e) => Outcome::Error(e),
-                None => Outcome::Done,
+            Op::CreateFeed { manager, form } => Outcome::Form {
+                form: FeedForm::CreateFeed,
+                error: manager
+                    .create_feed(
+                        form.name,
+                        form.rules,
+                        form.combination,
+                        None,
+                        None,
+                        form.factors,
+                    )
+                    .await
+                    .err(),
             },
             Op::DeleteFeed { manager, feed_id } => match manager.delete_feed(feed_id).await.err() {
                 Some(e) => Outcome::Error(e),
@@ -2887,9 +2913,9 @@ impl Op {
                 kind,
                 uri,
                 name,
-            } => match manager.subscribe_bridge(kind, uri, name).await.err() {
-                Some(e) => Outcome::Error(e),
-                None => Outcome::Done,
+            } => Outcome::Form {
+                form: FeedForm::BridgeSubscribe,
+                error: manager.subscribe_bridge(kind, uri, name).await.err(),
             },
             Op::UnsubscribeBridge { manager, id } => {
                 match manager.unsubscribe_bridge(id).await.err() {
@@ -2965,10 +2991,13 @@ impl Op {
                 manager,
                 content,
                 staged,
-            } => match submit_post(manager, content, staged).await {
-                Some(e) => Outcome::Error(e),
-                None => Outcome::Done,
-            },
+            } => {
+                let kept = staged.clone();
+                Outcome::Form {
+                    form: FeedForm::Post { staged: kept },
+                    error: submit_post(manager, content, staged).await,
+                }
+            }
             Op::FetchImage {
                 blobs,
                 manager,
@@ -3120,10 +3149,72 @@ fn refusal_copy(e: String) -> String {
 /// collapses into this one `Done` variant, so success on ANY gesture clears a
 /// stale error from an unrelated prior failure, matching `app.errors` being
 /// page-scoped rather than gesture-scoped everywhere else.
+/// Which feed form a save belongs to ([`Outcome::Form`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedForm {
+    /// The composer; `staged` is the attachment that went out with the post.
+    Post { staged: Option<String> },
+    /// `feed-reply-dialog`, for the post it answers.
+    Reply { post_id: String },
+    /// The `create_feed` sub-page.
+    CreateFeed,
+    /// The inline bridge-subscribe form.
+    BridgeSubscribe,
+}
+
+/// Close `form` after its save succeeded — and only the form the save came
+/// from: a person who has since closed it, or opened the reply dialog on
+/// another post, keeps what they are looking at.
+fn close_saved_form(app: &mut App, form: FeedForm) {
+    match form {
+        FeedForm::Post { .. } => app.feed.compose_dialog_open = false,
+        FeedForm::Reply { post_id } => {
+            if app
+                .feed
+                .reply_draft
+                .as_ref()
+                .is_some_and(|d| d.post_id == post_id)
+            {
+                app.feed.reply_draft = None;
+            }
+        }
+        FeedForm::CreateFeed => {
+            if app.feed.mode == Mode::CreateFeed {
+                app.feed.mode = Mode::List;
+                app.feed.form = CreateFeedForm::fresh();
+            }
+        }
+        FeedForm::BridgeSubscribe => {
+            if app.feed.bridge_form_open {
+                app.feed.bridge_form_open = false;
+                app.feed.bridge_form = BridgeSubscribeForm::default();
+            }
+        }
+    }
+}
+
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
     match outcome {
         Outcome::Done => {
             app.errors.remove(&crate::pages::Page::Feed);
+        }
+        Outcome::Form { form, error: None } => {
+            app.errors.remove(&crate::pages::Page::Feed);
+            close_saved_form(app, form);
+        }
+        Outcome::Form {
+            form,
+            error: Some(e),
+        } => {
+            app.errors.insert(crate::pages::Page::Feed, e);
+            // The staged attachment went out with the op; hand it back so the
+            // still-open composer holds what the person attached — unless
+            // they staged another one meanwhile.
+            if let FeedForm::Post { staged: Some(path) } = form
+                && app.feed.staged_file.is_none()
+            {
+                app.feed.staged_file = Some(path);
+            }
         }
         Outcome::Error(e) => {
             app.errors.insert(crate::pages::Page::Feed, e);
@@ -3955,36 +4046,61 @@ pub fn elements(app: &App) -> Vec<Element> {
             Gesture::Feed(Action::ClearImported),
         ));
     }
+    // The feed selector is ONE one-of-N group — Trending, Local, then the
+    // user's own feeds — so each entry is a `Radio` (`apps/tui.md` § Rendering
+    // → *Control vocabulary*: `(*)` marks the current one) and publishes
+    // `state` on/off in its registry attrs, which is how the actuation sweep
+    // reads a re-chosen entry as the current choice
+    // (`e2e-systematic-ui-walks.md` § The possibility invariants, layer (c)).
+    const GROUP: &str = "feed-selector";
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    // The entry in force, by the one rule every app paints from
+    // (`FeedSnapshot::selector_choice`).
+    use fauna_feed::FeedSelectorChoice as Choice;
+    let choice = snapshot.selector_choice();
+    let trending_on = choice == Choice::Trending;
+    let local_on = choice == Choice::Local;
     // The built-in Trending virtual feed, **above** the user's own feeds
     // (`trending.md` § The Trending feed; ui.yaml's `feed-trending-item` note).
     // A pseudo-entry, not a `feed-item`: it has no feed row, so it carries no id
-    // and never appears in `snapshot.feeds`. Like `feed-item` it paints no
-    // selected state — tui's selector shows the selection through the posts it
-    // loads, the same shape every other row here uses.
-    out.push(Element::gesture_button(
-        ids::FEED_TRENDING_ITEM,
-        feed::list::TRENDING,
-        true,
-        Gesture::Feed(Action::SelectTrending),
-    ));
+    // and never appears in `snapshot.feeds`; `trending_selected` marks it.
+    out.push(
+        Element::radio_gesture(
+            ids::FEED_TRENDING_ITEM,
+            feed::list::TRENDING,
+            trending_on,
+            Gesture::Feed(Action::SelectTrending),
+        )
+        .attr("group", GROUP)
+        .attr("state", on_off(trending_on)),
+    );
     // The built-in Local entry, directly below Trending and above the user's own
     // feeds (`feed.md` § Layout & flow, region 1; ui.yaml `feed-local-item`): the
     // one gesture back to the nest's local feed once a custom feed or Trending is
-    // selected. Like Trending it is a pseudo-entry with no feed row, and like
-    // every row here it paints no selected state.
-    out.push(Element::gesture_button(
-        ids::FEED_LOCAL_ITEM,
-        feed::list::LOCAL,
-        true,
-        Gesture::Feed(Action::SelectFeed(None)),
-    ));
+    // selected. Like Trending it is a pseudo-entry with no feed row; it is the
+    // current choice when neither Trending nor a custom feed is.
+    out.push(
+        Element::radio_gesture(
+            ids::FEED_LOCAL_ITEM,
+            feed::list::LOCAL,
+            local_on,
+            Gesture::Feed(Action::SelectFeed(None)),
+        )
+        .attr("group", GROUP)
+        .attr("state", on_off(local_on)),
+    );
     for (i, f) in snapshot.feeds.iter().enumerate() {
-        out.push(Element::gesture_button(
-            ids::FEED_ITEM,
-            f.name.clone(),
-            true,
-            Gesture::Feed(Action::SelectFeed(Some(f.feed_id.clone()))),
-        ));
+        let on = choice == Choice::Feed(f.feed_id.as_str());
+        out.push(
+            Element::radio_gesture(
+                ids::FEED_ITEM,
+                f.name.clone(),
+                on,
+                Gesture::Feed(Action::SelectFeed(Some(f.feed_id.clone()))),
+            )
+            .attr("group", GROUP)
+            .attr("state", on_off(on)),
+        );
         // Scoped under its own `feed-item` row — the `feed-post-actions-button`
         // idiom under `post-card[i]` — since `feed-delete-button` is itself
         // unindexed (`ui.yaml`).
@@ -5081,12 +5197,15 @@ fn compose_elements(app: &App, snapshot: &FeedSnapshot) -> Vec<Element> {
             crate::wizard::localized(error),
         ));
     }
-    out.push(Element::gesture_button(
-        ids::POST_SUBMIT_BUTTON,
-        common::POST,
-        !compose.submitting,
-        Gesture::Feed(Action::SubmitPost),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::POST_SUBMIT_BUTTON,
+            common::POST,
+            !compose.submitting,
+            Gesture::Feed(Action::SubmitPost),
+        )
+        .possible(fauna_feed::forms::post_submit_possibility(&compose.text)),
+    );
     out
 }
 
@@ -5488,9 +5607,10 @@ fn reply_dialog_elements(state: &FeedState, snapshot: &FeedSnapshot) -> Vec<Elem
         Element::gesture_button(
             ids::FEED_REPLY_SUBMIT_BUTTON,
             common::REPLY,
-            !draft.text.trim().is_empty(),
+            true,
             Gesture::Feed(Action::SubmitReply),
         )
+        .possible(fauna_feed::forms::reply_submit_possibility(&draft.text))
         .within(ids::FEED_REPLY_DIALOG, 0),
     );
     out
@@ -6649,9 +6769,10 @@ fn create_feed_elements(
         Element::gesture_button(
             ids::CREATE_FEED,
             common::CREATE,
-            !form.name.is_empty(),
+            true,
             Gesture::Feed(Action::CreateFeed),
-        ),
+        )
+        .possible(fauna_feed::forms::create_feed_possibility(&form.name)),
         Element::gesture_button(
             ids::FEED_CREATE_CANCEL,
             common::CANCEL,
@@ -6700,9 +6821,12 @@ fn bridge_form_elements(
         Element::gesture_button(
             ids::BRIDGE_FORM_SUBSCRIBE_BUTTON,
             feed::list::SUBSCRIBE_BRIDGE,
-            !form.kind.is_empty() && !form.uri.is_empty(),
+            true,
             Gesture::Feed(Action::SubscribeBridge),
-        ),
+        )
+        .possible(fauna_feed::forms::bridge_subscribe_possibility(
+            &form.kind, &form.uri,
+        )),
         Element::gesture_button(
             ids::BRIDGE_FORM_CANCEL_BUTTON,
             common::CANCEL,
@@ -9396,7 +9520,10 @@ mod tests {
         assert!(
             matches!(
                 &local.role,
-                crate::element::Role::Button(Gesture::Feed(Action::SelectFeed(None)))
+                crate::element::Role::Radio {
+                    gesture: Gesture::Feed(Action::SelectFeed(None)),
+                    ..
+                }
             ),
             "feed-local-item must run select_feed(None), got {:?}",
             local.role
@@ -11625,6 +11752,17 @@ mod tests {
     }
 
     /// Every element the feed paints under `id`.
+    /// One element as the person sees it: through the possibility seam
+    /// (`App::page_elements`), so a declared `Blocked` answer is applied.
+    fn seamed(app: &App, id: &str) -> Element {
+        let mut app_on_feed = app.page_elements();
+        let at = app_on_feed
+            .iter()
+            .position(|e| e.id == id)
+            .unwrap_or_else(|| panic!("{id} not painted"));
+        app_on_feed.swap_remove(at)
+    }
+
     fn painted<'a>(app: &'a App, id: &'a str) -> Vec<Element> {
         crate::feed::elements(app)
             .into_iter()
@@ -12095,19 +12233,73 @@ mod tests {
         assert!(ids(&app).contains("compose-dialog-button"));
     }
 
-    /// Posting from the dialog closes it (linux's `d.close()` on its dialog's
-    /// Post), and the compose state it leaves behind is the manager's — so a
-    /// rejected submit surfaces on the inline bar rather than vanishing with the
-    /// overlay.
+    /// Posting from the dialog closes it only once the post is saved
+    /// (`ui/README.md` § Offer only what is possible, rule 7): the submit
+    /// leaves it open, a failure keeps it open with the error on
+    /// `error-message` and the staged attachment handed back, and a success
+    /// closes it.
     #[test]
-    fn submitting_closes_the_compose_dialog() {
+    fn the_compose_dialog_closes_only_when_the_post_is_saved() {
         let mut app = feed_app(vec![post("hello")]);
         apply_local(&mut app, Action::OpenComposeDialog);
-        assert!(app.feed.compose_dialog_open);
+        set_field(&mut app.feed, FeedField::ComposeText, "a post".into());
+        app.feed.staged_file = Some("/tmp/x-row-6039.png".into());
         let op = apply_local(&mut app, Action::SubmitPost);
         assert!(matches!(op, Some(Op::SubmitPost { .. })));
+        assert!(app.feed.compose_dialog_open, "open while the save runs");
+
+        apply_outcome(
+            &mut app,
+            Outcome::Form {
+                form: FeedForm::Post {
+                    staged: Some("/tmp/x-row-6039.png".into()),
+                },
+                error: Some("nest refused".into()),
+            },
+        );
+        assert!(
+            app.feed.compose_dialog_open,
+            "a failed post keeps the dialog"
+        );
+        assert_eq!(
+            app.errors
+                .get(&crate::pages::Page::Feed)
+                .map(String::as_str),
+            Some("nest refused")
+        );
+        assert_eq!(app.feed.staged_file.as_deref(), Some("/tmp/x-row-6039.png"));
+
+        apply_outcome(
+            &mut app,
+            Outcome::Form {
+                form: FeedForm::Post { staged: None },
+                error: None,
+            },
+        );
         assert!(!app.feed.compose_dialog_open);
         assert!(!ids(&app).contains("feed-compose-dialog"));
+        assert!(app.errors.get(&crate::pages::Page::Feed).is_none());
+    }
+
+    /// An empty post is never offered: `post-submit-button` is disabled with
+    /// the shared reason, and a submit anyway refuses with that reason on
+    /// `error-message` instead of reaching the manager.
+    #[test]
+    fn an_empty_post_is_blocked_with_its_reason() {
+        let mut app = feed_app(vec![post("hello")]);
+        let button = &seamed(&app, "post-submit-button");
+        assert!(!button.enabled);
+        assert_eq!(
+            button.label.as_deref(),
+            Some(fauna_i18n::strings::feed::COMPOSE_EMPTY)
+        );
+        assert!(apply_local(&mut app, Action::SubmitPost).is_none());
+        assert_eq!(
+            app.errors
+                .get(&crate::pages::Page::Feed)
+                .map(String::as_str),
+            Some(fauna_i18n::strings::feed::COMPOSE_EMPTY)
+        );
     }
 
     // ── the reply-compose dialog (`feed-reply-dialog`, row 98) ───────────────
@@ -12162,9 +12354,14 @@ mod tests {
 
         let field = &painted(&app, "feed-reply-text-field")[0];
         assert_eq!(field.path, vec![("feed-reply-dialog".to_string(), 0)]);
-        let submit = &painted(&app, "feed-reply-submit-button")[0];
+        let submit = &seamed(&app, "feed-reply-submit-button");
         assert_eq!(submit.path, vec![("feed-reply-dialog".to_string(), 0)]);
         assert!(!submit.enabled, "empty text must disable submit");
+        assert_eq!(
+            submit.label.as_deref(),
+            Some(fauna_i18n::strings::feed::REPLY_EMPTY),
+            "and say why"
+        );
     }
 
     /// Typing into `feed-reply-text-field` writes the armed draft's buffer —
@@ -12216,6 +12413,13 @@ mod tests {
             app.feed.reply_draft.is_some(),
             "the draft must survive a refused submit"
         );
+        assert_eq!(
+            app.errors
+                .get(&crate::pages::Page::Feed)
+                .map(String::as_str),
+            Some(fauna_i18n::strings::feed::REPLY_EMPTY),
+            "the refusal names its reason, never a silent no-op"
+        );
     }
 
     /// Submitting dispatches through the shared `FeedManager::reply` door —
@@ -12239,10 +12443,31 @@ mod tests {
         };
         assert_eq!(pid, post_id);
         assert_eq!(body, "totally agree");
-        assert!(
-            app.feed.reply_draft.is_none(),
-            "closes optimistically, same as SubmitPost"
+        assert!(app.feed.reply_draft.is_some(), "open while the save runs");
+
+        apply_outcome(
+            &mut app,
+            Outcome::Form {
+                form: FeedForm::Reply {
+                    post_id: post_id.clone(),
+                },
+                error: Some("refused".into()),
+            },
         );
+        assert_eq!(
+            app.feed.reply_draft.as_ref().map(|d| d.text.as_str()),
+            Some("totally agree"),
+            "a failed reply keeps the dialog with what was typed"
+        );
+
+        apply_outcome(
+            &mut app,
+            Outcome::Form {
+                form: FeedForm::Reply { post_id },
+                error: None,
+            },
+        );
+        assert!(app.feed.reply_draft.is_none());
         assert!(!ids(&app).contains("feed-reply-dialog"));
     }
 
@@ -13164,6 +13389,84 @@ mod tests {
         }
     }
 
+    /// The feed selector is one radio group that publishes its current choice:
+    /// exactly one of Trending, Local and the user's feeds is marked `(*)` and
+    /// carries `state=on`, the others `state=off` — so re-choosing the current
+    /// entry reads as the current choice (`e2e-systematic-ui-walks.md` § The
+    /// possibility invariants, layer (c)).
+    #[test]
+    fn feed_selector_publishes_its_current_choice() {
+        let feeds = || {
+            ["feed-a", "feed-b"]
+                .map(|id| FeedSummaryView {
+                    feed_id: id.into(),
+                    name: id.into(),
+                    combination: "all".into(),
+                    scope: String::new(),
+                    contributor_seeds: Vec::new(),
+                })
+                .to_vec()
+        };
+        // (snapshot tweak, the one entry expected on) — entries in paint order:
+        // trending, local, feed-a, feed-b.
+        type Case = (&'static str, fn(&mut FeedSnapshot), usize);
+        let cases: [Case; 3] = [
+            ("local by default", |_| {}, 1),
+            ("trending", |s| s.trending_selected = true, 0),
+            (
+                "a custom feed",
+                |s| s.selected_feed = Some("feed-b".into()),
+                3,
+            ),
+        ];
+        for (name, tweak, want_on) in cases {
+            let mut snapshot = FeedSnapshot {
+                feeds: feeds(),
+                status: fauna_feed::FeedStatus::Loaded,
+                ..Default::default()
+            };
+            tweak(&mut snapshot);
+            let app = feed_app_with(snapshot);
+            let entries: Vec<_> = crate::feed::elements(&app)
+                .into_iter()
+                .filter(|e| {
+                    [
+                        ids::FEED_TRENDING_ITEM,
+                        ids::FEED_LOCAL_ITEM,
+                        ids::FEED_ITEM,
+                    ]
+                    .contains(&e.id.as_str())
+                })
+                .collect();
+            assert_eq!(entries.len(), 4, "{name}: trending, local and two feeds");
+            for (i, e) in entries.iter().enumerate() {
+                let on = i == want_on;
+                let selected = match &e.role {
+                    crate::element::Role::Radio { selected, .. } => *selected,
+                    other => panic!("{name}: {} is not a radio: {other:?}", e.id),
+                };
+                assert_eq!(selected, on, "{name}: {}[{i}] marked", e.id);
+                let state = e
+                    .attrs
+                    .iter()
+                    .find(|(k, _)| k == "state")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(
+                    state,
+                    Some(if on { "on" } else { "off" }),
+                    "{name}: {}[{i}] state",
+                    e.id
+                );
+                let group = e
+                    .attrs
+                    .iter()
+                    .find(|(k, _)| k == "group")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(group, Some("feed-selector"), "{name}: one group");
+            }
+        }
+    }
+
     #[test]
     fn delete_feed_action_dispatches_the_delete_feed_op() {
         let mut app = feed_app_with_feeds(vec![FeedSummaryView {
@@ -13259,10 +13562,93 @@ mod tests {
             ),
             "expected SubscribeBridge with the buffered fields"
         );
-        assert!(
-            !app.feed.bridge_form_open,
-            "submit closes the form optimistically, like CreateFeed"
+        assert!(app.feed.bridge_form_open, "open while the save runs");
+
+        apply_outcome(
+            &mut app,
+            Outcome::Form {
+                form: FeedForm::BridgeSubscribe,
+                error: Some("refused".into()),
+            },
         );
+        assert!(
+            app.feed.bridge_form_open,
+            "a failed subscribe keeps the form"
+        );
+        assert_eq!(app.feed.bridge_form.uri, "nostr://npub1example");
+
+        apply_outcome(
+            &mut app,
+            Outcome::Form {
+                form: FeedForm::BridgeSubscribe,
+                error: None,
+            },
+        );
+        assert!(!app.feed.bridge_form_open);
+    }
+
+    /// The subscribe button is painted from the shared predicate: with no URI
+    /// it is disabled with its reason, and a submit refuses with the same one.
+    #[test]
+    fn subscribe_bridge_without_a_uri_is_blocked_with_its_reason() {
+        let mut app = feed_app_with_bridges(
+            vec![fauna_feed::AvailableBridge {
+                id: "nostr".into(),
+                name: "Nostr".into(),
+            }],
+            Vec::new(),
+        );
+        apply_local(&mut app, Action::OpenBridgeForm);
+        let button = &seamed(&app, "bridge-form-subscribe-button");
+        assert!(!button.enabled);
+        assert_eq!(
+            button.label.as_deref(),
+            Some(fauna_i18n::strings::feed::bridge_form::URI_REQUIRED)
+        );
+        assert!(apply_local(&mut app, Action::SubscribeBridge).is_none());
+        assert_eq!(
+            app.errors
+                .get(&crate::pages::Page::Feed)
+                .map(String::as_str),
+            Some(fauna_i18n::strings::feed::bridge_form::URI_REQUIRED)
+        );
+    }
+
+    /// `create-feed` waits for its save: a failure keeps the sub-page open with
+    /// the name typed, a success returns to the list.
+    #[test]
+    fn create_feed_closes_only_when_saved() {
+        let mut app = feed_app(vec![post("hello")]);
+        app.feed.mode = Mode::CreateFeed;
+        let button = &seamed(&app, "create-feed");
+        assert!(!button.enabled, "no name yet");
+        assert_eq!(
+            button.label.as_deref(),
+            Some(fauna_i18n::strings::feed::create::NAME_REQUIRED)
+        );
+        app.feed.form.name = "Mine".into();
+        assert!(matches!(
+            apply_local(&mut app, Action::CreateFeed),
+            Some(Op::CreateFeed { .. })
+        ));
+        assert_eq!(app.feed.mode, Mode::CreateFeed);
+        apply_outcome(
+            &mut app,
+            Outcome::Form {
+                form: FeedForm::CreateFeed,
+                error: Some("refused".into()),
+            },
+        );
+        assert_eq!(app.feed.mode, Mode::CreateFeed);
+        assert_eq!(app.feed.form.name, "Mine");
+        apply_outcome(
+            &mut app,
+            Outcome::Form {
+                form: FeedForm::CreateFeed,
+                error: None,
+            },
+        );
+        assert_eq!(app.feed.mode, Mode::List);
     }
 
     /// A subscribed bridge feed paints an unsubscribe control that wires back

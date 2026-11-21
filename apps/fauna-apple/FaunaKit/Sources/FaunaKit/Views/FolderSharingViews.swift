@@ -315,30 +315,40 @@ struct FolderShareSheet: View {
                 // `folder-share-confirm` — commit the picked recipient.
                 Button(L.devices.shareButton) { Task { await confirm() } }
                     .buttonStyle(.borderedProminent)
-                    .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty)
                     .accessibilityIdentifier(Ids.folderShareConfirm)
-                    .automationActivate(
-                        Ids.folderShareConfirm,
-                        isEnabled: { !input.trimmingCharacters(in: .whitespaces).isEmpty }
-                    ) { Task { await confirm() } }
+                    .automationActivate(Ids.folderShareConfirm) { Task { await confirm() } }
+                    // The draft's shared answer (`fauna_client_folders::forms`),
+                    // outside the automation modifier so the registry reads it.
+                    .faunaPossible(sharePossibility)
             }
+            FaunaPossibilityReason(sharePossibility)
         }
         .padding(20)
         .frame(minWidth: 360)
     }
 
+    private var sharePossibility: Possibility { vm.folderSharePossibility(recipient: input) }
+
+    /// The sheet closes and clears its input once the share op is issued
+    /// (`folders.md` § Errors & edge cases): a refusal — blank recipient, no
+    /// session to admit them through — lands on `error-message` and the sheet
+    /// stays open with what was typed; a share the predicate passes is issued,
+    /// the sheet closes at once, and a failure at resolution (a handle nobody
+    /// holds) lands on the page's `error-message` after it has closed. The
+    /// caller's unstructured `Task` outlives the dismissed sheet, so the share
+    /// runs to its end on the view model.
     private func confirm() async {
         let handle = input.trimmingCharacters(in: .whitespaces)
-        guard !handle.isEmpty else { return }
-        resolveState = .resolving
-        if await vm.shareFolder(
-            name: folder.name, recipientInput: handle, access: access == "writer" ? "writer" : nil
-        ) {
-            onDismiss()
-        } else {
-            // The page `error-message` carries the detail; the picker just flags it.
-            resolveState = .error
+        guard sharePossibility.isPossible else {
+            // The verb asks the same predicate and puts its reason on the page.
+            _ = await vm.shareFolder(name: folder.name, recipientInput: handle)
+            return
         }
+        let name = folder.name
+        let grant: String? = access == "writer" ? "writer" : nil
+        input = ""
+        onDismiss()
+        await vm.shareFolder(name: name, recipientInput: handle, access: grant)
     }
 }
 

@@ -11,6 +11,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [AdminWebContent] (the admin
@@ -29,14 +31,16 @@ class AdminWebContentTest {
     private fun render(
         currentActorHex: String? = null,
         actors: List<ActorOption> = emptyList(),
-        apexUrl: String = "https://example.com/",
+        apexInfo: LocalizedText? = LocalizedText("admin.web_page.apex_info", mapOf("url" to "https://example.com/")),
+        pickerAnswer: Possibility = Possibility.Possible,
         onSetApex: (String?) -> Unit = {},
     ) {
         composeTestRule.setContent {
             AdminWebContent(
                 currentActorHex = currentActorHex,
                 actors = actors,
-                apexUrl = apexUrl,
+                apexInfo = apexInfo,
+                pickerAnswer = pickerAnswer,
                 onBack = {},
                 onSetApex = onSetApex,
             )
@@ -45,12 +49,28 @@ class AdminWebContentTest {
 
     @Test
     fun rendersHeadingNavBackPickerAndInfo() {
-        render(apexUrl = "https://example.com/")
+        render()
         composeTestRule.onNodeWithTag("admin-web-heading").assertExists()
         composeTestRule.onNodeWithTag("admin-nav-back").assertExists()
         composeTestRule.onNodeWithTag("admin-web-apex-actor-select").assertExists()
         composeTestRule.onNodeWithTag("admin-web-apex-info")
             .assertTextContains("https://example.com/", substring = true)
+    }
+
+    /** A nest that serves no web content paints the reason, never `https:///`. */
+    @Test
+    fun infoLineExplainsANestWithNoServingDomain() {
+        render(apexInfo = LocalizedText("admin.web_page.apex_no_serving_domain", emptyMap()))
+        composeTestRule.onNodeWithTag("admin-web-apex-info")
+            .assertTextContains("no web address yet", substring = true)
+    }
+
+    /** Rule 5: before the read lands the picker is disabled with its reason. */
+    @Test
+    fun pickerIsBlockedBeforeItsRead() {
+        render(pickerAnswer = Possibility.Blocked(LocalizedText("common.still_loading", emptyMap())))
+        composeTestRule.onNodeWithTag("admin-web-apex-actor-select")
+            .performScrollTo().assertIsNotEnabled()
     }
 
     @Test

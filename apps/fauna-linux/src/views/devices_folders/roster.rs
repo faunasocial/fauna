@@ -18,6 +18,26 @@ thread_local! {
     /// the editor state lives here, outside the widgets.
     static RENAMING: std::cell::RefCell<Option<(String, String)>> =
         const { std::cell::RefCell::new(None) };
+    /// The editor box currently showing [`RENAMING`] — the newest card's, as
+    /// the list rebuilds. A save's success may land after the refresh it
+    /// triggered rebuilt the cards, so closing reaches the live editor
+    /// through this, not only the one the save was pressed in.
+    static OPEN_EDITOR: std::cell::RefCell<Option<gtk::glib::WeakRef<gtk::Box>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Close the rename editor after a save went through (`ui/devices.md`
+/// § Errors & edge cases): forget the draft and hide both the editor the
+/// save was pressed in and the live one, should a rebuild have replaced it.
+fn close_rename_editor(pressed_in: &gtk::Box) {
+    RENAMING.with(|r| *r.borrow_mut() = None);
+    pressed_in.set_visible(false);
+    if let Some(live) = OPEN_EDITOR
+        .with(|w| w.borrow_mut().take())
+        .and_then(|w| w.upgrade())
+    {
+        live.set_visible(false);
+    }
 }
 
 /// Build the page-level "peer identity" section — a single, non-per-row copy
@@ -246,15 +266,19 @@ fn build_device_card(
     // the machine painted the row — own-ness, checked, label, actionable —
     // so the app never re-derives which row is its own; the machine also
     // picks the arm the click takes and paints any refusal on
-    // `error-message`. Reference: tui `settings/devices.rs`.
+    // `error-message`. Painted from the shared
+    // `P2pParticipationPaint::possibility` (`ui/devices.md` § Errors & edge
+    // cases): a sibling turning off is blocked by its own label, an off
+    // sibling by "turn it on from that device", the reason on the tooltip;
+    // the click asks the answer again. Reference: tui `settings/devices.rs`.
     let paint = device.participation_paint();
     let participation = gtk::CheckButton::builder()
         .label(paint.label.resolve(strings::lookup))
         .active(paint.checked)
-        .sensitive(paint.actionable)
         .halign(gtk::Align::Start)
         .build();
     set_test_id(&participation, ids::DEVICE_P2P_PARTICIPATION_TOGGLE);
+    crate::possible::paint(&participation, None, paint.possibility());
     {
         let machine = Arc::clone(machine);
         let on = !paint.checked;
@@ -262,7 +286,10 @@ fn build_device_card(
         // (success refreshes, a refusal sets the error), which rebuilds this
         // card from the new paint — GTK's own flip of the check is never
         // the state of record.
-        participation.connect_toggled(move |_| {
+        participation.connect_toggled(move |check| {
+            if !crate::possible::painted_possible(check) {
+                return;
+            }
             let machine = Arc::clone(&machine);
             async_helper::run_on_tokio(
                 async move { machine.set_p2p_participation(index, on).await },
@@ -295,9 +322,10 @@ fn build_device_card(
     // --- Rename affordance (`devices.md` § Device names, rule (1)) ---
     // `device-rename-button` opens ONE editor over this card: the input
     // prefilled with the machine's opened name (`DevicesMachine::device_name`,
-    // without rule (c)'s ` · code`), then confirm and cancel. Confirm hands
-    // the machine the text — it sends nothing for a blank or unchanged name
-    // and paints every refusal on `error-message`; cancel writes nothing.
+    // without rule (c)'s ` · code`), then confirm and cancel. Confirm is
+    // painted from the machine's draft answer and hands the machine the text —
+    // it sends nothing for an unchanged name and paints every refusal on
+    // `error-message`, the editor staying open; cancel writes nothing.
     // Reference: tui `settings/devices.rs`.
     let rename_btn = gtk::Button::builder()
         .icon_name("document-edit-symbolic")
@@ -345,12 +373,32 @@ fn build_device_card(
             RENAMING.with(|r| *r.borrow_mut() = Some((device_id.clone(), name.clone())));
             input.set_text(&name);
             editor.set_visible(true);
+            OPEN_EDITOR.with(|w| *w.borrow_mut() = Some(editor.downgrade()));
             input.grab_focus();
         });
     }
+    // `device-rename-confirm-button` paints from the shared
+    // `DevicesMachine::rename_possibility` over the typed draft
+    // (`ui/devices.md` § Errors & edge cases): a blank name, an app's default
+    // name or no owner key leaves Save insensitive with the reason.
+    let paint_confirm = {
+        let confirm_btn = confirm_btn.clone();
+        let machine = Arc::clone(machine);
+        let device_id = device.device_id.clone();
+        move |text: &str| {
+            crate::form_gate::paint_submit(
+                &confirm_btn,
+                &machine.rename_possibility(&device_id, text),
+                None,
+            );
+        }
+    };
+    paint_confirm(&rename_input.text());
     {
         let device_id = device.device_id.clone();
+        let paint_confirm = paint_confirm.clone();
         rename_input.connect_changed(move |e| {
+            paint_confirm(&e.text());
             RENAMING.with(|r| {
                 if let Some((id, text)) = r.borrow_mut().as_mut()
                     && *id == device_id
@@ -360,20 +408,29 @@ fn build_device_card(
             });
         });
     }
+    if editor.is_visible() {
+        OPEN_EDITOR.with(|w| *w.borrow_mut() = Some(editor.downgrade()));
+    }
+    // The save asks the machine, which refuses with the same reason on
+    // `error-message`; the editor closes only once `save_device_name` answers
+    // that the save went through, and stays open with the text otherwise.
     let do_confirm = {
         let editor = editor.clone();
         let input = rename_input.clone();
         let machine = Arc::clone(machine);
         let device_id = device.device_id.clone();
         move || {
-            RENAMING.with(|r| *r.borrow_mut() = None);
-            editor.set_visible(false);
             let text = input.text().to_string();
             let machine = Arc::clone(&machine);
             let device_id = device_id.clone();
+            let editor = editor.clone();
             async_helper::run_on_tokio(
-                async move { machine.rename_device(device_id, text).await },
-                |_| {},
+                async move { machine.save_device_name(device_id, text).await },
+                move |saved| {
+                    if saved {
+                        close_rename_editor(&editor);
+                    }
+                },
             );
         }
     };
@@ -395,7 +452,19 @@ fn build_device_card(
         .spacing(4)
         .valign(gtk::Align::Center)
         .build();
-    actions.append(&rename_btn);
+    // A row no rename can ever reach — the nest's WebDAV pseudo-device — carries
+    // no button at all (`ui/README.md` § Offer only what is possible): the
+    // shared answer over the row's unchanged name is Absent for it.
+    let rename_offered = {
+        let name = machine
+            .device_name(device.device_id.clone())
+            .unwrap_or_default();
+        machine.rename_possibility(&device.device_id, &name)
+            != fauna_core::possibility::Possibility::Absent
+    };
+    if rename_offered {
+        actions.append(&rename_btn);
+    }
     actions.append(&remove_btn);
 
     info.append(&editor);

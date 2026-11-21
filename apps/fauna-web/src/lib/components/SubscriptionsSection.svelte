@@ -27,11 +27,18 @@
   import { t } from '#lib/i18n/strings';
   import ClaimRedeem from './payments/ClaimRedeem.svelte';
   import { IDS } from '#lib/generated/uiIds';
+  import { readFailed, type ReadWord } from '#lib/read-gate';
 
   // The parent settings page owns the single error surface; our errors flow in.
   let { error = $bindable('') } = $props();
 
   let subscriptions = $state<SubscriptionMine[]>([]);
+  // Where the `mine.list` read stands — the list is three-state
+  // (`subscriptions.md`; `ui/README.md` § List pages: loading is not empty):
+  // loading before the read answers, "No subscriptions" only after a read
+  // answered empty, neither after a failed first read (`error-message` says
+  // why). Matches tui's `SubscriptionsState::mine_read`.
+  let mineRead = $state<ReadWord>('pending');
 
   // Each row's creator label through the private overlay face — the viewer's
   // nickname, else the handle, else the hex id (value-formatting.md
@@ -68,10 +75,12 @@
     if (!s) return;
     try {
       subscriptions = await subscriptionsMineList(s);
+      mineRead = 'resolved';
       if (listError && error === listError) error = '';
       listError = '';
     } catch (e) {
       listError = e instanceof Error ? e.message : String(e);
+      mineRead = readFailed(mineRead);
       error = listError;
     }
   }
@@ -96,6 +105,7 @@
       await ensureWasm();
       await loadMine();
     } catch (e) {
+      mineRead = readFailed(mineRead);
       error = e instanceof Error ? e.message : String(e);
     }
   });
@@ -116,7 +126,9 @@
         >{t.subscriptions.unsubscribe}</button>
       </div>
     {/each}
-    {#if subscriptions.length === 0}
+    {#if mineRead === 'pending'}
+      <p class="muted">{t.common.loading}</p>
+    {:else if mineRead === 'resolved' && subscriptions.length === 0}
       <p class="muted">{t.subscriptions.no_subscriptions}</p>
     {/if}
   </div>

@@ -604,6 +604,9 @@ FIXTURE_START_OPTIONS = {
     "deploy_gate_nest": frozenset(),
     "dr_nest": frozenset(),
     "family_succession_nest": frozenset(),
+    # A dedicated fresh nest — own admin, no tier
+    # (`test_fresh_account_offer_only_possible.py`).
+    "fresh_nest": frozenset(),
     "fronted_nest": frozenset(),
     "gated_nest": frozenset(),
     # `gated_nest`'s shape for the sealed-video journey (`test_feed_video_playback.py`).
@@ -628,6 +631,9 @@ FIXTURE_START_OPTIONS = {
     "channel_nest": frozenset(),
     "pinned_channel_nest": frozenset(),
     "no_scanner_nest": frozenset(),
+    # A dedicated nest whose payments plane the test withdraws through the
+    # capability-withhold hook (`test_share_webdav_redeem_offer_only_possible.py`).
+    "no_payments_nest": frozenset(),
     "overdue_nest": frozenset({"extra_env"}),
     "plugin_nest": frozenset({"extra_env"}),
     # Its bridge-glyph twin (bridges outcome 11): the same publisher env, a
@@ -819,6 +825,10 @@ FIXTURE_START_OPTIONS = {
     "report_origin_nest": frozenset({"handle_domain_seed", "serve_tls"}),
     "cross_nest_member_nest": frozenset({"handle_domain_seed", "serve_tls"}),
     "smoke_handled_nest": frozenset({"handle_domain_seed", "serve_tls"}),
+    # Its closed-registration twin (`tests/test_pending_invite_journey.py`): the
+    # same loopback-authority TLS nest, so an unregistered handle check lands on
+    # invite_request.
+    "invite_only_handled_nest": frozenset({"handle_domain_seed", "serve_tls"}),
     # Its Store-build twin (`tests/artifact/test_windows_store_install.py`): the
     # same loopback-authority TLS nest a Release build signs in to with no seed.
     "store_nest": frozenset({"handle_domain_seed", "serve_tls"}),
@@ -1291,6 +1301,7 @@ OWN_IMAGE_FIXTURES = frozenset({
     "perimeter_nest",
     "provider_nest",
     "real_clamd_nest",
+    "reclaim_nest",
     "relay_nest",
     "relay_net",
     "relay_peers",

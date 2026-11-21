@@ -587,6 +587,13 @@ pub struct WasmConversationsManager {
     /// `pollConversations` future can borrow it across the `await`-free read/write
     /// around each per-channel fetch.
     conv_cursors: Rc<RefCell<HashMap<ChannelId, i64>>>,
+    /// Whether the last [`Self::poll_conversations`] read every bound channel
+    /// without an error — the wasm twin of the native sweep's `BoundFold::read`,
+    /// read by the JS tick through [`Self::last_conv_poll_read`] to decide
+    /// whether this pass may mark the room list loaded
+    /// ([`Self::mark_rooms_loaded`]). A partial failure still resolves the
+    /// promise (its ingested count is the useful answer), so it lives here.
+    conv_poll_read: Rc<Cell<bool>>,
     /// Set once [`Self::restore_mls_state`] has settled — the replica restored
     /// and wired, or failed for good. Web's MLS engine is in-memory, so after a
     /// reload it holds no group until the restore has run, and an engine with
@@ -985,6 +992,7 @@ impl WasmConversationsManager {
             peer_anchor_sweep: Rc::new(RefCell::new(None)),
             fauna_mls: RefCell::new(None),
             conv_cursors: Rc::new(RefCell::new(HashMap::new())),
+            conv_poll_read: Rc::new(Cell::new(false)),
             mls_restored: Rc::new(Cell::new(false)),
             folder_cursors: Rc::new(RefCell::new(HashMap::new())),
             scheduling_cursors: Rc::new(RefCell::new(HashMap::new())),
@@ -1085,6 +1093,33 @@ impl WasmConversationsManager {
     /// the only way an invitation reaches `room-invitation[i]` on web: the
     /// inbox drain deliberately leaves the kind un-acked, so nothing else
     /// projects it. Never rejects; resolves once listed.
+    /// The identity epoch this manager serves now
+    /// (`ConversationsManager::identity_epoch`) — read by the JS receive tick
+    /// before a rail's first read, so a pass that ends after an account switch
+    /// marks nothing loaded for the incoming account. An `f64`, not a bigint:
+    /// the epoch counts identity changes in one tab and never nears 2^53.
+    #[wasm_bindgen(js_name = identityEpoch)]
+    pub fn identity_epoch(&self) -> f64 {
+        self.manager.identity_epoch() as f64
+    }
+
+    /// Mark the room list loaded for the identity read under `epoch` — the
+    /// JS tick's twin of the native `full_sweep!`'s mark, called only once
+    /// every rail's read came back without an error under that epoch
+    /// (`ConversationsSnapshot::loaded`; `ui/README.md` § List pages: loading
+    /// is not empty, rule 2). A stale epoch marks nothing.
+    #[wasm_bindgen(js_name = markRoomsLoaded)]
+    pub fn mark_rooms_loaded(&self, epoch: f64) {
+        self.manager.mark_rooms_loaded(epoch as u64);
+    }
+
+    /// Whether the last `pollConversations` read every bound channel without
+    /// an error (`conv_poll_read`).
+    #[wasm_bindgen(js_name = lastConvPollRead)]
+    pub fn last_conv_poll_read(&self) -> bool {
+        self.conv_poll_read.get()
+    }
+
     #[wasm_bindgen(js_name = refreshRoomInvitations)]
     pub fn refresh_room_invitations(&self) -> js_sys::Promise {
         let mgr = self.manager.clone();
@@ -2776,6 +2811,7 @@ impl WasmConversationsManager {
             ))),
             fauna_mls: RefCell::new(Some(fauna_mls)),
             conv_cursors: Rc::new(RefCell::new(HashMap::new())),
+            conv_poll_read: Rc::new(Cell::new(false)),
             mls_restored: Rc::new(Cell::new(false)),
             folder_cursors: Rc::new(RefCell::new(HashMap::new())),
             scheduling_cursors: Rc::new(RefCell::new(HashMap::new())),
@@ -3458,11 +3494,15 @@ impl WasmConversationsManager {
     /// messages ingested this pass.
     #[wasm_bindgen(js_name = pollConversations)]
     pub fn poll_conversations(&self) -> js_sys::Promise {
+        // Not read until this pass proves otherwise — a pass with no backend
+        // yet (activation still pending) has read nothing.
+        self.conv_poll_read.set(false);
         let Some(backend) = self.fauna_mls.borrow().clone() else {
             return js_sys::Promise::resolve(&JsValue::from_f64(0.0));
         };
         let mgr = self.manager.clone();
         let cursors = self.conv_cursors.clone();
+        let conv_poll_read = self.conv_poll_read.clone();
         // The peer-anchor harvest's handles, cloned out here so no `RefCell`
         // borrow is held across an await.
         let harvest_client = self.nest_client.borrow().clone();
@@ -3616,6 +3656,7 @@ impl WasmConversationsManager {
                     .await;
                 *harvest_sweep.borrow_mut() = Some(sweep);
             }
+            conv_poll_read.set(first_err.is_none());
             match first_err {
                 Some(msg) if total == 0 => Err(JsValue::from_str(&msg)),
                 _ => Ok(JsValue::from_f64(total as f64)),
@@ -5516,6 +5557,75 @@ pub fn room_invitation_text(invitation: JsValue) -> Result<String, JsValue> {
 pub fn room_pending_invite_text(invite: JsValue) -> Result<String, JsValue> {
     let invite: fauna_conversations::room::RoomPendingInviteSnapshot = crate::rpc::from_js(invite)?;
     Ok(fauna_conversations::room::room_pending_invite_text(invite))
+}
+
+/// Whether a thread or room control a role or the rail decides can succeed now
+/// (`ThreadCapabilities::possibility`; `docs/goal/ui/conversations.md` § Errors
+/// & edge cases → *Controls this person can never use*), in `Possibility`'s
+/// serde form (`{state: "possible"}`, `{state: "blocked", reason}` or
+/// `{state: "absent"}`) for `#lib/possibility`'s `paintPossibility`.
+/// `capabilities` is the thread detail's `capabilities` as the snapshot ships
+/// it, `control` a `ThreadControl` token (`invite`, `remove_member`,
+/// `set_policy`, `appoint_admins`, `transfer_ownership`, `leave_room`,
+/// `local_remove`, `subject`), `myRole` the room's `my_role` (`Owner` /
+/// `Admin` / `Member`; `null` on a policy-less thread). The wasm twin of the
+/// UniFFI `thread_control_possibility`: the paint and the handler ask this one
+/// answer.
+#[wasm_bindgen(js_name = threadControlPossibility)]
+pub fn thread_control_possibility(
+    capabilities: JsValue,
+    control: JsValue,
+    my_role: JsValue,
+) -> Result<JsValue, JsValue> {
+    let capabilities: fauna_conversations::ThreadCapabilities = crate::rpc::from_js(capabilities)?;
+    let control: fauna_conversations::ThreadControl = crate::rpc::from_js(control)?;
+    let my_role: Option<fauna_conversations::room::RoomRole> =
+        if my_role.is_null() || my_role.is_undefined() {
+            None
+        } else {
+            Some(crate::rpc::from_js(my_role)?)
+        };
+    crate::rpc::to_js(&fauna_conversations::thread_control_possibility(
+        capabilities,
+        control,
+        my_role,
+    ))
+}
+
+/// Whether the reply bar (`dm-text-field`, `dm-send-button`) can send now
+/// (`ThreadCapabilities::send_possibility`), in `Possibility`'s serde form —
+/// the wasm twin of the UniFFI `thread_send_possibility`. `capabilities` is the
+/// thread detail's `capabilities` as the snapshot ships it.
+#[wasm_bindgen(js_name = threadSendPossibility)]
+pub fn thread_send_possibility(capabilities: JsValue) -> Result<JsValue, JsValue> {
+    let capabilities: fauna_conversations::ThreadCapabilities = crate::rpc::from_js(capabilities)?;
+    crate::rpc::to_js(&fauna_conversations::thread_send_possibility(capabilities))
+}
+
+/// Whether a new-thread composer control can succeed now
+/// (`new_thread_possibility`; `docs/goal/ui/conversations.md` § Errors & edge
+/// cases → *The new-thread composer offers only what it can send*), in
+/// `Possibility`'s serde form for `#lib/possibility`'s `paintPossibility`.
+/// `compose` is the snapshot's `new_thread_compose` as it ships it (`null` /
+/// `undefined` when no composer is open → absent), `control` a
+/// `NewThreadControl` token (`send`, `attach`, `topic`). The wasm twin of the
+/// UniFFI `new_thread_control_possibility`: the paint and the handler ask this
+/// one answer.
+#[wasm_bindgen(js_name = newThreadControlPossibility)]
+pub fn new_thread_control_possibility(
+    compose: JsValue,
+    control: JsValue,
+) -> Result<JsValue, JsValue> {
+    let control: fauna_conversations::NewThreadControl = crate::rpc::from_js(control)?;
+    let compose: Option<fauna_conversations::compose::ComposeState> =
+        if compose.is_null() || compose.is_undefined() {
+            None
+        } else {
+            Some(crate::rpc::from_js(compose)?)
+        };
+    crate::rpc::to_js(&fauna_conversations::new_thread_control_possibility(
+        compose, control,
+    ))
 }
 
 /// Whether a community room may name a labeler of this artifact kind — the

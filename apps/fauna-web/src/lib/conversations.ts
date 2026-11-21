@@ -108,6 +108,7 @@ import {
   stopAccountRuntime,
 } from './account-runtime';
 import { runAtLaterEdge } from './launch-pass';
+import { countedFace, trackRpc } from './rpc-in-flight';
 import { wireArchiveLinks } from './archive-links';
 
 /** A row mirroring the manager snapshot's `ThreadSummary`, in the shape the e2e
@@ -285,6 +286,8 @@ function selfAddressFor(id: { handle?: string; domain?: string }): string {
  *  the engine can actually confirm the join). Never build here — `null` is the
  *  honest answer, and the next 15s refresh re-asks. */
 export function conversationsManagerIfReady(): WasmConversationsManager | null {
+  // The same counted face in a test build as `getConversationsManager`'s.
+  if (__FAUNA_E2E_AUTOMATION__ && manager) return countedFace(manager);
   return manager;
 }
 
@@ -353,7 +356,8 @@ function noteContactsRevision(): void {
  *  seams wait out the start themselves, and a tab that does not hold the
  *  MLS-writing role (the build refuses) simply stays without a runtime. */
 function ensureAccountRuntime(): void {
-  getConversationsManager().catch(() => {});
+  // Uncounted (`getConversationsManager` says why): no gesture awaits it.
+  buildConversationsManager().catch(() => {});
 }
 
 // A page mounts before `startReceivePoll` first runs, so a port call can be
@@ -471,7 +475,26 @@ async function buildStageOne(
   return built;
 }
 
+/** The conversations manager, for a caller that awaits it on a user's behalf
+ *  — a page, a handler, a one-shot wrapper below. In a test build the await
+ *  and every promise a method of the returned manager hands back are counted
+ *  as in flight for the e2e barrier (`#lib/rpc-in-flight`): a handler that
+ *  awaits the manager paints its outcome only once that work settles, and the
+ *  work reaches the nest through wasm, never through `#lib/rpc`'s counted
+ *  `call` (the web actuation sweep's `nostr-link-button` settle race,
+ *  2026-11-20). The session-long loops — the receive poll and the account
+ *  runtime's start — use `buildConversationsManager` and the raw `manager`
+ *  instead, as `#lib/rpc`'s `callLoop` keeps the critical-alert sweep out: a
+ *  counted loop would hold every barrier to its bound. A production build
+ *  hands back the manager itself. */
 export function getConversationsManager(): Promise<WasmConversationsManager> {
+  if (!__FAUNA_E2E_AUTOMATION__) return buildConversationsManager();
+  return trackRpc(() => buildConversationsManager()).then((m) => countedFace(m));
+}
+
+/** The memoized build behind `getConversationsManager`, uncounted — for the
+ *  session-long callers named there. */
+function buildConversationsManager(): Promise<WasmConversationsManager> {
   if (managerPromise) return managerPromise;
   const id = get(identity);
   if (!id?.secretHex) {
@@ -1038,9 +1061,15 @@ export async function trainModerationCorrection(
   source: 'Server' | 'Local',
 ): Promise<void> {
   if (source === 'Local') {
+    // Train FIRST, then drop the flag (`moderation.md` § Errors & edge cases):
+    // a degraded outcome (mail not enabled, no sealed-at-rest) resolves and
+    // stays silent; a dispatch that FAILED rejects here — the caller says it on
+    // `error-message` and the flag stays, so the correction can be tried again
+    // rather than lost. The text is read before the flag goes. The tui twin is
+    // `Op::Correct` in `apps/fauna-tui/src/moderation.rs`.
     const text = messageBody(contentId);
+    if (text && text.trim() !== '') await trainSpamModelClientSide(secretHex, text, false);
     moderationRemoveLocalDetection(contentId);
-    if (text) await trainSpamModelClientSide(secretHex, text, false);
     return;
   }
   if (!settingsMachine) settingsMachine = await mailSettingsMachine(secretHex);
@@ -1327,9 +1356,13 @@ async function drainFeed(
   return cursor;
 }
 
-async function pollOnce(secretHex: string): Promise<void> {
-  if (!manager) return;
-  if (!(await ensureRecipientSecret(secretHex))) return;
+/** One mail pass. Resolves whether both feeds were read without an error —
+ *  `true` with no mail keys yet (no feed to walk is a completed walk, as the
+ *  native `poll_mail_feeds` answers); throws on an INBOX read failure. */
+async function pollOnce(secretHex: string): Promise<boolean> {
+  if (!manager) return false;
+  if (!(await ensureRecipientSecret(secretHex))) return true;
+  let sentRead = true;
   // On-device spam scoring: enable/refresh the scorer BEFORE the INBOX drain so
   // each message is scored at ingest (best-effort — a failure here must never
   // degrade mail delivery, so it just disables scoring this pass).
@@ -1362,6 +1395,7 @@ async function pollOnce(secretHex: string): Promise<void> {
       'sent',
     );
   } catch (e) {
+    sentRead = false;
     logMessage('debug', 'fauna_web::conversations', `sent feed drain failed (best-effort): ${e}`);
   }
   // Mail attachments the store's budget evicted and a render has since asked
@@ -1381,6 +1415,7 @@ async function pollOnce(secretHex: string): Promise<void> {
   // newest first up to the MDA's cap, then the disposition flushed once more
   // so a filed copy is watermarked and moved.
   await rescoreHeldMail(secretHex);
+  return sentRead;
 }
 
 /** The app's spam catch-up — the web twin of the shared driver's
@@ -1586,6 +1621,7 @@ async function flushSpamScoring(secretHex: string): Promise<void> {
  *  logged, never thrown, so it can't block the SMTP rail in the same pass. */
 async function pollFaunaMlsOnce(): Promise<void> {
   if (!manager) return;
+  const epoch = manager.identityEpoch();
   try {
     // drainInbox first (queued Welcomes → group join, plus the folder contact
     // gate's auto-join arm), then pull channel ciphertext on the newly-bound +
@@ -1597,6 +1633,9 @@ async function pollFaunaMlsOnce(): Promise<void> {
     // channel walk. Without it no invitation ever stands on web. Never rejects.
     await manager.refreshRoomInvitations();
     await manager.pollConversations();
+    // The drain above did not throw; the channel walk says for itself whether
+    // every channel's read came back (a partial failure still resolves).
+    if (manager.lastConvPollRead()) noteRailRead('conv', epoch);
     // Re-read the contact roster the recipient suggestions draw on — the web
     // twin of the native receive loop's backstop-tick `full_sweep!` arm
     // (`conversations.md` § Where logic lives → *Recipient suggestions*). Never rejects.
@@ -1650,14 +1689,43 @@ export const receiveRailStalled: Writable<boolean> = writable(false);
  *  secret becomes derivable), so enabling mail after load is picked up without a
  *  reload. Self-contained error handling, as the pump requires. */
 async function pollMailOnce(): Promise<void> {
+  if (!manager) return;
+  const epoch = manager.identityEpoch();
   const id = get(identity);
-  if (!id?.secretHex) return;
+  if (!id?.secretHex) {
+    // No identity secret: no mail feed and no bridged inbox to walk — a
+    // completed walk, as the native sweep counts a session without them.
+    noteRailRead('mail', epoch);
+    return;
+  }
+  let mailRead = false;
   try {
-    await pollOnce(id.secretHex);
+    mailRead = await pollOnce(id.secretHex);
   } catch {
     // Transient (disconnect / mail not enabled) — the ticker retries.
   }
-  await pollBridgedOnce(id.secretHex);
+  const bridgedRead = await pollBridgedOnce(id.secretHex);
+  if (mailRead && bridgedRead) noteRailRead('mail', epoch);
+}
+
+// ── The room list's `loaded` bit — the native `full_sweep!`'s mark ──────────
+//
+// The page paints its empty state only once the room list has LOADED
+// (`ConversationsSnapshot.loaded`; `ui/README.md` § List pages: loading is not
+// empty): every rail read without an error under one identity. Web's sweep is
+// two pump rails, so each records the identity epoch it last read cleanly
+// under, and the second to arrive under the current epoch marks the manager.
+// A failed read records nothing, so a failed first read keeps the page
+// unloaded (rule 2); the shared mark itself ignores a stale epoch.
+const railReadEpoch: { conv: number | null; mail: number | null } = { conv: null, mail: null };
+
+function noteRailRead(rail: 'conv' | 'mail', epoch: number): void {
+  railReadEpoch[rail] = epoch;
+  if (!manager) return;
+  if (railReadEpoch.conv === epoch && railReadEpoch.mail === epoch) {
+    manager.markRoomsLoaded(epoch);
+    refreshConversations();
+  }
 }
 
 /** The bridged rail's pass — the rooms and inbox of every bridge serving the
@@ -1667,8 +1735,8 @@ async function pollMailOnce(): Promise<void> {
  *  it opens under the same recipient keys — but it is NOT gated on them: with
  *  mail off the rooms still list and paint, and only the inbox read waits.
  *  Never rejects. */
-async function pollBridgedOnce(secretHex: string): Promise<void> {
-  if (!manager) return;
+async function pollBridgedOnce(secretHex: string): Promise<boolean> {
+  if (!manager) return false;
   try {
     await ensureRecipientSecret(secretHex);
   } catch {
@@ -1677,8 +1745,10 @@ async function pollBridgedOnce(secretHex: string): Promise<void> {
   try {
     await manager.pollBridged();
     refreshConversations();
+    return true;
   } catch (e) {
     logMessage('debug', 'fauna_web::conversations', `bridged receive poll failed (transient): ${e}`);
+    return false;
   }
 }
 
@@ -1866,7 +1936,8 @@ export async function startReceivePoll(): Promise<void> {
         // subscription above), so DM delivery is never delayed by identity
         // resolution.
         if (!manager) {
-          await getConversationsManager();
+          // Uncounted: the session-long loop (`getConversationsManager`).
+          await buildConversationsManager();
           refreshConversations();
         }
       } catch (e) {

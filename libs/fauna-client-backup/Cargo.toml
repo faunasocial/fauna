@@ -79,3 +79,6 @@ fauna-core = { path = "../fauna-core", default-features = false, features = ["js
 # hand-rolled copies stop reimplementing it (one owner for the `RpcRequester`
 # seam's fake).
 fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The small paging rule (`PagingRule::with_thresholds`), so a test reaches a
+# paged root without a 64 GB file.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["test-util"] }

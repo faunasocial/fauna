@@ -46,7 +46,8 @@ import uniffi.fauna_conversations.ConversationsManager
  *   * `KidsExcisedApi.startAutoRenewCadence` takes its wait from
  *     [autoRenewWaiter] — ungated, a bare `delay` here;
  *   * [com.fauna.app.ui.navigation.FaunaNavHost] writes [focusManager] inside
- *     a `BuildConfig.DEBUG`-gated `SideEffect`;
+ *     a `BuildConfig.DEBUG`-gated `SideEffect`, and [rootSurface] through
+ *     [com.fauna.app.ui.navigation.RootSurface]'s;
  *   * `ConversationDetailScreen`'s reaction picker writes [moreReactionPick]
  *     inside a `BuildConfig.DEBUG`-gated `DisposableEffect`;
  *   * `ProfileEditForm.kt`'s edit form writes [profileEditImagePick] inside a
@@ -85,6 +86,14 @@ object TestAgent {
      * `SideEffect` still type-checks in the release variant.
      */
     var focusManager: androidx.compose.ui.focus.FocusManager? = null
+
+    /**
+     * Never read in release — there is no `root_surface` journal here. Mirrors
+     * the debug twin's `rootSurface` only so
+     * [com.fauna.app.ui.navigation.RootSurface]'s `BuildConfig.DEBUG`-gated
+     * `SideEffect` still type-checks in the release variant.
+     */
+    var rootSurface: String? = null
 
     /**
      * Never read in release — there is no `type_text` dispatch here. Mirrors the

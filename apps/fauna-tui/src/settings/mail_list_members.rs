@@ -229,11 +229,14 @@ pub(super) fn mail_list_members_elements(state: &SettingsState) -> Vec<Element> 
             )
             .labelled(t::ADD_MEMBER_PLACEHOLDER),
         );
-        els.push(Element::gesture_button(
-            ids::MAIL_LIST_MEMBERS_ADD_SHEET_SUBMIT_BUTTON,
-            t::ADD_MEMBER_SUBMIT,
-            true,
-            Gesture::Settings(Action::MailListMembersAddSubmit),
+        els.push(super::mail::gated_button(
+            Element::gesture_button(
+                ids::MAIL_LIST_MEMBERS_ADD_SHEET_SUBMIT_BUTTON,
+                t::ADD_MEMBER_SUBMIT,
+                true,
+                Gesture::Settings(Action::MailListMembersAddSubmit),
+            ),
+            fauna_client_mail_settings::member_add_possibility(m.address_input.clone()),
         ));
         els.push(Element::gesture_button(
             ids::MAIL_LIST_MEMBERS_ADD_SHEET_CANCEL_BUTTON,
@@ -253,11 +256,14 @@ pub(super) fn mail_list_members_elements(state: &SettingsState) -> Vec<Element> 
             )
             .labelled(t::IMPORT_PLACEHOLDER),
         );
-        els.push(Element::gesture_button(
-            ids::MAIL_LIST_MEMBERS_IMPORT_SHEET_SUBMIT_BUTTON,
-            t::IMPORT_SUBMIT,
-            true,
-            Gesture::Settings(Action::MailListMembersImportSubmit),
+        els.push(super::mail::gated_button(
+            Element::gesture_button(
+                ids::MAIL_LIST_MEMBERS_IMPORT_SHEET_SUBMIT_BUTTON,
+                t::IMPORT_SUBMIT,
+                true,
+                Gesture::Settings(Action::MailListMembersImportSubmit),
+            ),
+            fauna_client_mail_settings::member_import_possibility(m.import_input.clone()),
         ));
         els.push(Element::gesture_button(
             ids::MAIL_LIST_MEMBERS_IMPORT_SHEET_CANCEL_BUTTON,

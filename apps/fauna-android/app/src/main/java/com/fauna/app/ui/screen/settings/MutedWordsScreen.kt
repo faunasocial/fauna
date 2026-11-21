@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
@@ -17,9 +18,16 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.TokenSelect
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.ffi.mutedWordAddPossibility
 import com.fauna.app.ui.viewmodel.MutedWordsVM
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The **Muted words** Settings sub-page (`ui.yaml` page `muted-words`; settings.md
@@ -99,12 +107,25 @@ fun MutedWordsContent(
     onSetLevel: (term: String, token: String) -> Unit,
 ) {
     var input by remember { mutableStateOf("") }
+    // A refused press's reason (`error-message`), until the draft changes.
+    var refusal by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+
+    // `muted-word-add-button`'s answer — the shared
+    // `fauna_client_config::muted_word_add_possibility` (a term, and no change
+    // in flight; `docs/goal/ui/settings.md` § Errors & edge cases). The button
+    // paints from it; the press and the input's Done ask it again and refuse
+    // with the same reason.
+    val addGate = faunaFormGate(askForm { mutedWordAddPossibility(input, busy) })
 
     fun submit() {
-        if (input.isNotBlank()) {
-            onAdd(input)
-            input = ""
+        formRefusal(context, askForm { mutedWordAddPossibility(input, busy) })?.let {
+            refusal = it.reason
+            return
         }
+        refusal = null
+        onAdd(input)
+        input = ""
     }
 
     Scaffold(
@@ -144,7 +165,10 @@ fun MutedWordsContent(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = input,
-                    onValueChange = { input = it },
+                    onValueChange = {
+                        input = it
+                        refusal = null
+                    },
                     singleLine = true,
                     placeholder = { Text(stringResource(R.string.muted_words_input_placeholder)) },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
@@ -160,14 +184,15 @@ fun MutedWordsContent(
                 Spacer(Modifier.width(8.dp))
                 Button(
                     onClick = { submit() },
-                    enabled = !busy,
+                    enabled = addGate.enabled,
                     modifier = Modifier.testTag(Ids.MUTED_WORD_ADD_BUTTON),
                 ) {
                     Text(stringResource(R.string.muted_words_add))
                 }
             }
+            DisabledControlReasonText(addGate.reason)
 
-            error?.let {
+            (refusal ?: error)?.let {
                 Text(
                     it,
                     color = MaterialTheme.colorScheme.error,

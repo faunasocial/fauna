@@ -529,9 +529,24 @@ impl LocalWriteHost for SyncEngine {
     async fn converge(&self, folder: &str) -> Vec<String> {
         if !self.row_read_for_first_pass().await {
             tracing::info!(
-                "{}: local pass held until the folder row has been read",
+                "{}: local pass held until the folder row has been read; its delete \
+                 detection runs",
                 fauna_core::log_redact::log_folder_name(folder)
             );
+            // The hold is a take-up rule, never a delete one. The nest down at
+            // boot is the commonest restart, and an on-demand root connects
+            // right after this pass: a seen placeholder the downtime deleted
+            // that this pass skipped would be listed straight back by the
+            // re-armed population (`delete-propagation.md` § *An offline
+            // placeholder delete propagates*, decision (c)). Over the unread
+            // matcher the detection can only find fewer deletes than an armed
+            // pass (`SyncEngine::reconcile_deletes`).
+            if let Err(e) = self.reconcile_deletes().await {
+                tracing::error!(
+                    "delete detection ({}): {e:#}",
+                    fauna_core::log_redact::log_folder_name(folder)
+                );
+            }
             return Vec::new();
         }
         let drained = self.drain_pending_uploads().await.is_ok();
@@ -1089,6 +1104,18 @@ pub const KEEPS_EVERY_FILE: &str = "this folder keeps every file on this device 
 /// on an on-demand root*, point 4). Runs on the calling loop, so the engine is
 /// never driven from two tasks at once; a caller that went away just drops the
 /// reply receiver (the command still ran — only the report is lost).
+///
+/// **Nothing an arm reaches opens a cloud-only file.** On an on-demand root this
+/// runs on the thread that serves the root, and the provider's own read of its
+/// own cfapi placeholder stalls it for cfapi's 60 s timeout (`crate::placeholder`).
+/// Every read of the root an arm reaches asks first: the share ingest through
+/// `peer_share_store::read_local_body` (its retention reads only a body that
+/// reader hashed locally; a converged delete's verdict asks the attributes, and
+/// a group seat reports a declined delete to no nest, so reads nothing for it),
+/// the restore through its own refusal ([`crate::engine::RESTORE_OVER_CLOUD_ONLY`])
+/// and the upload it calls through the upload's choke point; the held deletes
+/// read attributes alone and the re-seal only the nest's bytes. A new arm, or a
+/// new read under one, asks the same question.
 pub async fn answer_engine_command(engine: &SyncEngine, cmd: EngineCommand) {
     match cmd {
         EngineCommand::ApplyHeldDeletes { reply } => {

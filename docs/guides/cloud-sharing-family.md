@@ -2,7 +2,7 @@
 
 > **Status — this guide describes Fauna as it is taking shape.** Most of it is
 > built and tested; the [table at the end](#where-this-stands-today) says
-exactly what is available now, what is being built, and what is planned.
+exactly what is available now.
 >
 > Part of the [Your own cloud](your-own-cloud.md) series.
 
@@ -103,15 +103,13 @@ invitation stops asking on every one of your devices, and nothing is added.
 
 Two things are worth knowing about a folder shared this way:
 
-- **It has no name yet.** It is listed by a short code you can both see on your
-  own screens — enough to tell two of them apart. Naming is being built.
-- **Leaving one is not available yet.** The person who started the share is the
+- **It has no name of its own.** It is listed by a short code you can both see on your own screens — enough to tell two of them apart.
+- **You cannot leave one yourself.** The person who started the share is the
   one who can remove someone from it.
 
 **Putting files in it.** Once the folder is listed, each of you picks where it
 lives on your own device: open its row in **Folders**, type a path into
-**Location path** and press **Add location** (**Bind Location** in the Windows
-and Mac apps). From then on, a file either of
+**Location path** and press **Add location**. From then on, a file either of
 you adds there reaches the other person's copy straight from your device. Your
 nest plays no part in this, so it does not need to be running or reachable. In
 turn, nothing moves unless both apps are open, **Peer transfers** is on for
@@ -137,7 +135,7 @@ document exists only on your co-author's machine in the same room.
 
 There is nothing to set up, and one thing to turn off if you want: each device
 has a **Peer transfers** switch on the **Devices** page. Off means that device
-opens no connection for other devices to reach — it neither hands files out nor fetches them directly, for a shared folder or between your own devices, and everything simply goes through your nest. You can turn
+opens no connection for other devices to reach — it neither hands files out nor fetches them directly, for a shared folder or between your own devices, and everything simply goes through your nest — except a folder shared in person, which has no nest to go through: nothing in it moves to or from a device while **Peer transfers** is off on that device. You can turn
 any of your devices off from any other; only the device itself turns back on.
 The **Folders** page shows a **Peer transfers**
 section: one line saying whether this device is currently serving your shared
@@ -158,14 +156,6 @@ A file in a folder you have made public, or in a private folder — one only you
   revocable.
 - **Giving a non-Fauna tool or person managed access**: serve a folder over [WebDAV](cloud-sync.md#mount-it-like-a-network-drive-webdav) with real credentials.
 - **Actually-public files** — a photo page for the family reunion, your résumé: make an ordinary folder, set who can see it to **Public**, turn on **"Serve this folder as your website"** on its row, and switch on **Publish my website** in Settings → Web. That publishes it as a real public website on your domain. Public on purpose looks like publishing — and your app confirms the step, because a public folder's *file names* are public too. See [Folders you make public](who-can-see-what.md#folders-you-make-public).
-
-### Collaborative documents (coming)
-
-Live co-edited documents — Fauna's answer to shared notes/Google-Docs-style
-collaboration, with viewer/editor roles and end-to-end encryption — are a
-designed, approved feature ("Spaces") that is **not built yet** and gated on
-its cryptographic foundations maturing. Until it ships: share a folder for
-files; use messaging for the discussion.
 
 ## A family on one nest
 
@@ -235,7 +225,7 @@ discards it.)
 **Age bands.** When an admin admits a supervised account, they set the child's
 age band beside the guardian — under 13, 13–15, 16–17 or 18+ — and it picks the
 starting settings the guardian then adjusts. It never changes on its own:
-nothing graduates an account when a birthday passes. The child sees their own band on the Family page, with how it was set — "set by guardian"; a band confirmed by the phone's app store is not available yet. The guardian sees each child's band on the child's row. An account
+nothing graduates an account when a birthday passes. The child sees their own band on the Family page, with how it was set — "set by guardian". The guardian sees each child's band on the child's row. An account
 admitted before bands existed simply shows none.
 
 **Denying someone is not permanent.** The people you have denied for a child are
@@ -330,7 +320,7 @@ count against the next day, and leaving a device switched on with the app open
 does not quietly burn the allowance — only real use does. Leave the field empty
 for no daily limit.
 
-A separate app for children under 13, limited to contacts their guardian approves, is planned. What a family nest gives every member, at any age, is an ad-free, tracker-free, algorithm-free home for their data.
+What a family nest gives every member, at any age, is an ad-free, tracker-free, algorithm-free home for their data.
 
 ## Where this stands today
 
@@ -343,12 +333,12 @@ A separate app for children under 13, limited to contacts their guardian approve
 | WebDAV credentialed access for non-Fauna tools | **Available** (server + the per-folder toggle on every app) — see [sync guide](cloud-sync.md#where-this-stands-today) |
 | Public website hosting of a folder | **Available** — set a folder you own to **Public**, turn on **"Serve this folder as your website"** on its row, and switch on **Publish my website** in Settings → Web |
 | Share links for people without Fauna (expiring, revocable; private files carry their key in the link) | **Available** — **Share a link** on a file in Media |
-| Share a folder with someone sitting next to you, with no nest involved | **Available** — the exchange works on your local network; each of you picks where the folder lives, files go straight between your two devices while both apps are open and **Peer transfers** is on for both devices, and a save that lost to the other person's can be brought back from the conflict review list. Naming the folder is still being built, and leaving it is not available yet |
-| Collaborative documents (Spaces, viewer/editor) | **Planned** — designed, unbuilt |
+| Share a folder with someone sitting next to you, with no nest involved | **Available** — the exchange works on your local network; each of you picks where the folder lives, files go straight between your two devices while both apps are open and **Peer transfers** is on for both devices, and a save that lost to the other person's can be brought back from the conflict review list. The folder has no name of its own, and you cannot leave it yourself |
 | Multi-user nest: invite codes/requests, tiers-as-quotas (enforced), eviction | **Available** on all seven apps |
 | Per-member privacy from the admin (files stored encrypted with each member's own keys, apart from a member's profile and what they make public) | **Available** |
 | Parental controls (supervised accounts: guardian link, reach policy, guardian device, graduation) | **Available** — guardian link at admission, who-can-reach-the-child enforcement, guardianship transfer, graduation |
-| Parental controls: content rules (by category, keywords or labeler; block flagged posts and messages or hide them behind a warning) | **Available** — set from the Family page and enforced on the child's own feed and conversations |
+| Parental controls: an admin taking over a child's guardianship | **Available** — **Take over**, then **Confirm take-over**, on the child's row on the admin **Users** page makes you the guardian at once, and the child's account then appears on your own Family page. The Windows app does not offer it |
+| Parental controls: content rules (by category, keywords or labeler; block flagged posts and messages or hide them behind a warning) | **Available** — set from the Family page on every app and enforced on the child's own feed and conversations |
 | Parental controls: direct messages from unknown senders on connected outside accounts | **Available** — the "Unknown message senders" control on the Family page holds a stranger's first message for guardian review, on every app |
 | Parental controls: undoing a denied message sender | **Available** — "Denied message senders" lists everyone you denied for a child, each with a one-click **Allow again** |
 | Parental controls: the child asking in-app for a new contact | **Available** — "Ask your guardian" appears where the refusal happens and lands in the parent's approval queue |

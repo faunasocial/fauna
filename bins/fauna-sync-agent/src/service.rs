@@ -9,14 +9,24 @@ use crate::state::SyncServiceState;
 ///
 /// Previously named `run_service_loop`; renamed to `run_agent` because
 /// "service loop" implied SCM/Windows-Service mode (removed in Task 3.2a).
-pub async fn run_agent(pipe_name: &str, data_dir: Option<&std::path::Path>) -> anyhow::Result<()> {
+///
+/// `system_close` resolves when the operating system asks the agent to close in a
+/// way no signal carries — on windows the session-end messages a deployment over
+/// the package or a logoff sends (`crate::close_request`); the run then shuts down
+/// by the orderly path ctrl-c takes. Elsewhere it is `std::future::pending()`:
+/// SIGTERM is that request there, and has its own arm.
+pub async fn run_agent(
+    pipe_name: &str,
+    data_dir: Option<&std::path::Path>,
+    system_close: impl std::future::Future<Output = ()>,
+) -> anyhow::Result<()> {
     // The per-user credential store the capability persists in (sync-agent.md
     // § Credential model), over the agent's unscoped state base — where its
     // headless `0600` file rests. Env-routed (`FAUNA_E2E_CREDENTIAL_DIR` /
     // `FAUNA_KEYRING_APP`) so e2e harnesses stay off the real keyring.
     let state_base = SyncPaths::new(data_dir.map(|d| d.to_path_buf()))?.flat_base_dir();
     let credentials = std::sync::Arc::new(crate::credentials::production_store(state_base));
-    run_agent_with_store(pipe_name, data_dir, credentials).await
+    run_agent_with_store(pipe_name, data_dir, credentials, system_close).await
 }
 
 /// [`run_agent`] with the credential store injected — the seam that lets the
@@ -27,6 +37,7 @@ pub(crate) async fn run_agent_with_store(
     pipe_name: &str,
     data_dir: Option<&std::path::Path>,
     credentials: std::sync::Arc<fauna_credential_store::CredentialStore>,
+    system_close: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
     // Log the transport this build actually serves. `pipe_name` is windows-only
     // (discarded under `cfg(unix)` below), so logging it unconditionally printed
@@ -156,8 +167,16 @@ pub(crate) async fn run_agent_with_store(
     // availability probe the status reply reports, and on linux lazily unmount
     // every leftover mount of this agent's FUSE binding at a configured on-demand
     // location — a ghost under a mount point would otherwise take a second mount
-    // on top of it. Blocking (a device open, a helper process per ghost), so off
-    // the async runtime, and awaited: the engines below must find it done.
+    // on top of it; on windows sweep the ghost shell sync-root registrations
+    // (folders that vanished while the service was down, crashed-test leftovers,
+    // and the roots of a package no longer installed — `installers/windows.md`
+    // § Direct download, 5, *Removal*), since an engine starting first would take
+    // a removed package's root as registered and connect it while the sweep tears
+    // it down. Registrations are persistent across service restarts by design, and
+    // this is the boot reconcile that keeps that model from accreting stale
+    // Explorer entries. Blocking (a device open, a helper process per ghost, WinRT
+    // calls), so off the async runtime, and awaited: the engines below must find it
+    // done.
     {
         let state = state.clone();
         #[cfg(target_os = "linux")]
@@ -178,6 +197,13 @@ pub(crate) async fn run_agent_with_store(
             .map(|home| home.join(crate::presence_roots::PRESENCE_DIR));
         let reconciled = tokio::task::spawn_blocking(move || {
             let _ = state.on_demand.set(crate::state::probe_on_demand());
+            #[cfg(windows)]
+            {
+                let swept = crate::cfapi_host::sweep_ghost_shell_registrations();
+                if swept > 0 {
+                    tracing::info!(swept, "removed ghost shell sync-root registrations");
+                }
+            }
             #[cfg(target_os = "linux")]
             {
                 let swept = crate::fuse_host::sweep_ghost_mounts(
@@ -281,19 +307,6 @@ pub(crate) async fn run_agent_with_store(
         state.shutdown_tx.subscribe(),
     ));
 
-    // Startup janitor: sweep ghost shell sync-root registrations (folders that
-    // vanished while the service was down, crashed-test leftovers). Registrations
-    // are persistent across service restarts by design — this is the boot
-    // reconcile that keeps that model from accreting stale Explorer entries.
-    // Blocking WinRT calls, so off the async runtime; best-effort.
-    #[cfg(windows)]
-    tokio::task::spawn_blocking(|| {
-        let swept = crate::cfapi_host::sweep_ghost_shell_registrations();
-        if swept > 0 {
-            tracing::info!(swept, "removed ghost shell sync-root registrations");
-        }
-    });
-
     // Start the local IPC control-plane server. Same length-prefixed dag-cbor frame
     // and the same platform-neutral `pipe_server::handle_request` everywhere; only the
     // transport differs — a per-SID named pipe on windows, a per-user unix socket
@@ -365,15 +378,29 @@ pub(crate) async fn run_agent_with_store(
             r = &mut ipc_handle => Some(r),
         }
     };
+    // On windows the system's request to close — a deployment over the package
+    // (an update, a removal) or the session ending — takes the same orderly path:
+    // the shipped agent is GUI-subsystem, so it never sees ctrl-c, and before
+    // this arm Windows ended it at its timeout and filed a `Quiesce` hang against
+    // the package on every update (`installers/windows.md` § Direct download, 2).
     #[cfg(windows)]
-    let early_ipc_exit = tokio::select! {
-        r = tokio::signal::ctrl_c() => {
-            r?;
-            tracing::info!("shutting down");
-            None
+    let early_ipc_exit = {
+        let mut system_close = std::pin::pin!(system_close);
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => {
+                r?;
+                tracing::info!("shutting down");
+                None
+            }
+            () = &mut system_close => {
+                tracing::info!("the system asked the agent to close — shutting down");
+                None
+            }
+            r = &mut ipc_handle => Some(r),
         }
-        r = &mut ipc_handle => Some(r),
     };
+    #[cfg(not(windows))]
+    drop(system_close);
     #[cfg(not(any(windows, unix)))]
     tokio::signal::ctrl_c().await?;
 

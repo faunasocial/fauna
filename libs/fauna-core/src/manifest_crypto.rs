@@ -100,9 +100,131 @@ pub fn open_manifest_hashes(
     crate::encoding::canonical_decode(&plaintext).context("decoding sealed manifest hashes payload")
 }
 
+/// The derive context of a paged manifest's ROOT seal — distinct from the
+/// page / single-manifest context `"fauna.manifest.v1"`, so a root's key and
+/// salt never meet a page's (`mls-group-key-material.md` § M2 *Sealed manifest
+/// hashes* → *Paged manifests*).
+const ROOT_CONTEXT: &str = "fauna.manifest.root.v1";
+
+/// The plaintext payload sealed into a paged root's `sealed_hashes`: the
+/// whole-file hash alone (a root lists no chunk hashes — its pages carry them).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SealedRootHash {
+    file_hash: ContentHash,
+}
+
+/// The root's convergent salt: a BLAKE3 derive-key hash, under the root's own
+/// context, over the ordered page hashes — the one identity of the root a
+/// reader knows before opening. Domain-separated at the salt itself (not only
+/// at the key), so a root's salt — and the nonce cut from it — never equals a
+/// page's [`stored_hashes_salt`] even over the same digest sequence.
+fn page_hashes_salt(page_hashes: &[ContentHash]) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new_derive_key(ROOT_CONTEXT);
+    for h in page_hashes {
+        hasher.update(&h.digest());
+    }
+    hasher.finalize()
+}
+
+fn derive_root_key(root_secret: &[u8; 32], salt: &blake3::Hash) -> [u8; 32] {
+    crate::domain_key::derive_domain_key(ROOT_CONTEXT, root_secret, salt.as_bytes())
+}
+
+/// Seal a paged root's `file_hash` under the set's chunk root, salted by the
+/// ordered page hashes the root names. Under a fixed root secret the page
+/// hashes determine the file, so the deterministic nonce only ever reproduces
+/// the identical blob.
+pub fn seal_root_file_hash(
+    root_secret: &[u8; 32],
+    file_hash: &ContentHash,
+    page_hashes: &[ContentHash],
+) -> Result<Vec<u8>> {
+    let plaintext = crate::encoding::canonical_encode(&SealedRootHash {
+        file_hash: *file_hash,
+    })
+    .context("encoding sealed root hash payload")?;
+    let salt = page_hashes_salt(page_hashes);
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&derive_root_key(root_secret, &salt)).expect("32 bytes");
+    cipher
+        .encrypt(&derive_manifest_nonce(&salt), plaintext.as_slice())
+        .map_err(|e| anyhow::anyhow!("manifest root sealing failed: {e}"))
+}
+
+/// Open a paged root's sealed `file_hash`. `page_hashes` must be the root's
+/// plaintext page list, in order: the salt binds the blob to it, so a
+/// reordered, dropped or swapped page fails the tag check (fail-closed).
+pub fn open_root_file_hash(
+    root_secret: &[u8; 32],
+    page_hashes: &[ContentHash],
+    sealed: &[u8],
+) -> Result<ContentHash> {
+    let salt = page_hashes_salt(page_hashes);
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&derive_root_key(root_secret, &salt)).expect("32 bytes");
+    let plaintext = cipher
+        .decrypt(&derive_manifest_nonce(&salt), sealed)
+        .map_err(|e| anyhow::anyhow!("manifest root unsealing failed: {e}"))?;
+    let payload: SealedRootHash = crate::encoding::canonical_decode(&plaintext)
+        .context("decoding sealed root hash payload")?;
+    Ok(payload.file_hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_seal_round_trips_and_binds_the_page_list() {
+        let root = [7u8; 32];
+        let file_hash = hash_of(b"whole file");
+        let pages = vec![hash_of(b"page 0"), hash_of(b"page 1")];
+        let sealed = seal_root_file_hash(&root, &file_hash, &pages).unwrap();
+        assert_eq!(
+            open_root_file_hash(&root, &pages, &sealed).unwrap(),
+            file_hash
+        );
+        // Convergent: identical input, identical blob.
+        assert_eq!(
+            seal_root_file_hash(&root, &file_hash, &pages).unwrap(),
+            sealed
+        );
+        // Wrong secret, reordered, dropped or swapped page ⇒ fail closed.
+        assert!(open_root_file_hash(&[8u8; 32], &pages, &sealed).is_err());
+        let reordered = vec![pages[1], pages[0]];
+        assert!(open_root_file_hash(&root, &reordered, &sealed).is_err());
+        assert!(open_root_file_hash(&root, &pages[..1], &sealed).is_err());
+        let swapped = vec![pages[0], hash_of(b"attacker page")];
+        assert!(open_root_file_hash(&root, &swapped, &sealed).is_err());
+    }
+
+    #[test]
+    fn a_root_salt_never_equals_a_page_salt() {
+        // Same digest sequence on both sides: the salts, the nonces cut from
+        // them and the keys all differ, and neither seal opens as the other.
+        let root = [3u8; 32];
+        let seq = vec![hash_of(b"a"), hash_of(b"b")];
+        let page_salt = stored_hashes_salt(&seq);
+        let root_salt = page_hashes_salt(&seq);
+        assert_ne!(page_salt, root_salt);
+        assert_ne!(
+            derive_manifest_nonce(&page_salt),
+            derive_manifest_nonce(&root_salt)
+        );
+        assert_ne!(
+            derive_manifest_key(&root, &page_salt),
+            derive_root_key(&root, &root_salt)
+        );
+        assert_ne!(
+            derive_manifest_key(&root, &root_salt),
+            derive_root_key(&root, &root_salt)
+        );
+        let file_hash = hash_of(b"f");
+        let page_seal = seal_manifest_hashes(&root, &file_hash, &[], &seq).unwrap();
+        assert!(open_root_file_hash(&root, &seq, &page_seal).is_err());
+        let root_seal = seal_root_file_hash(&root, &file_hash, &seq).unwrap();
+        assert!(open_manifest_hashes(&root, &seq, &root_seal).is_err());
+    }
 
     fn hash_of(data: &[u8]) -> ContentHash {
         ContentHash::of_raw(data)

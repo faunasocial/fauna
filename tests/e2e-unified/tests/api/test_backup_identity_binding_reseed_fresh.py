@@ -13,8 +13,9 @@ harness library (`harness_backup_pull_back`)::
     enroll D (harness); push                     -> D holds A's mail
     A lost; A' rebuilt from the same seed, claimed
     one DIFFERENT message arrives on A' (INBOX)  -> A' is lived-in, not fresh
-    harness_backup_pull_back                     -> the mail set answers AlreadyLive (wire: target_not_empty)
-    mailboxes on A'                              -> exactly the one arrival, nothing restored
+    harness_backup_pull_back                     -> the verb refuses the flip (wire: target_not_empty); the
+                                                    driver completes the set by record: Recovered { records: 1 }
+    mailboxes on A'                              -> the arrival kept beside the restored message (INBOX 2)
 
 Every wait is a synchronous barrier (the run-now sweep, each leg's own return),
 never a sleep (convention 14).
@@ -75,19 +76,25 @@ def test_reseeding_a_replacement_box_refuses_a_target_nest_that_is_not_fresh(
     before = mailbox_counts(box_a2, owner)
     assert before.get("INBOX") == 1, f"pre-state on the replacement: {before!r}"
 
-    # ── The re-seed refuses ──────────────────────────────────────────────────
-    refused = fauna_ffi.harness_backup_pull_back(
+    # ── The re-seed refuses the flip and completes the set by record ────────
+    reseeded = fauna_ffi.harness_backup_pull_back(
         box_a2["url"], secret, destination_id, state_path, rows)
-    # The wire answers the lived-in mail scope `target_not_empty`; the shared
-    # driver reports that set as `AlreadyLive` — "the owner pointed at a
-    # lived-in nest", nothing written, no force arm (`reseed.rs` SetOutcome).
-    assert refused["sets"].get("__landing/mail") == "AlreadyLive", (
-        f"the lived-in mail scope must be refused, not materialized: {refused!r}")
+    # The wire answers the lived-in mail scope `target_not_empty` — the flip is
+    # refused, no force arm — and the shared driver hands that segment set to
+    # the source's recovery leg in the same run, which files the copy by
+    # record beside what the target holds (`backup-destinations.md` § Third
+    # destination kind → *A lived-in segment set is completed by record in the
+    # same gesture*, rule (1); `reseed.rs` SetOutcome::Recovered).
+    mail_outcome = reseeded["sets"].get("__landing/mail") or ""
+    assert mail_outcome.startswith("Recovered") and "records: 1," in mail_outcome, (
+        f"the lived-in mail scope must be refused the flip and recovered by record: {reseeded!r}")
+    assert reseeded["whole"], f"a whole recovery counts toward a whole re-seed: {reseeded!r}"
 
-    # Nothing was written: the replacement holds exactly what it held.
+    # The target's own arrival survives (a flip would have replaced it): the
+    # replacement holds its arrival plus the one restored message.
     after = mailbox_counts(box_a2, owner)
-    assert after == before, (
-        f"NEST-SIDE: the refused re-seed changed the target: {before!r} -> {after!r}")
+    assert after.get("INBOX") == 2, (
+        f"NEST-SIDE: the lived-in target must keep its arrival beside the copy: {before!r} -> {after!r}")
 
 
 # ── Outcome 32: a destination is held to the identity it proved ─────────────
@@ -153,7 +160,7 @@ def test_a_destination_url_answered_by_another_nest_is_refused_at_every_later_co
 ):
     """box A (owner, one INBOX message), destination D1 enrolled and pushed to::
 
-        harness_backup_pull_back(A, D1)       -> reaches D1 (A is lived-in: AlreadyLive)
+        harness_backup_pull_back(A, D1)       -> reaches D1 (A is lived-in: Recovered by record, nothing new)
         D1 stopped; D2 (another deployment) started on D1's port
         harness_backup_pull_back(A, D1's row) -> refused, "proved identity …, not the destination enrolled as …"
         mailboxes on A                        -> unchanged
@@ -180,9 +187,10 @@ def test_a_destination_url_answered_by_another_nest_is_refused_at_every_later_co
     assert before.get("INBOX") == 1, f"pre-state on A: {before!r}"
 
     # The control: the enrolled destination connects, and the re-seed reaches
-    # the set rule (A is lived-in, so the mail set is refused AlreadyLive).
+    # the set rule (A is lived-in, so the verb refuses the flip and the driver
+    # recovers the mail set by record — A already holds the one message).
     reached = fauna_ffi.harness_backup_pull_back(box_a["url"], secret, destination_id, state_path)
-    assert reached["sets"].get("__landing/mail") == "AlreadyLive", reached
+    assert (reached["sets"].get("__landing/mail") or "").startswith("Recovered"), reached
 
     # ── Another deployment takes over the destination's URL ─────────────────
     stop_nest(box_d1)

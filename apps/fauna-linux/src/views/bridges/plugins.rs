@@ -66,6 +66,8 @@ pub struct PluginsSection {
     url_entry: gtk::Entry,
     submit: gtk::Button,
     opened_hint: gtk::Label,
+    /// The install form's `error-message` (a blank URL's refusal).
+    error_label: gtk::Label,
     rows: RefCell<Vec<InstalledPluginRow>>,
     /// The plugin whose inline uninstall confirm is open, by install row id.
     armed: RefCell<Option<Vec<u8>>>,
@@ -128,6 +130,8 @@ impl PluginsSection {
         opened_hint.add_css_class("dim-label");
         opened_hint.set_visible(false);
         admin_box.append(&opened_hint);
+        let error_label = crate::form_gate::dialog_error_label();
+        admin_box.append(&error_label);
 
         let section = Rc::new(Self {
             root,
@@ -139,17 +143,28 @@ impl PluginsSection {
             url_entry,
             submit,
             opened_hint,
+            error_label,
             rows: RefCell::new(Vec::new()),
             armed: RefCell::new(None),
             client: Rc::clone(client),
         });
 
         {
-            // The draft is committed only with something in it.
+            // The submit paints from the shared `plugin_install_possibility`
+            // (`behavior/bridges.md` § Errors & edge cases): a blank URL
+            // leaves it insensitive with the reason.
             let submit = section.submit.clone();
-            section.url_entry.connect_changed(move |entry| {
-                submit.set_sensitive(!entry.text().trim().is_empty())
-            });
+            let paint = move |text: &str| {
+                crate::form_gate::paint_submit(
+                    &submit,
+                    &fauna_client_bridges::bridge_forms::plugin_install_possibility(text),
+                    None,
+                );
+            };
+            paint("");
+            section
+                .url_entry
+                .connect_changed(move |entry| paint(&entry.text()));
         }
         {
             let section_for_submit = Rc::clone(&section);
@@ -170,10 +185,17 @@ impl PluginsSection {
         &self.root
     }
 
-    /// The admin gate: the list and the install entry are the admin's alone.
+    /// The admin gate: the list and the install entry are the admin's alone —
+    /// an admin entry point, absent for a non-admin by the shared answer
+    /// (`fauna_client_account::admin_entry_possibility`; `admin.md` § Errors
+    /// & edge cases, *Role and state gates answer one `Possibility` too*).
     pub fn set_admin(&self, admin: bool) {
         ADMIN.set(admin);
-        self.admin_box.set_visible(admin);
+        crate::possible::paint(
+            &self.admin_box,
+            None,
+            fauna_client_account::admin_entry_possibility(admin),
+        );
     }
 
     /// Repaint the settings cards from a fresh `fauna.plugins.available` reply.
@@ -297,9 +319,15 @@ impl PluginsSection {
 
     fn install(&self) {
         let url = self.url_entry.text().trim().to_string();
-        if url.is_empty() {
+        // The press asks the answer the submit was painted from, and refuses
+        // with its reason on the section's `error-message`.
+        if crate::form_gate::refuse(
+            &fauna_client_bridges::bridge_forms::plugin_install_possibility(&url),
+            &self.error_label,
+        ) {
             return;
         }
+        crate::form_gate::show_error(&self.error_label, None);
         self.opened_hint.set_visible(false);
         self.client.install_plugin(url);
     }

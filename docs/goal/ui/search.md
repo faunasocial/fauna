@@ -22,13 +22,14 @@ policy-gated **public bridge corpus** (`bridge.<id>` rows, owned by
 there is no per-nest availability difference and the former `not_server_side`
 refusal is gone — no nest ever returns it. Local/sealed search (mail, calendar,
 conversations) is a separate, capability-position story (owner: content-index.md),
-not this page's wire surface. **One designed exception (2026-11-08):** on a nest
+not this page's wire surface. **One exception (designed 2026-11-08, built):** on a nest
 whose materializer holds the signed-in owner's materialization grant,
-`fauna.search.query` also answers from that owner's readable nest-side mail index
-— the shape that gives the web SPA and a phone-only user full mail search with no
-local engine, and no change to this page (owner:
+`fauna.search.query` also answers from that owner's readable nest-side index of
+the granted kinds — the shape that gives the web SPA and a phone-only user those
+hits with no local engine, and no change to this page (owner:
 `../architecture/capability-grants.md` § Capability tiering → *The
-materialization grant*, part (d); unbuilt).
+materialization grant*, part (d); status: `../ui/nests.md` § Implementation
+status today).
 
 The tantivy/`fauna-index` architecture, the `__index` reserved-set sync model,
 and the per-app availability matrix are owned by
@@ -219,11 +220,13 @@ CS0104), and snapshot rows are **projections with no serde-flatten catch-all**
 - **Wire + backend:** `fauna.search.query` over `content_fts` is
   live and serves the Search page on all seven apps, uniformly on every nest
   (§ The page's wire surface).
-- **The materialization fast path (§ The page's wire surface, the designed
-  exception) is designed 2026-11-08 and unbuilt:** no nest yet
-  merges an owner's readable mail index into the reply; the page needs no change
-  when it lands — the shared snapshot dedups the nest's mail hit against a local
-  one by `(kind, content_id)`.
+- **The materialization fast path (§ The page's wire surface, the exception)
+  is BUILT:** the nest's `fauna.search.query` handler merges the connection
+  actor's readable views of the kinds it holds a grant for into the one reply
+  (`bins/fauna-nest/src/search_handlers.rs`); the page needed no change — the
+  shared snapshot dedups the nest's hit against a local one by
+  `(kind, content_id)`. Per-app state of the opt-in option: `nests.md` §
+  Implementation status today.
 - **The `content_id` contract is pinned, and its spelling fixed (2026-08-03).**
   The owed nest conformance pin exists
   (`conformance_search.rs::a_post_class_content_id_is_the_post_id_and_navigates`),
@@ -751,7 +754,7 @@ CS0104), and snapshot rows are **projections with no serde-flatten catch-all**
 |---|---|---|
 | `search-query-field` | Update query. | `SearchManager` (S3); today per-app view state. |
 | `search-submit-button` | Run query. | `SearchManager` — fires both arms (§ State & data shape). |
-| `search-type-filter` | Set type filter. | `SearchManager` — one mapping onto both arms. |
+| `search-type-filter` | Set type filter, re-running the query under it. A choice is never dropped: over a blank field before any search the token is held (committed to the snapshot, nothing fired) and the next submit runs under it; over a field cleared after a search the last fired query re-runs under it, so the committed filter always describes the rows shown. | `SearchManager::run_query` — one mapping onto both arms; every app hands it the filter change whatever the field holds. |
 | `search-toggle-button` | Toggle search affordance (per ui.yaml). | App glue (pure view affordance, no search semantics). |
 | `search-clear-button` | Clear query. | `SearchManager` (S3); today per-app view state. |
 | `search-cancel-button` | Cancel in-flight search. | `SearchManager` — settles the snapshot, drops late replies. |
@@ -774,6 +777,7 @@ introduced, it is manager-owned state, never per-app storage. (The local
   shown honestly). Query syntax errors surface the same way (the nest maps
   fts5 syntax errors to `invalid_params`; the local arm reports its parse
   errors through the same field).
+- **A blank query is not offered (ruled 2026-11-16; the form case of [`README.md`](README.md) § Offer only what is possible, rule 4).** `search-submit-button` is painted from `fauna_client_search::query_possibility`, blocked with `search_page.query_required` while the field is blank, and the submit asks the same predicate and refuses with that reason on `error-message` rather than returning with no feedback. `SearchManager::run_query`'s blank guard stays as the backstop.
 
 ## Architectural rules
 

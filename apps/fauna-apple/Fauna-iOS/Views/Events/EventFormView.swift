@@ -40,6 +40,11 @@ struct EventFormView: View {
             }
 
             Section {
+                // The form's own `error-message` (ruling 4): a refused or failed
+                // save's whole sentence, the sheet staying open with its text.
+                if let error = vm.createFormError {
+                    ErrorBanner(message: error)
+                }
                 Button(L.events.createEvent) {
                     submitCreateEvent()
                 }
@@ -94,10 +99,13 @@ struct EventFormView: View {
     /// The create-event button's action, factored out so the automation sibling
     /// drives the exact same code path the Button does.
     private func submitCreateEvent() {
-        let request = form.makeCreateRequest(calendarId: vm.selectedCalendar?.id ?? "")
+        // Empty id: the shared create target resolves the calendar (selection,
+        // else the first loaded one) — or refuses with the predicate's reason.
+        let request = form.makeCreateRequest(calendarId: "")
         Task {
-            await vm.createEvent(request)
-            dismiss()
+            // Dismiss on success only: a refused or failed save keeps the
+            // sheet open with what was typed and the sentence in the form.
+            if await vm.createEvent(request) { dismiss() }
         }
     }
 }

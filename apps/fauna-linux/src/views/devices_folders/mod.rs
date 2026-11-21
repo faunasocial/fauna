@@ -18,6 +18,7 @@
 //! / the device-local folder map; the machine refreshes on auth + when either
 //! sub-page becomes visible (wired in `app.rs`).
 
+use fauna_core::possibility::ReadState;
 use fauna_ui_ids as ids;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -347,15 +348,20 @@ struct RenderCtx {
     /// It gates each owner row's `folder-webdav-toggle` — disabled + hinted
     /// for an MSEK-less actor rather than clicking into a `NoMsek` that has already
     /// committed the nest flag (`webdav-server.md` § Independent enablement pt 2).
-    /// Starts `false` (fail-safe: a control that cannot succeed is not offered).
-    can_serve_webdav: Cell<bool>,
+    /// Carries where the read stands beside its answer, so the toggle is painted
+    /// from the shared `webdav_serve_possibility` (`folders.md` § Errors & edge
+    /// cases, *Own-tier and mail gates*): starts `Pending` — "still loading",
+    /// never "set up mail" — and a failed read is said as such.
+    can_serve_webdav: Cell<(ReadState, bool)>,
     /// The creator's own subscription tier names — the option set each web-type
     /// row's `folder-paywall-tier-select` offers. Like `can_serve_webdav`, a
     /// page-level read the keyless `DevicesMachine` can't own: fetched off the
     /// key-bearing `FaunaClient` (`fetch_own_tier_names`) on page-map and cached
-    /// here. Empty ⇒ the select renders disabled with a "create a tier first" hint
-    /// (nothing to paywall to). `docs/goal/ui/folders.md` § Web paywall.
-    own_tiers: RefCell<Vec<String>>,
+    /// here, with where the read stands: the select is painted from the shared
+    /// `own_tiers_possibility` (use `Paywall`), so only an ANSWERED read with no
+    /// tier says "create a tier first". `docs/goal/ui/folders.md` § Web paywall,
+    /// § Errors & edge cases.
+    own_tiers: RefCell<(ReadState, Vec<String>)>,
     /// The co-present ceremony's own shared-set listing — sets this device
     /// holds the machinery for, appended as `folder-row`s after the M2 sets
     /// (`p2p.md` § Offline share initiation). Painted through
@@ -443,6 +449,16 @@ fn nest_pinned(fauna_client: &FaunaClient) -> bool {
         .is_some()
 }
 
+/// The custody offer's host options — this account's 1:1 conversations — or
+/// `None` while the conversations session is not up (not read yet).
+fn read_mint_candidates(
+    fauna_client: &FaunaClient,
+) -> Option<Vec<fauna_client_capabilities::custody_view::CustodyMintCandidateView>> {
+    crate::conversations::conv_backend::active_session()
+        .as_deref()
+        .map(|s| fauna_client_custody::mint_candidates(s, fauna_client.secret_bytes()))
+}
+
 /// Paint (or clear) a custody gesture's error on the Devices `error-message`,
 /// through `devices_error_text` so the machine's own error keeps precedence.
 fn set_custody_error(ctx: &RenderCtx, machine: &DevicesMachine, error: Option<String>) {
@@ -467,21 +483,19 @@ fn run_custody_gesture(
     let act = match gesture {
         G::MintOpen => {
             // The options are this account's 1:1 conversations (the request
-            // travels over one). None → say so, rather than an empty picker
-            // whose confirm can never succeed.
-            let candidates = session
-                .as_deref()
-                .map(|s| fauna_client_custody::mint_candidates(s, fauna_client.secret_bytes()))
-                .unwrap_or_default();
-            if candidates.is_empty() {
-                set_custody_error(
-                    ctx,
-                    machine,
-                    Some(strings::devices::CUSTODY_MINT_NO_CONTACTS.to_string()),
-                );
-            } else {
-                set_custody_error(ctx, machine, None);
-                view.mint.open(candidates);
+            // travels over one). The press asks the same shared answer the
+            // button was painted from, and refuses with its reason — never an
+            // empty picker whose confirm can never succeed.
+            let candidates = read_mint_candidates(fauna_client);
+            view.mint.paint_entry(candidates.as_deref());
+            let answer =
+                fauna_client_conversations::custody_mint_possibility(candidates.as_deref());
+            match candidates {
+                Some(candidates) if answer.is_possible() => {
+                    set_custody_error(ctx, machine, None);
+                    view.mint.open(candidates);
+                }
+                _ => set_custody_error(ctx, machine, crate::form_gate::reason_text(&answer)),
             }
             return;
         }
@@ -717,8 +731,8 @@ pub fn build_devices_and_folders_pages(
         folders_error_label: fshell.error_label,
         gesture_error: gesture_error.clone(),
         location_map: Rc::clone(&location_map),
-        can_serve_webdav: Cell::new(false),
-        own_tiers: RefCell::new(Vec::new()),
+        can_serve_webdav: Cell::new((ReadState::Pending, false)),
+        own_tiers: RefCell::new((ReadState::Pending, Vec::new())),
         #[cfg(feature = "p2p-share")]
         group_scopes: RefCell::new(Vec::new()),
         wizard_parent: fshell.content.upcast::<gtk::Widget>(),
@@ -853,6 +867,9 @@ pub fn build_devices_and_folders_pages(
                     if let Some(facet) = facet {
                         view.paint(&facet, nest_pinned(&fauna_client));
                     }
+                    // The offer's entry gate reads the candidates each visit.
+                    let candidates = read_mint_candidates(&fauna_client);
+                    view.mint.paint_entry(candidates.as_deref());
                 },
             );
         }));
@@ -880,46 +897,60 @@ pub fn build_devices_and_folders_pages(
     // changed, so a nav doesn't rebuild the list (which would collapse any expanded
     // row) for nothing — which is also what makes it safe for the store-change
     // notice to re-drive while the page is open (a level, not an event).
-    let folders_serve_refresh: NavHook = {
+    //
+    // Cache a new reading of where the custody read stands and repaint the rows
+    // only when it changed — the one write of `ctx.can_serve_webdav` after build.
+    let paint_serve: Rc<dyn Fn((ReadState, bool))> = {
         let machine = machine.clone();
         let ctx = Rc::clone(&ctx);
         let fauna_client = Rc::clone(fauna_client);
+        Rc::new(move |can_serve| {
+            if ctx.can_serve_webdav.replace(can_serve) == can_serve {
+                return;
+            }
+            let snap = machine.snapshot();
+            folders::update_folder_list(
+                &ctx.folder_list_box,
+                &snap.folders,
+                &machine,
+                &fauna_client,
+                &ctx.location_map,
+                can_serve,
+                &ctx.own_tiers.borrow(),
+                snap.website_address_enabled,
+                folders::LeaseCtx {
+                    devices: &snap.devices,
+                    this_device_row: lease_this_row(&ctx).as_deref(),
+                },
+                #[cfg(feature = "p2p-share")]
+                &ctx.group_scopes.borrow(),
+            );
+        })
+    };
+    let folders_serve_refresh: NavHook = {
+        let paint_serve = Rc::clone(&paint_serve);
+        let fauna_client = Rc::clone(fauna_client);
         Rc::new(move || {
-            let ctx = Rc::clone(&ctx);
-            let machine = machine.clone();
-            let fauna_client = Rc::clone(&fauna_client);
+            let paint_serve = Rc::clone(&paint_serve);
             let query = fauna_client.can_serve_webdav();
             async_helper::spawn_with_snapshot(
                 &fauna_client.runtime_handle(),
                 move || query,
-                move |can_serve| {
-                    if ctx.can_serve_webdav.replace(can_serve) == can_serve {
-                        return;
-                    }
-                    let snap = machine.snapshot();
-                    folders::update_folder_list(
-                        &ctx.folder_list_box,
-                        &snap.folders,
-                        &machine,
-                        &fauna_client,
-                        &ctx.location_map,
-                        can_serve,
-                        &ctx.own_tiers.borrow(),
-                        snap.website_address_enabled,
-                        folders::LeaseCtx {
-                            devices: &snap.devices,
-                            this_device_row: lease_this_row(&ctx).as_deref(),
-                        },
-                        #[cfg(feature = "p2p-share")]
-                        &ctx.group_scopes.borrow(),
-                    );
-                },
+                move |can_serve| paint_serve(can_serve),
             );
         })
     };
     {
         let refresh = Rc::clone(&folders_serve_refresh);
-        folders_page.connect_map(move |_| refresh());
+        // A visit's read is out until it answers: the toggle says "still
+        // loading", never the last visit's answer (`folders.md` § Errors &
+        // edge cases, *Own-tier and mail gates*; tui's hydrate does the same).
+        // The store-change re-drive (`settings_shell`) keeps the standing
+        // answer while its re-read is out. The rebuild keeps expanded rows.
+        folders_page.connect_map(move |_| {
+            paint_serve((ReadState::Pending, false));
+            refresh();
+        });
     }
 
     // Re-read WHICH ROW THIS MACHINE ENROLLED ON whenever the Devices sub-page
@@ -1737,8 +1768,30 @@ mod tests {
             );
             seen.borrow_mut().clear();
 
-            // The mint: the button asks the page for candidates; the page opens
-            // the flow over them.
+            // The mint is gated at the entry from the shared answer: not
+            // enabled before the candidates are read, blocked with the
+            // start-a-conversation step over none, live over one.
+            let entry =
+                crate::testid::find_by_test_id(&shell.content, "custody-mint-button").unwrap();
+            assert!(!entry.is_sensitive(), "unread candidates → not enabled");
+            shell.custody.mint.paint_entry(Some(&[]));
+            assert!(!entry.is_sensitive());
+            assert_eq!(
+                entry.tooltip_text().as_deref(),
+                Some(strings::devices::CUSTODY_MINT_NO_CONTACTS),
+            );
+            let bob = CustodyMintCandidateView {
+                host: vec![0xB0; 32],
+                channel_hex: "abcd".to_string(),
+                label: "bob".to_string(),
+            };
+            shell
+                .custody
+                .mint
+                .paint_entry(Some(std::slice::from_ref(&bob)));
+            assert!(entry.is_sensitive());
+            // The button asks the page for candidates; the page opens the
+            // flow over them.
             click(&shell.content, "custody-mint-button");
             assert_eq!(*seen.borrow(), vec![G::MintOpen]);
             seen.borrow_mut().clear();

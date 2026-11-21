@@ -20,6 +20,7 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/davauth"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	faunaFfi "github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_ffi"
+	"lukechampine.com/blake3"
 )
 
 // Backend implements emersion/go-webdav's FileSystem over the user's folder
@@ -559,33 +560,52 @@ func (b *Backend) readFileBytes(ctx context.Context, served faunaFfi.FfiServedSe
 	if err != nil {
 		return nil, fmt.Errorf("download manifest %s: %w", file.ManifestHash, err)
 	}
-	// Decoded here only to learn the store keys to fetch; the walk decodes
-	// (and verifies) it again on its own terms. A sealed manifest names no
-	// plaintext chunk hash (they ride sealed — `mls-group-key-material.md`
-	// § M2 *Sealed manifest hashes*), so the store keys are the whole list;
-	// the walk opens the sealed hashes under the served set's keys.
-	manifest, err := faunaFfi.DeserializeManifest(manifestBytes)
+	// What to fetch comes from the ONE manifest walk (`file-sync.md` § Paged
+	// manifests → *One walk, used by every reader*), never from decoding the
+	// chunk list here: a large file's manifest is a root whose chunk entries
+	// ride in pages, each fetched from the manifest route. The walk names the
+	// pages (none for a single manifest), verifies each fetched page against
+	// its root, and lists the store keys across them; the open walk below
+	// re-verifies all of it on its own terms.
+	pageHashes, err := faunaFfi.WebdavManifestPageHashes(manifestBytes)
 	if err != nil {
 		return nil, fmt.Errorf("decode manifest: %w", err)
 	}
-	if manifest.StoredHashes == nil {
-		return nil, webdav.NewHTTPError(http.StatusServiceUnavailable, errors.New("webdav: manifest missing ciphertext store keys (not content-key sealed)"))
+	pages := make([][]byte, 0, len(pageHashes))
+	for i, h := range pageHashes {
+		page, err := b.bytes.DownloadManifest(ctx, hex.EncodeToString(h))
+		if err != nil {
+			return nil, fmt.Errorf("download manifest page %d (%x): %w", i, h, err)
+		}
+		pages = append(pages, page)
 	}
-	stored := *manifest.StoredHashes
+	stored, err := faunaFfi.WebdavManifestStoreKeys(manifestBytes, pages)
+	if err != nil {
+		return nil, fmt.Errorf("walk manifest: %w", err)
+	}
 
+	// One fetch per distinct store key: a file repeating a chunk names it
+	// once per occurrence.
+	fetched := make(map[string][]byte, len(stored))
 	bodies := make([][]byte, 0, len(stored))
 	for _, storeKey := range stored {
-		ct, err := b.bytes.DownloadChunk(ctx, hex.EncodeToString(storeKey))
-		if err != nil {
-			return nil, fmt.Errorf("download chunk %x: %w", storeKey, err)
+		keyHex := hex.EncodeToString(storeKey)
+		ct, ok := fetched[keyHex]
+		if !ok {
+			ct, err = b.bytes.DownloadChunk(ctx, keyHex)
+			if err != nil {
+				return nil, fmt.Errorf("download chunk %s: %w", keyHex, err)
+			}
+			fetched[keyHex] = ct
 		}
 		bodies = append(bodies, ct)
 	}
 
 	// The walk names the missing generation, the failing chunk, or the
 	// whole-file mismatch itself; all three are a 500 here (the served set's
-	// keys ARE in the blob — this is not the keyless 503 above).
-	pt, err := faunaFfi.WebdavOpenFile(served.Keys, *file.ContentKeyVersion, file.Path, manifestBytes, bodies)
+	// keys ARE in the blob — this is not the keyless 503 above). A manifest
+	// that is not content-key sealed fails here too: no generation opens it.
+	pt, err := faunaFfi.WebdavOpenFile(served.Keys, *file.ContentKeyVersion, file.Path, manifestBytes, pages, bodies)
 	if err != nil {
 		return nil, fmt.Errorf("open %q: %w", file.Path, err)
 	}
@@ -698,6 +718,9 @@ func (b *Backend) chunkSealUpload(ctx context.Context, sess *davauth.Session, se
 		}
 	}
 
+	if err := b.uploadManifestPages(ctx, token, sealed.ManifestPages); err != nil {
+		return "", 0, err
+	}
 	manifestHash, err := b.bytes.UploadManifest(ctx, token, sealed.ManifestBytes)
 	if err != nil {
 		return "", 0, err
@@ -709,6 +732,44 @@ func (b *Backend) chunkSealUpload(ctx context.Context, sess *davauth.Session, se
 		return "", 0, fmt.Errorf("webdav: nest stored the manifest as %s, the seal computed %s", manifestHash, want)
 	}
 	return manifestHash, sealed.ContentKeyVersion, nil
+}
+
+// uploadManifestPages posts a paged file's pages the nest does not already
+// hold — after the chunks they name, before their root (`file-sync.md`
+// § Paged manifests → *Transport and order*), as the sync engine's
+// `post_manifest` does: the existing existence check sees a page like any
+// blob, and a page repeated in the file goes up once. No pages (a file at or
+// under the inline bound) is nothing to do. The engine's nest-capability gate
+// is an assertion here: the MDA writes only to the nest it is a role of,
+// which serves the page door at its own version.
+func (b *Backend) uploadManifestPages(ctx context.Context, token string, pages [][]byte) error {
+	if len(pages) == 0 {
+		return nil
+	}
+	hashes := make([]string, len(pages))
+	for i, p := range pages {
+		sum := blake3.Sum256(p)
+		hashes[i] = hex.EncodeToString(sum[:])
+	}
+	missing, err := b.bytes.CheckChunks(ctx, token, hashes)
+	if err != nil {
+		return fmt.Errorf("webdav: check manifest pages: %w", err)
+	}
+	sent := make(map[string]bool, len(pages))
+	for i, h := range hashes {
+		if !missing[h] || sent[h] {
+			continue
+		}
+		got, err := b.bytes.UploadManifestPage(ctx, token, pages[i])
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(got, h) {
+			return fmt.Errorf("webdav: nest stored manifest page %d as %s, the seal computed %s", i, got, h)
+		}
+		sent[h] = true
+	}
+	return nil
 }
 
 func (b *Backend) RemoveAll(ctx context.Context, name string, opts *webdav.RemoveAllOptions) error {

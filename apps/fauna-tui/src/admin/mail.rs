@@ -12,18 +12,21 @@
 //! Every editable control is a **draft** re-seeded from the persisted snapshot on
 //! every fold (`super::apply_outcome`), so a group shows persisted state until the
 //! human edits it and each Save gathers the group's drafts into the full `*View`
-//! (unedited fields ride through unchanged — the no-clobber full-PUT; an unparsed
-//! numeric falls back to the persisted value, mirroring linux's `gather_*`). A
+//! (unedited fields ride through unchanged — the no-clobber full-PUT; a numeric
+//! draft that does not parse refuses the save with its reason, never the stored value). A
 //! machine dispatch/read error surfaces on the **global** `error-message` (`admin.md`
 //! § 6 — unlike the page-scoped aliases error), bridged in the fold.
 
+use fauna_client_mail_settings::admin_policy;
 use fauna_client_mail_settings::admin_policy::{
     AliasPolicyView, AuthPolicyView, DmarcPolicyView, FcrdnsMode, ImapDeleteNonempty,
     ImapPolicyView, MailHealthView, MailPolicyConfirm, MailPolicySnapshot, OutboundPolicyView,
     SENDER_DASHBOARD_LINKS, SpamPolicyView, SubmissionPolicyView, dmarc_forensic_mode_options,
     dmarc_forensic_retention_warns, secret_rotation_text,
 };
-use fauna_core::format::{parse_count, parse_count_u64};
+use fauna_core::format::parse_count;
+use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use fauna_i18n::strings::admin as t;
 use fauna_i18n::strings::common;
 use fauna_ui_ids as ids;
@@ -86,6 +89,8 @@ pub(super) fn mail_elements(state: &AdminState) -> Vec<Element> {
                 (false, false) => "off",
             },
         )
+        // Agrees with the shared `enable_toggle_possibility` that
+        // `apply_read_gates` declares; its reason is the notice below.
         .enabled(!unavailable),
     ];
     if unavailable {
@@ -1025,107 +1030,101 @@ impl MailDrafts {
     /// Gather the Spam group's drafts into a full `SpamPolicyView`. Numeric fields
     /// parse over the persisted `base` value (an unparsed/blank field rides through
     /// unchanged — the no-clobber full-PUT, linux's `gather_spam`).
-    pub(super) fn gather_spam(&self, base: &SpamPolicyView) -> SpamPolicyView {
+    pub(super) fn gather_spam(
+        &self,
+        base: &SpamPolicyView,
+    ) -> Result<SpamPolicyView, LocalizedText> {
         let d = &self.spam;
-        SpamPolicyView {
-            max_score_before_spam_folder: pu32(&d.junk, base.max_score_before_spam_folder),
-            max_score_before_reject: pu32(&d.reject, base.max_score_before_reject),
+        Ok(SpamPolicyView {
+            max_score_before_spam_folder: knob(&d.junk)?,
+            max_score_before_reject: knob(&d.reject)?,
             dnsbl_servers: split_lines(&d.dnsbl),
             reject_no_rdns: d.reject_no_rdns,
             greylist_enabled: d.greylist_enabled,
-            greylist_delay_secs: pu32(&d.greylist_delay, base.greylist_delay_secs),
-            max_conn_per_min: pu32(&d.max_conn_per_min, base.max_conn_per_min),
+            greylist_delay_secs: knob(&d.greylist_delay)?,
+            max_conn_per_min: knob(&d.max_conn_per_min)?,
             fcrdns_mode: d.fcrdns_mode.clone(),
             helo_identity_required: d.helo_identity_required,
             reject_fcrdns_fail: d.reject_fcrdns_fail,
-            max_message_bytes: pu32(&d.max_message_bytes, base.max_message_bytes),
-            bayesian_weight_milli: pu32(&d.bayesian_weight, base.bayesian_weight_milli),
-            bayesian_min_samples: pu32(&d.bayesian_min_samples, base.bayesian_min_samples),
-            bayesian_full_confidence_samples: pu32(
-                &d.bayesian_full_confidence,
-                base.bayesian_full_confidence_samples,
-            ),
-            training_history_retention_days: pu32(
-                &d.training_retention,
-                base.training_history_retention_days,
-            ),
-            unlisted_recipient_penalty: pu32(&d.unlisted_penalty, base.unlisted_recipient_penalty),
+            max_message_bytes: knob(&d.max_message_bytes)?,
+            bayesian_weight_milli: knob(&d.bayesian_weight)?,
+            bayesian_min_samples: knob(&d.bayesian_min_samples)?,
+            bayesian_full_confidence_samples: knob(&d.bayesian_full_confidence)?,
+            training_history_retention_days: knob(&d.training_retention)?,
+            unlisted_recipient_penalty: knob(&d.unlisted_penalty)?,
             // Not a Spam-group draft (the standing toggle is its own gesture) —
             // the persisted value rides through, so a group save never turns
             // the deployment's standing baseline publish off (which withdraws).
             baseline_standing_publish: base.baseline_standing_publish,
-        }
+        })
     }
 
     /// Gather the Auth group's drafts into a full `AuthPolicyView`.
-    pub(super) fn gather_auth(&self, base: &AuthPolicyView) -> AuthPolicyView {
+    pub(super) fn gather_auth(&self) -> Result<AuthPolicyView, LocalizedText> {
         let d = &self.auth;
-        AuthPolicyView {
+        Ok(AuthPolicyView {
             enforce_dmarc: d.enforce_dmarc,
             enforce_dmarc_quarantine: d.enforce_dmarc_quarantine,
             enforce_spf_hardfail: d.enforce_spf_hardfail,
             enforce_dkim: d.enforce_dkim,
             log_only: d.log_only,
-            max_auth_failures_per_minute: pu32(&d.max_failures, base.max_auth_failures_per_minute),
-            max_conn_per_ip: pu32(&d.max_conn_per_ip, base.max_conn_per_ip),
-        }
+            max_auth_failures_per_minute: knob(&d.max_failures)?,
+            max_conn_per_ip: knob(&d.max_conn_per_ip)?,
+        })
     }
 
     /// Gather the Submission group's drafts into a full `SubmissionPolicyView`.
-    pub(super) fn gather_submission(&self, base: &SubmissionPolicyView) -> SubmissionPolicyView {
+    pub(super) fn gather_submission(&self) -> Result<SubmissionPolicyView, LocalizedText> {
         let d = &self.submission;
-        SubmissionPolicyView {
-            max_per_day: pu32(&d.max_per_day, base.max_per_day),
-            max_recipients_per_message: pu32(&d.max_recipients, base.max_recipients_per_message),
-        }
+        Ok(SubmissionPolicyView {
+            max_per_day: knob(&d.max_per_day)?,
+            max_recipients_per_message: knob(&d.max_recipients)?,
+        })
     }
 
     /// Gather the IMAP group's drafts into a full `ImapPolicyView`.
-    pub(super) fn gather_imap(&self, base: &ImapPolicyView) -> ImapPolicyView {
+    pub(super) fn gather_imap(&self) -> Result<ImapPolicyView, LocalizedText> {
         let d = &self.imap;
-        ImapPolicyView {
-            idle_timeout_secs: pu32(&d.idle_timeout, base.idle_timeout_secs),
-            tombstone_retention_days: pu32(&d.tombstone_retention, base.tombstone_retention_days),
+        Ok(ImapPolicyView {
+            idle_timeout_secs: knob(&d.idle_timeout)?,
+            tombstone_retention_days: knob(&d.tombstone_retention)?,
             delete_nonempty: d.delete_nonempty.clone(),
-            bodystructure_cache_max: pu32(&d.bodystructure_cache, base.bodystructure_cache_max),
-            storage_bytes_default: pu64(&d.storage_bytes, base.storage_bytes_default),
-            message_count_default: pu32(&d.message_count, base.message_count_default),
-        }
+            bodystructure_cache_max: knob(&d.bodystructure_cache)?,
+            storage_bytes_default: knob_u64(&d.storage_bytes)?,
+            message_count_default: knob(&d.message_count)?,
+        })
     }
 
     /// Gather the Outbound group's drafts into a full `OutboundPolicyView`.
     /// `postmaster_cc_bounces` is carried through from the base unchanged (read-only).
-    pub(super) fn gather_outbound(&self, base: &OutboundPolicyView) -> OutboundPolicyView {
+    pub(super) fn gather_outbound(
+        &self,
+        base: &OutboundPolicyView,
+    ) -> Result<OutboundPolicyView, LocalizedText> {
         let d = &self.outbound;
-        OutboundPolicyView {
-            retry_schedule_seconds: split_u64_lines(
-                &d.retry_schedule,
-                &base.retry_schedule_seconds,
-            ),
-            permanent_failure_timeout_hours: pu32(
-                &d.permfail_timeout,
-                base.permanent_failure_timeout_hours,
-            ),
-            delay_warning_at_hours: pu32(&d.delay_warning, base.delay_warning_at_hours),
-            ndr_rate_limit_days: pu32(&d.ndr_rate_limit, base.ndr_rate_limit_days),
+        Ok(OutboundPolicyView {
+            retry_schedule_seconds: knob_lines(&d.retry_schedule)?,
+            permanent_failure_timeout_hours: knob(&d.permfail_timeout)?,
+            delay_warning_at_hours: knob(&d.delay_warning)?,
+            ndr_rate_limit_days: knob(&d.ndr_rate_limit)?,
             suppress_ndr_spf_hardfail: d.suppress_ndr_spf,
             suppress_ndr_dmarc_reject: d.suppress_ndr_dmarc,
             postmaster_cc_bounces: base.postmaster_cc_bounces,
             tlsrpt_send_reports: d.tlsrpt_send,
             ipv6_enabled: d.ipv6,
             treat_5xx_as_transient: split_lines(&d.treat_5xx),
-        }
+        })
     }
 
     /// Gather the Alias group's drafts into a full `AliasPolicyView`.
-    pub(super) fn gather_alias(&self, base: &AliasPolicyView) -> AliasPolicyView {
+    pub(super) fn gather_alias(&self) -> Result<AliasPolicyView, LocalizedText> {
         let d = &self.alias;
-        AliasPolicyView {
-            exact_aliases_max: pu32(&d.exact_max, base.exact_aliases_max),
+        Ok(AliasPolicyView {
+            exact_aliases_max: knob(&d.exact_max)?,
             reserved_local_parts: split_lines(&d.reserved_local_parts),
             subaddressing_enabled: d.subaddressing,
             wildcard_prefix_enabled: d.wildcard_prefix,
-        }
+        })
     }
 
     /// Gather the DMARC group's drafts into a full `DmarcPolicyView`: the five
@@ -1133,28 +1132,70 @@ impl MailDrafts {
     /// control (`p`, `sp`, `pct`, `adkim`, `aspf`, `rua`, the `ruf` destination,
     /// `ri`) carried through unchanged. A retention past its ceiling is sent as
     /// typed — the nest refuses it onto `error-message`, never clamped here.
-    pub(super) fn gather_dmarc(&self, base: &DmarcPolicyView) -> DmarcPolicyView {
+    pub(super) fn gather_dmarc(
+        &self,
+        base: &DmarcPolicyView,
+    ) -> Result<DmarcPolicyView, LocalizedText> {
         let d = &self.dmarc;
-        DmarcPolicyView {
+        Ok(DmarcPolicyView {
             ruf_publish: d.ruf_publish,
             fo_mode: d.fo_mode.clone(),
-            aggregate_retention_days: pu32(&d.aggregate_retention, base.aggregate_retention_days),
-            forensic_retention_days: pu32(&d.forensic_retention, base.forensic_retention_days),
+            aggregate_retention_days: knob(&d.aggregate_retention)?,
+            forensic_retention_days: knob(&d.forensic_retention)?,
             outbound_aggregate_enabled: d.outbound_aggregate,
             ..base.clone()
+        })
+    }
+
+    /// The draft half of a mail save's answer (`admin.md` § Errors & edge cases
+    /// → draft validity): a group's save is possible only while its gather
+    /// succeeds, the Microsoft save only while the shared pair check passes.
+    /// The gate map folds it after the policy read's answer, and the save
+    /// gathers again through the same parsers, so the two cannot disagree.
+    /// `None` for an action with no draft, or before the snapshot a gather
+    /// seeds from (the read gate blocks then).
+    pub(super) fn save_draft_possibility(
+        &self,
+        action: &Action,
+        snapshot: Option<&MailPolicySnapshot>,
+    ) -> Option<Possibility> {
+        if let Action::SaveMailMicrosoft = action {
+            let d = &self.microsoft;
+            return Some(admin_policy::microsoft_draft_possibility(
+                &d.client_id,
+                &d.tenant,
+            ));
         }
+        let s = snapshot?;
+        let refusal = match action {
+            Action::SaveMailSpam => self.gather_spam(&s.spam).err(),
+            Action::SaveMailAuth => self.gather_auth().err(),
+            Action::SaveMailSubmission => self.gather_submission().err(),
+            Action::SaveMailImap => self.gather_imap().err(),
+            Action::SaveMailOutbound => self.gather_outbound(&s.outbound).err(),
+            Action::SaveMailAlias => self.gather_alias().err(),
+            Action::SaveMailDmarc => self.gather_dmarc(&s.dmarc).err(),
+            _ => return None,
+        };
+        Some(Possibility::from_blocked_reason(refusal))
     }
 }
 
-/// Parse a numeric draft over the persisted value (unparsed/blank → keep persisted;
-/// the shared `parse_count`, the linux `parse_u32` fallback).
-fn pu32(draft: &str, prev: u32) -> u32 {
-    parse_count(draft.trim()).unwrap_or(prev)
+/// Parse one numeric draft — the shared `admin_policy::parse_knob`, which
+/// refuses an unparseable draft with its sentence instead of keeping the stored
+/// value (`admin.md` § Errors & edge cases → draft validity).
+fn knob(draft: &str) -> Result<u32, LocalizedText> {
+    admin_policy::parse_knob(draft)
 }
 
-/// Parse a u64 numeric draft over the persisted value (IMAP storage bytes).
-fn pu64(draft: &str, prev: u64) -> u64 {
-    parse_count_u64(draft.trim()).unwrap_or(prev)
+/// The `u64` sibling (IMAP storage bytes).
+fn knob_u64(draft: &str) -> Result<u64, LocalizedText> {
+    admin_policy::parse_knob_u64(draft)
+}
+
+/// A one-number-per-line list (the retry schedule): any bad line refuses it.
+fn knob_lines(draft: &str) -> Result<Vec<u64>, LocalizedText> {
+    admin_policy::parse_knob_u64_lines(draft)
 }
 
 /// Split a one-value-per-line list draft (trim, drop blanks) → full-replace `Vec`.
@@ -1166,20 +1207,6 @@ fn split_lines(draft: &str) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect()
-}
-
-/// Split a one-value-per-line u64 list draft (retry schedule). If ANY line fails to
-/// parse, keep the whole persisted list (never send a partially-parsed schedule —
-/// linux's `read_u64_lines`).
-fn split_u64_lines(draft: &str, prev: &[u64]) -> Vec<u64> {
-    let mut out = Vec::new();
-    for line in draft.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        match parse_count_u64(line) {
-            Some(v) => out.push(v),
-            None => return prev.to_vec(),
-        }
-    }
-    out
 }
 
 /// Join a u64 list for display (one per line).
@@ -1815,14 +1842,14 @@ mod tests {
     /// base: an edited numeric is carried, an unparseable one falls back to the
     /// persisted value, and the sibling (unedited) fields ride through unchanged.
     #[test]
-    fn gather_spam_carries_edits_with_fallback_and_no_clobber() {
+    fn gather_spam_carries_edits_and_refuses_a_bad_number() {
         let mut drafts = MailDrafts::default();
         let base = sample_snapshot().spam;
         drafts.seed(&sample_snapshot());
 
         // Edit the junk threshold; the rest keep their seeded (persisted) values.
         drafts.spam.junk = "7".into();
-        let gathered = drafts.gather_spam(&base);
+        let gathered = drafts.gather_spam(&base).expect("every draft parses");
         assert_eq!(
             gathered.max_score_before_spam_folder, 7,
             "edited field carried"
@@ -1832,12 +1859,65 @@ mod tests {
             "sibling field rides through unchanged (no clobber)"
         );
 
-        // An unparseable numeric falls back to the persisted base value.
+        // An unparseable numeric refuses the save with its reason — never the
+        // persisted value under a reported success (rule 7) — and the save's
+        // answer says so before the press.
         drafts.spam.junk = "not-a-number".into();
-        assert_eq!(
-            drafts.gather_spam(&base).max_score_before_spam_folder,
-            base.max_score_before_spam_folder,
+        let refusal = drafts.gather_spam(&base).unwrap_err();
+        assert_eq!(refusal.key, "admin.mail_page.knob_invalid");
+        let snap = sample_snapshot();
+        let answer = drafts
+            .save_draft_possibility(&Action::SaveMailSpam, Some(&snap))
+            .expect("a group save has a draft answer");
+        assert_eq!(answer.reason(), Some(&refusal));
+        drafts.spam.junk = "7".into();
+        assert!(
+            drafts
+                .save_draft_possibility(&Action::SaveMailSpam, Some(&snap))
+                .is_some_and(|a| a.is_possible())
         );
+    }
+
+    /// Every group's save refuses one bad number in it, through the same
+    /// gather the press sends.
+    #[test]
+    fn every_group_save_refuses_a_bad_number() {
+        let snap = sample_snapshot();
+        type Spoil = fn(&mut MailDrafts);
+        let cases: [(Action, Spoil); 7] = [
+            (Action::SaveMailSpam, |d| d.spam.greylist_delay = "x".into()),
+            (Action::SaveMailAuth, |d| {
+                d.auth.max_conn_per_ip = "x".into()
+            }),
+            (Action::SaveMailSubmission, |d| {
+                d.submission.max_per_day = "".into()
+            }),
+            (Action::SaveMailImap, |d| d.imap.storage_bytes = "-5".into()),
+            (Action::SaveMailOutbound, |d| {
+                d.outbound.retry_schedule = "60\nsoon".into()
+            }),
+            (Action::SaveMailAlias, |d| d.alias.exact_max = "1.5".into()),
+            (Action::SaveMailDmarc, |d| {
+                d.dmarc.aggregate_retention = "x".into()
+            }),
+        ];
+        for (action, spoil) in cases {
+            let mut drafts = MailDrafts::default();
+            drafts.seed(&snap);
+            assert!(
+                drafts
+                    .save_draft_possibility(&action, Some(&snap))
+                    .is_some_and(|a| a.is_possible()),
+                "{action:?} seeded drafts save"
+            );
+            spoil(&mut drafts);
+            assert!(
+                drafts
+                    .save_draft_possibility(&action, Some(&snap))
+                    .is_some_and(|a| !a.is_possible()),
+                "{action:?} refuses the bad number"
+            );
+        }
     }
 
     /// The DMARC Save carries the five edited fields and round-trips every
@@ -1859,16 +1939,18 @@ mod tests {
         drafts.toggle(MailToggle::DmarcOutboundAggregate);
         drafts.dmarc.fo_mode = "d".into();
         drafts.set_text(MailField::DmarcForensicRetention, "60".into());
-        drafts.set_text(MailField::DmarcAggregateRetention, "oops".into());
-        let gathered = drafts.gather_dmarc(&snap.dmarc);
+        drafts.set_text(MailField::DmarcAggregateRetention, "120".into());
+        let gathered = drafts
+            .gather_dmarc(&snap.dmarc)
+            .expect("every draft parses");
         assert_eq!(
             gathered,
             DmarcPolicyView {
                 ruf_publish: true,
                 fo_mode: "d".into(),
                 forensic_retention_days: 60,
-                // Unparsed → the persisted value.
-                aggregate_retention_days: 90,
+                // The edited retention rides as typed.
+                aggregate_retention_days: 120,
                 outbound_aggregate_enabled: false,
                 ..snap.dmarc.clone()
             }
@@ -1999,19 +2081,18 @@ mod tests {
     }
 
     /// A list draft splits on newlines dropping blanks (full-replace); the u64
-    /// retry-schedule keeps the persisted list if any line fails to parse.
+    /// retry-schedule refuses the whole list if any line fails to parse.
     #[test]
-    fn list_gathers_split_and_fall_back() {
+    fn list_gathers_split_and_refuse_a_bad_line() {
         assert_eq!(
             split_lines("a.test\n\n  b.test  \n"),
             vec!["a.test".to_string(), "b.test".to_string()]
         );
         assert!(split_lines("   ").is_empty(), "empty box clears the list");
-        assert_eq!(split_u64_lines("30\n90", &[1, 2]), vec![30, 90]);
-        assert_eq!(
-            split_u64_lines("30\nnope", &[1, 2]),
-            vec![1, 2],
-            "a bad line keeps the persisted schedule"
+        assert_eq!(knob_lines("30\n90"), Ok(vec![30, 90]));
+        assert!(
+            knob_lines("30\nnope").is_err(),
+            "a bad line refuses the schedule, never the persisted one"
         );
     }
 }

@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use fauna_e2e_contract::{
     ConnectionReports, KnockNotices, LaidOutText, PaintedErrorTally, PaintedTextArea,
+    RootSurfaceJournal, ToplevelWindowJournal,
 };
 
 use crate::nest_client::FfiConnectionState;
@@ -133,6 +134,29 @@ pub fn subscriptions_hold_author_drain_for_test() {
 #[uniffi::export]
 pub fn subscriptions_release_author_drain_for_test() {
     fauna_client_subscriptions::orchestration::release_author_drain_for_test();
+}
+
+/// Hold this process's Folders-page mail-custody reads — the
+/// `folders_hold_custody_reads` agent command's mechanism on the UniFFI apps
+/// (tui's arm is the reference): every later `owner_can_serve_webdav` read
+/// parks until the release, so `folder-webdav-toggle` is read while that read
+/// is out (`folders.md` § Errors & edge cases, *Own-tier and mail gates* —
+/// blocked "still loading"). An account-store read, so no nest reply hold
+/// reaches it; the hold is shared Rust's process-wide gate
+/// (`fauna_client_folders::webdav_provision`). Gated like its neighbours
+/// (convention 15).
+#[cfg(feature = "test-helpers")]
+#[uniffi::export]
+pub fn folders_hold_custody_reads_for_test() {
+    fauna_client_folders::webdav_provision::hold_custody_reads_for_test();
+}
+
+/// Release [`folders_hold_custody_reads_for_test`]; every parked read answers
+/// and later reads pass. A no-op when nothing is held.
+#[cfg(feature = "test-helpers")]
+#[uniffi::export]
+pub fn folders_release_custody_reads_for_test() {
+    fauna_client_folders::webdav_provision::release_custody_reads_for_test();
 }
 
 /// Ring the app-only outbox drain now — the `app_outbox_drain_now` agent
@@ -279,6 +303,92 @@ impl FfiPaintedErrorTallyForTest {
     }
 }
 
+/// The journal behind `fauna_e2e_agent::ROOT_SURFACE_KEY`. An app holds ONE,
+/// fed once per painted frame with what its root showed — one of the
+/// `fauna_e2e_contract::ROOT_SURFACE_*` names, another launch surface's ui.yaml
+/// page name, or `None` when the frame painted nothing — and publishes
+/// [`Self::json`] under that key (`onboarding.md` § Wizard exit handling → *The
+/// wizard becomes the app in place*).
+#[derive(uniffi::Object)]
+pub struct FfiRootSurfaceJournalForTest {
+    inner: Mutex<RootSurfaceJournal>,
+}
+
+#[uniffi::export]
+impl FfiRootSurfaceJournalForTest {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(RootSurfaceJournal::default()),
+        })
+    }
+
+    /// Record one painted frame.
+    pub fn observe(&self, showing: Option<String>) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(showing.as_deref());
+    }
+
+    /// The `root_surface` state value, as JSON text.
+    pub fn json(&self) -> String {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .json()
+            .to_string()
+    }
+}
+
+/// One visible top-level window, for [`FfiToplevelWindowJournalForTest`]: a
+/// process-local serial naming the window object for its whole life, and the
+/// window's own name.
+#[derive(uniffi::Record)]
+pub struct FfiToplevelWindow {
+    pub id: u64,
+    pub name: String,
+}
+
+/// The journal behind `fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY`. An app whose
+/// shell owns top-level windows (macOS) holds ONE, fed with its visible
+/// windows each time the set may have changed, and publishes [`Self::json`]
+/// under that key (`onboarding.md` § Wizard exit handling → *The wizard
+/// becomes the app in place*: the window that showed the wizard is the one
+/// that shows the app).
+#[derive(uniffi::Object)]
+pub struct FfiToplevelWindowJournalForTest {
+    inner: Mutex<ToplevelWindowJournal>,
+}
+
+#[uniffi::export]
+impl FfiToplevelWindowJournalForTest {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(ToplevelWindowJournal::default()),
+        })
+    }
+
+    /// Record the visible windows now.
+    pub fn observe(&self, visible: Vec<FfiToplevelWindow>) {
+        let pairs: Vec<(u64, &str)> = visible.iter().map(|w| (w.id, w.name.as_str())).collect();
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(&pairs);
+    }
+
+    /// The `toplevel_windows` state value, as JSON text.
+    pub fn json(&self) -> String {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .json()
+            .to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +422,24 @@ mod tests {
         tally.observe(frame());
         let json: serde_json::Value = serde_json::from_str(&tally.json()).unwrap();
         assert_eq!(json["count"], 1, "a standing error counts once");
+
+        let surfaces = FfiRootSurfaceJournalForTest::new();
+        for showing in [Some("wizard"), Some("wizard"), None, Some("app")] {
+            surfaces.observe(showing.map(str::to_string));
+        }
+        let json: serde_json::Value = serde_json::from_str(&surfaces.json()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "journal": [
+                    { "seq": 0, "showing": "wizard" },
+                    { "seq": 1, "showing": null },
+                    { "seq": 2, "showing": "app" },
+                ],
+                "now": "app",
+            }),
+            "one entry per change, a frame that painted nothing included"
+        );
 
         let knocks = FfiKnockNoticesForTest::new();
         knocks.observe();

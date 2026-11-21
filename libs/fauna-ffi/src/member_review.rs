@@ -190,6 +190,20 @@ pub fn member_review_row_text(
     Ok(review_row_text(&review, handle.as_deref()))
 }
 
+/// `member-review-remove-button`'s answer — the FFI face of
+/// [`fauna_core::data::member_review_remove_possibility`]: blocked with
+/// `settings.recovery_kit.review_remove_not_ready` until the conversations
+/// session is up, since only its eviction earns a verdict
+/// (`succession-propagation.md` § Propagation). Painted on the button and
+/// asked again by the press, so a missing session is said, never a silent
+/// return.
+#[uniffi::export]
+pub fn member_review_remove_possibility(
+    conversations_ready: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_core::data::member_review_remove_possibility(conversations_ready)
+}
+
 /// Record **Keep** — the owner recognises this person, so every open item
 /// for them closes with no group changes. Returns whether anything was
 /// actually open: a concurrent device may have already answered, and that is

@@ -447,6 +447,24 @@ impl RuleEditor {
         self.is_editable() && self.document.status(&self.publisher).is_applied()
     }
 
+    /// [`Self::can_save`] as the typed answer every gated affordance gives
+    /// (`ui/README.md` § Offer only what is possible, rule 6): possible, or
+    /// blocked by the sentence `rule-editor-status` shows — the validator's
+    /// first defect, else the newer-version one. The bool stays for the app
+    /// families that read it through the view.
+    pub fn save_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        if self.can_save() {
+            return Possibility::Possible;
+        }
+        Possibility::blocked(
+            self.validate()
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| LocalizedText::key("rule_editor.newer_version")),
+        )
+    }
+
     /// Everything the editor paints.
     pub fn view(&self) -> RuleEditorView {
         view::view(self)

@@ -123,6 +123,31 @@ public partial class AdminUsersViewModel : ObservableObject
     [ObservableProperty] private string? _mintedCode;
     [ObservableProperty] private bool _showMintedCode;
 
+    /// <summary>The code the last confirmed <c>admin-users-invite-code-copy-btn</c> copy
+    /// put on the clipboard — paints "Copied!" beside the button's label and is its
+    /// <c>copied</c> attr (the <c>account-actor-id-copy-btn</c> contract); <c>null</c>
+    /// before a copy, after a failed one, and once another code is minted.</summary>
+    [ObservableProperty] private string? _mintedCodeCopied;
+
+    partial void OnMintedCodeChanged(string? value) => MintedCodeCopied = null;
+
+    /// <summary>Record an invite-code copy's outcome (<c>docs/goal/ui/README.md</c>
+    /// § Offer only what is possible, rule 7): a copy that reached the clipboard confirms
+    /// on the button (<see cref="MintedCodeCopied"/>); one that threw says so on
+    /// <c>admin-users-action-error</c> (<c>common.copy_failed</c>) — never swallowed.</summary>
+    internal void RecordInviteCopy(string code, Exception? failure)
+    {
+        if (failure is null)
+        {
+            MintedCodeCopied = code;
+        }
+        else
+        {
+            MintedCodeCopied = null;
+            ActionError = Strings.Format("common/copy_failed", failure.Message);
+        }
+    }
+
     /// <summary>The user roster (<c>user-row</c>); the admin themselves is always present.</summary>
     public ObservableCollection<AdminUserRow> Users { get; } = new();
     /// <summary>Every account on the nest (admin.md § 2 → <i>Which accounts a picker

@@ -53,8 +53,6 @@ def test_reimporting_a_different_key_restarts_the_handle_check(app):
             "args": {"domain": "example.com"},
         },
         "continue_enabled": True,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     # Deadline-polled (convention 14): the injection lands in the machine and
     # the page repaints on the app's own tick, so a one-shot read can see the

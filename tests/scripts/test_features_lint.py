@@ -1283,3 +1283,307 @@ def test_the_real_identity_page_has_tui_legs_linux_and_windows():
     app_marks, _s, platform_marks = fc.scan_marks()
     assert fc.legs(pages["identity-protected-on-this-device"], "tui", app_marks,
                    platform_marks) == (frozenset({"linux"}), frozenset({"windows"}))
+
+
+# --- rule 8: Stable is never recorded ahead of the dev line (image-pipeline.md § Image tags &
+# channels → *What moves `:dev` without a session's initiative*, part (4)) -----------------
+
+A, B, C = "a" * 40, "b" * 40, "c" * 40
+
+
+def _row(commit, *, verified=None, promoted=False, version="0.1.8"):
+    row = {"version": version, "commit": commit, "promoted": promoted, "date": "2026-11-20"}
+    if verified:
+        row["verified"] = verified
+    return row
+
+
+@pytest.mark.parametrize("rows", [
+    [],
+    [_row(A, verified="2026-11-20"), _row(A, promoted=True)],           # verified at its commit
+    [_row(A, promoted=True), _row(A, verified="2026-11-20")],           # … recorded either side
+    [_row(A, verified="2026-11-19"), _row(B, promoted=True), _row(C, verified="2026-11-21")],
+    [_row(A, promoted=False)],                                          # unpromoted: nothing owed
+])
+def test_rule_8_passes_a_promoted_row_with_a_verified_row_at_or_after_it(rows):
+    assert fl._rule_8(rows) == []
+
+
+def test_rule_8_flags_a_promoted_row_ahead_of_every_verified_row():
+    rows = [_row(A, verified="2026-11-19"), _row(B, promoted=True)]
+    problems = fl._rule_8(rows)
+    assert len(problems) == 1 and "0.1.8" in problems[0] and B[:12] in problems[0]
+
+
+def test_rule_8_reads_the_table_through_the_lint(tmp_path):
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=TAGGED)
+    (features / "ledger" / "releases.json").write_text(json.dumps(
+        {"schema": 1, "releases": [_row(A, verified="2026-11-19"), _row(B, promoted=True)],
+         "artifacts": []}), encoding="utf-8")
+    assert any("rule 8" in p for p in run(features, e2e, repo))
+
+
+def test_rule_8_passes_the_committed_release_table():
+    assert fl._rule_8(fc.load_releases(fc.FEATURES)) == []
+
+
+
+# ── merge-path cost (merge-gates.md § The 10-second budget) ────────────────
+
+def test_statement_walk_answers_what_the_full_walk_did():
+    """`_module_facts` walks statements only: imports and fixtures are
+    statements, nested at any depth — a function, a class, an `if`, a `try`."""
+    import ast
+    src = (
+        "import os\n"
+        "class T:\n"
+        "    @pytest.fixture\n"
+        "    def a(self, app): pass\n"
+        "try:\n"
+        "    pass\n"
+        "except Exception:\n"
+        "    def b(x):\n"
+        "        from playwright.sync_api import sync_playwright\n"
+        "if True:\n"
+        "    @pytest.fixture\n"
+        "    def c(two_account_app): pass\n"
+        "f = lambda: [g for g in range(3)]\n"
+    )
+    tree = ast.parse(src)
+    fast = fs._module_facts(tree)
+    keep = fs._statements
+    try:
+        fs._statements = ast.walk
+        slow = fs._module_facts(tree)
+    finally:
+        fs._statements = keep
+    assert fast == slow and fast[0] is True and set(fast[1]) == {"a", "c"}
+
+
+def test_a_helper_scope_is_read_once_and_again_after_an_edit(tmp_path, monkeypatch):
+    helper = tmp_path / "h.py"
+    helper.write_text("APPS = ('tui',)\n", encoding="utf-8")
+    fs._HELPER_SCOPES.clear()
+    first = fs._helper_scope(helper, 1)
+    assert fs._helper_scope(helper, 1) is first
+    helper.write_text("APPS = ('tui', 'web')\n# longer\n", encoding="utf-8")
+    assert fs._helper_scope(helper, 1) is not first
+    fs._HELPER_SCOPES.clear()
+
+
+def test_ancestry_is_kept_only_for_an_answer_about_known_commits(monkeypatch):
+    import subprocess
+    calls = []
+
+    def run(cmd, *a, **kw):
+        calls.append(cmd)
+        rc = {"k1": 0, "k2": 1}.get(cmd[-2], 128)
+        return subprocess.CompletedProcess(cmd, rc, "", "")
+
+    fc._ANCESTRY.clear()
+    monkeypatch.setitem(fc._CHAINS, str(fc.REPO), {})  # no chain: every pair asks git
+    monkeypatch.setattr(fc.subprocess, "run", run)
+    for _ in range(2):
+        assert fc.is_ancestor("k1", "n") is True
+        assert fc.is_ancestor("k2", "n") is False
+        assert fc.is_ancestor("unknown", "n") is False
+    assert len(calls) == 4  # k1 and k2 once each; the unknown asked both times
+    fc._ANCESTRY.clear()
+
+
+def test_ancestry_on_the_first_parent_chain_matches_git_and_off_it_asks_git(tmp_path):
+    """The chain answers both directions exactly; a side-branch commit falls through
+    to `merge-base --is-ancestor`, and every answer equals git's own."""
+    import subprocess
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(tmp_path), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    git("init", "--quiet", "--initial-branch=main")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    shas = []
+    for n in range(3):
+        (tmp_path / "f").write_text(str(n), encoding="utf-8")
+        git("add", "-A")
+        git("commit", "--quiet", "-m", f"c{n}")
+        shas.append(git("rev-parse", "HEAD"))
+    git("checkout", "--quiet", "-b", "side", shas[0])
+    (tmp_path / "g").write_text("s", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "side")
+    side = git("rev-parse", "HEAD")
+    git("checkout", "--quiet", "main")
+    fc._ANCESTRY.clear()
+    fc._CHAINS.pop(str(tmp_path), None)
+    try:
+        chain = fc._first_parent_chain(tmp_path)
+        assert set(chain) == set(shas) and side not in chain
+        for older in shas + [side]:
+            for newer in shas + [side]:
+                if older == newer:
+                    continue
+                truth = subprocess.run(
+                    ["git", "-C", str(tmp_path), "merge-base", "--is-ancestor", older, newer]
+                ).returncode == 0
+                assert fc.is_ancestor(older, newer, tmp_path) is truth, (older, newer)
+    finally:
+        fc._ANCESTRY.clear()
+        fc._CHAINS.pop(str(tmp_path), None)
+
+
+def test_headings_are_read_once_and_again_after_an_edit(tmp_path):
+    doc = tmp_path / "d.md"
+    doc.write_text("# A\n", encoding="utf-8")
+    first = fl._headings(doc)
+    assert first == ["A"] and fl._headings(doc) is first
+    doc.write_text("# A\n\n## Longer B\n", encoding="utf-8")
+    assert fl._headings(doc) == ["A", "Longer B"]
+
+
+def test_a_last_green_index_is_built_once_and_again_after_a_publish(tmp_path):
+    features = tmp_path / "features"
+    (features / "last-green").mkdir(parents=True)
+    snap = features / "last-green" / "linux.json"
+    snap.write_text('{"tests": {"t.py::test_x[tui]": {"a": 1}}}', encoding="utf-8")
+    first = fc._last_green_index("linux", features)
+    assert first == {"t.py::test_x": [(("tui",), {"a": 1})]}
+    assert fc._last_green_index("linux", features) is first
+    snap.write_text('{"tests": {"t.py::test_y": {"b": 22}}}', encoding="utf-8")
+    assert fc._last_green_index("linux", features) == {"t.py::test_y": [((), {"b": 22})]}
+    assert fc._last_green_index("windows", features) == {}, "never published"
+
+
+def test_one_mark_walk_answers_every_mark_question_and_skips_mark_free_lines(tmp_path):
+    """`_mark_index` is one walk per node, read by every mark question; a node whose
+    source lines never say `mark` is not walked; and the scan restores the cyclic
+    collector and leaves no per-file state behind. The facts equal the per-question
+    walks the index replaced."""
+    import ast
+    import gc
+    src = (
+        "import pytest\n"
+        "def _desktop(fn):\n"
+        "    return pytest.mark.host_platform('linux')(pytest.mark.tui(fn))\n"
+        "def _plain(x):\n"
+        "    return x + 1\n"
+        "@pytest.fixture\n"
+        "def seat(app): pass\n"
+        "@_desktop\n"
+        "@pytest.mark.feature('feed-read')\n"
+        "@pytest.mark.parametrize('n', [1, 2])\n"
+        "def test_a(seat, n):\n"
+        "    pass\n"
+    )
+    path = tmp_path / "test_x.py"
+    path.write_text(src, encoding="utf-8")
+    walked = []
+    real_walk = fs.ast.walk
+
+    def spy(node):
+        walked.append(node)
+        return real_walk(node)
+
+    fs.ast.walk = spy
+    try:
+        facts = fs.scan_file(path, repo=tmp_path)
+    finally:
+        fs.ast.walk = real_walk
+    assert fs._MARK_INDEX is None and fs._SOURCE_LINES is None
+    names = {n.name for n in walked if isinstance(n, ast.FunctionDef)}
+    assert "_plain" not in names, "a mark-free helper body is not walked"
+    assert "_desktop" in names, "a helper that says `mark` is"
+    (fact,) = facts
+    assert fact.features == ("feed-read",) and fact.apps == ("tui",)
+    assert fact.platforms == ("linux",)
+    tree = ast.parse(src)
+    dec = tree.body[-1].decorator_list[2]
+    calls, marks = fs._mark_index(dec)
+    assert [c.func.attr for c in calls["parametrize"]] == ["parametrize"]
+    assert marks == {"parametrize"}
+    was = gc.isenabled()
+    fs._SCAN_CACHE.clear()
+    (tmp_path / "e2e").mkdir()
+    fs.scan_tree(tmp_path / "e2e", repo=tmp_path)
+    assert gc.isenabled() is was
+
+
+def _scan_fresh(monkeypatch, root, repo, *, min_files=None, make_pool=None):
+    """One uncached `scan_tree`, the pool's threshold and maker stood in."""
+    fs._SCAN_CACHE.clear()
+    with monkeypatch.context() as m:
+        if min_files is not None:
+            m.setattr(fs, "_POOL_MIN_FILES", min_files)
+        if make_pool is not None:
+            m.setattr(fs, "_make_pool", make_pool)
+        got = fs.scan_tree(root, repo=repo)
+    fs._SCAN_CACHE.clear()
+    return got
+
+
+def _small_tree(tmp_path):
+    """Three test modules, each with marked tests, under `tmp_path/e2e`."""
+    e2e = tmp_path / "e2e"
+    (e2e / "tests").mkdir(parents=True)
+    for n in range(3):
+        (e2e / "tests" / f"test_m{n}.py").write_text(
+            "import pytest\n\n"
+            f"@pytest.mark.feature('feed-read')\ndef test_a{n}(app):\n    pass\n\n"
+            f"def test_b{n}():\n    pass\n",
+            encoding="utf-8")
+    return e2e
+
+
+def test_pooled_scan_tree_equals_the_serial_one_over_the_live_tree(monkeypatch):
+    """The process pool (merge-gates.md § The 10-second budget, rule 7) gives the
+    serial loop's answer over the whole live tree — the same facts, in the same
+    insertion order, which every caller iterates."""
+    started = []
+
+    def counting_pool(**kw):
+        started.append(kw)
+        return fs.ProcessPoolExecutor(**kw)
+
+    serial = _scan_fresh(monkeypatch, fs.E2E, fs.REPO, min_files=10**9)
+    pooled = _scan_fresh(monkeypatch, fs.E2E, fs.REPO, make_pool=counting_pool)
+    assert started == [{"max_workers": fs._POOL_WIDTH}], "the live tree is scanned over the pool"
+    assert len(serial) > 1000
+    assert list(pooled) == list(serial)
+    assert pooled == serial
+
+
+@pytest.mark.parametrize("failure", [OSError("no processes"), fs.BrokenProcessPool("worker died")])
+def test_a_pool_that_cannot_run_falls_back_to_the_serial_scan(monkeypatch, tmp_path, failure):
+    """A pool that cannot start, or whose worker dies, never turns the lint red:
+    the scan falls back to the serial loop and gives the same answer."""
+    e2e = _small_tree(tmp_path)
+    serial = _scan_fresh(monkeypatch, e2e, tmp_path)
+    assert len(serial) == 6
+
+    def broken_pool(**kw):
+        raise failure
+
+    got = _scan_fresh(monkeypatch, e2e, tmp_path, min_files=1, make_pool=broken_pool)
+    assert list(got) == list(serial) and got == serial
+
+
+def test_a_pooled_scan_of_a_small_tree_keeps_the_serial_order(monkeypatch, tmp_path):
+    """Forced over the pool, even a three-file tree comes back in the serial
+    loop's order: the chunks are interleaved, the merge is not."""
+    e2e = _small_tree(tmp_path)
+    serial = _scan_fresh(monkeypatch, e2e, tmp_path)
+    pooled = _scan_fresh(monkeypatch, e2e, tmp_path, min_files=1)
+    assert list(pooled) == list(serial) and pooled == serial
+
+
+def test_a_tree_under_the_threshold_starts_no_pool(monkeypatch, tmp_path):
+    """A fixture world of a few files is scanned serially, in-process: starting
+    spawned workers would cost more than the scan."""
+    e2e = _small_tree(tmp_path)
+    assert len(list(e2e.rglob("test_*.py"))) < fs._POOL_MIN_FILES
+
+    def no_pool(**kw):
+        raise AssertionError("a pool was started for a tree under the threshold")
+
+    assert len(_scan_fresh(monkeypatch, e2e, tmp_path, make_pool=no_pool)) == 6

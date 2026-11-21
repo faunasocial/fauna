@@ -47,8 +47,10 @@ use fauna_client_mail_settings::{
 };
 
 use fauna_client_mail_settings::admin_policy::{
-    MailHealthView, MailPolicyConfirm, SENDER_DASHBOARD_LINKS, secret_rotation_text,
+    self, MailHealthView, MailPolicyConfirm, SENDER_DASHBOARD_LINKS, secret_rotation_text,
 };
+use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 
 use crate::async_helper::spawn_with_snapshot;
 use crate::i18n::strings::admin::mail_page as S;
@@ -180,6 +182,9 @@ struct MailCtx {
     /// The delist URL the readout currently carries, for the link's click.
     delist_url: std::cell::RefCell<Option<String>>,
     w: MailWidgets,
+    /// The group saves, painted from [`save_answer`] on every render and every
+    /// keystroke in a draft field.
+    saves: MailSaveButtons,
 }
 
 /// Add a raw-integer `gtk::Entry` row (title + subtitle) to `group`, ID on the
@@ -270,6 +275,14 @@ fn dropdown_row(
 
 /// Build the flat `admin-mail` policy page.
 pub fn build_admin_mail_page() -> adw::PreferencesPage {
+    let (page, saves, widgets) = build_page_parts();
+    wire_machine(saves, widgets);
+    page
+}
+
+/// Build the page's widgets, unwired (the unit tests read the gathers off
+/// them without a client).
+fn build_page_parts() -> (adw::PreferencesPage, MailSaveButtons, MailWidgets) {
     let page = adw::PreferencesPage::builder()
         .title(S::TITLE)
         .icon_name("mail-message-new-symbolic")
@@ -1168,13 +1181,12 @@ pub fn build_admin_mail_page() -> adw::PreferencesPage {
         microsoft: microsoft_save,
         publish_baseline,
     };
-    wire_machine(saves, widgets);
-
-    page
+    (page, saves, widgets)
 }
 
 /// The per-group Save buttons, threaded to `wire_machine` so each can gather +
 /// dispatch its own full-PUT.
+#[derive(Clone)]
 struct MailSaveButtons {
     spam: gtk::Button,
     auth: gtk::Button,
@@ -1204,7 +1216,25 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
         syncing: Cell::new(false),
         delist_url: std::cell::RefCell::new(None),
         w: widgets,
+        saves: saves.clone(),
     });
+
+    // Every group save follows its drafts: repainted on each keystroke in any
+    // draft field (and on every render, below in `render`).
+    paint_saves(&ctx);
+    // The toggles and confirms wait for the policy read (`admin.md` § Errors
+    // & edge cases, *Controls wait for their read*): painted from the
+    // machine's `write_possibility` before the first hydrate lands, and on
+    // every render after.
+    paint_writes(&ctx.w, &ctx.machine, &ctx.machine.snapshot());
+    for entry in ctx.w.draft_entries() {
+        let ctx = Rc::clone(&ctx);
+        entry.connect_changed(move |_| paint_saves(&ctx));
+    }
+    for view in ctx.w.draft_lists() {
+        let ctx = Rc::clone(&ctx);
+        view.buffer().connect_changed(move |_| paint_saves(&ctx));
+    }
 
     hydrate_and_render(&ctx);
 
@@ -1217,6 +1247,20 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
         ctx.w.enabled_toggle.clone().connect_map(move |_| {
             hydrate_and_render(&ctx);
         });
+    }
+    // ...and again when the nest connection comes back with the page on
+    // screen, while its read has not answered (`admin.md` § Errors & edge
+    // cases, *Controls wait for their read*) — an answered page keeps
+    // every draft typed over it.
+    {
+        let answered = Rc::clone(&ctx);
+        let reread = Rc::clone(&ctx);
+        crate::admin_reread::register_widget(
+            "admin-mail",
+            &ctx.w.enabled_toggle,
+            move || crate::admin_reread::resolved(answered.machine.read_state()),
+            move || hydrate_and_render(&reread),
+        );
     }
 
     // Mail health readout buttons. Recheck → RecheckHealth; the delist link opens
@@ -1269,6 +1313,17 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
                 if ctx.syncing.get() {
                     return;
                 }
+                // The flip asks its answer again — the policy read first, then
+                // (a turn-on) the box's ability to enable mail — and, refused,
+                // says why on `error-message` and puts it back.
+                if crate::possible::refused_toggle(
+                    sw,
+                    &enable_flip_answer(&ctx.machine, sw.is_active()),
+                    &ctx.w.error_label,
+                    &ctx.syncing,
+                ) {
+                    return;
+                }
                 dispatch_action(
                     &ctx,
                     MailPolicyAction::SetMailEnabled {
@@ -1287,6 +1342,14 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
             .clone()
             .connect_active_notify(move |sw| {
                 if ctx.syncing.get() {
+                    return;
+                }
+                if crate::possible::refused_toggle(
+                    sw,
+                    &ctx.machine.write_possibility(),
+                    &ctx.w.error_label,
+                    &ctx.syncing,
+                ) {
                     return;
                 }
                 dispatch_action(
@@ -1309,6 +1372,14 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
                 if ctx.syncing.get() {
                     return;
                 }
+                if crate::possible::refused_toggle(
+                    sw,
+                    &ctx.machine.write_possibility(),
+                    &ctx.w.error_label,
+                    &ctx.syncing,
+                ) {
+                    return;
+                }
                 dispatch_action(
                     &ctx,
                     MailPolicyAction::SetBaselineStandingPublish {
@@ -1322,8 +1393,12 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
     {
         let ctx = Rc::clone(&ctx);
         saves.spam.connect_clicked(move |_| {
-            let policy = gather_spam(&ctx);
-            dispatch_action(&ctx, MailPolicyAction::SaveSpam { policy });
+            if refused(&ctx, MailGroup::Spam) {
+                return;
+            }
+            if let Ok(policy) = gather_spam(&ctx.w, &ctx.machine.snapshot().spam) {
+                dispatch_action(&ctx, MailPolicyAction::SaveSpam { policy });
+            }
         });
     }
 
@@ -1331,8 +1406,12 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
     {
         let ctx = Rc::clone(&ctx);
         saves.auth.connect_clicked(move |_| {
-            let policy = gather_auth(&ctx);
-            dispatch_action(&ctx, MailPolicyAction::SaveAuth { policy });
+            if refused(&ctx, MailGroup::Auth) {
+                return;
+            }
+            if let Ok(policy) = gather_auth(&ctx.w) {
+                dispatch_action(&ctx, MailPolicyAction::SaveAuth { policy });
+            }
         });
     }
 
@@ -1340,8 +1419,12 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
     {
         let ctx = Rc::clone(&ctx);
         saves.submission.connect_clicked(move |_| {
-            let policy = gather_submission(&ctx);
-            dispatch_action(&ctx, MailPolicyAction::SaveSubmission { policy });
+            if refused(&ctx, MailGroup::Submission) {
+                return;
+            }
+            if let Ok(policy) = gather_submission(&ctx.w) {
+                dispatch_action(&ctx, MailPolicyAction::SaveSubmission { policy });
+            }
         });
     }
 
@@ -1349,8 +1432,12 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
     {
         let ctx = Rc::clone(&ctx);
         saves.imap.connect_clicked(move |_| {
-            let policy = gather_imap(&ctx);
-            dispatch_action(&ctx, MailPolicyAction::SaveImap { policy });
+            if refused(&ctx, MailGroup::Imap) {
+                return;
+            }
+            if let Ok(policy) = gather_imap(&ctx.w) {
+                dispatch_action(&ctx, MailPolicyAction::SaveImap { policy });
+            }
         });
     }
 
@@ -1358,8 +1445,12 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
     {
         let ctx = Rc::clone(&ctx);
         saves.outbound.connect_clicked(move |_| {
-            let policy = gather_outbound(&ctx);
-            dispatch_action(&ctx, MailPolicyAction::SaveOutbound { policy });
+            if refused(&ctx, MailGroup::Outbound) {
+                return;
+            }
+            if let Ok(policy) = gather_outbound(&ctx.w, &ctx.machine.snapshot().outbound) {
+                dispatch_action(&ctx, MailPolicyAction::SaveOutbound { policy });
+            }
         });
     }
 
@@ -1367,8 +1458,12 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
     {
         let ctx = Rc::clone(&ctx);
         saves.alias.connect_clicked(move |_| {
-            let policy = gather_alias(&ctx);
-            dispatch_action(&ctx, MailPolicyAction::SaveAlias { policy });
+            if refused(&ctx, MailGroup::Alias) {
+                return;
+            }
+            if let Ok(policy) = gather_alias(&ctx.w) {
+                dispatch_action(&ctx, MailPolicyAction::SaveAlias { policy });
+            }
         });
     }
 
@@ -1377,16 +1472,24 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
     {
         let ctx = Rc::clone(&ctx);
         saves.dmarc.connect_clicked(move |_| {
-            let policy = gather_dmarc(&ctx);
-            dispatch_action(&ctx, MailPolicyAction::SaveDmarc { policy });
+            if refused(&ctx, MailGroup::Dmarc) {
+                return;
+            }
+            if let Ok(policy) = gather_dmarc(&ctx.w, ctx.machine.snapshot().dmarc) {
+                dispatch_action(&ctx, MailPolicyAction::SaveDmarc { policy });
+            }
         });
     }
 
-    // Microsoft registration Save → SetMicrosoftRegistration with the two drafts
-    // as typed (the machine validates and clears on both-blank).
+    // Microsoft registration Save → the shared pair check asked again, then
+    // SetMicrosoftRegistration with the two drafts as typed (the machine
+    // validates again and clears on both-blank).
     {
         let ctx = Rc::clone(&ctx);
         saves.microsoft.connect_clicked(move |_| {
+            if refused(&ctx, MailGroup::Microsoft) {
+                return;
+            }
             let w = &ctx.w;
             dispatch_action(
                 &ctx,
@@ -1443,6 +1546,12 @@ fn dispatch_action(ctx: &Rc<MailCtx>, action: MailPolicyAction) {
 /// One press of a confirm button: the shared machine arms it, or — when it is
 /// the armed one — runs its act; the page keeps no arm of its own.
 fn press(ctx: &Rc<MailCtx>, button: MailPolicyConfirm) {
+    // A confirm waits for the policy read and refuses while a change is on its
+    // way (`admin.md` § Errors & edge cases, *Controls wait for their read*):
+    // the reason on `error-message`, nothing sent.
+    if crate::possible::refused_at_press(&ctx.machine.write_possibility(), &ctx.w.error_label) {
+        return;
+    }
     dispatch_action(ctx, MailPolicyAction::Press { button });
 }
 
@@ -1522,11 +1631,12 @@ fn render(ctx: &Rc<MailCtx>, snap: &MailPolicySnapshot) {
         w.enabled_toggle.set_active(snap.mail_enabled);
         ctx.syncing.set(false);
     }
-    // On a box that cannot enable mail (the shared machine's
-    // `mail_unavailable_here`, read — never re-derived) a mail-off toggle reads
-    // `unavailable` and is insensitive, the notice beneath it; mail already on
-    // keeps a live toggle so it can still be turned off.
-    let unavailable = !snap.mail_enabled && snap.mail_unavailable_here;
+    // On a box that cannot enable mail a mail-off toggle reads `unavailable`
+    // and is painted from the shared `enable_toggle_possibility` — blocked by
+    // the notice beneath it; mail already on keeps a live toggle so it can
+    // still be turned off (`admin.md` § Errors & edge cases).
+    let answer = snap.enable_toggle_possibility();
+    let unavailable = !answer.is_possible();
     crate::testid::set_test_attr(
         &w.enabled_toggle,
         "state",
@@ -1536,7 +1646,6 @@ fn render(ctx: &Rc<MailCtx>, snap: &MailPolicySnapshot) {
             (false, false) => "off",
         },
     );
-    w.enabled_toggle.set_sensitive(!unavailable);
     w.unavailable_row.set_visible(unavailable);
 
     // Auto-enable-for-new-users toggle — same echo-guarded persisted-state sync.
@@ -1706,6 +1815,9 @@ fn render(ctx: &Rc<MailCtx>, snap: &MailPolicySnapshot) {
     } else {
         S::MICROSOFT_USING_OWN
     });
+
+    paint_saves(ctx);
+    paint_writes(&ctx.w, &ctx.machine, snap);
 }
 
 /// A small fixed label for one cell of a health check row, carrying `test_id`.
@@ -1791,142 +1903,307 @@ fn render_health(ctx: &Rc<MailCtx>, health: Option<&MailHealthView>) {
     w.health_delist.set_visible(health.delist_url.is_some());
 }
 
-/// Gather the whole Spam/inbound-perimeter sub-struct from the widgets, starting
-/// from the persisted snapshot so unparsed/blank integer fields fall back to the
-/// persisted value (full PUT — every field is sent).
-fn gather_spam(ctx: &Rc<MailCtx>) -> SpamPolicyView {
-    let w = &ctx.w;
-    let mut s = ctx.machine.snapshot().spam;
-    s.max_score_before_spam_folder = parse_u32(&w.threshold_junk, s.max_score_before_spam_folder);
-    s.max_score_before_reject = parse_u32(&w.threshold_reject, s.max_score_before_reject);
-    s.dnsbl_servers = read_lines(&w.dnsbl_servers);
-    s.reject_no_rdns = w.reject_no_rdns.is_active();
-    s.greylist_enabled = w.greylist_enabled.is_active();
-    s.greylist_delay_secs = parse_u32(&w.greylist_delay, s.greylist_delay_secs);
-    s.max_conn_per_min = parse_u32(&w.max_conn_per_min, s.max_conn_per_min);
-    s.fcrdns_mode = FcrdnsMode::ORDER
-        [(w.fcrdns_mode.selected() as usize).min(FcrdnsMode::ORDER.len() - 1)]
-    .as_str()
-    .to_string();
-    s.helo_identity_required = w.helo_identity_required.is_active();
-    s.reject_fcrdns_fail = w.reject_fcrdns_fail.is_active();
-    s.max_message_bytes = parse_u32(&w.max_message_bytes, s.max_message_bytes);
-    s.bayesian_weight_milli = parse_u32(&w.bayesian_weight, s.bayesian_weight_milli);
-    s.bayesian_min_samples = parse_u32(&w.bayesian_min_samples, s.bayesian_min_samples);
-    s.bayesian_full_confidence_samples = parse_u32(
-        &w.bayesian_full_confidence_samples,
-        s.bayesian_full_confidence_samples,
-    );
-    s.training_history_retention_days = parse_u32(
-        &w.training_history_retention,
-        s.training_history_retention_days,
-    );
-    s.unlisted_recipient_penalty =
-        parse_u32(&w.unlisted_recipient_penalty, s.unlisted_recipient_penalty);
-    s
+/// One draft-gated save on the page (`admin.md` § Errors & edge cases, *A
+/// form's submit is live only for a draft the nest would accept*; § 6 Mail).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MailGroup {
+    Spam,
+    Auth,
+    Submission,
+    Imap,
+    Outbound,
+    Alias,
+    Dmarc,
+    Microsoft,
+}
+
+impl MailGroup {
+    const ALL: [MailGroup; 8] = [
+        MailGroup::Spam,
+        MailGroup::Auth,
+        MailGroup::Submission,
+        MailGroup::Imap,
+        MailGroup::Outbound,
+        MailGroup::Alias,
+        MailGroup::Dmarc,
+        MailGroup::Microsoft,
+    ];
+}
+
+impl MailWidgets {
+    /// Every single-line draft a group save gathers (the repaint triggers).
+    fn draft_entries(&self) -> Vec<gtk::Entry> {
+        vec![
+            self.threshold_junk.clone(),
+            self.threshold_reject.clone(),
+            self.greylist_delay.clone(),
+            self.max_conn_per_min.clone(),
+            self.max_message_bytes.clone(),
+            self.bayesian_weight.clone(),
+            self.bayesian_min_samples.clone(),
+            self.bayesian_full_confidence_samples.clone(),
+            self.training_history_retention.clone(),
+            self.unlisted_recipient_penalty.clone(),
+            self.max_failures.clone(),
+            self.max_conn_per_ip.clone(),
+            self.submission_max_per_day.clone(),
+            self.submission_max_recipients.clone(),
+            self.imap_idle_timeout.clone(),
+            self.imap_tombstone_retention.clone(),
+            self.imap_bodystructure_cache.clone(),
+            self.imap_storage_bytes.clone(),
+            self.imap_message_count.clone(),
+            self.outbound_permfail_timeout.clone(),
+            self.outbound_delay_warning.clone(),
+            self.outbound_ndr_rate_limit.clone(),
+            self.alias_exact_max.clone(),
+            self.dmarc_aggregate_retention.clone(),
+            self.dmarc_forensic_retention.clone(),
+            self.microsoft_client_id.clone(),
+            self.microsoft_tenant.clone(),
+        ]
+    }
+
+    /// Every multi-line draft a group save gathers through a parser (the
+    /// retry schedule; the other lists are free text and always gather).
+    fn draft_lists(&self) -> Vec<gtk::TextView> {
+        vec![self.outbound_retry_schedule.clone()]
+    }
+
+    fn save_button(saves: &MailSaveButtons, group: MailGroup) -> &gtk::Button {
+        match group {
+            MailGroup::Spam => &saves.spam,
+            MailGroup::Auth => &saves.auth,
+            MailGroup::Submission => &saves.submission,
+            MailGroup::Imap => &saves.imap,
+            MailGroup::Outbound => &saves.outbound,
+            MailGroup::Alias => &saves.alias,
+            MailGroup::Dmarc => &saves.dmarc,
+            MailGroup::Microsoft => &saves.microsoft,
+        }
+    }
+}
+
+/// A group save's draft answer: possible only while its gather succeeds (the
+/// Microsoft save: the shared pair check). The gathers run through
+/// `admin_policy::parse_knob*`, so a number that does not parse — blank
+/// included — blocks with its sentence, never falling back to the stored value.
+fn draft_answer(w: &MailWidgets, snap: &MailPolicySnapshot, group: MailGroup) -> Possibility {
+    let refusal = match group {
+        MailGroup::Microsoft => {
+            return admin_policy::microsoft_draft_possibility(
+                &w.microsoft_client_id.text(),
+                &w.microsoft_tenant.text(),
+            );
+        }
+        MailGroup::Spam => gather_spam(w, &snap.spam).err(),
+        MailGroup::Auth => gather_auth(w).err(),
+        MailGroup::Submission => gather_submission(w).err(),
+        MailGroup::Imap => gather_imap(w).err(),
+        MailGroup::Outbound => gather_outbound(w, &snap.outbound).err(),
+        MailGroup::Alias => gather_alias(w).err(),
+        MailGroup::Dmarc => gather_dmarc(w, snap.dmarc.clone()).err(),
+    };
+    Possibility::from_blocked_reason(refusal)
+}
+
+/// A group save's whole answer: the machine's write gate (read resolved, no
+/// change on its way) first, then the group's drafts.
+fn save_answer(ctx: &MailCtx, group: MailGroup) -> Possibility {
+    ctx.machine
+        .write_possibility()
+        .and(draft_answer(&ctx.w, &ctx.machine.snapshot(), group))
+}
+
+/// The mail-enable toggle's answer: the policy read (and no change on its
+/// way) first — a page still loading says so before anything else — then the
+/// box's ability to enable mail (`enable_toggle_possibility`, which blocks
+/// only a turn-on).
+fn enable_toggle_answer(machine: &MailPolicyMachine, snap: &MailPolicySnapshot) -> Possibility {
+    machine
+        .write_possibility()
+        .and(snap.enable_toggle_possibility())
+}
+
+/// A flip of the mail-enable toggle asked again at the press: `turning_on`
+/// is the switch's new state (the snapshot still holds the persisted one).
+fn enable_flip_answer(machine: &MailPolicyMachine, turning_on: bool) -> Possibility {
+    if turning_on {
+        enable_toggle_answer(machine, &machine.snapshot())
+    } else {
+        machine.write_possibility()
+    }
+}
+
+/// Paint every control on the page that writes what the policy read decides
+/// and has no draft of its own: the three toggles and the four confirms.
+fn paint_writes(w: &MailWidgets, machine: &MailPolicyMachine, snap: &MailPolicySnapshot) {
+    let write = machine.write_possibility();
+    crate::possible::paint(&w.enabled_toggle, None, enable_toggle_answer(machine, snap));
+    crate::possible::paint(&w.auto_enable_new_users, None, write.clone());
+    crate::possible::paint(&w.baseline_standing, None, write.clone());
+    for confirm in [
+        &w.health_warmup_reset,
+        &w.publish_baseline,
+        &w.secret_unsubscribe_rotate,
+        &w.secret_srs_rotate,
+    ] {
+        crate::possible::paint(confirm, None, write.clone());
+    }
+}
+
+/// Paint every group save from [`save_answer`].
+fn paint_saves(ctx: &MailCtx) {
+    let snap = ctx.machine.snapshot();
+    let write = ctx.machine.write_possibility();
+    for group in MailGroup::ALL {
+        crate::possible::paint(
+            MailWidgets::save_button(&ctx.saves, group),
+            None,
+            write.clone().and(draft_answer(&ctx.w, &snap, group)),
+        );
+    }
+}
+
+/// The press half: the group's answer asked again, refused onto the page's
+/// `error-message` with its reason (nothing is sent; the drafts stay).
+fn refused(ctx: &MailCtx, group: MailGroup) -> bool {
+    crate::possible::refused_at_press(&save_answer(ctx, group), &ctx.w.error_label)
+}
+
+/// Parse one numeric draft through the shared `admin_policy::parse_knob`.
+fn knob(entry: &gtk::Entry) -> Result<u32, LocalizedText> {
+    admin_policy::parse_knob(&entry.text())
+}
+
+/// The `u64` sibling (the IMAP storage ceiling), `admin_policy::parse_knob_u64`.
+fn knob_u64(entry: &gtk::Entry) -> Result<u64, LocalizedText> {
+    admin_policy::parse_knob_u64(&entry.text())
+}
+
+/// A one-number-per-line list (the outbound retry schedule) through
+/// `admin_policy::parse_knob_u64_lines`: any bad line refuses the whole list —
+/// never a partially parsed schedule, never the stored one.
+fn knob_lines(view: &gtk::TextView) -> Result<Vec<u64>, LocalizedText> {
+    admin_policy::parse_knob_u64_lines(&textview_text(view))
+}
+
+/// Gather the whole Spam/inbound-perimeter sub-struct from the widgets (full
+/// PUT). The standing-publish flag is its own gesture, so the persisted value
+/// in `base` rides through.
+fn gather_spam(w: &MailWidgets, base: &SpamPolicyView) -> Result<SpamPolicyView, LocalizedText> {
+    Ok(SpamPolicyView {
+        max_score_before_spam_folder: knob(&w.threshold_junk)?,
+        max_score_before_reject: knob(&w.threshold_reject)?,
+        dnsbl_servers: read_lines(&w.dnsbl_servers),
+        reject_no_rdns: w.reject_no_rdns.is_active(),
+        greylist_enabled: w.greylist_enabled.is_active(),
+        greylist_delay_secs: knob(&w.greylist_delay)?,
+        max_conn_per_min: knob(&w.max_conn_per_min)?,
+        fcrdns_mode: FcrdnsMode::ORDER
+            [(w.fcrdns_mode.selected() as usize).min(FcrdnsMode::ORDER.len() - 1)]
+        .as_str()
+        .to_string(),
+        helo_identity_required: w.helo_identity_required.is_active(),
+        reject_fcrdns_fail: w.reject_fcrdns_fail.is_active(),
+        max_message_bytes: knob(&w.max_message_bytes)?,
+        bayesian_weight_milli: knob(&w.bayesian_weight)?,
+        bayesian_min_samples: knob(&w.bayesian_min_samples)?,
+        bayesian_full_confidence_samples: knob(&w.bayesian_full_confidence_samples)?,
+        training_history_retention_days: knob(&w.training_history_retention)?,
+        unlisted_recipient_penalty: knob(&w.unlisted_recipient_penalty)?,
+        ..base.clone()
+    })
 }
 
 /// Gather the whole Auth-enforcement sub-struct from the widgets (full PUT).
-fn gather_auth(ctx: &Rc<MailCtx>) -> AuthPolicyView {
-    let w = &ctx.w;
-    let mut a = ctx.machine.snapshot().auth;
-    a.enforce_dmarc = w.enforce_dmarc.is_active();
-    a.enforce_dmarc_quarantine = w.enforce_dmarc_quarantine.is_active();
-    a.enforce_spf_hardfail = w.enforce_spf_hardfail.is_active();
-    a.enforce_dkim = w.enforce_dkim.is_active();
-    a.log_only = w.log_only.is_active();
-    a.max_auth_failures_per_minute = parse_u32(&w.max_failures, a.max_auth_failures_per_minute);
-    a.max_conn_per_ip = parse_u32(&w.max_conn_per_ip, a.max_conn_per_ip);
-    a
+fn gather_auth(w: &MailWidgets) -> Result<AuthPolicyView, LocalizedText> {
+    Ok(AuthPolicyView {
+        enforce_dmarc: w.enforce_dmarc.is_active(),
+        enforce_dmarc_quarantine: w.enforce_dmarc_quarantine.is_active(),
+        enforce_spf_hardfail: w.enforce_spf_hardfail.is_active(),
+        enforce_dkim: w.enforce_dkim.is_active(),
+        log_only: w.log_only.is_active(),
+        max_auth_failures_per_minute: knob(&w.max_failures)?,
+        max_conn_per_ip: knob(&w.max_conn_per_ip)?,
+    })
 }
 
 /// Gather the whole Submission-quota sub-struct from the widgets (full PUT).
-fn gather_submission(ctx: &Rc<MailCtx>) -> SubmissionPolicyView {
-    let w = &ctx.w;
-    let mut s = ctx.machine.snapshot().submission;
-    s.max_per_day = parse_u32(&w.submission_max_per_day, s.max_per_day);
-    s.max_recipients_per_message =
-        parse_u32(&w.submission_max_recipients, s.max_recipients_per_message);
-    s
+fn gather_submission(w: &MailWidgets) -> Result<SubmissionPolicyView, LocalizedText> {
+    Ok(SubmissionPolicyView {
+        max_per_day: knob(&w.submission_max_per_day)?,
+        max_recipients_per_message: knob(&w.submission_max_recipients)?,
+    })
 }
 
 /// Gather the whole IMAP-server policy sub-struct from the widgets (full PUT).
-fn gather_imap(ctx: &Rc<MailCtx>) -> ImapPolicyView {
-    let w = &ctx.w;
-    let mut i = ctx.machine.snapshot().imap;
-    i.idle_timeout_secs = parse_u32(&w.imap_idle_timeout, i.idle_timeout_secs);
-    i.tombstone_retention_days = parse_u32(&w.imap_tombstone_retention, i.tombstone_retention_days);
-    i.delete_nonempty = ImapDeleteNonempty::ORDER
-        [(w.imap_delete_nonempty.selected() as usize).min(ImapDeleteNonempty::ORDER.len() - 1)]
-    .as_str()
-    .to_string();
-    i.bodystructure_cache_max = parse_u32(&w.imap_bodystructure_cache, i.bodystructure_cache_max);
-    i.storage_bytes_default = parse_u64(&w.imap_storage_bytes, i.storage_bytes_default);
-    i.message_count_default = parse_u32(&w.imap_message_count, i.message_count_default);
-    i
+fn gather_imap(w: &MailWidgets) -> Result<ImapPolicyView, LocalizedText> {
+    Ok(ImapPolicyView {
+        idle_timeout_secs: knob(&w.imap_idle_timeout)?,
+        tombstone_retention_days: knob(&w.imap_tombstone_retention)?,
+        delete_nonempty: ImapDeleteNonempty::ORDER
+            [(w.imap_delete_nonempty.selected() as usize).min(ImapDeleteNonempty::ORDER.len() - 1)]
+        .as_str()
+        .to_string(),
+        bodystructure_cache_max: knob(&w.imap_bodystructure_cache)?,
+        storage_bytes_default: knob_u64(&w.imap_storage_bytes)?,
+        message_count_default: knob(&w.imap_message_count)?,
+    })
 }
 
-/// Gather the whole Outbound-delivery sub-struct from the widgets (full PUT).
-/// `postmaster_cc_bounces` is read-only (project policy never CC) — its switch is
-/// insensitive, so `is_active()` returns the rendered persisted value unchanged.
-fn gather_outbound(ctx: &Rc<MailCtx>) -> OutboundPolicyView {
-    let w = &ctx.w;
-    let mut o = ctx.machine.snapshot().outbound;
-    o.retry_schedule_seconds =
-        read_u64_lines(&w.outbound_retry_schedule, &o.retry_schedule_seconds);
-    o.permanent_failure_timeout_hours = parse_u32(
-        &w.outbound_permfail_timeout,
-        o.permanent_failure_timeout_hours,
-    );
-    o.delay_warning_at_hours = parse_u32(&w.outbound_delay_warning, o.delay_warning_at_hours);
-    o.ndr_rate_limit_days = parse_u32(&w.outbound_ndr_rate_limit, o.ndr_rate_limit_days);
+/// Gather the whole Outbound-delivery sub-struct from the widgets (full PUT),
+/// over the persisted `base`. `postmaster_cc_bounces` is read-only (project
+/// policy never CC) — its switch is insensitive, so `is_active()` returns the
+/// rendered persisted value unchanged.
+fn gather_outbound(
+    w: &MailWidgets,
+    base: &OutboundPolicyView,
+) -> Result<OutboundPolicyView, LocalizedText> {
+    let mut o = base.clone();
+    o.retry_schedule_seconds = knob_lines(&w.outbound_retry_schedule)?;
+    o.permanent_failure_timeout_hours = knob(&w.outbound_permfail_timeout)?;
+    o.delay_warning_at_hours = knob(&w.outbound_delay_warning)?;
+    o.ndr_rate_limit_days = knob(&w.outbound_ndr_rate_limit)?;
     o.suppress_ndr_spf_hardfail = w.outbound_suppress_ndr_spf.is_active();
     o.suppress_ndr_dmarc_reject = w.outbound_suppress_ndr_dmarc.is_active();
     o.postmaster_cc_bounces = w.outbound_postmaster_cc.is_active();
     o.tlsrpt_send_reports = w.outbound_tlsrpt_send.is_active();
     o.ipv6_enabled = w.outbound_ipv6.is_active();
     o.treat_5xx_as_transient = read_lines(&w.outbound_treat_5xx_transient);
-    o
+    Ok(o)
 }
 
 /// Gather the whole alias-policy sub-struct from the widgets (full PUT). An
 /// empty reserved-local-parts box clears the reservation (`Some(vec![])`),
 /// matching the wire semantics — distinct from "keep the default".
-fn gather_alias(ctx: &Rc<MailCtx>) -> AliasPolicyView {
-    let w = &ctx.w;
-    let mut a = ctx.machine.snapshot().alias;
-    a.exact_aliases_max = parse_u32(&w.alias_exact_max, a.exact_aliases_max);
-    a.reserved_local_parts = read_lines(&w.alias_reserved_local_parts);
-    a.subaddressing_enabled = w.alias_subaddressing.is_active();
-    a.wildcard_prefix_enabled = w.alias_wildcard_prefix.is_active();
-    a
+fn gather_alias(w: &MailWidgets) -> Result<AliasPolicyView, LocalizedText> {
+    Ok(AliasPolicyView {
+        exact_aliases_max: knob(&w.alias_exact_max)?,
+        reserved_local_parts: read_lines(&w.alias_reserved_local_parts),
+        subaddressing_enabled: w.alias_subaddressing.is_active(),
+        wildcard_prefix_enabled: w.alias_wildcard_prefix.is_active(),
+    })
 }
 
-/// Gather the DMARC catalog from the widgets: the four edited fields over the
+/// Gather the DMARC catalog from the widgets: the edited fields over the
 /// persisted view, every other record tag (`p`, `sp`, `pct`, `adkim`, `aspf`,
 /// `rua`, the `ruf` destination, `ri`) carried through unchanged. A retention
 /// past its ceiling is sent as typed — the nest refuses it onto
-/// `error-message`, never clamped here.
-fn gather_dmarc(ctx: &Rc<MailCtx>) -> DmarcPolicyView {
-    let w = &ctx.w;
-    let base = ctx.machine.snapshot().dmarc;
-    DmarcPolicyView {
+/// `error-message`, never clamped here; one that does not parse refuses the
+/// save here.
+fn gather_dmarc(w: &MailWidgets, base: DmarcPolicyView) -> Result<DmarcPolicyView, LocalizedText> {
+    Ok(DmarcPolicyView {
         ruf_publish: w.dmarc_ruf_publish.is_active(),
         fo_mode: DmarcForensicMode::ORDER
             [(w.dmarc_fo_mode.selected() as usize).min(DmarcForensicMode::ORDER.len() - 1)]
         .as_str()
         .to_string(),
-        aggregate_retention_days: parse_u32(
-            &w.dmarc_aggregate_retention,
-            base.aggregate_retention_days,
-        ),
-        forensic_retention_days: parse_u32(
-            &w.dmarc_forensic_retention,
-            base.forensic_retention_days,
-        ),
+        aggregate_retention_days: knob(&w.dmarc_aggregate_retention)?,
+        forensic_retention_days: knob(&w.dmarc_forensic_retention)?,
         outbound_aggregate_enabled: w.dmarc_outbound_aggregate.is_active(),
         ..base
-    }
+    })
 }
 
 /// Set an entry's text to a `u32` value.
@@ -1939,51 +2216,23 @@ fn set_u64(entry: &gtk::Entry, value: u64) {
     entry.set_text(&value.to_string());
 }
 
-/// Parse an entry as `u32`, falling back to `prev` on an empty/unparseable value
-/// (so a stray edit never silently zeroes a knob; mirrors `views/admin.rs::parse_cap`).
-/// The trim/parse lives in the shared validator `fauna_core::format::parse_count`
-/// (the one source of truth across all seven apps — `value-formatting.md`
-/// § Mail-knob validation); this stays the thin `&gtk::Entry`→`&str` wrapper.
-fn parse_u32(entry: &gtk::Entry, prev: u32) -> u32 {
-    fauna_core::format::parse_count(&entry.text()).unwrap_or(prev)
-}
-
-/// Parse an entry as `u64`, falling back to `prev` (the IMAP storage ceiling).
-/// Delegates to the shared `fauna_core::format::parse_count_u64` validator.
-fn parse_u64(entry: &gtk::Entry, prev: u64) -> u64 {
-    fauna_core::format::parse_count_u64(&entry.text()).unwrap_or(prev)
+/// A multiline `TextView`'s whole text.
+fn textview_text(view: &gtk::TextView) -> String {
+    let buffer = view.buffer();
+    buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+        .to_string()
 }
 
 /// Read a multiline `TextView` as one trimmed non-blank `String` per line (the
 /// dnsbl-servers + transient-5xx list knobs).
 fn read_lines(view: &gtk::TextView) -> Vec<String> {
-    let buffer = view.buffer();
-    let text = buffer
-        .text(&buffer.start_iter(), &buffer.end_iter(), false)
-        .to_string();
-    text.lines()
+    textview_text(view)
+        .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-/// Read a multiline `TextView` as a `Vec<u64>` (one delay-seconds value per
-/// non-blank line; the outbound retry schedule). Falls back to `prev` whole if
-/// any line fails to parse (full-PUT replaces the list — never send a partially
-/// parsed schedule).
-fn read_u64_lines(view: &gtk::TextView, prev: &[u64]) -> Vec<u64> {
-    let buffer = view.buffer();
-    let text = buffer
-        .text(&buffer.start_iter(), &buffer.end_iter(), false)
-        .to_string();
-    let parsed: Option<Vec<u64>> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(fauna_core::format::parse_count_u64)
-        .collect();
-    parsed.unwrap_or_else(|| prev.to_vec())
 }
 
 #[cfg(test)]
@@ -2076,6 +2325,107 @@ mod tests {
                     "missing widget id {id:?}; have {names:?}",
                 );
             }
+        });
+    }
+
+    /// `admin.md` § Errors & edge cases, *Controls wait for their read*, on
+    /// `admin-mail`: before the policy read the three toggles, the four
+    /// confirms and every group save paint blocked with *still loading* — the
+    /// read's reason ahead of any draft's — and a flip either way is refused,
+    /// never turning mail on or off from a guessed `false`.
+    #[test]
+    fn mail_writes_wait_for_the_policy_read() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let (_page, _saves, w) = build_page_parts();
+            let nest = fauna_client::NestClient::new(
+                "http://127.0.0.1:1".to_string(),
+                fauna_core::identity::ActorKeypair::generate(),
+            );
+            let machine = fauna_client_mail_settings::rpc_glue::build_mail_policy_machine(nest);
+            let snap = machine.snapshot();
+            paint_writes(&w, &machine, &snap);
+            let loading = Some(fauna_i18n::strings::common::STILL_LOADING);
+            for widget in [
+                w.enabled_toggle.upcast_ref::<gtk::Widget>(),
+                w.auto_enable_new_users.upcast_ref(),
+                w.baseline_standing.upcast_ref(),
+                w.health_warmup_reset.upcast_ref(),
+                w.publish_baseline.upcast_ref(),
+                w.secret_unsubscribe_rotate.upcast_ref(),
+                w.secret_srs_rotate.upcast_ref(),
+            ] {
+                assert!(!widget.is_sensitive());
+                assert_eq!(widget.tooltip_text().as_deref(), loading);
+            }
+            for turning_on in [true, false] {
+                assert_eq!(
+                    enable_flip_answer(&machine, turning_on)
+                        .reason()
+                        .map(|r| r.key.as_str()),
+                    Some("common.still_loading")
+                );
+            }
+            // A group save folds the read before its drafts: the blank auth
+            // drafts would block too, but the page says it is loading first.
+            let save = machine
+                .write_possibility()
+                .and(draft_answer(&w, &snap, MailGroup::Auth));
+            assert_eq!(
+                save.reason().map(|r| r.key.as_str()),
+                Some("common.still_loading")
+            );
+        });
+    }
+
+    /// `admin.md` § Errors & edge cases, draft validity, on `admin-mail`: a
+    /// group's gather runs through the shared `parse_knob*`, so a number that
+    /// does not parse — blank included — refuses the save with its sentence
+    /// and is never replaced by the stored value; the draft answer says so
+    /// before the press, and the press refuses onto `error-message`.
+    #[test]
+    fn a_group_save_refuses_a_malformed_number_instead_of_keeping_the_old_one() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let (_page, _saves, w) = build_page_parts();
+
+            w.submission_max_per_day.set_text("500");
+            w.submission_max_recipients.set_text("");
+            let refusal = gather_submission(&w).unwrap_err();
+            assert_eq!(refusal.key, "admin.mail_page.knob_invalid");
+            w.submission_max_recipients.set_text("50");
+            let gathered = gather_submission(&w).expect("every draft parses");
+            assert_eq!(
+                (gathered.max_per_day, gathered.max_recipients_per_message),
+                (500, 50)
+            );
+
+            w.imap_storage_bytes.set_text("5000000000");
+            assert_eq!(knob_u64(&w.imap_storage_bytes), Ok(5_000_000_000));
+            w.imap_storage_bytes.set_text("-1");
+            assert!(knob_u64(&w.imap_storage_bytes).is_err());
+
+            w.outbound_retry_schedule.buffer().set_text("60\n\n300");
+            assert_eq!(knob_lines(&w.outbound_retry_schedule), Ok(vec![60, 300]));
+            w.outbound_retry_schedule.buffer().set_text("60\nsoon");
+            assert_eq!(
+                knob_lines(&w.outbound_retry_schedule).unwrap_err().key,
+                "admin.mail_page.knob_list_invalid",
+                "a bad line refuses the whole list, never the stored schedule"
+            );
+
+            // The press half shows the same sentence on the page's error line.
+            let answer = Possibility::from_blocked_reason(gather_auth(&w).err());
+            assert!(!answer.is_possible(), "the unseeded auth drafts are blank");
+            assert!(crate::possible::refused_at_press(&answer, &w.error_label));
+            assert!(w.error_label.is_visible());
+            assert_eq!(
+                w.error_label.text().as_str(),
+                crate::i18n::strings::admin::mail_page::KNOB_INVALID
+            );
+            w.max_failures.set_text("10");
+            w.max_conn_per_ip.set_text("20");
+            assert!(gather_auth(&w).is_ok());
         });
     }
 

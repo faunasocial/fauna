@@ -8,6 +8,17 @@ use std::sync::Arc;
 use fauna_onboarding_machine::observer::CountingObserver;
 use fauna_onboarding_machine::observer::NullObserver;
 
+/// The handle check found the domain unregistered — the one verdict under
+/// which the buy box may be ticked (`onboarding-provisioning.md` § 3d).
+fn domain_available(m: &OnboardingMachine) {
+    m.set_handle_check_outcome_for_test(
+        fauna_onboarding_machine::snapshots::HandleCheckOutcome::DomainAvailable {
+            buyable_via_provider: true,
+            price: None,
+        },
+    );
+}
+
 fn test_machine() -> Arc<OnboardingMachine> {
     let observer: Arc<dyn OnboardingObserver> = Arc::new(NullObserver);
     OnboardingMachine::new(observer)
@@ -222,6 +233,7 @@ fn buy_domain_toggle_disables_non_registrar_providers() {
     let m = test_machine();
     m.set_step_for_test(OnboardingStep::DnsConfig);
     m.select_dns_provider(NO_REGISTRAR.into());
+    domain_available(&m);
     m.toggle_buy_domain(true);
     // Auto-deselected: buying a domain in the wizard needs a provider that can
     // actually register one.
@@ -249,6 +261,7 @@ fn buy_domain_toggle_keeps_registrar_capable_providers() {
     let m = test_machine();
     m.set_step_for_test(OnboardingStep::DnsConfig);
     m.select_dns_provider(REGISTRAR.into());
+    domain_available(&m);
     m.toggle_buy_domain(true);
     let dns = m.dns_config();
     assert_eq!(
@@ -370,6 +383,73 @@ async fn can_verify_vps_returns_false_when_verifying() {
     );
 }
 
+// ── the verify buttons' reasoned answers (ui/README.md § Offer only what is
+// possible, rules 2 and 6): each blocked state names what revives it ───────
+
+fn reason_key(p: &fauna_core::possibility::Possibility) -> Option<String> {
+    p.reason().map(|r| r.key.clone())
+}
+
+#[test]
+fn verify_dns_possibility_names_provider_then_fields_then_the_check() {
+    let m = test_machine();
+    m.set_step_for_test(OnboardingStep::DnsConfig);
+    assert_eq!(
+        reason_key(&m.verify_dns_possibility()).as_deref(),
+        Some("onboarding.dns_config.status_pick_provider"),
+        "no provider picked: a verify could only fail"
+    );
+    assert!(!m.can_verify_dns());
+    m.select_dns_provider("cloudflare".into());
+    assert_eq!(
+        reason_key(&m.verify_dns_possibility()).as_deref(),
+        Some("provisioning.fill_required_fields")
+    );
+    m.set_dns_cred("api-token".into(), "filled".into());
+    assert!(m.verify_dns_possibility().is_possible());
+    m.set_dns_state_for_test(|s| s.verifying = true);
+    assert_eq!(
+        reason_key(&m.verify_dns_possibility()).as_deref(),
+        Some("provisioning.checking_credentials")
+    );
+}
+
+#[test]
+fn verify_vps_possibility_names_provider_then_fields_then_the_check() {
+    let m = test_machine();
+    m.set_step_for_test(OnboardingStep::VpsConfig);
+    assert_eq!(
+        reason_key(&m.verify_vps_possibility()).as_deref(),
+        Some("onboarding.vps_config.status_pick_provider")
+    );
+    m.select_vps_provider("hetzner".into());
+    assert_eq!(
+        reason_key(&m.verify_vps_possibility()).as_deref(),
+        Some("provisioning.fill_required_fields")
+    );
+    m.set_vps_cred("api-token".into(), "filled".into());
+    assert!(m.verify_vps_possibility().is_possible());
+    m.set_vps_state_for_test(|s| s.verifying = true);
+    assert_eq!(
+        reason_key(&m.verify_vps_possibility()).as_deref(),
+        Some("provisioning.checking_credentials")
+    );
+}
+
+#[tokio::test]
+async fn verify_refuses_a_press_its_button_shows_blocked() {
+    let m = test_machine();
+    m.set_step_for_test(OnboardingStep::VpsConfig);
+    m.select_vps_provider("hetzner".into());
+    let err = m.verify_vps().await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("provisioning.fill_required_fields"),
+        "{err}"
+    );
+    assert!(!m.vps_config().verifying, "a refused press starts nothing");
+}
+
 #[test]
 fn select_vps_server_type_sets_id() {
     let m = test_machine();
@@ -416,8 +496,6 @@ async fn flow_a_provision_new_domain() {
             args: Default::default(),
         },
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         ..Default::default()
     });
 
@@ -463,8 +541,6 @@ async fn domain_available_inside_a_zone_lands_with_buy_domain_off() {
             args: Default::default(),
         },
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         ..Default::default()
     });
     m.set_handle_enclosing_zone_for_test(Some("example.com".into()));
@@ -491,7 +567,7 @@ async fn registered_no_nest_continue_sets_domain_status() {
 
     m.set_step_for_test(OnboardingStep::HandleEntry);
     m.set_current_handle("alice@owned.example".into());
-    // RegisteredNoNest with the control checkbox checked routes to DnsConfig
+    // RegisteredNoNest routes to DnsConfig (no checkbox gates it any more)
     // with buy_domain=false (the user owns the domain, isn't buying it).
     m.set_handle_check_snapshot_for_test(HandleCheckSnapshot {
         phase: HandleCheckPhase::Complete,
@@ -500,9 +576,8 @@ async fn registered_no_nest_continue_sets_domain_status() {
             key: "x".into(),
             args: Default::default(),
         },
-        continue_enabled: false,
-        control_checkbox_visible: true,
-        control_checkbox_checked: true,
+        // As the probe leaves it: Continue is live on a registered domain.
+        continue_enabled: true,
         ..Default::default()
     });
 
@@ -539,8 +614,6 @@ async fn flow_c_already_on_nest() {
             args: Default::default(),
         },
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         ..Default::default()
     });
 

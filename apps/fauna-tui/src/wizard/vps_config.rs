@@ -15,7 +15,8 @@
 //!     show one canonical `{id} — {vcpu} vCPU / {mem} GB / {disk} GB disk /
 //!     {price}/mo` (`onboarding.md:229`)
 //!   * the mail-mode RAM gate ← `server_type_allowed_for_mail(st, enable_mail)`
-//!   * verify/continue affordances ← `can_verify_vps()` / `can_continue_vps()`,
+//!   * verify/continue affordances ← `verify_vps_possibility()` /
+//!     `vps_continue_possibility()`,
 //!     and the reason a dead Continue is dead ← `vps_continue_blocked_reason()`
 //!     (rule-5 chrome, no ui.yaml id of its own)
 //!
@@ -60,7 +61,6 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     let m = &w.machine;
     let cfg = m.vps_config();
     let selected = cfg.selected_provider_id.clone();
-    let enable_mail = m.provision_mail_mode_enabled();
 
     // `vps-provider-row` is the *container*; each provider button is
     // `vps-provider-row[<provider_id>]` — the cross-app ID shape (linux
@@ -133,13 +133,81 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
             );
         }
 
-        out.push(Element::button(
-            ids::VPS_VERIFY_BUTTON,
-            fauna_i18n::strings::provisioning::VERIFY_CREDENTIALS,
-            m.can_verify_vps(),
-            Action::VerifyVps,
-        ));
+        // Enabled is the seam's: the button declares the machine's answer and
+        // `App::page_elements` disables it with the reason painted.
+        out.push(
+            Element::button(
+                ids::VPS_VERIFY_BUTTON,
+                fauna_i18n::strings::provisioning::VERIFY_CREDENTIALS,
+                true,
+                Action::VerifyVps,
+            )
+            .possible(m.verify_vps_possibility()),
+        );
     }
+
+    out.extend(choices(w));
+
+    out.push(Element::button(
+        ids::VPS_CONFIG_BACK_BUTTON,
+        common::BACK,
+        true,
+        Action::Back,
+    ));
+    // A DIM Continue is the only thing a terminal can say on its own, and "this
+    // is dead" is not a reason (`apps/tui.md` § Rendering → *Control
+    // vocabulary* rule 3; `ui/README.md` § Copy comprehensibility rule 5). This
+    // page had **no** explanatory surface whatsoever — unlike dns_config, whose
+    // `dns-status-text` merely went blank in its gating state — so a first-time
+    // user met four unmarked provider names and a dead Continue that said
+    // nothing at all.
+    //
+    // The reason comes from the machine, beside the verdict that greys the
+    // button, so the two cannot disagree and no shell re-derives the gating
+    // rule (priority #2). It paints as un-id'd chrome directly ABOVE the
+    // button, which is how this client expresses "explains the thing below"
+    // (the constrained-channel principle) and keeps ui.yaml's element set for
+    // `vps_config` unchanged — the same rule-5 precedent as the folder
+    // wizard's `devices.wizard.name_required` and the dns-provider rows'
+    // ineligibility lines.
+    //
+    // Above rather than below because Continue is the LAST element on the page:
+    // a line after it would sit off the bottom of the eyeshot the rule asks for.
+    //
+    // It doubles as the provider group's `explains-unset` line (walk.rs I5):
+    // in the entry state those four rows paint `( )` with none marked, and this
+    // is the line that says why — the user hasn't chosen yet, and choosing is
+    // what the page asks. The rows carry no `group` attr, so the page's single
+    // undeclared group is `""`.
+    if let Some(reason) = m.vps_continue_blocked_reason() {
+        out.push(Element::chrome(localized(&reason)).attr("explains-unset", ""));
+    }
+    // Enabled is the seam's to decide, never this page's: the button declares
+    // the machine's answer (`ui/README.md` § Offer only what is possible,
+    // rule 6) and `App::page_elements` disables it while that answer is
+    // blocked. Passing `true` here is what lets walk.rs's I8 catch a bypass.
+    out.push(
+        Element::button(
+            ids::VPS_CONFIG_CONTINUE_BUTTON,
+            common::CONTINUE,
+            true,
+            Action::ContinueFromVps,
+        )
+        .possible(m.vps_continue_possibility()),
+    );
+    out
+}
+
+/// The server choices — location, mail mode, SSH door, update channel and
+/// server type — shared by this page and `nest_provisioning`'s choices region
+/// (`onboarding-provisioning.md` § 3d *The choices on the setting-things-up
+/// page*: "§ 5's rules ... apply wherever those controls are shown"). One
+/// element list, so the two pages cannot drift apart.
+pub(super) fn choices(w: &Wizard) -> Vec<Element> {
+    let m = &w.machine;
+    let cfg = m.vps_config();
+    let enable_mail = m.provision_mail_mode_enabled();
+    let mut out = Vec::new();
 
     // Locations and server types only exist post-verify — `verify_vps` is what
     // populates them from the provider's API.
@@ -250,46 +318,6 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         );
     }
 
-    out.push(Element::button(
-        ids::VPS_CONFIG_BACK_BUTTON,
-        common::BACK,
-        true,
-        Action::Back,
-    ));
-    // A DIM Continue is the only thing a terminal can say on its own, and "this
-    // is dead" is not a reason (`apps/tui.md` § Rendering → *Control
-    // vocabulary* rule 3; `ui/README.md` § Copy comprehensibility rule 5). This
-    // page had **no** explanatory surface whatsoever — unlike dns_config, whose
-    // `dns-status-text` merely went blank in its gating state — so a first-time
-    // user met four unmarked provider names and a dead Continue that said
-    // nothing at all.
-    //
-    // The reason comes from the machine, beside the verdict that greys the
-    // button, so the two cannot disagree and no shell re-derives the gating
-    // rule (priority #2). It paints as un-id'd chrome directly ABOVE the
-    // button, which is how this client expresses "explains the thing below"
-    // (the constrained-channel principle) and keeps ui.yaml's element set for
-    // `vps_config` unchanged — the same rule-5 precedent as the folder
-    // wizard's `devices.wizard.name_required` and the dns-provider rows'
-    // ineligibility lines.
-    //
-    // Above rather than below because Continue is the LAST element on the page:
-    // a line after it would sit off the bottom of the eyeshot the rule asks for.
-    //
-    // It doubles as the provider group's `explains-unset` line (walk.rs I5):
-    // in the entry state those four rows paint `( )` with none marked, and this
-    // is the line that says why — the user hasn't chosen yet, and choosing is
-    // what the page asks. The rows carry no `group` attr, so the page's single
-    // undeclared group is `""`.
-    if let Some(reason) = m.vps_continue_blocked_reason() {
-        out.push(Element::chrome(localized(&reason)).attr("explains-unset", ""));
-    }
-    out.push(Element::button(
-        ids::VPS_CONFIG_CONTINUE_BUTTON,
-        common::CONTINUE,
-        m.can_continue_vps(),
-        Action::ContinueFromVps,
-    ));
     out
 }
 
@@ -329,7 +357,8 @@ mod tests {
                 .map(|e| e.text.clone())
         };
 
-        let els = elements(&app.wizard);
+        // Through the seam: it is what disables Continue (rule 6).
+        let els = app.page_elements();
         assert!(
             !continue_enabled(&els),
             "precondition: nothing is chosen, so Continue is dead"
@@ -338,7 +367,7 @@ mod tests {
 
         // Picked but unverified: the next act is Verify, not picking again.
         m.select_vps_provider("hetzner".into());
-        let els = elements(&app.wizard);
+        let els = app.page_elements();
         assert!(!continue_enabled(&els), "still dead until verify lands");
         assert_eq!(reason(&els).as_deref(), Some(t::STATUS_VERIFY_CREDENTIALS));
     }
@@ -504,7 +533,7 @@ mod tests {
             v.selected_server_type_id = Some("cx22".into());
         });
 
-        let els = elements(&app.wizard);
+        let els = app.page_elements();
         assert!(
             els.iter()
                 .find(|e| e.id == "vps-config-continue-button")

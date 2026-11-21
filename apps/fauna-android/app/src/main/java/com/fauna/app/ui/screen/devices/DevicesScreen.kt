@@ -30,12 +30,19 @@ import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.custodyHeldBytesText
 import com.fauna.app.ui.util.custodyReceiptStatusText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import uniffi.fauna_core.Possibility
+import com.fauna.ffi.custodyMintConfirmPossibility
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.resolveLocalizedNested
 import com.fauna.app.ui.viewmodel.CustodyGesture
 import com.fauna.app.ui.viewmodel.DevicesVM
+import com.fauna.ffi.p2pParticipationPossibility
 import com.fauna.ffi.shortId
 import uniffi.fauna_devices_machine.DeviceSummary
 import uniffi.fauna_devices_machine.DevicesSnapshot
@@ -44,6 +51,11 @@ import social.fauna.generated.Ids
 import uniffi.fauna_client_capabilities.CustodyHeldRowView
 import uniffi.fauna_client_capabilities.CustodyMintCandidateView
 import uniffi.fauna_client_capabilities.CustodyOfferRowView
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * Settings → Devices (`docs/goal/ui/devices.md`): the device **roster only**.
@@ -78,6 +90,7 @@ fun DevicesRosterScreen(
     val custodyOfferTargets by vm.custodyOfferTargets.collectAsState()
     val keylessPrincipals by vm.keylessPrincipals.collectAsState()
     val mintCandidates by vm.mintCandidates.collectAsState()
+    val mintEntry by vm.mintEntry.collectAsState()
     val memberRemovePending by vm.memberRemovePending.collectAsState()
     val sharingError by vm.sharingError.collectAsState()
     val enrollmentNotice by vm.enrollmentNotice.collectAsState()
@@ -126,6 +139,7 @@ fun DevicesRosterScreen(
             actorId = vm.actorId,
             onRemoveDevice = vm::removeDevice,
             onRenameDevice = vm::renameDevice,
+            renamePossibility = vm::renamePossibility,
             deviceName = vm::deviceName,
             onSetP2pParticipation = vm::setP2pParticipation,
             statusLabel = { online ->
@@ -145,6 +159,7 @@ fun DevicesRosterScreen(
             custodyOffers = custodyOffers,
             custodyOfferTargets = custodyOfferTargets,
             mintCandidates = mintCandidates,
+            mintEntry = mintEntry,
             onCustodyGesture = vm::runCustodyGesture,
             // Both custody lines are resolved out here and injected as plain
             // strings — the `conflictBadgeLabels` idiom that keeps the stateless
@@ -174,7 +189,10 @@ fun DevicesRosterContent(
     onRemoveDevice: (Int) -> Unit,
     // `device-rename-confirm-button`'s gesture — `(deviceId, text)`, keyed by the card's id
     // (`devices.md` § Device names); `deviceName` is the input's prefill.
-    onRenameDevice: (String, String) -> Unit = { _, _ -> },
+    onRenameDevice: (String, String, (Boolean) -> Unit) -> Unit = { _, _, _ -> },
+    // `device-rename-confirm-button`'s answer over `(deviceId, draft)` — the shared
+    // `DevicesMachine::rename_possibility` (`devices.md` § Errors & edge cases).
+    renamePossibility: (String, String) -> Possibility = { _, _ -> Possibility.Possible },
     deviceName: (String) -> String? = { null },
     // `device-p2p-participation-toggle[index]`'s click — `(index, on)`, the
     // machine's one gesture (it picks the arm; `p2p.md` § Per-device
@@ -206,6 +224,9 @@ fun DevicesRosterContent(
     custodyOfferTargets: Set<String> = emptySet(),
     // The mint flow: null = closed, else the host options it is open over.
     mintCandidates: List<CustodyMintCandidateView>? = null,
+    // `custody-mint-button`'s entry answer (the VM's `mintEntry`; `ui/devices.md`
+    // § Errors & edge cases).
+    mintEntry: Possibility = Possibility.Possible,
     // Every custody control's one sink — each gesture carries its grant id,
     // never a row index, which a refold can re-point at a different custody.
     onCustodyGesture: (CustodyGesture) -> Unit = {},
@@ -258,6 +279,7 @@ fun DevicesRosterContent(
                     onOpenRename = { renamingId = device.deviceId },
                     onCloseRename = { renamingId = null },
                     onRenameDevice = onRenameDevice,
+                    renamePossibility = renamePossibility,
                     deviceName = deviceName,
                     statusLabel, placeLabel,
                     keyless = device.principal?.let { it in keylessPrincipals } == true,
@@ -321,7 +343,7 @@ fun DevicesRosterContent(
                 onCustodyGesture,
             )
         }
-        CustodyMintFlow(mintCandidates, onCustodyGesture)
+        CustodyMintFlow(mintCandidates, mintEntry, onCustodyGesture)
     }
 }
 
@@ -504,12 +526,19 @@ private const val TARGET_NEST = "nest"
 @Composable
 private fun CustodyMintFlow(
     candidates: List<CustodyMintCandidateView>?,
+    entry: Possibility,
     onCustodyGesture: (CustodyGesture) -> Unit,
 ) {
+    // Gated at the entry from the shared `custody_mint_possibility`: disabled
+    // with the reason beside it before the candidates are read or with no 1:1
+    // conversation (`ui/devices.md` § Errors & edge cases).
+    val open = faunaFormGate(entry)
     OutlinedButton(
         onClick = { onCustodyGesture(CustodyGesture.MintOpen) },
+        enabled = open.enabled,
         modifier = Modifier.testTag(Ids.CUSTODY_MINT_BUTTON),
     ) { Text(stringResource(R.string.devices_custody_mint_button)) }
+    DisabledControlReasonText(open.reason)
     if (candidates == null) return
     // Re-opening over a new candidate list starts from the placeholder again.
     var chosen by remember(candidates) { mutableStateOf("") }
@@ -531,12 +560,16 @@ private fun CustodyMintFlow(
             modifier = Modifier.testTag(Ids.CUSTODY_MINT_FLOOR_NOTE),
         )
         val pick = candidates.firstOrNull { HexUtil.bytesToHex(it.host) == chosen }
+        // Blocked with its reason until a host is picked
+        // (`custody_mint_confirm_possibility`).
+        val confirm = faunaFormGate(askForm { custodyMintConfirmPossibility(pick != null) })
+        DisabledControlReasonText(confirm.reason)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 // Passed back unchanged — the page picks a row, it never
                 // assembles a channel.
                 onClick = { pick?.let { onCustodyGesture(CustodyGesture.Mint(it.host, it.channelHex)) } },
-                enabled = pick != null,
+                enabled = confirm.enabled && pick != null,
                 modifier = Modifier.testTag(Ids.CUSTODY_MINT_CONFIRM_BUTTON),
             ) { Text(stringResource(R.string.devices_custody_mint_confirm)) }
             TextButton(
@@ -679,7 +712,8 @@ private fun DeviceCard(
     renaming: Boolean,
     onOpenRename: () -> Unit,
     onCloseRename: () -> Unit,
-    onRenameDevice: (String, String) -> Unit,
+    onRenameDevice: (String, String, (Boolean) -> Unit) -> Unit,
+    renamePossibility: (String, String) -> Possibility,
     deviceName: (String) -> String?,
     statusLabel: (Boolean) -> String,
     placeLabel: (Boolean, Boolean, Boolean) -> String,
@@ -785,17 +819,27 @@ private fun DeviceCard(
             // snapshot, so a null paint is a row not painted yet: nothing to
             // draw. One toggleable node carries the label text, the checked
             // state and the click (the Material labelled-switch shape).
+            // Enabled from the shared `P2pParticipationPaint::possibility`
+            // (`ui/devices.md` § Errors & edge cases, *The participation switch
+            // answers one `Possibility`*): a sibling turning off is blocked by
+            // its own label, an off sibling by "turn it on from that device";
+            // the click asks the answer again.
             // Reference: tui `settings/devices.rs`.
             device.p2pParticipationPaint?.let { paint ->
+                val answer = p2pParticipationPossibility(paint)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
                         .toggleable(
                             value = paint.checked,
-                            enabled = paint.actionable,
+                            enabled = answer.isPossible,
                             role = Role.Switch,
-                            onValueChange = { onSetP2pParticipation(index, !paint.checked) },
+                            onValueChange = {
+                                if (p2pParticipationPossibility(paint).isPossible) {
+                                    onSetP2pParticipation(index, !paint.checked)
+                                }
+                            },
                         )
                         .testTag(Ids.DEVICE_P2P_PARTICIPATION_TOGGLE),
                 ) {
@@ -804,7 +848,12 @@ private fun DeviceCard(
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.weight(1f),
                     )
-                    Switch(checked = paint.checked, onCheckedChange = null, enabled = paint.actionable)
+                    Switch(checked = paint.checked, onCheckedChange = null, enabled = answer.isPossible)
+                }
+                // The blocked reason, unless it is the label already painted
+                // ("turning off…").
+                answer.blockedReason?.takeIf { it != paint.label }?.let { reason ->
+                    DisabledControlReasonText(localized(reason))
                 }
             }
             Text(
@@ -822,6 +871,12 @@ private fun DeviceCard(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag(Ids.DEVICE_RENAME_INPUT),
                 )
+                // Save paints from the shared draft answer (blank, an app's default
+                // name, no owner key → disabled with the reason); the machine asks
+                // it again on the save and refuses on `error-message`, and the
+                // editor closes only once the save went through.
+                val save = faunaFormGate(askForm { renamePossibility(device.deviceId, text) })
+                DisabledControlReasonText(save.reason)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Spacer(Modifier.weight(1f))
                     TextButton(
@@ -830,19 +885,26 @@ private fun DeviceCard(
                     ) { Text(stringResource(R.string.common_cancel)) }
                     TextButton(
                         onClick = {
-                            onCloseRename()
-                            onRenameDevice(device.deviceId, text)
+                            onRenameDevice(device.deviceId, text) { saved -> if (saved) onCloseRename() }
                         },
+                        enabled = save.enabled,
                         modifier = Modifier.testTag(Ids.DEVICE_RENAME_CONFIRM_BUTTON),
                     ) { Text(stringResource(R.string.devices_rename_confirm)) }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Spacer(Modifier.weight(1f))
-                IconButton(
-                    onClick = onOpenRename,
-                    modifier = Modifier.testTag(Ids.DEVICE_RENAME_BUTTON),
-                ) { Icon(Icons.Default.Edit, stringResource(R.string.devices_rename)) }
+                // A row no rename can ever reach — the nest's WebDAV pseudo-device —
+                // carries no button (`ui/README.md` § Offer only what is possible): the
+                // shared answer over the row's unchanged name is Absent for it.
+                val renameOffered = renamePossibility(device.deviceId, deviceName(device.deviceId).orEmpty()) !=
+                    Possibility.Absent
+                if (renameOffered) {
+                    IconButton(
+                        onClick = onOpenRename,
+                        modifier = Modifier.testTag(Ids.DEVICE_RENAME_BUTTON),
+                    ) { Icon(Icons.Default.Edit, stringResource(R.string.devices_rename)) }
+                }
                 IconButton(
                     onClick = { showRemoveDialog = true },
                     modifier = Modifier.testTag(Ids.DEVICE_REMOVE_BUTTON),

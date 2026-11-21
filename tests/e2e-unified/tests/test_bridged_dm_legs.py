@@ -36,8 +36,9 @@ publishes.
 
 **The picker**, one sentence per leg: the user types the peer's human spelling
 into the Conversations recipient picker → the bridged rail's probe asks the
-nest's ``conversation.rooms.open``, which matches the leg's grammar and
-resolves the spelling to the stable id the room keys on — a Bluesky handle,
+nest's effect-free ``conversation.address.admit``, which matches the leg's
+grammar and opens nothing → on Send, ``conversation.rooms.open`` resolves the
+spelling to the stable id the room keys on — a Bluesky handle,
 ``@`` or not, through ``app.bsky.actor.getProfile`` under the account's session
 (``bluesky/dm_leg.rs::far_room_id``); a Fediverse ``@user@host`` by WebFinger
 then the actor document (``activitypub/dm_leg.rs::far_room_id``) → the user
@@ -74,6 +75,7 @@ from helpers.ap_nest import deliver_direct_note, enable_ap, start_ap_nest
 from helpers.budgets import RECEIVE_CYCLE_S, RPC_ROUNDTRIP_S
 from helpers.fake_follower import FakeFollower, assert_valid_http_signature
 from helpers.waiting import wait_until
+from i18n.strings import S
 from tests.test_bluesky_feed_ingest import _link_through_callback
 from tests.test_bridged_conversation import _await_text, _page_error, _threads
 
@@ -280,12 +282,32 @@ def test_a_bluesky_room_started_from_the_picker_by_handle_reaches_the_resolved_p
     _signed_in_with_mail(app, request, nest, "bluesky_dm_spa_url")
     conv = app.conversations
 
-    # ── A handle the service names no one by opens nothing. ──
+    # ── A handle the service names no one by opens nothing. The probe only
+    # asks which bridge admits the spelling (`conversations.md` § *The picker
+    # tells the truth*, rule 4 (a)), so it resolves and no lookup or room
+    # follows; Send opens the room (4 (b)), and the far refusal there sends
+    # nothing, makes no room and keeps the chip, with the reason on the page.
     state = conv.resolve_recipient("@nobody.test")
-    assert state == "not-found", (
-        f"a handle getProfile refuses is no bridged address: {state!r}; "
+    assert state == "resolved", (
+        f"a spelling the leg's grammar admits resolves at the probe: {state!r}; "
         f"error: {_page_error(app)!r}"
     )
+    assert [r for r in _rooms(nest) if r["bridge_id"] == "bluesky"] == [], (
+        f"the keystroke probe opened a room: {_rooms(nest)!r}"
+    )
+    conv.accept_recipient_chip("@nobody.test")
+    app.driver.type_text("dm-text-field", _unique("never sent"))
+    app.driver.click("dm-send-button")
+    not_found = S.conversations.unified.recipient_resolve_not_found
+    wait_until(
+        lambda: not_found in _page_error(app),
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"a refused open said nothing on error-message: {_page_error(app)!r}",
+    )
+    assert app.driver.is_visible("recipient-picker-chip"), (
+        f"a refused open must keep the chip; error: {_page_error(app)!r}"
+    )
+    assert far.sent_snapshot() == [], far.sent_snapshot()
     conv.cancel_new_conversation()
     assert [r for r in _rooms(nest) if r["bridge_id"] == "bluesky"] == [], _rooms(nest)
 

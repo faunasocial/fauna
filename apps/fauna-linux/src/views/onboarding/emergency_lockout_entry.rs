@@ -17,7 +17,6 @@
 //! The lock warning and the `LOCK` prompt are the shared `sessions.*` strings,
 //! the same text the signed-in Sessions page paints — one copy of the REQUIRED
 //! warning (`devices.md` § The two panic buttons).
-use fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD;
 use fauna_ui_ids as ids;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -100,24 +99,42 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     }
     action_row.append(&back_btn);
 
-    // The word gates the button here AND in the machine — a wrong word is
-    // refused identically on all seven apps (`submit_emergency_lockout`).
+    // Painted from the shared draft answer as the fields are typed
+    // (`ui/README.md` § Offer only what is possible, rule 4's form case):
+    // secret, then account, then the confirm word — the same checks, in the
+    // same order, `submit_emergency_lockout` runs, so the lock is refused
+    // identically on all seven apps.
     let lock_btn = gtk::Button::with_label(s::LOCKOUT_BUTTON);
     lock_btn.add_css_class("destructive-action");
-    lock_btn.set_sensitive(false);
     crate::testid::set_test_id(&lock_btn, ids::SESSIONS_LOCKOUT_BUTTON);
-    {
+    let fields = [
+        secret_entry.clone().upcast::<gtk::Editable>(),
+        account_entry.clone().upcast::<gtk::Editable>(),
+        confirm_entry.clone().upcast::<gtk::Editable>(),
+    ];
+    let repaint: Rc<dyn Fn()> = {
         let lock_btn = lock_btn.clone();
-        confirm_entry.connect_changed(move |e| {
-            lock_btn.set_sensitive(e.text() == LOCKOUT_CONFIRM_WORD);
-        });
+        let fields = fields.clone();
+        Rc::new(move || crate::possible::paint(&lock_btn, None, lock_answer(&fields)))
+    };
+    repaint();
+    for f in &fields {
+        let repaint = repaint.clone();
+        f.connect_changed(move |_| repaint());
     }
     {
         let m = m.clone();
         let secret_entry = secret_entry.clone();
         let account_entry = account_entry.clone();
         let confirm_entry = confirm_entry.clone();
+        let repaint = repaint.clone();
         lock_btn.connect_clicked(move |btn| {
+            // The press asks the answer it was painted from again (rule 6);
+            // a blocked draft's line goes on the wizard's `error-message`.
+            if let Some(reason) = crate::possible::reason_text(&lock_answer(&fields)) {
+                m.set_error_message(reason);
+                return;
+            }
             // The account rides on the machine's one handle slot — forwarded
             // as shown, empty included, so the pasted `handle=` or the typed
             // field locates the nest, never a stale earlier handle.
@@ -127,12 +144,8 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
             btn.set_sensitive(false);
             let m_async = m.clone();
             let m_done = m.clone();
-            let btn = btn.clone();
-            let fields = [
-                secret_entry.clone().upcast::<gtk::Editable>(),
-                account_entry.clone().upcast::<gtk::Editable>(),
-                confirm_entry.clone().upcast::<gtk::Editable>(),
-            ];
+            let fields = fields.clone();
+            let repaint = repaint.clone();
             async_helper::run_on_tokio(
                 async move { m_async.submit_emergency_lockout(secret, word).await },
                 move |outcome| {
@@ -142,9 +155,8 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
                         for f in &fields {
                             f.set_text("");
                         }
-                    } else {
-                        btn.set_sensitive(fields[2].text() == LOCKOUT_CONFIRM_WORD);
                     }
+                    repaint();
                     settle(&m_done, &outcome);
                 },
             );
@@ -173,8 +185,19 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     // the machine's line on every tick — nothing machine-derived paints here.
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
         let _ = &m;
+        repaint();
     });
     (page, refresh)
+}
+
+/// `sessions-lockout-button`'s answer: the shared draft predicate over the
+/// secret, the account and the confirm word as typed.
+fn lock_answer(fields: &[gtk::Editable; 3]) -> fauna_core::possibility::Possibility {
+    fauna_onboarding_machine::emergency_lockout_possibility(
+        fields[0].text().to_string(),
+        fields[1].text().to_string(),
+        fields[2].text().to_string(),
+    )
 }
 
 /// Render the outcome's one shared line onto the machine's `error-message`

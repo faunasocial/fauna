@@ -19,7 +19,11 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.MailSpamVM
 import com.fauna.ffi.FfiReportShareEntry
@@ -29,9 +33,12 @@ import uniffi.fauna_client_mail_settings.TrainingLabel
 import uniffi.fauna_client_mail_settings.TrainingSource
 import uniffi.fauna_client_mail_settings.trainingLabelBadge
 import uniffi.fauna_client_mail_settings.trainingSourceBadge
+import uniffi.fauna_core.Possibility
 import java.text.DateFormat
 import java.util.Date
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The per-account `mail-spam` page (`mail-spam.md`): reset the per-user Bayesian
@@ -66,6 +73,9 @@ fun MailSpamScreen(
     val reportShare by vm.reportShare.collectAsState()
     val reportSharePublished by vm.reportSharePublished.collectAsState()
     val thresholdOverride by vm.thresholdOverride.collectAsState()
+    val contributeAnswer by vm.contributeAnswer.collectAsState()
+    val shareAnswer by vm.shareAnswer.collectAsState()
+    val thresholdAnswer by vm.thresholdAnswer.collectAsState()
 
     MailSpamContent(
         events = snapshot.events,
@@ -85,6 +95,9 @@ fun MailSpamScreen(
         onSetReportShare = vm::setReportShare,
         onSetThresholdOverride = vm::setThresholdOverride,
         onUndo = vm::undo,
+        contributeAnswer = contributeAnswer,
+        shareAnswer = shareAnswer,
+        thresholdAnswer = thresholdAnswer,
     )
 }
 
@@ -106,6 +119,15 @@ fun MailSpamContent(
     onSetThresholdOverride: (UInt?) -> Unit,
     onUndo: (String) -> Unit,
     parseCount: (String) -> UInt? = { com.fauna.ffi.parseCount(it) },
+    // Controls wait for their reads (mail-settings.md § Errors & edge cases,
+    // *Controls wait for their reads*): the classifier snapshot's, the
+    // report-share read's and the override read's answers
+    // (`Possibility::from_read` over the VM's read states). Blocked paints the
+    // control disabled with its reason; the VM's handlers ask the same
+    // answers. Defaults keep the pre-existing Content tests compiling.
+    contributeAnswer: Possibility = Possibility.Possible,
+    shareAnswer: Possibility = Possibility.Possible,
+    thresholdAnswer: Possibility = Possibility.Possible,
 ) {
     Scaffold(
         topBar = {
@@ -148,9 +170,14 @@ fun MailSpamContent(
             // A dispatch-on-change toggle IS the commit — there is no separate
             // save for it to buffer into, so it declares (the `TierDropdown`
             // users-row split, reached the same way).
-            val contributeGate = faunaGate(
-                "fauna.bridges.set_baseline_contribution",
-                enabled = !working,
+            // It waits for the classifier snapshot: before it the toggle's
+            // `false` is the never-read default, not the nest's answer.
+            val contributeGate = faunaFormGate(
+                contributeAnswer,
+                faunaGate(
+                    "fauna.bridges.set_baseline_contribution",
+                    enabled = !working && contributeAnswer.isPossible,
+                ),
             )
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -199,6 +226,11 @@ fun MailSpamContent(
             // would read as the control having been gated when nothing gates it.
             // Only a DISCRIMINANT may name an OfflineSafe kind here, and only
             // because its other arm is OnlineOnly.
+            //
+            // What does gate it is its read (mail-settings.md § Errors & edge
+            // cases, *Controls wait for their reads*): until the report-share
+            // read resolves the switch's `false` is a guess, so it is disabled
+            // with the read's reason — a shared answer, not an offline gate.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -214,17 +246,19 @@ fun MailSpamContent(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    DisabledControlReasonText(localized(shareAnswer.blockedReason))
                 }
                 Switch(
                     checked = reportShare,
                     onCheckedChange = onSetReportShare,
+                    enabled = shareAnswer.isPossible,
                     modifier = Modifier.testTag(Ids.MAIL_SPAM_SHARE_REPORTS_TOGGLE),
                 )
             }
 
             // ── Per-account spam-folder threshold override
             //    (mail-policy-config.md § Tier 3) ──
-            ThresholdOverrideField(thresholdOverride, onSetThresholdOverride, parseCount)
+            ThresholdOverrideField(thresholdOverride, onSetThresholdOverride, parseCount, thresholdAnswer)
 
             // ── "What this nest publishes" transparency list
             //    (report-share-published-list; read-only, no action) ──
@@ -290,6 +324,7 @@ private fun ThresholdOverrideField(
     thresholdOverride: UInt?,
     onSetThresholdOverride: (UInt?) -> Unit,
     parseCount: (String) -> UInt?,
+    thresholdAnswer: Possibility,
 ) {
     var input by remember(thresholdOverride) {
         mutableStateOf(thresholdOverride?.toString() ?: "")
@@ -303,7 +338,14 @@ private fun ThresholdOverrideField(
     // (`settings/mail_spam.rs`, `threshold_input`). Matching that. A disabled
     // Material text field still renders its current value, so the persisted
     // override stays readable with no nest — only editing-to-commit closes.
-    val thresholdGate = faunaGate("fauna.bridges.set_spam_threshold_override")
+    //
+    // It also waits for the override's read, so an empty pre-read draft is
+    // never committed as "clear the override"; the read's reason wins over
+    // the gate's, painted as a line of its own under the field.
+    val thresholdGate = faunaFormGate(
+        thresholdAnswer,
+        faunaGate("fauna.bridges.set_spam_threshold_override", enabled = thresholdAnswer.isPossible),
+    )
     Column {
         Text(
             stringResource(R.string.mail_spam_threshold_override_label),

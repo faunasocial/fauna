@@ -1068,6 +1068,10 @@ Per-app surfaces today (see the § Implementation status matrix):
   had. If the page trickles out later it does so with the contact-list opt-in
   when § Inbound authorization's trigger fires, as one shape on all 7 apps.
 
+### Only what can work (ruled 2026-11-16)
+
+The page's instance of [`../ui/README.md`](../ui/README.md) § Offer only what is possible. Every control on linux's P2P tab is painted from a predicate in `fauna_peer_sync::p2p_page` and each click asks the same predicate first, refusing with the same reason: **`p2p-tunnel-toggle`** is possible only while the device's peer service exists — its start can fail at sign-in, and then the toggle is shown disabled with *peer connections did not start on this device* (blocked, not absent: a restart may start it), never a click that does nothing; **`p2p-node-id-copy-btn`** is blocked until the node runs and reports an id; **`p2p-lan-copy-btn`** is blocked while LAN discovery found no address; **`p2p-contact-remove-button`** needs the service, as the toggle does. Every failure on the tab is written on its `error-message` (rule 7) — a failed start, a refused control's reason, and a removal the contact store refuses (naming the contact and the error) — never a log line alone. The predicates take their facts as inputs because the page's service object is linux's own; the page stays linux-only (§ RATIFIED 2026-08-24, below), so no other app owes a lift of it. Pinned by `fauna_peer_sync::p2p_page::tests` and `settings::p2p_tab::tests` on linux.
+
 ### RATIFIED 2026-08-24 — the `p2p` page does not trickle down; 1-of-7 is the target shape
 
 The design pass row 67 asked for, answered against code rather than against the

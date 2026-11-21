@@ -73,7 +73,9 @@ fn build_offline_window() -> (
         tx,
         machine,
     ));
-    let result = crate::app::build_main_window(&app, &client);
+    // What the app's startup installs before its first window (I10).
+    crate::read_text::install();
+    let result = crate::app::build_main_window(&app, &client, None);
     // GTK's `is_visible()` is ancestor-aware up to the toplevel, so an unshown
     // window reports every descendant hidden and every sweep below would pass
     // vacuously. Presenting it on the private display is what makes the walk
@@ -390,6 +392,620 @@ fn the_tooltip_invariant_catches_a_widget_wearing_its_own_id() {
     });
 }
 
+/// **I9 — enabled means possible** (`enabled-means-possible`; the rule is
+/// `ui/README.md` § Offer only what is possible, rule 6). The substance of
+/// tui's I8 (`apps/fauna-tui/src/walk.rs`), under linux's next free number:
+/// linux's I8 is the tooltip invariant above.
+///
+/// Every widget painted through the possibility seam (`possible.rs`) is
+/// sensitive only while its answer is *possible*, is not shown while its
+/// answer is *absent*, and, while insensitive with a *blocked* answer, carries
+/// that reason within eyeshot: on its reason line, shown, or as its tooltip.
+/// True by construction for a page that leaves both halves to
+/// [`crate::possible::paint`]; the ways to break it are a later write past the
+/// seam (a `set_sensitive(true)` on a control the answer blocks) and a reason
+/// line hidden or rewritten by the page.
+///
+/// It reads the seam's registry rather than the widget tree, like I6, so it
+/// covers every painted widget, including one on a surface the sweep's doors
+/// do not reach (the onboarding wizard).
+fn check_enabled_means_possible(ctx: &str) -> Result<(), String> {
+    check_possibility_over(&crate::possible::declarations(), ctx)
+}
+
+/// I9's body over a given list: the walk hands it the live registry, the
+/// red-verification a filtered slice of it after a write past the seam.
+fn check_possibility_over(painted: &[crate::possible::Painted], ctx: &str) -> Result<(), String> {
+    for p in painted {
+        let id = p.widget.widget_name();
+        if p.widget.is_visible() && !p.answer.is_shown() {
+            return Err(format!(
+                "{ctx}: `{id}` is shown, but its predicate answers absent — a choice \
+                 this person can never make here is offered"
+            ));
+        }
+        if p.widget.is_sensitive() && !p.answer.is_possible() {
+            return Err(format!(
+                "{ctx}: `{id}` is enabled, but its predicate answers {:?} — an \
+                 affordance offered that cannot succeed",
+                p.answer
+            ));
+        }
+        if !p.widget.is_sensitive()
+            && let Some(reason) = p.answer.reason()
+        {
+            let text = reason.resolve(crate::i18n::strings::lookup);
+            let on_line = p
+                .reason_line
+                .as_ref()
+                .is_some_and(|line| line.is_visible() && line.text() == text);
+            let on_tooltip = p.widget.tooltip_text().as_deref() == Some(text.as_str());
+            if !on_line && !on_tooltip {
+                return Err(format!(
+                    "{ctx}: `{id}` is disabled for {:?}, and that reason is painted \
+                     nowhere beside it",
+                    reason.key
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// I9's red-verification, kept as a test: the VPS page's Continue is painted
+/// from the machine's answer, which with nothing chosen is blocked. Through
+/// the seam I9 is green; enable the button past the seam and I9 must red;
+/// hide its reason line and I9 must red again.
+#[test]
+fn enabled_means_possible_reds_on_a_widget_that_bypasses_the_seam() {
+    run_on_gtk_thread(|| {
+        use fauna_onboarding_machine::OnboardingMachine;
+        use fauna_onboarding_machine::observer::NullObserver;
+        let m = OnboardingMachine::new(std::sync::Arc::new(NullObserver));
+        let (root, refresh) = crate::views::onboarding::vps_config::build(m.clone());
+        refresh();
+        let mine = || -> Vec<crate::possible::Painted> {
+            crate::possible::declarations()
+                .into_iter()
+                .filter(|p| p.widget.is_ancestor(&root))
+                .collect()
+        };
+        let cont = mine();
+        assert_eq!(
+            cont.len(),
+            1,
+            "the VPS page paints Continue through the seam"
+        );
+        assert_eq!(cont[0].widget.widget_name(), "vps-config-continue-button");
+        assert!(
+            !cont[0].answer.is_possible(),
+            "precondition: nothing is chosen, so the predicate answers blocked"
+        );
+        check_possibility_over(&cont, "through the seam")
+            .expect("the seam disables it and paints its reason");
+
+        cont[0].widget.set_sensitive(true);
+        let err = check_possibility_over(&mine(), "bypass")
+            .expect_err("I9 must red on a blocked control left enabled");
+        assert!(
+            err.contains("vps-config-continue-button") && err.contains("enabled"),
+            "{err}"
+        );
+
+        cont[0].widget.set_sensitive(false);
+        if let Some(line) = &cont[0].reason_line {
+            line.set_visible(false);
+        }
+        let err = check_possibility_over(&mine(), "silent")
+            .expect_err("I9 must red on a block whose reason is painted nowhere");
+        assert!(err.contains("painted nowhere"), "{err}");
+
+        refresh();
+        check_possibility_over(&mine(), "repainted").expect("a refresh restores the seam");
+    });
+}
+
+/// The onboarding credential pages paint Verify through the seam: with a
+/// provider picked and its required fields empty, the shared answer
+/// (`verify_dns_possibility` / `verify_vps_possibility`) is blocked, the
+/// button is painted from it, and I9 holds over the page.
+#[test]
+fn the_credential_verify_buttons_are_painted_from_their_shared_answers() {
+    run_on_gtk_thread(|| {
+        use fauna_onboarding_machine::OnboardingMachine;
+        use fauna_onboarding_machine::observer::NullObserver;
+        type Build = fn(std::sync::Arc<OnboardingMachine>) -> (gtk::Box, std::rc::Rc<dyn Fn()>);
+        type Case = (&'static str, Build, fn(&OnboardingMachine), &'static str);
+        let pages: [Case; 2] = [
+            (
+                "dns_config",
+                crate::views::onboarding::dns_config::build,
+                |m| m.select_dns_provider("cloudflare".into()),
+                "dns-verify-button",
+            ),
+            (
+                "vps_config",
+                crate::views::onboarding::vps_config::build,
+                |m| m.select_vps_provider("hetzner".into()),
+                "vps-verify-button",
+            ),
+        ];
+        for (page, build, pick, verify_id) in pages {
+            let m = OnboardingMachine::new(std::sync::Arc::new(NullObserver));
+            pick(&m);
+            let (root, refresh) = build(m.clone());
+            refresh();
+            let painted: Vec<_> = crate::possible::declarations()
+                .into_iter()
+                .filter(|p| p.widget.is_ancestor(&root))
+                .collect();
+            let verify = painted
+                .iter()
+                .find(|p| p.widget.widget_name() == verify_id)
+                .unwrap_or_else(|| panic!("{page}: `{verify_id}` is painted through the seam"));
+            assert!(
+                verify.widget.is_visible() && !verify.answer.is_possible(),
+                "{page}: required fields empty, so Verify is shown and blocked"
+            );
+            check_possibility_over(&painted, page).expect("I9 holds over the page");
+        }
+    });
+}
+
+/// The signed-out wizard forms paint their submit from their shared draft
+/// answer (`ui/README.md` § Offer only what is possible, rule 4's form case),
+/// the twin of tui's `every_signed_out_form_paints_its_submit_from_its_draft`:
+/// for each form a blank, a malformed (where the form has one) and a complete
+/// draft, typed into the page's own fields, leave the submit disabled,
+/// disabled and live, and I9 holds over the page at every step.
+#[test]
+fn every_signed_out_form_paints_its_submit_from_its_draft() {
+    run_on_gtk_thread(|| {
+        use crate::views::onboarding as ob;
+        use fauna_onboarding_machine::OnboardingMachine;
+        use fauna_onboarding_machine::observer::NullObserver;
+        use fauna_ui_ids as ids;
+        type Build = Box<dyn Fn(std::sync::Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>)>;
+        type Draft = &'static [(&'static str, &'static str)];
+        // A placeholder swapped for a 64-hex key at run time: the literal in
+        // a shipped file reads as a key to the publish secret scan.
+        const KEY: &str = "<a 64-hex identity secret>";
+        type Case = (&'static str, Build, &'static str, Vec<(Draft, bool)>);
+        let cases: Vec<Case> = vec![
+            (
+                "identity_import",
+                Box::new(|m| ob::identity_import::build(m, false)),
+                ids::IMPORT_SUBMIT_BUTTON,
+                vec![
+                    (&[], false),
+                    (&[(ids::PASTE_SECRET_FIELD, "not a key")], false),
+                    (&[(ids::PASTE_SECRET_FIELD, KEY)], true),
+                ],
+            ),
+            (
+                "recovery_entry",
+                Box::new(|m| ob::recovery_entry::build(m, false)),
+                ids::RECOVERY_ENTRY_SUBMIT_BUTTON,
+                vec![
+                    (&[], false),
+                    (
+                        &[
+                            (ids::RECOVERY_ENTRY_PHRASE_FIELD, KEY),
+                            (ids::RECOVERY_ENTRY_ACCOUNT_FIELD, "alice"),
+                        ],
+                        false,
+                    ),
+                    (
+                        &[
+                            (ids::RECOVERY_ENTRY_PHRASE_FIELD, KEY),
+                            (ids::RECOVERY_ENTRY_ACCOUNT_FIELD, "alice@example.com"),
+                        ],
+                        true,
+                    ),
+                ],
+            ),
+            (
+                "emergency_lockout_entry",
+                Box::new(ob::emergency_lockout_entry::build),
+                ids::SESSIONS_LOCKOUT_BUTTON,
+                vec![
+                    (&[], false),
+                    (
+                        &[
+                            (ids::PASTE_SECRET_FIELD, KEY),
+                            (ids::RECOVERY_ENTRY_ACCOUNT_FIELD, "alice@example.com"),
+                            (ids::SESSIONS_LOCKOUT_CONFIRM_FIELD, "lock"),
+                        ],
+                        false,
+                    ),
+                    (
+                        &[
+                            (ids::PASTE_SECRET_FIELD, KEY),
+                            (ids::RECOVERY_ENTRY_ACCOUNT_FIELD, "alice@example.com"),
+                            (ids::SESSIONS_LOCKOUT_CONFIRM_FIELD, "LOCK"),
+                        ],
+                        true,
+                    ),
+                ],
+            ),
+            (
+                "handle_entry",
+                Box::new(ob::handle_entry::build),
+                ids::HANDLE_CHECK_BUTTON,
+                vec![
+                    (&[], false),
+                    (&[(ids::HANDLE_INPUT, "   ")], false),
+                    (&[(ids::HANDLE_INPUT, "alice@example.com")], true),
+                ],
+            ),
+            (
+                "invite_request",
+                Box::new(|m| ob::invite_request::build(m, false)),
+                ids::INVITE_CODE_CHECK_BUTTON,
+                vec![
+                    (&[], false),
+                    (&[(ids::INVITE_CODE_INPUT, "   ")], false),
+                    (&[(ids::INVITE_CODE_INPUT, "CODE")], true),
+                ],
+            ),
+            (
+                "claim_code",
+                Box::new(ob::claim_code::build),
+                ids::CLAIM_CODE_SUBMIT_BUTTON,
+                vec![
+                    (&[], false),
+                    (&[(ids::CLAIM_CODE_INPUT, "   ")], false),
+                    (&[(ids::CLAIM_CODE_INPUT, "CODE")], true),
+                ],
+            ),
+        ];
+
+        let mut failures = Vec::new();
+        for (name, build, submit, drafts) in &cases {
+            for (i, (fields, enabled)) in drafts.iter().enumerate() {
+                let ctx = format!("{name} draft {i}");
+                let m = OnboardingMachine::new(std::sync::Arc::new(NullObserver));
+                let (root, refresh) = build(m.clone());
+                refresh();
+                for (id, value) in fields.iter() {
+                    let value = if *value == KEY {
+                        "01".repeat(32)
+                    } else {
+                        (*value).to_string()
+                    };
+                    crate::testid::find_by_test_id(&root, id)
+                        .and_then(|w| w.dynamic_cast::<gtk::Editable>().ok())
+                        .unwrap_or_else(|| panic!("{ctx}: `{id}` is an editable field"))
+                        .set_text(&value);
+                }
+                let painted: Vec<_> = crate::possible::declarations()
+                    .into_iter()
+                    .filter(|p| p.widget.is_ancestor(&root))
+                    .collect();
+                let Some(p) = painted.iter().find(|p| p.widget.widget_name() == *submit) else {
+                    failures.push(format!("{ctx}: `{submit}` is not painted through the seam"));
+                    continue;
+                };
+                if p.widget.is_sensitive() != *enabled || p.answer.is_possible() != *enabled {
+                    failures.push(format!(
+                        "{ctx}: `{submit}` sensitive={} answer={:?}, want enabled={enabled}",
+                        p.widget.is_sensitive(),
+                        p.answer
+                    ));
+                }
+                if let Err(e) = check_possibility_over(&painted, &ctx) {
+                    failures.push(e);
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "signed-out forms break the draft rule:\n  - {}",
+            failures.join("\n  - ")
+        );
+    });
+}
+
+/// The onboarding wizard's gates paint from the machine's answers
+/// (`ui/README.md` § Offer only what is possible, rule 6), the linux twin of
+/// tui's wizard paint: for each button a machine state the gate blocks and
+/// one it allows, the button is painted through the seam, its sensitivity is
+/// the machine's answer, and I9 holds over the page. The manual provider row
+/// covers DNS only and that pick is always possible, so it has no blocked
+/// state to pin; the other seven have both.
+#[test]
+fn the_wizard_gates_are_painted_from_the_machines_answers() {
+    run_on_gtk_thread(|| {
+        use crate::views::onboarding as ob;
+        use fauna_core::possibility::Possibility;
+        use fauna_onboarding_machine::observer::NullObserver;
+        use fauna_onboarding_machine::snapshots::{
+            HandleCheckOutcome, HandleCheckSnapshot, InviteRequestSnapshot, NatModeSnapshot,
+            OobCodeState,
+        };
+        use fauna_onboarding_machine::state::ProviderConnection;
+        use fauna_onboarding_machine::{GoalCover, OnboardingMachine, ProviderGoal};
+        use fauna_provisioning::dns::DnsZone;
+        use fauna_provisioning::registrar::RegistrarAvailability;
+        use fauna_provisioning::vps::{ServerTypeInfo, VpsLocation};
+        use fauna_ui_ids as ids;
+        use std::sync::Arc;
+
+        type Build = fn(Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>);
+        type Setup = fn(&OnboardingMachine);
+        type Gate = fn(&OnboardingMachine) -> Possibility;
+
+        /// A handle whose domain is bought, the price-agreement path.
+        const BUY_HANDLE: &str = "alice@fresh.test";
+        fn provider(server: bool, registrar: bool) -> ProviderConnection {
+            let mut creds = std::collections::HashMap::new();
+            creds.insert(
+                "api-token".to_string(),
+                fauna_core::secret::SecretString::from("t".to_string()),
+            );
+            ProviderConnection {
+                creds,
+                connected: true,
+                server_checked: server,
+                locations: if server {
+                    vec![VpsLocation {
+                        id: "fsn1".into(),
+                        name: "Falkenstein".into(),
+                        city: "Falkenstein".into(),
+                        country: "DE".into(),
+                    }]
+                } else {
+                    vec![]
+                },
+                server_types: if server {
+                    vec![ServerTypeInfo {
+                        id: "cx23".into(),
+                        vcpu: 2,
+                        mem_gb: 4.0,
+                        disk_gb: 40,
+                        price_monthly_cents: 500,
+                        currency: "EUR".into(),
+                    }]
+                } else {
+                    vec![]
+                },
+                listed_for_location: server.then(|| "fsn1".to_string()),
+                availability: registrar.then_some(RegistrarAvailability::Buyable {
+                    price_cents: 1200,
+                    currency: Some("EUR".into()),
+                    renewal_cents: Some(1500),
+                }),
+                ..Default::default()
+            }
+        }
+        /// Buying the handle's domain, DNS kept by hand: the other goals open.
+        fn buying(m: &OnboardingMachine) {
+            m.begin_create_identity();
+            m.set_current_handle(BUY_HANDLE.into());
+            m.select_goal_cover(ProviderGoal::Dns, GoalCover::Manual)
+                .expect("the manual row covers DNS");
+            m.set_handle_check_outcome_for_test(HandleCheckOutcome::DomainAvailable {
+                buyable_via_provider: true,
+                price: None,
+            });
+            m.toggle_buy_domain(true);
+        }
+        /// ... with a registrar and a server provider connected: covered.
+        fn covered(m: &OnboardingMachine) {
+            buying(m);
+            m.set_provider_connection_for_test("porkbun".into(), provider(false, true));
+            m.set_provider_connection_for_test("digitalocean".into(), provider(true, false));
+        }
+        /// ... and continued to the setting-up page, the price unagreed.
+        fn entered_unagreed(m: &OnboardingMachine) {
+            covered(m);
+            m.continue_from_providers()
+                .expect("every goal covered, Continue is possible");
+        }
+        /// A provider that rents servers too: the page keeps "same provider
+        /// for the server" ticked, which drops a DNS-only pick.
+        fn dns_picked(m: &OnboardingMachine) {
+            m.set_current_handle("alice@example.com".into());
+            m.select_dns_provider("hetzner".into());
+        }
+
+        type Case = (
+            &'static str,
+            Build,
+            &'static str,
+            Gate,
+            Option<Setup>,
+            Setup,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "provider_choice continue",
+                ob::provider_choice::build,
+                ids::PROVIDER_CHOICE_CONTINUE_BUTTON,
+                |m| {
+                    m.providers_continue_possibility()
+                        .resolving_nested_args(crate::i18n::strings::lookup)
+                },
+                Some(buying),
+                covered,
+            ),
+            (
+                "provider_choice manual row",
+                ob::provider_choice::build,
+                "provider-row[manual]",
+                |m| m.goal_cover_possibility(ProviderGoal::Dns, GoalCover::Manual),
+                None,
+                buying,
+            ),
+            (
+                "nest_provisioning start",
+                ob::nest_provisioning::build,
+                ids::PROVISIONING_START_BUTTON,
+                |m| m.provisioning_start_possibility(),
+                Some(entered_unagreed),
+                |m| {
+                    entered_unagreed(m);
+                    m.confirm_price();
+                },
+            ),
+            (
+                "dns_config continue",
+                ob::dns_config::build,
+                ids::DNS_CONFIG_CONTINUE_BUTTON,
+                |m| m.dns_continue_possibility(),
+                Some(dns_picked),
+                |m| {
+                    dns_picked(m);
+                    m.set_dns_state_for_test(|d| {
+                        d.verified = true;
+                        d.current_zones = vec![DnsZone {
+                            id: "zone-1".into(),
+                            name: "example.com".into(),
+                            nameservers: Vec::new(),
+                        }];
+                    });
+                },
+            ),
+            (
+                "handle_entry continue",
+                ob::handle_entry::build,
+                ids::HANDLE_ENTRY_CONTINUE_BUTTON,
+                |m| m.handle_continue_possibility(),
+                Some(|_| {}),
+                |m| {
+                    m.set_handle_check_snapshot_for_test(HandleCheckSnapshot {
+                        continue_enabled: true,
+                        ..HandleCheckSnapshot::idle()
+                    })
+                },
+            ),
+            (
+                "invite_request continue",
+                |m| ob::invite_request::build(m, false),
+                ids::INVITE_REQUEST_CONTINUE_BUTTON,
+                |m| m.invite_continue_possibility(),
+                Some(|_| {}),
+                |m| {
+                    m.set_invite_request_snapshot_for_test(InviteRequestSnapshot {
+                        out_of_band_code_state: OobCodeState::Valid {
+                            invite_id: "inv-1".into(),
+                            supervised_by: None,
+                        },
+                        ..InviteRequestSnapshot::idle()
+                    })
+                },
+            ),
+            (
+                "invite_request submit",
+                |m| ob::invite_request::build(m, false),
+                ids::INVITE_REQUEST_SUBMIT_BUTTON,
+                |m| m.invite_submit_possibility(),
+                Some(|m| m.set_loading_for_test(true)),
+                |_| {},
+            ),
+            (
+                "nat_mode_choice confirm",
+                ob::nat_mode_choice::build,
+                ids::NAT_MODE_CONFIRM_BUTTON,
+                |m| m.nat_mode_submit_possibility(),
+                Some(|m| {
+                    m.set_nat_mode_snapshot_for_test(NatModeSnapshot {
+                        submit_enabled: false,
+                        ..NatModeSnapshot::idle()
+                    })
+                }),
+                |_| {},
+            ),
+        ];
+
+        let mut failures = Vec::new();
+        for (name, build, id, gate, blocked, possible) in &cases {
+            let states = [(false, *blocked), (true, Some(*possible))];
+            for (want, setup) in states {
+                let Some(setup) = setup else { continue };
+                let ctx = format!("{name} ({})", if want { "possible" } else { "blocked" });
+                let m = OnboardingMachine::new(Arc::new(NullObserver));
+                setup(&m);
+                let answer = gate(&m);
+                if answer.is_possible() != want {
+                    failures.push(format!("{ctx}: fixture gives {answer:?}"));
+                    continue;
+                }
+                let (root, refresh) = build(m.clone());
+                refresh();
+                let painted: Vec<_> = crate::possible::declarations()
+                    .into_iter()
+                    .filter(|p| p.widget.is_ancestor(&root))
+                    .collect();
+                let Some(p) = painted.iter().find(|p| p.widget.widget_name() == *id) else {
+                    failures.push(format!("{ctx}: `{id}` is not painted through the seam"));
+                    continue;
+                };
+                if p.answer != answer || p.widget.is_sensitive() != want {
+                    failures.push(format!(
+                        "{ctx}: `{id}` sensitive={} painted {:?}, the machine answers {answer:?}",
+                        p.widget.is_sensitive(),
+                        p.answer
+                    ));
+                }
+                if let Err(e) = check_possibility_over(&painted, &ctx) {
+                    failures.push(e);
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "wizard gates not painted from the machine:\n  - {}",
+            failures.join("\n  - ")
+        );
+    });
+}
+
+/// I10 — read-only text is selectable (`docs/goal/ui/README.md` § Text the
+/// person reads can be copied). Two halves: every showing label the rule
+/// calls read-only text IS selectable (nothing switched it back off after it
+/// mapped), and every showing label wearing a message, error or status id is
+/// read-only text — so a status line never ends up classed as a control's
+/// caption.
+fn check_read_text_is_selectable(root: &impl IsA<gtk::Widget>, ctx: &str) -> Result<(), String> {
+    fn is_message_id(id: &str) -> bool {
+        id == "error-message"
+            || id.ends_with("-error")
+            || id.ends_with("-message")
+            || id.ends_with("-status")
+    }
+    fn walk(w: &gtk::Widget, bad: &mut Vec<String>) {
+        if let Some(label) = w.downcast_ref::<gtk::Label>() {
+            let id = label.widget_name();
+            let read = crate::read_text::is_read_text(label);
+            if read && !label.is_selectable() {
+                bad.push(format!(
+                    "{id:?} ({:?}) is text but not selectable",
+                    label.text()
+                ));
+            } else if !read && is_message_id(&id) {
+                bad.push(format!(
+                    "{id:?} is a message line classed as a control's caption"
+                ));
+            }
+        }
+        let mut c = w.first_child();
+        while let Some(child) = c {
+            if crate::automation::find::is_showing(&child) {
+                walk(&child, bad);
+            }
+            c = child.next_sibling();
+        }
+    }
+    let mut bad = Vec::new();
+    walk(root.upcast_ref(), &mut bad);
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{ctx}: I10 read-only text: {}", bad.join("; ")))
+    }
+}
+
 /// Every invariant over one surface.
 fn check_all(
     root: &impl IsA<gtk::Widget>,
@@ -402,6 +1018,8 @@ fn check_all(
     check_online_only_affordances_are_disabled(ctx)?;
     check_declared_kinds_are_registered(ctx)?;
     check_no_tooltip_restates_a_test_id(root, ctx)?;
+    check_enabled_means_possible(ctx)?;
+    check_read_text_is_selectable(root, ctx)?;
     Ok(())
 }
 
@@ -1089,4 +1707,65 @@ fn admin_tab_index() -> usize {
 
 fn feed_tab_index() -> usize {
     tab_index_of(crate::views::sidebar::SidebarItem::Feed)
+}
+
+/// The twin guard for I10, which an app with no selectable text at all would
+/// also satisfy: on the real feed and Settings pages some showing text IS
+/// selectable, and the sidebar's own row captions — controls — are not.
+#[test]
+fn the_walk_sees_selectable_text_and_unselectable_controls() {
+    fn showing_labels(root: &gtk::Widget, out: &mut Vec<gtk::Label>) {
+        if let Some(label) = root.downcast_ref::<gtk::Label>() {
+            out.push(label.clone());
+        }
+        let mut c = root.first_child();
+        while let Some(child) = c {
+            if crate::automation::find::is_showing(&child) {
+                showing_labels(&child, out);
+            }
+            c = child.next_sibling();
+        }
+    }
+    run_on_gtk_thread(|| {
+        let (_app, result) = offline_window();
+        for (tab, name) in [
+            (feed_tab_index(), "feed"),
+            (settings_tab_index(), "settings"),
+        ] {
+            click_sidebar_row(&result, tab);
+            let page = result.stack.visible_child().expect("a visible page");
+            let mut labels = Vec::new();
+            showing_labels(&page, &mut labels);
+            let selectable: Vec<_> = labels
+                .iter()
+                .filter(|l| l.is_selectable())
+                .map(|l| l.text().to_string())
+                .collect();
+            assert!(
+                !selectable.is_empty(),
+                "the {name} page shows no selectable text at all — the read-text hook did not run; \
+                 labels: {:?}",
+                labels
+                    .iter()
+                    .map(|l| (
+                        l.text().to_string(),
+                        l.is_mapped(),
+                        crate::read_text::is_read_text(l)
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut captions = Vec::new();
+        showing_labels(result.widgets.sidebar_list_box.upcast_ref(), &mut captions);
+        assert!(!captions.is_empty(), "the sidebar shows no captions");
+        let selectable: Vec<_> = captions
+            .iter()
+            .filter(|l| l.is_selectable())
+            .map(|l| l.text().to_string())
+            .collect();
+        assert!(
+            selectable.is_empty(),
+            "sidebar row captions are controls, yet these are selectable: {selectable:?}"
+        );
+    });
 }

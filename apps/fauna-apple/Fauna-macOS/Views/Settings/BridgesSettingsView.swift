@@ -31,11 +31,11 @@ struct BridgesSettingsView: View {
             // after the bridges.
             PluginCardsSection(vm: pluginCards, startIndex: vm.bridges.count)
 
-            if appState.isAdmin {
-                Section {
-                    PluginAdminSection(isAdmin: appState.isAdmin, reloadToken: appState.navGeneration)
-                }
+            // Painted from the shared answer: absent for a non-admin.
+            Section {
+                PluginAdminSection(entry: appState.adminEntry, reloadToken: appState.navGeneration)
             }
+            .faunaPossible(appState.adminEntry)
 
             if let error = vm.errorMessage {
                 Section {

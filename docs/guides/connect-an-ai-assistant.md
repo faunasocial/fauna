@@ -2,7 +2,7 @@
 
 > **Status — this guide describes Fauna as it is taking shape.** The feature
 > is built and tested; the [table at the end](#where-this-stands-today) says
-> exactly what is available now, what is landing, and what is planned.
+> exactly what is available now.
 
 ---
 
@@ -44,12 +44,11 @@ any time from the same page where you approved it.
   is enough. You need it to approve the connection; to read and reply in your
   conversations, the Fauna desktop app or terminal app must also be open and
   signed in on the computer where the assistant runs (see [What it can do](#what-it-can-do)).
-- **The `fauna-cli` program** on the computer where the assistant runs. It comes with the terminal app: each release's terminal-app archive for your operating system carries it, and the archive's `install.sh` installs it (on Windows, unpack the zip into a folder on your `PATH`); the Windows installer puts it on your computer with the terminal app, and the macOS package will once it is published — see [Terminal (TUI)](install.md#terminal-tui) in the install guide. Where no archive or installer fits your computer, build it from the source code, the same way the terminal app is built in its *Building from source* section (the package is `fauna-cli-device`, the program `fauna-cli`).
+- **The `fauna-cli` program** on the computer where the assistant runs. It comes with the terminal app: each release's terminal-app archive for your operating system carries it, and the archive's `install.sh` installs it (on Windows, unpack the zip into a folder on your `PATH`); the Windows installer puts it on your computer with the terminal app — see [Terminal (TUI)](install.md#terminal-tui) in the install guide. Where no archive or installer fits your computer, build it from the source code, the same way the terminal app is built in its *Building from source* section (the package is `fauna-cli-device`, the program `fauna-cli`).
 - **An assistant that can run a local MCP server.** Two kinds work: one that
   starts the program itself, and one that connects to a web address on the
   same computer. An assistant that runs only in the cloud and can connect
-  only to an address on the public internet cannot use this yet (see the
-  table at the end).
+  only to an address on the public internet cannot use this.
 
 ## Setting it up
 
@@ -155,8 +154,9 @@ assistant up:
 
 Where it does act for you — posting, editing your profile — it never sees
 your key: your nest signs for it. Once it has posted, edited your profile or
-used your conversations for you, its row under **Connected apps** shows what
-it did most recently and how many such requests were answered in all.
+used your conversations for you, its row under **Connected apps** shows how
+many times Fauna acted for it in the current window, how many of its requests
+were answered in all, and what it did most recently.
 
 ## What the assistant's provider sees
 
@@ -173,8 +173,9 @@ account you mean to share.
 Open **Settings → Connected apps** in any of your Fauna apps. The row
 **Fauna for AI assistants** says what the assistant may reach, when it was
 last used, and — once it has posted, edited your profile or used your
-conversations for you — what it did most recently and how many such requests
-were answered in all.
+conversations for you — how many times Fauna acted for it in the current
+window, how many of its requests were answered in all, and what it did most
+recently.
 **Disconnect** on that row, confirm, and the very next thing the assistant
 tries is refused. Nothing on the assistant's side can undo that.
 
@@ -210,7 +211,5 @@ you add `--yes`.
 | The admin's daily work, for an admin who asks for it | **Available** |
 | Assistants that start the program themselves, and assistants that connect to an address on the same computer | **Available** |
 | Using the same commands yourself at the terminal, with `--json` for scripts | **Available** |
-| Getting the program from a release download | **Available** — in the terminal app's archive for Linux, macOS and Windows, and in the Windows installer; the macOS package, once published, will carry it too |
+| Getting the program from a release download | **Available** — in the terminal app's archive for Linux, macOS and Windows, and in the Windows installer |
 | Staying connected between launches on a computer with no keychain or secret store it can use | **Available** — the connection is stored on its disk, protected by file permissions alone, and the assistant says so when you connect |
-| Mail, calendar, contacts, files, and searching beyond your conversations, for an assistant | **Planned** — one permission at a time, each a new line on the approval card |
-| An assistant that runs only in the cloud and connects to a public address | **Planned** — a form of the program that runs on your nest |

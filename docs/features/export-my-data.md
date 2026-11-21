@@ -48,8 +48,8 @@ Stamped 2026-11-07 at 6a0ded1015.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_export_my_data_journey.py::test_export_button_delivers_a_wellformed_archive` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_export_my_data_journey.py::test_export_archive_carries_the_body_the_user_wrote` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_export_my_data_journey.py::test_export_button_delivers_a_wellformed_archive` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_export_my_data_journey.py::test_export_archive_carries_the_body_the_user_wrote` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_export_coverage.py::test_archive_declares_what_it_withholds_by_name_and_reason` | nest (linux): passed, nest (macos): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_export_coverage.py::test_archive_never_carries_key_or_escrow_material` | nest (linux): passed, nest (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_export_archive_scope.py::test_an_evicted_members_export_is_the_archive_the_owner_gets` | nest (linux): passed |

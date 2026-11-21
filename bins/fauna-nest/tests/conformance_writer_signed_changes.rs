@@ -3211,3 +3211,71 @@ async fn a_former_writers_succession_moves_the_bit_with_its_chain() {
         vec![w0.actor_id()]
     );
 }
+
+/// Ruling (12)'s deletion leg: a member still holding `writer` on another
+/// owner's set has their account deleted. The deletion takes `writer` away, so
+/// it records the mark like every other such write — the roster lists them
+/// under `former_writers` — and it keeps what the mark exists to admit: the
+/// rows they recorded in the owner's set, and the cert their delegated signer
+/// verifies under, so the owner's reader still verifies every one of them.
+#[tokio::test]
+async fn a_deleted_current_writers_rows_stay_admitted_in_the_owners_set() {
+    let (router, state, owner) = nest().await;
+    create_set(&router, &state, &owner, SET, Some(NONCE)).await;
+    let channel = share_set(&router, &state, &owner).await;
+    let writer = member(&state).await;
+    welcome(&router, &state, &owner, &channel, &writer).await;
+    grant_writer(&router, &state, &owner, writer.actor_id().0).await;
+
+    // One row signed directly, one by the writer's delegated principal.
+    let wd = "0c".repeat(32);
+    register_device(&router, &state, &writer, &wd).await;
+    record_signed(&router, &state, &writer, &wd, "direct.jpg", 0xd1, 10)
+        .await
+        .expect("the writer records directly");
+    let (principal, principal_hex) = enroll_principal(&router, &state, &writer).await;
+    let req = sign(
+        record(&principal_hex, "delegated.jpg", 0xd2, 10),
+        &writer,
+        NONCE,
+        principal.signing_key(),
+    );
+    record_as(&router, &state, &writer, req)
+        .await
+        .expect("the writer's principal records");
+    let before = list(&router, &state, &owner).await;
+    assert_eq!(before.changes.len(), 2);
+    assert_eq!(before.signer_certs.len(), 1);
+
+    fauna_nest::pending_actions::finalize_user_deletion(&state, &writer.actor_id().0)
+        .await
+        .expect("the writer's account deletion finalizes");
+
+    let reply = roster_reply(&router, &state, &owner).await;
+    assert_eq!(
+        former_ids(&reply),
+        vec![writer.actor_id().to_hex()],
+        "the deletion took `writer` away, so it records the writer of record"
+    );
+    assert!(seat(&reply.members, writer.actor_id().0).is_none());
+
+    let after = list(&router, &state, &owner).await;
+    assert_eq!(
+        after.changes.len(),
+        2,
+        "the rows the deleted writer recorded in the owner's set stay"
+    );
+    assert_eq!(
+        after.signer_certs.len(),
+        1,
+        "the cert the delegated row verifies under stays beside it"
+    );
+    let mut certs = fauna_protocol::sync_writer_sig::SignerCertCache::new();
+    certs.ingest_all(&after.signer_certs);
+    for row in &after.changes {
+        fauna_protocol::sync_writer_sig::verify_row(row, NONCE, &certs, |a| {
+            *a == writer.actor_id().0
+        })
+        .expect("the owner's reader still verifies every kept row");
+    }
+}

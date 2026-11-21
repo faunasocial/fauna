@@ -30,7 +30,7 @@ pub(super) fn web_elements(state: &AdminState) -> Vec<Element> {
         None => (vec![t::web_page::APEX_NONE.to_string()], String::new()),
     };
 
-    let els = vec![
+    let mut els = vec![
         Element::label(ids::ADMIN_WEB_HEADING, t::web_page::TITLE),
         Element::chrome(t::web_page::DESCRIPTION),
         Element::gesture_button(
@@ -46,13 +46,19 @@ pub(super) fn web_elements(state: &AdminState) -> Vec<Element> {
             SelectTarget::ApexActor,
             options,
         )
+        // Not enabled before the read lands, nor after the apex read failed
+        // (rule 5): `admin::action_possibility` declares the answer and the
+        // pick asks it.
         .labelled(t::web_page::APEX_SELECT_LABEL),
         Element::chrome(t::web_page::APEX_SELECT_SUBTITLE),
-        Element::label(
-            ids::ADMIN_WEB_APEX_INFO,
-            t::web_page::apex_info(&state.apex_url()),
-        ),
+        Element::label(ids::ADMIN_WEB_APEX_INFO, state.apex_info()),
     ];
+    // The picker carries its own label, so the seam cannot put a blocked
+    // reason there: paint it as a line beside the picker, within eyeshot
+    // (rule 2).
+    if let Some(reason) = state.apex_picker_possibility().reason() {
+        els.insert(4, Element::chrome(crate::wizard::localized(reason)));
+    }
 
     els
 }
@@ -72,6 +78,86 @@ pub(super) fn page_error(state: &AdminState) -> Option<String> {
 mod tests {
     use super::*;
     use crate::admin::{AdminPage, AdminWebSnapshot};
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::{Possibility, ReadState};
+
+    /// A nest that serves no web content paints the reason, never `https:///`.
+    #[test]
+    fn apex_info_explains_an_empty_serving_domain_instead_of_composing_one() {
+        let mut app = crate::app::tests::test_app();
+        let mut snap = snapshot(None);
+        snap.serving_domain = String::new();
+        app.admin.web_snapshot = Some(snap);
+        let info = app.admin.apex_info();
+        assert!(!info.contains("https:///"), "{info}");
+        assert_eq!(info, t::web_page::APEX_NO_SERVING_DOMAIN);
+    }
+
+    /// Rule 5: the picker is not enabled before the read lands, nor after the
+    /// apex read failed.
+    #[test]
+    fn apex_picker_is_unknown_until_the_read_resolves() {
+        let mut app = crate::app::tests::test_app();
+        assert_eq!(
+            app.admin.apex_picker_possibility(),
+            Possibility::blocked(LocalizedText::key("common.still_loading"))
+        );
+        let mut failed = snapshot(None);
+        failed.read = ReadState::Failed;
+        app.admin.web_snapshot = Some(failed);
+        assert_eq!(
+            app.admin.apex_picker_possibility(),
+            Possibility::blocked(LocalizedText::key("common.load_failed"))
+        );
+        app.admin.web_snapshot = Some(snapshot(None));
+        assert_eq!(app.admin.apex_picker_possibility(), Possibility::Possible);
+    }
+
+    /// A pick before the snapshot is refused with its reason on the error
+    /// line, never a silent return.
+    #[test]
+    fn an_apex_pick_before_the_read_is_refused_out_loud() {
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Admin;
+        app.admin.sub = AdminPage::Web;
+        let op = crate::admin::apply_local(
+            &mut app,
+            crate::admin::Action::SelectApexActor("alice".to_string()),
+        );
+        assert!(op.is_none());
+        assert_eq!(
+            app.error_line_text().as_deref(),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+    }
+
+    /// A failed account read reaches `error-message` and the page still shows
+    /// the designation (`admin.md` § 7 Web).
+    #[tokio::test]
+    async fn a_failed_account_read_reaches_the_error_line() {
+        let fake = fauna_client_testkit::RejectingRequester::new()
+            .reply(
+                "fauna.web.get_apex_actor",
+                &fauna_protocol::web::WebGetApexActorReply::default(),
+            )
+            .reply(
+                "fauna.nest.info",
+                &fauna_protocol::discovery::NestInfoReply {
+                    web_serving_domain: Some("web.test".into()),
+                    ..Default::default()
+                },
+            );
+        let snap = crate::admin::load_web_snapshot(&fake).await;
+        assert_eq!(snap.read, ReadState::Resolved);
+        assert!(
+            snap.error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("load accounts:")),
+            "{:?}",
+            snap.error
+        );
+        assert_eq!(snap.serving_domain, "web.test");
+    }
 
     fn snapshot(current: Option<Vec<u8>>) -> AdminWebSnapshot {
         AdminWebSnapshot {
@@ -82,6 +168,7 @@ mod tests {
             ],
             serving_domain: "web.test".to_string(),
             error: None,
+            read: ReadState::Resolved,
         }
     }
 
@@ -93,7 +180,10 @@ mod tests {
         app.admin.sub = AdminPage::Web;
         app.admin.web_snapshot = Some(snapshot(None));
 
-        assert_eq!(app.admin.apex_url(), "https://web.test/");
+        assert_eq!(
+            app.admin.apex_info(),
+            t::web_page::apex_info("https://web.test/")
+        );
     }
 
     #[test]
@@ -198,6 +288,7 @@ mod tests {
             actors: Vec::new(),
             serving_domain: String::new(),
             error: Some("apex read failed".to_string()),
+            read: ReadState::Failed,
         });
         assert!(
             !web_elements(&app.admin)
@@ -230,6 +321,7 @@ mod tests {
                 actors: Vec::new(),
                 serving_domain: String::new(),
                 error: Some("apex read failed".to_string()),
+                read: ReadState::Failed,
             }),
         );
         assert_eq!(

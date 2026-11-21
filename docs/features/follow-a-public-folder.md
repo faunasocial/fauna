@@ -44,6 +44,8 @@ Stamped 2026-11-07 at 6a0ded1015.
    - `tests/e2e-unified/tests/test_folder_follow_media_browse.py::test_a_followed_folders_file_on_another_nest_downloads_with_no_account_there`
 11. [app] The folders you follow are the same on all your devices, and stopping on one stops on the others — `docs/goal/architecture/config-dissolution.md` § Implementation status today
    - `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_follows_are_the_same_on_another_of_your_devices_and_an_unfollow_reaches_both`
+12. [app] The follow form's confirm is disabled and says which is missing while the handle or the folder name is blank; pressing it says the same and follows nothing — `docs/goal/ui/folders.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_folder_and_tier_forms_offer_only_possible.py::test_the_follow_confirm_says_which_box_is_missing_until_both_are_typed`
 
 ## Status
 
@@ -76,4 +78,5 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 10 | app | `tests/e2e-unified/tests/test_tui_media_external_open.py::test_a_followed_folders_file_on_another_nest_opens_with_no_account_there` | tui (linux): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_folder_follow_media_browse.py::test_a_followed_folders_file_on_another_nest_downloads_with_no_account_there` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_follows_are_the_same_on_another_of_your_devices_and_an_unfollow_reaches_both` | tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_folder_and_tier_forms_offer_only_possible.py::test_the_follow_confirm_says_which_box_is_missing_until_both_are_typed` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

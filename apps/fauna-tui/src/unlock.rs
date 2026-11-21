@@ -118,16 +118,31 @@ pub fn elements(app: &App, mode: Mode) -> Vec<Element> {
             .labelled(t::CONFIRM_LABEL),
         );
     }
-    out.push(Element::gesture_button(
-        ids::UNLOCK_SUBMIT_BUTTON,
-        match mode {
-            Mode::Unlock => t::UNLOCK_BUTTON,
-            Mode::Create => t::CREATE_BUTTON,
-        },
-        true,
-        crate::element::Gesture::Unlock(UnlockAction::Submit),
-    ));
+    // Painted from the shared draft predicate (`ui/README.md` § Offer only
+    // what is possible, rule 4's form case); [`submit`] asks it again.
+    out.push(
+        Element::gesture_button(
+            ids::UNLOCK_SUBMIT_BUTTON,
+            match mode {
+                Mode::Unlock => t::UNLOCK_BUTTON,
+                Mode::Create => t::CREATE_BUTTON,
+            },
+            true,
+            crate::element::Gesture::Unlock(UnlockAction::Submit),
+        )
+        .possible(draft_possibility(app, mode)),
+    );
     out
+}
+
+/// The surface's draft through the shared predicate
+/// (`fauna_client_accounts::passphrase_possibility`): the confirm takes part
+/// in create mode only.
+fn draft_possibility(app: &App, mode: Mode) -> fauna_core::possibility::Possibility {
+    fauna_client_accounts::passphrase_possibility(
+        &app.unlock.passphrase,
+        (mode == Mode::Create).then_some(app.unlock.confirm.as_str()),
+    )
 }
 
 /// Whether the store's probe found an OS keyring that answered but is locked
@@ -172,25 +187,25 @@ pub fn submit(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<UiMessage>)
         // Unreachable: the button paints only on the two surfaces above.
         _ => return,
     };
-    if app.unlock.passphrase.is_empty() {
-        app.unlock.error = Some(t::ERROR_EMPTY.to_string());
+    // The draft predicate the button is painted from, asked again: an empty
+    // passphrase or a create-mode mismatch is refused with its own reason
+    // before any key is derived.
+    if let Some(reason) = draft_possibility(app, mode).reason() {
+        app.unlock.error = Some(reason.resolve(fauna_i18n::strings::lookup));
         return;
     }
     let Some(sealed) = app.credentials.sealed_backend() else {
         // Unreachable: the surface is only entered when the store resolved to
-        // the sealed backend (`App::route_locked_store`).
+        // the sealed backend (`App::route_locked_store`). Never silent all the
+        // same (`ui/README.md` § Offer only what is possible, rule 7): the
+        // surface's `error-message` says the store could not be opened.
         tracing::error!("[unlock] submit with no sealed backend");
+        app.unlock.error = Some(t::error_failed("no passphrase-sealed store is active"));
         return;
     };
     let outcome = match mode {
         Mode::Unlock => sealed.unlock(&app.unlock.passphrase),
-        Mode::Create => {
-            if app.unlock.passphrase != app.unlock.confirm {
-                app.unlock.error = Some(t::ERROR_MISMATCH.to_string());
-                return;
-            }
-            sealed.create(&app.unlock.passphrase)
-        }
+        Mode::Create => sealed.create(&app.unlock.passphrase),
     };
     match outcome {
         Ok(()) => {

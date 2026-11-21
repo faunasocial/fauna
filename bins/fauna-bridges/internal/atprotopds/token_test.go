@@ -73,8 +73,8 @@ func TestVerifyRejectsTampering(t *testing.T) {
 	cases := map[string]string{
 		"empty":            "",
 		"two segments":     parts[0] + "." + parts[1],
-		"tampered payload": parts[0] + "." + parts[1][:len(parts[1])-2] + "xx" + "." + parts[2],
-		"tampered mac":     parts[0] + "." + parts[1] + "." + parts[2][:len(parts[2])-2] + "xx",
+		"tampered payload": parts[0] + "." + flipB64Char(parts[1], len(parts[1])/2) + "." + parts[2],
+		"tampered mac":     parts[0] + "." + parts[1] + "." + flipB64Char(parts[2], 0),
 		// alg-none / alg-swap: any header other than the pinned HS256 one.
 		"alg none":  "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0." + parts[1] + ".",
 		"alg RS256": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9." + parts[1] + "." + parts[2],
@@ -95,6 +95,23 @@ func TestVerifyRejectsTampering(t *testing.T) {
 	if _, err := m3.Verify(good); err == nil {
 		t.Fatal("token verified under a different service DID")
 	}
+}
+
+// flipB64Char swaps the base64url character at i for a different one. It
+// never touches a segment's last character: a raw base64url segment's last
+// character may carry padding bits the decoder ignores, so overwriting the
+// tail (the old "...xx" form) left the decoded bytes unchanged whenever the
+// real tail already decoded the same — about one MAC in a thousand, a flaky
+// accept.
+func flipB64Char(s string, i int) string {
+	if i >= len(s)-1 {
+		panic("flipB64Char: index must not be the segment's last character")
+	}
+	c := byte('A')
+	if s[i] == 'A' {
+		c = 'B'
+	}
+	return s[:i] + string(c) + s[i+1:]
 }
 
 func TestExpiryEnforced(t *testing.T) {

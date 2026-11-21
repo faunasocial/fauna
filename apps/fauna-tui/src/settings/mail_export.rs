@@ -82,6 +82,7 @@
 //! sibling `mail-import` wizard landed 2026-08-28. `actions/mail_export.py`'s
 //! `next()`/`back()`/`mailbox_names()`/`toggle_mailbox()` methods drive them.
 
+use fauna_core::possibility::Possibility;
 use fauna_ui_ids as ids;
 use std::sync::Arc;
 
@@ -185,6 +186,28 @@ impl MailExportState {
             },
             MailExportAction::Next,
         ]
+    }
+
+    /// The machine's snapshot with the scope step's date drafts folded in —
+    /// what the machine will hold once Next commits them, so the painted
+    /// answer is the one the machine then asks.
+    fn projected(&self) -> Option<MailExportSnapshot> {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.with_scope_drafts(&self.date_from_input, &self.date_to_input))
+    }
+
+    /// `wizard-next-button`'s answer (`MailExportSnapshot::next_possibility`);
+    /// not possible before the machine's first snapshot (rule 5).
+    pub(crate) fn next_answer(&self) -> Possibility {
+        self.projected()
+            .map_or_else(|| Possibility::once_read(false), |s| s.next_possibility())
+    }
+
+    /// `mail-export-start-button`'s answer (`start_possibility`).
+    pub(crate) fn start_answer(&self) -> Possibility {
+        self.projected()
+            .map_or_else(|| Possibility::once_read(false), |s| s.start_possibility())
     }
 }
 
@@ -354,12 +377,17 @@ fn scope_step_elements(e: &MailExportState, snapshot: Option<&MailExportSnapshot
         true,
         Gesture::Settings(Action::MailExportBack),
     ));
-    els.push(Element::gesture_button(
-        ids::WIZARD_NEXT_BUTTON,
-        t::NEXT,
-        true,
-        Gesture::Settings(Action::MailExportNext),
-    ));
+    // The machine's own answer over the drafts (zero mailboxes, a bad range):
+    // the seam disables Next with its reason (`mail-export.md` § UX shape).
+    els.push(
+        Element::gesture_button(
+            ids::WIZARD_NEXT_BUTTON,
+            t::NEXT,
+            true,
+            Gesture::Settings(Action::MailExportNext),
+        )
+        .possible(e.next_answer()),
+    );
     els
 }
 
@@ -418,7 +446,12 @@ fn confirm_step_elements(
             t::START_BUTTON,
             true,
             Gesture::Settings(Action::MailExportStart),
-        ),
+        )
+        // The scope's answer, re-asked at Start by the machine.
+        .possible(snapshot.map_or_else(
+            || fauna_core::possibility::Possibility::once_read(false),
+            MailExportSnapshot::start_possibility,
+        )),
     ]);
     els
 }

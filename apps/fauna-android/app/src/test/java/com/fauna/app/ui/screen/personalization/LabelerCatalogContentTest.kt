@@ -11,6 +11,8 @@ import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.app.testing.LabelerCatalogEntryFixture
 import com.fauna.app.testing.LabelerInspectViewFixture
 import org.robolectric.annotation.Config
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogEntry
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogSnapshot
 import uniffi.fauna_labeler_catalog_machine.LabelerInspectListEntry
@@ -59,7 +61,7 @@ class LabelerCatalogContentTest {
         onUnsubscribe: (Int) -> Unit = {},
         onCloseInspect: () -> Unit = {},
         kindBadge: (LabelerCatalogEntry) -> String = { it.artifactKind },
-        subscribeEnabled: (Int) -> Boolean = { true },
+        subscribeAnswer: (Int) -> Possibility = { Possibility.Possible },
         ngramLabels: (UInt, UInt) -> Pair<String, String> = { more, less ->
             (if (more >= less) "More like this" else "Less like this") to "In ${more + less} posts"
         },
@@ -73,7 +75,7 @@ class LabelerCatalogContentTest {
                 onUnsubscribe = onUnsubscribe,
                 onCloseInspect = onCloseInspect,
                 kindBadge = kindBadge,
-                subscribeEnabled = subscribeEnabled,
+                subscribeAnswer = subscribeAnswer,
                 ngramLabels = ngramLabels,
             )
         }
@@ -95,7 +97,10 @@ class LabelerCatalogContentTest {
                 null,
                 loaded = true,
             ),
-            subscribeEnabled = { index -> index != 1 },
+            subscribeAnswer = { index ->
+                if (index != 1) Possibility.Possible
+                else Possibility.Blocked(LocalizedText("labeler_catalog.error_subscribe_unverified", emptyMap()))
+            },
         )
         val buttons = composeTestRule.onAllNodesWithTag("labeler-catalog-item-subscribe-button")
         buttons.assertCountEquals(2)

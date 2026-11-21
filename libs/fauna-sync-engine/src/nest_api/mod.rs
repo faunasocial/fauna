@@ -139,4 +139,12 @@ pub trait SyncControlApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         &self,
         req: FolderDepositsRetireRequest,
     ) -> Result<bool, SyncControlError>;
+
+    /// The capability tokens the nest advertises on `fauna.nest.info`
+    /// (`version-compatibility.md` § Dimension 3) — read once per connection,
+    /// as every client reads them. The engine asks before it writes a paged
+    /// manifest (`file-sync.md` § Paged manifests → *Compatibility*): an `Err`
+    /// is no evidence the nest takes pages, so the caller refuses nothing on
+    /// it and retries the file on a later pass.
+    async fn nest_capabilities(&self) -> Result<Vec<String>, SyncControlError>;
 }

@@ -19,7 +19,7 @@ import Testing
 
 @Test @MainActor func downloadSnapshotFileRefusesMissingDeviceIdLoudly() async {
     let vm = BackupsMachineVM()
-    let data = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin")
+    let data = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin", carveOut: .possible)
     #expect(data == nil)
     #expect(vm.errorMessage == L.errors.snapshotDownloadNoDeviceId)
 }
@@ -27,7 +27,7 @@ import Testing
 @Test @MainActor func downloadSnapshotFileRefusesUnconfiguredApiLoudly() async {
     let vm = BackupsMachineVM()
     vm.seedDeviceIdForTest("device-abc")
-    let data = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin")
+    let data = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin", carveOut: .possible)
     #expect(data == nil)
     #expect(vm.errorMessage == L.errors.notConnectedToNest)
 }
@@ -37,7 +37,7 @@ import Testing
 // above testable at all.
 @Test @MainActor func downloadSnapshotFileNamesTheDeviceIdWhenBothAreMissing() async {
     let vm = BackupsMachineVM()
-    _ = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin")
+    _ = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin", carveOut: .possible)
     #expect(vm.errorMessage == L.errors.snapshotDownloadNoDeviceId)
     #expect(vm.errorMessage != L.errors.notConnectedToNest)
 }
@@ -49,6 +49,6 @@ import Testing
     let vm = BackupsMachineVM()
     vm.seedDeviceIdForTest("device-abc")
     vm.reset()
-    _ = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin")
+    _ = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin", carveOut: .possible)
     #expect(vm.errorMessage == L.errors.snapshotDownloadNoDeviceId)
 }

@@ -20,8 +20,10 @@ The `--stamp` freshness semantics themselves are pinned in
 `build_node` gate/slot/variant-pin.
 """
 
+import ast
 import os
 import re
+import shlex
 import sys
 import time
 import types
@@ -36,6 +38,7 @@ _JUSTFILE = _REPO / "justfile"
 
 import conftest  # noqa: E402  (tests/e2e-unified is on sys.path via conftest)
 from common import nest as common_nest  # noqa: E402
+from helpers import source_scan  # noqa: E402
 
 
 # ── The justfile composition: gate OUTSIDE the slot ───────────────────────────
@@ -697,8 +700,10 @@ class _FakeSlotModule:
     def acquire_slot(self, pool, cmd=None, timeout_s=None):
         import os
 
-        if pool == self.SIM_BOOT_POOL:
+        if pool in (self.SIM_BOOT_POOL, getattr(self, "SIM_IDLE_POOL", None)):
             # The real one: no count, admitted by the bound at its figure.
+            # (`SIM_IDLE_POOL` only where a test sets it: the default fake is
+            # a machine copy predating the kept devices' grant.)
             self.events.append(("acquire", pool, timeout_s))
             if not self.sim_boot_room:
                 raise TimeoutError("grant HELD by the core bound: 9.0 busy of 14, needs 12")
@@ -1015,8 +1020,14 @@ def test_a_build_a_warm_only_test_started_ends_the_run_before_its_report_is_note
     noted = []
     monkeypatch.setattr(conftest, "_last_green_note", lambda report, outcome: noted.append(report.nodeid))
     monkeypatch.setattr(conftest, "_feature_ledger_note", lambda report, outcome: noted.append(report.nodeid))
+    # The fake carries a real TestReport's outcome properties, and the pass-hold
+    # reader is off: under the background tester (FAUNA_RUN_ORIGIN=tester) the
+    # hook's `_pass_hold_mark` is live and reads `report.failed`, so a bare
+    # namespace failed this test there alone (2026-11-16, an e2e:tui verify) while every session run passed it.
+    monkeypatch.setattr(conftest, "_pass_hold_marks", lambda: None)
     report = types.SimpleNamespace(nodeid="tests/test_x.py::test_x[windows]", when="setup",
-                                   outcome="failed", duration=0.1, longrepr="refused")
+                                   outcome="failed", failed=True, passed=False, skipped=False,
+                                   duration=0.1, longrepr="refused")
     monkeypatch.setattr(conftest, "_print_live_reason", lambda report, label: None)
     conftest.pytest_runtest_logreport(report)
     assert noted, "an empty marker: the report is noted as ever"
@@ -1238,6 +1249,80 @@ def test_a_plan_only_run_prints_the_header_and_builds_nothing(plan_world, monkey
     assert all(probing for _, probing in calls) and ("setup", True) not in calls, calls
     assert mod.events == [], mod.events
     assert conftest._E2E_SLOT is None
+
+
+def test_two_jobs_on_one_build_both_read_stale_and_probe_it_once(plan_world, monkeypatch, capsys):
+    """Two plan jobs reaching the same builder with the same arguments — `windows`'s
+    `windows_app_path` fixture and its `app[windows]` app job are both
+    `_ensure_app_built("windows")` — read the same state, and the build is probed
+    once. Measured on Windows 2026-11-16: the second job replayed the first's memoized
+    refusal as `error (… Failing identically twice …)`, which left the touched set's
+    whole warm-up reading `unknown`."""
+    import os
+
+    from helpers import prebuild_donor
+
+    mod, tree, calls = plan_world
+    monkeypatch.setattr(conftest, "_BINARY_BUILD_MEMO", {})
+    monkeypatch.setattr(prebuild_donor, "cold_cost", lambda job: "cold cost: no record yet")
+
+    def inner():
+        calls.append(("app-build", bool(os.environ.get(mod.PLAN_PROBE_ENV))))
+        with open(os.environ[mod.REFUSE_BUILD_ENV], "a", encoding="utf-8") as fh:
+            fh.write("cargo build -p fauna-ffi\n")
+        raise RuntimeError("just exited 75")
+
+    monkeypatch.setattr(conftest, "_plan_fake_app",
+                        lambda name: conftest._memoized_build(f"app:{name}", inner),
+                        raising=False)
+    tree["jobs"] = [
+        ("windows_app_path", "_plan_fake_app", ("windows",)),
+        ("app[windows]", "_plan_fake_app", ("windows",)),
+    ]
+    monkeypatch.setenv(conftest.PLAN_ONLY_ENV, "1")
+    with pytest.raises(pytest.exit.Exception):
+        conftest.pytest_collection_finish(_FakeSession())
+    lines = _plan_lines(capsys.readouterr().out)
+    for label in ("windows_app_path", "app[windows]"):
+        assert (f"[e2e-plan] job {label}: stale (would compile: cargo build -p fauna-ffi) — "
+                "cold cost: no record yet") in lines, lines
+    assert calls == [("app-build", True)], calls
+
+
+def test_a_probe_s_refusal_is_not_replayed_to_another_builder(plan_world, monkeypatch, capsys):
+    """Two DIFFERENT builders sharing one memo key: the first probe's refusal is
+    forgotten when its probe ends, so the second asks its own freshness gate and
+    reads stale, never the first's memoized failure as `error`."""
+    import os
+
+    from helpers import prebuild_donor
+
+    mod, tree, calls = plan_world
+    monkeypatch.setattr(conftest, "_BINARY_BUILD_MEMO", {})
+    monkeypatch.setattr(prebuild_donor, "cold_cost", lambda job: "cold cost: no record yet")
+
+    def inner():
+        calls.append(("ffi-build", True))
+        with open(os.environ[mod.REFUSE_BUILD_ENV], "a", encoding="utf-8") as fh:
+            fh.write("cargo build -p fauna-ffi\n")
+        raise RuntimeError("just exited 75")
+
+    monkeypatch.setattr(conftest, "_plan_fake_ffi_a",
+                        lambda: conftest._memoized_build("ffi", inner), raising=False)
+    monkeypatch.setattr(conftest, "_plan_fake_ffi_b",
+                        lambda: conftest._memoized_build("ffi", inner), raising=False)
+    tree["jobs"] = [
+        ("ffi (a)", "_plan_fake_ffi_a", ()),
+        ("ffi (b)", "_plan_fake_ffi_b", ()),
+    ]
+    monkeypatch.setenv(conftest.PLAN_ONLY_ENV, "1")
+    with pytest.raises(pytest.exit.Exception):
+        conftest.pytest_collection_finish(_FakeSession())
+    lines = _plan_lines(capsys.readouterr().out)
+    for label in ("ffi (a)", "ffi (b)"):
+        assert (f"[e2e-plan] job {label}: stale (would compile: cargo build -p fauna-ffi) — "
+                "cold cost: no record yet") in lines, lines
+    assert calls == [("ffi-build", True), ("ffi-build", True)], calls
 
 
 def test_a_slot_copy_without_the_probe_calls_no_builder(plan_world, monkeypatch, capsys):
@@ -1642,12 +1727,13 @@ def test_the_windows_ffi_cdylib_is_warmed_with_the_loaders_recipe(monkeypatch, m
     monkeypatch.setattr(conftest, "_IS_WINDOWS", True)
     monkeypatch.setattr(conftest.platform, "machine", lambda: machine)
     monkeypatch.setattr(conftest, "_BINARY_BUILD_MEMO", {})
+    # Through the one retrying runner, like every `just` prebuild
+    # (test_helper_prebuild_retry.py pins the routing for all of them).
     monkeypatch.setattr(
-        conftest.subprocess, "run", lambda cmd, **kw: ran.append((cmd, kw)),
+        conftest, "_build_via_just", lambda recipe, what: ran.append(recipe),
     )
     conftest._ensure_fauna_ffi_built()
-    assert [cmd for cmd, _ in ran] == [expected]
-    assert ran[0][1].get("check") is True
+    assert [["just", *shlex.split(r)] for r in ran] == [expected]
 
 
 # ── recovery_fixture: reached through a helper call, hoisted by module import ─
@@ -2206,6 +2292,66 @@ def test_the_ios_device_archive_never_prebuilds_the_simulator_app(monkeypatch):
     assert _marker_app_set(monkeypatch, _MarkedItem("tier_4", "ios")) == set()
 
 
+class _FleetSiblingItem:
+    """A `[macos]` item of a module that launches `helpers.fleet.SiblingSeats`."""
+
+    def __init__(self, module: Path):
+        self.nodeid = f"{module}::test_y[macos]"
+        self.path = module
+        self.fspath = module
+        self.fixturenames = []
+        self.callspec = type("_C", (), {"params": {"app": "macos"}})()
+
+    def iter_markers(self):
+        return []
+
+    def get_closest_marker(self, name):
+        return None
+
+
+def test_a_fleet_sibling_seat_module_prebuilds_tui_beside_its_app(monkeypatch, tmp_path):
+    """The sibling seat is always tui, launched from a module-local fixture, so
+    the prebuild reads it off the module source — and only when tui is in the
+    selection, since `SiblingSeats` skips otherwise."""
+    module = tmp_path / "test_row_4629_sibling.py"
+    module.write_text("from helpers.fleet import SiblingSeats\n")
+    conftest._ROOM_SEAT_MODULES.pop(str(module), None)
+    assert _marker_app_set(monkeypatch, _FleetSiblingItem(module)) == {"macos", "tui"}
+    monkeypatch.setattr(conftest, "get_available_apps", lambda: ["macos"])
+    session = type("_S", (), {"items": [_FleetSiblingItem(module)]})()
+    assert conftest._prebuild_app_set(session, set()) == {"macos"}
+
+
+def test_a_hard_named_tui_sync_seat_module_prebuilds_tui_whatever_the_selection(
+    monkeypatch, tmp_path
+):
+    """`sync_seats.make_seat("tui", …)` launches a tui seat whatever `--app`
+    names (the iOS File Provider relay seat's seat b), so the prebuild reads it
+    off the module source and bounds it by the machine, not the selection —
+    without it every warm-only `e2e:ios` run naming the file ended `notwarm` on
+    `just tui-debug` inside the test (2026-11-17)."""
+    module = tmp_path / "test_row_5719_relay_seat.py"
+    module.write_text(
+        "def tui_seat(name):\n"
+        "    return sync_seats.make_seat(\n"
+        "        \"tui\", name=name,\n"
+        "    )\n"
+    )
+    conftest._ROOM_SEAT_MODULES.pop(str(module), None)
+    item = _MarkedItem("tier_3", "ios")
+    item.path = item.fspath = module
+    monkeypatch.setattr(conftest, "get_available_apps", lambda: ["ios"])
+    monkeypatch.setattr(conftest, "sweep_apps", lambda: ["ios", "macos", "tui"])
+    session = type("_S", (), {"items": [item]})()
+    assert conftest._prebuild_app_set(session, set()) == {"ios", "tui"}
+    # A `native` seat is the item's own platform app, never a hoist.
+    native = tmp_path / "test_row_5719_native_seat.py"
+    native.write_text("sync_seats.make_seat(\"native\", name=\"a\")\n")
+    conftest._ROOM_SEAT_MODULES.pop(str(native), None)
+    item.path = item.fspath = native
+    assert conftest._prebuild_app_set(session, set()) == {"ios"}
+
+
 def test_a_tier_4_macos_suite_and_a_non_artifact_ios_suite_keep_their_marker_build(monkeypatch):
     # The macOS artifact suite's marker build IS its artifact under
     # `--macos-artifact` (`mac-app debug`), and an ordinary ios-marked suite may
@@ -2287,6 +2433,87 @@ def test_a_slot_copy_without_the_pool_or_a_machine_listing_none_boots_as_before(
     monkeypatch.setattr(conftest, "_build_slot_module", lambda: None)
     conftest._boot_simulator_held("SIM-3")
     assert mod.events == [("boot", "SIM-3")], mod.events
+
+
+@pytest.fixture
+def idle_env(held_boot_env, monkeypatch):
+    """The fake slot module with the kept devices' pool, no lane held, no
+    kept grant yet."""
+    mod = held_boot_env
+    mod.SIM_IDLE_POOL = "sim_idle"
+    mod.sim_idle_enabled = lambda platform=None: True
+    monkeypatch.setattr(conftest, "_E2E_SIM_IDLE", [])
+    monkeypatch.setattr(conftest, "_E2E_SLOT", None)
+    return mod
+
+
+def test_a_booted_device_is_under_a_grant_from_its_registration_to_the_runs_exit(idle_env):
+    """mac-simulator-hold.md § Per-core tokens, *A booted device is always
+    under a grant*: the run's first device takes ONE `sim_idle` grant before
+    its boot, every later device is named in it, and it outlives the boot's
+    grant (released at quiet) — no window from boot to exit in which a
+    device the run keeps booted is named by no live grant. Failing first: the
+    boot's grant was the only one, released at quiet, and the device ran on
+    unnamed until the lane (36 `session` ticks of 2026-11-13..15)."""
+    mod = idle_env
+    conftest.register_simulator("SIM-1")
+    conftest._boot_simulator_held("SIM-1")
+    conftest.register_simulator("SIM-2")
+    conftest._boot_simulator_held("SIM-2")
+    assert mod.events == [
+        ("acquire", "sim_idle", conftest._SIM_BOOT_IN_TEST_WAIT_S),
+        ("note", "sim_idle", {"sims": ["SIM-1"]}),
+        ("acquire", "sim_boot", None), ("note", "sim_boot", {"sims": ["SIM-1"]}),
+        ("boot", "SIM-1"), ("quiet", "SIM-1"), ("release", "sim_boot"),
+        ("note", "sim_idle", {"sims": ["SIM-1", "SIM-2"]}),
+        ("acquire", "sim_boot", None), ("note", "sim_boot", {"sims": ["SIM-1", "SIM-2"]}),
+        ("boot", "SIM-2"), ("quiet", "SIM-2"), ("release", "sim_boot"),
+    ], mod.events
+    # Between the boots' releases and the exit, the kept grant still names both.
+    live = {fd for fd, pool in mod._pool_of.items() if pool == "sim_idle"}
+    assert len(live) == 1, mod._pool_of
+    mod.events.clear()
+    conftest._release_simulators_idle()
+    assert mod.events == [("release", "sim_idle")] and conftest._E2E_SIM_IDLE == []
+
+
+def test_no_room_for_the_kept_grant_goes_on_loudly_and_the_next_device_asks_again(
+    idle_env, capsys
+):
+    mod = idle_env
+    mod.sim_boot_room = False
+    conftest.register_simulator("SIM-1")
+    assert conftest._E2E_SIM_IDLE == [] and "[sim-idle] no room" in capsys.readouterr().err
+    mod.sim_boot_room = True
+    conftest.register_simulator("SIM-2")
+    assert len(conftest._E2E_SIM_IDLE) == 1
+    assert mod.events[-1] == ("note", "sim_idle", {"sims": ["SIM-1", "SIM-2"]}), mod.events
+    conftest._release_simulators_idle()
+
+
+def test_a_slot_copy_without_the_kept_pool_takes_no_kept_grant(held_boot_env, monkeypatch):
+    """The machine's slot copy predates the pool (the default fake): the
+    registration names the lanes as before and asks for nothing more."""
+    mod = held_boot_env
+    monkeypatch.setattr(conftest, "_E2E_SIM_IDLE", [])
+    monkeypatch.setattr(conftest, "_E2E_SLOT", None)
+    conftest.register_simulator("SIM-1")
+    assert mod.events == [] and conftest._E2E_SIM_IDLE == []
+
+
+def test_the_kept_grant_is_released_after_every_devices_exit_handler():
+    """atexit runs last-registered first, and every device registers its park
+    or delete when it is made — so the release is registered at the conftest's
+    import, at module level, before any device exists: the devices' reset,
+    park and shutdown run under the grant. Pinned over the source."""
+    tree = ast.parse((_REPO / "tests" / "e2e-unified" / "conftest.py").read_text())
+    top = [
+        n for n in tree.body
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+        and ast.unparse(n.value.func) == "atexit.register"
+        and [ast.unparse(a) for a in n.value.args] == ["_release_simulators_idle"]
+    ]
+    assert len(top) == 1, "the kept grant's release is not registered at module level"
 
 
 def test_the_first_seat_boots_held_in_the_warm_pass_and_its_memo_survives_the_forget(
@@ -2434,9 +2661,8 @@ def test_every_fixture_that_boots_a_second_ios_seat_is_prewarmed():
     conftest_path = _REPO / "tests" / "e2e-unified" / "conftest.py"
     tests_dir = _REPO / "tests" / "e2e-unified" / "tests"
 
-    def module_graph(path):
+    def module_graph(tree):
         """({function: callees}, {fixture names}) over a module's top-level defs."""
-        tree = ast.parse(path.read_text(encoding="utf-8"))
         calls, fixtures = {}, set()
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -2461,14 +2687,19 @@ def test_every_fixture_that_boots_a_second_ios_seat_is_prewarmed():
                     frontier.add(name)
         return found
 
-    calls, fixtures = module_graph(conftest_path)
+    calls, fixtures = module_graph(source_scan.parsed(conftest_path))  # shared, read-only
     assert target in calls
     conftest_helpers = reaching(calls, target)
     expected = {f for f in conftest_helpers if f in fixtures}
-    for path in sorted(tests_dir.glob("test_*.py")):
-        if target not in path.read_text(encoding="utf-8"):
+    # A module reaches the target by calling it or a conftest helper that
+    # reaches it, so it spells one of them; only those are parsed. (Keyed on the
+    # target alone, this skipped a module reaching it through a helper.)
+    for path, text in source_scan.spelling(
+            {target, *conftest_helpers}, root=tests_dir.parent, within=("tests",),
+            pattern="test_*.py"):
+        if path.parent != tests_dir:
             continue
-        t_calls, t_fixtures = module_graph(path)
+        t_calls, t_fixtures = module_graph(ast.parse(text))
         reach = set()
         for goal in (target, *conftest_helpers):
             reach |= reaching(t_calls, goal)
@@ -2703,6 +2934,26 @@ def test_a_tier_1_run_that_never_reaches_fauna_ffi_builds_nothing(tier_1_order, 
     assert tier_1_order == ["take-tier_1"]
 
 
+def test_a_tier_1_run_builds_no_helper_binary_its_imports_reach(tier_1_order, tmp_path, monkeypatch):
+    """A tier_1 item runs no external process (testing.md § The four-tier
+    taxonomy), so a helper binary its file reaches by import is a lazy import it
+    never executes: the warm step builds none. Red before 2026-11-18, when a
+    whole `--tier 1` run built `mls-keypackage-gen` and `mls-group-gen` for four
+    byte-level tests reaching `conv_api` through a helper's function-local import."""
+    from helpers import helper_bins
+
+    monkeypatch.setattr(conftest, "_ensure_helper_bin_built",
+                        lambda name: tier_1_order.append(f"helper-build {name}"))
+    mod = tmp_path / "test_reaches_mls.py"
+    mod.write_text("from tests.api import conv_api\n\ndef test_y():\n    assert conv_api\n",
+                   encoding="utf-8")
+    assert {e.name for e in helper_bins.reached_entries([_Tier1Item(mod)], set())} >= {
+        "mls-keypackage-gen", "mls-group-gen"}, "the module must reach the entries by import"
+    conftest.pytest_collection_finish(_Tier1Session([mod]))
+    assert not [e for e in tier_1_order if e.startswith("helper-build")], tier_1_order
+    assert tier_1_order[-1] == "take-tier_1"
+
+
 def test_a_failed_tier_1_warm_build_does_not_stop_the_run(tier_1_order, tmp_path, monkeypatch):
     def boom():
         raise RuntimeError("cargo failed")
@@ -2783,9 +3034,11 @@ def _mail_venue_callers_missing_the_declaration() -> list[str]:
         return getattr(target, "id", "")
 
     missing = []
-    files = [_E2E_ROOT / "conftest.py", *sorted((_E2E_ROOT / "tests").rglob("*.py"))]
-    for path in files:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    # Only the files that spell `_start_mail_venue` can call it
+    # (`helpers/source_scan.py`: a whole-tree parse is about a minute on Windows).
+    for path, source in source_scan.spelling(
+            {"_start_mail_venue"}, root=_E2E_ROOT, within=("conftest.py", "tests")):
+        tree = ast.parse(source)
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -2848,3 +3101,200 @@ def test_a_declared_lazy_build_reaches_the_prebuild_jobs(monkeypatch, request):
     builders = [builder for _, builder, _ in conftest._prebuild_jobs(session)]
     assert "_ensure_mail_bridge_built" not in builders
     assert "_ensure_seal_helper_built" not in builders
+
+
+_SEAL_KEY_HELPERS = {"provision_recipient_seal_key", "derive_recipient_seal_key"}
+
+
+def _seal_key_fallback_callers() -> list[tuple[Path, str]]:
+    """Every module-level function in conftest.py, a `helpers/` module or a
+    module under `tests/` that calls a recipient-seal-key helper WITHOUT a
+    ``run_seal_helper=`` — the calls that build the seal helper through the
+    helper module's own fallback."""
+    import ast
+
+    def _name(node):
+        target = node.func if isinstance(node, ast.Call) else node
+        if isinstance(target, ast.Attribute):
+            return target.attr
+        return getattr(target, "id", "")
+
+    out = []
+    # Only the files that spell a seal-key helper's name can call it
+    # (`helpers/source_scan.py`: a whole-tree parse is about a minute on Windows).
+    for path, source in source_scan.spelling(
+            _SEAL_KEY_HELPERS, root=_E2E_ROOT, within=("conftest.py", "helpers", "tests")):
+        if path.name == "recipient_seal_key.py":
+            continue
+        tree = ast.parse(source)
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if any(isinstance(c, ast.Call) and _name(c) in _SEAL_KEY_HELPERS
+                   and not any(k.arg == "run_seal_helper" for k in c.keywords)
+                   for c in ast.walk(node)):
+                out.append((path, node.name))
+    return out
+
+
+def test_a_seal_key_fallback_caller_is_one_the_prebuild_can_see():
+    """The recipient-seal-key helper builds the seal helper itself for a caller
+    that hands it no ``run_seal_helper`` — no fixture, so the prebuild sees the
+    build only through `LAZY_HELPER_MODULES`, which it reads off the importing
+    TEST module. A fallback call is therefore allowed only in a test module
+    (`test_*.py`); a shared helper or conftest passes the fixture through, or a
+    test importing only that helper would build inside its clock — refused,
+    `notwarm`, under the tester's warm-only lane (measured 2026-11-16)."""
+    hidden = [f"{p.relative_to(_E2E_ROOT)}::{fn}" for p, fn in _seal_key_fallback_callers()
+              if not p.name.startswith("test_")]
+    assert not hidden, (
+        "these call provision_/derive_recipient_seal_key without run_seal_helper= "
+        f"outside a test module, invisible to the prebuild: {hidden}")
+
+
+def test_a_module_importing_the_seal_key_helper_declares_the_seal_helper_build(tmp_path):
+    """A test module importing `helpers.recipient_seal_key` — at the top or inside
+    a test body — resolves `seal_helper_binary` lazily; one that does not, does not.
+    And every real fallback caller's module reads as declaring it."""
+    from helpers import fixture_closure
+
+    def item(src):
+        path = tmp_path / f"test_mod_{abs(hash(src))}.py"
+        path.write_text(src)
+        return types.SimpleNamespace(fixturenames=[], path=path)
+
+    local = "def test_x():\n    from helpers.recipient_seal_key import provision_recipient_seal_key\n"
+    top = "import helpers.recipient_seal_key as rsk\n"
+    package = "from helpers import recipient_seal_key\n"
+    none = "from helpers.principal_session import alice_client\n"
+    for src in (local, top, package):
+        assert fixture_closure.lazily_resolved(item(src)) == {"seal_helper_binary"}, src
+    assert fixture_closure.lazily_resolved(item(none)) == set()
+
+    for path, fn in _seal_key_fallback_callers():
+        found = fixture_closure.lazily_resolved(types.SimpleNamespace(fixturenames=[], path=path))
+        assert "seal_helper_binary" in found, f"{path.relative_to(_E2E_ROOT)}::{fn}"
+
+
+def test_a_seal_key_test_module_reaches_the_prebuild_jobs(monkeypatch):
+    """The bare-folder connected-apps test (the web verify shard
+    that ended `notwarm` at every seam) gets the seal-helper build in its warm step."""
+    from helpers import nest_mode as nest_mode_mod
+
+    path = _E2E_ROOT / "tests" / "test_connected_apps.py"
+    item = types.SimpleNamespace(
+        fixturenames=[], _fixtureinfo=types.SimpleNamespace(name2fixturedefs={}),
+        get_closest_marker=lambda name: None, path=path,
+        nodeid="tests/test_connected_apps.py::test_a_bare_folder_request_lets_the_user_"
+               "choose_the_folder_on_the_card[web]",
+    )
+    monkeypatch.setattr(conftest, "_prebuild_app_set", lambda s, r: set())
+    monkeypatch.setattr(conftest, "_helper_bin_jobs", lambda s, r: [])
+    session = types.SimpleNamespace(items=[item])
+    monkeypatch.setattr(nest_mode_mod, "builds_local_nest", lambda mode: True)
+    builders = [builder for _, builder, _ in conftest._prebuild_jobs(session)]
+    assert "_ensure_seal_helper_built" in builders
+
+
+# ── The warm pass names every rebuild (e2e-warm-pass.md, *The warm pass names
+# every rebuild and its wall*): one `[prebuild] rebuilt` line per job whose gate
+# built, in the gate's own words, nothing for a warm job, and the wall line.
+_BUILD_IF_STALE = Path(conftest.__file__).resolve().parents[2] / "scripts" / "build-if-stale.py"
+
+
+def _gate_builder(tmp_path: Path, name: str):
+    """A builder running the REAL build-if-stale gate in a subprocess (as a
+    `just` recipe does), over a throwaway target, stamp and source."""
+    import subprocess
+
+    src = tmp_path / f"{name}-src"
+    src.mkdir(exist_ok=True)
+    (src / "lib.rs").write_text("fn main() {}\n")
+    target, stamp = tmp_path / f"{name}.bin", tmp_path / f"{name}.stamp"
+
+    def build():
+        subprocess.run(
+            [sys.executable, str(_BUILD_IF_STALE), "--label", name, "--stamp", str(stamp),
+             "--target", str(target), "--source", str(src), "--",
+             sys.executable, "-c", f"open({str(target)!r}, 'w').close()"],
+            check=True,
+        )
+
+    return build, target, stamp, src
+
+
+def test_a_warm_job_prints_nothing_and_a_stale_one_its_gates_reason(
+        monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(conftest, "_PHASE_CONFIG", None)
+    monkeypatch.delenv(conftest.REBUILD_REASON_ENV, raising=False)
+    cold, cold_target, _, _ = _gate_builder(tmp_path, "cold-gate")
+    warm, _, _, _ = _gate_builder(tmp_path, "warm-gate")
+    warm()  # built once: the job below finds it up to date
+    stale, _, stale_stamp, stale_src = _gate_builder(tmp_path, "stale-gate")
+    stale()
+    later = stale_stamp.stat().st_mtime + 60
+    os.utime(stale_src / "lib.rs", (later, later))
+    for name, fn in (("_fake_cold", cold), ("_fake_warm", warm), ("_fake_stale", stale)):
+        monkeypatch.setattr(conftest, name, fn, raising=False)
+    capsys.readouterr()
+    ran, rebuilt = conftest._run_prebuild_jobs(
+        [("app[cold]", "_fake_cold", ()), ("app[warm]", "_fake_warm", ()),
+         ("app[stale]", "_fake_stale", ())], prewarm=True)
+    lines = [ln for ln in capsys.readouterr().out.splitlines()
+             if ln.startswith(conftest.REBUILT_PREFIX)]
+    assert lines == [
+        f"[prebuild] rebuilt app[cold]: cold-gate missing {tmp_path / 'cold-gate.stamp'}",
+        "[prebuild] rebuilt app[stale]: stale-gate stale (a source newer than the stamp)",
+    ], lines
+    assert (ran, rebuilt) == (3, 2)
+    assert cold_target.exists()
+    assert conftest.REBUILD_REASON_ENV not in os.environ
+
+
+def test_a_failed_job_still_names_why_it_rebuilt(monkeypatch, capsys):
+    monkeypatch.setattr(conftest, "_PHASE_CONFIG", None)
+
+    def broken():
+        common_nest._load_build_if_stale().note_rebuild("nest-variant", "missing /t/nest")
+        raise RuntimeError("cargo exited 101")
+
+    monkeypatch.setattr(conftest, "_fake_broken", broken, raising=False)
+    assert conftest._run_prebuild_jobs([("nest_binary", "_fake_broken", ())],
+                                       prewarm=True) == (1, 1)
+    out = capsys.readouterr().out
+    assert "[prebuild] rebuilt nest_binary: nest-variant missing /t/nest" in out
+    assert "[prebuild] nest_binary FAILED" in out
+
+
+def test_the_warm_pass_ends_on_its_wall_line(monkeypatch, capsys):
+    monkeypatch.setattr(conftest, "_PHASE_CONFIG", None)
+    monkeypatch.setattr(conftest, "_BINARY_BUILD_MEMO", {})
+    monkeypatch.setattr(conftest, "_prebuild_web_spa", lambda session: None)
+    monkeypatch.setattr(conftest, "_prebuild_binaries",
+                        lambda session, *, prewarm=False: (4, 1))
+    clock = iter([1000.0, 1000.0 + 3 * 3600 + 7 * 60 + 5])
+    monkeypatch.setattr(conftest.time, "time", lambda: next(clock, 1000.0 + 11225))
+    monkeypatch.setattr(conftest, "_print_kache_report", lambda started: None)
+    assert conftest._prewarm_prebuilds(_FakeSession()) == []
+    lines = [ln for ln in capsys.readouterr().out.splitlines()
+             if ln.startswith(conftest.WARM_WALL_PREFIX)]
+    assert lines == ["[prebuild] warm pass wall: 187 min 05 s — 1 of 5 job(s) rebuilt"], lines
+
+
+def test_each_stamp_gate_names_why_it_would_build(tmp_path):
+    from helpers import helper_bins
+
+    built, stamp = tmp_path / "bin", tmp_path / "bin.stamp"
+    assert common_nest._variant_stale_reason(built, stamp, lambda: 0.0) == f"missing {built}"
+    built.write_text("")
+    stamp.write_text("")
+    newest = stamp.stat().st_mtime
+    assert common_nest._variant_stale_reason(built, stamp, lambda: newest) is None
+    assert (common_nest._variant_stale_reason(built, stamp, lambda: newest + 1)
+            == "stale (a source newer than the stamp)")
+    stamp.write_text(f"{helper_bins._BINARY_MTIME_PREFIX}{built.stat().st_mtime_ns}\n"
+                     f"{helper_bins._CARGO_ARGS_PREFIX}-p a\n")
+    newest = stamp.stat().st_mtime
+    assert helper_bins._stamp_stale_reason(built, stamp, lambda: newest, ["-p", "a"]) is None
+    assert (helper_bins._stamp_stale_reason(built, stamp, lambda: newest, ["-p", "b"])
+            == "stale (other cargo arguments: now -p b)")

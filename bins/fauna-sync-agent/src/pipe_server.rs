@@ -271,41 +271,54 @@ async fn handle_get_service_status(
         ConnectionState::Disconnected
     };
 
+    // Every lock-guarded field is read into a local first, each guard dropped
+    // at the end of its own statement. A guard read inside the reply
+    // expression is a temporary of that whole expression, so it would stay
+    // held across the later fields' awaits — and the capability slot is a fair
+    // `RwLock`: `keys_pending`'s own read of it, asked while a writer (an app's
+    // `RefreshBearer`) queued behind this reply's still-held guard, waited for
+    // that writer, which waited for this reply. Every later reader of the slot
+    // then queued behind the writer for good.
+    //
+    // The principal-support advertisement (`sync-agent.md` § Credential
+    // model → the RULED 2026-08-15 block, decision 4). A **cached** field
+    // read, never a slot lookup: this reply is on the app's convergence
+    // tick, and a keyring round trip per tick is exactly the blocking I/O
+    // an ack path must not carry. `crate::renewal::refresh_store_principal_presence`
+    // is what keeps it true, off this path.
+    let store_principal_actor = state
+        .store_principal_actor
+        .read()
+        .await
+        .as_ref()
+        .map(hex::encode);
+    // The machine's sync device id (decision 2's enrollment target). A
+    // field read of the capability already in memory — no keyring, no
+    // nest — so it is ack-path safe exactly as the line above is.
+    let sync_device_id = state
+        .capability
+        .read()
+        .await
+        .as_ref()
+        .map(|c| c.device_id.clone());
+    // *Keys pending*, derived where the truth is (`sync-agent.md` § Local
+    // agent health): an in-memory read of the agent's own resolution, ack-path
+    // safe like every field above.
+    let keys_pending = crate::content_keys::keys_pending(state).await;
+
     Ok(ResponsePayload::ServiceStatus(ServiceStatusInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_secs: state.start_time.elapsed().as_secs(),
         connection,
         sync,
-        // The principal-support advertisement (`sync-agent.md` § Credential
-        // model → the RULED 2026-08-15 block, decision 4). A **cached** field
-        // read, never a slot lookup: this reply is on the app's convergence
-        // tick, and a keyring round trip per tick is exactly the blocking I/O
-        // an ack path must not carry. `crate::renewal::refresh_store_principal_presence`
-        // is what keeps it true, off this path.
-        store_principal_actor: state
-            .store_principal_actor
-            .read()
-            .await
-            .as_ref()
-            .map(hex::encode),
-        // The machine's sync device id (decision 2's enrollment target). A
-        // field read of the capability already in memory — no keyring, no
-        // nest — so it is ack-path safe exactly as the line above is.
-        sync_device_id: state
-            .capability
-            .read()
-            .await
-            .as_ref()
-            .map(|c| c.device_id.clone()),
+        store_principal_actor,
+        sync_device_id,
         // The terminal renewal refusal: the refusal record's in-memory mirror,
         // never the bearer slot — an app's pushed bearer re-arms dialling and
         // leaves this standing until a renewal succeeds (`crate::renewal`).
         // A field read, ack-path safe like the two fields above.
         needs_reenrollment: crate::renewal::standing_refusal(state).is_some(),
-        // *Keys pending*, derived where the truth is (`sync-agent.md` § Local
-        // agent health): an in-memory read of the agent's own resolution, ack-path
-        // safe like every field above.
-        keys_pending: crate::content_keys::keys_pending(state).await,
+        keys_pending,
         // The push arm's sink — a cached answer, never the probe itself (a
         // session-bus round trip), so ack-path safe like every field above.
         notification_sink: state.notification_sink.availability(),
@@ -4980,6 +4993,67 @@ mod tests {
         match resp.result {
             ResponseResult::Ok(ResponsePayload::BackupStatus(rows)) => assert!(rows.is_empty()),
             other => panic!("expected BackupStatus, got {other:?}"),
+        }
+    }
+
+    /// The status reply never holds a capability read guard across an await
+    /// (`sync-agent.md` § Control plane split: an open app reads the agent over
+    /// one connection, so a wedged status read loses its whole control surface).
+    ///
+    /// The slot is a fair `RwLock`: a reader asking while a writer queues waits
+    /// behind it. A reply that kept the guard of one field's read alive (a
+    /// temporary of the reply expression) while a later field read the slot
+    /// again deadlocked against any writer queued between the two reads — an
+    /// app's `RefreshBearer`, pushed every 30 s — and from then every reader of
+    /// the slot (`GetSyncStatus`, the renewal loop) queued behind that writer
+    /// for good. Writers hammer the slot here while the reply is asked for
+    /// again and again; each must answer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_service_status_reply_answers_while_the_capability_slot_is_written() {
+        let state = test_state();
+        *state.capability.write().await = Some(SyncCapability::new(
+            vec![1u8; 32],
+            vec![2u8; 32],
+            "https://nest.example".into(),
+            "d1".into(),
+            BearerToken::new("tok".into(), 4_000_000_000),
+        ));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writers: Vec<_> = (0..3)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let stop = Arc::clone(&stop);
+                tokio::spawn(async move {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        if let Some(cap) = state.capability.write().await.as_mut() {
+                            cap.bearer.expires_at = cap.bearer.expires_at.wrapping_add(1);
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })
+            .collect();
+        for id in 0..2_000u64 {
+            let req = Request {
+                id,
+                method: RequestMethod::GetServiceStatus,
+            };
+            let answered = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                handle_request(&req, &state),
+            )
+            .await;
+            if answered.is_err() {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                panic!(
+                    "GetServiceStatus request {id} never answered: the reply waits behind a \
+                     writer queued on a capability slot it already holds a read guard on"
+                );
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for w in writers {
+            w.await.expect("writer task");
         }
     }
 

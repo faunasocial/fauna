@@ -378,13 +378,40 @@ public final class BackupDestinationsVM {
     /// kind — never a hard-coded `"client-device"` literal.
     public var isCustodianKind: Bool { kindInput == destinationKindClientDevice() }
 
+    /// Which ceremony the dialog runs — what decides which fields the shared
+    /// `destination_form_possibility` must see. On edit `kindInput` is the
+    /// row's own kind (`openEditForm`), so a this-device row edits as a rename.
+    public var destinationForm: FfiDestinationForm {
+        switch (editingId != nil, isCustodianKind) {
+        case (true, true): return .editClientDevice
+        case (true, false): return .editNest
+        case (false, true): return .addClientDevice
+        case (false, false): return .addNest
+        }
+    }
+
+    /// `backup-destination-add-confirm-button`'s answer over the typed draft
+    /// (`ui/backups.md` § Errors & edge cases → *What the page offers*): a
+    /// nest form needs its URL, the add-device form a readable capacity when
+    /// one is typed, and a this-device edit is a rename that needs nothing.
+    /// The confirm paints from it and `submitForm` asks it again.
+    public var formPossibility: Possibility {
+        destinationFormPossibility(form: destinationForm, url: urlText, capacity: capacityText)
+    }
+
     /// Read the dialog inputs and dispatch add / enroll-custodian / edit (per
-    /// `editingId` + `kindInput`). A blank URL is a no-op on the nest path
-    /// (mirrors linux `submit_form`); a blank name defaults to the
+    /// `editingId` + `kindInput`). The press asks `formPossibility` first and
+    /// refuses on `error-message` with its reason — never a silent no-op
+    /// (`ui/README.md` § Offer only what is possible, rules 4 and 7). A
+    /// this-device edit reaches the shared edit with its blank URL, which
+    /// re-resolves only a URL that changed; a blank name defaults to the
     /// destination's handle domain inside the FFI fn. Add + client-device kind
     /// takes a wholly separate branch — no URL at all — handled by
     /// `submitCustodianEnroll()`.
     public func submitForm() async {
+        // Asked before the `api` guard: the draft is refusable whether or not a
+        // nest is connected, and its refusal is never silent.
+        if refusePress(formPossibility, errorMessage: &errorMessage) { return }
         guard let api else { return }
         if editingId == nil, isCustodianKind {
             await submitCustodianEnroll()
@@ -392,7 +419,6 @@ public final class BackupDestinationsVM {
         }
         let url = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = nameText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !url.isEmpty else { return }
         // Resolving a destination is a network round-trip; show interim status in
         // the same surface linux does.
         errorMessage = L.backups.backupDestinationResolving
@@ -426,15 +452,10 @@ public final class BackupDestinationsVM {
         guard let api, let deviceId else { return }
         let name = nameText.trimmingCharacters(in: .whitespacesAndNewlines)
         let typed = capacityText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cap: UInt64?
-        if typed.isEmpty {
-            cap = nil
-        } else if let bytes = parseByteSize(input: typed) {
-            cap = bytes
-        } else {
-            errorMessage = L.backups.backupDestinationCapacityInvalid
-            return
-        }
+        // `submitForm` already asked `formPossibility`, so a typed capacity
+        // reads; blank is a real choice (uncapped, `nil`). The shared
+        // `parse_destination_capacity` is the one reading the answer used.
+        let cap: UInt64? = typed.isEmpty ? nil : parseDestinationCapacity(typed: typed)
         isLoading = true
         defer { isLoading = false }
         do {

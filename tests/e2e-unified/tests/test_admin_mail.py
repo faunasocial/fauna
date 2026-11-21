@@ -1064,11 +1064,29 @@ def test_microsoft_registration_save_round_trips(admin_app, nest_instance, test_
             f"{admin_app.admin.mail_field_text(client_field)!r}"
         )
 
-        # A malformed ID is refused onto `error-message`; the stored pair stays.
-        admin_app.admin.save_mail_microsoft_registration("not-a-guid", _MS_TENANT)
-        assert _wait(lambda: admin_app.error_text().strip() != ""), (
-            "a non-GUID client ID was not refused onto error-message"
-        )
+        # A malformed ID is refused; the stored pair stays. An app painting Save
+        # from the shared draft answer (`microsoft_draft_possibility`, `ui/README.md`
+        # § Offer only what is possible) disables it with its reason beside it —
+        # the refusal is that reason, and a click would press a disabled control.
+        # An app that leaves Save armed refuses the press onto `error-message`.
+        from helpers.app_surface import app_name, surface_built
+
+        admin_app.admin.type_mail_microsoft_registration("not-a-guid", _MS_TENANT)
+        if surface_built("blocked-reason-read", app_name(admin_app.driver)):
+            assert _wait(
+                lambda: not admin_app.admin.microsoft_save_enabled()
+                and bool(admin_app.admin.microsoft_save_blocked_reason())
+            ), (
+                "Save was not disabled with its reason for a non-GUID client ID: "
+                f"enabled={admin_app.admin.microsoft_save_enabled()!r}, "
+                f"reason={admin_app.admin.microsoft_save_blocked_reason()!r}, "
+                f"error: {admin_app.error_text()!r}"
+            )
+        else:
+            admin_app.admin.press_mail_microsoft_save()
+            assert _wait(lambda: admin_app.error_text().strip() != ""), (
+                "a non-GUID client ID was not refused onto error-message"
+            )
         assert _stored_microsoft_registration(nest_instance) == {
             "client_id": _MS_CLIENT_ID,
             "tenant": _MS_TENANT,
@@ -1214,11 +1232,14 @@ def test_out_of_order_spam_thresholds_show_the_nest_refusal(admin_app, nest_inst
 @pytest.mark.android
 @pytest.mark.web
 @pytest.mark.feature("admin-mail-policy")
-def test_non_numeric_entry_keeps_the_saved_value(admin_app, nest_instance):
-    """A numeric field saved with something that is not a number keeps the value
-    already saved (`mail-policy-config.md` § What `0` means on an unsigned knob:
-    each field saves as `parse_count(text).unwrap_or(prev)`) — the nest still
-    holds the earlier value, and the page shows it again after the save."""
+@pytest.mark.requires_surface("admin-form-draft-validity")
+def test_non_numeric_entry_blocks_the_group_save(admin_app, nest_instance):
+    """A number field holding something that is not a number blocks its
+    group's Save, and the typed text stays in the field (`admin.md` § Errors &
+    edge cases → *A form's submit is live only for a draft the nest would
+    accept*): the save is never sent with the stored value under a reported
+    success, the defect `value-formatting.md` § Mail-knob validation retired —
+    so the nest still holds the earlier value."""
     field = "admin-mail-max-conn-per-min-input"
     before = _spam_now(nest_instance)["max_conn_per_min"]
 
@@ -1231,15 +1252,24 @@ def test_non_numeric_entry_keeps_the_saved_value(admin_app, nest_instance):
     )
 
     admin_app.admin.set_mail_field(field, "lots")
-    admin_app.admin.save_mail_spam()
 
-    assert _wait(lambda: admin_app.admin.mail_field_text(field).strip() == str(before)), (
-        f"after saving a non-number {field} reads "
-        f"{admin_app.admin.mail_field_text(field)!r}, not the saved {before}; "
-        f"error: {admin_app.error_text()!r}"
+    assert _wait(lambda: not admin_app.driver.is_enabled("admin-mail-spam-save-button")), (
+        f"the spam group's Save is live with {field} reading "
+        f"{admin_app.admin.mail_field_text(field)!r}; error: {admin_app.error_text()!r}"
+    )
+    assert admin_app.admin.mail_field_text(field).strip() == "lots", (
+        f"the typed draft must stay in {field}; reads "
+        f"{admin_app.admin.mail_field_text(field)!r}"
     )
     assert _spam_now(nest_instance)["max_conn_per_min"] == before, (
-        "a non-numeric entry must keep the value already saved"
+        "a non-numeric entry must leave the value already saved untouched"
+    )
+
+    # Fixing the draft makes the Save live again.
+    admin_app.admin.set_mail_field(field, str(before))
+    assert _wait(lambda: admin_app.driver.is_enabled("admin-mail-spam-save-button")), (
+        f"the spam group's Save stayed blocked on a fixed draft; "
+        f"error: {admin_app.error_text()!r}"
     )
 
 

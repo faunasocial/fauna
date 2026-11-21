@@ -30,6 +30,10 @@ use fauna_labeler_catalog_machine::{
 };
 
 use fauna_client_moderation::moderation::ModerationSignalShareStatusReply;
+use fauna_client_personalization::engagement::{
+    clear_engagement_possibility, share_signals_possibility,
+};
+use fauna_core::possibility::{Possibility, ReadState};
 
 use crate::async_helper::spawn_with_snapshot;
 use crate::client::FaunaClient;
@@ -97,6 +101,19 @@ fn page_heading(text: &str) -> gtk::Label {
     heading
 }
 
+/// A control's reason line (`ui/README.md` § Offer only what is possible,
+/// rule 2: the reason within eyeshot), hidden while the control is live. The
+/// possibility seam (`crate::possible::paint`) owns its text and visibility.
+fn reason_line() -> gtk::Label {
+    gtk::Label::builder()
+        .visible(false)
+        .wrap(true)
+        .xalign(0.0)
+        .halign(gtk::Align::Start)
+        .css_classes(["dim-label", "caption"])
+        .build()
+}
+
 fn error_label() -> gtk::Label {
     let label = gtk::Label::builder().visible(false).build();
     label.add_css_class("error");
@@ -113,10 +130,14 @@ struct HomeShell {
     labelers_empty: gtk::Label,
     browse_catalog_button: gtk::Button,
     clear_engagement_data_button: gtk::Button,
+    /// `personalization-clear-engagement-data-button`'s reason line.
+    clear_engagement_reason: gtk::Label,
     // Layer-B signal-sharing (engagement-cues.md § Layer B): the opt-in toggle +
     // the "what this nest publishes" transparency pane. Mirrors the report-share
     // pane in `settings/mail_spam.rs`, on the Personalization home instead.
     share_signals_toggle: gtk::Switch,
+    /// `personalization-share-signals-toggle`'s reason line.
+    share_signals_reason: gtk::Label,
     signal_published_group: adw::PreferencesGroup,
     signal_published_placeholder: adw::ActionRow,
     signal_published_rows: Rc<std::cell::RefCell<Vec<adw::ActionRow>>>,
@@ -180,11 +201,20 @@ fn build_home_shell() -> (HomeShell, trained_topics::TrainedTopicsWidgets) {
         &clear_engagement_data_button,
         ids::PERSONALIZATION_CLEAR_ENGAGEMENT_DATA_BUTTON,
     );
+    // Painted from its answer before the offline gate records the page's
+    // intent (the web page's order): not live until the feed manager is up.
+    let clear_engagement_reason = reason_line();
+    crate::possible::paint(
+        &clear_engagement_data_button,
+        Some(&clear_engagement_reason),
+        clear_engagement_possibility(manager_ready()),
+    );
     crate::offline_gate::declare_wire_kind(
         &clear_engagement_data_button,
         "fauna.personalization.model.delete",
     );
     content.append(&clear_engagement_data_button);
+    content.append(&clear_engagement_reason);
 
     // "Share anonymous signals" (engagement-cues.md § Layer B): the opt-in for
     // contributing k-anonymized per-item verdicts to the network — default off,
@@ -203,6 +233,15 @@ fn build_home_shell() -> (HomeShell, trained_topics::TrainedTopicsWidgets) {
         &share_signals_toggle,
         ids::PERSONALIZATION_SHARE_SIGNALS_TOGGLE,
     );
+    // Not live before the `signal_share.status` read answers: the switch's
+    // pre-read `false` is the type's default, never the nest's word, and
+    // flipping it would write a guess (`engagement-cues.md` § Layer B; rule 5).
+    let share_signals_reason = reason_line();
+    crate::possible::paint(
+        &share_signals_toggle,
+        Some(&share_signals_reason),
+        share_signals_possibility(manager_ready(), ReadState::Pending),
+    );
     crate::offline_gate::declare_wire_kind(
         &share_signals_toggle,
         "fauna.moderation.signal_share.set",
@@ -215,6 +254,7 @@ fn build_home_shell() -> (HomeShell, trained_topics::TrainedTopicsWidgets) {
     share_signals_row.add_suffix(&share_signals_toggle);
     share_signals_group.add(&share_signals_row);
     content.append(&share_signals_group);
+    content.append(&share_signals_reason);
 
     // signal-share-published-list — the ≥k aggregates this nest exports to peers
     // (byte-identical to the federation export — the transparency guarantee;
@@ -243,7 +283,9 @@ fn build_home_shell() -> (HomeShell, trained_topics::TrainedTopicsWidgets) {
             labelers_empty,
             browse_catalog_button,
             clear_engagement_data_button,
+            clear_engagement_reason,
             share_signals_toggle,
+            share_signals_reason,
             signal_published_group,
             signal_published_placeholder,
             signal_published_rows: Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -303,12 +345,14 @@ fn build_catalog_shell() -> CatalogShell {
 /// `labeler-catalog-item`: "labeler-catalog-item-subscribe-button …
 /// labeler-catalog only"); unsubscribe is always present so the
 /// personalization home's subscribed-labelers facet can un-subscribe inline.
+/// `error_label` is the page's `error-message`, where a refused press says why.
 fn build_labeler_row(
     machine: &Arc<LabelerCatalogMachine>,
     runtime: &tokio::runtime::Handle,
     entry: &LabelerCatalogEntry,
     index: u32,
     show_inspect_subscribe: bool,
+    error_label: &gtk::Label,
 ) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -379,16 +423,23 @@ fn build_labeler_row(
             let subscribe = gtk::Button::with_label(labeler_catalog::SUBSCRIBE);
             subscribe.add_css_class("suggested-action");
             set_test_id(&subscribe, ids::LABELER_CATALOG_ITEM_SUBSCRIBE_BUTTON);
-            // Disabled while the open inspect view is THIS row's labeler and
-            // fails the shared `subscribable` gate — the machine's one read
-            // (`subscribe_enabled`), set before the offline gate records the
-            // page's own sensitivity.
-            subscribe.set_sensitive(machine.subscribe_enabled(index));
+            // Disabled with the refusal's reason while the open inspect view
+            // is THIS row's labeler and fails the shared `subscribable` gate —
+            // the machine's one read (`subscribe_possibility`), painted before
+            // the offline gate records the page's own sensitivity.
+            crate::form_gate::paint_submit(&subscribe, &machine.subscribe_possibility(index), None);
             crate::offline_gate::declare_wire_kind(&subscribe, "fauna.labelers.subscribe");
             {
                 let machine = Arc::clone(machine);
                 let runtime = runtime.clone();
+                let error_label = error_label.clone();
                 subscribe.connect_clicked(move |_| {
+                    // The row's answer, asked again: a labeler whose inspect
+                    // already failed refuses with that reason (rule 6).
+                    if crate::form_gate::refuse(&machine.subscribe_possibility(index), &error_label)
+                    {
+                        return;
+                    }
                     let machine = Arc::clone(&machine);
                     runtime.spawn(async move { machine.subscribe(index).await });
                 });
@@ -426,12 +477,20 @@ fn rebuild_rows(
     runtime: &tokio::runtime::Handle,
     indices: &[(u32, &LabelerCatalogEntry)],
     show_inspect_subscribe: bool,
+    error_label: &gtk::Label,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
     for (index, entry) in indices {
-        let row = build_labeler_row(machine, runtime, entry, *index, show_inspect_subscribe);
+        let row = build_labeler_row(
+            machine,
+            runtime,
+            entry,
+            *index,
+            show_inspect_subscribe,
+            error_label,
+        );
         list.append(&row);
     }
 }
@@ -448,6 +507,9 @@ struct RenderCtx {
 /// `RenderCtx` the labeler loop owns.
 struct SignalShareCtx {
     toggle: gtk::Switch,
+    toggle_reason: gtk::Label,
+    clear_button: gtk::Button,
+    clear_reason: gtk::Label,
     published_group: adw::PreferencesGroup,
     published_placeholder: adw::ActionRow,
     published_rows: Rc<std::cell::RefCell<Vec<adw::ActionRow>>>,
@@ -455,7 +517,60 @@ struct SignalShareCtx {
     /// Set while `render_signal_share` programmatically updates the toggle, so its
     /// `active_notify` handler doesn't echo the change back as a `set`.
     syncing: Cell<bool>,
+    /// Where the `signal_share.status` read stands — the toggle's answer waits
+    /// on it (rule 5).
+    share_read: Cell<ReadState>,
+    /// The opt-in the nest last confirmed. The toggle writes its flip, never
+    /// the switch's own (possibly guessed) position.
+    confirmed: Cell<bool>,
     rt: tokio::runtime::Handle,
+}
+
+/// Whether the live feed manager both engagement-cue controls act through is
+/// up.
+fn manager_ready() -> bool {
+    crate::feed::host::manager().is_some()
+}
+
+/// Repaint both engagement-cue controls from their shared answers.
+fn paint_controls(ctx: &SignalShareCtx) {
+    let ready = manager_ready();
+    crate::possible::paint(
+        &ctx.toggle,
+        Some(&ctx.toggle_reason),
+        share_signals_possibility(ready, ctx.share_read.get()),
+    );
+    crate::possible::paint(
+        &ctx.clear_button,
+        Some(&ctx.clear_reason),
+        clear_engagement_possibility(ready),
+    );
+}
+
+/// The toggle press: asks the answer the switch painted from again. Possible →
+/// `Some(the flip of the nest-confirmed value)`, the one value it may write.
+/// Otherwise the reason goes on the page's `error-message` and `None` comes
+/// back — no guessed write, no silent return.
+fn share_toggle_press(
+    answer: &Possibility,
+    confirmed: bool,
+    error_label: &gtk::Label,
+) -> Option<bool> {
+    if crate::possible::refused_at_press(answer, error_label) {
+        return None;
+    }
+    Some(!confirmed)
+}
+
+/// Put the switch back on the nest-confirmed value without echoing it as a
+/// gesture.
+fn resync_toggle(ctx: &SignalShareCtx) {
+    let confirmed = ctx.confirmed.get();
+    if ctx.toggle.is_active() != confirmed {
+        ctx.syncing.set(true);
+        ctx.toggle.set_active(confirmed);
+        ctx.syncing.set(false);
+    }
 }
 
 /// Wire the signal-sharing opt-in toggle + transparency pane over the shared
@@ -469,11 +584,16 @@ fn wire_signal_sharing(
 ) {
     let ctx = Rc::new(SignalShareCtx {
         toggle: home.share_signals_toggle.clone(),
+        toggle_reason: home.share_signals_reason.clone(),
+        clear_button: home.clear_engagement_data_button.clone(),
+        clear_reason: home.clear_engagement_reason.clone(),
         published_group: home.signal_published_group.clone(),
         published_placeholder: home.signal_published_placeholder.clone(),
         published_rows: Rc::clone(&home.signal_published_rows),
         error_label: home.error_label.clone(),
         syncing: Cell::new(false),
+        share_read: Cell::new(ReadState::Pending),
+        confirmed: Cell::new(false),
         rt: fauna_client.runtime_handle(),
     });
 
@@ -485,11 +605,21 @@ fn wire_signal_sharing(
     // published list may shrink on the re-read.
     {
         let ctx = Rc::clone(&ctx);
-        home.share_signals_toggle.connect_active_notify(move |sw| {
+        home.share_signals_toggle.connect_active_notify(move |_| {
             if ctx.syncing.get() {
                 return;
             }
-            set_signal_share(&ctx, sw.is_active());
+            // The answer the switch painted from, asked again: no manager, or
+            // an unread opt-in, refuses on `error-message` and puts the switch
+            // back; a possible press writes the flip of the confirmed value.
+            let answer = share_signals_possibility(manager_ready(), ctx.share_read.get());
+            match share_toggle_press(&answer, ctx.confirmed.get(), &ctx.error_label) {
+                Some(share) => set_signal_share(&ctx, share),
+                None => {
+                    resync_toggle(&ctx);
+                    paint_controls(&ctx);
+                }
+            }
         });
     }
 
@@ -499,7 +629,11 @@ fn wire_signal_sharing(
     // labeler/trained refresh-on-map.
     {
         let ctx = Rc::clone(&ctx);
-        home_page.connect_map(move |_| hydrate_signal_share(&ctx));
+        home_page.connect_map(move |_| {
+            // The manager may have come up since the last paint.
+            paint_controls(&ctx);
+            hydrate_signal_share(&ctx);
+        });
     }
 }
 
@@ -526,8 +660,13 @@ fn hydrate_signal_share(ctx: &Rc<SignalShareCtx>) {
 /// re-read status so the toggle + published list reflect the persisted value
 /// (opting out withdraws this actor's signals, which may shrink the list).
 fn set_signal_share(ctx: &Rc<SignalShareCtx>, share: bool) {
+    // The press asked the answer; the manager can only have gone since then,
+    // which is the same refusal.
     let Some(manager) = crate::feed::host::manager() else {
-        crate::settings::render_error_label(&ctx.error_label, Some(strings::common::NOT_CONNECTED));
+        let answer = share_signals_possibility(false, ctx.share_read.get());
+        crate::possible::refused_at_press(&answer, &ctx.error_label);
+        resync_toggle(ctx);
+        paint_controls(ctx);
         return;
     };
     let ctx_render = Rc::clone(ctx);
@@ -546,6 +685,10 @@ fn render_signal_share(
     ctx: &Rc<SignalShareCtx>,
     res: Result<ModerationSignalShareStatusReply, String>,
 ) {
+    ctx.share_read.set(ctx.share_read.get().after(res.is_ok()));
+    if let Ok(reply) = &res {
+        ctx.confirmed.set(reply.share);
+    }
     crate::settings::render_share_pane(
         crate::settings::SharePaneWidgets {
             toggle: &ctx.toggle,
@@ -559,6 +702,10 @@ fn render_signal_share(
         personalization::SIGNAL_PUBLISHED_CONTRIBUTORS,
         res.map(|s| (s.share, s.published)),
     );
+    // A failed write leaves the switch where the press put it; it shows the
+    // confirmed value instead (a success already synced it).
+    resync_toggle(ctx);
+    paint_controls(ctx);
 }
 
 /// Build the **Personalization** home + **Community labelers** catalog
@@ -603,17 +750,19 @@ pub fn build_personalization_and_catalog_pages(
         .connect_clicked(move |_| on_navigate_to_catalog());
 
     // Clear activity data → FeedManager::delete_cue_rollup (model.delete on
-    // cues:v1 + live-engine reset). The manager is built on auth; `None`
-    // (pre-auth) surfaces on the page error element rather than panicking.
+    // cues:v1 + live-engine reset). The press asks the button's answer again:
+    // with no live manager it refuses with the feed-not-ready reason on the
+    // page's error element, never a bare return.
     {
         let error_label = home.error_label.clone();
         let runtime = fauna_client.runtime_handle();
         home.clear_engagement_data_button.connect_clicked(move |_| {
-            let Some(manager) = crate::feed::host::manager() else {
-                crate::settings::render_error_label(
-                    &error_label,
-                    Some(strings::common::NOT_CONNECTED),
-                );
+            let manager = crate::feed::host::manager();
+            let answer = clear_engagement_possibility(manager.is_some());
+            if crate::possible::refused_at_press(&answer, &error_label) {
+                return;
+            }
+            let Some(manager) = manager else {
                 return;
             };
             let error_label = error_label.clone();
@@ -709,6 +858,7 @@ fn render_pages(
         runtime,
         &subscribed,
         false,
+        &ctx.home.error_label,
     );
     // `personalization-labelers-empty` paints only once a refresh has
     // actually RETURNED — an empty `subscribed` list is indistinguishable
@@ -724,7 +874,14 @@ fn render_pages(
         .enumerate()
         .map(|(i, e)| (i as u32, e))
         .collect();
-    rebuild_rows(&ctx.catalog.catalog_list, machine, runtime, &all, true);
+    rebuild_rows(
+        &ctx.catalog.catalog_list,
+        machine,
+        runtime,
+        &all,
+        true,
+        &ctx.catalog.error_label,
+    );
     // Same `loaded` gate as the home page's empty state above.
     ctx.catalog
         .catalog_empty
@@ -779,6 +936,64 @@ mod tests {
                     "missing widget id {id:?}; have {names:?}"
                 );
             }
+        });
+    }
+
+    /// Rules 5 and 7 on the engagement-cue controls (`engagement-cues.md`
+    /// § Layer B): with no live feed manager both are painted disabled with
+    /// the feed-not-ready reason beside them, and a press refuses on
+    /// `error-message` instead of writing a guess or returning without a word.
+    #[test]
+    fn engagement_controls_wait_for_the_manager_and_the_read() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let feed_not_ready = strings::errors::FEED_NOT_READY;
+            // No manager in a unit test: both controls paint blocked.
+            assert!(crate::feed::host::manager().is_none());
+            let (shell, _trained) = build_home_shell();
+            for (widget, line) in [
+                (
+                    shell.share_signals_toggle.upcast_ref::<gtk::Widget>(),
+                    &shell.share_signals_reason,
+                ),
+                (
+                    shell
+                        .clear_engagement_data_button
+                        .upcast_ref::<gtk::Widget>(),
+                    &shell.clear_engagement_reason,
+                ),
+            ] {
+                assert!(widget.is_visible() && !widget.is_sensitive());
+                assert!(line.is_visible());
+                assert_eq!(line.text().as_str(), feed_not_ready);
+            }
+
+            let error = gtk::Label::new(None);
+            // The toggle press, manager down: refused, said.
+            let answer = share_signals_possibility(false, ReadState::Resolved);
+            assert_eq!(share_toggle_press(&answer, false, &error), None);
+            assert!(error.is_visible());
+            assert_eq!(error.text().as_str(), feed_not_ready);
+            // Manager up, opt-in unread: refused as still loading.
+            let answer = share_signals_possibility(true, ReadState::Pending);
+            assert_eq!(share_toggle_press(&answer, false, &error), None);
+            assert_eq!(error.text().as_str(), strings::common::STILL_LOADING);
+            // Read: the press writes the flip of the CONFIRMED value.
+            let answer = share_signals_possibility(true, ReadState::Resolved);
+            assert_eq!(share_toggle_press(&answer, true, &error), Some(false));
+            assert_eq!(share_toggle_press(&answer, false, &error), Some(true));
+
+            // The clear press, manager down: refused with feed-not-ready.
+            let error = gtk::Label::new(None);
+            assert!(crate::possible::refused_at_press(
+                &clear_engagement_possibility(false),
+                &error
+            ));
+            assert_eq!(error.text().as_str(), feed_not_ready);
+            assert!(!crate::possible::refused_at_press(
+                &clear_engagement_possibility(true),
+                &error
+            ));
         });
     }
 

@@ -36,7 +36,7 @@ struct OfflineShareSectionView: View {
                 if gates.showsEntryButtons {
                     entryButtons
                 } else if gates.showsCodeWidgets {
-                    openPanel(view, gates)
+                    openPanel(view)
                 }
             }
         }
@@ -55,7 +55,7 @@ struct OfflineShareSectionView: View {
     }
 
     /// The typed compare code's live parse, for the inline hint text only
-    /// (`codeHint`) — the act gates come from `offlineShareGates(view:)`,
+    /// (`codeHint`) — the act answers come from `offlineShareBeginPossibility`/`offlineShareExpectPossibility`,
     /// never a re-derivation of this parse.
     private var peerCodeParsed: PeerCodeParsed? { vm.offlineSharePeerCodeParsed }
 
@@ -68,8 +68,32 @@ struct OfflineShareSectionView: View {
         return offlineShareCodeErrorLabel(error: error).map(renderLocalizedText)
     }
 
+    /// The open panel's act answer: Begin's on the initiator panel, Expect's
+    /// on the recipient one.
+    static func actAnswer(_ view: OfflineShareView) -> Possibility {
+        view.panel == .initiate
+            ? offlineShareBeginPossibility(view: view)
+            : offlineShareExpectPossibility(view: view)
+    }
+
+    /// The presses ask the answer again (`ui/README.md` § Offer only what is
+    /// possible, rule 7); the reason is already painted beside the control.
+    /// Read live from the VM, never the paint's snapshot: an automation
+    /// closure registered at an earlier body pass must ask the current answer.
+    private func begin() {
+        guard let view = vm.offlineShareView,
+              offlineShareBeginPossibility(view: view).isPossible else { return }
+        Task { await vm.beginOfflineShare() }
+    }
+
+    private func expect() {
+        guard let view = vm.offlineShareView,
+              offlineShareExpectPossibility(view: view).isPossible else { return }
+        vm.expectOfflineShare()
+    }
+
     @ViewBuilder
-    private func openPanel(_ view: OfflineShareView, _ gates: OfflineShareGates) -> some View {
+    private func openPanel(_ view: OfflineShareView) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(L.folders.offlineShareOwnCodeLabel)
                 .font(.caption)
@@ -100,23 +124,29 @@ struct OfflineShareSectionView: View {
             }
 
             // Exactly one of Begin/Expect is ever shown at once, matching
-            // which panel is open.
+            // which panel is open — each painted from the shared answer
+            // (`offlineShareBeginPossibility` / `offlineShareExpectPossibility`:
+            // absent off its own panel, blocked by an in-flight ceremony or a
+            // code that cannot be used; tui's `offline_share_elements`).
+            let answer = OfflineShareSectionView.actAnswer(view)
             if view.panel == .initiate {
-                Button(L.folders.offlineShareBegin) { Task { await vm.beginOfflineShare() } }
+                Button(L.folders.offlineShareBegin) { begin() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!gates.canBegin)
                     .accessibilityIdentifier(Ids.offlineShareBeginButton)
-                    .automationActivate(Ids.offlineShareBeginButton, isEnabled: { gates.canBegin }) {
-                        Task { await vm.beginOfflineShare() }
-                    }
+                    .automationActivate(Ids.offlineShareBeginButton) { begin() }
+                    .faunaPossible(answer)
             } else {
-                Button(L.folders.offlineShareExpect) { vm.expectOfflineShare() }
+                Button(L.folders.offlineShareExpect) { expect() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!gates.canExpect)
                     .accessibilityIdentifier(Ids.offlineReceiveExpectButton)
-                    .automationActivate(Ids.offlineReceiveExpectButton, isEnabled: { gates.canExpect }) {
-                        vm.expectOfflineShare()
-                    }
+                    .automationActivate(Ids.offlineReceiveExpectButton) { expect() }
+                    .faunaPossible(answer)
+            }
+            // The reason within eyeshot — unless the code hint above or the
+            // status line below already says it (no second copy).
+            if let reason = answer.reasonText, reason != codeHint,
+               reason != renderLocalizedText(offlineShareStatusLabel(status: view.status)) {
+                FaunaPossibilityReason(answer)
             }
 
             automationText(

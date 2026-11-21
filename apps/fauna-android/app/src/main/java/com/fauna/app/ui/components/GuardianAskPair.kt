@@ -1,7 +1,6 @@
 package com.fauna.app.ui.components
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -10,6 +9,7 @@ import androidx.compose.ui.res.stringResource
 import com.fauna.app.R
 import com.fauna.app.core.ContactAskRender
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * The supervised ward's in-app contact ask — the `contact-request-guardian-button`

@@ -908,6 +908,15 @@ public sealed partial class PersonalizationPage : Page
 
     private async void PublishSubmitButton_Click(object sender, RoutedEventArgs e) => await SubmitPublishAsync();
 
+    /// <summary>Enter in the public name is the sheet's submit — the same
+    /// press as Publish (ui/settings.md § Errors &amp; edge cases: the press,
+    /// an input's Enter included, refuses with its reason on
+    /// <c>error-message</c>).</summary>
+    private async void PublishNameInput_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter) await SubmitPublishAsync();
+    }
+
     /// <summary>Publish what survived the prune. Validate the name → collect
     /// checked rows → publish; on success close the sheet (drop target/rows/
     /// generation); on failure re-enable Submit, surface the localized error,

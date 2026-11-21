@@ -19,6 +19,8 @@ mod bearer;
 mod bridge;
 #[cfg(windows)]
 mod cfapi_host;
+#[cfg(windows)]
+mod close_request;
 mod config;
 mod content_keys;
 mod credentials;
@@ -199,8 +201,28 @@ pub fn run_main() -> anyhow::Result<()> {
     };
 
     tracing::info!("starting FaunaSync per-user sync agent");
+    // The system's request to close the agent, where no signal carries it: on
+    // windows the session-end messages a deployment over the package or a logoff
+    // sends, heard by a hidden window (`close_request`). Started before the runtime
+    // and dropped after it, so the listener's bound on a close covers the whole
+    // teardown, the runtime's own included. Elsewhere SIGTERM is that request, with
+    // its own arm in the run loop.
+    #[cfg(windows)]
+    let close = close_request::CloseListener::start();
+    #[cfg(windows)]
+    let system_close = close_request::requested(close.as_ref());
+    #[cfg(not(windows))]
+    let system_close = std::future::pending::<()>();
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(service::run_agent(&pipe_name, args.data_dir.as_deref()))?;
+    let ran = rt.block_on(service::run_agent(
+        &pipe_name,
+        args.data_dir.as_deref(),
+        system_close,
+    ));
+    drop(rt);
+    #[cfg(windows)]
+    drop(close);
+    ran?;
 
     Ok(())
 }

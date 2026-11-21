@@ -36,6 +36,17 @@ import Foundation
                 identifier: NSFileProviderDomainIdentifier(rawValue: domainId),
                 displayName: displayName
             )
+            #if DEBUG
+            // An e2e seat whose reconcile the harness lifted runs headless:
+            // the OS adds a fresh domain disabled until a person turns it on
+            // in Files, and a disabled domain serves nothing (FP -2011). The
+            // `.alwaysEnabled` testing mode stands in for that one tap, as the
+            // test CLI's `register … always-enabled` does; it is honoured only
+            // under the testing-mode entitlement, and never compiled in release.
+            if FaunaE2E.fileProviderReconcile {
+                domain.testingModes = [.alwaysEnabled]
+            }
+            #endif
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
                 NSFileProviderManager.add(domain) { error in
                     if let error { cont.resume(throwing: error) } else { cont.resume() }
@@ -233,8 +244,13 @@ import Foundation
             }
             var signalled = 0
             for domain in domains where domainIds.contains(domain.identifier.rawValue) {
-                try await NSFileProviderManager(for: domain)?.signalEnumerator(
-                    for: .rootContainer)
+                // The working set first: a root signal alone never launches
+                // the extension while no enumerator watches the root
+                // (`FileProviderWorkingSetFeed.nudgedContainers`).
+                for container in FileProviderWorkingSetFeed.nudgedContainers {
+                    try await NSFileProviderManager(for: domain)?.signalEnumerator(
+                        for: container)
+                }
                 signalled += 1
             }
             return signalled
@@ -445,6 +461,10 @@ import Foundation
                     message: "[fp] reconcile skipped — presence plan failed: \(error)")
                 return
             }
+            logMessage(
+                level: .info, target: "fauna.fileprovider",
+                message:
+                    "[fp] reconcile: \(sets.count) set(s) held, plan add \(plan.add.count) keep \(plan.keep.count) remove \(plan.remove.count)")
 
             // The single-slot capability is provisioned for the active account
             // before its first add. Nothing desired → nothing to provision;

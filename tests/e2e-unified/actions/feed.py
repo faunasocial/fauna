@@ -269,9 +269,15 @@ class FeedActions:
         under fleet load the real cause is usually the feed manager still
         booting. Latency-independent per convention 14: a generous ceiling
         polled to a deadline, costing a green run nothing.
+
+        Every app, not web alone: each paints the button from the draft's
+        shared answer (`feed_post_submit_possibility`, `ui/README.md` § Offer
+        only what is possible), and on a native app that answer reads the
+        manager's snapshot, which the typed text reaches a moment after the
+        keystroke. A click sent straight after typing hits a button still
+        painted for the empty draft, and every agent refuses a click on a
+        disabled control (macOS's 409 *element is disabled*).
         """
-        if not self.driver.is_web():
-            return
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.driver.is_enabled("post-submit-button"):
@@ -281,10 +287,15 @@ class FeedActions:
             body = self.compose_body_text()
         except Exception as e:  # noqa: BLE001 — diagnostic only; never mask the timeout
             body = f"<{type(e).__name__}: {e}>"
+        try:
+            reason = self.driver.blocked_reason("post-submit-button")
+        except Exception as e:  # noqa: BLE001 — diagnostic only; never mask the timeout
+            reason = f"<{type(e).__name__}: {e}>"
         raise AssertionError(
-            "web: 'post-submit-button' still disabled after "
-            f"{timeout:.0f}s — web gates it on "
-            "`composing || !composeBody.trim() || !feedReady`. Observed: "
+            f"'post-submit-button' still disabled after {timeout:.0f}s "
+            f"(its painted reason: {reason!r}) — web gates it on "
+            "`composing || !composeBody.trim() || !feedReady`, a native app on "
+            "the feed manager being built and the draft's shared answer. Observed: "
             f"compose-text-field present={self.driver.is_visible('compose-text-field')}, "
             f"compose-body={body!r}, "
             f"compose-file-ready={self.driver.is_visible('compose-file-ready')}, "
@@ -504,10 +515,6 @@ class FeedActions:
         body = "\n".join(tail)
         return f"\n--- browser console (last {len(tail)} of {len(lines)}) ---\n{head}{body}"
 
-    def _use_compose_state(self) -> bool:
-        """Use state protocol for compose on clients where compose UI is inaccessible."""
-        return self.driver.is_macos()
-
     def create_post(
         self, text: str, timeout: float = 20, expect_top: str | None = None
     ) -> None:
@@ -526,14 +533,6 @@ class FeedActions:
         at its display cap the text match is the only signal that can see a new
         post land, so a raw-body match would time out with the post on top."""
         expected = text if expect_top is None else expect_top
-        if self._use_compose_state():
-            # set_state returns once the compose model is patched; the app then
-            # submits + reloads the feed asynchronously. Wait for the post to
-            # land (state read) so callers don't race the in-flight reload.
-            initial = self.post_count()
-            self.driver.set_state({"compose": {"post": {"body": text}}})
-            self._wait_for_new_post(initial, expected_text=expected, timeout=timeout)
-            return
         self._open_composer()
         initial = self._settled_post_count()
         self.driver.type_text("compose-text-field", text)
@@ -856,12 +855,6 @@ class FeedActions:
 
     def create_post_with_tags(self, text: str, tags: str) -> None:
         """Type text + tags, submit, wait for post to appear."""
-        if self._use_compose_state():
-            initial = self.post_count()
-            tag_list = [t.strip() for t in tags.split(",")]
-            self.driver.set_state({"compose": {"post": {"body": text, "tags": tag_list}}})
-            self._wait_for_new_post(initial, expected_text=text)
-            return
         self._open_composer()
         initial = self._settled_post_count()
         self.driver.type_text("compose-text-field", text)

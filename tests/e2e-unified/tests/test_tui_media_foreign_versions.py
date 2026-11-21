@@ -17,7 +17,8 @@ pieces (the relay arm, the federated kind's registration, the judge's binding
 of a relayed version) shows as a one-row history.
 
 The seats are ``test_folder_cross_nest_member_reads.py``'s
-(``cross_nest_folder_seats``: two real apps, each signed in on its own nest):
+(``cross_nest_folder_seats``: two real apps, each signed in on its own nest; on
+the web and android columns the member is that app and the owner a tui seat):
 
 1. The owner, on the set's home nest, creates the set in the app and shares it
    from the picker to ``member@<member nest>``; the member accepts the knock.
@@ -96,8 +97,65 @@ def _error_text(driver) -> str:
     return driver.get_text("error-message") if driver.is_visible("error-message") else ""
 
 
+def _member_media_log(driver, limit: int = 60) -> str:
+    """The member app's own log lines about its Media page and the foreign
+    scope, for the failure message: the page's listing state is the app's,
+    and the owner's diagnosis never shows it."""
+    try:
+        scope = driver.get_attr("media-folder-filter", "value")
+    except Exception as e:  # a driver that does not answer the attr
+        scope = f"<unreadable: {e!r}>"
+    head = f"  [member] media-folder-filter value={scope!r}\n"
+    # The Media rows' automation records — where each slot sits and why it
+    # reads hidden. A row the page rendered can still count 0: an over-wide
+    # page parks its rows off-screen (``geo-parked`` at negative x), which no
+    # log line shows. A driver with no tree answers "".
+    tree = driver.tree() if hasattr(driver, "tree") else ""
+    rows, keep = [], False
+    for ln in tree.splitlines():
+        if not ln.lstrip().startswith("["):  # an id's header; its slots follow
+            keep = any(k in ln for k in ("media", "upload", "share-link"))
+        if keep:
+            rows.append(ln)
+    if rows:
+        head += "  [member] automation tree (Media):\n" + "\n".join(
+            f"    {ln[:200]}" for ln in rows[:60]
+        ) + "\n"
+    try:
+        text = driver.app_stderr_text()
+    except Exception as e:  # a driver with no app log
+        return head + f"  [member] app log unreadable: {e!r}"
+    all_lines = text.splitlines()
+    head += f"  [member] app log: {len(all_lines)} lines\n"
+    lines = [
+        line
+        for line in all_lines
+        if "fauna_media" in line or "foreign" in line or "rate_limited" in line
+    ]
+    if not lines:
+        tail = "\n".join(f"    {line}" for line in all_lines[-25:])
+        return head + "  [member] no fauna_media / foreign lines; the log's tail:\n" + tail
+    return head + "  [member] app log (Media, foreign scope):\n" + "\n".join(
+        f"    {line}" for line in lines[-limit:]
+    )
+
+
 @pytest.mark.timeout(1500)
 @pytest.mark.feature("share-a-folder")
+# The member apps that have run this journey green; naming them here narrows
+# the columns this witness is asked of (``feature-catalog.md`` § Cell
+# semantics). linux seats both owner and member, as tui and macOS do; the
+# fixture seats a web, android or ios member beside a tui owner (the owner
+# binds a folder, which none of those serves).
+@pytest.mark.parametrize(
+    "cross_nest_folder_seats",
+    ["tui", "macos", "linux", "web", "android", "ios"],
+    indirect=True,
+)
+# The owner's bound folder needs a real agent behind it on macOS, whose
+# production spawner is launchd, which an e2e launch must not bootstrap: without
+# this marker the macOS owner binds a folder that never uploads (tui ignores it).
+@pytest.mark.real_sync_agent
 def test_a_member_on_another_nest_reads_a_shared_files_whole_history(
     cross_nest_folder_seats, tmp_path, request
 ):
@@ -175,14 +233,13 @@ def test_a_member_on_another_nest_reads_a_shared_files_whole_history(
     media = MediaActions(member_driver)
 
     def _history_count():
-        media.reenter()
-        media.set_filter(scope)
-        if not media.wait_for_loaded():
+        names = media.foreign_scope_names(scope, _FILE_NAME)
+        if names is None:
             return None
-        names = media.item_names()
-        if _FILE_NAME not in names:
-            return None
-        media.open_item_detail(names.index(_FILE_NAME))
+        try:
+            media.open_item_detail(names.index(_FILE_NAME))
+        except AssertionError as e:  # an off-screen row: carry the geometry
+            raise AssertionError(f"{e}\n{_member_media_log(member_driver)}") from None
         count = media.wait_for_version_count(2)
         media.close_detail()
         return count if count >= 2 else None
@@ -194,7 +251,8 @@ def test_a_member_on_another_nest_reads_a_shared_files_whole_history(
         diagnose=lambda: (
             f"the member's foreign item detail never listed both versions of "
             f"{_FILE_NAME!r}; versions={media.version_count()} "
-            f"names={media.item_names()!r} error={_error_text(member_driver)!r}"
+            f"names={media.item_names()!r} error={_error_text(member_driver)!r}\n"
+            + _member_media_log(member_driver)
         ),
     )
     assert count == 2, f"the home nest holds two versions; the detail lists {count}"

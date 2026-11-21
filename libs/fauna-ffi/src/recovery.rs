@@ -991,6 +991,23 @@ pub fn recovery_pending_days_remaining(lands_at: i64, now: i64) -> u64 {
     fauna_client_recovery::replacement::days_remaining_from(lands_at, now)
 }
 
+/// `identity-stolen-button`'s draft-validity answer (`docs/goal/ui/README.md`
+/// § Offer only what is possible, rule 4's form case): the FFI door to
+/// [`fauna_client_recovery::ceremony::stolen_entry_possibility`] — a kit
+/// pasted first, then the confirm field holding the never-localized word. Both
+/// surfaces of the ceremony (the Settings section and the signed-out locked
+/// door) paint the button from it and re-ask it before starting, so no app
+/// compares the word itself. Gated `value-format` for the bare-`fauna_core`
+/// type reason `forms.rs` gives.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn recovery_stolen_entry_possibility(
+    phrase: String,
+    confirm_word: String,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_recovery::ceremony::stolen_entry_possibility(&phrase, &confirm_word)
+}
+
 /// The `fauna://recovery` URI behind a minted kit's QR **and** copy button —
 /// never the bare [`FfiMintedKit::secret_hex`], which is only the on-screen
 /// display (`identity-succession.md` § The RecoveryKey, *Which encoding each
@@ -1417,6 +1434,33 @@ pub fn recovery_owed_nests_after_dismiss(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The door forwards the shared answer untouched: the phrase blocks
+    /// first, then the word, and both held is possible.
+    #[cfg(feature = "value-format")]
+    #[test]
+    fn stolen_entry_door_forwards_the_shared_answer() {
+        let key = |p: &str, c: &str| {
+            recovery_stolen_entry_possibility(p.into(), c.into())
+                .reason()
+                .map(|r| r.key.clone())
+        };
+        assert_eq!(
+            key("", "SUCCEED").as_deref(),
+            Some("settings.recovery_kit.kit_phrase_required")
+        );
+        assert_eq!(
+            key("fauna://recovery?x", "succeed").as_deref(),
+            Some("settings.recovery_kit.stolen_confirm_placeholder")
+        );
+        assert!(
+            recovery_stolen_entry_possibility(
+                "fauna://recovery?x".into(),
+                fauna_client_recovery::ceremony::STOLEN_CONFIRM_WORD.into()
+            )
+            .is_possible()
+        );
+    }
 
     fn owed_entry(keeper: Option<u8>, nest: u8, outcome_kind: &str) -> FfiOwedNestEntry {
         use fauna_core::localized::LocalizedText;

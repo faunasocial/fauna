@@ -96,24 +96,25 @@ private func select(_ value: String) -> FfiRuleTypeOption {
     #expect(form.newRuleThreshold == "")                  // reset
 }
 
-// MARK: - canCreate gating + filterRules builder
+// MARK: - createPossibility gating + filterRules builder
 
-@Test func canCreateRequiresANameAndNothingElse() {
+@Test func createPossibilityRequiresANameAndNothingElse() {
     var form = FeedCreateForm()
-    #expect(form.canCreate == false)                      // no name
+    #expect(!form.createPossibility.isPossible)          // no name
     form.name = "My Feed"
     // A name ALONE is enough. This assertion used to read `== false` with the
     // comment "name but no rules": the old gate also demanded a staged rule,
     // which made a factor-only feed uncreatable through the real UI while web
     // and linux both allowed it (priorities #1/#4). See `FeedCreateForm
-    // .canCreate` for the full story and how the actuation gate surfaced it.
-    #expect(form.canCreate == true)
+    // .createPossibility` for the full story and how the actuation gate
+    // surfaced it.
+    #expect(form.createPossibility.isPossible)
     form.selectedRuleType = select("BodyContains")
     form.newRuleValue = "rust"
     form.addRule()
-    #expect(form.canCreate == true)                       // still true with a rule
+    #expect(form.createPossibility.isPossible)           // still possible with a rule
     form.name = "   "
-    #expect(form.canCreate == false)                      // whitespace-only name
+    #expect(!form.createPossibility.isPossible)          // whitespace-only name
 }
 
 @Test func filterRulesMapsStagedTriplesToFilterRuleInput() {

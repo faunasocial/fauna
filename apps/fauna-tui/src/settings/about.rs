@@ -23,7 +23,10 @@
 //! linux General page's button flips its label the same way), and
 //! `update-available-notice`, painted ONLY once a check found a newer release.
 //! Beside the version, `settings-terms-link` (user-approved 2026-10-20) shows
-//! and copies the organisation's terms URL (`fauna_core::TERMS_URL`).
+//! and copies the organisation's terms URL (`fauna_core::TERMS_URL`;
+//! `terms-and-content-guidelines.md` § Element IDs): a copy that reached the
+//! terminal reads "Copied!" with a `copied` attr, a failed one is said on
+//! `error-message` ([`record_terms_copy`]).
 //!
 //! **The e2e seam.** A walk cannot depend on the real GitHub feed (network,
 //! rate limits, and whatever release happens to be newest that day), so under
@@ -61,6 +64,48 @@ pub(crate) enum UpdateCheck {
     Newer { tag: String },
 }
 
+/// `settings-terms-link`: the label and the URL it copies; after a copy that
+/// reached the terminal, "Copied!" before them and the URL as its `copied`
+/// attr (the `account-actor-id-copy-btn` contract — OSC 52 is
+/// fire-and-forget, so the attr is what a test reads).
+fn terms_link(state: &SettingsState) -> Element {
+    let label = if state.terms_copied {
+        format!("{} · {}", common::COPIED, crate::wizard::terms_link_label())
+    } else {
+        crate::wizard::terms_link_label()
+    };
+    let link = Element::gesture_button(
+        ids::SETTINGS_TERMS_LINK,
+        label,
+        true,
+        Gesture::Settings(Action::CopyTermsUrl),
+    )
+    .attr("href", fauna_core::TERMS_URL);
+    if state.terms_copied {
+        link.attr("copied", fauna_core::TERMS_URL)
+    } else {
+        link
+    }
+}
+
+/// Record a terms-link copy's outcome: a write that reached the terminal
+/// confirms on the link and clears a prior failure; one that failed confirms
+/// nothing and says so on `error-message` (`docs/goal/ui/README.md` § Offer
+/// only what is possible, rule 7: a failure is never silent).
+pub(super) fn record_terms_copy(state: &mut SettingsState, outcome: std::io::Result<()>) {
+    match outcome {
+        Ok(()) => {
+            crate::wizard::log_displayed_notice(common::COPIED);
+            state.local_failure = None;
+            state.terms_copied = true;
+        }
+        Err(e) => {
+            state.terms_copied = false;
+            state.local_failure = Some(crate::wizard::copy_failed_text(&e));
+        }
+    }
+}
+
 /// The About block's elements, in paint order.
 pub(super) fn elements(state: &SettingsState) -> Vec<Element> {
     let mut els = vec![
@@ -68,13 +113,7 @@ pub(super) fn elements(state: &SettingsState) -> Vec<Element> {
         // The terms link beside the version (`terms-and-content-guidelines.md`
         // § The decisions, item 4 (b)): shown and copied, like
         // `admin-mail-health-delist-link` — a terminal opens no browser.
-        Element::gesture_button(
-            ids::SETTINGS_TERMS_LINK,
-            crate::wizard::terms_link_label(),
-            true,
-            Gesture::Settings(Action::CopyTermsUrl),
-        )
-        .attr("href", fauna_core::TERMS_URL),
+        terms_link(state),
         Element::gesture_button(
             ids::SETTINGS_CHECK_UPDATES_BUTTON,
             button_label(&state.update_check),
@@ -206,6 +245,59 @@ mod tests {
             &link.role,
             crate::element::Role::Button(Gesture::Settings(Action::CopyTermsUrl))
         ));
+    }
+
+    /// A press whose write reached the terminal confirms on the link; one
+    /// whose write failed confirms nothing and is said on `error-message`.
+    #[test]
+    fn a_terms_copy_is_confirmed_or_its_failure_said() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let link = |state: &SettingsState| {
+            elements(state)
+                .into_iter()
+                .find(|e| e.id == ids::SETTINGS_TERMS_LINK)
+                .expect("settings-terms-link is always painted")
+        };
+        let copied_attr = |e: &Element| {
+            e.attrs
+                .iter()
+                .find(|(k, _)| k == "copied")
+                .map(|(_, v)| v.clone())
+        };
+        let mut state = SettingsState::default();
+        assert_eq!(copied_attr(&link(&state)), None);
+
+        record_terms_copy(&mut state, Ok(()));
+        let copied = link(&state);
+        assert_eq!(copied_attr(&copied).as_deref(), Some(fauna_core::TERMS_URL));
+        assert!(copied.text.starts_with(common::COPIED), "{}", copied.text);
+        assert!(
+            copied.text.contains(fauna_core::TERMS_URL),
+            "{}",
+            copied.text
+        );
+        assert_eq!(super::super::page_error(&state), None);
+
+        let outcome = crate::wizard::write_osc52(&mut Closed, fauna_core::TERMS_URL);
+        record_terms_copy(&mut state, outcome);
+        assert_eq!(
+            copied_attr(&link(&state)),
+            None,
+            "a failed copy confirms nothing"
+        );
+        let line = super::super::page_error(&state).expect("the failed copy is said");
+        assert!(line.contains("closed"), "{line}");
     }
 
     #[test]

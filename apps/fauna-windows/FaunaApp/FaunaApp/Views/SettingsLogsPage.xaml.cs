@@ -5,6 +5,8 @@ using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Logs;
 using FaunaApp.Core.ViewModels;
 using FaunaApp.Helpers;
+using Microsoft.UI.Xaml.Automation;
+using S = FaunaApp.Core.Services.Strings;
 
 namespace FaunaApp.Views;
 
@@ -49,26 +51,52 @@ public sealed partial class SettingsLogsPage : Page
         // Fires during XAML init (SelectedIndex=0) before the VM exists — guard it.
         if (_vm is null) return;
         _vm.SetFilter(FilterCombo.SelectedIndex);
+        RenderError(_vm.Error);
         UpdateEmpty();
     }
 
+    /// <summary><c>log-copy-button</c>: asks the shared ring answer again (an empty
+    /// ring copies nothing), then confirms a copy that reached the clipboard ("Copied!"
+    /// + its <c>copied</c> attr) or puts <c>common.copy_failed</c> on
+    /// <c>error-message</c>.</summary>
     private void CopyButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_vm is null) return;
-        ClipboardHelper.CopyText(_vm.CopyText());
+        if (_vm?.CopyPayload() is not { } text) return;
+        Exception? failure = null;
+        try
+        {
+            ClipboardHelper.CopyText(text);
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+        _vm.RecordCopyOutcome(text, failure);
+        RenderError(_vm.Error);
+        UpdateEmpty();
     }
 
     private void ClearButton_Click(object sender, RoutedEventArgs e)
     {
         if (_vm is null) return;
         _vm.Clear();
+        RenderError(_vm.Error);
         UpdateEmpty();
     }
 
+    /// <summary>The empty line and the two ring buttons, painted from the shared
+    /// <see cref="LogsViewModel.RingAction"/> answer. Its blocked reason IS the page's
+    /// own empty line (<c>logs.empty</c>), already visible, so no second copy is painted
+    /// beside the buttons.</summary>
     private void UpdateEmpty()
     {
         if (_vm is null) return;
         EmptyPlaceholder.Visibility = _vm.Entries.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        var answer = _vm.RingAction();
+        CopyButton.ApplyPossibility(answer);
+        ClearButton.ApplyPossibility(answer);
+        CopyButton.Content = _vm.Copied is null ? S.Get("logs/copy_button") : S.Get("common/copied");
+        AutomationProperties.SetHelpText(CopyButton, _vm.Copied ?? string.Empty);
     }
 
     private void RenderError(string? msg)

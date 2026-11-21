@@ -25,8 +25,14 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.UrlOpener
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.components.rememberTwoClickArm
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.pressAsked
 import com.fauna.app.ui.util.resolveComposed
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.ArchiveImportVM
@@ -42,10 +48,18 @@ import uniffi.fauna_archive_import_machine.AudienceMode
 import uniffi.fauna_archive_import_machine.CategoryRow
 import uniffi.fauna_archive_import_machine.RunState
 import uniffi.fauna_archive_import_machine.archiveImportAudienceModeLabel
+import uniffi.fauna_archive_import_machine.archiveImportNextPossibility
+import uniffi.fauna_archive_import_machine.archiveImportProfilePrefillPossibility
+import uniffi.fauna_archive_import_machine.archiveImportStartPossibility
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_archive_import_machine.archiveImportPageText
 import uniffi.fauna_archive_import_machine.archiveImportSourceHelp
 import uniffi.fauna_archive_import_machine.archiveImportSourceKindLabel
 import java.io.File
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The user-facing **archive-import** wizard — Settings → Import from other
@@ -119,6 +133,7 @@ fun ArchiveImportScreen(
         onApplyProfile = vm::applyProfile,
         onViewImported = { vm.viewImported { navController.navigate("feed") } },
         onOpenFolders = { navController.navigate("settings/folders") },
+        onRefuse = { vm.errorMessage.value = it },
     )
 }
 
@@ -216,6 +231,9 @@ fun ArchiveImportContent(
     onApplyProfile: () -> Unit,
     onViewImported: () -> Unit,
     onOpenFolders: () -> Unit,
+    // A refused press's reason (Next, Start, the profile prefill), for the
+    // page's `error-message` — rule 6's second half.
+    onRefuse: (String) -> Unit = {},
 ) {
     Scaffold(
         topBar = {
@@ -257,11 +275,11 @@ fun ArchiveImportContent(
                 val lines = remember(snapshot) { labels.pageText(snapshot) }
                 when (snapshot.step) {
                     ArchiveImportStep.SOURCE -> SourceStep(snapshot, labels, lines, onSelectSource, onOpenExportPage, onNext)
-                    ArchiveImportStep.ARCHIVE -> ArchiveStep(snapshot, lines, pickedPath, onOpenArchive, onPickArchive, onNext, onPrev)
-                    ArchiveImportStep.SCOPE -> ScopeStep(snapshot, labels, lines, onToggleCategory, onSetAudienceMode, onScopeNext, onPrev)
-                    ArchiveImportStep.CONFIRM -> ConfirmStep(lines, onStart, onPrev)
+                    ArchiveImportStep.ARCHIVE -> ArchiveStep(snapshot, lines, pickedPath, onOpenArchive, onPickArchive, onNext, onPrev, onRefuse)
+                    ArchiveImportStep.SCOPE -> ScopeStep(snapshot, labels, lines, onToggleCategory, onSetAudienceMode, onScopeNext, onPrev, onRefuse)
+                    ArchiveImportStep.CONFIRM -> ConfirmStep(snapshot, lines, onStart, onPrev, onRefuse)
                     ArchiveImportStep.PROGRESS -> ProgressStep(snapshot, lines, onPause, onResume, onCancel, onPrev)
-                    ArchiveImportStep.DONE -> DoneStep(snapshot, lines, onApplyProfile, onViewImported, onOpenFolders, onPrev)
+                    ArchiveImportStep.DONE -> DoneStep(snapshot, lines, onApplyProfile, onViewImported, onOpenFolders, onPrev, onRefuse)
                 }
             }
             // Built only when there is something to say (convention 2's rider):
@@ -317,7 +335,7 @@ private fun SourceStep(
         onClick = { if (url.isNotEmpty()) onOpenExportPage(url) },
         modifier = Modifier.testTag(Ids.ARCHIVE_IMPORT_SOURCE_EXPORT_LINK),
     ) { Text(lines.sourceLink) }
-    NextButton(onNext)
+    NextButton(onNext = onNext)
 }
 
 // ── step 2 — archive ────────────────────────────────────────────────────
@@ -331,6 +349,7 @@ private fun ArchiveStep(
     onPickArchive: () -> Unit,
     onNext: () -> Unit,
     onPrev: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
     // Seeded once from the snapshot (a hydrate that found an unfinished
     // import names its archive again), never over what was typed.
@@ -355,7 +374,8 @@ private fun ArchiveStep(
             modifier = Modifier.testTag(Ids.ARCHIVE_IMPORT_ARCHIVE_SUMMARY),
         )
     }
-    BackNextRow(onPrev, onNext)
+    // Next waits for an opened archive (`ArchiveImportSnapshot::next_possibility`).
+    BackNextRow(onPrev, askForm { archiveImportNextPossibility(snapshot, snapshot.dateFrom, snapshot.dateTo) }, onRefuse, onNext)
 }
 
 // ── step 3 — scope ──────────────────────────────────────────────────────
@@ -369,6 +389,7 @@ private fun ScopeStep(
     onSetAudienceMode: (AudienceMode) -> Unit,
     onScopeNext: (String, String) -> Unit,
     onPrev: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
     var dateFrom by remember { mutableStateOf(snapshot.dateFrom) }
     var dateTo by remember { mutableStateOf(snapshot.dateTo) }
@@ -424,7 +445,10 @@ private fun ScopeStep(
         singleLine = true,
         modifier = Modifier.fillMaxWidth().testTag(Ids.ARCHIVE_IMPORT_SCOPE_DATE_TO),
     )
-    BackNextRow(onPrev) { onScopeNext(dateFrom, dateTo) }
+    // Next asks the machine's answer over the typed date drafts (a bad range).
+    BackNextRow(onPrev, askForm { archiveImportNextPossibility(snapshot, dateFrom, dateTo) }, onRefuse) {
+        onScopeNext(dateFrom, dateTo)
+    }
 }
 
 /** One indexed `archive-import-scope-category-item`: a toggle for an
@@ -464,10 +488,16 @@ private fun CategoryItem(
 
 @Composable
 private fun ConfirmStep(
+    snapshot: ArchiveImportSnapshot,
     lines: ArchiveImportLines,
     onStart: () -> Unit,
     onPrev: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
+    val context = LocalContext.current
+    // An opened archive and a range that resolves, re-asked at the press
+    // (`ArchiveImportSnapshot::start_possibility`).
+    val startAnswer = askForm { archiveImportStartPossibility(snapshot) }
     Text(stringResource(R.string.archive_import_confirm_title), style = MaterialTheme.typography.titleMedium)
     Text(
         lines.confirmSummary,
@@ -476,10 +506,15 @@ private fun ConfirmStep(
     )
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         BackButton(onPrev)
-        Button(onClick = onStart, modifier = Modifier.testTag(Ids.ARCHIVE_IMPORT_START_BUTTON)) {
+        Button(
+            onClick = { pressAsked(context, startAnswer, onRefuse, onStart) },
+            enabled = startAnswer.isPossible,
+            modifier = Modifier.testTag(Ids.ARCHIVE_IMPORT_START_BUTTON),
+        ) {
             Text(stringResource(R.string.archive_import_start_button))
         }
     }
+    DisabledControlReasonText(localized(startAnswer.blockedReason))
 }
 
 // ── step 5 — progress ───────────────────────────────────────────────────
@@ -575,7 +610,9 @@ private fun DoneStep(
     onViewImported: () -> Unit,
     onOpenFolders: () -> Unit,
     onPrev: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     // Review skipped is a view toggle: the skip log is already on the snapshot.
     var showSkipped by remember { mutableStateOf(false) }
     Text(stringResource(R.string.archive_import_done_title), style = MaterialTheme.typography.titleMedium)
@@ -594,13 +631,17 @@ private fun DoneStep(
         ) { Text(stringResource(R.string.archive_import_review_skipped_button)) }
     }
     if (showSkipped) SkipLog(snapshot)
-    // Enabled while the run's end found a profile in the archive and the tap
-    // has not applied it yet — a second tap never re-publishes it.
+    // Offered, never applied silently: the shared answer is blocked, with its
+    // reason painted, when the run found no profile in the archive and once
+    // the tap applied it — a second tap never re-publishes it
+    // (`ArchiveImportSnapshot::profile_prefill_possibility`).
+    val prefillAnswer = askForm { archiveImportProfilePrefillPossibility(snapshot) }
     OutlinedButton(
-        onClick = onApplyProfile,
-        enabled = snapshot.archiveProfile != null && !snapshot.profileApplied,
+        onClick = { pressAsked(context, prefillAnswer, onRefuse, onApplyProfile) },
+        enabled = prefillAnswer.isPossible,
         modifier = Modifier.testTag(Ids.ARCHIVE_IMPORT_PROFILE_PREFILL_BUTTON),
     ) { Text(stringResource(R.string.archive_import_profile_prefill_button)) }
+    DisabledControlReasonText(localized(prefillAnswer.blockedReason))
     TextButton(onClick = onOpenFolders, modifier = Modifier.testTag(Ids.ARCHIVE_IMPORT_FOLDER_LINK)) {
         Text(lines.folderLink)
     }
@@ -616,17 +657,34 @@ private fun BackButton(onPrev: () -> Unit) {
     }
 }
 
+/** `wizard-next-button`, painted from the step's [answer] and asking it
+ *  again at the press (rule 6): blocked → its reason to [onRefuse]. */
 @Composable
-private fun NextButton(onNext: () -> Unit) {
-    Button(onClick = onNext, modifier = Modifier.testTag(Ids.WIZARD_NEXT_BUTTON)) {
+private fun NextButton(
+    answer: Possibility = Possibility.Possible,
+    onRefuse: (String) -> Unit = {},
+    onNext: () -> Unit,
+) {
+    val context = LocalContext.current
+    Button(
+        onClick = { pressAsked(context, answer, onRefuse, onNext) },
+        enabled = answer.isPossible,
+        modifier = Modifier.testTag(Ids.WIZARD_NEXT_BUTTON),
+    ) {
         Text(stringResource(R.string.archive_import_next))
     }
 }
 
 @Composable
-private fun BackNextRow(onPrev: () -> Unit, onNext: () -> Unit) {
+private fun BackNextRow(
+    onPrev: () -> Unit,
+    answer: Possibility,
+    onRefuse: (String) -> Unit,
+    onNext: () -> Unit,
+) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         BackButton(onPrev)
-        NextButton(onNext)
+        NextButton(answer, onRefuse, onNext)
     }
+    DisabledControlReasonText(localized(answer.blockedReason))
 }

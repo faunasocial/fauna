@@ -137,18 +137,16 @@ pub(super) fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                     return None;
                 }
             };
+            // The answer the button is painted from, asked again: the account
+            // store assembles off the login path, and until it has there is
+            // nowhere to write — the staged edits stay on screen.
+            if app.errors.refuse(Page::Profile, &save_answer(app)) {
+                return None;
+            }
             let (Some(manager), Some(store)) = (
                 app.conversations.manager.clone(),
                 app.settings.account_store.clone(),
             ) else {
-                // The account store assembles off the login path; until it has,
-                // there is nowhere to write — the staged edits stay on screen.
-                app.errors.insert(
-                    Page::Profile,
-                    crate::wizard::localized(&fauna_core::localized::LocalizedText::key(
-                        "common.still_loading",
-                    )),
-                );
                 return None;
             };
             Some(Op::SavePrivate {
@@ -189,9 +187,18 @@ pub(super) fn apply_saved(app: &mut App, actor: &str) {
     }
 }
 
+/// `profile-private-save-button`'s answer — the shared
+/// `contact_overlays::save_possibility` over this seat's manager and store.
+fn save_answer(app: &App) -> fauna_core::possibility::Possibility {
+    fauna_client_account_runtime::contact_overlays::save_possibility(
+        app.conversations.manager.is_some(),
+        app.settings.account_store.is_some(),
+    )
+}
+
 /// The section's elements, painted on OTHER only (below the relationship
 /// actions, above the tab strip).
-pub(super) fn elements(st: &ProfileState, out: &mut Vec<Element>) {
+pub(super) fn elements(app: &App, st: &ProfileState, out: &mut Vec<Element>) {
     let form = st.private_form();
     out.push(Element::label(
         ids::PROFILE_PRIVATE_SECTION,
@@ -245,10 +252,13 @@ pub(super) fn elements(st: &ProfileState, out: &mut Vec<Element>) {
         true,
         Gesture::Profile(Action::AddPrivateLabel),
     ));
-    out.push(Element::gesture_button(
-        ids::PROFILE_PRIVATE_SAVE_BUTTON,
-        t::PRIVATE_SAVE,
-        true,
-        Gesture::Profile(Action::SavePrivate),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::PROFILE_PRIVATE_SAVE_BUTTON,
+            t::PRIVATE_SAVE,
+            true,
+            Gesture::Profile(Action::SavePrivate),
+        )
+        .possible(save_answer(app)),
+    );
 }

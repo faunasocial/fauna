@@ -304,6 +304,33 @@ impl CacheDb {
         }
     }
 
+    /// The still-`pending` actions of one type naming `target`, oldest first
+    /// — what a repeated request for the same action folds onto instead of
+    /// scheduling a duplicate (`behavior/backup-restore.md` § 7).
+    pub async fn find_pending_actions_for_target(
+        &self,
+        action_type: &str,
+        target: &str,
+    ) -> Result<Vec<PendingActionRow>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, action_type, actor_id, target, payload, status, created_at,
+                    execute_after, executed_at, cancelled_by, cancelled_at,
+                    requires_quorum, approvals, ip_address, chain_hash
+             FROM pending_actions
+             WHERE action_type = ?1 AND target = ?2 AND status = 'pending'
+             ORDER BY id ASC",
+            )
+            .context("prepare find_pending_actions_for_target")?;
+        let rows = stmt
+            .query_map(rusqlite::params![action_type, target], parse_row)
+            .context("query find_pending_actions_for_target")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("collect find_pending_actions_for_target")?;
+        Ok(rows)
+    }
+
     // ==================== List ====================
 
     /// List the pending actions that concern a given actor (all statuses):

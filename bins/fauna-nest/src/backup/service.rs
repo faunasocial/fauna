@@ -805,7 +805,16 @@ mod tests {
         (
             "chunk_routes.rs",
             "upload_manifest",
-            Use::NoServe("writes a canonical-`ChunkManifest`-validated body"),
+            Use::NoServe(
+                "writes a canonical-`ChunkManifest`-validated body; a paged root is first \
+                 walked (`manifest_walk::store_keys`) to confirm its pages are at rest — \
+                 the page bytes are verified, never returned",
+            ),
+        ),
+        (
+            "chunk_routes.rs",
+            "upload_manifest_page",
+            Use::NoServe("writes a canonical-`ManifestPage`-validated body"),
         ),
         (
             "chunk_routes.rs",

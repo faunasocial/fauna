@@ -124,11 +124,14 @@ def test_a_member_leaves_the_room_and_the_floor_drops_them(room_seats, nest_inst
     assert leaver_view.room["my_role"] == "Member", leaver_view.room
     assert leaver_view.capabilities["can_leave_room"], leaver_view.capabilities
 
-    # The owner's control is PAINTED and DEAD — greyed, never hidden.
+    # The owner's control is PAINTED and DEAD — blocked, never hidden: the
+    # owner can lift it by handing the room over, which is the reason it
+    # names (`ui/conversations.md` § Errors & edge cases → *Controls this
+    # person can never use*).
     owner.app.conversations.open_thread_by_id(group_id)
     owner.app.conversations.open_room_settings()
     assert owner.app.driver.is_visible("room-leave-button"), (
-        "the walk-out is painted for the owner too — greyed, never hidden\n"
+        "the walk-out is painted for the owner too — blocked, never hidden\n"
         f"{seat_element(owner, 'room-leave-button')}"
     )
     assert not owner.app.conversations.room_leave_enabled(), (

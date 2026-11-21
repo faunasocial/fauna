@@ -9,7 +9,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -31,15 +30,23 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.fauna.app.R
+import androidx.compose.ui.platform.LocalContext
 import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.LogEntryList
 import com.fauna.app.ui.components.LogLevelFilter
 import com.fauna.app.ui.components.renderLogs
+import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.isPossible
 import com.fauna.ffi.logClear
+import com.fauna.ffi.logRingActionPossibility
 import com.fauna.ffi.logSnapshot
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_log.LogEntry
 import uniffi.fauna_log.LogRow
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
 
 /**
  * The Settings → Logs sub-page (`settings-logs`) — the client's durable, in-app
@@ -70,6 +77,7 @@ fun SettingsLogsScreen(navController: NavController) {
     // Filter + render through shared fauna-log (FFI); the stateless Content takes
     // the pre-computed rows so it stays Robolectric-safe.
     val rendered = remember(source, filterIndex) { renderLogs(source, filterIndex) }
+    val appMessages = LocalAppMessages.current
 
     SettingsLogsContent(
         rows = rendered.rows,
@@ -81,8 +89,20 @@ fun SettingsLogsScreen(navController: NavController) {
             source = runCatching { logSnapshot() }.getOrDefault(emptyList())
         },
         onBack = { navController.popBackStack() },
+        // The page's `error-message` is the app-wide MessageBanner.
+        onError = { appMessages.showError(it) },
     )
 }
+
+/**
+ * `log-copy-button` / `log-clear-button`'s one answer
+ * (`fauna_log::format::ring_action_possibility` over UniFFI): blocked by the
+ * page's own empty line ([emptyReasonKey]) while the filter shows no entry.
+ * Both Logs pages paint from it and their handlers ask it again
+ * (`observability.md` § Surfaces). Fails open like every [askForm].
+ */
+internal fun logRingAnswer(shown: Int, emptyReasonKey: String): Possibility =
+    askForm { logRingActionPossibility(shown.toUInt(), emptyReasonKey) }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,7 +113,19 @@ fun SettingsLogsContent(
     onFilterChange: (Int) -> Unit,
     onClear: () -> Unit,
     onBack: () -> Unit,
+    onError: (String) -> Unit = {},
 ) {
+    val context = LocalContext.current
+    // Copy and clear offer only what they can do: blocked by `logs.empty` while
+    // nothing is shown — and then the empty line below is already on the page,
+    // so no second copy of the reason is painted (tui `logs_elements`).
+    val ringAnswer = logRingAnswer(rows.size, "logs.empty")
+    // The press asks the same answer again (rule 6) and refuses on error-message.
+    val mayAct: () -> Boolean = {
+        val refusal = answerRefusal(context, logRingAnswer(rows.size, "logs.empty"))
+        refusal?.reason?.let(onError)
+        refusal == null
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -138,9 +170,14 @@ fun SettingsLogsContent(
                     testTag = Ids.LOG_COPY_BUTTON,
                     text = copyText,
                     label = stringResource(R.string.logs_copy_button),
+                    enabled = ringAnswer.isPossible,
+                    confirm = true,
+                    onCopyFailed = onError,
+                    mayCopy = mayAct,
                 )
                 Button(
-                    onClick = onClear,
+                    onClick = { if (mayAct()) onClear() },
+                    enabled = ringAnswer.isPossible,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error,
                     ),

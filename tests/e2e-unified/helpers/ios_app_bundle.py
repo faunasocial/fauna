@@ -69,7 +69,7 @@ def write_app_bundle(app_dir: Path, exe: Path, bundle_id: str, *, kids: bool = F
     name = "Fauna Kids" if kids else "Fauna"
     photos = "" if kids else (
         "    <key>NSPhotoLibraryUsageDescription</key>\n"
-        "    <string>Fauna backs up your photos to your own nest.</string>\n"
+        "    <string>Fauna backs up your photos and videos to your own nest.</string>\n"
     )
     info_plist.write_text(f"""\
 <?xml version="1.0" encoding="UTF-8"?>

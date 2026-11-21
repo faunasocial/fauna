@@ -30,8 +30,8 @@ import pytest
 
 from actions.mail_import import MailImportActions
 from helpers import budgets
-from helpers.mail_dedicated_nest import login_as_nest_admin
-from helpers.mail_import_ui import save_microsoft_registration
+from helpers.mail_dedicated_nest import dedicated_node_url, login_as_nest_admin
+from helpers.mail_import_ui import enable_mail_so_the_nest_can_seal, save_microsoft_registration
 from i18n.strings import S
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fakes"))
@@ -56,14 +56,18 @@ ADMIN_TENANT = "contoso.example"
 
 @pytest.mark.feature("mailbox-import")
 def test_an_admin_set_microsoft_registration_is_the_client_id_the_sign_in_sends(
-    app, dedicated_no_mail_nest
+    app, dedicated_mail_nest, request
 ):
-    # A plain dedicated nest: the registration is nest-wide setup state and the
-    # sign-in goes to the identity fake, so no bridge is ever dialled and a mail
-    # venue (whose idling bridges the rebind sweep makes a test restart) buys
-    # nothing. tui-only today, so the raw nest URL is reachable.
-    nest = dedicated_no_mail_nest
-    login_as_nest_admin(app, nest, nest["url"])
+    # A mail venue, with mail turned on for the admin through the app UI: the
+    # Import mailbox page is gated at its entry on the shared mail-usable
+    # answer (`MailSettingsSnapshot::mail_usable`, `ui/mail-settings.md`
+    # § Errors & edge cases, the mail-usable gate), so on a nest with mail off
+    # it opens on its reason alone and the Outlook sign-in is not offered —
+    # the same preamble as test_mail_import.py's Outlook walk. The sign-in
+    # itself goes to the identity fake; no bridge is dialled.
+    handle = dedicated_mail_nest
+    login_as_nest_admin(app, handle.nest, dedicated_node_url(app, handle, request))
+    enable_mail_so_the_nest_can_seal(app, handle)
     fake = session_microsoft_identity()
 
     try:

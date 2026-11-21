@@ -122,3 +122,105 @@ private func pendingAction(id: Int64, status: String) -> FfiAdminPendingAction {
     // A failed act never invents or drops rows: the list is the last good read.
     #expect(vm.pendingActions.map(\.id) == [3])
 }
+
+// MARK: - Admin take-over (family-safety.md § App surface → *Admin take-over*)
+//
+// The armed confirm's state machine — arm, one row at a time, cancel sends
+// nothing, confirm disarms BEFORE it dispatches `fauna.family.transfer
+// { ward, self }` — and the viewer reaching the shared offer. Mirrors linux
+// `take_over_arms_one_row_at_a_time_and_disarm_returns_the_ward`; the full
+// round-trip is `test_family.py::test_family_admin_takes_over_guardianship`.
+
+private func actor32(_ byte: UInt8) -> Data {
+    Data(repeating: byte, count: 32)
+}
+
+private func ward(actor: UInt8, guardian: UInt8) -> FfiAdminUser {
+    FfiAdminUser(
+        actorId: actor32(actor),
+        tier: "free",
+        label: "",
+        handle: "ward\(actor)",
+        suspended: false,
+        createdAt: 0,
+        inboxBytesUsed: 0,
+        storageBytesUsed: 0,
+        eviction: nil,
+        mailServingEnabled: true,
+        isAdmin: false,
+        guardian: FfiAdminUserGuardian(actorId: actor32(guardian), handle: "parent\(guardian)")
+    )
+}
+
+@Test @MainActor func takeOverArmsOneRowAtATime() {
+    let vm = AdminVM()
+    // A row offers take-over only against a viewer who is not its guardian;
+    // with no viewer the shared answer is absent and arming refuses.
+    vm.setViewer(actor32(0xAA))
+    let first = ward(actor: 0x01, guardian: 0x09)
+    let second = ward(actor: 0x02, guardian: 0x09)
+
+    #expect(!vm.isTakeOverArmed(first))
+    vm.armTakeOver(first)
+    #expect(vm.isTakeOverArmed(first))
+    vm.armTakeOver(second)
+    #expect(!vm.isTakeOverArmed(first))
+    #expect(vm.isTakeOverArmed(second))
+}
+
+@Test @MainActor func takeOverCancelDisarmsAndSendsNothing() async {
+    let vm = AdminVM()
+    vm.setViewer(actor32(0xAA))
+    var sent = 0
+    vm.takeOverSender = { _, _ in sent += 1 }
+
+    vm.armTakeOver(ward(actor: 0x01, guardian: 0x09))
+    vm.cancelTakeOver()
+    #expect(vm.takeOverArmed == nil)
+    await vm.confirmTakeOver()
+    #expect(sent == 0)
+}
+
+@Test @MainActor func takeOverConfirmDisarmsBeforeItDispatchesWardAndSelf() async {
+    let vm = AdminVM()
+    vm.setViewer(actor32(0xAA))
+    var sent: [(ward: Data, guardian: Data, armedAtSend: Data?)] = []
+    vm.takeOverSender = { ward, guardian in
+        sent.append((ward, guardian, vm.takeOverArmed))
+    }
+
+    vm.armTakeOver(ward(actor: 0x01, guardian: 0x09))
+    await vm.confirmTakeOver()
+    #expect(sent.count == 1)
+    #expect(sent.first?.ward == actor32(0x01))
+    #expect(sent.first?.guardian == actor32(0xAA))
+    // Disarmed when the send ran, so a second confirm can never re-send.
+    #expect(sent.first?.armedAtSend == nil)
+    await vm.confirmTakeOver()
+    #expect(sent.count == 1)
+}
+
+@Test @MainActor func takeOverRefusalLandsOnTheHubLine() async {
+    struct Refused: Error {}
+    let vm = AdminVM()
+    vm.setViewer(actor32(0xAA))
+    vm.takeOverSender = { _, _ in throw Refused() }
+
+    vm.armTakeOver(ward(actor: 0x01, guardian: 0x09))
+    await vm.confirmTakeOver()
+    #expect(vm.actionError != nil)
+    #expect(vm.takeOverArmed == nil)
+}
+
+@Test @MainActor func takeOverOfferNeedsTheViewer() {
+    let vm = AdminVM()
+    let supervised = ward(actor: 0x01, guardian: 0x09)
+    // No viewer: the shared rule offers nothing.
+    #expect(!vm.rowControls(supervised).takeOver)
+    // A viewer who is not the guardian is offered the take-over.
+    vm.setViewer(actor32(0xAA))
+    #expect(vm.rowControls(supervised).takeOver)
+    // The guardian themself is not.
+    vm.setViewer(actor32(0x09))
+    #expect(!vm.rowControls(supervised).takeOver)
+}

@@ -94,12 +94,7 @@ def _nest_rename(nest) -> dict | None:
 def _error_text(app) -> str | None:
     """The page's ``error-message`` text, read by count + text rather than
     visibility (a late-toggled error is not reliably re-marked visible)."""
-    if app.driver.count("error-message") == 0:
-        return None
-    try:
-        return app.driver.get_text("error-message") or None
-    except Exception:
-        return None
+    return app.error_text() or None
 
 
 def _diagnose(app, what: str) -> str:
@@ -292,9 +287,9 @@ def test_removing_a_domain_asks_to_confirm_first(lifecycle_admin_app, lifecycle_
     assert not app.admin.remove_confirm_open(), "the confirm must close the dialog"
 
 
-def _start_rename_from_the_sheet(app, target: str, grace_days: str) -> None:
-    """Open the rename sheet from the primary row, pick ``target``, type
-    ``grace_days`` (``""`` leaves the field blank) and submit."""
+def _fill_the_rename_sheet(app, target: str, grace_days: str) -> None:
+    """Open the rename sheet from the primary row, pick ``target`` and type
+    ``grace_days`` (``""`` leaves the field blank)."""
     app.driver.click("admin-dns-domain-rename-button")
     wait_until(
         lambda: app.admin.rename_sheet_open() or None,
@@ -303,6 +298,14 @@ def _start_rename_from_the_sheet(app, target: str, grace_days: str) -> None:
     )
     app.driver.select("admin-dns-rename-new-primary-select", target)
     app.driver.clear_and_type("admin-dns-rename-grace-days-input", grace_days)
+
+
+def _start_rename_from_the_sheet(app, target: str, grace_days: str) -> None:
+    """Fill the rename sheet with a valid draft and submit it, once the submit
+    is offered (``dns-management.md`` § Errors & edge cases: the submit is
+    painted from the rename sheet's draft predicate)."""
+    _fill_the_rename_sheet(app, target, grace_days)
+    app.driver.wait_until_enabled("admin-dns-rename-submit-button", timeout=UI_SETTLE_S)
     app.driver.click("admin-dns-rename-submit-button")
 
 
@@ -357,12 +360,27 @@ def test_rename_grace_period_is_chosen_at_the_start(lifecycle_admin_app, lifecyc
     assert rename["grace_days"] == 3, f"the chosen grace period must be kept; got {rename!r}"
     _abort_from_the_banner(app, lifecycle_nest)
 
-    _start_rename_from_the_sheet(app, other, "31")
-    err = wait_until(
-        lambda: _error_text(app),
-        RPC_ROUNDTRIP_S,
-        diagnose=lambda: _diagnose(app, "a 31-day grace period surfaced no refusal"),
-    )
+    # Out of range: an app on the shared rename-sheet predicate paints the
+    # submit disabled — that disabled control IS the refusal (``ui/README.md``
+    # § Offer only what is possible); an app not yet lifted still offers it
+    # and refuses on the press, naming the reason on ``error-message``.
+    _fill_the_rename_sheet(app, other, "31")
+    err = "submit not offered"
+    try:
+        wait_until(
+            lambda: app.driver.is_disabled("admin-dns-rename-submit-button") or None,
+            UI_SETTLE_S,
+        )
+        offered = False
+    except AssertionError:
+        offered = True
+    if offered:
+        app.driver.click("admin-dns-rename-submit-button")
+        err = wait_until(
+            lambda: _error_text(app),
+            RPC_ROUNDTRIP_S,
+            diagnose=lambda: _diagnose(app, "a 31-day grace period surfaced no refusal"),
+        )
     assert _nest_rename(lifecycle_nest) is None, (
         f"a 31-day grace period must start no rename (the page said {err!r})"
     )

@@ -761,6 +761,20 @@ enum CPublish {
 /// `sync_storage.rs::report_conflict` for a report, one row for a direct
 /// publish. `capture_w` stamps only the direct shape (the reporter's
 /// contiguous consumed prefix at capture).
+/// The edit stamp's own-run widening (`conflicts.md` § the causal watermark,
+/// *An edit stamp reaches across the writer's own acknowledged run*): the
+/// newest seq `s ≥ anchor` such that every row in `anchor+1..=s` is this
+/// seat's own. The model's log is one set and dense, so log contiguity here is
+/// production's chain of previous-set-row links; every own row counts as
+/// acknowledged — the LARGEST claim production can ever make.
+fn own_run_top(nest: &[CRow], me: usize, anchor: usize) -> usize {
+    let mut top = anchor;
+    while top < nest.len() && nest[top].author == me {
+        top += 1;
+    }
+    top
+}
+
 fn mint_publish(nest: &mut Vec<CRow>, reporter: usize, capture_w: usize, p: CPublish) {
     match p {
         CPublish::Direct(content) => nest.push(CRow {
@@ -2368,7 +2382,7 @@ impl Fuzz {
         self.authored.push(marker);
         if publish {
             let content = v[i].local.clone();
-            let w = v[i].seen;
+            let w = own_run_top(&self.nest, i, v[i].seen);
             v[i].last_recorded = Some(content.clone());
             self.nest.push(CRow {
                 author: i,
@@ -2702,6 +2716,13 @@ impl Fuzz {
                         .any(|(s, c)| *s <= v[i].frontier && *c == content)
             }
             Seats::Legacy(_) => false,
+        };
+        // The own-run widening is the EDIT stamp's alone: a proven reissue's
+        // bytes are old, and descend from none of this seat's later rows.
+        let w = if proven {
+            w
+        } else {
+            own_run_top(&self.nest, i, w)
         };
         self.note_sent(i, &content);
         self.nest.push(CRow {
@@ -3337,6 +3358,46 @@ fn leg4_unique_anchor_plain_deliveries_converge() {
         &steps,
     )
     .unwrap_or_else(|e| panic!("the ruled rules must converge the leg-4 reproduction: {e}"));
+}
+
+/// **Two saves inside the writer's own record→echo window stay linear**
+/// (`conflicts.md` § the causal watermark, *An edit stamp reaches across the
+/// writer's own acknowledged run*, ruled 2026-11-19). Seat `a` publishes two
+/// appends without consuming its own echo: the second row claims the first
+/// (`w = 1`, the own-run widening), so every peer fast-forwards both and no
+/// seat files a report — the log stays the two rows `a` wrote. Stamped at the
+/// bare anchor (`w = 0`) the second row judged diverged at every receiver.
+#[test]
+fn a_second_save_inside_the_own_echo_window_stays_linear() {
+    let mut f = Fuzz::new_clean(Engine::Causal, 3);
+    f.edit(0, true);
+    f.edit(0, true);
+    assert_eq!(
+        f.nest.iter().map(|r| r.derived_through).collect::<Vec<_>>(),
+        vec![0, 1],
+        "the second save claims the writer's own first row and nothing more"
+    );
+    f.drain(8)
+        .unwrap_or_else(|e| panic!("two linear saves must quiesce: {e}"));
+    f.check_exactly_once()
+        .unwrap_or_else(|e| panic!("two linear saves reach every seat: {e}"));
+    // A conflict report mints the reporter's losing candidate as a retention
+    // row; drain's reconcile re-sends (proven reissues of the agreed body) are
+    // the only rows a linear history adds.
+    assert!(
+        f.nest.iter().all(|r| !r.is_retention),
+        "no seat reported a conflict over two linear saves: {:?}",
+        f.nest
+            .iter()
+            .map(|r| (
+                r.author,
+                r.derived_through,
+                r.is_resolution,
+                r.is_retention,
+                String::from_utf8_lossy(&r.content).to_string()
+            ))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// The PLAIN-schedule search: Deliver/Redeliver/Reupload/Edit steps — no

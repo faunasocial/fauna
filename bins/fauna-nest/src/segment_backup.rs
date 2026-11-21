@@ -257,6 +257,13 @@ pub struct FolderRunReport {
     /// stands elsewhere on the box; every not-yet-confirmed or newly-changed
     /// path still opens exactly as before.
     pub manifests_opened: usize,
+    /// Live paths whose manifest is a paged root, skipped because the
+    /// destination does not advertise `paged-manifests` (`file-sync.md`
+    /// § Paged manifests → *Compatibility*: an older nest's garbage collector
+    /// would read the root as chunkless and delete the file, so nothing of
+    /// the path is sent). Re-tried every pass, so the path mirrors the pass
+    /// after the destination advertises the token.
+    pub paged_unsupported_paths: usize,
 }
 
 /// A stored manifest blob's plaintext bytes **and** its parse — the mirror
@@ -1235,16 +1242,19 @@ impl NestBackupCoordinator {
         // in the report, and retracted at the destination if an earlier pass
         // mirrored it. Gate before the store read where the digest is already
         // known (the manifest hash), and before any chunk read otherwise.
+        //
+        // A paged root (`file-sync.md` § Paged manifests) is read through the
+        // one manifest walk: the path is withheld when its root, any page it
+        // names or any chunk a page names is withheld.
         let withheld = self.state.db.list_blob_legal_withhold().await?;
-        let path_withheld =
-            |manifest_key: &fauna_core::data::ContentHash,
-             manifest: &fauna_core::chunk::ChunkManifest| {
-                withheld.contains(&manifest_key.digest())
-                    || manifest
-                        .store_keys()
-                        .iter()
-                        .any(|k| withheld.contains(&k.digest()))
-            };
+        let src_pages = crate::manifest_walk::StorePages {
+            store: &store,
+            at_rest_key,
+        };
+        // Whether the destination advertises `paged-manifests`: read the
+        // first time a pass meets a paged root, never before, and never
+        // carried across passes (the destination may upgrade or downgrade).
+        let mut destination_takes_pages: Option<bool> = None;
 
         // The set is empty on nearly every box, and then the loop costs what
         // it always did (`already_mirrored` alone short-circuits). While a
@@ -1285,7 +1295,7 @@ impl NestBackupCoordinator {
                 .map(fauna_core::data::ContentHash::from_digest_raw)
                 .context("folder head row carries a non-32-byte manifest hash")?;
             let mut is_withheld = withheld.contains(&manifest_key.digest());
-            let mut opened: Option<(Vec<u8>, fauna_core::chunk::ChunkManifest)> = None;
+            let mut opened: Option<(Vec<u8>, crate::manifest_walk::ManifestKeys)> = None;
             if !is_withheld {
                 // GC pins every live head's manifest
                 // (`db/sync_storage.rs::sync_change_manifest_refs`'s
@@ -1301,8 +1311,27 @@ impl NestBackupCoordinator {
                 })?;
                 report.manifests_opened += 1;
                 let (manifest_bytes, manifest) = manifest_plaintext(&raw, at_rest_key)?;
-                is_withheld = path_withheld(&manifest_key, &manifest);
-                opened = Some((manifest_bytes, manifest));
+                // GC pins a live root's pages as it pins the root, so a page
+                // missing here is the same can't-happen as a missing
+                // manifest: abort loud.
+                let keys = crate::manifest_walk::store_keys(&manifest, &src_pages)
+                    .await
+                    .map_err(|e| match e {
+                        crate::manifest_walk::WalkError::Source(e) => e,
+                        other => anyhow::anyhow!("{other}"),
+                    })
+                    .with_context(|| {
+                        format!(
+                            "walking manifest {} for folder {folder_id}",
+                            hex::encode(&file.manifest_hash)
+                        )
+                    })?;
+                is_withheld = keys
+                    .page_hashes
+                    .iter()
+                    .chain(&keys.store_keys)
+                    .any(|k| withheld.contains(&k.digest()));
+                opened = Some((manifest_bytes, keys));
             }
             if is_withheld {
                 // Retract what an earlier pass mirrored — the takedown's
@@ -1342,13 +1371,40 @@ impl NestBackupCoordinator {
             if already_mirrored {
                 continue;
             }
-            let (manifest_bytes, manifest) =
+            let (manifest_bytes, keys) =
                 opened.expect("a path that is not withheld had its manifest opened above");
 
-            // Chunks first, then the manifest, then custody: the destination's
-            // charge derivation refuses a record naming bytes it does not hold.
-            let store_keys = manifest.store_keys();
-            let missing = client.check_chunks(&store_keys).await?;
+            // A paged root travels with its pages or not at all
+            // (`file-sync.md` § Paged manifests → *Compatibility*): to a
+            // destination without `paged-manifests` the path is skipped and
+            // counted, never sent as a chunkless root.
+            let paged = !keys.page_hashes.is_empty();
+            if paged {
+                let takes_pages = match destination_takes_pages {
+                    Some(takes) => takes,
+                    None => {
+                        let takes = self.destination_takes_pages(dest).await?;
+                        destination_takes_pages = Some(takes);
+                        takes
+                    }
+                };
+                if !takes_pages {
+                    report.paged_unsupported_paths += 1;
+                    tracing::warn!(
+                        destination_id = %dest.destination_id,
+                        folder_id = folder_id,
+                        path_hash = %hex::encode(&file.path_hash),
+                        "nest folder mirror: the destination does not advertise paged-manifests; a paged file is not sent to it; retried next pass",
+                    );
+                    continue;
+                }
+            }
+
+            // Chunks first, then the pages, then the manifest, then custody:
+            // the destination's root door refuses a root whose pages are not
+            // at rest, and its charge derivation refuses a record naming bytes
+            // it does not hold.
+            let missing = client.check_chunks(&keys.store_keys).await?;
             for key in &missing {
                 let chunk_raw = store.get(key).await?.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1358,6 +1414,24 @@ impl NestBackupCoordinator {
                 })?;
                 let body = chunk_wire_body(key, &chunk_raw, at_rest_key)?;
                 client.upload_chunk(key, &body).await?;
+            }
+            if paged {
+                use crate::manifest_walk::PageSource as _;
+                let missing_pages = client.check_chunks(&keys.page_hashes).await?;
+                for key in &missing_pages {
+                    let body = src_pages.page(key).await?.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "source blob store is missing manifest page {} for folder {folder_id}",
+                            hex::encode(key.digest())
+                        )
+                    })?;
+                    anyhow::ensure!(
+                        fauna_core::data::ContentHash::of_raw(&body) == *key,
+                        "stored manifest page {} does not hash to its address — refusing to mirror corrupt bytes",
+                        hex::encode(key.digest())
+                    );
+                    client.upload_manifest_page(&body).await?;
+                }
             }
             client.upload_manifest(&manifest_bytes).await?;
 
@@ -1439,9 +1513,32 @@ impl NestBackupCoordinator {
             uploaded = report.uploaded_paths,
             dropped = report.dropped_paths,
             withheld = report.withheld_paths,
+            paged_unsupported = report.paged_unsupported_paths,
             "nest folder mirror: pass complete",
         );
         Ok(report)
+    }
+
+    /// Whether `dest` advertises `paged-manifests` on its `fauna.nest.info`,
+    /// read fresh through the federation pool's trust-ruled discovery dial
+    /// and refused unless the answering nest is the destination's pinned id.
+    async fn destination_takes_pages(&self, dest: &BackupDestinationRow) -> Result<bool> {
+        use fauna_protocol::discovery::capability;
+        let nest_id: [u8; 32] = dest
+            .nest_id
+            .as_slice()
+            .try_into()
+            .context("backup destination row carries a non-32-byte nest id")?;
+        let capabilities = self
+            .state
+            .federation_pool
+            .peer_capabilities(&dest.nest_url, &nest_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("reading the destination's capabilities: {e}"))?;
+        Ok(capability::supports(
+            &capabilities,
+            capability::PAGED_MANIFESTS,
+        ))
     }
 
     /// Tear down the mirror of every folder this coordinator has pushed to a

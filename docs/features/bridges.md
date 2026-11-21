@@ -57,17 +57,19 @@ Stamped 2026-11-07 at ac836c937b.
    - `tests/e2e-unified/tests/api/test_plugin_ingress.py::test_a_plugins_declared_path_and_sub_name_answer_and_the_nests_own_stay_put`
 15. [nest] A private message that reached you over a linked network never enters your nest's search; only what that network published openly can be found there — `docs/goal/behavior/content-index.md` § Bridge content in the Search corpus
    - `tests/e2e-unified/tests/api/test_bridge_private_content_not_searchable.py::test_a_private_bridge_message_never_enters_search_and_a_public_one_does`
+16. [app] The feed's bridge-subscribe form disables Subscribe and says which is missing while no bridge is picked or no address is typed, and stays open with what you typed when the subscribe fails — `docs/goal/ui/feed.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_bridge_subscribe_is_blocked_until_complete_and_a_failed_subscribe_keeps_the_form`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+5f525618 docker |
-| linux | ✅ full | 0.1.5-dev+5f525618 docker |
+| web | ⚠ partial | 0.1.5-dev+5f525618 docker |
+| linux | ⚠ partial | 0.1.5-dev+5f525618 docker |
 | windows | ⚠ partial | 0.1.5-dev+5f525618 docker |
 | macos | ✅ full | 0.1.5-dev+5f525618 docker |
-| ios | ✅ full | 0.1.5-dev+5f525618 docker |
+| ios | ⚠ partial | 0.1.5-dev+5f525618 docker |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+5f525618 docker |
 | android-kids | — absent | |
@@ -75,9 +77,9 @@ Stamped 2026-11-07 at ac836c937b.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_bridges.py::test_activitypub_links_through_the_bridges_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_bridges.py::test_activitypub_link_blocked_shows_the_nests_own_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_bridges.py::test_activitypub_link_blocked_falls_back_to_the_generic_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_bridges.py::test_activitypub_links_through_the_bridges_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_bridges.py::test_activitypub_link_blocked_shows_the_nests_own_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_bridges.py::test_activitypub_link_blocked_falls_back_to_the_generic_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_feed_bridge_subscribe.py::test_bridge_subscribe_and_unsubscribe_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_feed_bridge_selector_gating.py::test_bridge_subscribe_toggle_hidden_when_nest_supports_no_bridges` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_bluesky_oauth.py::test_bluesky_listed_with_oauth_link_mode` | nest (linux): passed, nest (macos): passed |
@@ -85,10 +87,10 @@ Stamped 2026-11-07 at ac836c937b.
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_availability_in_image.py::test_shipped_image_lists_the_bridges_it_compiled_in` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_availability_in_image.py::test_shipped_image_offers_the_bluesky_bridge` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_availability_in_image.py::test_domainless_shipped_image_refuses_bluesky_with_a_reason` | nest (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_bridges.py::test_a_card_setting_saves_on_change` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_bridges.py::test_the_search_toggle_and_cap_persist` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_bridges.py::test_a_follow_keeps_its_nickname` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_bridges.py::test_the_card_shows_the_linked_identity` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_bridges.py::test_a_card_setting_saves_on_change` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_bridges.py::test_the_search_toggle_and_cap_persist` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_bridges.py::test_a_follow_keeps_its_nickname` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_bridges.py::test_the_card_shows_the_linked_identity` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_an_admin_installs_a_plugin_from_its_card_and_uninstalls_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_user_connects_a_plugin_from_its_settings_card_and_disconnects_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 11 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_connected_bridge_app_is_listed_as_a_network_row_with_its_glyph` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
@@ -97,4 +99,5 @@ Stamped 2026-11-07 at ac836c937b.
 | 13 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_plugin_that_refused_to_start_is_listed_stopped_with_its_reason` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_plugin_ingress.py::test_a_plugins_declared_path_and_sub_name_answer_and_the_nests_own_stay_put` | nest (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_bridge_private_content_not_searchable.py::test_a_private_bridge_message_never_enters_search_and_a_public_one_does` | nest (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_bridge_subscribe_is_blocked_until_complete_and_a_failed_subscribe_keeps_the_form` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

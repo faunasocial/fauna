@@ -21,8 +21,9 @@ Three gates (all mandatory, in this order):
 2. **Ambient-session guard** (``real_ambient_session`` below): the run must
    actually be on the real desktop session — real ``/run/user/<uid>`` runtime
    dir, real session bus, a reachable ``systemd --user`` manager, no
-   ``FAUNA_E2E_*`` isolation in the environment. Fails loudly otherwise: a
-   green run inside driver-style isolation would silently test nothing.
+   ``FAUNA_E2E_*`` isolation in the environment. Refuses loudly otherwise (the
+   not-run exit, below): a green run inside driver-style isolation would
+   silently test nothing.
 3. **Exclusivity**: a machine-wide loud+bounded flock (the live_box_lock
    convention, keyed ``real-desktop-session``) held for the whole session —
    the desktop session is a singleton resource, so two runs serialize instead
@@ -55,6 +56,15 @@ could be theirs — and needs nothing of the desktop session, which a run drivin
 device does not use. A run whose every test is marked ``android`` takes this arm.
 Gate 3 is keyed ``real-android-device``, the resource actually held.
 
+**A refusal is not a red.** Every gate-2 refusal, and every precondition a test
+here refuses on because the box is busy with something it must not touch (on
+linux, a live Fauna desktop app owning ``social.fauna.fauna`` on the session bus —
+the run never kills it, that is live work), ends the run through
+``refuse_unrun``: it prints an ``UNRUN`` line and exits ``REAL_SESSION_UNRUN_EXIT``,
+loud and non-zero, but distinct from a test that ran and failed. The verify
+queue's tail declares the same exit for a ``real_session/`` node and leaves the
+request standing for a later pass (delayed-testing.md § The verify queue).
+
 Contract for tests here: **borrow and give back**. Back up any real state you
 touch (an existing ``fauna-sync-agent.service``, a running agent), restore it
 on teardown, and remove state your run created. Debris that is inert-by-key
@@ -69,6 +79,7 @@ import sys
 import pytest
 
 from helpers import live_box_lock
+from helpers.real_session_refusal import refuse_unrun
 
 # The singleton resource key: this box's desktop session. One owner at a time,
 # machine-wide, regardless of which test module wants it. On macOS the ambient
@@ -79,7 +90,7 @@ REAL_SESSION_LOCK_KEY = (
 
 
 def _fail(msg: str):
-    pytest.fail(f"real_session ambient-session guard: {msg}", pytrace=False)
+    refuse_unrun(f"real_session ambient-session guard: {msg}")
 
 
 #: Gate 3's key for the Android arm: the run's device.

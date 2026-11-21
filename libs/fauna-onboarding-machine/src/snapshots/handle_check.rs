@@ -51,8 +51,6 @@ pub struct HandleCheckSnapshot {
     pub outcome: HandleCheckOutcome,
     pub message: LocalizedText,
     pub continue_enabled: bool,
-    pub control_checkbox_visible: bool,
-    pub control_checkbox_checked: bool,
     /// Paint the by-continuing terms notice (`onboarding-terms-notice` +
     /// `onboarding-terms-link`) above the bottom row — true iff `outcome` is
     /// `AlreadyOnNest`, the one outcome whose Continue signs in rather than
@@ -82,6 +80,24 @@ pub fn terms_notice_visible_for(outcome: &HandleCheckOutcome) -> bool {
     }
 }
 
+/// Whether a completed check with this outcome leaves Continue live — an
+/// outcome Continue can act on: set up the domain (available, or registered
+/// with no nest), claim the nest, join it, or sign in. Exhaustive on purpose,
+/// like [`terms_notice_visible_for`].
+pub fn continue_enabled_for(outcome: &HandleCheckOutcome) -> bool {
+    match outcome {
+        HandleCheckOutcome::DomainAvailable { .. }
+        | HandleCheckOutcome::RegisteredNoNest
+        | HandleCheckOutcome::AlreadyOnNest { .. }
+        | HandleCheckOutcome::NestRunningUserUnregistered
+        | HandleCheckOutcome::UnregisteredUnclaimedNest => true,
+        HandleCheckOutcome::None
+        | HandleCheckOutcome::FormatInvalid
+        | HandleCheckOutcome::TldInvalid
+        | HandleCheckOutcome::ProbeError { .. } => false,
+    }
+}
+
 impl HandleCheckSnapshot {
     pub fn idle() -> Self {
         Self {
@@ -103,9 +119,23 @@ impl HandleCheckSnapshot {
             // milliseconds of Check, so it reads only while it is true.
             message: LocalizedText::key("onboarding.handle_check.idle"),
             continue_enabled: false,
-            control_checkbox_visible: false,
-            control_checkbox_checked: false,
             terms_notice_visible: false,
+        }
+    }
+}
+
+impl HandleCheckSnapshot {
+    /// `handle-entry-continue-button`'s answer (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 6): possible once the check found
+    /// an outcome Continue can act on, else blocked with the snapshot's own
+    /// `message` — the line every app already paints in
+    /// `handle-message-area`, never blank (see [`Self::idle`]). Replaces an
+    /// app reading `continue_enabled` beside the message itself.
+    pub fn continue_possibility(&self) -> fauna_core::possibility::Possibility {
+        if self.continue_enabled {
+            fauna_core::possibility::Possibility::Possible
+        } else {
+            fauna_core::possibility::Possibility::blocked(self.message.clone())
         }
     }
 }
@@ -242,12 +272,27 @@ mod tests {
                 args: Default::default(),
             },
             continue_enabled: true,
-            control_checkbox_visible: false,
-            control_checkbox_checked: false,
             terms_notice_visible: true,
         };
         let raw = serde_json::to_string(&s).unwrap();
         let s2: HandleCheckSnapshot = serde_json::from_str(&raw).unwrap();
         assert_eq!(s, s2);
+    }
+
+    /// Rule 6: Continue's answer is blocked by the very line the page paints
+    /// in `handle-message-area` until the check found an outcome to act on.
+    #[test]
+    fn continue_possibility_is_blocked_by_the_painted_message() {
+        let idle = HandleCheckSnapshot::idle();
+        assert_eq!(
+            idle.continue_possibility().reason(),
+            Some(&idle.message),
+            "idle Continue names the idle line"
+        );
+        let ready = HandleCheckSnapshot {
+            continue_enabled: true,
+            ..HandleCheckSnapshot::idle()
+        };
+        assert!(ready.continue_possibility().is_possible());
     }
 }

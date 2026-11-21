@@ -1114,6 +1114,28 @@ pub(super) const MIGRATIONS_MATERIALIZE_IN_FLIGHT: &str = "
     );
 ";
 
+/// `materialize_receipts` — the materialize receipt (`backup-destinations.md`
+/// § Third destination kind → *A lived-in segment set is completed by record in
+/// the same gesture*, rule (2); `db/materialize_receipts.rs`). One row per
+/// `(actor, set)` whose flip committed, written inside the transaction that
+/// made it live: the corpus's ledger generation (`0` for a covered folder) and
+/// the copy's manifest anchor. A later materialize of a copy the row covers is
+/// answered `already_materialized` rather than `target_not_empty`.
+///
+/// Why-recreatable: bookkeeping derived from the ceremony, never user data.
+/// Losing it only turns a repeat of a finished flip back into the ordinary
+/// empty-target refusal.
+pub(super) const MIGRATIONS_MATERIALIZE_RECEIPTS: &str = "
+    CREATE TABLE IF NOT EXISTS materialize_receipts (
+        actor_id          BLOB    NOT NULL,
+        set_name          TEXT    NOT NULL,
+        ledger_generation INTEGER NOT NULL,
+        manifest_anchor   BLOB    NOT NULL,
+        materialized_at   INTEGER NOT NULL,
+        PRIMARY KEY (actor_id, set_name)
+    );
+";
+
 pub(super) const MIGRATIONS_KEY_PACKAGES: &str = "
     CREATE TABLE IF NOT EXISTS key_packages (
         id TEXT PRIMARY KEY,
@@ -5695,6 +5717,10 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
     (
         "MIGRATIONS_MATERIALIZE_IN_FLIGHT",
         MIGRATIONS_MATERIALIZE_IN_FLIGHT,
+    ),
+    (
+        "MIGRATIONS_MATERIALIZE_RECEIPTS",
+        MIGRATIONS_MATERIALIZE_RECEIPTS,
     ),
     (
         "MIGRATIONS_FOLDER_CONTENT_KEYS",

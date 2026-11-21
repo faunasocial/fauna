@@ -345,6 +345,26 @@ pub fn custody_mint_candidates(
     Ok(fauna_client_custody::mint_candidates(&session, secret))
 }
 
+/// Whether `custody-mint-button` can open the offer flow now
+/// (`docs/goal/ui/devices.md` § Errors & edge cases): the shared
+/// [`fauna_client_conversations::custody_mint_possibility`] over the
+/// [`custody_mint_candidates`] answer — `None` before the page has read it
+/// (not enabled on a guess), an empty list blocked with the
+/// start-a-conversation step. The gate is at the entry, never on click.
+#[uniffi::export]
+pub fn custody_mint_possibility(
+    candidates: Option<Vec<CustodyMintCandidateView>>,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_conversations::custody_mint_possibility(candidates.as_deref())
+}
+
+/// `custody-mint-confirm-button`: blocked with its reason until a host is
+/// picked — [`fauna_client_conversations::custody_mint_confirm_possibility`].
+#[uniffi::export]
+pub fn custody_mint_confirm_possibility(host_picked: bool) -> fauna_core::possibility::Possibility {
+    fauna_client_conversations::custody_mint_confirm_possibility(host_picked)
+}
+
 /// Send a custody offer (`custody-mint-confirm-button`) — v1 offers the
 /// **Account** scope with the default grant window, the shape
 /// `ui/devices.md` § Custody facet ratified (a scope/duration control is a

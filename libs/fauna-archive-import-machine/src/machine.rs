@@ -23,6 +23,7 @@ use std::task::{Context, Poll, Waker};
 
 use fauna_archive::{ArchiveSummary, Category, ExportFormat, Platform};
 use fauna_core::data::Timestamp;
+use fauna_core::localized::LocalizedText;
 
 use crate::nest::{ArchiveNest, ArchiveNestError, ArchiveOpener, SharedSource};
 use crate::run::{category_of_kind, read_all, skip_line};
@@ -680,10 +681,9 @@ impl ArchiveImportMachine {
                 snap.step = ArchiveImportStep::Archive;
             }
             ArchiveImportStep::Archive => {
-                if snap.summary.is_none() {
-                    return Err(ArchiveImportDispatchError::InvalidState(
-                        "open an archive before choosing what to import".into(),
-                    ));
+                // The answer the Next button paints from, asked again.
+                if let Some(reason) = snap.next_possibility().reason() {
+                    return Err(refusal(reason.clone()));
                 }
                 snap.step = ArchiveImportStep::Scope;
             }
@@ -938,23 +938,44 @@ pub(crate) fn resolve_date_range(
     since: &str,
     until: &str,
 ) -> Result<(Option<Timestamp>, Option<Timestamp>), ArchiveImportDispatchError> {
-    let day = |value: &str| -> Result<Option<Timestamp>, ArchiveImportDispatchError> {
+    date_range_days(since, until).map_err(refusal)
+}
+
+/// [`resolve_date_range`]'s check with the reason a page paints — the one
+/// check the Scope step's answer
+/// ([`crate::ArchiveImportSnapshot::scope_possibility`]) and the run share.
+pub(crate) fn date_range_days(
+    since: &str,
+    until: &str,
+) -> Result<(Option<Timestamp>, Option<Timestamp>), LocalizedText> {
+    let day = |value: &str| -> Result<Option<Timestamp>, LocalizedText> {
         if value.is_empty() {
             return Ok(None);
         }
-        parse_ymd(value).map(Some).ok_or_else(|| {
-            ArchiveImportDispatchError::InvalidState("date must be YYYY-MM-DD".into())
-        })
+        parse_ymd(value)
+            .map(Some)
+            .ok_or_else(|| LocalizedText::key("archive_import.scope_date_invalid"))
     };
     let (from, until) = (day(since)?, day(until)?);
     if let (Some(f), Some(u)) = (from, until)
         && f > u
     {
-        return Err(ArchiveImportDispatchError::InvalidState(
-            "the since date is after the until date".into(),
+        return Err(LocalizedText::key(
+            "archive_import.scope_date_range_inverted",
         ));
     }
     Ok((from, until.map(|u| Timestamp(u.0 + 86_400 * 1_000_000))))
+}
+
+/// A refusal in the words a page paints: the reason's key, resolved.
+pub(crate) fn refusal(reason: LocalizedText) -> ArchiveImportDispatchError {
+    ArchiveImportDispatchError::InvalidState(reason.resolve(fauna_i18n::strings::lookup))
+}
+
+/// The "open an archive first" sentence, for a refusal the run makes when no
+/// archive is open (the same reason the Next button paints).
+pub(crate) fn archive_needed_sentence() -> String {
+    LocalizedText::key(crate::snapshot::ARCHIVE_NEEDED).resolve(fauna_i18n::strings::lookup)
 }
 
 #[cfg(test)]

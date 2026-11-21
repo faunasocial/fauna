@@ -602,7 +602,8 @@ pub struct BridgeBlock {
     pub glyph: String,
     /// A regex over the far network's own address spelling, at most
     /// [`MAX_BRIDGE_ADDRESS_GRAMMAR_BYTES`], known to compile. Matched
-    /// nest-side only, at `conversation.rooms.open`.
+    /// nest-side only, at `conversation.address.admit` and
+    /// `conversation.rooms.open`.
     pub address_grammar: String,
     /// The `ThreadCapabilities` record minus `encryption`.
     pub capabilities: std::collections::BTreeMap<String, BridgeCapabilityValue>,

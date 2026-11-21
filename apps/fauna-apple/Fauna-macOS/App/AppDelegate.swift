@@ -63,10 +63,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         // Bound it — quit must never hang on a put that cannot complete (an
-        // unreachable nest). Same 2.5 s ceiling linux bounds its blocking flush at;
-        // whichever reply lands first wins, and a dropped put leaves the rollup
-        // dirty so the next session retries it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+        // unreachable nest). The shared leave-flush budget plus a 0.5 s outer
+        // margin (as linux states it); whichever reply lands first wins, and a
+        // dropped put leaves the rollup dirty so the next session retries it.
+        let quitMargin: Duration = .milliseconds(500)
+        let quitCeiling = leaveFlushBound + quitMargin
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Int(quitCeiling / .milliseconds(1)))) {
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

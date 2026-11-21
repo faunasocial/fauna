@@ -271,7 +271,10 @@ _GOOD_VERDICTS = [
     "shipped-notices: windows-msi rust: components=728 files-copied=1147 fallbacks=68 left-out=0 refused=0",
     "shipped-notices: windows-msi go: components=24 files-copied=29 fallbacks=0 left-out=0 refused=0",
     "shipped-notices: windows-msi nuget: components=7 files-copied=11 fallbacks=1 left-out=0 refused=0",
-    "shipped-notices: windows-msi bundled: components=3 files-copied=8 fallbacks=0 left-out=0 refused=0",
+    # 7, not the 8 that run printed: the WiX entry's MS-RL text has been printed
+    # from its `standard_texts` field since 2026-11-14, no longer a staged file
+    # (MSI_BUNDLED_FILES says the same).
+    "shipped-notices: windows-msi bundled: components=3 files-copied=7 fallbacks=0 left-out=0 refused=0",
     "shipped-notices: windows-msi toolchain: components=2 files-copied=2 fallbacks=0 left-out=0 refused=0",
     "shipped-notices: not shipped nuget Microsoft.Windows.SDK.BuildTools@10.0.22621.756:"
     " no asset of it reaches the published output",
@@ -320,6 +323,24 @@ def test_the_msi_notices_check_names_each_missing_part(drop, why):
     assert any("no runtime pack read" in f for f in msi_notices_faults(zero, "win-arm64"))
 
 
+def test_the_msi_notices_check_reads_the_lines_the_build_step_returns(tmp_path):
+    """The check reads what `run_build_step` hands back, not lines typed into
+    a test: the generator's verdicts pass through the build step's pipe drain,
+    which tags each line it keeps by stream. Before this test, every fixture
+    MSI build failed with "the generator printed no OK verdict" over a
+    generator that had printed it, because the tag hid the verdict's prefix."""
+    import sys
+
+    from helpers.build_step import run_build_step
+
+    child = tmp_path / "echo_lines.py"
+    child.write_text("import sys\nfor ln in sys.argv[1:]:\n    print(ln)\n", encoding="utf-8")
+    out = run_build_step([sys.executable, str(child), "cargo fetch noise", *_GOOD_VERDICTS],
+                         "the notices verdicts, through the build step's drain")
+    assert msi_notices_faults(out, "win-arm64") == [], out
+    assert out[0] == "cargo fetch noise", "the build step hands back each line as the step printed it"
+
+
 def _build_msi_body() -> str:
     """`build_msi`'s source: the one builder of the test MSI, behind `msi_path`."""
     src = (_REPO / "tests" / "e2e-unified" / "helpers" / "windows_installer.py").read_text(encoding="utf-8")
@@ -345,3 +366,45 @@ def test_the_installer_readme_build_lists_the_notices_directory():
     """The hand build the README documents passes every variable the release does."""
     text = (_INSTALLER / "README.md").read_text(encoding="utf-8")
     assert "windows-msi-notices" in text and "NoticesDir=" in text
+
+
+# ── the nest MSI (installers/windows.md § Direct download, 1) ────────────────
+
+
+def test_the_nest_msi_artifact_names_its_row_and_carries_no_app():
+    """The nest MSI's own artifact: its features' binaries, the mail bridge and
+    the three bundled components — no NuGet leg, no agent, no shell extension
+    (shipped-notices.md § Per channel, the Windows nest MSI row)."""
+    arts = _manifest()["artifact"]
+    art = arts["windows-nest-msi"]
+    assert art["channel"] == "Windows nest MSI"
+    assert "nuget" not in art
+    packages = {p for group in art["rust"] for p in group["packages"]}
+    assert packages == {"fauna-nest-service", "fauna-bridge-service", "fauna-tui", "fauna-cli-device", "fauna-ffi"}
+    assert art["go"] == arts["windows-msi"]["go"]
+    assert art["bundled"] == arts["windows-msi"]["bundled"], (
+        "the nest MSI ships the same three bundled components as the full-feature MSI")
+
+
+def test_the_nest_recipe_writes_the_nest_artifact_after_staging_wix():
+    body = _recipe_body("windows-nest-msi-notices")
+    assert re.search(r'just shipped-licences "\{\{dir\}\}" \.txt', body), body
+    stage = body.index('scripts/windows-msi-wix-stage.py "$(dirname "{{bridge}}")"')
+    write = body.index('scripts/shipped-notices.py windows-nest-msi "{{dir}}/THIRD-PARTY-NOTICES.txt"')
+    assert stage < write
+    assert '--target "$CPU-pc-windows-msvc" --target "$CPU-pc-windows-gnullvm"' in body
+
+
+def test_the_nest_notices_check_asks_no_app_parts():
+    """`msi_notices_faults` for the nest artifact asks its bundled line and its
+    verdict, and nothing of a publish it never ran."""
+    nest = [
+        "shipped-notices: windows-nest-msi rust: components=600 files-copied=900 fallbacks=50 left-out=0 refused=0",
+        "shipped-notices: windows-nest-msi bundled: components=3 files-copied=7 fallbacks=0 left-out=0 refused=0",
+        "shipped-notices: windows-nest-msi OK — 640 components, 400 distinct texts",
+    ]
+    assert msi_notices_faults(nest, "win-arm64", "windows-nest-msi") == []
+    assert any("no OK verdict for windows-nest-msi" in f
+               for f in msi_notices_faults(nest[:2], "win-arm64", "windows-nest-msi"))
+    # the full-feature artifact's lines do not stand in for the nest's
+    assert msi_notices_faults(_GOOD_VERDICTS, "win-arm64", "windows-nest-msi")

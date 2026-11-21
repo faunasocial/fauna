@@ -727,6 +727,16 @@ pub struct AppState {
     #[cfg(feature = "test-hooks")]
     pub mail_health_state_override: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 
+    /// Test-only script of the outbound-STARTTLS probe's outcome, shared with
+    /// the `ScriptedStarttlsProber` the e2e build installs as
+    /// [`starttls_prober`](Self::starttls_prober) — how a tier_3 run stands in a
+    /// box whose outbound port 25 is blocked without touching the network.
+    /// `None` = the Null prober's answer. Driven by
+    /// `POST /api/v1/test/mail/starttls-probe`. Never compiled into production.
+    #[cfg(feature = "test-hooks")]
+    pub starttls_probe_script:
+        std::sync::Arc<std::sync::Mutex<Option<crate::mail_deliverability::StarttlsProbeOutcome>>>,
+
     /// Test-only re-score worklist serve counters — the drain's decision-point
     /// observable, so an e2e can prove "the nest decided after my plant landed"
     /// instead of sleeping a settle window. Bumped by

@@ -8,6 +8,9 @@ import com.fauna.app.core.ShellLog
 import com.fauna.ffi.FfiSessionsPage
 import com.fauna.ffi.FfiSessionsSnapshot
 import com.fauna.ffi.sessionsLockoutConfirmWord
+import com.fauna.ffi.sessionsRevokeOthersPossibility
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,7 +34,22 @@ data class SessionsUiState(
     val revokeOthersArmed: Boolean = false,
     val lockWord: String = "",
     val busy: Boolean = false,
+    /**
+     * `sessions-revoke-others-button`'s answer — the shared
+     * `sessions_view::revoke_others_possibility` over [snapshot] and [busy]
+     * (`ui/sessions.md` § Errors & edge cases), re-asked by the VM on every
+     * state change. The arm and the confirm both ask it again. The default is
+     * for the stateless harness only.
+     */
+    val revokeOthersAnswer: Possibility = Possibility.Possible,
+    /** A press the answer refused, painted on `error-message` above the
+     *  snapshot's own error; cleared by the next press that goes. */
+    val refusal: LocalizedText? = null,
 )
+
+/** The revoke-others answer over [state]'s fold and in-flight act. */
+internal fun revokeOthersAnswerOf(state: SessionsUiState): Possibility =
+    sessionsRevokeOthersPossibility(state.snapshot, state.busy)
 
 /**
  * Settings → Sessions (`docs/goal/ui/sessions.md`). Holds no fold, sort or
@@ -47,8 +65,25 @@ class SessionsVM @Inject constructor(
     private val secureStorage: SecureStorage,
 ) : ViewModel() {
 
-    private val _state = MutableStateFlow(SessionsUiState())
+    private val _state = MutableStateFlow(answered(SessionsUiState()))
     val state: StateFlow<SessionsUiState> = _state.asStateFlow()
+
+    /** [s] with its revoke-others answer re-asked — every state write goes
+     *  through [set], so the button never paints a stale answer. */
+    private fun answered(s: SessionsUiState): SessionsUiState =
+        s.copy(revokeOthersAnswer = revokeOthersAnswerOf(s))
+
+    private fun set(transform: (SessionsUiState) -> SessionsUiState) =
+        _state.update { answered(transform(it)) }
+
+    /** Rule 6 at the arm and the confirm: ask the answer again; a refusal
+     *  goes on `error-message` and nothing happens. `true` when refused. */
+    private fun refusesRevokeOthers(): Boolean {
+        val answer = revokeOthersAnswerOf(_state.value)
+        if (answer is Possibility.Possible) return false
+        set { it.copy(refusal = (answer as? Possibility.Blocked)?.reason, revokeOthersArmed = false) }
+        return true
+    }
 
     /** The lock's word, `LOCK`, from shared Rust — for the render's enable
      *  check only; the face re-checks what was typed in its action arm. */
@@ -78,19 +113,27 @@ class SessionsVM @Inject constructor(
     fun revoke(tokenId: String, onLocked: () -> Unit) =
         run(onLocked) { d, own, prev -> revoke(d, own, prev, tokenId) }
 
-    /** `sessions-revoke-others-button` — the first press only arms the confirm. */
-    fun armRevokeOthers() = _state.update { it.copy(revokeOthersArmed = true) }
+    /** `sessions-revoke-others-button` — the first press only arms the confirm,
+     *  and only when the answer says there is something to end: before the
+     *  first read folds, with no other sign-in listed, or in flight, it
+     *  refuses on `error-message` (`ui/sessions.md` § Errors & edge cases). */
+    fun armRevokeOthers() {
+        if (refusesRevokeOthers()) return
+        set { it.copy(revokeOthersArmed = true, refusal = null) }
+    }
 
     /** `sessions-revoke-others-cancel-button`. */
-    fun cancelRevokeOthers() = _state.update { it.copy(revokeOthersArmed = false) }
+    fun cancelRevokeOthers() = set { it.copy(revokeOthersArmed = false) }
 
-    /** `sessions-revoke-others-confirm-button` — the second press. */
+    /** `sessions-revoke-others-confirm-button` — the second press, which asks
+     *  the same answer again before anything reaches the nest. */
     fun confirmRevokeOthers(onLocked: () -> Unit) {
-        _state.update { it.copy(revokeOthersArmed = false) }
+        if (refusesRevokeOthers()) return
+        set { it.copy(revokeOthersArmed = false, refusal = null) }
         run(onLocked) { d, own, prev -> revokeOthers(d, own, prev) }
     }
 
-    fun onLockWordChange(value: String) = _state.update { it.copy(lockWord = value) }
+    fun onLockWordChange(value: String) = set { it.copy(lockWord = value) }
 
     /** `sessions-lockout-button` — the typed word goes to the face verbatim,
      *  which refuses a wrong one on `error-message` and reaches no nest. */
@@ -104,7 +147,7 @@ class SessionsVM @Inject constructor(
         call: suspend (DevicesMachine?, String?, FfiSessionsSnapshot?) -> FfiSessionsPage,
     ) {
         if (_state.value.busy) return
-        _state.update { it.copy(busy = true) }
+        set { it.copy(busy = true) }
         viewModelScope.launch {
             val page = try {
                 call(ensureDevices(), ownDeviceId, _state.value.snapshot)
@@ -113,14 +156,15 @@ class SessionsVM @Inject constructor(
                 ShellLog.w("SessionsVM", "[sessions] the pass could not start: ${e.message}")
                 null
             }
-            _state.update { it.copy(busy = false, snapshot = page?.snapshot ?: it.snapshot) }
+            // A landed pass paints its own error; an earlier refusal is stale.
+            set { it.copy(busy = false, snapshot = page?.snapshot ?: it.snapshot, refusal = null) }
             page?.snapshot?.let { SessionsTestState.paintedTokenIds = it.rows.map { r -> r.tokenId } }
             if (page?.locked == true) {
                 // The lock landed: every bearer is revoked and the nest mints no
                 // new one, so the app leaves the shell for its launch surface,
                 // whose re-run challenge lands the locked notice (leg 2).
                 ShellLog.w("SessionsVM", "[sessions] the account lock landed — leaving for the launch surface")
-                _state.update { it.copy(lockWord = "") }
+                set { it.copy(lockWord = "") }
                 onLocked()
             }
         }

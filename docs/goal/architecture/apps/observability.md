@@ -234,6 +234,7 @@ display funnel, each converted print, and each meaningful swallow.
   copy-to-clipboard / export affordance, and a clear button. Element IDs +
   page scope: ui.yaml (`settings-logs` page; the shared `log-entry` /
   `log-level-filter` / `log-copy-button` / `log-clear-button` component IDs).
+- **Copy and clear offer only what they can do (ruled 2026-11-17, `../../ui/README.md` § Offer only what is possible, rules 2 and 7).** With no entry shown under the active filter there is nothing to copy and nothing to clear: `log-copy-button` and `log-clear-button` are disabled with the page's own empty line as their reason — one answer, `fauna_log::format::ring_action_possibility(shown, <the page's empty key>)` (`logs.empty` on the device page, `admin.logs_page.empty` on `admin-logs`), which the buttons paint and the actions refuse by. A copy whose write reached the clipboard is confirmed on the button ("Copied!", the copied text as its `copied` attr — the `account-actor-id-copy-btn` contract); a write that failed puts `common.copy_failed` with the cause on the page's `error-message`, never a silent no-op. Built on tui (2026-11-17); lifted to the other six apps 2026-11-18.
 - **Per-page error banners stay — and now log as they display.** A user-facing
   failure still sets its page's `error-message` element (unchanged) — that is
   "displayed in the app" for the *active* task; the Logs page is the durable

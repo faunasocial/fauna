@@ -16,11 +16,9 @@ On Windows, yes — that's the everyday experience there. Fauna shows up as a
 cloud location in File Explorer (the same way OneDrive does), and Word, Excel,
 or any other program reads and writes those folders directly.
 
-On a Mac, not yet: the Fauna location in the Finder sidebar is built, but in
-the released Mac app it does not list your folders yet. Until it does, sync
-the folder to a location of your own choosing on the Mac: it is an ordinary
-folder in Finder; Word, Excel, or any other program reads and writes it
-directly, and Fauna keeps it in sync.
+On a Mac, no: the Fauna location in the Finder sidebar is built, but in the released Mac app it does not list your folders — Finder shows it empty, as if you were not signed in. Sync the folder to a location of your own choosing on the Mac: it is an ordinary folder
+in Finder; Word, Excel, or any other program reads and writes it directly, and
+Fauna keeps it in sync.
 
 Either way, you need the Fauna app itself only at the edges: accepting a share
 the first time, choosing which location on your machine carries it, browsing
@@ -52,7 +50,7 @@ Continuously, in both directions. When you save, your machine uploads within
 seconds, and if you and your collaborator are on the same nest their device
 is nudged the moment your save lands — in practice their copy updates in
 well under a couple of seconds, no waiting for the next scan. Sharing across
-two different nests doesn't get that instant nudge yet: there, learning
+two different nests doesn't get that instant nudge: there, learning
 about the other person's saves happens on the periodic catch-up, which runs
 every few minutes on every device. Either way, that catch-up remains the
 safety net that also picks up anything missed while a device was asleep or
@@ -110,6 +108,17 @@ an older version. The entry clears by itself as soon as that device receives
 a newer version of the file: edit the file on any device, or restore a
 version from its history. If the device was behind on Fauna itself, update
 it first.
+
+## What does a "Too large for this nest" entry on the conflict review list mean?
+
+Very large files are stored in a form that older nests cannot keep. When one
+of your devices finds a file too large for the nest it syncs with, it uploads
+none of it and lists the file on the folder's conflict review list as
+**Too large for this nest — not uploaded**. Every other file keeps syncing,
+and refusing the file leaves the device's own copy untouched. To fix it,
+update the nest to a newer version of Fauna, or keep the file out of the
+folder. The entry clears by itself once the file uploads, or when you delete
+the file or move it out of the folder.
 
 ## Can Word and Excel co-author live, like on OneDrive?
 
@@ -204,7 +213,7 @@ A location is never left *silently* stale.
 
 | Piece | Status |
 |---|---|
-| Explorer / Finder cloud folders (open/edit/save without the app) | **Available on Windows** (File Explorer); **not yet on Mac** — the Finder location is built but does not list your folders in the released Mac app; a folder synced to a location of your own choosing works in Finder meanwhile |
+| Explorer / Finder cloud folders (open/edit/save without the app) | **Available on Windows** (File Explorer); **not on Mac** — the Finder location is built but does not list your folders in the released Mac app; a folder synced to a location of your own choosing works in Finder |
 | Sharing to someone on your nest, Reader/Writer roles, per-writer caps | **Available** — a writer's folder syncs both ways (the web app keeps no local folder to sync) |
 | Sharing to someone on **another nest** — browsing + downloading | **Available** (accept the invitation once, then it behaves like any other directory) |
 | Write access for someone on another nest (their location binding) | **Available** — accept the invitation, then bind the folder like one of your own |

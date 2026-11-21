@@ -143,6 +143,21 @@ func (c *Client) UploadManifest(ctx context.Context, token string, manifestBytes
 	return c.doUpload(req, "manifest")
 }
 
+// UploadManifestPage POSTs one page of a paged manifest to the page door
+// (`/api/v1/manifest-pages`) under a bulk `write` token and returns the
+// nest-computed page hash (hex). Pages go up after the chunks they name and
+// before their root (`file-sync.md` § Paged manifests → *Transport and
+// order*); a page is fetched back, like a root, through DownloadManifest.
+func (c *Client) UploadManifestPage(ctx context.Context, token string, pageBytes []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/manifest-pages", bytes.NewReader(pageBytes))
+	if err != nil {
+		return "", fmt.Errorf("build manifest page upload: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	return c.doUpload(req, "manifest page")
+}
+
 func (c *Client) doUpload(req *http.Request, kind string) (string, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {

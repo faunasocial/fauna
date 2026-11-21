@@ -137,6 +137,17 @@ class MutedWordsContentTest {
         composeTestRule.onNodeWithTag("muted-word-add-button").assertIsNotEnabled()
     }
 
+    /** The add button paints from the shared `muted_word_add_possibility`:
+     *  disabled until a term is typed, live once one is
+     *  (`docs/goal/ui/settings.md` § Errors & edge cases). */
+    @Test
+    fun addIsDisabledUntilATermIsTyped() {
+        render()
+        composeTestRule.onNodeWithTag("muted-word-add-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("muted-word-input").performTextInput("news")
+        composeTestRule.onNodeWithTag("muted-word-add-button").assertIsEnabled()
+    }
+
     @Test
     fun errorRendersWhenPresent() {
         render(error = "boom")

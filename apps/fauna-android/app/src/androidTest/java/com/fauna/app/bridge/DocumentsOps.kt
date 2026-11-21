@@ -5,6 +5,8 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import com.fauna.app.provider.FaunaDocumentsProvider
+import com.fauna.app.provider.FfiOnDemandSource
+import com.fauna.app.testing.OnDemandResidencyProbe
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -17,7 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * The documents provider as another app's picker drives it
  * (`drivers/android.py`'s `documents_*` verbs): list a directory, create a
  * document, open one for write and later write + close it, read one back,
- * and read each presented set's park.
+ * read each presented set's park, read one document's residency, and trim
+ * the account's on-demand cache as the OS does.
  *
  * The provider is guarded by `MANAGE_DOCUMENTS`, which `adb shell content`
  * does not hold; the instrumentation runs in the app's own process, whose uid
@@ -47,6 +50,7 @@ class DocumentsOps(private val context: Context) {
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_FLAGS,
+            DocumentsContract.Document.COLUMN_SIZE,
         )
         context.contentResolver.query(uri, projection, null, null, null)?.use { c ->
             while (c.moveToNext()) {
@@ -54,7 +58,9 @@ class DocumentsOps(private val context: Context) {
                     JSONObject()
                         .put("id", c.getString(0))
                         .put("name", c.getString(1))
-                        .put("flags", c.getInt(2)),
+                        .put("flags", c.getInt(2))
+                        // A directory row carries no size.
+                        .put("size", if (c.isNull(3)) JSONObject.NULL else c.getLong(3)),
                 )
             }
         }
@@ -95,12 +101,45 @@ class DocumentsOps(private val context: Context) {
         context.contentResolver.openInputStream(docUri(documentId))?.use { it.readBytes() }
             ?: error("the provider opened no stream for $documentId")
 
+    private fun source(): FfiOnDemandSource = EntryPointAccessors.fromApplication(
+        context.applicationContext,
+        FaunaDocumentsProvider.OnDemandSourceEntryPoint::class.java,
+    ).onDemandSource()
+
+    /**
+     * Where [documentId]'s body rests, read in-process off the host the provider
+     * calls (`OnDemandResidencyProbe`): `{listed, size, hydrated, root, body_bytes}`,
+     * `root` being `kept`, `cache` or null (a placeholder); `listed` false when the
+     * set lists no such document. Reading never opens the document, so it never
+     * hydrates — the twin of a desktop leg's `stat`.
+     */
+    fun residency(documentId: String): JSONObject {
+        val (scopedId, rel) = OnDemandResidencyProbe.split(documentId)
+            ?: error("not a document id: $documentId")
+        val host = runBlocking { source().host(scopedId) } ?: error("no presented set: $scopedId")
+        val read = runBlocking { OnDemandResidencyProbe.read(host, rel, context.filesDir, context.cacheDir) }
+            ?: return JSONObject().put("listed", false)
+        return JSONObject()
+            .put("listed", true)
+            .put("size", read.sizeBytes)
+            .put("hydrated", read.hydrated)
+            .put("root", read.root?.wire ?: JSONObject.NULL)
+            .put("body_bytes", read.bodyBytes)
+    }
+
+    /**
+     * The OS's cache trim over the signed-in account's on-demand cache roots
+     * (`OnDemandResidencyProbe.reclaimCache`); how many files went. Nothing of
+     * the app's is told — the host observes it at its next open or pull.
+     */
+    fun reclaimCache(): Int {
+        val actor = source().activeActorHex() ?: error("signed out: no account's cache to trim")
+        return OnDemandResidencyProbe.reclaimCache(context.cacheDir, actor)
+    }
+
     /** Each presented set's park read: name, folder id, the host's mark, the un-recorded count. */
     fun parks(): JSONArray {
-        val source = EntryPointAccessors.fromApplication(
-            context.applicationContext,
-            FaunaDocumentsProvider.OnDemandSourceEntryPoint::class.java,
-        ).onDemandSource()
+        val source = source()
         val out = JSONArray()
         runBlocking { source.presentedParks() }.forEach { (name, park) ->
             out.put(

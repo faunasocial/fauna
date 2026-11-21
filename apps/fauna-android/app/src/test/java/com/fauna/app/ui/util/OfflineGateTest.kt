@@ -92,6 +92,9 @@ import com.fauna.app.ui.screen.nostr.NostrContent
 import com.fauna.app.ui.screen.profile.ProfileOffersContent
 import com.fauna.app.ui.screen.profile.ProfileTiersContent
 import uniffi.fauna_core.OfferStatus
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
+import com.fauna.app.core.atproto.AtprotoPossibilities
 import com.fauna.app.core.HexUtil
 import com.fauna.app.payments.ClaimItem
 import com.fauna.app.payments.ProviderItem
@@ -107,6 +110,9 @@ import com.fauna.ffi.FfiTierItem
 import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_client_dns.DelegationView
 import uniffi.fauna_client_dns.DnsRecordRow
+import uniffi.fauna_client_dns.CredentialSummary
+import uniffi.fauna_client_dns.DnsSnapshot
+import uniffi.fauna_client_dns.DnsStatus
 import uniffi.fauna_client_dns.DomainView
 import uniffi.fauna_client_dns.PendingCertIssue
 import uniffi.fauna_client_dns.RecordVerdict
@@ -120,7 +126,9 @@ import uniffi.fauna_client_mail_settings.OutboundPolicyView
 import uniffi.fauna_client_mail_settings.SpamPolicyView
 import uniffi.fauna_client_mail_settings.SubmissionPolicyView
 import uniffi.fauna_client_mail_settings.DomainDmarcPolicy
+import uniffi.fauna_client_mail_settings.LocalDomainStatus
 import uniffi.fauna_client_mail_settings.LocalDomainView
+import uniffi.fauna_client_mail_settings.LocalDomainsSnapshot
 import com.fauna.app.ui.screen.devices.DevicesRosterContent
 import com.fauna.app.ui.screen.settings.MailExportContent
 import com.fauna.app.ui.screen.settings.MailImportContent
@@ -135,6 +143,8 @@ import uniffi.fauna_client_mail_settings.ImportStep
 import uniffi.fauna_client_mail_settings.ImportTlsMode
 import uniffi.fauna_client_mail_settings.MailExportSnapshot
 import uniffi.fauna_client_mail_settings.MailImportSnapshot
+import uniffi.fauna_client_mail_settings.MailboxOption
+import uniffi.fauna_client_mail_settings.SourceMailboxOption
 import uniffi.fauna_devices_machine.DevicesSnapshot
 import uniffi.fauna_mail.ExportFormat
 import uniffi.fauna_client_mail_settings.PrimaryDomainRenameView
@@ -178,7 +188,7 @@ import org.robolectric.annotation.Config
  * the **real** shared rule (`account-data-plane.md` § The offline-mutation
  * contract → *How a surface asks*).
  *
- * These call the live `offlineAffordance` over JNA rather than a Kotlin stand-in,
+ * These call the live `offlinePossibility` over JNA rather than a Kotlin stand-in,
  * which is the whole point: the rule's three rulings are not restated in Kotlin,
  * so a test that mocked the verdict would prove only that `enabled =` is wired
  * to *something*. Run them with `just android-host-test` — it builds the host
@@ -455,6 +465,7 @@ class OfflineGateTest {
                 // control always present) is what `committing` covers.
                 regionView = null,
                 regionWorking = false,
+                setAnswers = com.fauna.app.ui.screen.settings.AdminDraftFakes.nestSet,
                 onBack = {},
                 onSetPairing = {},
                 onSaveServingPort = {},
@@ -509,6 +520,11 @@ class OfflineGateTest {
                         code.length in 2..8 && code.all { c -> c in 'A'..'Z' || c in '0'..'9' }
                     }
                 },
+                // The two saves' draft answers held possible: this file's
+                // subject is the gate, and an undeclared region's blank draft
+                // would otherwise block its save before the gate is asked.
+                servingPortDraft = { uniffi.fauna_core.Possibility.Possible },
+                regionDraft = { uniffi.fauna_core.Possibility.Possible },
             )
         }
     }
@@ -717,12 +733,12 @@ class OfflineGateTest {
                 restoreOutcome = null,
             ),
             onBack = {},
-            onLink = {},
+            onLink = { _, _ -> },
             onUnlink = {},
             onSetLens = { _, _ -> },
             onRenew = {},
             onRevoke = {},
-            onMint = { _, _, _, _ -> },
+            onMint = { _, _, _, _, _ -> },
             onRevokeBackupSeal = {},
             onRevokeBackupWriter = {},
             onRestoreGeneration = { _, _, _, _ -> },
@@ -1143,9 +1159,17 @@ class OfflineGateTest {
         )
     }
 
+    /** A typed code, so the redeem's draft half (`redeem_code_possibility`) is
+     *  satisfied and the assertion is about the offline gate alone. */
+    private fun typeClaimCode() {
+        composeTestRule.onNodeWithTag("subscription-claim-redeem-input")
+            .performScrollTo().performTextInput("CODE42")
+    }
+
     @Test
     fun subscriptionCommitsGate_whileTheClaimCodeBufferStaysLive() {
         render(FfiConnectionState.DISCONNECTED) { SubscriptionSettings() }
+        typeClaimCode()
         composeTestRule.onNodeWithTag("subscription-mine-unsubscribe-button")
             .performScrollTo().assertIsNotEnabled()
         composeTestRule.onNodeWithTag("subscription-claim-redeem-button")
@@ -1159,6 +1183,7 @@ class OfflineGateTest {
     @Test
     fun subscriptionCommitsAreLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) { SubscriptionSettings() }
+        typeClaimCode()
         composeTestRule.onNodeWithTag("subscription-mine-unsubscribe-button")
             .performScrollTo().assertIsEnabled()
         composeTestRule.onNodeWithTag("subscription-claim-redeem-button")
@@ -1188,6 +1213,8 @@ class OfflineGateTest {
             statusLabel = { "none" },
             working = false,
             onSubscribe = {},
+            // A typed code: the draft half is satisfied, so the gate is what closes it.
+            redeemCode = "CODE42",
         )
     }
 
@@ -1253,6 +1280,11 @@ class OfflineGateTest {
             webhookUrl = { kind -> "https://example.test/webhook/$kind" },
             claimStatusLabel = { _, _ -> LocalizedText("k", emptyMap()) },
             providerStatusLabel = { _, _ -> LocalizedText("k", emptyMap()) },
+            // The §1 tier read has answered: the mint and the provider opener are
+            // painted from the shared own-tier answer over it, so a PENDING read
+            // (the parameter's default) would hold them dead for a reason that is
+            // not the gate under test.
+            tiersRead = ReadState.RESOLVED,
         )
     }
 
@@ -1359,11 +1391,14 @@ class OfflineGateTest {
     @Test
     fun providerFormSaveStaysDeadWithNoTiersEvenConnected() {
         // The converse, and the reason the pair above can discriminate.
+        // With no tier the form never opens — the page's own-tier answer gates
+        // its opener (profile.md § Errors & edge cases, *A tier before what
+        // sells it*), so the save is unreachable for a page reason, never the gate.
         render(FfiConnectionState.CONNECTED) { ScrollHost { TiersWithNoTiers() } }
         composeTestRule.onNodeWithTag("subscription-provider-add-button")
-            .performScrollTo().performClick()
-        composeTestRule.onNodeWithTag("subscription-provider-form-save")
             .performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("subscription-provider-form-save")
+            .assertDoesNotExist()
         composeTestRule.onNodeWithText(needsNest()).assertDoesNotExist()
     }
 
@@ -1499,6 +1534,10 @@ class OfflineGateTest {
     @Test
     fun proposeTransferIsLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) { Family(familyStatus()) }
+        // A valid hex id, so the draft half (`transfer_possibility`) is
+        // satisfied and the assertion is about the offline gate alone.
+        composeTestRule.onNodeWithTag("family-transfer-input")
+            .performScrollTo().performTextInput("cd".repeat(32))
         composeTestRule.onNodeWithTag("family-transfer-button")
             .performScrollTo().assertIsEnabled()
     }
@@ -1595,7 +1634,8 @@ class OfflineGateTest {
         AdminWebContent(
             currentActorHex = null,
             actors = listOf(ActorOption(idHex = "ab".repeat(32), label = "alice")),
-            apexUrl = "https://example.test/",
+            apexInfo = null,
+            pickerAnswer = uniffi.fauna_core.Possibility.Possible,
             onBack = {},
             onSetApex = {},
         )
@@ -1941,6 +1981,17 @@ class OfflineGateTest {
                     makeAdmin = true, removeAdmin = true,
                 )
             },
+            // The admit key and ceiling drafts held possible: this file's
+            // subject is the gate, and the blank admit key would otherwise
+            // block admit before the gate is asked. Remove-admin likewise: the
+            // fixture's non-admin row answers absent, which `rowControls`
+            // above overrides only for shown-ness.
+            answers = com.fauna.app.ui.screen.settings.AdminUsersAnswers(
+                removeAdmin = { uniffi.fauna_core.Possibility.Possible },
+                registrationCeiling = { uniffi.fauna_core.Possibility.Possible },
+                admitActor = { uniffi.fauna_core.Possibility.Possible },
+                rowControl = com.fauna.app.ui.screen.settings.AdminDraftFakes.rowControl,
+            ),
         )
     }
 
@@ -2064,6 +2115,12 @@ class OfflineGateTest {
             onSaveMembershipTier = { _, _, _ -> },
             onClearMembershipTier = {},
             parseCap = { it.trim().toLongOrNull()?.coerceAtLeast(0) },
+            // The membership save's draft held possible: this file's subject
+            // is the gate, and an undesignated row's blank admitted-at tier
+            // would otherwise block its save before the gate is asked.
+            drafts = com.fauna.app.ui.screen.settings.AdminSettingsDrafts(
+                membershipSave = { uniffi.fauna_core.Possibility.Possible },
+            ),
         )
     }
 
@@ -2299,6 +2356,7 @@ class OfflineGateTest {
         pendingCert: PendingCertIssue? = null,
         working: Boolean = false,
         removeConfirmDomain: String? = null,
+        credentials: List<CredentialSummary> = emptyList(),
     ) {
         // Deliberately NOT wrapped in [ScrollHost]: `AdminDnsContent` owns its own
         // `verticalScroll`, and nesting two vertical scrollers is an immediate
@@ -2311,7 +2369,7 @@ class OfflineGateTest {
             addingFirstDomain = false,
             removeConfirmDomain = removeConfirmDomain,
             dnsDomains = dnsDomains,
-            credentials = emptyList(),
+            credentials = credentials,
             actors = actors,
             manageAll = false,
             certStatuses = emptyList(),
@@ -2319,12 +2377,36 @@ class OfflineGateTest {
             pendingCert = pendingCert,
             working = working,
             error = null,
+            // The page's shared answers read these (`dns-management.md` § Errors &
+            // edge cases), built from the seeded state as the VM publishes them.
+            dnsSnapshot = DnsSnapshot(
+                domains = dnsDomains,
+                credentials = credentials,
+                status = DnsStatus.IDLE,
+                error = null,
+                pendingCert = pendingCert,
+                delegations = delegations,
+                certStatuses = emptyList(),
+                certIssuanceErrors = emptyList(),
+                uncoveredSans = emptyList(),
+            ),
+            localDomainsSnapshot = LocalDomainsSnapshot(
+                active = activeDomains,
+                softDeleted = removedDomains,
+                status = LocalDomainStatus.IDLE,
+                error = null,
+                lastAddSkipped = false,
+                activeRename = activeRename,
+                renameAvailable = renameAvailable,
+                addingFirstDomain = false,
+                removeConfirmDomain = removeConfirmDomain,
+            ),
             onBack = {},
             onRefresh = {},
-            onAddDomain = {},
+            onAddDomain = { _, _ -> },
             onArmRemoveDomain = {},
             onRestoreDomain = {},
-            onStartRename = { _, _ -> },
+            onStartRename = { _, _, _ -> },
             onCompleteRename = { _, _ -> },
             onExtendRename = { _, _ -> },
             onAbortRename = {},
@@ -2333,7 +2415,7 @@ class OfflineGateTest {
             onSetDmarcPolicy = { _, _ -> },
             onSetMode = { _, _ -> },
             onSetManageAll = {},
-            onPutCredential = { _, _, _ -> },
+            onPutCredential = { _, _, _, _ -> },
             onClearCredential = {},
             onIssueCert = {},
             onBeginManualIssue = {},
@@ -2352,6 +2434,10 @@ class OfflineGateTest {
         // stay live — and it has to, or the submit could never be reached.
         composeTestRule.onNodeWithTag("admin-dns-add-domain-button")
             .performScrollTo().assertIsEnabled().performClick()
+        // ⚠ The submit has its OWN draft predicate (a well-formed new name), so
+        // type one first, or this passes against an ungated app.
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-input")
+            .performTextInput("new.example.com")
         composeTestRule.onNodeWithTag("admin-dns-add-domain-submit-button")
             .performScrollTo().assertIsNotEnabled()
         // *The commit gates, not the buffer* — in its two clearest forms.
@@ -2366,6 +2452,8 @@ class OfflineGateTest {
         render(FfiConnectionState.CONNECTED) { AdminDns() }
         composeTestRule.onNodeWithTag("admin-dns-add-domain-button")
             .performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-input")
+            .performTextInput("new.example.com")
         composeTestRule.onNodeWithTag("admin-dns-add-domain-submit-button")
             .performScrollTo().assertIsEnabled()
     }
@@ -2455,6 +2543,11 @@ class OfflineGateTest {
             AdminDns(
                 activeDomains = listOf(localDomain(primary = true)),
                 dnsDomains = listOf(managedDns("example.com")),
+                // The master switch's "on" needs every active domain covered by
+                // a held credential (its own answer, not the gate's).
+                credentials = listOf(
+                    CredentialSummary(providerId = "hetzner", zones = listOf("example.com"), label = "Hetzner"),
+                ),
             )
         }
         composeTestRule.onNodeWithTag("admin-dns-manage-all-toggle")
@@ -3036,6 +3129,11 @@ class OfflineGateTest {
             onBatchImport = {},
             onUnsubscribe = {},
             onResubscribe = {},
+            // The submits' emptiness predicates live in shared Rust now; hand
+            // the Content the real answers the Screen does, so the converse
+            // case below reads the composed gate, not a default `Possible`.
+            addAnswer = { uniffi.fauna_client_mail_settings.memberAddPossibility(it) },
+            importAnswer = { uniffi.fauna_client_mail_settings.memberImportPossibility(it) },
         )
     }
 
@@ -3114,6 +3212,10 @@ class OfflineGateTest {
                 )
             ),
             localDomains = localDomains,
+            // The shared create answer as `MailListsSnapshot::create_possibility`
+            // gives it: blocked with the domain reason while there is none.
+            createAnswer = if (localDomains.isNotEmpty()) uniffi.fauna_core.Possibility.Possible
+            else uniffi.fauna_core.Possibility.Blocked(LocalizedText("mail_lists.no_domain", emptyMap())),
             working = false,
             onBack = {},
             onCreate = {},
@@ -3195,7 +3297,10 @@ class OfflineGateTest {
                     expiresAtMs = null,
                 )
             ),
-            defaultDomain = defaultDomain,
+            // The shared create answer as `MailAliasesSnapshot::create_possibility`
+            // gives it: blocked with the domain reason while there is none.
+            createAnswer = if (defaultDomain != null) uniffi.fauna_core.Possibility.Possible
+            else uniffi.fauna_core.Possibility.Blocked(LocalizedText("mail_aliases.no_default_domain", emptyMap())),
             working = false,
             lastImportResult = null,
             kindLabel = { it.name },
@@ -3312,10 +3417,11 @@ class OfflineGateTest {
     private fun MailSettings(pendingRotation: PendingRotationStatus? = null) {
         MailSettingsContent(
             enabled = true,
+            mailUsable = uniffi.fauna_core.Possibility.Possible,
             caldavEnabled = false,
             carddavEnabled = false,
             servesWebdavSet = false,
-            credentialManagementReachable = true,
+            credentialAnswer = uniffi.fauna_core.Possibility.Possible,
             servingEnabled = true,
             credentials = listOf(
                 MailCredentialSummary(
@@ -3449,7 +3555,7 @@ class OfflineGateTest {
             onBack = {},
             onSetCaldavEnabled = {},
             onSavePort = {},
-            onInvalidPort = {},
+            onPortRefused = {},
             parsePort = { it.toIntOrNull() },
         )
     }
@@ -3956,7 +4062,7 @@ class OfflineGateTest {
             onExportIcs = {},
             onRsvp = { _, _ -> },
             onCreateCalendar = {},
-            onCreateEvent = {},
+            onCreateEvent = { _, _ -> },
             draft = draft,
             onDraftEdited = onDraftEdited,
             onStartFreshDraft = onStartFreshDraft,
@@ -4296,8 +4402,16 @@ class OfflineGateTest {
      */
     @Composable
     private fun AtprotoUnderTest(snapshot: AtprotoSettingsSnapshot) {
+        // The machine's answers are inputs to the page: a hosted rung the box
+        // refuses is blocked with the gate's reason, every other rung possible.
+        val hostedGate = Possibility.Blocked(LocalizedText("atproto_settings.gate_reason", emptyMap()))
         AtprotoSettingsContent(
             snapshot = snapshot,
+            possibilities = AtprotoPossibilities.forTest(
+                rungs = listOf("off", "linked", "hosted_visible", "hosted_full").associateWith {
+                    if (it.startsWith("hosted") && !snapshot.hostedAllowed) hostedGate else Possibility.Possible
+                },
+            ),
             blueskyBridge = null,
             blueskyFollows = emptyList(),
             onBack = {},
@@ -4574,14 +4688,26 @@ class OfflineGateTest {
         status = LocalizedText("features.status_restricted", emptyMap()),
     )
 
+    /** A 64-hex draft, so the add button's draft half (the shared
+     *  `zap_signer_add_possibility`) is satisfied and each case below is
+     *  about the gate, not about an empty field. */
+    private fun typeValidSignerPubkey() {
+        composeTestRule.onNodeWithTag("nostr-zap-signer-pubkey-input")
+            .performScrollTo().performTextInput("ab".repeat(32))
+    }
+
     @Composable
     private fun ZapSigners(gateRow: FfiFeatureRow? = null) {
+        // The VM's answer over a loaded read: the shared gate over the row,
+        // or a bounded-but-available plane when the case names none.
+        val gate = gateRow?.let { com.fauna.ffi.featuresGatePossibility(listOf(it), "zaps") }
+            ?: uniffi.fauna_core.Possibility.Possible
         NostrContent(
             registered = true,
             bridge = nostrBridge(),
             follows = emptyList(),
             zapSigners = listOf(zapSigner()),
-            zapSignerGateRow = gateRow,
+            zapSignerGate = gate,
             onLink = { _, _ -> },
             onUnlink = {},
             onUpdateSetting = { _, _ -> },
@@ -4595,6 +4721,7 @@ class OfflineGateTest {
     @Test
     fun theZapSignerAddAndRemoveGate_whileTheirPubkeyAndLabelBuffersStayLive() {
         render(FfiConnectionState.DISCONNECTED) { ZapSigners() }
+        typeValidSignerPubkey()
         // Designating a signer and undesignating one are both commits: the
         // remove is an immediate commit with no arming step, so the row button
         // IS the gesture.
@@ -4613,6 +4740,7 @@ class OfflineGateTest {
     @Test
     fun theZapSignerCommitsAreLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) { ZapSigners() }
+        typeValidSignerPubkey()
         composeTestRule.onNodeWithTag("nostr-zap-signer-add-btn")
             .performScrollTo().assertIsEnabled()
         composeTestRule.onNodeWithTag("nostr-zap-signer-remove")
@@ -4623,6 +4751,7 @@ class OfflineGateTest {
     @Test
     fun theZapSignerAddStaysDeadUnderAFeatureDenyEvenConnected() {
         render(FfiConnectionState.CONNECTED) { ZapSigners(gateRow = deniedZapsRow()) }
+        typeValidSignerPubkey()
         // The converse half. The page's Dim-3 verdict is the stronger, more
         // specific reason, so with a nest present the button is still dead and
         // the reason beside it is the FEATURE's, never "needs a nest".
@@ -4873,7 +5002,10 @@ class OfflineGateTest {
         tlsMode = ImportTlsMode.IMPLICIT,
         username = "",
         password = "",
-        mailboxes = emptyList(),
+        // One mailbox selected: the Start is painted from the shared scope
+        // answer (no mailbox → blocked), and the gate under test must be the
+        // only thing left that can disable it.
+        mailboxes = listOf(SourceMailboxOption(name = "INBOX", selected = true, messageCount = 10u)),
         dateFrom = "",
         maxSizeBytes = 52428800uL,
         sessionState = null,
@@ -4892,6 +5024,7 @@ class OfflineGateTest {
     private fun MailImport(step: ImportStep) {
         MailImportContent(
             snapshot = importSnap(step),
+            outlookAnswer = uniffi.fauna_core.Possibility.Possible,
             sourceKindLabel = { it.name },
             tlsModeLabel = { it.name },
             onBack = {},
@@ -4915,10 +5048,13 @@ class OfflineGateTest {
         )
     }
 
-    private fun exportSnap(step: ExportStep) = MailExportSnapshot(
+    private fun exportSnap(step: ExportStep, downloadUrl: String = "") = MailExportSnapshot(
         step = step,
         format = ExportFormat.MBOX,
-        mailboxes = emptyList(),
+        // One mailbox selected: the Start is painted from the shared scope
+        // answer (no mailbox → blocked), and the gate under test must be the
+        // only thing left that can disable it.
+        mailboxes = listOf(MailboxOption(name = "INBOX", selected = true)),
         dateFrom = "",
         dateTo = "",
         stripHeaders = false,
@@ -4930,7 +5066,7 @@ class OfflineGateTest {
         mailboxProgress = emptyList(),
         errorLog = emptyList(),
         blobBytes = null,
-        downloadUrl = "",
+        downloadUrl = downloadUrl,
         savedArchivePath = "",
         startedAt = 0L,
         lastProgressAt = 0L,
@@ -4939,9 +5075,9 @@ class OfflineGateTest {
     )
 
     @Composable
-    private fun MailExport(step: ExportStep) {
+    private fun MailExport(step: ExportStep, downloadUrl: String = "") {
         MailExportContent(
-            snapshot = exportSnap(step),
+            snapshot = exportSnap(step, downloadUrl),
             formatLabel = { it.name },
             onBack = {},
             onSelectFormat = {},
@@ -5050,5 +5186,26 @@ class OfflineGateTest {
     fun theExportDiscardIsLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) { MailExport(ExportStep.DONE) }
         assertGated(listOf("mail-export-discard-button"), gated = false)
+    }
+
+    // The export Download has no wire kind (a GET of the minted URL), so it
+    // paints from the shared carve-out answer (`carveOutAnswer`), the backups
+    // file-download shape: offline it is disabled with `common.needs_nest`.
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExportDownloadAsksTheCarveOutAnswerOffline() {
+        render(FfiConnectionState.DISCONNECTED) {
+            MailExport(ExportStep.DONE, downloadUrl = "https://nest.example/x")
+        }
+        assertGated(listOf("mail-export-download-button"), gated = true)
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExportDownloadIsLiveWhenConnected() {
+        render(FfiConnectionState.CONNECTED) {
+            MailExport(ExportStep.DONE, downloadUrl = "https://nest.example/x")
+        }
+        assertGated(listOf("mail-export-download-button"), gated = false)
     }
 }

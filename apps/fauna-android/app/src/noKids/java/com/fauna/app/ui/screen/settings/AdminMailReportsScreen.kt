@@ -23,6 +23,7 @@ import uniffi.fauna_client_mail_settings.DmarcCountRow
 import uniffi.fauna_client_mail_settings.DmarcReportRowView
 import uniffi.fauna_client_mail_settings.DmarcReportsSnapshot
 import uniffi.fauna_client_mail_settings.dmarcReportWindowOptions
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * The `admin-mail-reports` admin sub-page — the DMARC aggregate reports peer mail

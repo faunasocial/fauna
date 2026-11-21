@@ -13,7 +13,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -32,12 +31,14 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.LabelerCatalogItemRow
 import com.fauna.app.ui.components.LabelerInspectPanel
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.formRefusal
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.LabelerCatalogVM
 import com.fauna.ffi.ngramDirectionLabel
 import com.fauna.ffi.ngramDocCountLabel
 import com.fauna.ffi.textModelNeedsNewerApp
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogEntry
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogSnapshot
 import uniffi.fauna_labeler_catalog_machine.LabelerInspectView
@@ -75,7 +76,12 @@ fun LabelerCatalogScreen(
         snapshot = snapshot,
         onBack = { navController.popBackStack() },
         onInspect = vm::inspect,
-        onSubscribe = vm::subscribe,
+        // The press asks the row's answer again and refuses with its reason on
+        // `error-message` (`docs/goal/ui/settings.md` § Errors & edge cases).
+        onSubscribe = { index ->
+            val refusal = formRefusal(context, vm.subscribePossibility(index))
+            if (refusal == null) vm.subscribe(index) else refusal.reason?.let(appMessages::showError)
+        },
         onUnsubscribe = vm::unsubscribe,
         onCloseInspect = vm::closeInspect,
         // The two shared faces, off the testable content (FFI lives here):
@@ -83,10 +89,10 @@ fun LabelerCatalogScreen(
         // row labels — the SAME faces the publisher's review rows render, so
         // the two ends cannot disagree about what a row means.
         kindBadge = { entry -> kindBadgeText(context, entry) },
-        // The subscribe gate, off the machine — the one predicate every app
-        // paints from (false on a row whose open inspect view failed
-        // verification); never re-derived from `verified` here.
-        subscribeEnabled = vm::subscribeEnabled,
+        // The subscribe answer, off the machine — the one predicate every app
+        // paints from (blocked with the refusal's reason on a row whose open
+        // inspect view failed verification); never re-derived from `verified`.
+        subscribeAnswer = vm::subscribePossibility,
         ngramLabels = { more, less ->
             (resolveLocalized(context, ngramDirectionLabel(more, less)) ?: "") to
                 (resolveLocalized(context, ngramDocCountLabel(more, less)) ?: "")
@@ -118,7 +124,7 @@ fun LabelerCatalogContent(
     onUnsubscribe: (Int) -> Unit,
     onCloseInspect: () -> Unit,
     kindBadge: (LabelerCatalogEntry) -> String = { it.artifactKind },
-    subscribeEnabled: (Int) -> Boolean = { true },
+    subscribeAnswer: (Int) -> Possibility = { Possibility.Possible },
     ngramLabels: (UInt, UInt) -> Pair<String, String> = { _, _ -> "" to "" },
 ) {
     val entries = snapshot?.entries ?: emptyList()
@@ -184,7 +190,7 @@ fun LabelerCatalogContent(
                             onSubscribe = onSubscribe,
                             onUnsubscribe = onUnsubscribe,
                             kindBadge = kindBadge,
-                            subscribeEnabled = subscribeEnabled(index),
+                            subscribeAnswer = subscribeAnswer(index),
                         )
                     }
                 }
